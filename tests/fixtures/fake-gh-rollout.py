@@ -3,17 +3,27 @@
 
 It answers the three reads the checker makes from a JSON state file
 ($FAKE_GH_STATE): the PR body, the PR's changed files, and the caller file on the
-default branch. Each call's arguments are appended to $FAKE_GH_LOG, one call per
-line, so a test can say which reads were made and with what. It prints what each
-read's --jq would, and refuses (exit 2) a read whose --jq or pagination is not
-the checker's (#2116 review): it cannot evaluate them, so without the pin a
-checker that read the title, or only the first page of files, would pass here.
+default branch. Given a "bodies" list instead of a "body", it serves one body per
+read, in order, the last one repeating, so a test can edit the body while the gate
+waits; an entry {"fail": CODE} fails that read. Each call's arguments are appended
+to $FAKE_GH_LOG, one call per line, so a test can say which reads were made and
+with what. It prints what each read's --jq would, and refuses (exit 2) a read
+whose --jq or pagination is not the checker's (#2116 review): it cannot evaluate
+them, so without the pin a checker that read the title, or only the first page of
+files, would pass here.
 """
 
 import json
 import os
 import re
 import sys
+
+BODY = re.compile(r"/pulls/\d+$")
+
+
+def endpoint_of(call):
+    return next((a for a in call if a.startswith("repos/")), "")
+
 
 args = sys.argv[1:]
 with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
@@ -25,7 +35,7 @@ fail = state.get("fail") or {}
 if not args or args[0] != "api":
     print(f"fake gh: unexpected call {args}", file=sys.stderr)
     sys.exit(2)
-endpoint = next((a for a in args if a.startswith("repos/")), "")
+endpoint = endpoint_of(args)
 
 if "/contents/" in endpoint:
     if fail.get("contents"):
@@ -47,14 +57,22 @@ elif re.search(r"/pulls/\d+/files(\?|$)", endpoint):
         print(item["filename"])
         if item.get("previous_filename"):
             print(item["previous_filename"])
-elif re.search(r"/pulls/\d+$", endpoint):
+elif BODY.search(endpoint):
     if '.body // ""' not in args:
         print(f"fake gh: the body read is not the PR body: {args}", file=sys.stderr)
         sys.exit(2)
     if fail.get("body"):
         print("gh: Server Error (HTTP 502)", file=sys.stderr)
         sys.exit(1)
-    print(state.get("body") or "")
+    body = state.get("body")
+    if state.get("bodies") is not None:
+        with open(os.environ["FAKE_GH_LOG"], encoding="utf-8") as log:
+            reads = sum(1 for line in log if BODY.search(endpoint_of(json.loads(line))))
+        body = state["bodies"][min(reads, len(state["bodies"])) - 1]
+        if isinstance(body, dict):
+            print(f"gh: Server Error (HTTP {body['fail']})", file=sys.stderr)
+            sys.exit(1)
+    print(body or "")
 else:
     print(f"fake gh: unexpected endpoint {endpoint!r}", file=sys.stderr)
     sys.exit(2)
