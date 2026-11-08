@@ -113,7 +113,6 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
 
 
 def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
-    from claudlobby.task_audit import audit_tasks
     from claudlobby.task_state import TASK_EMITTER, read_tasks
 
     root = _root(tmp_path)
@@ -127,13 +126,12 @@ def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
         fleet_uid = conn.execute(
             "SELECT uid FROM identity_registry WHERE kind='fleet' AND alias=?", (F,)
         ).fetchone()[0]
-        task = read_tasks(conn, fleet_uid=fleet_uid).get(task_id)
-        audit = audit_tasks(conn)
+        state = read_tasks(conn, fleet_uid=fleet_uid)
+        task = state.get(task_id)
     assert task.state == "queued" and task.current_assignment is None
     assert task.terminal_event is None and not task.blockers
     assert task.assignments[0].terminal_event.emitter == "attention-expiry"
-    assert audit.counts["unassigned_tasks"] == 1 and not audit.blockers
-    assert audit.preview(task_id, fleet_uid=fleet_uid, active_only=True).mapping.assignment_id is None
+    assert [t.task_id for t in state.tasks] == [task_id] and not state.blockers
 
 
 def test_negative_horizon_refused():

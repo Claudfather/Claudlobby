@@ -300,7 +300,7 @@ def _hit(reference: str, value: str | None, prefix: bool) -> bool:
 
 
 def _reference_candidates(snapshot: TaskSnapshot, reference: str, kind: str, prefix: bool = False):
-    """A0-style historical mapping within this snapshot, never a global scan.
+    """Historical mapping within this snapshot, never a global scan.
 
     Keep closed assignments and task-plus-assignment display metadata. A
     returned task has its own unassigned intake candidate as well as history;
