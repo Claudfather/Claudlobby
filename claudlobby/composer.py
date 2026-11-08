@@ -1357,6 +1357,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # /claudna:capture runs, and nobody at a bot's pane runs it. Its own default
     # is on, so compose 0 unless the fleet arms it.
     lines.append(f"export CLAUDNA_PRECOMPACT_REFLECT={1 if bot.claudna.precompact_reflect else 0}")
+    # #1053: 1 where this compose adds the engine's session-loop hooks, PreCompact
+    # among them, by the same test as the hook merge, so the two cannot disagree.
+    lines.append(f"export CLAUDRON_SESSION_LOOP={1 if claudron_session_loop_composed(bot, bot_dir) else 0}")
 
     # Default only when absent: inherited values and later .env tiers keep
     # their existing precedence, including explicit-empty resume disabling.
@@ -2602,6 +2605,19 @@ def _claudron_hook_vault_root(bot: BotConfig, bot_dir: Path) -> str | None:
     return str(bot_dir / Path(bot.claudron_vault_path).expanduser())
 
 
+def claudron_session_loop_composed(bot: BotConfig, bot_dir: Path) -> bool:
+    """Whether a compose adds the engine's session-loop hooks, its ``hook
+    pre-compact`` among them, to this bot's settings (#1053).
+
+    One test for the three places that state it: the hook merge in
+    ``compose_settings_local``, ``CLAUDRON_SESSION_LOOP`` in ``bot.conf``, and
+    ``bot show``'s ``precompact`` block. The loop resolves on and a vault root
+    resolves; an explicit ``claudron_session_loop: true`` with no vault composes
+    no hook, so it reads false here too.
+    """
+    return _session_loop_enabled(bot) and _claudron_hook_vault_root(bot, bot_dir) is not None
+
+
 def _claudron_hook_entries(executable: str, vault_root: str) -> dict[str, list]:
     """The engine's session-loop hook entries in Claude Code settings shape.
 
@@ -3309,7 +3325,7 @@ def compose_settings_local(
     # install such a loop (Claudron #183), and the validator errors on it, so
     # generate stops before it gets here; the loud refusal is the validator's.
     vault_root = _claudron_hook_vault_root(bot, bot_dir)
-    if _session_loop_enabled(bot) and vault_root is not None:
+    if claudron_session_loop_composed(bot, bot_dir):
         executable, warning = _resolve_claudron_executable()
         if warning:
             _log.warning("bot %s: %s", bot.bot_id, warning)
