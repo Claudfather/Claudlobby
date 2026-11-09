@@ -482,6 +482,25 @@ def test_6_another_bots_live_lease_gets_no_keys_and_keeps_the_request(rig):
     assert len(rig.rows("compaction_skipped")) == 1
 
 
+def test_6_the_operators_stop_gets_no_keys_and_keeps_the_request_until_it_goes(rig):
+    stop = rig.tmp / "state" / "compaction-slot" / "disabled"
+    stop.parent.mkdir(parents=True)
+    stop.touch()
+    rig.request()
+    rig.tick()
+    rig.tick()   # once per reason per request
+    assert rig.keys() == [] and rig.pending()
+    [row] = rig.rows("compaction_skipped")
+    assert row["data"]["reason"] == "slot_disabled" and row["data"]["request"] == "kept"
+    assert row["data"]["slot"]["stop"]["path"] == str(stop)
+    assert os.listdir(stop.parent) == ["disabled"]   # a refused take writes nothing
+    stop.unlink()
+    rig.tick()
+    assert rig.keys() == ["TEXT /compact", "KEY Enter"] and not rig.pending()
+    [sent] = rig.rows("compaction_sent")
+    assert sent["data"]["request_id"] == "req-1"
+
+
 # --- 7: a request 2 hours old ---------------------------------------------------
 
 def test_7_a_request_over_2_hours_old_expires_with_a_row(rig):
