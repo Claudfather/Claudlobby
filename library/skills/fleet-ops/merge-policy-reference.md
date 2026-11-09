@@ -26,6 +26,10 @@ Over the 21 PRs created in the current plane epoch, **4 (19%) have no citing rep
 
 Historically, authorship depended on prose: **17 of 57 PR-citing task events (29%) carried an empty summary**, and restrictive capture could strip it.
 
+On the third, an author on another fleet:
+
+Measured with the retired report reader: the same PR returned 5 rows under `--fleet ai-platform` and **0 under `--fleet crog-eng-team`**.
+
 On what `fleet reports list` returns:
 
 The public result distinguishes a successful empty `data.items` page from a structured `unavailable` error.
@@ -79,6 +83,12 @@ On `--match-head-commit`, which rung 0 alone cannot do:
 This closes the window between them.
 
 On the guardrail's abbreviated-sha error transcript:
+
+```
+$ gh pr merge <n> --squash --admin --delete-branch --match-head-commit bda6de9
+GraphQL: Variable $input of type MergePullRequestInput! was provided invalid value
+for expectedHeadOid (Could not coerce value "bda6de9" to GitObjectID)
+```
 
 The merge did **not** proceed and the PR stayed `OPEN` — verified on a real merge. That direction is the right one: an abbreviation is *rejected*, never silently coerced or ignored. A flag that quietly no-opped on a malformed value would be worse than no flag, because the gate would report itself protected while protecting nothing — the same "reads green on the wrong thing" family as the stale head itself.
 
