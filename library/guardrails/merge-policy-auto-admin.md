@@ -50,9 +50,11 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    - **No opening row at all.** No answer is available at any confidence.
    - **An older row with no explicit authored role.** The current explicit `pr_role: authored` metadata survives that content policy; an older absent role cannot be backfilled or assumed.
-   - **The author is on another fleet.** `fleet reports list` is fleet-scoped. Measured with the retired report reader: the same PR returned 5 rows under `--fleet ai-platform` and **0 under `--fleet crog-eng-team`**. Zero rows from the wrong fleet is indistinguishable from zero rows because nobody reported.
+   - **The author is on another fleet.** `fleet reports list` is fleet-scoped. Zero rows from the wrong fleet is indistinguishable from zero rows because nobody reported.
 
    In all three the honest output is "rung 1 unanswerable — verify by hand or do not merge", never a pass. Neither an empty page nor an unavailable source proves a different author.
+
+   The measurements behind the three states: §Rung 1.
 
    **Do NOT read `task reviews` as proof of PR authorship.** A result with no live block says nothing about the author.
 2. **CI green — the repo's DECLARED required checks, BY NAME, never by count.** Verify that every check **this repo declares as required** appears in the status rollup by name, and that every one is `SUCCESS`.
@@ -136,11 +138,7 @@ gh pr merge "$N" --repo "$REPO" --squash --admin $DELETE --match-head-commit "$P
 
 **Reuse `$PH` — do not re-read the sha, and never abbreviate it.** The flag requires the full 40-character object id and **fails closed** on anything else:
 
-```
-$ gh pr merge <n> --squash --admin --delete-branch --match-head-commit bda6de9
-GraphQL: Variable $input of type MergePullRequestInput! was provided invalid value
-for expectedHeadOid (Could not coerce value "bda6de9" to GitObjectID)
-```
+The refusal an abbreviated sha gets: §The merge flag.
 
 Why the flag fails closed, why `--admin`, and what branch protection enforces on this estate: §The merge flag, §Why --admin, §The ruleset survey.
 
