@@ -38,7 +38,7 @@ vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.9.0"]
 claudlobby = "claudlobby.__main__:main"
 
 [tool.setuptools]
-packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
+packages = ["claudlobby", "claudlobby.commands", "claudlobby.infra", "claudlobby.plane"]
 include-package-data = false
 
 [tool.setuptools.package-data]

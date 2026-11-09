@@ -66,6 +66,12 @@ def _dispatch_host_update(args):
                    json_output=args.json)
 
 
+def _dispatch_host_spec(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_spec", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _dispatch_host_supervision(args):
     return execute(args.public_command,
                    lambda: import_module(".host_supervision", __package__).dispatch(args),
@@ -195,6 +201,9 @@ def register_release_subparsers(sub):
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
     status = _route(hosts, "status", "host.status", "Inspect recorded state and passive cold-host prerequisites; no setup effects")
     status.set_defaults(func=_dispatch_host)
+    spec = _route(hosts, "spec", "host.spec",
+                  "Read this host's facts, each with its source, and what its OS can enforce; changes nothing")
+    spec.set_defaults(func=_dispatch_host_spec)
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
     explain = configs.add_parser("explain", help="Explain environment tiers or supported fleet/bot scalar sources without values")
