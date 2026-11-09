@@ -160,9 +160,7 @@ Read before acting: §Reads.
 The brief defaults to your bot and combines mission, open work, workstreams,
 reports and recent alerts. Its `data.brief.work` uses canonical task IDs; inspect
 `data.brief.degraded` and `data.brief.work.issues` before treating an empty view as clear.
-Unacknowledged report rows (`reports.unacked`) are in the fleet manager's view only, the
-oldest 50; any other view carries their number (`reports.count`) and the command that
-lists them (`reports.list_command`).
+Its `reports` fields are in §Reads.
 `--bot BOT` changes only the view. It does not change your caller identity.
 The session, supervision, log and utilization reads are in §Session and supervision reads. A missing bot log is
 different from an unreadable source. Native state and recorded activity are
@@ -206,14 +204,10 @@ to submit `/compact`. A successful result means only that the control was
 submitted; inspect the session before claiming interruption or compaction.
 An unknown result may have reached the pane, so do not automatically retry.
 
-`start` is idempotent when the selected bot's session is already ready; use
-`restart` for an intentional bounce: it waits for an idle prompt, continues the
-same conversation and ends with a fresh bridge/session readiness check. Add
+What `start`, `restart` and `stop` do is in §Bot lifecycle. Add
 `--fresh` to start a new session instead, with an empty context that resumes
 from the bot's saved handoff when that is under a day old; when its current
 context matters, request `bot handoff WORKER` first and wait for `saved`.
-`stop` de-enrolls supervision and stops the session, so keepalive cannot revive
-it; a later `start` is explicit re-enrollment.
 `stop` also records the stop, with an optional `--reason`, so fleet-pulse raises
 no alert for the bot and shows it as stopped; `start` removes that record.
 Read `data.recording`: `degraded` means the record or its plane row did not
@@ -335,14 +329,7 @@ keeps your past-deadline assignments dispatched before it out of `overdue` and
 `orphaned` while it is under 45 minutes old (the default; an operator can change
 it); one dispatched after it waits for a newer report. `block` is not progress.
 
-| `status` | What it tells you | What changes it |
-| --- | --- | --- |
-| `not_due` | Before its deadline, or open-ended. | The deadline passes. |
-| `overdue` | Past its deadline, no progress since its dispatch in the last 45 minutes, and your session has run since the dispatch. | You record progress, or the assignment ends. |
-| `orphaned` (`respawned_after_dispatch`) | The same, but your session started after the dispatch, so the session that received it has ended. The assignment is still open and still yours. | You record progress, or the assignment ends. |
-| `past_due` (`progress_grace`) | Past its deadline, held back by a progress report made since its dispatch and under 45 minutes old. | 45 minutes after that report it reads `overdue` or `orphaned` again; a newer report holds it back again. |
-| `past_due` (`max_age_cap`) | More than 24 hours after the dispatch or, once the manager has moved the deadline, after the move or the new deadline, whichever is later: aged out, no longer flagged, and not resolved. | The assignment ends. |
-| `unknown` | The watch could not read some of its evidence (the brief's `DEGRADED` section says which). It says nothing about the assignment. | The evidence becomes readable. |
+The table of what each `status` means and what changes it is in §Deadline watch.
 
 **Ending it.** `complete`, `fail` and `return` end the assignment, and it leaves
 your open work. `block` keeps it and changes nothing in the table. Only your
@@ -416,10 +403,8 @@ claudlobby --json project show PROJECT
 What `bot show BOT` and `bot capabilities BOT` print is in §Orientation reads. Both
 describe what was composed, not what a running session enforces:
 `permissions.enforcement` and `runtime_observed` always read `unknown` or
-`not_probed`, because nothing probes the session, and unknown is not "off". `project list` and
-`project show PROJECT` read the fleet's declared projects: key, title, repos,
-validation tier (how work in them is closed) and mission file. A manager's
-CLAUDE.md carries that table; a worker reads it here.
+`not_probed`, because nothing probes the session, and unknown is not "off". What `project list` and
+`project show PROJECT` print is in §Orientation reads too.
 
 To ask for a `merge`, `deploy`, `spend` or `delete` that needs a person's approval,
 record a request. A message, an escalation, a comment or a passing review does not
