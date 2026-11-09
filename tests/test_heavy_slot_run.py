@@ -868,9 +868,17 @@ class TestTheStopLine:
 # --- the host's bounds and its one off (#2790) -----------------------------------
 
 
+def _refusal(hs, d: Path, text: str) -> str:
+    """What run_lines refuses a run-lines file holding text with."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run-lines").write_text(text)
+    with pytest.raises(hs.LinesError) as refused:
+        hs.run_lines(d)
+    return str(refused.value)
+
+
 class TestTheHostsBounds:
-    def test_the_fallback_is_this_hosts_numbers_inside_its_own_bounds(self):
-        hs = load_lib_module("heavy-slot")
+    def test_the_fallback_is_this_hosts_numbers_inside_its_own_bounds(self, hs):
         assert hs.RUN_LINES == {
             "stop_mib": 3800, "debounce_reads": 2, "poll_s": 2, "grace_s": 10,
             "stop_mib_floor": 3000, "notice_within_s": 6, "stopped_within_s": 21, "stop": "on"}
@@ -881,8 +889,7 @@ class TestTheHostsBounds:
         assert hs._bounds_broken(dict(hs.RUN_LINES)) is None
         assert hs._bounds_broken(dict(render)) is None
 
-    def test_each_bound_holds_at_its_edge(self):
-        hs = load_lib_module("heavy-slot")
+    def test_each_bound_holds_at_its_edge(self, hs):
         run, render = dict(hs.RUN_LINES), dict(hs.RENDER_LINES)
         assert hs._bounds_broken({**run, "stop_mib": 3000}) is None  # at the floor
         assert "stop_mib_floor" in hs._bounds_broken({**run, "stop_mib": 2999.9})
@@ -907,17 +914,9 @@ class TestTheHostsBounds:
         ("stopped_within_s = 12\n", "stopped_within_s"),  # 4 s + 10 s
         ("stop = off\nstop_mib = 100\n", "stop_mib_floor"),  # the off line excuses no number
     ])
-    def test_a_run_lines_file_outside_its_bounds_refuses_before_the_slot(self, se, text, bound):
-        _arm(se, text)
-        r = _run(se, "pytest")
-        assert r.returncode == 2, r.stderr
-        assert "NOT RUN" in r.stderr and "breaks its bounds" in r.stderr and "#2790" in r.stderr
-        assert bound in r.stderr, r.stderr
-        assert _ran(se.tmp) == []
-        assert not (se.state / "slot-0.lock").exists()
-        (refused,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
-        assert refused["data"]["where"] == "lines" and bound in refused["data"]["why"]
-        assert "NOT ARMED" in _status(se).stdout
+    def test_a_run_lines_file_outside_its_bounds_is_refused(self, hs, tmp_path, text, bound):
+        why = _refusal(hs, tmp_path, text)
+        assert "breaks its bounds" in why and bound in why and "#2790" in why, why
 
     @pytest.mark.parametrize("text", [
         "stop = on\n", "stop = OFF\n", "stop = no\n", "stop = 0\n", "stop = false\n",
@@ -926,12 +925,22 @@ class TestTheHostsBounds:
         "debounce_reads = inf\n", "grace_s = nan\n", "notice_within_s = inf\n",
         "stopped_within_s = 0\n",
     ])
-    def test_a_value_that_acts_as_an_off_stays_refused(self, se, text):
+    def test_a_value_that_acts_as_an_off_stays_refused(self, hs, tmp_path, text):
+        _refusal(hs, tmp_path, text)
+
+    @pytest.mark.parametrize("text, said", [
+        ("stop_mib = 2999\n", "stop_mib_floor"),
+        ("stop = on\n", "stop takes one value, off"),
+    ])
+    def test_a_refused_file_refuses_every_run_before_the_slot(self, se, text, said):
         _arm(se, text)
         r = _run(se, "pytest")
-        assert r.returncode == 2 and "NOT RUN" in r.stderr, r.stderr
-        assert _ran(se.tmp) == []
-        assert not (se.state / "slot-0.lock").exists()
+        assert r.returncode == 2, r.stderr
+        assert "NOT RUN" in r.stderr and said in r.stderr, r.stderr
+        assert _ran(se.tmp) == [] and not (se.state / "slot-0.lock").exists()
+        (refused,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
+        assert refused["data"]["where"] == "lines" and said in refused["data"]["why"]
+        assert "NOT ARMED" in _status(se).stdout
 
     def test_a_file_sets_the_hosts_own_bounds(self, se):
         _arm(se, "stop_mib_floor = 2000\nstop_mib = 2500\nnotice_within_s = 10\n"
@@ -942,9 +951,10 @@ class TestTheHostsBounds:
                 lines["stopped_within_s"], lines["stop"]) == (2500, 2000, 10, 30, "on")
 
     def test_the_off_line_is_the_one_off_and_says_so_on_every_run(self, se):
-        _arm(se, "# the host's one off\nstop = off\n")
-        _mem(se, 3000)  # under the line: a watched run would be stopped
-        r = _run(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc", STUB_RC=3, STUB_SLEEP=0.6)
+        # fast lines: with the stop on, this host would stop the job in a fraction of a second
+        _arm(se, "# the host's one off\nstop = off\npoll_s = 0.1\n")
+        _mem(se, 3000)
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=0.6)
         assert r.returncode == 3, r.stderr
         assert "memory stop is OFF" in r.stderr and "stop = off" in r.stderr and "#2790" in r.stderr
         rec = _record(se)
@@ -952,13 +962,29 @@ class TestTheHostsBounds:
         events = _events(se)
         assert [e["type"] for e in events] == ["heavy_slot_acquired", "heavy_slot_released"]
         assert events[0]["data"]["stop"] == "off"
-        # the control: the same host and job, with the stop on, is stopped
-        _arm(se)
-        r = _run(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc", STUB_RC=3, STUB_SLEEP=5)
+        # the control: the same lines and job with the stop on are stopped
+        _arm(se, "poll_s = 0.1\n")
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=5)
         assert r.returncode == 79, r.stderr
         assert "memory stop is OFF" not in r.stderr
         acquired = [e for e in _events(se) if e["type"] == "heavy_slot_acquired"]
         assert len(acquired) == 2 and "stop" not in acquired[1]["data"]
+
+    def test_a_signal_still_reaches_the_whole_group_with_the_stop_off(self, se):
+        _arm(se, "stop = off\n")
+        _stub(se, 'trap \'touch "$STUB_DIR/term"; exit 143\' TERM\n'
+                  'sleep 60 &\n'
+                  'echo $! > "$STUB_DIR/bg.pid"\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest")
+        bg = _pid_of(se.tmp / "bg.pid")
+        _wait_for(lambda: _ran(se.tmp))
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(30) in (143, -signal.SIGTERM)
+        _wait_for(lambda: _gone(bg))
+        assert (se.tmp / "term").exists()
+        assert _record(se)["state"] == "released"
 
     def test_status_shows_the_bounds_and_the_off_line(self, se):
         out = _status(se).stdout

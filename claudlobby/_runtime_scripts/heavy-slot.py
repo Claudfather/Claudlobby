@@ -1759,11 +1759,11 @@ def _read_lines(f: Path, defaults: dict, kind: str) -> Optional[dict]:
 
 
 def _bounds_broken(lines: dict) -> Optional[str]:
-    """Why lines break the bounds they keep, or None: stop_mib under
+    """Why lines break the bounds they carry, or None: stop_mib under
     stop_mib_floor, a crossing noticed later than notice_within_s (debounce_reads
-    readings poll_s apart; one reading where there is no debounce, as in a
-    render), or, where there is a grace, the job stopped later than
-    stopped_within_s (that notice plus grace_s)."""
+    readings poll_s apart; a render has no debounce and stops on one reading),
+    or, where the lines carry stopped_within_s, the job stopped later than that
+    (the notice plus grace_s)."""
     if lines["stop_mib"] < lines["stop_mib_floor"]:
         return (f"stop_mib {lines['stop_mib']:g} is under stop_mib_floor "
                 f"{lines['stop_mib_floor']:g}")
@@ -1774,7 +1774,7 @@ def _bounds_broken(lines: dict) -> Optional[str]:
                f"one reading every {lines['poll_s']:g} s")
         return (f"a crossing would be noticed {notice:g} s after it ({how}), over "
                 f"notice_within_s {lines['notice_within_s']:g}")
-    if "grace_s" in lines:
+    if "stopped_within_s" in lines:
         stopped = round(notice + lines["grace_s"], 6)
         if stopped > lines["stopped_within_s"]:
             return (f"the job would be stopped {stopped:g} s after a crossing (that notice and "
@@ -3060,7 +3060,8 @@ def cmd_run(args: List[str]) -> int:
     record.update(lines=stop_lines, lines_from=lines_from)
     _write(fd, record)
     acquired = _acquired(slot, n, shape, record, mine, why, started)
-    if stop_lines["stop"] == "off":  # said on every run: nothing watches this one
+    off = stop_lines["stop"] == "off"
+    if off:  # said on every run: nothing watches this one
         acquired["stop"] = "off"
         print(f"heavy-slot: the memory stop is OFF ({lines_from} says stop = off): nothing "
               "stops this run if the host runs short of memory (#2790)", file=sys.stderr)
@@ -3084,7 +3085,7 @@ def cmd_run(args: List[str]) -> int:
     if child is not None:
         for signum in pending:
             send(signum)
-        if stop_lines["stop"] == "off":
+        if off:
             rc = child.wait()
         else:
             group, watch = _Group(child.pid), _StopWatch(stop_lines)
