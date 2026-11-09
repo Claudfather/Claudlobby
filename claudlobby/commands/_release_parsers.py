@@ -116,6 +116,9 @@ def register_release_subparsers(sub):
     register_host_repos(hosts)
     from ._host_owner_parsers import register_host_owner
     register_host_owner(hosts)
+    spec = _route(hosts, "spec", "host.spec",
+                  "Read this host's facts, each with its source, and what its OS can enforce; changes nothing")
+    spec.set_defaults(func=_dispatch_host_spec)
     supervision = hosts.add_parser("supervision", help="Inspect the selected release's supervised units")
     supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
     failed = supervision_actions.add_parser(
@@ -201,9 +204,6 @@ def register_release_subparsers(sub):
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
     status = _route(hosts, "status", "host.status", "Inspect recorded state and passive cold-host prerequisites; no setup effects")
     status.set_defaults(func=_dispatch_host)
-    spec = _route(hosts, "spec", "host.spec",
-                  "Read this host's facts, each with its source, and what its OS can enforce; changes nothing")
-    spec.set_defaults(func=_dispatch_host_spec)
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
     explain = configs.add_parser("explain", help="Explain environment tiers or supported fleet/bot scalar sources without values")
