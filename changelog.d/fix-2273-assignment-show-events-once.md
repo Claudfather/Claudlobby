@@ -4,7 +4,7 @@
 
 - `data.assignment`, and each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
 - `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`.
-- Schema-1's top-level keys are unchanged, as are every other field, the plain-text lines, `task show` and `task list`.
+- Schema-1's top-level keys are unchanged, as are every other field and the plain-text lines. This change leaves `task show` and `task list` alone; #2773 changed `task show` and #2812 changed `task list`.
 - A jq read of a removed key now gets null, which is also what an open assignment's `terminal_event` read before. To tell open from closed, read `state` or `terminal_event_id`.
 
 On three of one worker's closed assignments (13, 10 and 9 events), a read is 60% to 63% smaller in tokens: 21,246 to 7,813 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
