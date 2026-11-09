@@ -14,7 +14,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from claudlobby.__main__ import main
-from claudlobby.context import resolve_paths
 from claudlobby.infra import spec
 from claudlobby.infra.spec import Host, UnsupportedHost, read_spec
 from tests.conftest import MINIMAL_FLEET_YAML
@@ -34,7 +33,7 @@ class FixtureHost(Host):
         self.dirs = set(dirs)
         for path in self.files:
             self.dirs.update(str(parent) for parent in PurePosixPath(path).parents)
-        self.paths = dict(which or {})
+        self.on_path = dict(which or {})
         self.commands = dict(commands or {})
         self.sizes = dict(statvfs or {})
 
@@ -55,7 +54,7 @@ class FixtureHost(Host):
                        if entry.startswith(prefix)})
 
     def which(self, name):
-        return self.paths.get(name)
+        return self.on_path.get(name)
 
     def run(self, argv):
         key = (PurePosixPath(argv[0]).name, *argv[1:])
@@ -65,6 +64,11 @@ class FixtureHost(Host):
 
     def statvfs(self, path):
         return self.sizes[path]
+
+    def paths(self, root):
+        if root is None:
+            raise ValueError("no data root in this fixture")
+        return super().paths(root)
 
 
 MEMINFO = "MemTotal:       16608304 kB\nMemFree:          512000 kB\nMemAvailable:    4041728 kB\nSwapTotal:      10485752 kB\n"
@@ -135,16 +139,18 @@ def mac():
         statvfs={"/System/Volumes/Data": (460 * GIB, 200 * GIB, 190 * GIB)})
 
 
-def facts(host, **kwargs):
-    return read_spec(host, paths_error="no root in this test", **kwargs).as_dict()["facts"]
+def read(host, root=None):
+    """The spec's facts and enforcement rows, from one read."""
+    data = read_spec(host, root=root).as_dict()
+    return data["facts"], data["enforcement"]
 
 
-def states(host):
-    return {name: row["state"] for name, row in read_spec(host, paths_error="none").as_dict()["enforcement"].items()}
+def states(rows):
+    return {name: row["state"] for name, row in rows.items()}
 
 
 def test_this_pi_reads_every_fact_with_its_source():
-    assert facts(pi()) == {
+    assert read(pi())[0] == {
         "ram": {"source": "/proc/meminfo MemTotal", "value": 16219},
         "mem_available": {"source": "/proc/meminfo MemAvailable", "value": 3947},
         "swap": {"source": "/proc/swaps", "value": {
@@ -165,20 +171,20 @@ def test_this_pi_reads_every_fact_with_its_source():
         "controllers_root": {"source": "/sys/fs/cgroup/cgroup.controllers", "value": ["cpuset", "cpu", "io", "pids"]},
         "user_manager": {"source": MANAGER, "value": True},
         "controllers_user_manager": {"source": f"{MANAGER}/cgroup.controllers", "value": ["cpu", "pids"]},
-        "controllers_own": {"source": "/proc/self/cgroup, then its cgroup.controllers",
-                            "value": {"cgroup": OWN[len("/sys/fs/cgroup"):], "controllers": ["pids"]}},
+        "own_cgroup": {"source": "/proc/self/cgroup", "value": OWN[len("/sys/fs/cgroup"):]},
+        "controllers_own": {"source": "the own cgroup's cgroup.controllers", "value": ["pids"]},
         "pressure": {"source": "/proc/pressure", "value": []},
         "kernel_cmdline": {"source": "/proc/cmdline, its cgroup, psi and swapaccount settings only",
                            "value": ["cgroup_disable=memory"]},
         "root_fs": {"source": "statvfs /", "value": {"path": "/", "size_mib": 2030592, "used_pct": 13}},
         "bots": {"source": "each fleet.yaml under the data root",
-                 "unreadable": "no data root: no root in this test"},
+                 "unreadable": "no data root: no data root in this fixture"},
     }
 
 
 def test_this_pi_reads_the_cap_inert_naming_the_boot_setting():
-    rows = read_spec(pi(), paths_error="none").as_dict()["enforcement"]
-    assert {name: row["state"] for name, row in rows.items()} == {
+    rows = read(pi())[1]
+    assert states(rows) == {
         "scope": "available", "memory_cap": "inert", "bot_throttle": "inert",
         "free_memory": "available", "pressure": "unavailable"}
     assert "cgroup_disable=memory" in rows["memory_cap"]["reason"]
@@ -187,20 +193,20 @@ def test_this_pi_reads_the_cap_inert_naming_the_boot_setting():
 
 
 def test_a_host_whose_controllers_include_memory_can_cap_and_throttle():
-    assert states(memory_host()) == {"scope": "available", "memory_cap": "available", "bot_throttle": "available",
-                                     "free_memory": "available", "pressure": "available"}
-    assert facts(memory_host())["pressure"]["value"] == ["cpu", "io", "memory"]
+    facts, rows = read(memory_host())
+    assert states(rows) == {"scope": "available", "memory_cap": "available", "bot_throttle": "available",
+                            "free_memory": "available", "pressure": "available"}
+    assert facts["pressure"]["value"] == ["cpu", "io", "memory"]
 
 
 def test_a_host_with_no_systemd_holds_a_run_by_its_process_group_only():
-    host = no_systemd_host()
-    read = facts(host)
-    assert read["init"]["value"] == "tini" and read["systemd_booted"]["value"] is False
-    assert read["systemd_run"]["value"] == "none" and read["user_manager"]["value"] is False
-    assert read["controllers_user_manager"]["value"] == "none"
-    assert read["controllers_own"]["value"] == {"cgroup": "/", "controllers": ["cpu", "io", "memory", "pids"]}
-    rows = read_spec(host, paths_error="none").as_dict()["enforcement"]
-    assert {name: row["state"] for name, row in rows.items()} == {
+    facts, rows = read(no_systemd_host())
+    assert facts["init"]["value"] == "tini" and facts["systemd_booted"]["value"] is False
+    assert facts["systemd_run"]["value"] == "none" and facts["user_manager"]["value"] is False
+    assert facts["controllers_user_manager"]["value"] == "none"
+    assert facts["own_cgroup"]["value"] == "/"
+    assert facts["controllers_own"]["value"] == ["cpu", "io", "memory", "pids"]
+    assert states(rows) == {
         "scope": "unavailable", "memory_cap": "unavailable", "bot_throttle": "unavailable",
         "free_memory": "available", "pressure": "available"}
     assert rows["scope"]["reason"] == "systemd is not the init system, so a heavy run is held by its process group only"
@@ -209,14 +215,12 @@ def test_a_host_with_no_systemd_holds_a_run_by_its_process_group_only():
 
 
 def test_a_mac_reads_the_cap_unavailable():
-    host = mac()
-    read = facts(host)
-    assert {name: fact.get("value") for name, fact in read.items()} == {
+    facts, rows = read(mac())
+    assert {name: fact.get("value") for name, fact in facts.items()} == {
         "ram": 16384, "swap": {"total_mib": 2048, "used_mib": 1022, "encrypted": True}, "cpus": 8,
         "os": "macOS 14.5", "kernel": "23.5.0", "init": "launchd", "vm_stat": "/usr/bin/vm_stat",
         "root_fs": {"path": "/System/Volumes/Data", "size_mib": 471040, "used_pct": 58}, "bots": None}
-    rows = read_spec(host, paths_error="none").as_dict()["enforcement"]
-    assert {name: row["state"] for name, row in rows.items()} == {
+    assert states(rows) == {
         "scope": "unavailable", "memory_cap": "unavailable", "bot_throttle": "unavailable",
         "free_memory": "available", "pressure": "unavailable"}
     assert rows["memory_cap"]["reason"] == "macOS has no documented memory cap for a process tree"
@@ -227,45 +231,43 @@ def test_a_mac_reads_the_cap_unavailable():
                                             ("MemTotal:       16608304", "MemTotal")])
 def test_a_meminfo_line_that_is_not_a_number_is_refused_by_name(line, name):
     meminfo = "\n".join(line if row.startswith(f"{name}:") else row for row in MEMINFO.splitlines()) + "\n"
-    host = pi(**{"/proc/meminfo": meminfo})
-    read = facts(host)
-    fact = read["mem_available" if name == "MemAvailable" else "ram"]
+    facts, rows = read(pi(**{"/proc/meminfo": meminfo}))
+    fact = facts["mem_available" if name == "MemAvailable" else "ram"]
     assert fact == {"source": f"/proc/meminfo {name}",
                     "unreadable": f"the {name} line of /proc/meminfo is not a number of kB: {line!r}"}
-    rows = read_spec(host, paths_error="none").as_dict()["enforcement"]
     if name == "MemAvailable":
-        assert read["ram"]["value"] == 16219
+        assert facts["ram"]["value"] == 16219
         assert rows["free_memory"] == {"state": "unavailable",
                                        "reason": f"the memory stop cannot read free memory: {fact['unreadable']}"}
     else:
-        assert read["mem_available"]["value"] == 3947 and rows["free_memory"]["state"] == "available"
+        assert facts["mem_available"]["value"] == 3947 and rows["free_memory"]["state"] == "available"
 
 
 def test_no_failed_reading_becomes_a_number():
     host = pi(**{"/proc/meminfo": None, "/proc/swaps": "Filename\n/dev/zram0 partition many 0 100\n",
                  "/sys/devices/system/cpu/online": "3-0\n",
                  "/sys/block/zram0/mm_stat": "5441060864 1066273189 1097269248\n"})
-    read = facts(host)
-    assert read["ram"] == {"source": "/proc/meminfo MemTotal", "unreadable": "/proc/meminfo does not exist"}
-    assert read["swap"]["unreadable"] == ("a /proc/swaps row is not a name, type, size, used and priority: "
-                                          "'/dev/zram0 partition many 0 100'")
-    assert read["cpus"]["unreadable"] == "/sys/devices/system/cpu/online is not a list of CPU ranges: '3-0'"
-    assert read["zram"]["unreadable"] == "/sys/block/zram0/mm_stat does not start with four byte counts"
-    assert all(("value" in fact) != ("unreadable" in fact) for fact in read.values())
+    facts = read(host)[0]
+    assert facts["ram"] == {"source": "/proc/meminfo MemTotal", "unreadable": "/proc/meminfo does not exist"}
+    assert facts["swap"]["unreadable"] == ("a /proc/swaps row is not a name, type, size, used and priority: "
+                                           "'/dev/zram0 partition many 0 100'")
+    assert facts["cpus"]["unreadable"] == "/sys/devices/system/cpu/online is not a list of CPU ranges: '3-0'"
+    assert facts["zram"]["unreadable"] == "/sys/block/zram0/mm_stat does not start with four byte counts"
+    assert all(("value" in fact) != ("unreadable" in fact) for fact in facts.values())
 
 
 def test_a_memory_controller_kept_from_the_user_manager_is_inert_and_says_where():
     files = linux_files(root="cpuset cpu io memory pids")
-    rows = read_spec(FixtureHost("linux", files, statvfs=ROOT_FS, **SYSTEMD), paths_error="none").enforcement
+    rows = read_spec(FixtureHost("linux", files, statvfs=ROOT_FS, **SYSTEMD)).enforcement
     assert rows["memory_cap"].state == "inert"
     assert rows["memory_cap"].reason.endswith("it is not delegated to the user manager")
     assert rows["memory_cap"].changes_it == "Delegate= on user@.service, which is the operator's"
 
 
 def test_an_unreadable_controllers_file_leaves_the_cap_unknown():
-    host = pi(**{f"{MANAGER}/cgroup.controllers": PermissionError(13, "Permission denied")})
-    rows = read_spec(host, paths_error="none").enforcement
-    assert facts(host)["controllers_user_manager"]["unreadable"] == "[Errno 13] Permission denied"
+    spec = read_spec(pi(**{f"{MANAGER}/cgroup.controllers": PermissionError(13, "Permission denied")}))
+    rows = spec.enforcement
+    assert spec.facts["controllers_user_manager"].unreadable == "[Errno 13] Permission denied"
     assert rows["memory_cap"].state == rows["bot_throttle"].state == "unknown"
     assert rows["scope"].state == "available"
 
@@ -286,16 +288,15 @@ def fleet_root(tmp_path: Path, second: str | None) -> Path:
 
 def test_the_bots_are_counted_over_every_fleet_on_the_data_root(tmp_path):
     root = fleet_root(tmp_path, MINIMAL_FLEET_YAML.replace("name: test-fleet", "name: second"))
-    paths = resolve_paths(root=root)
-    assert read_spec(pi(), paths=paths).as_dict()["facts"]["bots"] == {
-        "source": f"each fleet.yaml under {paths.root}", "value": {"bots": 4, "fleets": 2}}
+    assert read(pi(), root)[0]["bots"] == {
+        "source": "each fleet.yaml under the data root",
+        "value": {"bots": 4, "fleets": 2, "root": str(root.resolve())}}
 
 
 def test_a_fleet_that_cannot_be_read_leaves_the_count_unreadable(tmp_path):
     root = fleet_root(tmp_path, "fleet: [unclosed\n")
-    paths = resolve_paths(root=root)
-    bots = read_spec(pi(), paths=paths).as_dict()["facts"]["bots"]
-    assert bots["unreadable"].startswith(f"{paths.root / 'local' / 'second' / 'fleet.yaml'} cannot be read: ")
+    bots = read(pi(), root)[0]["bots"]
+    assert bots["unreadable"].startswith(f"{root.resolve() / 'local' / 'second' / 'fleet.yaml'} cannot be read: ")
 
 
 def test_the_verb_reads_this_host_and_says_every_source(tmp_path, capsys):
@@ -307,7 +308,7 @@ def test_the_verb_reads_this_host_and_says_every_source(tmp_path, capsys):
     assert body["ok"] is True and body["command"] == "host.spec" and body["error"] is None
     data = body["data"]
     assert data["platform"] in ("linux", "darwin")
-    assert data["facts"]["bots"]["value"] == {"bots": 2, "fleets": 1}
+    assert data["facts"]["bots"]["value"] == {"bots": 2, "fleets": 1, "root": str(root.resolve())}
     for fact in data["facts"].values():
         assert fact["source"] and set(fact) in ({"source", "value"}, {"source", "unreadable"})
     assert set(data["enforcement"]) == {"scope", "memory_cap", "bot_throttle", "free_memory", "pressure"}
@@ -317,4 +318,4 @@ def test_the_verb_reads_this_host_and_says_every_source(tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == f"host spec ({data['platform']}): each fact, then [where it was read]"
     assert "what the OS can enforce here" in lines
-    assert f"  bots: 2 in 1 fleet(s) [each fleet.yaml under {root.resolve()}]" in lines
+    assert f"  bots: 2 in 1 fleet(s) under {root.resolve()} [each fleet.yaml under the data root]" in lines

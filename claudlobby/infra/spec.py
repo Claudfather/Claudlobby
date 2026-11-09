@@ -21,7 +21,9 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import Literal
 
 MIB = 1024 * 1024
 RUN_TIMEOUT_S = 10
@@ -29,6 +31,7 @@ NONE = "none"
 # Only these kernel command line settings are disclosed: they decide the controllers and pressure.
 CMDLINE_SETTINGS = ("cgroup", "psi", "systemd.unified_cgroup_hierarchy", "swapaccount")
 SCOPE_ONLY = "a heavy run is held by its process group only"
+State = Literal["available", "inert", "unavailable", "unknown"]
 
 
 class Unreadable(Exception):
@@ -58,7 +61,7 @@ class Fact:
 
 @dataclass(frozen=True)
 class Enforcement:
-    state: str
+    state: State
     reason: str
     changes_it: str | None = None
 
@@ -134,10 +137,15 @@ class Host:
         st = os.statvfs(path)
         return st.f_blocks * st.f_frsize, st.f_bfree * st.f_frsize, st.f_bavail * st.f_frsize
 
+    def paths(self, root: Path | None):
+        """The data root, explicit or the one the CLI would select; its fleets give the bot count."""
+        from ..context import resolve_paths
 
-def read_spec(host: Host | None = None, *, paths=None, paths_error: str | None = None) -> HostSpec:
-    """Read the host. `paths` is the resolved data root, whose fleets give the bot count;
-    without one, `paths_error` says why and the count reads unreadable."""
+        return resolve_paths(root=root)
+
+
+def read_spec(host: Host | None = None, *, root: Path | None = None) -> HostSpec:
+    """Read the host. `root` selects the data root whose fleets give the bot count, as `--root` does."""
     host = Host() if host is None else host
     if host.platform.startswith("linux"):
         platform, readers, enforce = "linux", _linux_readers(host), _linux_enforcement
@@ -147,18 +155,15 @@ def read_spec(host: Host | None = None, *, paths=None, paths_error: str | None =
         raise UnsupportedHost(f"host spec reads Linux and macOS hosts, and this one is {host.platform}")
     facts: dict[str, Fact] = {}
     for name, source, reader in readers:
-        facts[name] = _read(source, lambda: reader(host, facts))
-    source = f"each fleet.yaml under {paths.root}" if paths is not None else "each fleet.yaml under the data root"
-    facts["bots"] = _read(source, lambda: _bots(paths, paths_error))
+        facts[name] = _read(source, partial(reader, host))
+    facts["bots"] = _read("each fleet.yaml under the data root", partial(_bots, host, root))
     return HostSpec(platform, facts, enforce(facts))
 
 
 def _read(source: str, read) -> Fact:
     try:
         value, shown = read()
-    except Unreadable as exc:
-        return Fact(source, unreadable=str(exc))
-    except (OSError, ValueError) as exc:
+    except (Unreadable, OSError, ValueError) as exc:
         return Fact(source, unreadable=str(exc))
     return Fact(source, value=value, shown=shown)
 
@@ -185,17 +190,12 @@ def _meminfo_kib(host: Host, name: str) -> int:
     raise Unreadable(f"/proc/meminfo has no {name} line")
 
 
-def _ram_linux(host, facts):
-    mib = round(_meminfo_kib(host, "MemTotal") / 1024)
+def _meminfo_mib(host: Host, name: str) -> tuple[int, str]:
+    mib = round(_meminfo_kib(host, name) / 1024)
     return mib, f"{mib:,} MiB"
 
 
-def _mem_available_linux(host, facts):
-    mib = round(_meminfo_kib(host, "MemAvailable") / 1024)
-    return mib, f"{mib:,} MiB now"
-
-
-def _swap_linux(host, facts):
+def _swap_linux(host):
     rows = _need(host, "/proc/swaps").splitlines()
     if not rows or not rows[0].startswith("Filename"):
         raise Unreadable("/proc/swaps does not start with its Filename header")
@@ -216,7 +216,7 @@ def _swap_linux(host, facts):
     return {"devices": devices, "total_mib": total, "used_mib": used}, shown
 
 
-def _zram(host, facts):
+def _zram(host):
     names = host.listdir("/sys/block")
     if names is None:
         raise Unreadable("/sys/block does not exist")
@@ -251,7 +251,7 @@ def _int_file(host: Host, path: str) -> int:
     return int(text)
 
 
-def _cpus_linux(host, facts):
+def _cpus_linux(host):
     text = _need(host, "/sys/devices/system/cpu/online").strip()
     count = 0
     for part in text.split(","):
@@ -262,7 +262,7 @@ def _cpus_linux(host, facts):
     return count, str(count)
 
 
-def _os_linux(host, facts):
+def _os_linux(host):
     for line in _need(host, "/etc/os-release").splitlines():
         if line.startswith("PRETTY_NAME="):
             name = line.partition("=")[2].strip().strip("\"'")
@@ -278,20 +278,12 @@ def _one_line(host: Host, path: str) -> tuple[str, str]:
     return text, text
 
 
-def _kernel_linux(host, facts):
-    return _one_line(host, "/proc/sys/kernel/osrelease")
-
-
-def _init_linux(host, facts):
-    return _one_line(host, "/proc/1/comm")
-
-
-def _systemd_booted(host, facts):
+def _systemd_booted(host):
     booted = host.listdir("/run/systemd/system") is not None
     return booted, "yes" if booted else "no (/run/systemd/system is absent)"
 
 
-def _systemd_run(host, facts):
+def _systemd_run(host):
     path = host.which("systemd-run")
     if path is None:
         return NONE, "none (not on PATH)"
@@ -302,7 +294,7 @@ def _systemd_run(host, facts):
     return {"path": path, "version": int(version.group(1))}, f"{path}, systemd {version.group(1)}"
 
 
-def _cgroup(host, facts):
+def _cgroup(host):
     mounts = [line.split()[1:3] for line in _need(host, "/proc/self/mounts").splitlines()
               if len(line.split()) > 2]
     if ["/sys/fs/cgroup", "cgroup2"] in mounts:
@@ -319,7 +311,7 @@ def _controllers(text: str) -> tuple[list[str], str]:
     return names, " ".join(names) or "none offered"
 
 
-def _controllers_root(host, facts):
+def _controllers_root(host):
     text = host.text("/sys/fs/cgroup/cgroup.controllers")
     return (NONE, "none (no cgroup v2 at /sys/fs/cgroup)") if text is None else _controllers(text)
 
@@ -328,33 +320,41 @@ def _user_manager_dir(uid: int) -> str:
     return f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service"
 
 
-def _user_manager(host, facts):
+def _user_manager(host):
     running = host.listdir(_user_manager_dir(host.uid())) is not None
     return running, "running" if running else "none (no user manager's cgroup)"
 
 
-def _controllers_user_manager(host, facts):
+def _controllers_user_manager(host):
     text = host.text(f"{_user_manager_dir(host.uid())}/cgroup.controllers")
     return (NONE, "none (no user manager's cgroup)") if text is None else _controllers(text)
 
 
-def _controllers_own(host, facts):
+def _own_cgroup_path(host: Host) -> str | None:
     lines = [line[3:] for line in _need(host, "/proc/self/cgroup").splitlines() if line.startswith("0::")]
-    if not lines:
+    return lines[0] if lines else None
+
+
+def _own_cgroup(host):
+    path = _own_cgroup_path(host)
+    return (NONE, "none (this process is in no cgroup v2 hierarchy)") if path is None else (path, path)
+
+
+def _controllers_own(host):
+    path = _own_cgroup_path(host)
+    if path is None:
         return NONE, "none (this process is in no cgroup v2 hierarchy)"
-    path = f"/sys/fs/cgroup{lines[0].rstrip('/')}/cgroup.controllers"
-    names, shown = _controllers(_need(host, path))
-    return {"cgroup": lines[0], "controllers": names}, f"{shown} (in {lines[0]})"
+    return _controllers(_need(host, f"/sys/fs/cgroup{path.rstrip('/')}/cgroup.controllers"))
 
 
-def _pressure(host, facts):
+def _pressure(host):
     names = host.listdir("/proc/pressure")
     if names is None:
         return [], "none (/proc/pressure is absent)"
     return names, " ".join(names) or "none"
 
 
-def _cmdline(host, facts):
+def _cmdline(host):
     settings = [token for token in _need(host, "/proc/cmdline").split()
                 if token.startswith(CMDLINE_SETTINGS)]
     return settings, " ".join(settings) or "none of these settings"
@@ -368,28 +368,29 @@ def _filesystem(host: Host, path: str) -> tuple[dict, str]:
             f"{_mib(size):,} MiB, {percent}% used")
 
 
-def _root_fs_linux(host, facts):
+def _root_fs_linux(host):
     return _filesystem(host, "/")
 
 
 def _linux_readers(host: Host):
     manager = _user_manager_dir(host.uid())
     return (
-        ("ram", "/proc/meminfo MemTotal", _ram_linux),
-        ("mem_available", "/proc/meminfo MemAvailable", _mem_available_linux),
+        ("ram", "/proc/meminfo MemTotal", partial(_meminfo_mib, name="MemTotal")),
+        ("mem_available", "/proc/meminfo MemAvailable", partial(_meminfo_mib, name="MemAvailable")),
         ("swap", "/proc/swaps", _swap_linux),
         ("zram", "/sys/block/zram*: disksize, comp_algorithm, mm_stat", _zram),
         ("cpus", "/sys/devices/system/cpu/online", _cpus_linux),
         ("os", "/etc/os-release PRETTY_NAME", _os_linux),
-        ("kernel", "/proc/sys/kernel/osrelease", _kernel_linux),
-        ("init", "/proc/1/comm", _init_linux),
+        ("kernel", "/proc/sys/kernel/osrelease", partial(_one_line, path="/proc/sys/kernel/osrelease")),
+        ("init", "/proc/1/comm", partial(_one_line, path="/proc/1/comm")),
         ("systemd_booted", "/run/systemd/system", _systemd_booted),
         ("systemd_run", "PATH, then systemd-run --version", _systemd_run),
         ("cgroup", "/proc/self/mounts", _cgroup),
         ("controllers_root", "/sys/fs/cgroup/cgroup.controllers", _controllers_root),
         ("user_manager", manager, _user_manager),
         ("controllers_user_manager", f"{manager}/cgroup.controllers", _controllers_user_manager),
-        ("controllers_own", "/proc/self/cgroup, then its cgroup.controllers", _controllers_own),
+        ("own_cgroup", "/proc/self/cgroup", _own_cgroup),
+        ("controllers_own", "the own cgroup's cgroup.controllers", _controllers_own),
         ("pressure", "/proc/pressure", _pressure),
         ("kernel_cmdline", "/proc/cmdline, its cgroup, psi and swapaccount settings only", _cmdline),
         ("root_fs", "statvfs /", _root_fs_linux),
@@ -410,12 +411,12 @@ def _sysctl_int(host: Host, name: str) -> int:
     return int(text)
 
 
-def _ram_macos(host, facts):
+def _ram_macos(host):
     mib = _mib(_sysctl_int(host, "hw.memsize"))
     return mib, f"{mib:,} MiB"
 
 
-def _swap_macos(host, facts):
+def _swap_macos(host):
     text = _sysctl(host, "vm.swapusage")
     sizes = re.match(r"total = ([0-9.]+)([MG])\s+used = ([0-9.]+)([MG])", text)
     if sizes is None:
@@ -425,12 +426,12 @@ def _swap_macos(host, facts):
             f"{total:,} MiB, {used:,} MiB used (dynamic swap files)")
 
 
-def _cpus_macos(host, facts):
+def _cpus_macos(host):
     count = _sysctl_int(host, "hw.ncpu")
     return count, str(count)
 
 
-def _os_macos(host, facts):
+def _os_macos(host):
     fields = dict(line.partition(":")[::2] for line in host.run(["sw_vers"]).splitlines())
     name, version = (fields.get(key, "").strip() for key in ("ProductName", "ProductVersion"))
     if not (name and version):
@@ -438,24 +439,24 @@ def _os_macos(host, facts):
     return f"{name} {version}", f"{name} {version}"
 
 
-def _kernel_macos(host, facts):
+def _kernel_macos(host):
     release = _sysctl(host, "kern.osrelease")
     return release, f"Darwin {release}"
 
 
-def _init_macos(host, facts):
+def _init_macos(host):
     name = Path(host.run(["ps", "-o", "comm=", "-p", "1"]).strip()).name
     if not name:
         raise Unreadable("ps names no process 1")
     return name, name
 
 
-def _vm_stat(host, facts):
+def _vm_stat(host):
     path = host.which("vm_stat")
     return (NONE, "none (not on PATH)") if path is None else (path, path)
 
 
-def _root_fs_macos(host, facts):
+def _root_fs_macos(host):
     if host.listdir("/System/Volumes/Data") is None:
         raise Unreadable("/System/Volumes/Data does not exist")
     return _filesystem(host, "/System/Volumes/Data")
@@ -473,9 +474,11 @@ _MACOS_READERS = (
 )
 
 
-def _bots(paths, paths_error):
-    if paths is None:
-        raise Unreadable(f"no data root: {paths_error}")
+def _bots(host: Host, root: Path | None):
+    try:
+        paths = host.paths(root)
+    except (ValueError, OSError) as exc:
+        raise Unreadable(f"no data root: {exc}") from exc
     import yaml
 
     from ..config import load_fleet
@@ -489,13 +492,13 @@ def _bots(paths, paths_error):
         except (OSError, yaml.YAMLError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise Unreadable(f"{fleet.fleet_yaml} cannot be read: {exc}") from exc
         count += len(config.bots)
-    return {"bots": count, "fleets": len(fleets)}, f"{count} in {len(fleets)} fleet(s)"
+    return ({"bots": count, "fleets": len(fleets), "root": str(paths.root)},
+            f"{count} in {len(fleets)} fleet(s) under {paths.root}")
 
 
 def _names(fact: Fact) -> list[str]:
     """A controllers fact's names; `none` offers none."""
-    value = fact.value
-    return value if isinstance(value, list) else value["controllers"] if isinstance(value, dict) else []
+    return fact.value if isinstance(fact.value, list) else []
 
 
 def _unknown(facts: dict[str, Fact], *names: str) -> Enforcement | None:
@@ -553,28 +556,42 @@ def _limit_on(what: str, holder: Enforcement, facts: dict[str, Fact]) -> Enforce
     return memory
 
 
+def _bot_manager(facts: dict[str, Fact]) -> Enforcement:
+    unknown = _unknown(facts, "systemd_booted", "user_manager")
+    if unknown:
+        return unknown
+    if facts["systemd_booted"].value and facts["user_manager"].value:
+        return Enforcement("available", "bots run under the systemd user manager")
+    return Enforcement("unavailable", "bots do not run under a systemd user manager here")
+
+
+def _free_memory_linux(facts: dict[str, Fact]) -> Enforcement:
+    """The memory stop's reading. A line it cannot read leaves the stop without it: unavailable, by name."""
+    available = facts["mem_available"]
+    if available.unreadable is not None:
+        return Enforcement("unavailable", f"the memory stop cannot read free memory: {available.unreadable}")
+    return Enforcement("available", "the memory stop reads free memory from MemAvailable in /proc/meminfo")
+
+
+def _pressure_linux(facts: dict[str, Fact]) -> Enforcement:
+    unknown = _unknown(facts, "pressure")
+    if unknown:
+        return unknown
+    if "memory" in facts["pressure"].value:
+        return Enforcement("available", "the kernel exposes memory pressure (/proc/pressure/memory), "
+                           "which systemd-oomd needs to act on it")
+    return Enforcement("unavailable", "the kernel exposes no memory pressure (/proc/pressure/memory "
+                       "is absent), so systemd-oomd cannot act on it here")
+
+
 def _linux_enforcement(facts: dict[str, Fact]) -> dict[str, Enforcement]:
     scope = _scope(facts)
-    manager = _unknown(facts, "systemd_booted", "user_manager") or (
-        Enforcement("available", "bots run under the systemd user manager")
-        if facts["systemd_booted"].value and facts["user_manager"].value
-        else Enforcement("unavailable", "bots do not run under a systemd user manager here"))
-    available = facts["mem_available"]
-    pressure = facts["pressure"]
     return {
         "scope": scope,
         "memory_cap": _limit_on("a MemoryMax on a heavy run's scope", scope, facts),
-        "bot_throttle": _limit_on("a MemoryHigh on a bot's unit", manager, facts),
-        "free_memory": (
-            Enforcement("unavailable", f"the memory stop cannot read free memory: {available.unreadable}")
-            if available.unreadable is not None
-            else Enforcement("available", "the memory stop reads free memory from MemAvailable in /proc/meminfo")),
-        "pressure": _unknown(facts, "pressure") or (
-            Enforcement("available", "the kernel exposes memory pressure (/proc/pressure/memory), "
-                        "which systemd-oomd needs to act on it")
-            if "memory" in pressure.value
-            else Enforcement("unavailable", "the kernel exposes no memory pressure (/proc/pressure/memory "
-                             "is absent), so systemd-oomd cannot act on it here")),
+        "bot_throttle": _limit_on("a MemoryHigh on a bot's unit", _bot_manager(facts), facts),
+        "free_memory": _free_memory_linux(facts),
+        "pressure": _pressure_linux(facts),
     }
 
 

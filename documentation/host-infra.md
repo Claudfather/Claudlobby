@@ -31,11 +31,12 @@ On Linux:
 | `controllers_root` | the controllers the kernel offers | `/sys/fs/cgroup/cgroup.controllers` |
 | `user_manager` | whether the caller's systemd user manager runs | its cgroup, `user@UID.service` |
 | `controllers_user_manager` | the controllers delegated to the user manager, which bound every unit and scope under it | its `cgroup.controllers` |
-| `controllers_own` | the caller's own cgroup and its controllers (a bot's unit, when a bot runs the read) | `/proc/self/cgroup`, then that cgroup's `cgroup.controllers` |
+| `own_cgroup` | the caller's own cgroup (a bot's unit, when a bot runs the read) | `/proc/self/cgroup` |
+| `controllers_own` | the controllers in that cgroup | its `cgroup.controllers` |
 | `pressure` | the pressure stall files present | `/proc/pressure` |
 | `kernel_cmdline` | only the command line's `cgroup*`, `psi*`, `systemd.unified_cgroup_hierarchy` and `swapaccount` settings | `/proc/cmdline` |
 | `root_fs` | size in MiB, and percent used as `df` counts it | `statvfs /` |
-| `bots` | the bots and fleets declared on the data root | each `fleet.yaml` under the data root |
+| `bots` | the bots and fleets declared on the data root, and the root (`--root`, else the one the CLI selects) | each `fleet.yaml` under the data root |
 
 On macOS: `ram` (`sysctl hw.memsize`), `swap` (`sysctl vm.swapusage`: total and used, since macOS sizes its swap files as it goes), `cpus` (`sysctl hw.ncpu`), `os` (`sw_vers`), `kernel` (`sysctl kern.osrelease`), `init` (`ps -o comm= -p 1`), `vm_stat` (its path), `root_fs` (the data volume, `/System/Volumes/Data`) and `bots`.
 
