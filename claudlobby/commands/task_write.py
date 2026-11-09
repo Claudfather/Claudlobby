@@ -10,8 +10,9 @@ import sqlite3
 
 from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
+from ..request_ids import canonical_request_id
 from ..task_operations import UNSPECIFIED_ASSIGNMENT
-from ..application_tasks import (_reference, _request_id, _text, _committed_notification,
+from ..application_tasks import (_reference, _text, _committed_notification,
                                  _recording_failure, task_outcome)
 
 
@@ -57,7 +58,7 @@ def _deadline(value: str | None) -> str | None:
 
 
 def _inputs(args) -> dict:
-    _request_id(args.request_id)
+    canonical_request_id(args.request_id)
     if args.public_command == "task.feedback":
         from ..message_payload import MessageBody, MessagePayloadError
         from ..plane.ids import ID_PATTERNS
