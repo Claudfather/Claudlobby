@@ -19,6 +19,7 @@ claudlobby fleet reconcile  # audit the fleet's supervision state
 claudlobby fleet status  # fleet health dashboard
 claudlobby bot status <name>  # one bot in detail
 claudlobby host doctor [--switches]  # pre-flight diagnostic; --switches: every switch and its arming line
+claudlobby host spec  # the host's facts with their sources, and what its OS can enforce; changes nothing
 claudlobby host credentials reconcile  # declared vs stored vs equipped credentials
 claudlobby config validate --runtime  # self-containment audit (--strict, --bot)
 claudlobby host supervision reap-orphans --dry-run  # stale supervision units; --apply removes
