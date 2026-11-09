@@ -857,9 +857,141 @@ class TestTheStopLine:
         assert "run line:" in out and "3800" in out and "(default)" in out
         info = json.loads(_status(se, "--json").stdout)["run_lines"]
         assert info["stop_mib"] == 3800 and info["file"] == "default"
-        _arm(se, "poll_s = 1\n")  # a file sets values, never off
+        _arm(se, "poll_s = 1\n")  # a file sets values over the defaults
         info = json.loads(_status(se, "--json").stdout)["run_lines"]
         assert info["stop_mib"] == 3800 and info["poll_s"] == 1
         _arm(se, "bogus = 1\n")
         assert "NOT ARMED" in _status(se).stdout
         assert "error" in json.loads(_status(se, "--json").stdout)["run_lines"]
+
+
+# --- the host's bounds and its one off (#2790) -----------------------------------
+
+
+def _refusal(hs, d: Path, text: str) -> str:
+    """What run_lines refuses a run-lines file holding text with."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run-lines").write_text(text)
+    with pytest.raises(hs.LinesError) as refused:
+        hs.run_lines(d)
+    return str(refused.value)
+
+
+class TestTheHostsBounds:
+    def test_the_fallback_is_this_hosts_numbers_inside_its_own_bounds(self, hs):
+        assert hs.RUN_LINES == {
+            "stop_mib": 3800, "debounce_reads": 2, "poll_s": 2, "grace_s": 10,
+            "stop_mib_floor": 3000, "notice_within_s": 6, "stopped_within_s": 21, "stop": "on"}
+        render = hs.RENDER_LINES
+        assert (render["stop_mib"], render["poll_s"], render["stop_mib_floor"],
+                render["notice_within_s"]) == (3800, 2, 3000, 6)
+        assert "stopped_within_s" not in render and "stop" not in render  # no grace, no off
+        assert hs._bounds_broken(dict(hs.RUN_LINES)) is None
+        assert hs._bounds_broken(dict(render)) is None
+
+    def test_each_bound_holds_at_its_edge(self, hs):
+        run, render = dict(hs.RUN_LINES), dict(hs.RENDER_LINES)
+        assert hs._bounds_broken({**run, "stop_mib": 3000}) is None  # at the floor
+        assert "stop_mib_floor" in hs._bounds_broken({**run, "stop_mib": 2999.9})
+        assert hs._bounds_broken({**run, "debounce_reads": 3}) is None  # noticed in 6 s
+        assert "notice_within_s" in hs._bounds_broken({**run, "debounce_reads": 4})
+        assert hs._bounds_broken({**run, "grace_s": 17}) is None  # stopped in 4 + 17 s
+        assert "stopped_within_s" in hs._bounds_broken({**run, "grace_s": 17.5})
+        # 30 x 0.2 s is 6.000000000000001 in floats: still 6 s
+        assert hs._bounds_broken({**run, "debounce_reads": 30, "poll_s": 0.2, "grace_s": 15}) is None
+        assert hs._bounds_broken({**render, "poll_s": 6}) is None  # one reading is a render's notice
+        assert "notice_within_s" in hs._bounds_broken({**render, "poll_s": 6.5})
+        assert "stop_mib_floor" in hs._bounds_broken({**render, "stop_mib": 2999})
+
+    @pytest.mark.parametrize("text, bound", [
+        ("stop_mib = 2999\n", "stop_mib_floor"),  # under this host's floor
+        ("stop_mib_floor = 3500\nstop_mib = 3400\n", "stop_mib_floor"),  # under the file's own
+        ("stop_mib_floor = 3900\n", "stop_mib_floor"),  # a floor over this host's line
+        ("debounce_reads = 4\n", "notice_within_s"),  # 4 readings 2 s apart: 8 s
+        ("poll_s = 3.5\n", "notice_within_s"),  # 2 readings 3.5 s apart: 7 s
+        ("notice_within_s = 3\n", "notice_within_s"),  # this host's 4 s notice
+        ("grace_s = 17.5\n", "stopped_within_s"),  # 4 s + 17.5 s
+        ("stopped_within_s = 12\n", "stopped_within_s"),  # 4 s + 10 s
+        ("stop = off\nstop_mib = 100\n", "stop_mib_floor"),  # the off line excuses no number
+    ])
+    def test_a_run_lines_file_outside_its_bounds_is_refused(self, hs, tmp_path, text, bound):
+        why = _refusal(hs, tmp_path, text)
+        assert "breaks its bounds" in why and bound in why and "#2790" in why, why
+
+    @pytest.mark.parametrize("text", [
+        "stop = on\n", "stop = OFF\n", "stop = no\n", "stop = 0\n", "stop = false\n",
+        "stop =\n", "stop_mib = off\n", "stop_mib = 0\n", "stop_mib = -1\n",
+        "stop_mib = inf\n", "stop_mib = nan\n", "stop_mib_floor = 0\n",
+        "debounce_reads = inf\n", "grace_s = nan\n", "notice_within_s = inf\n",
+        "stopped_within_s = 0\n",
+    ])
+    def test_a_value_that_acts_as_an_off_stays_refused(self, hs, tmp_path, text):
+        _refusal(hs, tmp_path, text)
+
+    @pytest.mark.parametrize("text, said", [
+        ("stop_mib = 2999\n", "stop_mib_floor"),
+        ("stop = on\n", "stop takes one value, off"),
+    ])
+    def test_a_refused_file_refuses_every_run_before_the_slot(self, se, text, said):
+        _arm(se, text)
+        r = _run(se, "pytest")
+        assert r.returncode == 2, r.stderr
+        assert "NOT RUN" in r.stderr and said in r.stderr, r.stderr
+        assert _ran(se.tmp) == [] and not (se.state / "slot-0.lock").exists()
+        (refused,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
+        assert refused["data"]["where"] == "lines" and said in refused["data"]["why"]
+        assert "NOT ARMED" in _status(se).stdout
+
+    def test_a_file_sets_the_hosts_own_bounds(self, se):
+        _arm(se, "stop_mib_floor = 2000\nstop_mib = 2500\nnotice_within_s = 10\n"
+                 "stopped_within_s = 30\ndebounce_reads = 4\npoll_s = 0.1\ngrace_s = 20\n")
+        assert _run(se, "pytest").returncode == 0
+        lines = _record(se)["lines"]
+        assert (lines["stop_mib"], lines["stop_mib_floor"], lines["notice_within_s"],
+                lines["stopped_within_s"], lines["stop"]) == (2500, 2000, 10, 30, "on")
+
+    def test_the_off_line_is_the_one_off_and_says_so_on_every_run(self, se):
+        # fast lines: with the stop on, this host would stop the job in a fraction of a second
+        _arm(se, "# the host's one off\nstop = off\npoll_s = 0.1\n")
+        _mem(se, 3000)
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=0.6)
+        assert r.returncode == 3, r.stderr
+        assert "memory stop is OFF" in r.stderr and "stop = off" in r.stderr and "#2790" in r.stderr
+        rec = _record(se)
+        assert rec["lines"]["stop"] == "off" and rec["ended"] == "done" and "peak" not in rec
+        events = _events(se)
+        assert [e["type"] for e in events] == ["heavy_slot_acquired", "heavy_slot_released"]
+        assert events[0]["data"]["stop"] == "off"
+        # the control: the same lines and job with the stop on are stopped
+        _arm(se, "poll_s = 0.1\n")
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=5)
+        assert r.returncode == 79, r.stderr
+        assert "memory stop is OFF" not in r.stderr
+        acquired = [e for e in _events(se) if e["type"] == "heavy_slot_acquired"]
+        assert len(acquired) == 2 and "stop" not in acquired[1]["data"]
+
+    def test_a_signal_still_reaches_the_whole_group_with_the_stop_off(self, se):
+        _arm(se, "stop = off\n")
+        _stub(se, 'trap \'touch "$STUB_DIR/term"; exit 143\' TERM\n'
+                  'sleep 60 &\n'
+                  'echo $! > "$STUB_DIR/bg.pid"\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest")
+        bg = _pid_of(se.tmp / "bg.pid")
+        _wait_for(lambda: _ran(se.tmp))
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(30) in (143, -signal.SIGTERM)
+        _wait_for(lambda: _gone(bg))
+        assert (se.tmp / "term").exists()
+        assert _record(se)["state"] == "released"
+
+    def test_status_shows_the_bounds_and_the_off_line(self, se):
+        out = _status(se).stdout
+        assert "floor 3000 MiB, notice within 6 s, stopped within 21 s (default)" in out, out
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert (info["stop"], info["stop_mib_floor"], info["notice_within_s"],
+                info["stopped_within_s"]) == ("on", 3000, 6, 21)
+        _arm(se, "stop = off\n")
+        assert "run line: OFF" in _status(se).stdout
+        assert json.loads(_status(se, "--json").stdout)["run_lines"]["stop"] == "off"

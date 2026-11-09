@@ -286,6 +286,32 @@ def test_a_lines_file_it_cannot_read_refuses(rs, text):
     assert "render-lines" in r.stderr and _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
 
 
+@pytest.mark.parametrize("text, said", [
+    ("stop_mib = 2999\n", "stop_mib_floor"),  # under this host's floor
+    ("stop_mib_floor = 3900\n", "stop_mib_floor"),  # a floor over this host's line
+    ("poll_s = 6.5\n", "notice_within_s"),  # one reading is a render's notice
+    ("notice_within_s = 1\n", "notice_within_s"),
+    ("stop = off\n", "names no render line"),  # a render has no off line
+])
+def test_a_lines_file_outside_its_bounds_is_refused(tmp_path, text, said):
+    """The render keeps the plain run's bounds where the two share a line (#2790)."""
+    hs = load_lib_module("heavy-slot")
+    (tmp_path / "render-lines").write_text(text)
+    with pytest.raises(hs.LinesError) as refused:
+        hs.render_lines(tmp_path)
+    assert said in str(refused.value)
+
+
+@needs_linux
+def test_a_lines_file_outside_its_bounds_refuses_the_render(rs):
+    (rs.state / "render-lines").write_text("poll_s = 6.5\n")
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2, r.stderr
+    assert not (rs.tmp / "ran").exists()
+    assert "breaks its bounds" in r.stderr and "notice_within_s" in r.stderr, r.stderr
+    assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
+
+
 def test_an_unknown_profile_is_refused(rs):
     r = subprocess.run([str(WRAPPER), "run", "--profile", "nope", "--", "sh", "-c", 'touch "$STUB_DIR/ran"'],
                        env=rs.env, capture_output=True, text=True, timeout=60)
