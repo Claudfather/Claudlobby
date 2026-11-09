@@ -1018,13 +1018,13 @@ DOC_PATHS = [
     "library/expertise/code-review.md",
     "library/protocols/review-flow.md",
     "library/protocols/verify-before-merge.md",
-    "library/protocols/pr-comment-hygiene.md",
+    "library/skills/_pr-comment-examples.md",
 ]
 
 #: Every verdict WORD these docs teach, normalized the way `parse_verdict`
 #: itself normalizes before its NORM lookup (`.lower()`, then collapse
 #: `[\s-]+` to one space) -- "keep every verdict word the tool reads" made
-#: executable rather than eyeballed. `approve` is `pr-comment-hygiene.md`'s;
+#: executable rather than eyeballed. `approve` is `_pr-comment-examples.md`'s;
 #: the other four are `review-flow.md` step 5's (#1895), echoed by
 #: `code-review.md` and (ship it / request changes) by
 #: `verify-before-merge.md`. `comment` is deliberately NOT here -- it is a
@@ -1055,7 +1055,7 @@ BRACKET_TAG = re.compile(r"\]\s*\[VERDICT\]", re.I)
 #: file still parses cleanly (otis's review: a mutation on one of several
 #: bullets in a file can leave the file's count non-zero while one example
 #: silently vanished -- a bare ">0" check does not see that). Includes
-#: `pr-comment-hygiene.md`'s `comment` example: it is bracket-tag SHAPED
+#: `_pr-comment-examples.md`'s `comment` example: it is bracket-tag SHAPED
 #: (`BRACKET_TAG` matches it) even though it is not a verdict the tool
 #: reads, so it is a counted example here, just one whose `verdict` is
 #: `None` in `_doc_examples()`'s output.
@@ -1063,7 +1063,7 @@ EXAMPLES_PER_FILE = {
     "library/expertise/code-review.md": 4,
     "library/protocols/review-flow.md": 5,
     "library/protocols/verify-before-merge.md": 2,
-    "library/protocols/pr-comment-hygiene.md": 3,
+    "library/skills/_pr-comment-examples.md": 3,
 }
 
 
@@ -1092,7 +1092,7 @@ class TestDocsTeachTheParseableHeader:
         """(path, line, verdict) for every line in the four docs that is
         EITHER a verdict `parse_verdict` recognizes OR carries the bracket-tag
         SHAPE (`BRACKET_TAG`) whether or not the word after it resolves --
-        so a taught-but-unrecognized word (`pr-comment-hygiene.md`'s
+        so a taught-but-unrecognized word (`_pr-comment-examples.md`'s
         `comment`) is a FOUND example with `verdict is None`, never a silent
         exclusion (#1921 review, S1). `<...>` marks a template line
         (`<bot-name>`, `<sha>`) and is skipped explicitly -- selection must
@@ -1136,7 +1136,7 @@ class TestDocsTeachTheParseableHeader:
             assert anchor, f"{rel}: header carries no SHA anchor: {line!r}"
             if verdict is None:
                 # The one taught, bracket-tagged word the tool does not gate
-                # on at all (S1, #1921 review): `pr-comment-hygiene.md`'s
+                # on at all (S1, #1921 review): `_pr-comment-examples.md`'s
                 # `comment`. Checked against the RAW LINE, deliberately not
                 # `prs.verdict_words()` -- that shares `VERDICT_HEADER`'s own
                 # vocabulary-restricted regex, so it returns `None` for
