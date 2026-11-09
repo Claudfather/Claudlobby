@@ -223,9 +223,7 @@ def _isolation_findings(
         composed = set(json.loads(target.read_text())["permissions"]["deny"])
     except (OSError, ValueError, KeyError, TypeError):
         composed = None
-    remedy = ("stage `claudlobby --root <data-root> config plan --release <sealed-release-id>`"
-              " and activate the returned plan with `claudlobby --root <data-root>"
-              " host activate <plan-id> --install-directory <native-user-unit-dir>`")
+    remedy = "run `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`"
     if composed is None:
         findings.append(Finding(
             bot.bot_id, "isolation_not_composed", WARN,
