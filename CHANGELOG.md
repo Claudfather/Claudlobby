@@ -6,6 +6,573 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed — fixture code no test reads: two parameters and a SQL copy in `tests/release_fixtures.py`
+
+The `releases` fixture loses its `request` parameter and the compatibility update it read. No test has parametrized `releases` since #2727 deleted `tests/test_migration_plan.py`, so that update was always empty. `_database` loses its `version` parameter: both callers build version 1, so it now runs the original schema script alone. `releases` also stops copying the plane's SQL files into each historical release's `package/plane/migrations`: `claudlobby/migration_plan.py` was the only code that read that directory, and it went in #2727. Tests only: no test is added or removed, and nothing outside `tests/` changes.
+
+### Changed — one `--request-id` check and one request-proof read replace their copies
+
+The `--request-id` check was written out five times: in `claudlobby/application_tasks.py` and in the `automation`, `checkin`, `message_write` and `workstream` command modules. It is now `canonical_request_id` in a new module, `claudlobby/request_ids.py`, which imports only `uuid` and `command_result`. Every caller imports it from there, including `task_write`, `task_permissions`, `report_write` and `assignment_delivery`, which imported a copy from `application_tasks.py` or `message_write.py`. `checkin_operations.py` imports `_proof`, the read-only Plane read that proves one request's fact, from `report_operations.py` instead of keeping an identical copy. Every command accepts and refuses the same request IDs, with the same error, as before.
+
+### Removed — four names nothing reads
+
+`ConfigInstall.retained_directories` in `claudlobby/config_install.py`, `Resolution.origin_hint` in `claudlobby/env_tiers.py`, `ENV_READ` in `claudlobby/isolation.py` and `_FEEDBACK_GENERATED_ENV` in `claudlobby/plane/owner_feedback.py` are deleted, with the `_GENERATED_ENV` import that only the last one used. No code read any of them. No journal row carries the `retained` key the first was built from. The second's comment said the register fills it, but no code ever set it. The env-read lint calls `_env_read_re()` itself. The owner feedback adapter refuses `BOT_SERVICE` and `CLAUDLOBBY_TIMER_CONTEXT` through the action context in `plane/owner_service.py`, which `tests/test_plane_owner_feedback.py` checks.
+
+### Changed — one factory builds the parsers' lazy command handlers
+
+Thirteen command handlers in eleven `claudlobby/commands/_*_parsers.py` modules each wrapped `execute` around a lambda that imported one command module and called its `dispatch(args)`. `claudlobby.commands.lazy(module, request_id=False)` now builds them. A command module is still imported only when its route runs, and every command's result is unchanged: the handlers that put the route's `--request-id` on the result pass `request_id=True`, and `request show` still leaves its positional request ID off the result.
+
+### Removed — the task audit module that nothing imports
+
+`claudlobby/task_audit.py` read every task record, old and current, as a preflight for the retired release migration. No code has imported it since #2727 deleted the migration planner, and no command, runbook or script runs it. The module and the tests of it are gone. `tests/test_task_audit.py` keeps the four row helpers that four other test files import, and one test of the task reader's blockers for a report event from another fleet, with no assignment, or with no fleet, on the original and the current schema: no other test checks those three blockers. The expiry and task-query tests that used the audit as a second reading now check the task reader, or state the values the audit returned.
+
+### Removed — test code nothing reads: `_task_details` (two copies), `_ts`, `REPO` (two copies) and `PR`
+
+`_task_details` in `tests/test_link_source.py` and `tests/test_pr_attribution_withheld.py` is deleted, with the imports only it used: `json`, `sqlite3`, and `connect` and `db_path` from `claudlobby.plane.db`. Its callers, each file's `TestTheWriter` class, went in #1989. The same two files lose the module constants that only classes #1989 removed read: `REPO` in both, which `TestOneDiscriminatorOnly` read, with the `pathlib` import only it used, and `PR` in `tests/test_pr_attribution_withheld.py`, which `TestTheWriter` read. `_ts` in `tests/test_uptime.py` is deleted; its callers went with the keepalive.log parser tests in #1472. Tests only: no test is added or removed, and nothing outside `tests/` changes.
+
+### Changed — four pins in the library tests hold only their rule, without the example, history or mechanism beside it (#2761)
+
+The library tests pin, word for word, the rule sentences the #717 token cuts kept in their protocols. Four pins also held text beside the rule, so an edit to that text alone failed its test while the rule stayed the same. In the `fleet-observability` Decision Table, the `crash_loop` pin now holds "The cause is in the bot's `logs/startup.log`" without the dated example after it; the `browser_outside_render` pin holds the instruction to report a browser a bot session opened, without the history clause before it; and the `pane_unknown` pin holds "`activity_stuck` never fires for it" without the mechanism and the issue reference around it. In the `dispatch` protocol, the `task admit` command is pinned as the three parts around its example title and repo. Editing the text left out no longer fails these tests; removing or changing the rule's part still does. Tests only; nothing in `claudlobby/` or `library/` changes, so no composed text and no token count moves.
+
+### Fixed — library and documentation text names the live update and doors, not the retired `config plan`, `host activate` and `generate` (#2751, #2615)
+
+Text in 21 files that no open pull request changes told readers to stage `config plan`, run `host activate`, rely on `claudlobby generate`, `claudlobby validate` or `claudlobby doctor`, or open `report-back.sh` or `lib/tg-post.sh`, none of which main has. It now names what main does: the operator's `host update apply FULL_COMMIT`, `config validate`, `host doctor` and `$CLAUDLOBBY_NATIVE_DIR/tg-post.sh`. Two sentences of the `fleet-ops` skill, which every bot composes, change this way, and so does the `verify-rollout` guardrail's framework step, which now waits for `host update status` to read `done` at a target that contains the merge commit. The other files are the Search Console, Meta Ads, PostHog and GitGuardian integrations, the integrations, skills and tools READMEs, the `run-eval` skill, ten documentation pages and one harness comment. Files an open pull request changes, such as `templates/claude.md.j2` and the `bootstrap` skill, keep their text for now.
+
+### Removed — five functions that only their own tests called
+
+`format_report` in `claudlobby/freshbox.py`, `format_json` in `claudlobby/uptime.py`, `managed_listeners` in `claudlobby/plane/owner_service.py`, and `package_name` and `warm_argv` in `claudlobby/_runtime_scripts/mcp-package-grammar.py` are deleted, with the tests that called them. No command reached them: `config validate --runtime` prints freshbox findings itself, `fleet uptime` returns its data through the CLI result, activation stopped calling `managed_listeners` when the Git updater replaced sealed activation, and the grammar's callers use `warm_prefix`, `bare_name`, `declared_packages` and `probe_targets`. The checks that reached `warm_prefix` or `bare_name` through the deleted pair now call those functions directly.
+
+### Changed — the library tests check the text the #717 token cuts moved: rules moved into skills stay, reasons moved out stay out (#2761)
+
+The token cuts of #2753, #2755 and #2758 moved text between protocols and skills. No test held the rules they put into a skill, that the `fleet-pulse` description names the file the `fleet-observability` pointer names, or most of the text #2758 moved out of `shared-documentation-vault`. Three checks now do. The `run-eval` skill keeps, word for word, each rule sentence that #2753's guard table places on its lines: 52 `in` checks, one per sentence or rule part. The `fleet-pulse` skill's description names the same file as the protocol's pointer, that file is in the skill's own directory, and the skill's first rule still lets a bot that composes the protocol read the reference. None of the 12 sentences #2758 moved out of `shared-documentation-vault` comes back into it, the maintainer note in its old quoted form included. A later trim that drops a moved rule, a description that names another file, or a moved reason that returns to the protocol now fails its test. Tests only; nothing in `claudlobby/` or `library/` changes, so no composed text and no token count moves.
+
+### Added — keepalive types `/compact` for a bot's pending compaction request (#1053)
+
+A bot's own `bot compact <its own ID>` records a request; keepalive now acts on it. On a tick where the request is under 2 hours old (by its `requested_epoch`), no assignment was delivered to the bot since it, the bot has not compacted or started a new session since it, and no composed PreCompact hook would refuse the first compaction, keepalive reads the bot's turn markers (its last turn ended 10 s ago or more, after its last input and tool call) and its whole screen (no running turn, menu or text in the box, and a prompt), takes the host's compaction slot, reads the request, the markers and the screen again under the pane's send lock, and types the one fixed command `/compact` with its repairs off. A screen that changed between the two reads vetoes. `compaction_sent` records the send with every reading; the compaction's `compact_boundary` row newer than the send gives `compaction_proven` with its sizes, and none within 10 minutes gives the critical `compaction_not_proven`, with nothing resent. A request it does not act on writes `compaction_skipped`, once per reason. A bot whose Claudron session loop runs an engine under 0.10.0, or whose clauDNA prompt is armed, is left to be compacted by hand. Nothing is typed on a usage-limit tick or one that typed a reload.
+
+### Added — the A/B comms-eval verdict pins its battery, its harness revision and each arm's composed output (#790)
+
+`harness/ab-comms-eval.sh` takes three run pins before any cell, and `harness/ab-comms-verdict.py` records them: the sha256 of the battery the cells get (written to `battery.json` in the run's root), the commit the harness tree is at (with `-dirty` when its tracked files differ from it), and, per arm, one sha256 over what that arm's session reads in its composed bot directory. A dry run's verdict carries all three. With `--real`, which the harness passes on any run but a dry run, a verdict that lacks a run pin is refused with exit 3, naming each missing pin; without it, a missing pin is recorded as null. The token-efficiency real mode stays refused before any cell.
+
+### Added — a delivery to a bot waits for its compaction to end, and presses no extra Enter into it (#1053)
+
+While the host's compaction slot holds a lease naming a bot, a Claude Code compaction is in flight there. Its pane alone cannot show it: on Claude Code 2.1.319 the footer draws "esc to interrupt" while the input box is empty or shows queued messages, but not while a message sits typed in the box, and the "Compacting conversation…" line is not the busy check's activity-line shape.
+
+- Every delivery through the CLI's messaging transport (`message send` and `reply`, `assignment deliver`, `fleet reports submit`, and the notices that assignment reports and task acts send) waits for that lease to end, reading the slot every 2 seconds and for 60 seconds at most, and then sends as to any busy bot. A delivery to any other bot does not wait. One that waited says so in one line on stderr.
+- The CLI's repair Enter (the one it presses when a message is still held in the box after the receipt wait) presses nothing while the lease lives; its look reads `compacting`.
+- `bot_is_busy` reads such a bot busy, so the briefing trigger, the manager check-in and the bot sweep pass it over as they pass over a bot in a turn.
+
+All three ask the slot with one reader, which calls the slot's own `status()`: the new `lib-common.sh` helper `compaction_lease_left` runs it for `bot_is_busy` and the repair, and the transport runs the same text itself, with no shell. A release without the slot, or a slot that cannot be read, reads as no compaction in flight, so nothing waits. Nothing takes a lease yet: the compaction executor is to take one just before it types `/compact`, so until it does no delivery ever waits.
+
+### Changed — `task list` and `fleet inbox` print each event once (#2771)
+
+`claudlobby --json task list` printed each task whole: its history, each assignment's history and closing event, and the current assignment again, so an event appeared up to four times. An event recorded with one task's ID under another task's assignment appeared under both tasks. `fleet inbox` printed its open work the same way. Each event now appears once per read, in ingest order: in `data.events` for `task list`, and in `data.work.events` for `fleet inbox`. That list holds every event of the page's tasks. Each task is printed as `task show` has printed it since #2773, naming its events by ID:
+
+- Each task record in `data.items` and `data.work.items`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. A task's history is the entries of the page's events with its `task_id`; the current assignment's record is its entry in the task's `assignments`.
+- Each record in a task's `assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of the page's events with its `assignment_id`.
+- Schema-1's top-level keys are unchanged, as are every other field, the cursors, `issues`, the inbox's reports and attention, and the plain-text lines. `task list --help` now says where the events are.
+- A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
+
+On one fleet's live plane, a `task list --state all` page of 100 tasks went from 864,842 to 475,916 characters (−45.0%), and the open page of three tasks from 12,019 to 6,435 (−46.5%). `fleet inbox` saves the same 5,584 characters in its work section. Tokens, and whether a reader acts as well on the shorter read, are not measured.
+
+### Removed — four more finished plans under documentation/plans/
+
+The observable plane's Phase-1 kernel plan and Phase-2 ingest plan, the Claudron consumption plan and the L3 lessons triage ledger are deleted from `documentation/plans/` and `documentation/plans/archive/`; git history keeps them. Where other files pointed at them, they now name the issues and PRs that carried that work (#509, #517, #1341, #1345, #1372, #1384) or say the plan is in git history. The lessons-migrate docstring and `library/lessons/README.md` give the classification in `claudlobby/commands/lessons_migrate.py` as the record of each note's verdict.
+
+### Removed — the two SCHEMA 2 naked-bot baselines the gate can no longer compare
+
+`documentation/baselines/naked-bot-2026-08-11.json` and `naked-bot-2026-08-12.json` are deleted. `harness/naked-bot-observe.py` refuses to diff records across schema versions, and both remaining records are SCHEMA 3, so nothing current could be compared with them; git history keeps both. `documentation/naked-bot-observation-gate.md` now names one diff target, `naked-bot-2026-09-30.json`, in its table and its example command, and says how to read the SCHEMA 2 records from git.
+
+### Removed — 18 finished plans and 3 one-shot records under documentation/
+
+Eighteen finished plans under `documentation/plans/` and `documentation/plans/archive/`, `documentation/architecture/system-map-2026-07-30.md`, `documentation/reflections/reflect-claude-2026-05-28.md` and `documentation/runbooks/runtime-neutral-codex-canary-batch.md` are deleted; git history keeps them. `documentation/README.md` now says a completed or superseded doc is deleted, not moved to `archive/`.
+
+### Changed — the library tests of six protocols pin each rule sentence the #717 token cuts kept (#2761)
+
+The token cuts of #2753, #2755, #2757, #2758 and #2760 moved reference text out of six protocols and kept each rule as a standing sentence. A test now holds each of those sentences word for word, one `in` check per sentence: 210 sentences across `eval-workflow`, `ab-gating-rollout`, `fleet-observability`, `dispatch`, `shared-documentation-vault` and `decision-fork-lifecycle`, taken from the guards each cut's pull request listed and its review checked. Each Decision Table row of `fleet-observability` is checked inside its own row. A later trim that drops one of these sentences fails its test, and a rule reworded on purpose changes its line in the test in the same pull request. Tests only; nothing in `claudlobby/` or `library/` changes, so no composed text and no token count moves.
+
+### Changed — the canary-rollout protocol points at `harness/CLAUDE.md` for the pre-merge check, instead of naming one script (#2794)
+
+`library/protocols/canary-rollout.md` made `harness/validate-bot-change.sh` the hard gate for every runtime merge. Its row now names the pre-merge check that `harness/CLAUDE.md` gives for the change, and the PR's `## Harness` section reports it. The gate keeps its force: every runtime change, before merge. `harness/CLAUDE.md` now says that `validate-bot-change.sh` writes and starts user units under `$HOME` and leaves empty ones behind, so it runs under a scratch HOME, as CI's `harness` job runs it. By Claude Code's `/context`, the composed protocol grows by 11 tokens for each bot that composes it, and `harness/CLAUDE.md` by 37; whether managers pick and run a fitting check more often is not measured.
+
+### Added — every PR body names what ran for it, under a required `## Harness` section (#2792)
+
+The section names what CI ran that exercises the change, each instrument or live test run for the PR with its result, or, in one line, why none applies. The rollout check's reader (`.github/workflows/verify-rollout.yml`) fails a body without it, or with nothing in it, in the same run and under the same check name, so the merge guardrails gate it as they gate the Rollout check. The PR template and the `verify-rollout` guardrail carry the section, and the review methodology asks reviewers to read it against the PR's checks. A PR opened before this merged is judged by the new reader at its next push. A body edit, a reopen or ready-for-review may still run the old reader, because that run uses the PR's last merge commit. A PR opened after this merged is judged by the new reader at every run, body edits included.
+
+### Fixed — an A/B comms-eval task whose quality the stub scored can no longer PASS (#790)
+
+The quality stub in `harness/ab-comms-eval.sh` wrote `"gate":"pass"`, so once a run was given `--threshold`, `harness/ab-comms-verdict.py` could read PASS on the token axes alone: a dry run with `--threshold 0.15` read PASS. The stub now writes `"gate":"unscored"`, and a task with any unscored row is INCONCLUSIVE ("quality unscored") whatever the threshold, the token axes or the mechanical check. Each task's `quality` in the verdict now reports what its rows say (`unscored`, `pass` or `fail`) instead of a fixed label.
+
+### Added — `bot show` names the PreCompact hooks a bot's compose gives it, and `bot.conf` carries the Claudron session loop (#1053)
+
+`claudlobby --json bot show BOT` gains `effective_configuration.precompact`, as do `bot list` and `bot capabilities`:
+
+- `claudron_session_loop`: whether the compose adds Claudron's session-loop hooks, its `hook pre-compact` among them. It is the composer's own test (the loop resolves on and a vault path is set), not a read of the settings file.
+- `claudna_precompact_reflect`: clauDNA's PreCompact prompt, as `bot.conf` composes it.
+- `composed`: the `PreCompact` commands in the bot's composed `settings.local.json`, each named `claudron` or `other` and identified by SHA-256, never printed. `matches_declaration` is false where the file is older than the declaration, and a file that cannot be read is `absent` or `unreadable`, never an empty list. A plugin's hooks and the account's own settings are not in that file, so they are not listed.
+
+Every bot's `bot.conf` gains `export CLAUDRON_SESSION_LOOP=1` or `=0` beside `CLAUDNA_PRECOMPACT_REFLECT`, from the same test, and the hook merge reads that test too, so the line and the composed hook cannot disagree. Nothing reads the line yet: the compaction executor is to read it before it sends a `/compact`.
+
+### Added — `compaction-slot.py`, a lease for one compaction at a time on the host (#1053)
+
+A new runtime script, `compaction-slot.py`, keeps one Claude Code compaction at a time on the host. `take --fleet F --bot B` grants a lease that names the bot, the time it was taken and an end 10 minutes later. It refuses, writing nothing, while a lease is live, whoever holds it, and while the host's 1-minute load is 40 or more (the heavy slot's own stop line) or cannot be read. `release` ends a lease by its ID and never a later one, and `status --json` reads `free` or `held`, the last lease and the load. The lease is a record in `state/compaction-slot/`, so a holder that died leaves its lease to end at its 10 minutes, and a host reset ends it at once. Nothing takes the slot yet: it is the third step of compaction at task close, and a later change's executor is to take it before it types `/compact`.
+
+### Added — `bot compact` on the caller's own ID records a request for its own compaction (#1053)
+
+A bot's `claudlobby --json bot compact <its own ID>` used to be refused: only the fleet's manager may control another bot, and a bot's own turn is running while it runs the CLI. With `--request-id UUID` it now records a request and types nothing: one JSON line in the bot's `data/.compact-request` (who, when, the request ID and its context then) and a `compact_requested` row on the plane. A call while a request is pending returns that one, and a request ID the plane already holds records nothing (`replayed`). `--cancel` withdraws the pending request, with a `compact_cancelled` row, and a cancel retried under its cancel ID takes nothing (`replayed` too). Nothing acts on a request yet: a later change's executor is to type `/compact` at the bot's next idle, empty prompt. A manager's `bot compact WORKER` is unchanged, and a worker naming another bot is still refused.
+
+### Fixed — the rollout check waits up to 180 s for the body edit when a PR is offered with an incomplete body, and a second check fails at once (#2797)
+
+`rollout-check / Rollout check` used to fail a PR offered without its sections within seconds, and that failed run was the PR's first judged run, even when the author fixed the body a minute later. Authors of these bodies write the sections after a check fails them, not before, so the check now runs as two jobs of one checker. `rollout-check / Rollout check (no wait)` judges the body once and fails at once, as the check always did, but it cannot fail the run, and the merge guardrails do not read it. `rollout-check / Rollout check`, the name the merge guardrails read, re-reads the body every 15 s for up to 180 s when a PR is opened, reopened or marked ready for review with a body that fails, so an edit made in that time passes it. On any other event both judge once. Both names are plain text, so a draft's skipped runs keep them. Adopting repos get the change when they move their pinned `uses:` sha.
+
+### Added — heavy-slot.py run stops its job when free memory stays under 3800 MiB, on Linux and macOS, on by default (#2221)
+
+Every plain run is watched: the wrapper runs the job in a session of its own and reads the host's free memory every few seconds. A host sets other values in `state/heavy-slot/run-lines`, never off. Once memory stays under `stop_mib` for the debounce, SIGTERM goes to the job's process group and to every process found to have left it, SIGKILL follows after a grace, and the run exits 79 with a `heavy_slot_stopped` row. Whether a stop at this line saves a host is not measured.
+
+### Added — every bot records when input last reached its session and when its last turn ended (#1053)
+
+A new hook, `turn-marker.sh`, composed for every bot on `UserPromptSubmit`, `Stop` and `StopFailure`, writes `data/.turn-input` when a prompt is submitted and `data/.turn-ended` when a turn ends, normally or on an error. The file's modification time is the fact, and its one line names the event that wrote it. Nothing reads the markers yet: they are the first step of compaction at task close (#1053), where keepalive will tell a finished turn from a running one by them. The hook prints nothing and exits 0 on every path, so it never adds to a prompt, blocks one, or keeps a turn going.
+
+### Changed — `task show` prints each event once (#2771)
+
+`claudlobby --json task show` printed the task's history, then each assignment with its own history and closing event, then the current assignment again. So each event appeared two to four times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. This is the shape `assignment show` has printed since #2768, so the two commands now print a task the same way. Every other place that held an event names it by ID:
+
+- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`; the current assignment's record is its entry in `data.task.assignments`.
+- Each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
+- Schema-1's top-level keys are unchanged, as are every other field, `resolved_from_prefix`, the plain-text lines, `task list` and `fleet inbox`.
+- A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
+
+On one worker's three tasks with the most events (17, 15 and 11), a read is 47% to 49% smaller in tokens: 18,932 to 9,684 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
+
+### Changed — the context-management protocol keeps every rule and moves its measurements to a file beside the fleet-ops skill (#2273)
+
+Every bot composes `library/protocols/context-management.md` into its `CLAUDE.md`, so every call carries all of it. Its two measured observations of the context gauge, one history sentence and one reason are now in `library/skills/fleet-ops/context-reference.md`, word for word, and the protocol keeps one pointer to it. Every bot links the `fleet-ops` skill, so the file reaches each bot and costs nothing until a bot opens it. By Claude Code's `/context`, the composed protocol went from 1,734 to 1,620 tokens; whether bots act as well with the measurements one file away is not measured. Every rule, guard and command block stays in the protocol, word for word, in place.
+
+### Changed — the `worker-lifecycle` protocol keeps every rule and moves its descriptions and reasons to a file beside the fleet-ops guide (#2273)
+
+Every bot that composes the `worker-lifecycle` protocol carries all of it on every call. Its descriptions of what the manager, the fleet pulse, a restart and the framework's pane delivery do, with the reasons behind them, are now in `library/skills/fleet-ops/worker-lifecycle-reference.md`, word for word, and the protocol keeps two short pointers to that file. Every bot gets the `fleet-ops` skill directory, so the file reaches each bot that composes the protocol and costs nothing until a bot opens it. By Claude Code's `/context`, the protocol's composed section went from 3,743 to 3,461 tokens; whether workers follow the lifecycle as well with these descriptions and reasons one file away is not measured. Every step, rule, guard, table and command block stays in the protocol, word for word and in order.
+
+### Changed — the `--admin` merge guardrail keeps every rule and moves its measurements and reasons to a file beside the fleet-ops guide (#2273)
+
+Every bot that composes the `merge-policy-auto-admin` guardrail carries all of it on every call. Its measurements, incidents and reasons are now in `library/skills/fleet-ops/merge-policy-reference.md`, word for word, and the guardrail keeps four short pointers to that file's sections. Every bot gets the `fleet-ops` skill directory, so the file reaches each bot that composes the guardrail and costs nothing until a bot opens it. By Claude Code's `/context`, the guardrail's composed section went from 9,082 to 5,699 tokens; whether managers merge as safely with the reasons one file away is not measured. Every rule, guard and command block stays in the guardrail, word for word and in order.
+
+### Changed — the GitHub integration keeps every rule and moves its measured incidents to a file beside the fleet-ops skill (#2273)
+
+Every bot that carries the GitHub integration composes `library/integrations/github.md` into its `CLAUDE.md`, so every call carries all of it. Its measured incidents, the 403 divergence table and two reason sentences are now in `library/skills/fleet-ops/github-reference.md`, word for word, and the integration keeps one pointer to it. Every bot links the `fleet-ops` skill, so the file reaches each bot and costs nothing until a bot opens it. By Claude Code's `/context`, the composed section went from 3,909 to 3,575 tokens; whether bots act as well with the incidents one file away is not measured. Every rule and guard stays in the integration, word for word, in place.
+
+### Changed — the root `CLAUDE.md` keeps every rule and moves its reference text behind pointers (#2273)
+
+A Claude Code session attaches the repository's root `CLAUDE.md` whole the first time it reads a file inside a Claudlobby checkout, and carries it on every later call. Its rules stay word for word. Its reference text moves, word for word, behind four pointers:
+
+- what claudlobby is beside clauDNA and Claudron, the architecture diagram, six of the eight key concepts, and bot supervision with the canonical task commands, to `documentation/architecture/overview.md`;
+- how Claude Code and Codex load instruction files, to a new `documentation/instruction-files.md`;
+- the command list, to a new `documentation/key-commands.md`. The reboot snapshot and the test setup stay, because they carry rules.
+
+The file goes from 28,903 to 23,150 bytes, and from 11,040 to 8,957 tokens by Claude Code's own `/context`. A session that reads a file in a checkout carries 2,083 fewer tokens on every later call. Codex's tightest instruction chain gains the same bytes of room: 86 bytes are left of its 32 KiB on main, and 5,839 after this change. Whether sessions follow the rules as well with this text behind a pointer is not measured. `AGENTS.md` stays a byte copy.
+
+### Changed — the fleet-ops guide keeps every rule and moves its command reference to a file beside it (#2273)
+
+Every bot's `CLAUDE.md` ends with the fleet-ops guide, so every call carries all of it. The guide's reference text, which is its example command blocks, command catalogues, flag syntax and descriptions of what each read prints, is now in `library/skills/fleet-ops/command-reference.md`, word for word. The guide keeps twelve short pointers to that file's sections. Every bot gets the skill directory, so the file reaches each bot and costs nothing until a bot opens it. By Claude Code's `/context`, the composed guide went from 8,391 to 7,034 tokens; whether bots act as well with the command forms one file away is not measured. Every rule stays in the guide, word for word.
+
+### Changed — `harness/CLAUDE.md` keeps every rule and guard and moves its reference text behind a pointer (#2273)
+
+A Claude Code session attaches `harness/CLAUDE.md` whole the first time it reads or edits a file under `harness/`, and carries it on every later call. Every rule stays word for word, and so does every guard a script keeps: what it refuses, never does or asserts. The rest of each script's row (what it does and how, its flags, outputs, measurements and history) moves, word for word, to the same script's row of a new `documentation/harness-script-reference.md`, behind one pointer. One sentence is reworded so that it stays true: the file is now "the index and the rules".
+
+The file goes from 27,966 to 18,476 bytes, and from 10,523 to 6,898 tokens by Claude Code's own `/context`. A session that reads a file under `harness/` carries 3,625 fewer tokens on every later call. Whether sessions follow the rules as well with this text behind a pointer is not measured. `harness/AGENTS.md` stays a byte copy.
+
+### Fixed — composed library text names the git runtime's `host update`, not the retired `host activate` and `config plan` (#2751)
+
+The `claudlobby-dev-in-projects` guardrail, the `canary-rollout` protocol, the Google Analytics, Search Console, Meta Ads and PostHog integrations and the `add-bot` skill told bots to stage `config plan` and give the operator `host activate`, which the git runtime retired. Each step now names what the git runtime does: the operator's `host update apply FULL_COMMIT`, run from a shell outside any bot session, and, for a canary's first fleet, `host setup`, `fleet setup --plan-only`, `config diff FINGERPRINT` and `host update continue`. Keeping old releases for rollback goes, because the git runtime has no rollback route. Every rule stays. A bot that composes the guardrail, a default for every bot, carries 69 fewer tokens on every call (212 to 143, counted with Claude Code's own `/context`) from its first session after a host update; the `canary-rollout` section is 11 tokens smaller (1,824 to 1,813). Whether bots and operators follow the new steps correctly is not measured.
+
+### Changed — `assignment show` prints each event once (#2273)
+
+`claudlobby --json assignment show` printed the assignment and then its whole task, which carried the assignment again. So each event of the assignment appeared three times, four while it was the task's current assignment, and a closing event up to six times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. Every other place that held an event names it by ID:
+
+- `data.assignment`, and each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
+- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`.
+- Schema-1's top-level keys are unchanged, as are every other field, the plain-text lines, `task show` and `task list`.
+- A jq read of a removed key now gets null, which is also what an open assignment's `terminal_event` read before. To tell open from closed, read `state` or `terminal_event_id`.
+
+On three of one worker's closed assignments (13, 10 and 9 events), a read is 60% to 63% smaller in tokens: 21,246 to 7,813 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
+
+### Changed — the check-in protocol keeps its rules and points to its skill for the record command (#717)
+
+Every leaf manager carries the `checkin` protocol on every call. It now names `checkin record` and points to `/checkin` for the full command line, which the skill gives at the step that records the decision; it leaves the rule of one request UUID per operation to the fleet-ops guide, which states it for every bot; and it says once, not twice, that the `manager-checkin` fleet job sends `/checkin`. By Claude Code's `/context`, the protocol's composed section went from 1,113 to 1,018 tokens; whether managers check in as well with the command read from the skill is not measured. Every rule stays in the protocol.
+
+### Changed — the `decision-fork-lifecycle` protocol keeps its rules and points to its examples (#717, #1674)
+
+The `decision-fork-lifecycle` protocol keeps every rule: who may lock a fork, that a lock names one of the plan's options and gives its rationale, that a reopen needs new evidence, that markers count only from authors who can triage the repository, and the convergence rule. Its state diagram, example lock and reopen comments, and sample `Evidence:` fields are now in a shared skill partial, `library/skills/_decision-fork-examples.md`, which staging puts in every bot's `.claude/skills/`. The protocol names that path. A partial is not a skill, so it adds no line to a bot's skill listing. A manager that composes the protocol carries 410 fewer tokens on every call (2,006 to 1,596, counted with Claude Code's own `/context`), from its first session after a host update; a bot that opens the examples reads 672 tokens. Whether managers ratify and reopen forks as well, with the examples one read away rather than in their context, is not measured.
+
+### Changed — the vault form of the Shared Documentation protocol keeps its rules and moves its reasons to a file every bot links (#717)
+
+Every bot wired to a Claudron vault carries the `shared-documentation-vault` protocol on every call. Its reasons, with the Claudron #143 evidence, are now in `library/skills/fleet-ops/vault-reference.md`, word for word, and the protocol keeps a one-line pointer to it. Every bot links the `fleet-ops` skill, so the file reaches each bot that composes the protocol at no cost per call. By Claude Code's `/context`, the protocol's composed section went from 1,821 to 1,363 tokens; whether bots follow the vault rules as well with their reasons in a separate file is not measured. Every rule stays in the protocol.
+
+### Changed — the `dispatch` protocol keeps only what the fleet-ops guide does not already say (#717, #1674)
+
+The `dispatch` protocol no longer repeats the fleet-ops guide that every bot composes. The admit, assign and deliver commands, the canonical IDs, request UUIDs, what to do after an uncertain outcome, the message door, the reads of current state, `task escalate`, the `bot start` command and which of its result fields to read, and `fleet reconcile` are now one pointer to the guide, which for `task withdraw` and `task reassign` names their `--help`. What only the protocol said stays as it was: what the delivery file carries, admitting with the task's repo and project, the check-in assignment, zoned timestamps, the re-check and standing-goal rules, the worker preflight and its readiness gate, the shared-knowledge preflight and active-plan monitoring. Two outcomes the guide states only in more general words stay as one sentence each: an uncertain send or admit never becomes a second assignment or a second task, and a worker answers a note that asked for no work with the unlinked report. A manager that composes the protocol carries 545 fewer tokens on every call (2,413 to 1,868, counted with Claude Code's own `/context`), from its first session after a host update. Whether managers dispatch as well, with these rules read once from the guide rather than twice, is not measured.
+
+### Changed — the fleet-observability protocol keeps its guards and moves its event reference into the fleet-pulse skill (#717)
+
+A manager carries the `fleet-observability` protocol on every call. Its reference text, read only now and then (the event schema, why event reads go through `claudlobby event list`, three everyday read commands, retention and configuration), is now in an "Event reference" section of the `fleet-pulse` skill, word for word, and the protocol keeps a one-line pointer to it. By Claude Code's `/context`, the protocol body went from 9.5k to 8.4k tokens. Quality was not measured: whether a manager still finds the event schema or a read recipe when it needs one. Every guard stays in the protocol. The protocol now requires the skill, so any bot that composes it gets `fleet-pulse` too. The skill's description sends a reader after the event schema or a read recipe to that section, since invoking the skill starts a pulse run.
+
+### Changed — the eval protocols compose as a short trigger, and their procedure lives in the `run-eval` skill (#717)
+
+`eval-workflow` and `ab-gating-rollout` now say only when each applies: an eval is due when its result could change a decision, and a PR whose justification is a measurable effect needs a verdict, where INCONCLUSIVE never passes. `ab-gating-rollout` also keeps what makes a verdict count: its statistic registered before the first run, no axis or threshold changed after the results, and pins that still match the running system. The procedure they carried is in the `run-eval` skill, which a bot loads when it runs an eval: the pre-registration, sizing, the verdict and the report, version pins, the dry-run default and the real-run gate, and the honesty rules. The skill also says what each verdict does to a PR. Each protocol requires the skill, so a bot that composes either one has it. A bot that composes both carries 3,901 fewer tokens on every call (4,333 to 432, counted with Claude Code's own `/context`), from its first session after a host update. Whether bots keep the eval rules as well, with the procedure loaded only when they invoke the skill, is not measured.
+
+### Fixed — `bot usage` and `fleet usage` read a transcript past 64 MiB, from its end back to the window's start (#717)
+
+The usage read added up whole file sizes against a 64 MiB limit before reading anything, so a bot whose current transcript had passed 64 MiB read as `unavailable`, however short the window. Each transcript is now read backwards from its end in 64 KiB blocks, and the read stops at the first assistant row older than the window, so a read costs what its window costs. The limit now bounds the bytes read, 256 MiB per bot. `coverage` says where they went: `bytes_read`; `bytes_before_window`, older rows that were not read; and `bytes_unread_at_limit`, left unread at the limit under the issue `byte_limit_reached`. The listing's file cap is now its own issue, `file_limit_reached`. Bytes a bot writes after its transcripts are listed are not read, so a transcript that grows during the read no longer makes the coverage `partial`, and `coverage.diagnostics` has no `truncated_file` count.
+
+### Fixed — a start whose SessionStart capture never lands reads ready, instead of waiting out its readiness ceiling (#2748)
+
+A new session's SessionStart hook confirms the bot's native-session receipt, and every start waits for that confirmation: `bot start`, `bot restart` with or without `--fresh`, and a host update's restart of each running bot. When the capture never landed, the wait polled until its readiness ceiling and the start read unverified. The wait's confirm now adopts the launch from the provider's PID record for the pane's process, by the rule the planned checkpoint uses: the record must name the session the receipt retains, at the pane's own process start, and that session must have written its transcript. Neither the confirm nor the planned checkpoint adopts a resumed launch while the pane is still the process it replaces, whose record names the same session: adopting it would refuse the replacement's capture. Anything short of that proof leaves the receipt untouched and the wait polling as before, so a record that contradicts the launch still waits out the ceiling. A launch whose capture missed after its session wrote its transcript now continues that session at its next start, such as a keepalive restart, where it was retried as a new session under the same id, which Claude Code refuses for an id already in use.
+
+### Docs — the existing-host runbook covers holding an old source-puller
+
+`documentation/existing-host-release-conversion.md` described adopting a source-pulling host into sealed releases through `host activate --adopt-existing` and other retired commands. It now points to "Converting an existing sealed host" in the update lifecycle guide and gives the one procedure no other page has: holding an old `pull-root` source-puller before the branch it follows moves, and keeping it retired after the host converts. The fleet-ops skill now says that `bot remove` refuses, since the Git updater does not yet support roster changes, and that `bot stop` takes a bot out of service.
+
+### Fixed — a plain `bot restart` continues a session whose SessionStart capture never landed, instead of refusing (#2748)
+
+A new session's SessionStart hook confirms the bot's native-session receipt. When that capture never landed, the receipt stayed pending, and the planned checkpoint that a plain `bot restart` and a host update take refused it, so after such a `bot restart --fresh` a plain restart of the bot failed. The checkpoint now adopts a pending receipt from the provider's PID record for the pane's process, as it already adopts a running bot that predates receipts, when that record names the session the receipt retains at the pane's own process start. A pending receipt the record does not prove still refuses, and nothing is written. A refused `bot restart` now prints its reason, as a refused `bot stop` does, instead of `bot native or session readiness cannot be established`.
+
+### Fixed — a scheduled job that meets an update's fence skips its tick instead of failing (#2734)
+
+A timer job that fires while a host update has its fence up now logs one skipped line and exits 0, so it starts no failure alert and takes no lock the updater must wait for. A resident unit stays a failure, now exit 75, and a keepalive sweep caught by the fence pauses quietly. Maintenance, a busy lock and an unreadable record still exit 6.
+
+### Fixed — a host update waits for readers of the runtime lock and names them, instead of refusing (#2734)
+
+The updater tried the runtime lock once and refused if anything held it. Scheduled jobs and CLI calls hold it shared for much of the time, so one update on a busy host needed ten job runs, seven of them refused at that lock, with its fence up throughout. It now tries every 50 ms and takes the first free moment between readers. After 300 s it posts one notice naming what holds the lock, as `<unit> (<command> pid <n>, running <s> s)`, and goes on waiting. After 6 hours it refuses with the same names, and `host update continue` starts a fresh wait. `host update status` shows a wait in progress as `runtime_wait`, and `runtime_waits` keeps a row for every time the lock was taken, with who held it and for how long.
+
+### Fixed — first-fleet setup's registry-scan refusal says what clears it (#2644)
+
+When a fleet's `.env` tiers or the update command's environment set `PLANE_EMIT_ENABLED=0`, or the environment sets `PLANE_EMIT_DISABLED=1`, first-fleet setup refuses at its prepare stage, before it stops or starts anything. The refusal named commands that no longer exist. It now names first-fleet setup and says what clears it. For an exported value, that is to unset it, then run `host update continue`, which resumes the retained update. For a tier value, no step clears it, because the update froze the `.env` tiers: the operator removes the line and starts over with a new installation and data root. The environment variable reference says the same. The getting-started guide's post-setup checks now name `fleet status`, which reports each bot's session and supervision, where they named `host status`, which reads only sealed-release records and reports a fresh setup as `unselected`.
+
+### Fixed — a new bot or job no longer stops at preparation when a systemd search directory is a symlink (#2731)
+
+On Debian 12 the `systemd` package ships `/etc/xdg/systemd/user` as a link, and systemd lists it. The updater refused every new native unit on such a host, so a first fleet stopped at preparation and an update could add no bot or job. Now only the install directory has to be unredirected. A unit reached through a linked directory still counts as present.
+
+### Fixed — tests that delete a fresh Git checkout no longer fail at random on `maintenance.lock` (#2717)
+
+Since Git 2.47, a commit, fetch or merge ends by detaching `git maintenance run --auto`, which still holds `.git/objects/maintenance.lock` after the command returns. A test that then deleted the checkout could list that file and find it gone at its unlink, and `test_stable_launcher_fences_before_loading_missing_source_or_environment[record2]` failed that way once on macOS CI. The launcher played no part: the test was still in its own setup. The shared `_source_installation` fixture and the helper in `tests/test_notify_behind.py` now turn `maintenance.auto` off for their repositories, and two tests read Git's trace to confirm that no maintenance starts.
+
+### Fixed — skills and protocols say what a bot restart does now (#2703)
+
+A plain `bot restart` continues the bot's exact session, but protocols, skills and expertise texts still said a restart clears context, restarted bots to shed it, or had a handoff written that a plain restart never reads. They now say a plain restart continues the same conversation, and name `bot restart BOT --fresh` (#2696) where a fresh session is the aim and `bot compact` where context should be relieved in place. The `restart` skill no longer says a scheduled job invokes it or that resume and startup arrive in one bootstrap envelope, and `advanced-patterns.md` describes the handoff and resume as they work today.
+
+### Removed — command branches for an error nothing raises
+
+Nineteen commands caught `ReleaseMismatch`, which has had no raiser since sealed activation was retired, so those branches could not run and are gone. No command does or prints anything different: runtime admission refuses with `ActivationError`, and each of these commands already answers that with its own refusal. The class and the one handler in `commands/host_owner.py` stay for now.
+
+### Removed — a restore check that nothing calls
+
+`host_backup.restored_bootstrap` let a restored database into sealed activation. Its one caller went when that path was retired, and only a test assertion still reached it, so both are gone. A restored host stays guarded: `update_operation._fresh_root` refuses initialization while a restore marker exists.
+
+### Removed — the migration planner module that nothing imports
+
+`claudlobby/migration_plan.py` built the preview for `host activate` and `migration plan`. Both routes are retired, and no code has imported the module since the Git updater replaced them. The module and `tests/test_migration_plan.py` are gone. The three fixtures other test files took from that test file are now in `tests/release_fixtures.py`.
+
+### Fixed — the harness's session-scoped readiness scenario waits for its foreign poller before the boot (#2716)
+
+The `validate-bot-change.sh` scenario for #1530 starts a production-shaped
+poller tree (`claude` → `bun … start` → `bun … server.ts`) and then boots the
+bot, to check that another session's live poller is not read as ready. It gave
+the tree a fixed 100 polls of 0.05 s to write `bot.pid`, and booted whatever it
+found. On CI the tree once took longer: its poller's pid came after the boot's
+own subreaper's, so the boot met an empty slot. Three checks failed, and the
+check that another session's poller is not read as ready passed with no poller
+there to read.
+
+The scenario now waits up to 30 s for `bot.pid` to name a live process. A tree
+that exits first is reported at once, and one still starting at 30 s is
+reported with the processes it is running. Either way, the precondition and
+every check after it in the scenario fail as refused, naming why, instead of
+being scored against an empty slot. `tests/test_validate_harness_fixture_wait.py`
+runs the scenario's setup, lifted from the harness, with a stand-in tree that
+holds the slot late, exits first, or never holds it.
+
+### Fixed — An unfinished update's notice reaches someone in more cases, and quotes no credential (#2715)
+
+The notice an update's job sends when a run leaves the update unfinished (#2702) gave up when its first recipient refused: a half-written `bot.conf` or a revoked sender token ended it. It now tries each bot with an alert chat in turn, in the order `resolve_alert_target` walks them, until one accepts, and the job's log says how many refused.
+
+It runs the copies of `lib-common.sh`, `cli-context.sh` and `tg-post.sh` that the update retains at quiesce, beside the supervisor scripts it already keeps, not the ones the update has just installed, so a broken script in the new release cannot silence it. An update prepared before this change runs the live scripts, as before. So does one whose retained copies no longer match, and the job's log says so.
+
+A run refused before it reaches the update now sends the notice too: its retained support changed, its native unit differs from the one bound, or its dispatch record is missing. A run that cannot show it is the update's job (no bound job, or membership refused or unknown) still sends nothing, since it may be a hand-run `_run` waiting while the job itself runs.
+
+Text the notice quotes from a failed stage or a refusal is redacted first: a token, a key, a password and similar shapes become `[redacted]`. `host update status` still shows the whole line. A notice stopped at its time limit now gets SIGTERM before SIGKILL, so each bash in it runs its exit trap and removes its scratch files, among them the token-bearing curl config `tg-post.sh` writes. Only a child that ignores SIGTERM, which `curl` does not, can still hold that cleanup past the SIGKILL.
+
+An update job keeps the coordinator it started with. So the job run that installs this change runs without it, and every job run that starts after that run's commit stage has it, a `host update continue` of the same update included. The retained scripts start with the next update's quiesce.
+
+### Fixed — a `/compact` or `/clear` inside a bot's checkout records its native session (#2697)
+
+The native SessionStart hook refused a session whose working directory was not the bot directory itself. A `/compact` or `/clear` while the session worked in a `projects/` checkout, or in `memory/` or `data/`, printed "native continuation unavailable: unsupported native SessionStart identity" and kept the old receipt. After a refused `/clear`, the next host update or restart resumed the conversation the `/clear` had ended. The hook now accepts any working directory inside the bot directory, named without a symlink or `..`, and still refuses one outside it. The receipt still names the bot directory, where a resume starts. A receipt left stale by an earlier refused `/clear` stays stale until the bot's next captured `/clear` or a new session.
+
+### Fixed — An update no longer runs every scheduled job at once when it restores the timers (#2059)
+
+On the systemd versions affected by systemd/systemd#31231, Debian 12's 252.39 among them, a timer started again in the same user manager counts its schedule from its previous start, so the update's restore ran every daily job, briefings included, the moment it started their timers again; a timer with `Persistent=true` also ran any time it missed while the update held it. The restore now starts each timer it brings back to running with its service held: runtime drop-ins give the timer one elapse at once and make the service skip that one run, which becomes the timer's last trigger, so its schedule continues from the restore. The hold is removed once that skipped run is seen. If it never is, the service stays held, and the update reports the timer until a later pass sees the skip and releases it.
+
+### Fixed — An update names each bot it leaves paused, and stays pending until someone decides (#2699)
+
+Converting a host whose previous updater had stopped after parking producers keeps each paused bot's runtime mask and withholds its unit file, as before, but the update then reported done with no health error, and the bots stayed down. The restore now records a health error for each such bot, naming the bot, its unit and the decision to make: clear the mask, then either resume the bot with `bot start` or record that it stays stopped with `bot stop`, and run `host update continue`. While the error stands the update is pending, as with any other health error: `host update apply` refuses another target until it is resolved. Each restore pass reads the bot again, and the error ends once a stop is recorded for it or it runs with its session ready. A bot that already has a recorded stop raises no error. The update still starts nothing and publishes nothing over the mask, and the timers still restore after it.
+
+### Fixed — An update that cannot finish tells the alert chat, and an interrupted stage records why (#2702)
+
+When an update's application stage timed out or could not start, the update stopped in its phase, waiting for `host update continue`, with nothing in its record to say why. Nobody was told either: the timers that would page someone are among the units the update stops. An interrupted stage now records its cause in the update record as `stage_error`, as a refused stage already did, so `host update status` shows it until the same stage succeeds.
+
+The update's own job now sends one notice when a run leaves the update unfinished, whatever the cause: a stage interrupted or refused, or units that came back with a health error. It goes to Telegram through the installation's own alert door, `resolve_alert_target` and `tg-post.sh`, the chat and sender a host job's FLEET ALERT uses. No unit the update stops is on that path. The notice names the request, its phase and the cause, and says to read `host update status`, then run `host update continue` from a shell outside any bot session. A run that finishes sends nothing.
+
+An update job keeps the coordinator it started with. So the update that installs this change runs without it, and every job run after that has it, a `host update continue` of that same update included.
+
+### Added — `bot restart --fresh` gives a bot a new session that resumes from its saved handoff (#2696)
+
+A restart continues the exact native session, so a manager could not give a worker a fresh context and `/restart` returned the same conversation. `bot restart BOT --fresh` now starts a new Claude Code session in place of the current one, after the same idle wait and session proof. The new session first submits the configured resume command when the saved handoff is under a day old, then the authored startup. The `restart` skill uses `--fresh`; a self restart into a fresh session needs a handoff under 300 s old. Without `--fresh`, a restart still continues the same conversation, as host updates and the weekly restart do.
+
+### Fixed — `bot start` starts a bot again after its unit file was removed and its enablement link stayed (#2700)
+
+When a bot's unit file was removed but its `default.target.wants` link stayed, systemd went on listing the unit as `not-found`, and the enrollment inventory refused it as a "loaded consumer lacks installed source bytes". `bot start` and `fleet reconcile` then refused with exit 6 until someone removed the link and reloaded the user manager by hand. The inventory now reads a unit that systemd lists that way as absent, as it already read a bot that `bot stop` de-enrolled, once systemd shows the unit with no definition and no process left in its cgroup. `bot start` then installs the unit file again, and a link that `systemctl enable` made for that file names it once more. A listed unit that still has a process in its cgroup is refused as before.
+
+### Fixed — a `bot` or `fleet` lifecycle refusal names the failure that stopped it (#2487)
+
+`bot start`, `bot stop`, `bot restart`, `fleet start`, `fleet stop`, `fleet restart` and `fleet reconcile` refuse with exit 6 when a read of the host's native supervision state fails before any native effect. The refusal dropped the supervision inventory's or the operating system's own message, so nothing said which unit or file had stopped it. It now ends with that message's first line, at most 500 characters, and the JSON result also carries it as `data.cause`. Any other exception's text stays private. A bot's own lifecycle refusal inside a fleet sweep, and a failure after a native effect has begun, read as before.
+
+### Changed — prepare Git runtime paths and consolidate context-save verification (#2695)
+
+Add explicit source-checkout and stable-launcher paths for the upcoming Git update
+flow. Configuration publication now reuses staged bytes and leaves unchanged
+outputs in place. Planned restart and activation share request-bound context-save
+verification, retaining unresolved requests rather than sending them again.
+The existing installation workflow remains in effect until the common updater
+and migration path are ready.
+
+### Changed — consolidate update recovery and effective configuration foundations
+
+Add a source-independent current-update record and Git cutover primitives. A
+pending render and its publication progress now fit within that operation,
+without creating another permanent plan or activation journal. The committed
+configuration reader is independent of whether every consumer started, and
+native quiet checks share one implementation. These are internal foundations;
+the common updater and host migration are still being integrated.
+
+### Changed — prepare a first fleet through the same Git updater
+
+Replace the bundle bootstrap and its publishing workflow with an explicit trusted
+Git source and hash-locked Python environment. First-fleet preview retains the
+same update request that launch continues; concurrent setup cannot replace its
+configuration or advance a different request. Retry checks verify the installed
+dependencies without silently repairing them. Initial recorder and registry setup
+share the update coordinator, and new native consumers use the existing supervision
+adapter. The CLI guide and CI installation rehearsal follow this path; browser
+first-team integration, existing-host migration and native acceptance remain pending.
+
+### Changed — use the Git update request for browser first-team setup
+
+Browser setup now prepares and launches the same Git operation as the CLI. It
+retains the original request before launch and shows its receipt after reconnects
+or uncertain responses, without sending a replacement. First-owner binding survives
+an interrupted configuration publication. Historical sealed setup records remain
+readable as recovery evidence and cannot authorize a Git launch.
+
+Remove the public sealed activation, repair, abort and plan commands and the unused
+release assembly module. Configuration diff reads the pending Git render or the
+committed generated-output snapshot. Existing-host conversion and native/browser
+cold-start acceptance are still required before rollout; the remaining legacy
+coordinator internals are being retired separately.
+
+### Changed — retire the sealed runtime coordinator
+
+Operational reads, actions and native units now use the managed Git installation
+and committed configuration. Remove the old activation engine, its enrollment and
+handoff implementations, and its release-based runtime admission. Historical
+activation and migration records remain read-only diagnostic evidence. Bot move
+and removal explicitly refuse without effects until the common updater supports
+roster changes; they cannot invoke the retired coordinator. Human task feedback
+also refuses admitted native maintenance children.
+
+### Changed — fetch updates from the prepared Git source
+
+`host update apply` fetches the installation’s configured trusted ref, or an
+explicit full commit, before freezing a new operation. A pending operation keeps
+its original target and request without another fetch. Remove unused sealed
+release/configuration writers and their rollback path; the shared Git publication
+owner retains interrupted-write recovery. Old records remain readable.
+
+### Changed — align operator guidance with the Git updater
+
+Remove obsolete sealed-update instructions from the current runbooks and CLI
+recovery hints. Distinguish authored source review from published-output drift,
+and document the remaining conversion, roster-change and restored-root startup
+limitations instead of suggesting commands that no longer exist.
+
+### Fixed — reject invalid first-fleet input before preparing an update
+
+Validate an authored fleet with the canonical configuration parser before copying
+it or recording an update. Invalid input now leaves setup ready for a corrected
+file, without a recovery operation or any native service effects.
+
+### Changed — resume native conversations without model-written update handoffs
+
+Routine Git updates and planned restarts wait for an idle bot, retain its exact
+Claude session, and resume that conversation with current composed instructions.
+They send no checkpoint or restore prompt. The mandatory SessionStart hook keeps
+the saved identity tied to its account, working directory and native process;
+unknown prior sends are never replayed. Background updates measure Claude using
+the same tool path as the bot. Running older bots without a native
+receipt can adopt their exact PID-keyed provider session through that same
+checkpoint path. The configured account, working directory and process start
+must match; malformed receipts are never replaced and stopped bots stay stopped.
+Linux matches the provider record to exact kernel process-start ticks and its
+machine-ID/PID-namespace domain. This shape has read-only native evidence; full
+Linux update acceptance remains separate.
+
+Optional `bot handoff` receipts remain untouched and do not gate native restart
+or update, including pending, unknown, malformed or unreadable receipts. Explicit
+handoff retains its existing no-resend protection.
+
+### Fixed — wait for saved context and stop checkpointed bots cleanly
+
+- Host activation waits for slow handoff saves without resending requests, reports progress, and keeps a timed-out wait resumable.
+- Linux activation closes the checkpointed bot's private session before stopping its masked service, and reconciles a failed stopped bot only after checking its process state.
+
+### Fixed — retain handoff results and recover early upgrades
+
+Recent handoff checks now use the saved context timestamp as well as the file
+write time. Activation retains the native handoff result before checking the
+capture, so a known recent-save skip is not lost as an unknown send. Resuming
+an unknown handoff still never sends it again.
+
+An early upgrade abort can restore parked bot unit files when no bot stop has
+begun. It verifies the original configuration and native disposition, preserves
+handoff receipts, and does not stop, start or message a bot. Interrupted file
+restoration uses the existing abort and configuration journals.
+
+### Fixed — guided setup offers the observed persistent user directory
+
+Guided setup lets Enter select the normal per-user LaunchAgents or systemd user
+directory when the native manager reports that path. Linux honors an absolute
+XDG_CONFIG_HOME. Other observed paths remain available through an explicit
+choice or --install-directory; missing user-path evidence never defaults to a
+system, control or transient directory. All local approval gates remain explicit.
+
+### Docs — Guided first-team setup and recovery
+
+Replace separate owner/storage commands with the trusted guided installer and
+its exact printed resume command. Non-secret configuration can precede access
+checks; missing values stop at their prompt, and unverified provider/repository
+or native access stops before INITIALIZE. Preserve local consent, foreground
+serving, original activation receipts and separate team-action approvals. Public
+installer publication and fresh manual cold acceptance remain separate gates.
+
+### Fixed — Guided setup resume command
+
+Before entering the local guide, the installer displays a copyable resume
+command using the exact validated sealed CLI and selected data root. Paths are
+shell-quoted, including spaces and quotes. Ordinary installer output and JSON
+behavior are unchanged. Native cold-host qualification remains separate.
+
+### Added — candidate local first-team preparation guide
+
+An opt-in installer continuation enters the exact assembled CLI's local guide,
+reusing owner pairing, workspace consent and setup approval while managing the
+foreground owner server. Existing commands remain available. Preparation does
+not launch a team, enroll an owner service, provision Tailscale or grant ordinary
+actions; the terminal stays open for the browser's existing plan and launch flow.
+Retained setup status now exposes expiry, revocation and original launch IDs so
+interrupted preparation cannot silently replace a launch. Native cold-host and
+public-installer qualification remain separate gates.
+
+Foreground shutdown waits for already-admitted work without a kill deadline;
+canonical assembly/startup refusals remain visible to the local operator.
+
+### Fixed — distinguish recorder status from readable team summaries
+
+Connected workspaces label recorder-status coverage separately from team-summary
+coverage, so independent reads can differ without presenting conflicting global
+source counts. Pending recorder reads say they are checking; failed reads retain
+their recovery guidance, and recorder down, unknown, and quiet evidence remains visible.
+
+### Added — prepare connected workspace storage in one local operation
+
+`host owner initialize-connected --prepare-workspace` can prepare both optional storage schemas atomically. It shows both preparations and requires the existing `INITIALIZE-WORKSPACE` and `INITIALIZE-CONNECTED` confirmations before changing storage. Cancellation, changed owner identity or an incompatible schema leaves preparation unapplied. Existing commands and defaults remain supported; this does not approve a workspace, create a session or grant fleet actions.
+
+### Fixed — explain blocked workspace and CLI views
+
+Rooms and Tasks now explain missing connections and first-time owner pairing instead of losing the reason during aggregation. Setup prerequisites, unsupported connected tools, held task rechecks, switch observations, disabled host jobs, interrupted activation, report capture limits and malformed configuration expose their existing gate and next inspection step. Successful empty reads remain distinct from unavailable data. No permission, switch default or owner setting changes. The gate audit records covered and deferred cases.
+
+### Changed — Give task results room while keeping messages close
+
+Tasks opens with the existing message composer collapsed into a compact disclosure that shows kept drafts and unconfirmed requests. Selecting a bot, manager, task feedback or nudge reveals the same form. View changes and refreshes preserve drafts, task targets and saved request IDs without sending or checking receipts.
+
+### Added — Approve selected team actions together
+
+Add a local `host owner allow-actions` approval for explicitly selected messages, nudges and feedback, with one action confirmation, atomic grant persistence and unchanged generations for matching grants. Permission decisions retain their separate approval door.
+
+Show the selected team's action permissions and a guarded local approval example in Action access help, with a guide for operators continuing after first-team launch. Older hosts retain their individual local approval doors; checking access grants no authority.
+
+### Fixed — Keep exact ledger counts out of frequent team summaries
+
+Overview reads now explicitly mark the ledger row count as not counted instead of scanning all history on each refresh. Routine summary and health reads also omit full-table counts; exact counts require the native `/api/summary?counts=true` diagnostic. Bot, task, permission and freshness facts keep their existing semantics; this removes one measured latency cost without claiming all overview timeouts are resolved.
+
+### Fixed — Avoid scanning metric history for overview host samples
+
+Overview host-sample discovery now seeks distinct subjects through the existing index instead of walking every retained metric row. Historical subjects and empty results keep their existing meaning; query deadlines and freshness rules are unchanged. This removes one measured overview cost without claiming to resolve every timeout.
+
+### Added — Browse older recorded tasks
+
+Tasks can load older recorded work in bounded pages, preserving each connected host's own continuation and task ownership. Loaded history stays visible during activity updates until refreshed, and incomplete or unsupported source coverage stays explicit.
+
+### Changed — a new activation refuses before its lock while a running bot's save is too old (#2553)
+
+`claudlobby host activate` now reads each running bot's saved handoff before it takes the activation lock or pauses anything, with the verifier and the window (`--handoff-max-age`, 300 s by default) the run itself checks at each bot's handoff. While any running bot's save is older, missing or unreadable, it refuses (exit 4, no activation record), naming each such bot and its save's age (`stale_saves` in `--json`). Every door is still open then, so the operator can save those bots and run the same command again. Before, the run found such a bot only after it had paused the producers, when no new save could be asked for: on one host that took 72 minutes and 11 invocations to clear.
+
+A `--resume` never makes this check, and a bot stopped through `bot stop` is not counted. A save that ages past the window while the run hands off the other bots still takes the handoff request, and can still refuse the run there.
+
+### Fixed — A startup prompt taller than the pane is submitted (#2669)
+
+The one-prompt bootstrap is taller than the 80x24 pane a bot session starts in. Claude Code's input box then loses its prompt line off the top of the pane, and the send looked for the payload's end only below that line, so it withheld the Enter: the bootstrap stayed in the box unsubmitted, with `BOOTSTRAP — NOT SUBMITTED` in startup.log. With no prompt line in view, the send now reads the bottom of the box: the payload's end must be the last text above the rule drawn under it. The check after the Enter reads the box the same way, so an Enter the box did not take is retried and then reported, never counted as a submit, and a send types nothing into a tall box that already holds text.
+
+### Added — `STARTUP_BOOTSTRAP_ENABLED=0` turns the one-prompt start off (#2669)
+
+Set in the host or root `.env`, it keeps the literal start at each bot's next start: the resume command, then the startup prompt, as two sends, with no plan or activation. The startup.log RESUME line names the switch. On by default.
+
+### Fixed — a fleet with no escalation pair sends its alerts to the manager's own Telegram chat (#2654)
+
+`claudlobby fleet notify`, a failed fleet job's alert and a failed message write's alert reached only the manager's pane in a fleet that declares no `fleet_pulse` escalation pair, reported as `telegram=unconfigured`. They now go to the fleet manager's own chat (its `telegram.chat_id`, else `telegram_group_chat_id`), posted by the manager's own bot, whose token tg-post reads from the manager's channel state dir as it does for a declared pair. So an alert reaches a person with no extra configuration, including when the manager's session is what is down (#997). A declared pair still wins, as does a `TELEGRAM_GROUP_CHAT_ID` and `TELEGRAM_STATE_DIR` pair in the manager's `.env` tiers; a chat declared without its sender is still refused.
+
+`claudlobby config validate` now warns (`alert-pane-only`) when a fleet that sets up Telegram (a fleet chat, or a bot that declares a `handle`, `chat_id` or `token_env`) still leaves its alerts no Telegram target, because its manager is not a channel bot or has no chat.
+
+### Changed — bots no longer stop on Claude Code's offer to autocompact earlier (#1388)
+
+On a model with a native 1M window, Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier … Want to autocompact at 400k tokens instead?". Nobody at a bot's pane answers it, and the answer is kept per account and model, so a new account or a new model asks again. Every bot's composed `settings.local.json` now carries `modelSettings`, naming each such model `{"autoCompactWindow": "auto"}`. That is Claude Code's own window, the one it uses with nothing set, so bots compact when they did before; a window set outside user settings stops the asking.
+
+The new `auto_compact_window:` key takes `auto` (the default) or a whole number of tokens from 100000 to 1000000, which composes `autoCompactWindow` and caps every model's window at it. Set it under `defaults:` or per bot. A window set in user settings no longer reaches bots: with `auto` on those models, with a number on any model. A composed `settings.local.json` change reaches a bot at its next restart.
+
+### Fixed — A stale plugin entry no longer stops the one-prompt start (#2666)
+
+The start script now reads the resume Skill from the install Claude Code actually loads: for each enabled plugin, the first registry entry that applies to the bot (a user entry, or a project or local entry for the bot's directory), in registry order. Before, it required every applicable entry to name the same install, so a bot whose registry still held an old per-directory entry after the user entry fell back to the literal resume command, although Claude Code loaded the current install. Two enabled plugins with the same name, a missing skill file and an unreadable registry still keep the literal start.
+
+### Added — Open a bot’s recorded conversation from inspection
+
+View conversation in the Rooms bot inspector applies the existing exact-identity recent-thread filter without fetching or sending. Whole team restores the room, and conversation access remains separate from permission to message the bot.
+
+### Added — Filter recorded tasks by status and assignee
+
+Compact Tasks filters use the current recorded snapshot and exact team-qualified assignee identities. Reset restores the full view; refresh keeps missing selections explicit. Attention counts, incomplete-source warnings and truncated-history notices still describe the full snapshot, and task actions retain their existing guards.
+
+### Added — Check missing team action access without losing work
+
+Check action access reads only missing capabilities for the selected team, keeping the current message or task draft, selected task and saved request IDs. Collapsed help distinguishes authorization refusals from unavailable or unsupported access and explains the separate local approvals for messages, nudges and feedback. The check cannot send, approve access or reconnect.
+
+### Fixed — Reach bot inspection in connected Rooms
+
+The connected-view guard now permits explicitly marked read-only roster presence inspection while retaining equipment restrictions. Selecting a bot from another connected view opens its Rooms inspector; account refusal still disables inspection.
+
+### Added — Inspect a bot without leaving its room
+
+Bot names in Rooms open a compact read-only presence snapshot with separate recorded activity, live session, heartbeat and check time. Refresh status checks again; Message this bot prepares the existing guarded composer without sending. Inspection clears when its room, source, session or roster changes, and equipment inspection remains available on supported direct-host views.
+
+### Fixed — the two-source access-loss test no longer depends on event-loop timing
+
+`test_two_source_node_contract` could fail on a healthy tree. Its access-loss subtest required that no overview ever painted `ok`, but a live peer's accepted partial paints on a real zero-delay timer, and when that timer beat the test's two event-loop turns, a paint made before the loss failed the test. The subtest now sets the order with a fake clock and runs both orders, so a partial retired by the loss fires on every run. No client code changed.
+
 ### Changed — organize the workspace around Rooms and Tasks
 
 Use a compact team sidebar and one conversation or task surface. Keep computer diagnostics, bot lists and record identifiers available on demand. Focus recent room threads by exact bot/participant identity, compose to a selected bot, or talk to a manager only when an explicit granted lead also has message access. Drafts, uncertain receipts and task feedback/nudge remain in the existing composer.

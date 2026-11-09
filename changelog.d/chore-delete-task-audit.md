@@ -1,3 +1,0 @@
-### Removed — the task audit module that nothing imports
-
-`claudlobby/task_audit.py` read every task record, old and current, as a preflight for the retired release migration. No code has imported it since #2727 deleted the migration planner, and no command, runbook or script runs it. The module and the tests of it are gone. `tests/test_task_audit.py` keeps the four row helpers that four other test files import, and one test of the task reader's blockers for a report event from another fleet, with no assignment, or with no fleet, on the original and the current schema: no other test checks those three blockers. The expiry and task-query tests that used the audit as a second reading now check the task reader, or state the values the audit returned.

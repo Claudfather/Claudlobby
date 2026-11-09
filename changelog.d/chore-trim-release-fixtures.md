@@ -1,3 +1,0 @@
-### Removed — fixture code no test reads: two parameters and a SQL copy in `tests/release_fixtures.py`
-
-The `releases` fixture loses its `request` parameter and the compatibility update it read. No test has parametrized `releases` since #2727 deleted `tests/test_migration_plan.py`, so that update was always empty. `_database` loses its `version` parameter: both callers build version 1, so it now runs the original schema script alone. `releases` also stops copying the plane's SQL files into each historical release's `package/plane/migrations`: `claudlobby/migration_plan.py` was the only code that read that directory, and it went in #2727. Tests only: no test is added or removed, and nothing outside `tests/` changes.
