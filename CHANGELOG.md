@@ -133,17 +133,6 @@ Every plain run is watched: the wrapper runs the job in a session of its own and
 
 A new hook, `turn-marker.sh`, composed for every bot on `UserPromptSubmit`, `Stop` and `StopFailure`, writes `data/.turn-input` when a prompt is submitted and `data/.turn-ended` when a turn ends, normally or on an error. The file's modification time is the fact, and its one line names the event that wrote it. Nothing reads the markers yet: they are the first step of compaction at task close (#1053), where keepalive will tell a finished turn from a running one by them. The hook prints nothing and exits 0 on every path, so it never adds to a prompt, blocks one, or keeps a turn going.
 
-### Changed — `task show` prints each event once (#2771)
-
-`claudlobby --json task show` printed the task's history, then each assignment with its own history and closing event, then the current assignment again. So each event appeared two to four times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. This is the shape `assignment show` has printed since #2768, so the two commands now print a task the same way. Every other place that held an event names it by ID:
-
-- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`; the current assignment's record is its entry in `data.task.assignments`.
-- Each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
-- Schema-1's top-level keys are unchanged, as are every other field, `resolved_from_prefix`, the plain-text lines, `task list` and `fleet inbox`.
-- A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
-
-On one worker's three tasks with the most events (17, 15 and 11), a read is 47% to 49% smaller in tokens: 18,932 to 9,684 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
-
 ### Changed — the context-management protocol keeps every rule and moves its measurements to a file beside the fleet-ops skill (#2273)
 
 Every bot composes `library/protocols/context-management.md` into its `CLAUDE.md`, so every call carries all of it. Its two measured observations of the context gauge, one history sentence and one reason are now in `library/skills/fleet-ops/context-reference.md`, word for word, and the protocol keeps one pointer to it. Every bot links the `fleet-ops` skill, so the file reaches each bot and costs nothing until a bot opens it. By Claude Code's `/context`, the composed protocol went from 1,734 to 1,620 tokens; whether bots act as well with the measurements one file away is not measured. Every rule, guard and command block stays in the protocol, word for word, in place.
@@ -183,17 +172,6 @@ The file goes from 27,966 to 18,476 bytes, and from 10,523 to 6,898 tokens by Cl
 ### Fixed — composed library text names the git runtime's `host update`, not the retired `host activate` and `config plan` (#2751)
 
 The `claudlobby-dev-in-projects` guardrail, the `canary-rollout` protocol, the Google Analytics, Search Console, Meta Ads and PostHog integrations and the `add-bot` skill told bots to stage `config plan` and give the operator `host activate`, which the git runtime retired. Each step now names what the git runtime does: the operator's `host update apply FULL_COMMIT`, run from a shell outside any bot session, and, for a canary's first fleet, `host setup`, `fleet setup --plan-only`, `config diff FINGERPRINT` and `host update continue`. Keeping old releases for rollback goes, because the git runtime has no rollback route. Every rule stays. A bot that composes the guardrail, a default for every bot, carries 69 fewer tokens on every call (212 to 143, counted with Claude Code's own `/context`) from its first session after a host update; the `canary-rollout` section is 11 tokens smaller (1,824 to 1,813). Whether bots and operators follow the new steps correctly is not measured.
-
-### Changed — `assignment show` prints each event once (#2273)
-
-`claudlobby --json assignment show` printed the assignment and then its whole task, which carried the assignment again. So each event of the assignment appeared three times, four while it was the task's current assignment, and a closing event up to six times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. Every other place that held an event names it by ID:
-
-- `data.assignment`, and each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
-- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`.
-- Schema-1's top-level keys are unchanged, as are every other field, the plain-text lines, `task show` and `task list`.
-- A jq read of a removed key now gets null, which is also what an open assignment's `terminal_event` read before. To tell open from closed, read `state` or `terminal_event_id`.
-
-On three of one worker's closed assignments (13, 10 and 9 events), a read is 60% to 63% smaller in tokens: 21,246 to 7,813 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
 
 ### Changed — the check-in protocol keeps its rules and points to its skill for the record command (#717)
 
