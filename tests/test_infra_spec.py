@@ -102,9 +102,7 @@ def linux_files(*, root="cpuset cpu io pids", manager="cpu pids", own="pids", cm
     return files
 
 
-SYSTEMD = {"which": {"systemd-run": "/usr/bin/systemd-run"},
-           "commands": {("systemd-run", "--version"): "systemd 252 (252.39-1~deb12u1)\n+PAM +AUDIT\n"},
-           "dirs": {"/run/systemd/system"}}
+SYSTEMD = {"which": {"systemd-run": "/usr/bin/systemd-run"}, "dirs": {"/run/systemd/system"}}
 
 
 def pi(**overrides):
@@ -165,8 +163,7 @@ def test_this_pi_reads_every_fact_with_its_source():
         "kernel": {"source": "/proc/sys/kernel/osrelease", "value": "6.12.75+rpt-rpi-2712"},
         "init": {"source": "/proc/1/comm", "value": "systemd"},
         "systemd_booted": {"source": "/run/systemd/system", "value": True},
-        "systemd_run": {"source": "PATH, then systemd-run --version",
-                        "value": {"path": "/usr/bin/systemd-run", "version": 252}},
+        "systemd_run": {"source": "PATH", "value": "/usr/bin/systemd-run"},
         "cgroup": {"source": "/proc/self/mounts", "value": "v2"},
         "controllers_root": {"source": "/sys/fs/cgroup/cgroup.controllers", "value": ["cpuset", "cpu", "io", "pids"]},
         "user_manager": {"source": MANAGER, "value": True},

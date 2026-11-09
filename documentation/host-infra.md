@@ -26,7 +26,7 @@ On Linux:
 | `kernel` | the kernel release | `/proc/sys/kernel/osrelease` |
 | `init` | the name of PID 1 | `/proc/1/comm` |
 | `systemd_booted` | whether systemd runs the host | `/run/systemd/system`, systemd's own test |
-| `systemd_run` | its path and systemd version, or `none` | PATH, then `systemd-run --version` |
+| `systemd_run` | its path, or `none` | PATH |
 | `cgroup` | `v2`, `hybrid`, `v1` or `none` | `/proc/self/mounts` |
 | `controllers_root` | the controllers the kernel offers | `/sys/fs/cgroup/cgroup.controllers` |
 | `user_manager` | whether the caller's systemd user manager runs | its cgroup, `user@UID.service` |

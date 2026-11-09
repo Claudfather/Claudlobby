@@ -3,8 +3,7 @@
 Every fact names the place it was read from. A fact that cannot be read says why instead of
 standing in a number, so a failed reading never becomes 0. A fact that this host has nothing
 for reads `none`. Reading changes nothing: it opens files under /proc, /sys and /etc, runs
-read-only commands (`systemd-run --version`, `sysctl -n`, `sw_vers`, `ps`), and starts no unit,
-scope or job.
+read-only commands on macOS (`sysctl -n`, `sw_vers`, `ps`), and starts no unit, scope or job.
 
 What the OS can enforce is worked out from the facts alone. Each row reads `available` (the OS
 enforces it here), `inert` (the setting would be accepted and enforce nothing), `unavailable`
@@ -283,15 +282,9 @@ def _systemd_booted(host):
     return booted, "yes" if booted else "no (/run/systemd/system is absent)"
 
 
-def _systemd_run(host):
-    path = host.which("systemd-run")
-    if path is None:
-        return NONE, "none (not on PATH)"
-    first = host.run([path, "--version"]).splitlines()[:1]
-    version = re.match(r"systemd ([0-9]+)\b", first[0]) if first else None
-    if version is None:
-        raise Unreadable(f"`{path} --version` does not start with a systemd version: {first!r}")
-    return {"path": path, "version": int(version.group(1))}, f"{path}, systemd {version.group(1)}"
+def _on_path(host: Host, name: str) -> tuple[str, str]:
+    path = host.which(name)
+    return (NONE, "none (not on PATH)") if path is None else (path, path)
 
 
 def _cgroup(host):
@@ -384,7 +377,7 @@ def _linux_readers(host: Host):
         ("kernel", "/proc/sys/kernel/osrelease", partial(_one_line, path="/proc/sys/kernel/osrelease")),
         ("init", "/proc/1/comm", partial(_one_line, path="/proc/1/comm")),
         ("systemd_booted", "/run/systemd/system", _systemd_booted),
-        ("systemd_run", "PATH, then systemd-run --version", _systemd_run),
+        ("systemd_run", "PATH", partial(_on_path, name="systemd-run")),
         ("cgroup", "/proc/self/mounts", _cgroup),
         ("controllers_root", "/sys/fs/cgroup/cgroup.controllers", _controllers_root),
         ("user_manager", manager, _user_manager),
@@ -451,11 +444,6 @@ def _init_macos(host):
     return name, name
 
 
-def _vm_stat(host):
-    path = host.which("vm_stat")
-    return (NONE, "none (not on PATH)") if path is None else (path, path)
-
-
 def _root_fs_macos(host):
     if host.listdir("/System/Volumes/Data") is None:
         raise Unreadable("/System/Volumes/Data does not exist")
@@ -469,7 +457,7 @@ _MACOS_READERS = (
     ("os", "sw_vers", _os_macos),
     ("kernel", "sysctl kern.osrelease", _kernel_macos),
     ("init", "ps -o comm= -p 1", _init_macos),
-    ("vm_stat", "PATH", _vm_stat),
+    ("vm_stat", "PATH", partial(_on_path, name="vm_stat")),
     ("root_fs", "statvfs /System/Volumes/Data, the data volume", _root_fs_macos),
 )
 
