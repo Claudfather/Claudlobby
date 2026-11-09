@@ -33,10 +33,15 @@ runs a headless render through its render profile:
     ``stop_mib`` it sends SIGTERM to the job's process group and to every process
     it found to have left that group (by parent link), SIGKILL after ``grace_s``,
     then releases the slot and exits 79 with a ``heavy_slot_stopped`` event. A
-    reading that fails never stops the job. Every plain run is watched: the line
-    is on by default at 3800 MiB (RUN_LINES names the lines and holds the
-    defaults), ``state/heavy-slot/run-lines`` sets other values and never turns
-    it off, and a file it cannot read refuses every plain run at exit 2 (#2221).
+    reading that fails never stops the job. Every plain run is watched unless the
+    host turns the stop off: the line is on by default at 3800 MiB (RUN_LINES
+    names the lines and holds this host's numbers, which stand in where no file
+    is). ``state/heavy-slot/run-lines`` sets the host's own values and the bounds
+    they keep: ``stop_mib`` at or over ``stop_mib_floor``, ``debounce_reads`` x
+    ``poll_s`` at most ``notice_within_s``, and that plus ``grace_s`` at most
+    ``stopped_within_s``. Its one off is the line ``stop = off``. A file it cannot
+    read, or whose values break its bounds, refuses every plain run at exit 2
+    (#2221, #2790).
 
 ``run --profile render -- ARGV``
     A headless browser render, which plain ``run`` refuses: a render is a
@@ -84,11 +89,13 @@ Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 call through at once, without a restart; ``state/heavy-slot/no-queue`` makes
 every caller decide on the slots alone, as before the queue;
 ``state/heavy-slot/render-lines`` sets the render profile's lines (``name =
-value``; RENDER_LINES names them and holds the defaults), and a file it cannot
-read refuses every render. ``state/heavy-slot/run-lines`` sets other values for the
-stop line every plain ``run`` is watched by, on by default at 3800 MiB and never
-off (``name = value``; RUN_LINES), and a file it cannot read refuses every plain
-run. ``state/heavy-slot/render-record`` is the render
+value``; RENDER_LINES names them and holds this host's numbers), and a file it
+cannot read, or whose ``stop_mib`` or ``poll_s`` breaks its bounds, refuses every
+render. ``state/heavy-slot/run-lines`` sets the values and bounds of the stop line
+every plain ``run`` is watched by, on by default at 3800 MiB and off only by the
+line ``stop = off`` (``name = value``; RUN_LINES), and a file it cannot read, or
+whose values break its bounds, refuses every plain run.
+``state/heavy-slot/render-record`` is the render
 profile's record of kills and hold lifts, one JSON object per line; a file it
 cannot read refuses every render too. The environment's HEAVY_SLOT_TICKET_IDLE_S overrides
 TICKET_IDLE_S for the process that reads it. Test seams: HEAVY_SLOT_DIR,
@@ -1654,10 +1661,13 @@ def _emit(event: str, data: dict, wait: bool = False) -> None:
 # --- the render profile ----------------------------------------------------------
 # A headless browser render (#2039) runs only inside the host's render lines
 # (#2221, #2043), in a systemd user scope of its own, watched by the process
-# that started it. The lines are host knobs; these defaults are the primary
-# host's ruled lines (2026-10-19). A start line holds AT its number; a stop line
-# is crossed only PAST it, and one reading past it is enough: the ruled lines
-# name no debounce.
+# that started it. The lines are host config (state/heavy-slot/render-lines).
+# RENDER_LINES holds this host's numbers, the primary host's ruled lines and
+# bounds, and stands in for a host with no file until a design sizes them from
+# each host's own spec. A start line holds AT its number; a stop line is crossed
+# only PAST it, and one reading past it is enough: the ruled lines name no
+# debounce, so a render notices a crossing within one poll_s. Where the render
+# shares a line with the plain run (stop_mib, poll_s), it keeps the run's bounds.
 
 RENDER_LINES = {
     "start_mib": 4820.0,   # start only while MemAvailable is at least this
@@ -1667,6 +1677,8 @@ RENDER_LINES = {
     "stop_load1": 40.0,    # ... or the 1-minute load is over this
     "poll_s": 2.0,         # seconds between two readings
     "max_minutes": 45.0,   # a render still running after this is killed too
+    "stop_mib_floor": 3000.0,  # a bound: stop_mib may not go under this
+    "notice_within_s": 6.0,    # a bound: poll_s may not go over this
 }
 RENDER_LINES_FILE = "render-lines"
 # The job's session bus. A Chromium that reaches it asks systemd for a scope of
@@ -1687,20 +1699,30 @@ class LinesError(Exception):
 
 # The plain run's stop line (state/heavy-slot/run-lines, same format as the render
 # lines). stop_mib: stop the job while the host's free memory stays under this many
-# MiB. On by default at the host's ruled stop line, the render profile's stop_mib;
-# a file sets other values, never off. debounce_reads: how many readings in a row must be under it (a whole
-# number). poll_s: seconds between two readings (at most 60). grace_s: seconds
-# between SIGTERM and SIGKILL. A stop line is crossed only UNDER its number, as
-# the render's is: a reading equal to it does not stop the job.
-RUN_LINES = {"stop_mib": 3800.0, "debounce_reads": 2.0, "poll_s": 2.0, "grace_s": 10.0}
+# MiB; on by default at the host's ruled stop line, the render profile's stop_mib.
+# debounce_reads: how many readings in a row must be under it (a whole number).
+# poll_s: seconds between two readings (at most 60). grace_s: seconds between
+# SIGTERM and SIGKILL. A stop line is crossed only UNDER its number, as the
+# render's is: a reading equal to it does not stop the job. The bounds are host
+# config too: stop_mib may not go under stop_mib_floor, the stop must notice a
+# crossing within notice_within_s (debounce_reads x poll_s), and the job must have
+# had SIGTERM and, if still running, SIGKILL within stopped_within_s (that notice
+# plus grace_s). RUN_LINES holds this host's numbers and stands in for a host
+# with no file until a design sizes them from each host's own spec. The one off
+# is the line `stop = off`: no number turns the stop off.
+RUN_LINES = {"stop_mib": 3800.0, "debounce_reads": 2.0, "poll_s": 2.0, "grace_s": 10.0,
+             "stop_mib_floor": 3000.0, "notice_within_s": 6.0, "stopped_within_s": 21.0,
+             "stop": "on"}
 RUN_LINES_FILE = "run-lines"
 
 
 def _read_lines(f: Path, defaults: dict, kind: str) -> Optional[dict]:
     """The lines in file f over a copy of defaults, or None when f does not exist.
     The file holds `name = value` lines, and `#` starts a comment. A name it does
-    not know, a value that is not a positive number, or a file it cannot read
-    raises LinesError: a typo must never stand in for a line someone set."""
+    not know, a value that is not a positive number, a file it cannot read, or
+    values that break the bounds they keep (_bounds_broken) raise LinesError: a
+    typo must never stand in for a line someone set. A `stop` line, where the
+    defaults name one (the plain run's), takes the one value `off`."""
     lines = dict(defaults)
     try:
         text = f.read_text()
@@ -1716,6 +1738,12 @@ def _read_lines(f: Path, defaults: dict, kind: str) -> Optional[dict]:
         if not eq or name not in defaults:
             raise LinesError(f"{f} line {number} names no {kind} line (the names: "
                              f"{', '.join(defaults)})")
+        if name == "stop":
+            if value != "off":
+                raise LinesError(f"{f} line {number}: stop takes one value, off; the stop is "
+                                 "on while no line says so (#2790)")
+            lines[name] = value
+            continue
         try:
             number_value = float(value)
         except ValueError:
@@ -1724,13 +1752,42 @@ def _read_lines(f: Path, defaults: dict, kind: str) -> Optional[dict]:
             raise LinesError(f"{f} line {number}: {name} needs a positive number"
                              + (" of at most 60" if name == "poll_s" else ""))
         lines[name] = number_value
+    broken = _bounds_broken(lines)
+    if broken:
+        raise LinesError(f"{f} breaks its bounds: {broken} (#2790)")
     return lines
+
+
+def _bounds_broken(lines: dict) -> Optional[str]:
+    """Why lines break the bounds they keep, or None: stop_mib under
+    stop_mib_floor, a crossing noticed later than notice_within_s (debounce_reads
+    readings poll_s apart; one reading where there is no debounce, as in a
+    render), or, where there is a grace, the job stopped later than
+    stopped_within_s (that notice plus grace_s)."""
+    if lines["stop_mib"] < lines["stop_mib_floor"]:
+        return (f"stop_mib {lines['stop_mib']:g} is under stop_mib_floor "
+                f"{lines['stop_mib_floor']:g}")
+    reads = lines.get("debounce_reads", 1)
+    notice = round(reads * lines["poll_s"], 6)
+    if notice > lines["notice_within_s"]:
+        how = (f"{reads:g} readings {lines['poll_s']:g} s apart" if reads != 1 else
+               f"one reading every {lines['poll_s']:g} s")
+        return (f"a crossing would be noticed {notice:g} s after it ({how}), over "
+                f"notice_within_s {lines['notice_within_s']:g}")
+    if "grace_s" in lines:
+        stopped = round(notice + lines["grace_s"], 6)
+        if stopped > lines["stopped_within_s"]:
+            return (f"the job would be stopped {stopped:g} s after a crossing (that notice and "
+                    f"grace_s {lines['grace_s']:g}), over stopped_within_s "
+                    f"{lines['stopped_within_s']:g}")
+    return None
 
 
 def render_lines(d: Path) -> Tuple[dict, str]:
     """(the render lines, where they came from): RENDER_LINES with the host's own
     numbers from state/heavy-slot/render-lines over them, read on every use.
-    LinesError when the file cannot be read as lines: every render refuses."""
+    LinesError when the file cannot be read as lines, or breaks its bounds: every
+    render refuses."""
     f = d / RENDER_LINES_FILE
     lines = _read_lines(f, RENDER_LINES, "render")
     return (dict(RENDER_LINES), "default") if lines is None else (lines, str(f))
@@ -1739,8 +1796,9 @@ def render_lines(d: Path) -> Tuple[dict, str]:
 def run_lines(d: Path) -> Tuple[dict, str]:
     """(the plain run's lines, where they came from): RUN_LINES with the host's own
     numbers from state/heavy-slot/run-lines over them, read on every use. LinesError
-    when the file cannot be read as lines or gives debounce_reads a number that is
-    not whole: every plain heavy run refuses."""
+    when the file cannot be read as lines, breaks its bounds or gives debounce_reads
+    a number that is not whole: every plain heavy run refuses. lines["stop"] is
+    "off" only when the file says `stop = off`."""
     f = d / RUN_LINES_FILE
     lines = _read_lines(f, RUN_LINES, "run")
     if lines is None:
@@ -2572,8 +2630,8 @@ def _render_admission(shape: str):
     try:
         lines, _ = render_lines(d)
     except LinesError as e:
-        print(f"heavy-slot: NOT RUN: {e}. No render starts until the file reads.",
-              file=sys.stderr)
+        print(f"heavy-slot: NOT RUN: {e}. No render starts until the file reads, inside "
+              "its bounds.", file=sys.stderr)
         return 2
     refused = _rule_refusal(d, slot_count(d)[0], shape)
     if refused is not None:
@@ -2956,8 +3014,8 @@ def cmd_run(args: List[str]) -> int:
         try:
             stop_lines, lines_from = run_lines(d)
         except LinesError as e:
-            print(f"heavy-slot: NOT RUN: {e}. No plain heavy run starts until the file reads "
-                  "(#2221).", file=sys.stderr)
+            print(f"heavy-slot: NOT RUN: {e}. No plain heavy run starts until the file reads, "
+                  "inside its bounds (#2221).", file=sys.stderr)
             _emit("heavy_slot_refused", {"where": "lines", "shape": shape, "why": str(e)})
             return 2
     n, _ = slot_count(d)
@@ -3001,7 +3059,12 @@ def cmd_run(args: List[str]) -> int:
     record = _held_record(slot, n, shape, tool, boot, started)
     record.update(lines=stop_lines, lines_from=lines_from)
     _write(fd, record)
-    _emit("heavy_slot_acquired", _acquired(slot, n, shape, record, mine, why, started))
+    acquired = _acquired(slot, n, shape, record, mine, why, started)
+    if stop_lines["stop"] == "off":  # said on every run: nothing watches this one
+        acquired["stop"] = "off"
+        print(f"heavy-slot: the memory stop is OFF ({lines_from} says stop = off): nothing "
+              "stops this run if the host runs short of memory (#2790)", file=sys.stderr)
+    _emit("heavy_slot_acquired", acquired)
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
     if delay:
         try:
@@ -3021,8 +3084,11 @@ def cmd_run(args: List[str]) -> int:
     if child is not None:
         for signum in pending:
             send(signum)
-        group, watch = _Group(child.pid), _StopWatch(stop_lines)
-        rc, outcome = _watch(child, group, watch, stop_lines)
+        if stop_lines["stop"] == "off":
+            rc = child.wait()
+        else:
+            group, watch = _Group(child.pid), _StopWatch(stop_lines)
+            rc, outcome = _watch(child, group, watch, stop_lines)
     stopped = outcome is not None
     status = EX_STOPPED if stopped else rc if rc >= 0 else 128 - rc
     ended = time.time()
@@ -3177,10 +3243,16 @@ def cmd_status(args: List[str]) -> int:
     try:
         armed, armed_from = run_lines(d)
         run_info = dict(armed, file=armed_from)
-        run_line = (
-            f"run line: stop under {armed['stop_mib']:g} MiB for {armed['debounce_reads']} "
-            f"readings, {armed['poll_s']:g} s apart, KILL {armed['grace_s']:g} s after TERM "
-            f"({armed_from})")
+        if armed["stop"] == "off":
+            run_line = (f"run line: OFF ({armed_from} says stop = off), so nothing stops a "
+                        "plain heavy run when the host runs short of memory")
+        else:
+            run_line = (
+                f"run line: stop under {armed['stop_mib']:g} MiB for {armed['debounce_reads']} "
+                f"readings, {armed['poll_s']:g} s apart, KILL {armed['grace_s']:g} s after "
+                f"TERM; bounds: floor {armed['stop_mib_floor']:g} MiB, notice within "
+                f"{armed['notice_within_s']:g} s, stopped within "
+                f"{armed['stopped_within_s']:g} s ({armed_from})")
     except LinesError as e:
         run_info = {"error": str(e)}
         run_line = f"run line: NOT ARMED: {e}, so every plain heavy run refuses"

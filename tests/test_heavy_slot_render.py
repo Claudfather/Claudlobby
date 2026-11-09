@@ -277,13 +277,31 @@ def test_the_host_sets_its_own_lines(rs):
 
 
 @needs_linux
-@pytest.mark.parametrize("text", ["start_mib = lots\n", "start_mb = 4820\n", "poll_s = 0\n", "stop_mib\n"])
+@pytest.mark.parametrize("text", ["start_mib = lots\n", "start_mb = 4820\n", "poll_s = 0\n", "stop_mib\n",
+                                  "stop = off\n"])  # a render has no off line (#2790)
 def test_a_lines_file_it_cannot_read_refuses(rs, text):
     (rs.state / "render-lines").write_text(text)
     r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
     assert r.returncode == 2, r.stderr
     assert not (rs.tmp / "ran").exists()
     assert "render-lines" in r.stderr and _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
+
+
+@needs_linux
+@pytest.mark.parametrize("text, bound", [
+    ("poll_s = 0.1\nstop_mib = 2999\n", "stop_mib_floor"),  # under this host's floor
+    ("poll_s = 0.1\nstop_mib_floor = 3900\n", "stop_mib_floor"),  # a floor over the line
+    ("poll_s = 6.5\n", "notice_within_s"),  # one reading is a render's notice
+    ("poll_s = 0.1\nnotice_within_s = 0.05\n", "notice_within_s"),
+])
+def test_a_lines_file_outside_its_bounds_refuses(rs, text, bound):
+    """The render keeps the plain run's bounds where the two share a line (#2790)."""
+    (rs.state / "render-lines").write_text(text)
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2, r.stderr
+    assert not (rs.tmp / "ran").exists()
+    assert "breaks its bounds" in r.stderr and bound in r.stderr, r.stderr
+    assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
 
 
 def test_an_unknown_profile_is_refused(rs):
