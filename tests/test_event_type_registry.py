@@ -527,6 +527,7 @@ DOCS = (
     "library/protocols/fleet-observability.md",
     "library/skills/fleet-pulse/SKILL.md",
     "documentation/guides/observability.md",
+    "library/skills/fleet-pulse/fleet-observability-reference.md",   # the protocol's critical types (#1674)
 )
 TYPE_HEADERS = {"type", "event type", "critical type"}
 TOKEN = re.compile(r"`([a-z][a-z0-9_]*)`")
@@ -578,7 +579,7 @@ def test_the_doc_tables_are_found():
               "tool_call", "disk_high"):
         assert t in named, t
     labels = {(p, _label(h, hd)) for p, ts in tables.items() for h, hd, _r in ts}
-    assert {(DOCS[0], "critical"), (DOCS[2], "critical"), (DOCS[2], "notice")} <= labels
+    assert {(DOCS[3], "critical"), (DOCS[2], "critical"), (DOCS[2], "notice")} <= labels
 
 
 def test_every_type_a_doc_table_names_is_registered():
