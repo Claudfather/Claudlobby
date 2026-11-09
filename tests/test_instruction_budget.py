@@ -131,17 +131,23 @@ def test_codex_chain_reaches_every_folders_rules():
         sizes = [len((a / "CLAUDE.md").read_bytes()) for a in chain[:-1]] + [
             _head_bytes(d / "CLAUDE.md")
         ]
-        if sum(sizes) > CODEX_PROJECT_DOC_MAX_BYTES:
+        total = sum(sizes)
+        if total > CODEX_PROJECT_DOC_MAX_BYTES:
             parts = " + ".join(
                 f"{(a / 'CLAUDE.md').relative_to(REPO_DIR)} {n:,}"
                 for a, n in zip(chain, sizes)
             )
-            over.append(f"{parts} = {sum(sizes):,}")
+            over.append(
+                f"{parts} = {total:,} of {CODEX_PROJECT_DOC_MAX_BYTES:,} bytes, "
+                f"{total - CODEX_PROJECT_DOC_MAX_BYTES:,} over"
+            )
     assert not over, (
         f"Codex reads the AGENTS.md chain from the root to its start folder within one "
         f"{CODEX_PROJECT_DOC_MAX_BYTES:,}-byte budget, and these chains outrun it, so a "
-        f"session started there loses that folder's rules: {over}. Trim the root first "
-        f"(one line per thing; detail goes in the nested file or the script's header)."
+        f"session started there loses that folder's rules: {over}. Make room the way the "
+        f"root does: keep every rule, and move reference text into documentation/, the "
+        f"nested file or the script's own header, leaving a one-line pointer in its place. "
+        f"Start with the root: every chain reads it."
     )
 
 
