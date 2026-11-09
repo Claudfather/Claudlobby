@@ -16,8 +16,7 @@ from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, require_current_schema
 
 
-_PLAN_HINT = ("Review the authored change, then ask the operator to apply it with"
-              " claudlobby host update apply FULL_COMMIT_SHA.")
+_PLAN_HINT = "Review the authored change."
 
 
 def _key_pairs(keys):
