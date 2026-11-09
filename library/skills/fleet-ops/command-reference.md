@@ -1,6 +1,6 @@
 # Fleet-ops command reference
 
-Reference that the fleet-ops guide (`SKILL.md`) points to: command forms, flags and what each read prints. The guide keeps every rule; this file adds none.
+Reference that the fleet-ops guide (`SKILL.md`) points to: command forms, flags, what each command does and what each read prints. The guide keeps every rule; this file adds none.
 
 ## Request IDs
 
@@ -24,6 +24,11 @@ claudlobby --json task reviews OWNER/REPO --pr N
 claudlobby --json assignment show ASSIGNMENT_ID
 claudlobby --json workstream list
 ```
+
+On the brief's `reports`:
+Unacknowledged report rows (`reports.unacked`) are in the fleet manager's view only, the
+oldest 50; any other view carries their number (`reports.count`) and the command that
+lists them (`reports.list_command`).
 
 ## Session and supervision reads
 
@@ -58,6 +63,12 @@ claudlobby --json bot stop WORKER
 claudlobby --json bot stop WORKER --reason "parked until the review lands"
 ```
 
+`start` is idempotent when the selected bot's session is already ready; use
+`restart` for an intentional bounce: it waits for an idle prompt, continues the
+same conversation and ends with a fresh bridge/session readiness check.
+`stop` de-enrolls supervision and stops the session, so keepalive cannot revive
+it; a later `start` is explicit re-enrollment.
+
 For a slow bridge, `bot restart WORKER --ceiling SECONDS` overrides the
 per-bot readiness budget with a positive number.
 
@@ -87,6 +98,19 @@ claudlobby --json assignment progress ASSIGNMENT_ID --summary "Started the revie
 claudlobby --json assignment complete ASSIGNMENT_ID --summary "Reviewed the change" --request-id COMPLETE_UUID
 claudlobby --json assignment show ASSIGNMENT_ID
 ```
+
+## Deadline watch
+
+On the guide's deadline watch (`work.items[].attention` in the brief):
+
+| `status` | What it tells you | What changes it |
+| --- | --- | --- |
+| `not_due` | Before its deadline, or open-ended. | The deadline passes. |
+| `overdue` | Past its deadline, no progress since its dispatch in the last 45 minutes, and your session has run since the dispatch. | You record progress, or the assignment ends. |
+| `orphaned` (`respawned_after_dispatch`) | The same, but your session started after the dispatch, so the session that received it has ended. The assignment is still open and still yours. | You record progress, or the assignment ends. |
+| `past_due` (`progress_grace`) | Past its deadline, held back by a progress report made since its dispatch and under 45 minutes old. | 45 minutes after that report it reads `overdue` or `orphaned` again; a newer report holds it back again. |
+| `past_due` (`max_age_cap`) | More than 24 hours after the dispatch or, once the manager has moved the deadline, after the move or the new deadline, whichever is later: aged out, no longer flagged, and not resolved. | The assignment ends. |
+| `unknown` | The watch could not read some of its evidence (the brief's `DEGRADED` section says which). It says nothing about the assignment. | The evidence becomes readable. |
 
 ## Reports
 
@@ -122,3 +146,8 @@ with `matches_declaration` false where the settings are older than the declarati
 plugin's hooks and the account's own settings are not listed. `bot capabilities BOT`
 adds its permission rules as SHA-256 hashes, the arguments withheld, and is about
 four times as long; read it to compare rule sets, not to learn the equipment.
+
+`project list` and
+`project show PROJECT` read the fleet's declared projects: key, title, repos,
+validation tier (how work in them is closed) and mission file. A manager's
+CLAUDE.md carries that table; a worker reads it here.
