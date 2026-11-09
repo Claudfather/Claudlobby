@@ -9,21 +9,40 @@ or has ended.
 ``take --fleet F --bot B [--json]``
     Grants a lease that names the bot, the time it was taken (the send time) and
     an end LEASE_S (10 minutes) later, and prints its lease ID. Refused, exit 75,
-    writing nothing: while a lease is live, whoever holds it (the refusal names
-    the holder, so a bot can see that its own compaction is still in flight);
-    while the host's 1-minute load is LOAD_LINE (40) or more, the heavy slot's
-    own stop line; when the load cannot be read; or when another take or release
-    holds the slot's lock for more than LOCK_WAIT_S.
+    writing nothing: while the operator's stop is in place (`disabled`, below);
+    while a lease is live, whoever holds it (the refusal names the holder, so a
+    bot can see that its own compaction is still in flight); while the host's
+    1-minute load is LOAD_LINE (40) or more, the heavy slot's own stop line; when
+    the load cannot be read; or when another take or release holds the slot's
+    lock for more than LOCK_WAIT_S.
 
 ``release --fleet F --bot B --lease ID [--json]``
-    Ends that lease before its end. A lease that has already ended, or a lease
-    ID, fleet or bot that is not the current lease's, changes nothing
-    (`not_held`), so a late release never ends a later lease.
+    Ends that lease before its end, with the stop in place or not. A lease that
+    has already ended, or a lease ID, fleet or bot that is not the current
+    lease's, changes nothing (`not_held`), so a late release never ends a later
+    lease.
 
 ``status [--json]``
     `free` or `held`: the live lease, or the last one and how it ended
-    (`released`, `expired` at its end, or `reset` by a host reset), and the
-    1-minute load beside the line.
+    (`released`, `expired` at its end, or `reset` by a host reset); `disabled`,
+    whether the operator's stop is in place (`true`, with `stop`: its path and
+    since when; null when it cannot be looked at); and the 1-minute load beside
+    the line.
+
+The operator's stop is anything named `disabled` in the slot's directory,
+`$CLAUDLOBBY_ROOT/state/compaction-slot/disabled`: a file, empty or not, a
+directory or a link. While it is there every take is refused as `disabled`;
+once it is removed the next take goes ahead. It needs no activation and no
+restart: `touch` it to stop compactions, `rm` it to let them go on. A take
+reads it before the slot's lock, so a stopped take writes nothing at all, and
+again under the lock, so no take is granted after it is in place. A lease
+already live is left to end as any lease does, and its release still works.
+Only the name is read, never what the entry holds: a FIFO there would hang a
+read. A stop that cannot be looked at grants nothing either: the take exits 2.
+It stops what takes this slot, which is keepalive's compaction executor; a
+manager's `bot compact WORKER`, a `/compact` typed into a pane and Claude
+Code's own automatic compaction do not take the slot, and it does not reach
+them.
 
 The holder is a short-lived process, so a lease is a record, not a held lock: a
 holder that dies leaves its lease to end at its 10 minutes, and a host reset
@@ -40,7 +59,7 @@ The load is `<proc>/loadavg` where it exists, else `os.getloadavg()` (macOS).
 
 Exit: 0 granted, released, not held or read; 75 refused (retry later); 2 a
 usage or setup error (no absolute CLAUDLOBBY_ROOT, a directory or record that
-cannot be written).
+cannot be written, a stop that cannot be looked at).
 
 Test seams: COMPACTION_SLOT_DIR (the slot's directory), COMPACTION_SLOT_PROC (a
 directory standing in for /proc's loadavg), COMPACTION_SLOT_BOOT_ID, and
@@ -71,6 +90,7 @@ LOCK_WAIT_S = 2.0  # a take or a release holds the lock for milliseconds
 RECORD_MAX = 65536  # bytes of a record read; a lease is a few hundred
 RECORD = "lease.json"
 LOCK = "lock"
+STOP = "disabled"  # the operator's stop: anything by this name in the slot's directory
 _NAME = re.compile(r"[^\s/\x00-\x1f\x7f]{1,128}")
 
 
@@ -156,6 +176,32 @@ def read_record(d: Path) -> Tuple[Optional[dict], Optional[str]]:
     return rec, None
 
 
+def read_stop(d: Path) -> Optional[dict]:
+    """The operator's stop: None when nothing is named STOP in the slot's directory;
+    else its path and since when (the entry's own time), or its path and why it
+    cannot be looked at. The entry is never opened: a FIFO there would hang a read."""
+    path = d / STOP
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as e:
+        return {"path": str(path), "error": e.strerror or type(e).__name__}
+    return {"path": str(path), "since": _iso(info.st_mtime)}
+
+
+def _stopped(d: Path) -> Optional[Tuple[int, dict]]:
+    """A take's refusal while the operator's stop is in place, else None. A stop
+    that cannot be looked at is a setup error: no take is granted past it."""
+    stop = read_stop(d)
+    if stop is None:
+        return None
+    if "error" in stop:
+        raise SetupError(f"compaction-slot: the stop {stop['path']} cannot be looked at: "
+                         f"{stop['error']}")
+    return EX_TEMPFAIL, {"outcome": "refused", "reason": "disabled", "stop": stop}
+
+
 def judge(rec: dict, now: float, boot: str) -> str:
     """live, released, reset (taken on another boot) or expired (at its end)."""
     if isinstance(rec.get("released"), (int, float)):
@@ -205,9 +251,15 @@ def _locked(d: Path) -> Iterator[bool]:
 
 def take(fleet: str, bot: str) -> Tuple[int, dict]:
     d, boot = slot_dir(), boot_id()  # read before the lock: on macOS it runs sysctl
+    stopped = _stopped(d)  # before the lock, so a stopped take writes nothing at all
+    if stopped:
+        return stopped
     with _locked(d) as had:
         if not had:
             return EX_TEMPFAIL, {"outcome": "refused", "reason": "lock_busy"}
+        stopped = _stopped(d)  # and at the decision: a stop placed while this take waited
+        if stopped:
+            return stopped
         now = _now()
         rec, _problem = read_record(d)
         if rec is not None and judge(rec, now, boot) == "live":
@@ -249,7 +301,13 @@ def status() -> Tuple[int, dict]:
     d = slot_dir()
     now, boot = _now(), boot_id()
     rec, problem = read_record(d)
-    out: dict = {"state": "free", "lease": None, "last": None, "load_line": LOAD_LINE}
+    stop = read_stop(d)
+    out: dict = {"state": "free", "lease": None, "last": None, "load_line": LOAD_LINE,
+                 "disabled": stop is not None}
+    if stop is not None:
+        out["stop"] = stop
+        if "error" in stop:
+            out["disabled"] = None
     if rec is not None:
         state = judge(rec, now, boot)
         if state == "live":
@@ -276,12 +334,21 @@ def _line(verb: str, result: dict) -> str:
             head = f"held by {who} until {lease.get('ends_at')} (lease {lease.get('lease')})"
         else:
             head = "free"
+        stop = result.get("stop") or {}
+        if result.get("disabled"):
+            head += f"; stopped by {stop.get('path')} since {stop.get('since')}: every take is refused"
+        elif "error" in stop:
+            head += (f"; the stop {stop.get('path')} cannot be looked at ({stop['error']}): "
+                     "every take fails")
         return f"compaction slot: {head}; load1 {load_text} (takes refused at {LOAD_LINE:g})"
     outcome, reason = result["outcome"], result.get("reason")
     if outcome == "granted":
         return f"granted: lease {lease['lease']} until {lease['ends_at']}"
     if outcome == "released":
         return f"released: lease {lease['lease']}"
+    if reason == "disabled":
+        stop = result.get("stop") or {}
+        return f"refused: stopped by {stop.get('path')} since {stop.get('since')}"
     if reason == "held":
         return f"refused: held by {who} until {lease.get('ends_at')}"
     if reason == "load":
