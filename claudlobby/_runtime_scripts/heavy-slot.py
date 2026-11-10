@@ -28,20 +28,30 @@ runs a headless render through its render profile:
     because every slot is held or a free one is another caller's turn, takes
     a ticket in the queue (#2124) and exits 75. The job runs in a session of
     its own, and this process reads the host's free memory every ``poll_s``
-    (MemAvailable where there is a meminfo,
-    else vm_stat); once ``debounce_reads`` readings in a row are under
+    (MemAvailable where there is a meminfo, else vm_stat) and the job's PSS
+    (its processes, by parent link, where /proc gives it); once
+    ``debounce_reads`` readings in a row are under
     ``stop_mib`` it sends SIGTERM to the job's process group and to every process
     it found to have left that group (by parent link), SIGKILL after ``grace_s``,
     then releases the slot and exits 79 with a ``heavy_slot_stopped`` event. A
-    reading that fails never stops the job. Every plain run is watched unless the
-    host turns the stop off: the line is on by default at 3800 MiB (RUN_LINES
-    names the lines and holds this host's numbers, which stand in where no file
-    is). ``state/heavy-slot/run-lines`` sets the host's own values and the bounds
-    they keep: ``stop_mib`` at or over ``stop_mib_floor``, ``debounce_reads`` x
-    ``poll_s`` at most ``notice_within_s``, and that plus ``grace_s`` at most
-    ``stopped_within_s``. Its one off is the line ``stop = off``. A file it cannot
-    read, or whose values break its bounds, refuses every plain run at exit 2
-    (#2221, #2790).
+    reading that fails never stops the job. Every plain run is read, and the
+    stop acts unless the host turns it off: the line is on by default at 3800 MiB
+    (RUN_LINES names the lines and holds this host's numbers, which stand in
+    where no file is). ``state/heavy-slot/run-lines`` sets the host's own values
+    and the bounds they keep: ``stop_mib`` at or over ``stop_mib_floor``,
+    ``debounce_reads`` x ``poll_s`` at most ``notice_within_s``, and that plus
+    ``grace_s`` at most ``stopped_within_s``. Its one off is the line
+    ``stop = off``, and then nothing stops the run, which is still read. A file
+    it cannot read, or whose values break its bounds, refuses every plain run at
+    exit 2 (#2221, #2790).
+
+    Every run's ``heavy_slot_released`` row, a render's too, says what it drew
+    and how long it waited (#1645): ``waited_s``, from its ticket's issue to its
+    take (0 for a take with no ticket, absent when the queue was off or could
+    not be read), and ``peak``, with MemAvailable at the start
+    (``mem_available_mib_start``) and at its lowest (``mem_available_mib_low``)
+    and the job's largest PSS (``job_pss_mib_high``). A figure none of whose
+    readings succeeded is left out, never 0.
 
 ``run --profile render -- ARGV``
     A headless browser render, which plain ``run`` refuses: a render is a
@@ -1552,12 +1562,13 @@ def settle(q: dict, order: List[dict], mine: dict, queued: bool, ahead: bool,
 
 def _decide(d: Path, n: int, tool: str, take: bool):
     """One door's decision, under the queue's lock, the same for the hook and
-    the wrapper: (got, slots, mine, order, why). `got` is the (slot, fd) the
-    wrapper took (`take`), True when the hook may let the call through, else
+    the wrapper: (got, slots, mine, order, why, read). `got` is the (slot, fd)
+    the wrapper took (`take`), True when the hook may let the call through, else
     None; `slots` is the snapshot decided on. `mine` is the ticket the caller
     holds now, or the one it waited on; it and `order` are None and [] when
     there is no such ticket or the slots alone decided, and `why` then says why,
-    unless the queue is switched off."""
+    unless the queue is switched off. `read` says the queue was read and written
+    back, so a caller it holds no ticket for has not waited in it (#1645)."""
     idle, now = ticket_idle_s(), time.time()
     qfd, why = _open_queue(d)
     dropped: list = []
@@ -1578,9 +1589,10 @@ def _decide(d: Path, n: int, tool: str, take: bool):
         if qfd is not None:
             os.close(qfd)
     _emit_dropped(dropped if qfd is not None else [], idle)
+    read = qfd is not None and not why
     if qfd is None or (got is not None and not queued):
-        return got, slots, None, [], why
-    return got, slots, mine, order, why
+        return got, slots, None, [], why, read
+    return got, slots, mine, order, why, read
 
 
 def _refuse(d: Path, where: str, shape: str, n: int, slots, mine, order, why,
@@ -1615,6 +1627,16 @@ def _ticket_summary(t: dict, order: List[dict], idle: int, now: Optional[float] 
     if now is not None:
         out["waited_s"] = int(now - t["since"])
     return out
+
+
+def _waited_s(mine: Optional[dict], read: bool, now: float) -> Optional[int]:
+    """A run's wait in the queue, in whole seconds to `now` (#1645): from its
+    ticket's issue; 0 for a take with no ticket in a queue that was read; None
+    when the queue was not read (switched off, or its lock or file failed),
+    since a caller refused then held no ticket to time it by."""
+    if mine is not None:
+        return int(now - mine["since"])
+    return 0 if read else None
 
 
 def _emit_dropped(dropped, idle: int) -> None:
@@ -2207,9 +2229,12 @@ def _scope_procs(cgroup: str) -> Optional[List[int]]:
         return None
 
 
-def _pss_mib(pids: List[int]) -> int:
-    """The summed PSS of these processes: shared pages split between them."""
-    total = 0
+def _pss_mib(pids: List[int]) -> Optional[int]:
+    """The summed PSS of these processes, shared pages split between them, or
+    None for a reading that failed: none of them read (none left, or no
+    smaps_rollup here, as on macOS), or one that could not be read. A process
+    that ended before it was read adds nothing (#1645)."""
+    total = read = 0
     for pid in pids:
         try:
             with open(f"/proc/{pid}/smaps_rollup", "rb") as fh:
@@ -2217,9 +2242,18 @@ def _pss_mib(pids: List[int]) -> int:
                     if line.startswith(b"Pss:"):
                         total += int(line.split()[1])
                         break
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # it ended, or there is no smaps_rollup here
         except (OSError, ValueError, IndexError):
-            pass
-    return total // 1024
+            return None
+        read += 1
+    return total // 1024 if read else None
+
+
+def _note_pss(peak: dict, mib: Optional[int]) -> None:
+    """Keep the job's largest PSS reading in peak; a failed one changes nothing."""
+    if mib is not None:
+        peak["job_pss_mib_high"] = max(mib, peak.get("job_pss_mib_high", mib))
 
 
 def _duration(seconds: float) -> str:
@@ -2362,33 +2396,34 @@ class _Group:
 
 
 class _StopWatch:
-    """The debounce of the plain run's stop line, and what it measured."""
+    """The debounce of the plain run's stop line, and what it measured. With the
+    stop off it still measures, and never stops (#1645)."""
 
     def __init__(self, lines: dict):
         self.stop = lines["stop_mib"]
         self.need = lines["debounce_reads"]
         self.poll = lines["poll_s"]
+        self.off = lines.get("stop") == "off"
         self.run = 0
         self.last: Optional[int] = None
-        self.peak = {"mem_available_mib_start": None, "mem_available_mib_low": None,
-                     "readings": 0, "unreadable": 0}
+        # a figure enters with its first reading that succeeds: absent, never 0 (#1645)
+        self.peak = {"readings": 0, "unreadable": 0}
 
     def take(self, mib: Optional[int]) -> bool:
-        """True once `debounce_reads` readings in a row were under the line. A
-        reading that failed (None) resets the run and never stops."""
+        """True once `debounce_reads` readings in a row were under the line, unless
+        the stop is off. A reading that failed (None) resets the run and never
+        stops."""
+        peak = self.peak
         if mib is None:
-            self.peak["unreadable"] += 1
+            peak["unreadable"] += 1
             self.run = 0
             return False
-        peak = self.peak
         peak["readings"] += 1
-        if peak["mem_available_mib_start"] is None:
-            peak["mem_available_mib_start"] = mib
-        peak["mem_available_mib_low"] = (mib if peak["mem_available_mib_low"] is None
-                                         else min(peak["mem_available_mib_low"], mib))
+        peak.setdefault("mem_available_mib_start", mib)
+        peak["mem_available_mib_low"] = min(mib, peak.get("mem_available_mib_low", mib))
         self.last = mib
         self.run = self.run + 1 if mib < self.stop else 0
-        return self.run >= self.need
+        return not self.off and self.run >= self.need
 
     def reading(self) -> str:
         return (f"free memory {self.last} MiB, under {self.stop:g} MiB for {self.need} "
@@ -2445,7 +2480,7 @@ class _Render:
         self.peak = {"mem_available_mib_start": start["mem_available_mib"],
                      "mem_available_mib_low": start["mem_available_mib"],
                      "load1_high": start["load1"], "load5_high": start["load5"],
-                     "job_pss_mib_high": 0, "readings": 1}
+                     "readings": 1}  # job_pss_mib_high comes with a PSS reading (#1645)
 
     def take(self, chunk: bytes) -> None:
         """Read the keeper's complete report lines."""
@@ -2534,7 +2569,7 @@ class _Render:
                 self.read(r)
                 scoped, live = scope.members()
                 job = [pid for pid in (scoped or []) if pid != self.keeper.pid] + live
-                self.peak["job_pss_mib_high"] = max(self.peak["job_pss_mib_high"], _pss_mib(job))
+                _note_pss(self.peak, _pss_mib(job))
                 self.stop = _breach(r, lines)
                 if self.stop is None and now - began > lines["max_minutes"] * 60:
                     self.stop = ("max_minutes",
@@ -2594,11 +2629,13 @@ def _render_line(ended: str, status: int, rec: dict) -> str:
     if ended == "not-started":
         return f"heavy-slot: NOT RUN: the render could not start: {rec['stop']['reading']}"
     p = rec["peak"]
+    pss = (f"the job's PSS at most {p['job_pss_mib_high']} MiB" if "job_pss_mib_high" in p
+           else "the job's PSS not read")
     measured = (f"MemAvailable {p['mem_available_mib_start']} MiB at the start and "
                 f"{p['mem_available_mib_low']} MiB at its lowest "
                 f"({p['mem_available_mib_start'] - p['mem_available_mib_low']} MiB down), "
                 f"load1 at most {p['load1_high']:.2f}, load5 at most {p['load5_high']:.2f}, "
-                f"the job's PSS at most {p['job_pss_mib_high']} MiB")
+                + pss)
     if p["readings"] < 2:
         measured += " (it ended before the first reading after the start)"
     if rec.get("escapees"):
@@ -2654,7 +2691,7 @@ def _render_admission(shape: str):
     return EX_TEMPFAIL
 
 
-def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
+def _render_run(slot: int, fd: int, n: int, mine, why, read: bool, shape: str, tool: str,
                 argv: List[str], lines: dict, start: dict) -> int:
     """A render, from its slot taken to its release: the record, the scope and
     its watch, and the end, recorded in the slot's file and on the plane."""
@@ -2675,7 +2712,7 @@ def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
     boot = boot_id()
     _report_unreleased(fd, slot, boot)
     started = time.time()
-    record = _held_record(slot, n, shape, tool, boot, started)
+    record = _held_record(slot, n, shape, tool, boot, started, _waited_s(mine, read, started))
     record.update(profile="render", unit=_scope_unit(record["fleet"], record["bot"], started),
                   cgroup=None, lines=lines, start=start)
     _write(fd, record)
@@ -2725,8 +2762,9 @@ def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
     released = {"slot": slot, "shape": shape, "exit": status, "started_at": record["started_at"],
                 "duration_s": record["duration_s"], "profile": "render", "unit": record["unit"],
                 "ended": ended, "peak": render.peak}
-    if "stop" in record:
-        released["stop"] = record["stop"]
+    for key in ("stop", "waited_s"):
+        if key in record:
+            released[key] = record[key]
     _emit("heavy_slot_released", released)
     line = _render_line(ended, status, record)
     if ended == "killed":
@@ -2826,8 +2864,14 @@ def cmd_keep(args: List[str]) -> int:
                   "duration_s": rec.get("duration_s"), "by": "keeper"}
         _emit("heavy_slot_stopped", dict(common, line="runner", reading=stop["reading"],
                                          hold=hold is not None), wait=True)
-        _emit("heavy_slot_released", dict(common, exit=EX_STOPPED, ended="killed", stop=stop),
-              wait=True)
+        released = dict(common, exit=EX_STOPPED, ended="killed", stop=stop)
+        start = rec.get("start")
+        if isinstance(start, dict) and isinstance(start.get("mem_available_mib"), int):
+            # the runner held its readings after the start; the record keeps the start (#1645)
+            released["peak"] = {"mem_available_mib_start": start["mem_available_mib"]}
+        if isinstance(rec.get("waited_s"), int):
+            released["waited_s"] = rec["waited_s"]
+        _emit("heavy_slot_released", released, wait=True)
 
     def on_signal(signum, _frame):
         name = signal.Signals(signum).name
@@ -2899,7 +2943,7 @@ def cmd_hook() -> int:
     if rewritten is None:
         return 0
     n, _ = slot_count(d)
-    got, slots, mine, order, why = _decide(d, n, labels[0], take=False)
+    got, slots, mine, order, why, _ = _decide(d, n, labels[0], take=False)
     if got is None:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2928,15 +2972,19 @@ def _report_unreleased(fd: int, slot: int, boot: str) -> None:
                                         "across_reset": previous.get("boot_id") != boot})
 
 
-def _held_record(slot: int, n: int, shape: str, tool: str, boot: str, started: float) -> dict:
+def _held_record(slot: int, n: int, shape: str, tool: str, boot: str, started: float,
+                 waited: Optional[int]) -> dict:
     fleet, bot = _identity()
-    return {
+    record = {
         "v": 1, "slot": slot, "slots": n, "state": "held", "fleet": fleet, "bot": bot,
         "shape": shape, "tool": tool, "cwd": os.getcwd(), "pid": os.getpid(),
         "host": socket.gethostname(),
         "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
         "released_at": None, "exit": None,
     }
+    if waited is not None:  # its wait in the queue, which its release row carries (#1645)
+        record["waited_s"] = waited
+    return record
 
 
 def _acquired(slot: int, n: int, shape: str, record: dict, mine, why, started: float) -> dict:
@@ -2963,9 +3011,11 @@ def _parent_death_hook(signum: int):
 
 def _watch(child, group: _Group, watch: _StopWatch, lines: dict):
     """Wait for a plain run's job, reading the host's free memory every poll_s
-    (the first reading at once). (its exit status, None) when it ended on its
-    own; (its exit status, or -1 if it never reaped, and (whether SIGKILL was
-    needed, the pids still alive)) when the stop line held and stopped it."""
+    (the first reading at once), and the job's PSS once the stop has decided on
+    that reading, so a slow PSS read never delays a stop. (its exit status,
+    None) when it ended on its own; (its exit status, or -1 if it never reaped,
+    and (whether SIGKILL was needed, the pids still alive)) when the stop line
+    held and stopped it."""
     next_read = time.monotonic()
     while True:
         try:
@@ -2976,11 +3026,12 @@ def _watch(child, group: _Group, watch: _StopWatch, lines: dict):
             mib = _mem_available_mib()
         except (OSError, ValueError, subprocess.SubprocessError):
             mib = None
-        group.walk()
+        members, live = group.walk()
         next_read = time.monotonic() + lines["poll_s"]
         if watch.take(mib):
             stop = _stop(child, group, lines["grace_s"])
             return (-1 if child.returncode is None else child.returncode), stop
+        _note_pss(watch.peak, _pss_mib(members + live))  # after the decision (#1645)
 
 
 def cmd_run(args: List[str]) -> int:
@@ -3020,13 +3071,13 @@ def cmd_run(args: List[str]) -> int:
             return 2
     n, _ = slot_count(d)
     tool = _tool(argv)
-    got, slots, mine, order, why = _decide(d, n, tool, take=True)
+    got, slots, mine, order, why, read = _decide(d, n, tool, take=True)
     if got is None:
         print(_refuse(d, "wrapper", shape, n, slots, mine, order, why, profile), file=sys.stderr)
         return EX_TEMPFAIL
     slot, fd = got
     if profile == "render":
-        return _render_run(slot, fd, n, mine, why, shape, tool, argv, lines, start)
+        return _render_run(slot, fd, n, mine, why, read, shape, tool, argv, lines, start)
     # From here the wrapper holds the slot, so a signal must reach the job and
     # the release must still be written. The handler goes in NOW: installed
     # after the job started, it left a window in which a TERM killed the
@@ -3056,12 +3107,12 @@ def cmd_run(args: List[str]) -> int:
     boot = boot_id()
     _report_unreleased(fd, slot, boot)
     started = time.time()
-    record = _held_record(slot, n, shape, tool, boot, started)
+    record = _held_record(slot, n, shape, tool, boot, started, _waited_s(mine, read, started))
     record.update(lines=stop_lines, lines_from=lines_from)
     _write(fd, record)
     acquired = _acquired(slot, n, shape, record, mine, why, started)
     off = stop_lines["stop"] == "off"
-    if off:  # said on every run: nothing watches this one
+    if off:  # said on every run: nothing stops this one, which is still read (#1645)
         acquired["stop"] = "off"
         print(f"heavy-slot: the memory stop is OFF ({lines_from} says stop = off): nothing "
               "stops this run if the host runs short of memory (#2790)", file=sys.stderr)
@@ -3085,11 +3136,8 @@ def cmd_run(args: List[str]) -> int:
     if child is not None:
         for signum in pending:
             send(signum)
-        if off:
-            rc = child.wait()
-        else:
-            group, watch = _Group(child.pid), _StopWatch(stop_lines)
-            rc, outcome = _watch(child, group, watch, stop_lines)
+        group, watch = _Group(child.pid), _StopWatch(stop_lines)
+        rc, outcome = _watch(child, group, watch, stop_lines)
     stopped = outcome is not None
     status = EX_STOPPED if stopped else rc if rc >= 0 else 128 - rc
     ended = time.time()
@@ -3097,16 +3145,19 @@ def cmd_run(args: List[str]) -> int:
                   exit=status, duration_s=round(ended - started, 1))
     released = {"slot": slot, "shape": shape, "exit": status,
                 "started_at": record["started_at"], "duration_s": record["duration_s"]}
+    if "waited_s" in record:
+        released["waited_s"] = record["waited_s"]
     record["ended"] = "stopped" if stopped else "done"
-    if watch is not None:
+    if watch is not None:  # every run that started: what it drew (#1645)
         record.update(peak=watch.peak, escapees=len(group.escapees))
+        released["peak"] = watch.peak
     if stopped:
         stop = {"line": "stop_mib", "reading": watch.reading()}
         sigkill, still = outcome
         record.update(stop=stop, sigkill=sigkill)
         if still:
             record["still_running"] = still
-        released.update(ended="stopped", stop=stop, peak=watch.peak)
+        released.update(ended="stopped", stop=stop)
     _write(fd, record)
     os.close(fd)
     if stopped:

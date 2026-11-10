@@ -130,3 +130,40 @@ def test_the_stop_watch():
     assert got == [False, False, False]
     assert w.peak["unreadable"] == 1 and w.peak["readings"] == 2
     assert w.peak["mem_available_mib_low"] == 3000 and w.peak["mem_available_mib_start"] == 3000
+    # a figure enters with its first reading that succeeds: absent, never 0 (#1645)
+    w, _ = watch(None, None)
+    assert w.peak == {"readings": 0, "unreadable": 2}
+    w = hs._StopWatch({"stop_mib": 3800.0, "debounce_reads": 2, "poll_s": 2.0})
+    for pss in (None, 120, None, 90):  # the job's PSS, apart from the free-memory readings
+        hs._note_pss(w.peak, pss)
+    assert w.peak == {"readings": 0, "unreadable": 0, "job_pss_mib_high": 120}
+    # with the stop off every reading is still taken, under the line too, and nothing stops
+    off = hs._StopWatch({"stop_mib": 3800.0, "debounce_reads": 2, "poll_s": 2.0, "stop": "off"})
+    assert [off.take(3000) for _ in range(4)] == [False] * 4
+    assert (off.peak["mem_available_mib_low"], off.peak["readings"]) == (3000, 4)
+
+
+def test_the_pss_reader_never_reports_a_failed_reading(monkeypatch):
+    """The job's summed PSS (#1645), or None for a reading that failed: nothing
+    read (no process left, or no smaps_rollup, as on macOS), or a process it
+    could not read, which a partial sum would hide. A process that ended adds
+    nothing."""
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()  # reaped: nothing left to read
+    assert hs._pss_mib([]) is None and hs._pss_mib([ended.pid]) is None
+    own = hs._pss_mib([os.getpid()])
+    if not LINUX:
+        assert own is None
+        return
+    assert isinstance(own, int) and own > 0
+    assert isinstance(hs._pss_mib([ended.pid, os.getpid()]), int)
+    real = open
+
+    def refusing(path, *args, **kwargs):
+        if str(path) == f"/proc/{os.getpid()}/smaps_rollup":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(hs, "open", refusing, raising=False)
+    assert isinstance(hs._pss_mib([os.getppid()]), int)  # the control: its parent still reads
+    assert hs._pss_mib([os.getppid(), os.getpid()]) is None
