@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import re
@@ -43,6 +43,15 @@ class WorkstreamError(RuntimeError):
         super().__init__(message)
 
 
+class WorkstreamTasksChanged(WorkstreamError):
+    """The close's precondition refused: under the plane's write lock, the
+    workstream's open tasks are no longer the queued ones its read planned to
+    withdraw. Raised before any row in the batch is written."""
+
+    def __init__(self, message: str):
+        super().__init__("conflict", message)
+
+
 @dataclass(frozen=True)
 class WorkstreamResult:
     request_id: str
@@ -51,6 +60,8 @@ class WorkstreamResult:
     request_persisted: bool
     replayed: bool
     notification: str = "not_requested"
+    #: The queued tasks a close withdrew in its own batch, in task-ID order.
+    withdrawn_task_ids: tuple[str, ...] = ()
 
 
 def _configuration(ctx):
@@ -99,35 +110,114 @@ def _slug(title):
 
 
 def _ids_from_facts(ctx, facts):
+    """The committed workstream IDs, and the tasks a close withdrew, of a
+    replayed request."""
     from .plane.ingest import CONSTRUCT_TABLES
 
-    ids = []
+    ids, withdrawn = [], []
     with closing(connect_ro(db_file(ctx.root))) as conn:
         require_current_schema(conn)
         for fact in facts:
             table = CONSTRUCT_TABLES.get(fact.family, "events")
             if table == "events" and fact.family == "system":
                 continue
-            row = conn.execute(f"SELECT workstream_id FROM {table} WHERE event_id=? AND fleet_uid=?",
+            column, found = (("work_item_id", withdrawn) if fact.family == "task"
+                             else ("workstream_id", ids))
+            row = conn.execute(f"SELECT {column} FROM {table} WHERE event_id=? AND fleet_uid=?",
                                (fact.event_id, ctx.fleet_uid)).fetchone()
             if row is None:
                 raise WorkstreamError("unavailable", "committed workstream identity is unavailable")
-            ids.append(row[0])
-    return tuple(ids)
+            found.append(row[0])
+    return tuple(ids), tuple(withdrawn)
 
 
-def _event(ctx, request_id, ordinal, family, payload, now):
+def _open_tasks(ctx, conn, wid):
+    """The workstream's tasks that have not ended, with the task reducer's
+    state: the facts the registry's ``open_task_ids`` and admit's join check
+    read. A task the reducer cannot resolve has no terminal fact, so it is
+    open, with state None."""
+    from .task_state import TaskStateError, read_tasks
+
+    ids = [row[0] for row in conn.execute(
+        "SELECT work_item_id FROM work_items WHERE workstream_id=? AND fleet_uid=?",
+        (wid, ctx.fleet_uid))]
+    if not ids:
+        return ()
+    try:
+        snapshot = read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=ids)
+    except TaskStateError as exc:
+        raise WorkstreamError("unavailable", f"the workstream's task state is unreadable: {exc}") from exc
+    return tuple(task for task in snapshot.tasks if task.terminal_event is None)
+
+
+def _close_read(ctx, wid):
+    try:
+        with closing(connect_ro(db_file(ctx.root))) as conn:
+            require_current_schema(conn)
+            return _open_tasks(ctx, conn, wid)
+    except (OSError, sqlite3.Error) as exc:
+        raise WorkstreamError("unavailable", "the workstream's tasks are unavailable") from exc
+
+
+def _not_queued(task):
+    """How the close's refusal names a task it cannot withdraw."""
+    if task.state is None:
+        codes = ", ".join(sorted({issue.code for issue in task.blockers})) or "unresolved"
+        return f"{task.task_id} (the task reducer cannot resolve it: {codes})"
+    return f"{task.task_id} ({task.state}, a live assignment)"
+
+
+def _recheck_close(ctx, wid, withdrawn, write):
+    """The close's batch precondition, read under the plane's write lock: the
+    workstream's open tasks are still exactly the queued ones the close
+    withdraws. A task assigned, ended or joined since the read refuses the
+    close, and nothing in its batch is written."""
+    now_open = _open_tasks(ctx, write, wid)
+    changed = sorted({task.task_id for task in now_open if task.state != "queued"}
+                     | ({task.task_id for task in now_open} ^ set(withdrawn)))
+    if changed:
+        raise WorkstreamTasksChanged(
+            f"workstream {wid}'s tasks changed after the close read them: {', '.join(changed)}; "
+            "nothing was recorded; read workstream show and close it again with a new --request-id")
+
+
+def _lock_queued(stack, store, withdrawn):
+    """Hold each queued task's lock, the one every task verb takes, through
+    the close's write.
+
+    A task verb checks its task's state under that lock but outside the
+    plane's write lock, and writes with no precondition. Without the lock, a
+    close that committed between such a check and its write would leave that
+    verb's row, an assignment say, on a withdrawn task. The precondition
+    catches only the other order, a row that lands before the close.
+
+    The locks are taken in sorted task-ID order, so two callers that lock
+    overlapping sets take them in one order and neither can hold a lock the
+    other is waiting for. (A task lock never waits: a held one refuses.)
+    """
+    from .task_operations import _locked_task
+    from .task_queries import TaskQueryError
+
+    for task_id in sorted(withdrawn):
+        try:
+            stack.enter_context(_locked_task(store, task_id))
+        except TaskQueryError as exc:
+            raise WorkstreamError("conflict", f"task {task_id} cannot be withdrawn now: {exc}; "
+                                  "nothing was recorded; close again once it is free") from exc
+
+
+def _event(ctx, request_id, ordinal, family, payload, now, *, emitter="workstream-operation"):
     from .plane import PLANE_SCHEMA_VERSION
 
     return {"event_id": derive_uid("ev", f"workstream:v1:{ctx.host_uid}:{ctx.fleet_uid}:"
                                           f"{request_id}:{ordinal}"),
-            "event_type": family, "emitter": "workstream-operation",
+            "event_type": family, "emitter": emitter,
             "schema_version": PLANE_SCHEMA_VERSION, "fleet": ctx.context.fleet.name,
             "source_ref": f"request:{request_id}", "occurred_at": now,
             "payload": payload}
 
 
-def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
+def _plan(ctx, verb, args, registry, request_id, now, maximum, days, open_tasks=()):
     work = registry["workstreams"]
     archived = set(registry.get("archived", ()))
     if verb == "open":
@@ -194,7 +284,26 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
             raise WorkstreamError("conflict", f"active workstreams are at the cap ({maximum})")
         payload.update(event="unblocked", note=args["note"])
     elif verb == "close":
-        payload.update(event="closed", disposition=args.get("status", "done"))
+        # A task with a live assignment is the manager's to end first, and so
+        # is one the reducer cannot resolve, which cannot be told queued from
+        # assigned (#1053). The queued ones are withdrawn here, in the close's
+        # own batch, so a closed workstream never holds an open task.
+        held = [task for task in open_tasks if task.state != "queued"]
+        if held:
+            raise WorkstreamError(
+                "conflict", f"workstream {wid} holds tasks the close cannot withdraw: "
+                f"{'; '.join(_not_queued(task) for task in held)}; end each first, then close it")
+        from .task_operations import _withdrawal
+        from .task_state import TASK_EMITTER
+
+        disposition = args.get("status", "done")
+        payload.update(event="closed", disposition=disposition)
+        reason = f"withdrawn by the close of workstream {wid} ({disposition})"
+        return (wid,), [_event(ctx, request_id, 0, "workstream_event", payload, now)] + [
+            _event(ctx, request_id, ordinal, "task",
+                   _withdrawal(task_id, actor=ctx.caller.alias, reason=reason), now,
+                   emitter=TASK_EMITTER)
+            for ordinal, task_id in enumerate(sorted(task.task_id for task in open_tasks), 1)]
     else:
         raise WorkstreamError("invalid_argument", "unknown workstream verb")
     return (wid,), [_event(ctx, request_id, 0, "workstream_event", payload, now)]
@@ -236,7 +345,9 @@ def apply(ctx, verb: str, args: dict, *, request_id: str) -> WorkstreamResult:
                             store.outcome(0, "committed")
                         elif previous.stages[0].status != "committed":
                             raise WorkstreamError("conflict", "workstream fact conflicts with retained request state")
-                        return WorkstreamResult(request_id, _ids_from_facts(ctx, facts), "committed", True, True)
+                        ids, withdrawn = _ids_from_facts(ctx, facts)
+                        return WorkstreamResult(request_id, ids, "committed", True, True,
+                                                withdrawn_task_ids=withdrawn)
                     if proof.status == "unknown":
                         raise WorkstreamError("unavailable", "prior workstream recording proof unavailable; inspect request")
                     if proof.status == "conflict" or previous.stages[0].status == "committed":
@@ -245,7 +356,11 @@ def apply(ctx, verb: str, args: dict, *, request_id: str) -> WorkstreamResult:
                         store.outcome(0, "unrecorded")
                 registry = _reader(ctx, days, or_empty=True)
                 now = datetime.now(timezone.utc).isoformat()
-                ids, raws = _plan(ctx, verb, args, registry, request_id, now, maximum, days)
+                open_tasks = _close_read(ctx, args["id"]) if verb == "close" else ()
+                ids, raws = _plan(ctx, verb, args, registry, request_id, now, maximum, days,
+                                  open_tasks=open_tasks)
+                withdrawn = tuple(raw["payload"]["work_item_id"] for raw in raws
+                                  if raw["event_type"] == "task")
                 parties = {ctx.caller.alias: ctx.caller.uid,
                            **{actor.alias: actor.uid for actor in ctx.bots.values()}}
                 modes = load_capture_config(ctx.root)
@@ -256,25 +371,41 @@ def apply(ctx, verb: str, args: dict, *, request_id: str) -> WorkstreamResult:
                     raise WorkstreamError(
                         "conflict", "unrecorded workstream request no longer matches current state; "
                         "inspect workstream and request, then use a new --request-id for a new intent")
-                store.prepare(RequestIntent(f"workstream.{verb}", 1, ctx.host_uid, ctx.fleet_uid,
-                                            ctx.caller.uid, None, semantic,
-                                            (StagePlan("recording", facts),)))
-                store.begin_attempt()
-                store.stage(0)
-                try:
-                    outcome = emit_batch(ctx.root, raws, require_commit=True)
-                except (OSError, sqlite3.Error) as exc:
-                    raise WorkstreamError("unavailable", "workstream recording unconfirmed; inspect request") from exc
-                if len(outcome) != len(raws) or any(item.event_id != raw["event_id"] for item, raw in zip(outcome, raws)):
-                    raise WorkstreamError("unavailable", "workstream recording result unconfirmed; inspect request")
-                proof = _proof(ctx, facts)
-                if proof.status != "committed":
-                    raise WorkstreamError("unavailable", "workstream exact recording proof unavailable; inspect request")
-                try:
-                    store.outcome(0, "committed")
-                except OSError as exc:
-                    raise WorkstreamError("unavailable", "workstream committed but request outcome persistence failed") from exc
-                return WorkstreamResult(request_id, ids, "committed", True, False)
+                with ExitStack() as locks:
+                    batch = {}
+                    if verb == "close":
+                        _lock_queued(locks, store, withdrawn)
+                        wid = args["id"]
+                        batch["precondition"] = lambda write: _recheck_close(ctx, wid, withdrawn, write)  # noqa: E731
+                    store.prepare(RequestIntent(f"workstream.{verb}", 1, ctx.host_uid, ctx.fleet_uid,
+                                                ctx.caller.uid, None, semantic,
+                                                (StagePlan("recording", facts),)))
+                    store.begin_attempt()
+                    store.stage(0)
+                    try:
+                        outcome = emit_batch(ctx.root, raws, require_commit=True, **batch)
+                    except WorkstreamError:
+                        # Raised only by the close's precondition, after BEGIN IMMEDIATE
+                        # and before any row: the batch is definitely absent. A failed
+                        # outcome write leaves it unknown, which the next attempt reconciles.
+                        try:
+                            store.outcome(0, "unrecorded")
+                        except OSError:
+                            pass
+                        raise
+                    except (OSError, sqlite3.Error) as exc:
+                        raise WorkstreamError("unavailable", "workstream recording unconfirmed; inspect request") from exc
+                    if len(outcome) != len(raws) or any(item.event_id != raw["event_id"] for item, raw in zip(outcome, raws)):
+                        raise WorkstreamError("unavailable", "workstream recording result unconfirmed; inspect request")
+                    proof = _proof(ctx, facts)
+                    if proof.status != "committed":
+                        raise WorkstreamError("unavailable", "workstream exact recording proof unavailable; inspect request")
+                    try:
+                        store.outcome(0, "committed")
+                    except OSError as exc:
+                        raise WorkstreamError("unavailable", "workstream committed but request outcome persistence failed") from exc
+                    return WorkstreamResult(request_id, ids, "committed", True, False,
+                                            withdrawn_task_ids=withdrawn)
     except WorkstreamError:
         raise
     except TimeoutError as exc:

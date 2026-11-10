@@ -10,6 +10,7 @@ cut.
 """
 from dataclasses import replace
 from datetime import datetime, timezone
+import json
 import time
 from uuid import uuid4
 
@@ -141,18 +142,42 @@ def test_one_whose_tasks_all_ended_uncompleted_reads_abandoned(estate):
     assert entry["closed_ts"] == _ended_at(ctx, conn, failed.task_id)
 
 
+def _derived_alone(ctx, conn, wid):
+    """The close the registry derives from the workstream's tasks alone, as if no close were
+    recorded: the registry's own derivation, on an entry that holds no recorded close."""
+    from claudlobby.paths import load_lib_module
+
+    readers = load_lib_module(ctx.context.paths.lib, "plane-readers.py")
+    entry = {"status": "active", "last_progress_ts": ""}
+    readers._file_tasks(conn, ctx.fleet_uid, {wid: entry}, None)
+    return entry
+
+
 def test_a_recorded_close_wins_over_the_derived_one(estate):
-    ctx, _conn = estate
+    """A workstream holds a completed task and a queued one when the manager closes it as
+    abandoned, and the close withdraws the queued one (#1053). Its tasks alone would read `done`,
+    closed by the withdrawn task; the recorded close stands."""
+    ctx, conn = estate
     wid = _open(ctx)
-    task = tasks.admit(ctx, str(uuid4()), title="Finished after the close", workstream_id=wid)
-    workstream_apply(ctx, "close", {"id": wid, "status": "abandoned"}, request_id=str(uuid4()))
-    closed = _registry(ctx)[wid]
-    assert (closed["status"], closed["closed_by"]) == ("abandoned", "bot:example/manager")
-    _complete(ctx, task.task_id)
+    finished = tasks.admit(ctx, str(uuid4()), title="Finished before the close", workstream_id=wid)
+    queued = tasks.admit(ctx, str(uuid4()), title="Still queued at the close", workstream_id=wid)
+    _complete(ctx, finished.task_id)
+    request = str(uuid4())
+    closed = workstream_apply(ctx, "close", {"id": wid, "status": "abandoned"}, request_id=request)
+    assert closed.withdrawn_task_ids == (queued.task_id,)
+    # The queued task reads withdrawn, by a row naming the close.
+    withdrawn, = read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=[queued.task_id]).tasks
+    assert withdrawn.state == "cancelled"
+    assert withdrawn.terminal_event.source_ref == f"request:{request}"
+    assert json.loads(withdrawn.terminal_event.detail)["reason"] == (
+        f"withdrawn by the close of workstream {wid} (abandoned)")
+    # The derived reading alone would be done: a task completed, and the withdrawn one ended last.
+    derived = _derived_alone(ctx, conn, wid)
+    assert (derived["status"], derived["closed_by"]) == ("done", f"task:{queued.task_id}")
+    # The shown state stays the recorded abandoned.
     entry = _registry(ctx)[wid]
-    assert entry["status"] == "abandoned"  # not done: the manager's close stands
-    assert (entry["closed_ts"], entry["closed_by"]) == (closed["closed_ts"], closed["closed_by"])
-    assert entry["task_ids"] == [task.task_id] and entry["open_task_ids"] == []
+    assert (entry["status"], entry["closed_by"]) == ("abandoned", "bot:example/manager")
+    assert entry["task_ids"] == [finished.task_id, queued.task_id] and entry["open_task_ids"] == []
 
 
 def test_an_open_task_keeps_its_workstream_from_stalling_or_expiring(estate):
