@@ -957,14 +957,17 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
 # of a never-renewed workstream is the opening instant plus the fleet's lease
 # days — the door computed it from the same knob when it opened the row.
 #
-# Its tasks (#1053) are the work items that name it, in admission order, with
-# the state the task reducer gives them (`task_state.read_tasks`, loaded from
-# the selected package as the escalation reader loads `task_queries`). Those
-# are the terminal facts admit's join check reads, so the two cannot disagree
-# about a close, and no copy of the rule lives here. A workstream that holds a
-# task and no open one reads closed: `done` if any of its tasks completed, else
-# `abandoned`, dated by the row that ended its last open task and closed by
-# `task:<ID>`. A recorded close (the manager's `workstream close`) wins. The
+# Its tasks (#1053) are the tasks the reducer places in it, in admission order,
+# with the state the task reducer gives them (`task_state.read_tasks`, loaded
+# from the selected package as the escalation reader loads `task_queries`): a
+# task's workstream is the one its newest move joined (`task_state.read_moves`),
+# else the one it was admitted into. Those are the facts admit's join check
+# reads, so the two cannot disagree about a close, and no copy of the rule
+# lives here. A workstream that holds a task, or that a move took a task out of,
+# and holds no open one reads closed: `done` if any task it holds completed,
+# else `abandoned`, dated by the row that ended its last open task (a terminal
+# fact, or the move that took it out) and closed by `task:<ID>`. A move counts
+# as activity of both workstreams. A recorded close (the manager's `workstream close`) wins. The
 # derived close also wins over a declared wait, as admit's refusal does: no
 # task can join the workstream any more. A task the reducer cannot resolve has
 # no terminal fact, so it keeps its workstream open. Each task's newest row
@@ -1015,35 +1018,48 @@ def _file_tasks(conn: sqlite3.Connection, uid: str, entries: dict, tasks) -> str
     """Fill each live entry's tasks and derive its close; return the newest
     task row's instant ("" when there is none). *tasks* is the fleet's reducer
     read that the caller already holds in this snapshot; None reads only the
-    tasks of these entries."""
-    if tasks is None:
-        ids = [tid for tid, wid in conn.execute(WS_TASKS_SQL, (uid,)).fetchall() if wid in entries]
-        if not ids:
-            return ""
-        try:
-            tasks = _selected_package_module("task_state").read_tasks(
-                conn, fleet_uid=uid, task_ids=ids).tasks
-        except ValueError as exc:
-            raise PlaneUnreachable(f"task state unreadable: {exc}") from exc
+    tasks of these entries and the tasks a move took into or out of one."""
+    state = _selected_package_module("task_state")
+    try:
+        moves = state.read_moves(conn, fleet_uid=uid)
+        if tasks is None:
+            ids = {tid for tid, wid in conn.execute(WS_TASKS_SQL, (uid,)).fetchall() if wid in entries}
+            ids.update(m.task_id for m in moves if m.joined in entries or m.left in entries)
+            if not ids:
+                return ""
+            tasks = state.read_tasks(conn, fleet_uid=uid, task_ids=ids, moves=moves).tasks
+    except ValueError as exc:
+        raise PlaneUnreachable(f"task state unreadable: {exc}") from exc
     held: dict = {}
     for task in sorted(tasks, key=lambda t: t.ingest_seq):
         if task.workstream_id in entries:
             held.setdefault(task.workstream_id, []).append(task)
+    touched: dict = {}
+    for move in moves:
+        for wid in {move.left, move.joined} & entries.keys():
+            touched.setdefault(wid, []).append(move)
     newest = ""
-    for wid, members in held.items():
+    for wid in held.keys() | touched.keys():
         e = entries[wid]
+        members, moved = held.get(wid, []), touched.get(wid, [])
         e["task_ids"] = [t.task_id for t in members]
         e["open_task_ids"] = [t.task_id for t in members if t.terminal_event is None]
-        last = max(legacy_ts(at) for t in members for at in _task_instants(t))
+        last = max([legacy_ts(at) for t in members for at in _task_instants(t)]
+                   + [legacy_ts(m.occurred_at) for m in moved])
         e["last_progress_ts"] = max(e["last_progress_ts"], last)
         newest = max(newest, last)
         if e["status"] in ("done", "abandoned") or e["open_task_ids"]:
             continue
-        ended = max(members, key=lambda t: t.terminal_event.ingest_seq)
+        ends = [(t.terminal_event.ingest_seq, t.terminal_event.occurred_at, t.task_id)
+                for t in members]
+        ends += [(m.ingest_seq, m.occurred_at, m.task_id) for m in moved if m.left == wid]
+        if not ends:
+            continue
+        _seq, ended_at, ended_by = max(ends)
         e["status"] = ("done" if any(t.terminal_event.event == "completed" for t in members)
                        else "abandoned")
-        e["closed_ts"] = legacy_ts(ended.terminal_event.occurred_at)
-        e["closed_by"] = f"task:{ended.task_id}"
+        e["closed_ts"] = legacy_ts(ended_at)
+        e["closed_by"] = f"task:{ended_by}"
     return newest
 
 

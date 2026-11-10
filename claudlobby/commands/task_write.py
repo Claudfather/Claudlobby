@@ -91,6 +91,11 @@ def _inputs(args) -> dict:
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "reason": _text(args.reason, "--reason"),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "task.move":
+        return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "workstream_id": _optional(args.workstream, "--workstream", r"\S+"),
+                "reason": _text(args.reason, "--reason"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command == "task.escalate":
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "question": _text(args.question, "--question"),
@@ -194,7 +199,7 @@ def dispatch(args) -> CommandOutput:
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
     from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
-                                   complete, escalate, fail, progress, reassign,
+                                   complete, escalate, fail, move, progress, reassign,
                                    reschedule, return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
@@ -264,6 +269,8 @@ def dispatch(args) -> CommandOutput:
                 result = assign(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.withdraw":
                 result = withdraw(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "task.move":
+                result = move(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.escalate":
                 result = escalate(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.reassign":

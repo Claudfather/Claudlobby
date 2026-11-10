@@ -86,6 +86,14 @@ def register_task_write_subparsers(task_children, assignment_children):
     withdrawing.add_argument("--reason", required=True, metavar="TEXT")
     withdrawing.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
+    moving = _route(task_children, "move", "task.move",
+                    "Move open fleet work into another open workstream")
+    moving.add_argument("task_id", metavar="TASK_ID")
+    moving.add_argument("--workstream", required=True, metavar="ID",
+                        help="The open workstream of the task's fleet and project that it joins")
+    moving.add_argument("--reason", required=True, metavar="TEXT")
+    moving.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
     escalating = _route(task_children, "escalate", "task.escalate",
                         "Ask for human guidance on open fleet work")
     escalating.add_argument("task_id", metavar="TASK_ID")

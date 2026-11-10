@@ -31,7 +31,7 @@ from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (MessageRouteBinding, ReceiptConflict, RequestIntent,
                                StagePlan, locked_request, same_native_route, semantic_digest)
 from .task_queries import TaskNotFoundError, TaskQueryError, show_assignment, show_task
-from .task_state import TASK_EMITTER, Task, read_tasks
+from .task_state import TASK_EMITTER, Task, read_tasks, workstream_task_ids
 from .workstream_operations import task_workstream_id
 
 if TYPE_CHECKING:
@@ -235,30 +235,35 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
             raise TaskQueryError("workstream project differs from the selected task project")
 
 
-def _require_open_workstream(ctx, conn, workstream_id):
+_ADMIT_ELSEWHERE = "admit the task without --workstream, or into an open workstream"
+_MOVE_ELSEWHERE = "move the task into an open workstream"
+
+
+def _require_open_workstream(ctx, conn, workstream_id, *, elsewhere=_ADMIT_ELSEWHERE):
     """Refuse a join to a workstream that is archived or closed.
 
     Closed is a recorded close (``workstream close``) or a derived one: the
-    workstream holds a task, and every task in it has ended (the task
-    reducer's first terminal fact). Admit runs this before its request and
-    again as its batch's precondition, under the plane's write lock, so a
-    close that lands in between refuses the join instead of racing it.
+    workstream holds a task, or a move took one out of it, and every task it
+    holds has ended (the task reducer's first terminal fact). Its tasks are
+    the ones after moves (``task_state.workstream_task_ids``). Admit and a
+    move run this before their request and again as their batch's
+    precondition, under the plane's write lock, so a close that lands in
+    between refuses the join instead of racing it.
     """
     ended = {row[0] for row in conn.execute(
         "SELECT DISTINCT event FROM events WHERE kind='workstream' AND workstream_id=?"
         " AND fleet_uid=? AND event IN ('closed', 'archived')", (workstream_id, ctx.fleet_uid))}
     if ended:
         raise WorkstreamClosedError(
-            f"workstream is {'archived' if 'archived' in ended else 'closed'}; admit the task "
-            "without --workstream, or into an open workstream")
-    task_ids = [row[0] for row in conn.execute(
-        "SELECT work_item_id FROM work_items WHERE workstream_id=? AND fleet_uid=?",
-        (workstream_id, ctx.fleet_uid))]
-    if task_ids and all(task.terminal_event is not None for task in
-                        read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=task_ids).tasks):
-        raise WorkstreamClosedError(
-            "workstream is closed: every task in it has ended; admit the task without "
-            "--workstream, or into an open workstream")
+            f"workstream is {'archived' if 'archived' in ended else 'closed'}; {elsewhere}")
+    task_ids, moved_out = workstream_task_ids(conn, fleet_uid=ctx.fleet_uid,
+                                              workstream_id=workstream_id)
+    if (task_ids or moved_out) and all(task.terminal_event is not None for task in (
+            read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=task_ids).tasks if task_ids else ())):
+        why = ("every task in it has ended" if not moved_out
+               else "every task in it has ended or moved out" if task_ids
+               else "a move took its last task out of it")
+        raise WorkstreamClosedError(f"workstream is closed: {why}; {elsewhere}")
 
 
 def _provenance(ctx, conn, alias):
@@ -398,7 +403,7 @@ def _commit(store, ctx, conn, receipt, raws, check_lock, *, admit_read=None, pre
     store.begin_attempt()
     store.stage(0)  # durable unknown before SQLite; crashes never authorize blind replay
     try:
-        # Only a join passes a precondition; every other batch keeps its call.
+        # Only a join and a move pass a precondition; every other batch keeps its call.
         emit_batch(ctx.root, list(raws), require_commit=True,
                    **({} if precondition is None else {"precondition": precondition}))
     except WorkstreamClosedError:
@@ -686,6 +691,70 @@ def _withdrawal(task_id, *, actor, reason):
     (``workstream_operations.py``).
     """
     return dict(work_item_id=task_id, event="cancelled", actor=actor, reason=reason)
+
+
+def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream_id: str,
+         reason: str, by: str | None = None) -> TaskOperationResult:
+    """Move open fleet work into another open workstream of its fleet (#1053).
+
+    One system row, ``task_moved`` (``_moved``), names the task, the workstream
+    it left, the one it joined, who moved it and why. Every read takes a
+    task's workstream from its newest move (``task_state.read_moves``). Only
+    the fleet's manager or a local person moves a task, and only an open one.
+    The target must be in the task's fleet and project, and open: no recorded
+    close, no derived one, not archived. The batch's precondition checks that
+    again under the plane's write lock, so a close that lands in between
+    refuses the move. A workstream whose last open task moves out reads
+    closed (the registry derives it).
+    """
+    from .plane.registries import cap_for
+
+    if not _manager_or_local_person(ctx):
+        raise TaskConflictError("moving a task requires the current manager or a local person")
+    _reason(reason)
+    if len(reason.encode("utf-8")) > cap_for("task", "reason"):
+        raise TaskQueryError(f"a reason of at most {cap_for('task', 'reason')} bytes is required")
+    by_alias = _provenance_alias(ctx, by)
+    semantic = semantic_digest(dict(task_id=task_id, workstream_id=workstream_id, reason=reason,
+                                    by=by_alias))
+    with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
+        previous = _existing(store, ctx, "task.move", semantic)
+        with _reader(ctx) as conn:
+            first = show_task(conn, task_id, fleet_uid=ctx.fleet_uid)
+            with _locked_task(store, first.task_id) as check:
+                if _replayed(store, previous, conn):
+                    return _result(ctx, conn, previous, True)
+                task = show_task(conn, task_id, fleet_uid=ctx.fleet_uid).require_resolved()
+                if not task.open:
+                    raise TaskConflictError("terminal task cannot be moved")
+                if task.workstream_id == workstream_id:
+                    raise TaskConflictError("task is already in that workstream")
+                provenance = _provenance(ctx, conn, by)
+                _identities(ctx, conn, (ctx.caller, provenance))
+                _scope_links(ctx, conn, task.project_key, workstream_id, task.repo)
+                _require_open_workstream(ctx, conn, workstream_id, elsewhere=_MOVE_ELSEWHERE)
+                raw = _raw(ctx, request_id, "system",
+                           _moved(ctx, task, workstream_id, actor=provenance.alias, reason=reason),
+                           previous)
+                receipt = _prepare(store, ctx, "task.move", semantic, (raw,), task_id,
+                                   actors=(provenance,))
+                return _commit(store, ctx, conn, receipt, (raw,), check,
+                               precondition=lambda write: _require_open_workstream(
+                                   ctx, write, workstream_id, elsewhere=_MOVE_ELSEWHERE))
+
+
+def _moved(ctx, task, joined, *, actor, reason):
+    """The move row's payload: a system row whose subject is the task's fleet.
+
+    A system row has no task or actor column, so the task, both workstreams,
+    the mover and the reason ride its ``data``. Its subject is the fleet, the
+    one identity every task verb already holds, so the read seeks the fleet's
+    own subject rows (``task_state.read_moves``).
+    """
+    return {"event": "task_moved", "subject_kind": "fleet", "subject_uid": ctx.fleet_uid,
+            "subject_alias": ctx.context.fleet.name,
+            "data": {"task_id": task.task_id, "from_workstream_id": task.workstream_id,
+                     "to_workstream_id": joined, "actor": actor, "reason": reason}}
 
 
 def escalate(ctx: TaskOperationContext, request_id: str, task_id: str, *, question: str,
