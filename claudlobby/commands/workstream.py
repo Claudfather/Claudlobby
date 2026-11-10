@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 import re
 import sqlite3
@@ -58,10 +59,12 @@ def _scope(args):
     return selected_scope(args)
 
 
-def _read(args, destination, selected, bindings):
+def _session_read(destination, bindings, read):
+    """*read* on one read-only snapshot of the selected fleet's plane: the
+    reads, the close's dry run and the backfill's preview. It registers no
+    identity and opens no request."""
     from ..brief import plane_session
     from ..plane.schema_state import require_current_schema
-    from ..workstreams import format_list, format_show
 
     session, note = plane_session(destination.paths, destination.fleet.name)
     if session is None:
@@ -71,10 +74,18 @@ def _read(args, destination, selected, bindings):
         require_current_schema(session.conn)
         if session.pr.fleet_uid(session.conn, destination.fleet.name) != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "Plane fleet differs from selected workstream scope")
-        registry = session.pr.workstream_registry(
-            session.conn, destination.fleet.name,
-            lease_days=destination.fleet.workstreams.lease_days)
+        return read(session)
 
+
+def _registry(session, destination):
+    return session.pr.workstream_registry(session.conn, destination.fleet.name,
+                                          lease_days=destination.fleet.workstreams.lease_days)
+
+
+def _read(args, destination, selected, bindings):
+    from ..workstreams import format_list, format_show
+
+    registry = _session_read(destination, bindings, lambda session: _registry(session, destination))
     selected.check(destination.paths.root, package=destination.paths.package,
                    message='active workstream selection changed during read')
     entries = registry["workstreams"]
@@ -89,21 +100,16 @@ def _read(args, destination, selected, bindings):
                          lines=(format_list(entries),))
 
 
-def _write(args, destination, origin, selected, bindings):
+@contextmanager
+def _admitted(destination, origin, selected, bindings):
+    """The selected release's mutation admission, then the caller's operation
+    context: one path for a recorded verb and the backfill's apply."""
     from ..active_config import runtime_read_stamp
     from ..operation_context import resolve_task_mutation_context
-    from ..runtime_admission import RuntimeIdentity, mutation_admission
-    from ..workstream_operations import apply
-
-    request_id = canonical_request_id(args.request_id)
-    data = _inputs(args, destination)
-    if args.dry_run:
-        return CommandOutput({"validated": True, "recording": "not_attempted",
-                              "workstream_ids": [], "scope_state": "not_checked", **selected.provenance},
-                             release_id=selected.release_id,
-                             lines=("Workstream input valid; no request or fact recorded.",))
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission, runtime_release_id,
+                                     runtime_route_matches)
     from .message_write import _bound_release
-    from ..runtime_admission import runtime_release_id, runtime_route_matches
+
     bound_release = _bound_release(destination.paths.package, generated=origin is not None)
     with mutation_admission(destination.paths.root, identity=RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
@@ -119,16 +125,127 @@ def _write(args, destination, origin, selected, bindings):
         if ctx.host_uid != bindings["host_uid"] or ctx.fleet_uid != bindings["fleet_uid"]:
             raise CommandFailure("conflict", "workstream identity differs from active selection")
         selected.check(destination.paths.root, package=destination.paths.package)
+        yield ctx, runtime_release_id(release)
+
+
+def _close_preview(destination, bindings, wid):
+    """What ``workstream close`` would do now, read and not recorded: the
+    refusal it would raise, or the queued tasks it would withdraw (#1053)."""
+    from ..workstream_operations import close_refusal, open_tasks
+
+    def read(session):
+        row = _registry(session, destination)["workstreams"].get(wid)
+        tasks = (open_tasks(session.conn, fleet_uid=bindings["fleet_uid"], workstream_id=wid)
+                 if row is not None else ())
+        return close_refusal(wid, row, tasks), sorted(task.task_id for task in tasks)
+
+    refusal, task_ids = _session_read(destination, bindings, read)
+    if refusal is not None:
+        return {"refusal": {"code": refusal[0], "message": refusal[1]}, "withdraw_task_ids": []}
+    return {"refusal": None, "withdraw_task_ids": task_ids}
+
+
+def _close_preview_line(wid, preview):
+    refusal = preview["refusal"]
+    if refusal is not None:
+        return (f"close {wid} would be refused ({refusal['code']}): {refusal['message']}; "
+                "no request or fact recorded.")
+    return (f"close {wid} would withdraw: {', '.join(preview['withdraw_task_ids']) or 'no task'}; "
+            "no request or fact recorded.")
+
+
+def _write(args, destination, origin, selected, bindings):
+    from ..workstream_operations import apply
+
+    request_id = canonical_request_id(args.request_id)
+    data = _inputs(args, destination)
+    if args.dry_run:
+        out = {"validated": True, "recording": "not_attempted",
+               "workstream_ids": [], "scope_state": "not_checked", **selected.provenance}
+        lines = ("Workstream input valid; no request or fact recorded.",)
+        if args.workstream_action == "close":
+            # What a close does depends on its workstream's tasks, so its dry run reads them.
+            out.update(scope_state="read", close=_close_preview(destination, bindings, data["id"]))
+            selected.check(destination.paths.root, package=destination.paths.package,
+                           message="active workstream selection changed during read")
+            lines = (_close_preview_line(data["id"], out["close"]),)
+        return CommandOutput(out, release_id=selected.release_id, lines=lines)
+    with _admitted(destination, origin, selected, bindings) as (ctx, release_id):
         result = apply(ctx, args.workstream_action, data, request_id=request_id)
     return CommandOutput({"fleet": destination.fleet.name, **asdict(result), **selected.provenance},
-                         release_id=runtime_release_id(release),
-                         lines=write_lines(args.workstream_action, result))
+                         release_id=release_id, lines=write_lines(args.workstream_action, result))
+
+
+def _backfill(args, destination, origin, selected, bindings):
+    """``migration workstream-backfill`` (#1053): a preview by default, and
+    ``--apply`` records it (``workstream_operations.backfill_plan``)."""
+    from ..task_state import TaskStateError
+    from ..workstream_operations import apply, backfill_plan
+
+    if not args.apply:
+        if args.request_id is not None:
+            raise CommandFailure("invalid_argument", "--request-id is for --apply; a preview records nothing")
+
+        def read(session):
+            try:
+                return backfill_plan(session.conn, fleet_uid=bindings["fleet_uid"])
+            except TaskStateError as exc:
+                raise CommandFailure("unavailable", f"the fleet's task state is unreadable: {exc}") from exc
+
+        plan = _session_read(destination, bindings, read)
+        selected.check(destination.paths.root, package=destination.paths.package,
+                       message="active workstream selection changed during read")
+        return CommandOutput({"fleet": destination.fleet.name, "mode": "preview",
+                              "recording": "not_attempted",
+                              "tasks": [asdict(item) for item in plan.tasks],
+                              "left": [{"task_id": task_id, "reason": why} for task_id, why in plan.left],
+                              **selected.provenance},
+                             release_id=selected.release_id, lines=backfill_preview_lines(plan))
+    if args.request_id is None:
+        raise CommandFailure("invalid_argument", "--apply requires --request-id UUID")
+    request_id = canonical_request_id(args.request_id)
+    with _admitted(destination, origin, selected, bindings) as (ctx, release_id):
+        result = apply(ctx, "backfill", {}, request_id=request_id)
+    return CommandOutput({"fleet": destination.fleet.name, "mode": "apply", **asdict(result),
+                          **selected.provenance},
+                         release_id=release_id, lines=write_lines("backfill", result))
+
+
+def _filed_lines(pairs, verb) -> tuple[str, ...]:
+    """One line for the tasks that had no workstream, then one for each
+    closed workstream that tasks leave."""
+    groups = {}
+    for task_id, left in pairs:
+        groups.setdefault(left, []).append(task_id)
+    lines = ()
+    if None in groups:
+        lines += (f"{verb} (no workstream): {', '.join(groups.pop(None))}",)
+    for left in sorted(groups):
+        lines += (f"{verb} out of closed {left}: {', '.join(groups[left])}",)
+    return lines
+
+
+def backfill_preview_lines(plan) -> tuple[str, ...]:
+    """The preview's text: every task the apply would file, by where it is
+    now, and every open task it would leave, with why."""
+    return ((f"backfill preview: {len(plan.tasks)} task(s) to file into their own workstreams; "
+             "no request or fact recorded",)
+            + _filed_lines([(item.task_id, item.from_workstream_id) for item in plan.tasks], "would file")
+            + tuple(f"left alone: {task_id}: {why}" for task_id, why in plan.left))
 
 
 def write_lines(verb, result) -> tuple[str, ...]:
     """The text view of a recorded verb. A close that withdrew queued tasks
-    names them on a line of their own: a person reading the text must see
-    every task the close ended, not only the workstream."""
+    names them on a line of their own, and a backfill names every task it
+    filed: a person reading the text must see every task it changed, not
+    only the workstreams."""
+    if verb == "backfill":
+        if result.recording == "not_attempted":
+            return ("backfill: no open task needs a workstream; no request or fact recorded",)
+        return ((f"backfill: {len(result.filed_tasks)} task(s) filed into their own workstreams; "
+                 f"recording={result.recording}; replayed={result.replayed}",)
+                + _filed_lines([(task.task_id, task.from_workstream_id) for task in result.filed_tasks],
+                               "filed"))
     lines = (f"{verb}: {', '.join(result.workstream_ids) or '(none)'}; "
              f"recording={result.recording}; replayed={result.replayed}",)
     if result.withdrawn_task_ids:
@@ -155,6 +272,8 @@ def dispatch(args) -> CommandOutput:
                 raise CommandFailure("conflict", "generated workstream writer must be the selected manager")
         if args.workstream_action in ("list", "show"):
             return _read(args, destination, selected, bindings)
+        if args.workstream_action == "backfill":
+            return _backfill(args, destination, origin, selected, bindings)
         return _write(args, destination, origin, selected, bindings)
     except CommandFailure:
         raise

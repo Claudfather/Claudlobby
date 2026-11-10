@@ -188,7 +188,7 @@ _OPERATIONS = frozenset(
     "assignment.deliver assignment.reschedule assignment.accept assignment.progress assignment.block assignment.return "
     "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack "
     "checkin.record workstream.open workstream.progress workstream.renew workstream.block "
-    "workstream.unblock workstream.close workstream.prune".split())
+    "workstream.unblock workstream.close workstream.prune workstream.backfill".split())
 _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
              "delivery": {"prepared", "unknown", "received", "submitted", "failed"},
              "notification": {"prepared", "unknown", "received", "submitted", "failed"}}

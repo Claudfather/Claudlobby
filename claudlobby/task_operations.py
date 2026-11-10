@@ -239,31 +239,44 @@ _ADMIT_ELSEWHERE = "admit the task without --workstream, or into an open workstr
 _MOVE_ELSEWHERE = "move the task into an open workstream"
 
 
-def _require_open_workstream(ctx, conn, workstream_id, *, elsewhere=_ADMIT_ELSEWHERE):
-    """Refuse a join to a workstream that is archived or closed.
+def workstream_closed(conn, *, fleet_uid, workstream_id, moves=None):
+    """Why a workstream is closed to a join, or None while it is open.
 
     Closed is a recorded close (``workstream close``) or a derived one: the
     workstream holds a task, or a move took one out of it, and every task it
     holds has ended (the task reducer's first terminal fact). Its tasks are
-    the ones after moves (``task_state.workstream_task_ids``). Admit and a
-    move run this before their request and again as their batch's
-    precondition, under the plane's write lock, so a close that lands in
-    between refuses the join instead of racing it.
+    the ones after moves (``task_state.workstream_task_ids``); *moves* is the
+    fleet's ``read_moves`` when the caller already holds them. Admit's join, a
+    move and the workstream backfill (``workstream_operations.backfill_plan``)
+    read this one predicate.
     """
     ended = {row[0] for row in conn.execute(
         "SELECT DISTINCT event FROM events WHERE kind='workstream' AND workstream_id=?"
-        " AND fleet_uid=? AND event IN ('closed', 'archived')", (workstream_id, ctx.fleet_uid))}
+        " AND fleet_uid=? AND event IN ('closed', 'archived')", (workstream_id, fleet_uid))}
     if ended:
-        raise WorkstreamClosedError(
-            f"workstream is {'archived' if 'archived' in ended else 'closed'}; {elsewhere}")
-    task_ids, moved_out = workstream_task_ids(conn, fleet_uid=ctx.fleet_uid,
-                                              workstream_id=workstream_id)
+        return "archived" if "archived" in ended else "closed"
+    task_ids, moved_out = workstream_task_ids(conn, fleet_uid=fleet_uid,
+                                              workstream_id=workstream_id, moves=moves)
     if (task_ids or moved_out) and all(task.terminal_event is not None for task in (
-            read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=task_ids).tasks if task_ids else ())):
+            read_tasks(conn, fleet_uid=fleet_uid, task_ids=task_ids, moves=moves).tasks
+            if task_ids else ())):
         why = ("every task in it has ended" if not moved_out
                else "every task in it has ended or moved out" if task_ids
                else "a move took its last task out of it")
-        raise WorkstreamClosedError(f"workstream is closed: {why}; {elsewhere}")
+        return f"closed: {why}"
+    return None
+
+
+def _require_open_workstream(ctx, conn, workstream_id, *, elsewhere=_ADMIT_ELSEWHERE):
+    """Refuse a join to a workstream that is archived or closed (``workstream_closed``).
+
+    Admit and a move run this before their request and again as their batch's
+    precondition, under the plane's write lock, so a close that lands in
+    between refuses the join instead of racing it.
+    """
+    reason = workstream_closed(conn, fleet_uid=ctx.fleet_uid, workstream_id=workstream_id)
+    if reason is not None:
+        raise WorkstreamClosedError(f"workstream is {reason}; {elsewhere}")
 
 
 def _provenance(ctx, conn, alias):
@@ -734,7 +747,8 @@ def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream
                 _identities(ctx, conn, (ctx.caller, provenance))
                 _scope_links(ctx, conn, task.project_key, workstream_id, task.repo)
                 _require_open_workstream(ctx, conn, workstream_id, elsewhere=_MOVE_ELSEWHERE)
-                payload = _moved(ctx, task, workstream_id, actor=provenance.alias, reason=reason)
+                payload = _moved(ctx, task.task_id, task.workstream_id, workstream_id,
+                                 actor=provenance.alias, reason=reason)
                 _require_whole_row(payload["data"])
                 raw = _raw(ctx, request_id, "system", payload, previous)
                 receipt = _prepare(store, ctx, "task.move", semantic, (raw,), task_id,
@@ -744,17 +758,19 @@ def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream
                                    ctx, write, workstream_id, elsewhere=_MOVE_ELSEWHERE))
 
 
-def _moved(ctx, task, joined, *, actor, reason):
+def _moved(ctx, task_id, left, joined, *, actor, reason):
     """The move row's payload: a system row whose subject is the task's fleet.
 
-    A system row has no task or actor column, so the task, both workstreams,
-    the mover and the reason ride its ``data``. Its subject is the fleet, the
-    one identity every task verb already holds, so the read seeks the fleet's
-    own subject rows (``task_state.read_moves``).
+    A system row has no task or actor column, so the task, both workstreams
+    (*left* is None for a task that had none), the mover and the reason ride
+    its ``data``. Its subject is the fleet, the one identity every task verb
+    already holds, so the read seeks the fleet's own subject rows
+    (``task_state.read_moves``). ``task move`` records it, and so does the
+    workstream backfill for each task it files.
     """
     return {"event": "task_moved", "subject_kind": "fleet", "subject_uid": ctx.fleet_uid,
             "subject_alias": ctx.context.fleet.name,
-            "data": {"task_id": task.task_id, "from_workstream_id": task.workstream_id,
+            "data": {"task_id": task_id, "from_workstream_id": left,
                      "to_workstream_id": joined, "actor": actor, "reason": reason}}
 
 

@@ -7,8 +7,9 @@ the row `task withdraw` writes, carrying the close's request and naming the work
 batch's precondition rechecks the workstream's open tasks under the plane's write lock, so a task
 assigned between the close's read and its write refuses the close, and nothing is written. The
 close holds each queued task's lock through its write, so no task verb acts on a task it is
-withdrawing.
+withdrawing, and checks each lock just before the write, as a task verb checks its own.
 """
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from uuid import uuid4
@@ -220,6 +221,42 @@ def test_the_close_holds_each_queued_tasks_lock_through_its_write(estate, monkey
     result = _close(ctx, wid)
     assert refused == [(queued.task_id,)] and result.withdrawn_task_ids == (queued.task_id,)
     assert _task(ctx, conn, queued.task_id).state == "cancelled"
+
+
+def replace_lock_after_taking(monkeypatch, task_id):
+    """Once a caller holds *task_id*'s lock, put a new lock file at its path, as a cleanup that
+    removed the file would. The held lock no longer keeps a task verb out: a verb that opens the
+    path now locks the new file."""
+    real = tasks._locked_task
+
+    @contextmanager
+    def replaced(store, locked_id):
+        with real(store, locked_id) as check:
+            if locked_id == task_id:
+                path = (store.path.parent.parent.parent / "task-locks" / store.fleet_uid
+                        / f"{task_id}.lock")
+                path.unlink()
+                path.touch(mode=0o600)
+            yield check
+
+    monkeypatch.setattr(tasks, "_locked_task", replaced)
+
+
+def test_a_task_lock_replaced_while_the_close_holds_it_refuses_the_close(estate, monkeypatch):
+    """The close runs each held lock's check just before its write, as `task_operations._commit`
+    runs its one: a lock file replaced while the close held it refuses the close, and nothing is
+    recorded."""
+    ctx, conn = estate
+    wid = _open(ctx)
+    queued = tasks.admit(ctx, str(uuid4()), title="Replaced lock", workstream_id=wid)
+    replace_lock_after_taking(monkeypatch, queued.task_id)
+    request = str(uuid4())
+    with pytest.raises(ws.WorkstreamError, match="task lock was replaced") as refused:
+        _close(ctx, wid, request)
+    assert refused.value.code == "conflict"
+    assert _closes(conn, wid) == 0 and _rows_of(conn, request) == 0
+    assert _task(ctx, conn, queued.task_id).state == "queued"
+    assert _registry(ctx)[wid]["status"] == "active"
 
 
 def test_a_close_of_a_workstream_with_no_open_task_writes_its_one_row(estate, monkeypatch):
