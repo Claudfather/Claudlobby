@@ -11,7 +11,7 @@ The reader is `claudlobby/infra/spec.py`.
 
 ## Facts
 
-Each fact has a `source`, and either a `value` or, when the source could not be read, `unreadable` with the reason. A failed reading is never shown as 0. A `/proc/meminfo` line that is not a number of kB is refused by its name, for example `the MemAvailable line of /proc/meminfo is not a number of kB: 'MemAvailable:'`. A fact the host has nothing for reads `none`: no zram device, no `systemd-run` on PATH, no user manager.
+Each fact has a `source`, and either a `value` or, when the source could not be read, `unreadable` with the reason. A failed reading is never shown as 0. A `/proc/meminfo` line that is not a number of kB is refused by its name, for example `the MemAvailable line of /proc/meminfo is not a number of kB: 'MemAvailable:'`. In the text, a fact the host has nothing for reads `none`: no zram device, no `systemd-run` on PATH, no user manager. In `--json` such a fact keeps its own type: the string `none` for a path or a name (`systemd_run`, `vm_stat`, `cgroup`, `own_cgroup`, a controllers fact with no cgroup to read, and a zram device's memory limit), `false` for `user_manager`, and an empty list for `zram`, `pressure` and `kernel_cmdline`. `swap` then lists no devices, with totals of 0 MiB.
 
 On Linux:
 
@@ -35,7 +35,7 @@ On Linux:
 | `controllers_own` | the controllers in that cgroup | its `cgroup.controllers` |
 | `pressure` | the pressure stall files present | `/proc/pressure` |
 | `kernel_cmdline` | only the command line's `cgroup*`, `psi*`, `systemd.unified_cgroup_hierarchy` and `swapaccount` settings | `/proc/cmdline` |
-| `root_fs` | size in MiB, and percent used as `df` counts it | `statvfs /` |
+| `root_fs` | size in MiB, and percent used as `df` counts it. With no blocks in use or available, where `df` prints `-`, the percent is left out. | `statvfs /` |
 | `bots` | the bots and fleets declared on the data root, and the root (`--root`, else the one the CLI selects) | each `fleet.yaml` under the data root |
 
 On macOS: `ram` (`sysctl hw.memsize`), `swap` (`sysctl vm.swapusage`: total and used, since macOS sizes its swap files as it goes), `cpus` (`sysctl hw.ncpu`), `os` (`sw_vers`), `kernel` (`sysctl kern.osrelease`), `init` (`ps -o comm= -p 1`), `vm_stat` (its path), `root_fs` (the data volume, `/System/Volumes/Data`) and `bots`.
@@ -53,8 +53,8 @@ Where a host setting would change a row, `changes_it` names it. Every such setti
 | Row | `available` when | Otherwise |
 |---|---|---|
 | `scope` | systemd runs the host, cgroup v2 is mounted at `/sys/fs/cgroup`, `systemd-run` is on PATH and the user manager runs. A heavy run can then be held in a transient user scope and ended whole through its cgroup. | `unavailable`: a heavy run is held by its process group only. |
-| `memory_cap` | a scope is available, and the user manager is delegated the `memory` controller. A `MemoryMax` on a run's scope is then enforced. | `inert` when the controller is missing: the kernel offers none (the reason names `cgroup_disable=memory` when the command line carries it), or the controller is not delegated to the user manager. `unavailable` with no scope. |
-| `bot_throttle` | bots run under the user manager, and it is delegated the `memory` controller. A `MemoryHigh` on a bot's unit is then enforced. | As `memory_cap`. |
+| `memory_cap` | a scope is available, and the user manager is delegated the `memory` controller. A `MemoryMax` on a run's scope is then enforced. | `inert` when the controller is missing: the kernel offers none (the reason names the command line's `cgroup_disable=` setting when it lists `memory`, such as `cgroup_disable=memory` or `cgroup_disable=hugetlb,memory`), or the controller is not delegated to the user manager. `unavailable` with no scope. |
+| `bot_throttle` | systemd runs the host, cgroup v2 is mounted at `/sys/fs/cgroup`, bots run under the user manager, and it is delegated the `memory` controller. A `MemoryHigh` on a bot's unit is then enforced. | `unavailable` when cgroup v2 is not mounted at `/sys/fs/cgroup`, as on a cgroup v1 or hybrid host: `MemoryHigh` works only on cgroup v2, and the reason says so. Also `unavailable` when bots do not run under a systemd user manager. `inert` as `memory_cap`. |
 | `free_memory` | the memory stop can read free memory: MemAvailable in `/proc/meminfo` on Linux, `vm_stat` on macOS. | `unavailable`, naming the line or the tool it could not read. |
 | `pressure` | the kernel exposes `/proc/pressure/memory`, which systemd-oomd needs before it can act on memory pressure. | `unavailable`. |
 

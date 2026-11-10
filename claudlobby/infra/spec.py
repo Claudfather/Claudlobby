@@ -1,9 +1,10 @@
 """What this host is, and what its OS can enforce here: the read behind `claudlobby host spec`.
 
 Every fact names the place it was read from. A fact that cannot be read says why instead of
-standing in a number, so a failed reading never becomes 0. A fact that this host has nothing
-for reads `none`. Reading changes nothing: it opens files under /proc, /sys and /etc, runs
-read-only commands on macOS (`sysctl -n`, `sw_vers`, `ps`), and starts no unit, scope or job.
+standing in a number, so a failed reading never becomes 0. In the text, a fact that this host
+has nothing for reads `none`; documentation/host-infra.md says what `--json` carries for each.
+Reading changes nothing: it opens files under /proc, /sys and /etc, runs read-only commands on
+macOS (`sysctl -n`, `sw_vers`, `ps`), and starts no unit, scope or job.
 
 What the OS can enforce is worked out from the facts alone. Each row reads `available` (the OS
 enforces it here), `inert` (the setting would be accepted and enforce nothing), `unavailable`
@@ -30,6 +31,7 @@ NONE = "none"
 # Only these kernel command line settings are disclosed: they decide the controllers and pressure.
 CMDLINE_SETTINGS = ("cgroup", "psi", "systemd.unified_cgroup_hierarchy", "swapaccount")
 SCOPE_ONLY = "a heavy run is held by its process group only"
+NO_CGROUP_V2 = "cgroup v2 is not mounted at /sys/fs/cgroup"
 State = Literal["available", "inert", "unavailable", "unknown"]
 
 
@@ -353,12 +355,25 @@ def _cmdline(host):
     return settings, " ".join(settings) or "none of these settings"
 
 
+def _memory_disabled_by(cmdline: list[str]) -> str | None:
+    """The command line's cgroup_disable= setting whose list names the memory controller, if any."""
+    for setting in cmdline:
+        key, _, controllers = setting.partition("=")
+        if key == "cgroup_disable" and "memory" in controllers.split(","):
+            return setting
+    return None
+
+
 def _filesystem(host: Host, path: str) -> tuple[dict, str]:
+    """Size, and percent used as df counts it. With no blocks in use or available, df prints `-`,
+    and the percent is left out rather than read as 0."""
     size, free, available = host.statvfs(path)
     used = size - free
-    percent = math.ceil(100 * used / (used + available)) if used + available else 0
-    return ({"path": path, "size_mib": _mib(size), "used_pct": percent},
-            f"{_mib(size):,} MiB, {percent}% used")
+    value = {"path": path, "size_mib": _mib(size)}
+    if used + available == 0:
+        return value, f"{value['size_mib']:,} MiB, percent used unknown: no blocks are in use or available"
+    value["used_pct"] = math.ceil(100 * used / (used + available))
+    return value, f"{value['size_mib']:,} MiB, {value['used_pct']}% used"
 
 
 def _root_fs_linux(host):
@@ -503,7 +518,7 @@ def _scope(facts: dict[str, Fact]) -> Enforcement:
     if not facts["systemd_booted"].value:
         return Enforcement("unavailable", f"systemd is not the init system, so {SCOPE_ONLY}")
     if facts["cgroup"].value != "v2":
-        return Enforcement("unavailable", f"cgroup v2 is not mounted at /sys/fs/cgroup, so {SCOPE_ONLY}")
+        return Enforcement("unavailable", f"{NO_CGROUP_V2}, so {SCOPE_ONLY}")
     if facts["systemd_run"].value == NONE:
         return Enforcement("unavailable", f"systemd-run is not on PATH, so {SCOPE_ONLY}")
     if not facts["user_manager"].value:
@@ -521,9 +536,10 @@ def _memory_controller(facts: dict[str, Fact]) -> Enforcement:
         return Enforcement("available", "the user manager is delegated the memory controller")
     if "memory" not in _names(facts["controllers_root"]):
         cmdline = facts["kernel_cmdline"].value if facts["kernel_cmdline"].unreadable is None else []
-        if "cgroup_disable=memory" in cmdline:
+        disable = _memory_disabled_by(cmdline)
+        if disable:
             return Enforcement("inert", "the kernel offers no memory controller: its command line "
-                               "carries cgroup_disable=memory",
+                               f"carries {disable}",
                                "a boot whose kernel command line enables the memory controller "
                                "(cgroup_enable=memory); the boot setting is the operator's")
         return Enforcement("inert", "the kernel offers no memory controller",
@@ -533,6 +549,8 @@ def _memory_controller(facts: dict[str, Fact]) -> Enforcement:
 
 
 def _limit_on(what: str, holder: Enforcement, facts: dict[str, Fact]) -> Enforcement:
+    if holder.state == "unknown":
+        return holder
     if holder.state != "available":
         return Enforcement(holder.state, f"{what} cannot be set: {holder.reason}")
     memory = _memory_controller(facts)
@@ -545,9 +563,11 @@ def _limit_on(what: str, holder: Enforcement, facts: dict[str, Fact]) -> Enforce
 
 
 def _bot_manager(facts: dict[str, Fact]) -> Enforcement:
-    unknown = _unknown(facts, "systemd_booted", "user_manager")
+    unknown = _unknown(facts, "systemd_booted", "cgroup", "user_manager")
     if unknown:
         return unknown
+    if facts["systemd_booted"].value and facts["cgroup"].value != "v2":
+        return Enforcement("unavailable", f"{NO_CGROUP_V2}, and MemoryHigh needs it")
     if facts["systemd_booted"].value and facts["user_manager"].value:
         return Enforcement("available", "bots run under the systemd user manager")
     return Enforcement("unavailable", "bots do not run under a systemd user manager here")
