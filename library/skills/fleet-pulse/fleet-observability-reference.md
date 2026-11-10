@@ -21,7 +21,7 @@ The idle marker is a special case: keepalive touches `data/.idle` when it classi
 Each row in the protocol keeps what its event means and what the manager does; the rest of the row is here.
 
 - `activity_stuck` — Uses marker-file mtime comparison, not pane regex.
-- `keepalive_silent` — fleet-pulse keeps the epoch it first saw each live, supervised bot unwatched in `state/pulse/<fleet>.<bot>.unwatched`, and the names it last sent in `<fleet>.keepalive_silent.named`; a bot named for the first time sends the alert again at once. It is raised through the FLEET ALERT primitive, so it reaches the manager's pane and the alert channel. The threshold is each bot's own (`OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD`; at `0` the sweep names the bot on stderr instead).
+- `keepalive_silent` — fleet-pulse keeps the epoch it first saw each live, supervised bot unwatched in `state/pulse/<fleet>.<bot>.unwatched`, and the bots the open episode names in `<fleet>.keepalive_silent.named`; a bot not among them sends the alert again at once. It is raised through the FLEET ALERT primitive, so it reaches the manager's pane and the alert channel. The threshold is each bot's own (`OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD`; at `0` the sweep names the bot on stderr instead).
 - `usage_limit_held` — `reset` and `reset_epoch` name when it was due; `resume` says whether keepalive's one resume is `off`, `armed`, or already `tried`. While the menu is up, typed text goes to the menu, not the bot, so the framework's own sends refuse rather than type into it.
 - `pane_stuck` — Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`.
 - `crash_loop` — Before #1769 this read as "boot in flight" indefinitely and paged no one.

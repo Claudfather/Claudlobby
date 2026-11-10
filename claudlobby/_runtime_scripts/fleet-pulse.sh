@@ -662,10 +662,11 @@ fi
 # a bare epoch in <fleet>.<bot>.unwatched, starts its wait, so a sweep that runs
 # before keepalive's first tick after a boot or an update pages nothing. Once
 # the wait reaches the bot's OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD (default
-# 600 s; 0 turns the page off for that bot, said on stderr each sweep), the bot
-# is named in the fleet's one keepalive_silent alert after the loop. Any other
-# bot keeps no sighting: one stopped, with no unit or with no session is not one
-# keepalive watches, and its own checks report it.
+# 600 s; 0 turns the page off for that bot, said on stderr each sweep;
+# keepalive.sh reads the same key for where its watch restarts, with 0 as 600),
+# the bot is named in the fleet's one keepalive_silent alert after the loop. Any
+# other bot keeps no sighting: one stopped, with no unit or with no session is
+# not one keepalive watches, and its own checks report it.
 _ks_names=""
 _ks_detail=""
 _keepalive_silent_count() {  # <watched: 0|1>
@@ -1186,7 +1187,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # the active window (the horizon at which presence types a bot stale). An
     # unwatched bot is not judged and its alert stays as it was; the silence is
     # keepalive_silent's (_keepalive_silent_count).
-    _watch_window=$(bot_conf_get "$bot_dir" KEEPALIVE_ACTIVE_WINDOW_S "$_ACTIVE_WINDOW_DEFAULT")
+    _watch_window=${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}
     case "$_watch_window" in ''|*[!0-9]*) _watch_window=$_ACTIVE_WINDOW_DEFAULT ;; esac
     _watched=0
     if marker_age_within "$bot_dir/data/.observed" "$_watch_window"; then _watched=1; fi
@@ -1302,7 +1303,9 @@ done
 # again on the pulse's re-notify window, and at once when it names a bot it did
 # not name before, so a second silence is never folded into the first. It ends
 # at the first sweep that names no bot. <fleet>.keepalive_silent.named holds the
-# names the episode's alert last went out with.
+# bots the open episode names, kept once its alert has gone out. debounce_notify's
+# recipient argument would not do: it also fires when a bot leaves, and it is
+# rate-limited.
 # A send that reached nobody buys no window (#900): unless Telegram or the
 # manager's pane took it, no marker is written and the next sweep sends again.
 _keepalive_silent_page() {

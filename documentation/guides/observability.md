@@ -156,7 +156,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |
 | `state/pulse/<fleet>.pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
 | `state/pulse/<bot>.pane_hash` | Pane change detection markers | Persistent |
-| `state/pulse/<fleet>.<bot>.unwatched`, `<fleet>.keepalive_silent.named` | When fleet-pulse first saw a live, supervised bot unwatched by keepalive (removed once keepalive watches it again), and the bots the open `keepalive_silent` episode last named | Until the bot is watched again / the episode ends |
+| `state/pulse/<fleet>.<bot>.unwatched`, `<fleet>.keepalive_silent.named` | When fleet-pulse first saw a live, supervised bot unwatched by keepalive (removed once keepalive watches it again), and the bots the open `keepalive_silent` episode names | Until the bot is watched again / the episode ends |
 
 ## Configuration
 
