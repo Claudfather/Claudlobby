@@ -340,6 +340,11 @@ def test_no_scope_no_render(rs):
     assert rec["state"] == "released" and rec["ended"] == "not-started", rec
     assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
     assert [d["ended"] for d in _of(rs, "heavy_slot_released")] == ["not-started"]
+    (row,) = _of(rs, "heavy_slot_released")
+    # the start's reading, and no PSS: none was read, so it is left out, never 0 (#1645)
+    assert row["peak"] == {"mem_available_mib_start": 6000, "mem_available_mib_low": 6000,
+                           "load1_high": 2.0, "load5_high": 2.0, "readings": 1}
+    assert row["waited_s"] == 0
 
 
 @needs_linux
@@ -383,6 +388,7 @@ def test_a_render_runs_in_its_own_scope_with_the_session_bus_cut(rs, user_scope)
     assert acquired[0]["profile"] == "render" and acquired[0]["unit"] == rec["unit"]
     assert acquired[0]["readings"] == {"mem_available_mib": 6000, "load1": 2.0, "load5": 2.0}
     assert released[0]["ended"] == "done" and released[0]["peak"] == rec["peak"]
+    assert released[0]["waited_s"] == rec["waited_s"] == 0  # a free slot, no ticket (#1645)
     assert _of(rs, "heavy_slot_stopped") == []
     assert "render done" in _last_line(r.stderr), r.stderr
     # nothing left behind: systemd removes the emptied scope's cgroup on its own time
@@ -491,6 +497,9 @@ def test_the_scope_dies_with_its_runner(rs, user_scope):
         stopped = _wait_for(lambda: _of(rs, "heavy_slot_stopped"), timeout=10)
         assert len(stopped) == 1 and stopped[0]["line"] == "runner" and stopped[0]["unit"] == rec["unit"], _events(rs)
         assert [d["ended"] for d in _of(rs, "heavy_slot_released")] == ["killed"], _events(rs)
+        (row,) = _of(rs, "heavy_slot_released")
+        # the keeper has the record's start reading and wait; the runner held the rest (#1645)
+        assert row["peak"] == {"mem_available_mib_start": 6000} and row["waited_s"] == 0
         assert [e["by"] for e in _render_record(rs)] == ["keeper"]
         again = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
         assert again.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), again.stderr
