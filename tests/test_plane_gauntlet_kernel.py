@@ -55,7 +55,7 @@ def _dispatch_triple():
     return [
         {"event_type": "work_item", "emitter": "gauntlet", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "t",
-                     "created_by": sender}},
+                     "created_by": sender, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "gauntlet", "fleet": "f",
          "payload": {"assignment_id": f"asg_{H}", "work_item_id": f"wi_{H}",
                      "assignee": worker, "assigned_by": sender,

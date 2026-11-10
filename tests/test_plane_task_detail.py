@@ -32,7 +32,7 @@ def test_selected_detail_retains_full_body_and_history_outside_board_cap(tmp_pat
         conn.execute("UPDATE work_items SET body=? WHERE work_item_id=?", ("Full <task>\nSecond line", TASK))
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                    "created_by": "bot:engineering/mgr"}} for i in range(205)])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(205)])
     c = client(tmp_path)
     assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}
     before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
@@ -52,7 +52,7 @@ def test_older_task_pages_discover_work_without_reducing_the_whole_fleet(tmp_pat
     _seed(tmp_path)
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                    "created_by": "bot:engineering/mgr"}} for i in range(405)])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(405)])
     original = view.read_tasks
     projected = []
     def selected_only(conn, *, fleet_uid, task_ids=None):
@@ -68,7 +68,7 @@ def test_older_task_pages_discover_work_without_reducing_the_whole_fleet(tmp_pat
     newest = "wi_" + "f" * 32
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": newest, "title": "Admitted between pages",
-                    "created_by": "bot:engineering/mgr"}}])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}}])
     before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
     payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
     payload["after"][0] = 2 ** 63
@@ -94,7 +94,7 @@ def test_channel_links_old_cross_fleet_task_to_recorded_owner_not_emitter_or_roo
     _seed(tmp_path)
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                    "created_by": "bot:engineering/mgr"}} for i in range(205)])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(205)])
     emit_batch(tmp_path, [{"event_type": "communication", "emitter": "t", "fleet": "data",
         "payload": {"msg_id": "msg_" + "c" * 32, "sender": "bot:data/one",
                     "recipient": "bot:engineering/one", "message_class": "answer",
@@ -241,7 +241,8 @@ def test_detail_attention_uses_full_snapshot_before_caps_and_board_window(tmp_pa
         *[task_event("nudged", reason="Still waiting", by="synthetic-owner") for _ in range(4)],
         *[{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
            "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                       "created_by": "bot:engineering/mgr"}} for i in range(205)]])
+                       "created_by": "bot:engineering/mgr",
+                       "workstream_id": "ws-test"}} for i in range(205)]])
     monkeypatch.setattr(view, "_TASK_DETAIL_HISTORY", 1)
     c = client(tmp_path)
     assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}

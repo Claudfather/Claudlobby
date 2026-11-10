@@ -51,7 +51,7 @@ def _dispatch(root, n, *, expected_by, fleet=F, emitter="t"):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": emitter, "fleet": fleet,
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": f"bot:{fleet}/mgr"}},
+                     "created_by": f"bot:{fleet}/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": emitter, "fleet": fleet,
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": f"bot:{fleet}/w1", "assigned_by": f"bot:{fleet}/mgr",
