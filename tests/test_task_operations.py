@@ -64,7 +64,10 @@ def _manager_route(ctx):
                                ctx.bots["manager"].alias, native, native)
 
 
-def test_workstream_declared_wait_survives_child_completion_until_unblocked(estate):
+def test_workstream_declared_wait_survives_a_task_ending_until_its_last_task_ends(estate):
+    """A declared wait outlives a task's end while another task in the workstream is open, and
+    only `unblock` clears it then. Its last task's end closes the workstream (#1053): it reads
+    `done`, the wait ends with it, and the manager's verbs refuse it, as admit refuses a join."""
     from claudlobby.brief import _workstream_section, plane_session
     from claudlobby.workstream_operations import WorkstreamError, _reader, apply as workstream_apply
 
@@ -73,6 +76,7 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
         "project": None, "owner": None, "next": None}, request_id=str(uuid4()))
     wid = opened.workstream_ids[0]
     admitted = tasks.admit(ctx, str(uuid4()), title="Finish review", workstream_id=wid)
+    signoff = tasks.admit(ctx, str(uuid4()), title="Collect signoff", workstream_id=wid)
     assigned = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
     worker = replace(ctx, caller=ctx.bots["worker"])
     tasks.accept(worker, str(uuid4()), assigned.assignment_id)
@@ -88,24 +92,37 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
                    ReportPayload("completed", summary="Review finished"))
     workstream_apply(ctx, "progress", {"id": wid, "next": "Evidence prepared"},
                      request_id=str(uuid4()))  # progress never clears a declared wait
-    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
-    assert note is None
-    with plane:
-        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
-    assert section["active"] == []
-    assert section["blocked"][0]["id"] == wid
-    assert section["blocked"][0]["waiting_on"] == "human:reviewer"
-    assert section["blocked"][0]["note"] == "Waiting for signoff"
-    assert section["blocked"][0]["age_seconds"] is not None
+
+    def section():
+        plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
+        assert note is None
+        with plane:
+            return _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
+
+    waits = section()
+    assert waits["active"] == []
+    assert waits["blocked"][0]["id"] == wid
+    assert waits["blocked"][0]["waiting_on"] == "human:reviewer"
+    assert waits["blocked"][0]["note"] == "Waiting for signoff"
+    assert waits["blocked"][0]["age_seconds"] is not None
     unblocked = workstream_apply(ctx, "unblock", {"id": wid, "note": "Signoff received"},
                                  request_id=str(uuid4()))
     assert unblocked.workstream_ids == (wid,)
     assert _reader(ctx, 14, or_empty=False)["workstreams"][wid]["next"] == "Evidence prepared"
-    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
-    assert note is None
-    with plane:
-        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
-    assert section["blocked"] == [] and [row["id"] for row in section["active"]] == [wid]
+    after = section()
+    assert after["blocked"] == [] and [row["id"] for row in after["active"]] == [wid]
+    # Waiting again, its last open task ends: the workstream closes, and the wait with it.
+    workstream_apply(ctx, "block", {"id": wid, "on": "human:reviewer",
+        "note": "Waiting for the release note"}, request_id=str(uuid4()))
+    tasks.withdraw(ctx, str(uuid4()), signoff.task_id, reason="Signed off in person")
+    closed = _reader(ctx, 14, or_empty=False)["workstreams"][wid]
+    assert (closed["status"], closed["closed_by"]) == ("done", f"task:{signoff.task_id}")
+    ended = section()
+    assert ended["active"] == [] and ended["blocked"] == []
+    for verb, args in (("progress", {"id": wid, "next": None}),
+                       ("unblock", {"id": wid, "note": "Too late"})):
+        with pytest.raises(WorkstreamError, match="terminal workstream"):
+            workstream_apply(ctx, verb, args, request_id=str(uuid4()))
 
 
 def test_workstream_cap_renewal_archived_id_and_request_replay(estate):
