@@ -70,7 +70,8 @@ def register_task_write_subparsers(task_children, assignment_children):
     admitting.add_argument("--body-file", metavar="FILE")
     admitting.add_argument("--repo", metavar="OWNER/REPO")
     admitting.add_argument("--project", metavar="KEY")
-    admitting.add_argument("--workstream", metavar="ID")
+    admitting.add_argument("--workstream", metavar="ID",
+                           help="Join this open workstream; without it, admit opens the task's own")
     admitting.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
     assigning = _route(task_children, "assign", "task.assign", "Assign queued work without delivery")

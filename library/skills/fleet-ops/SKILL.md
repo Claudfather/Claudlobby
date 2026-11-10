@@ -284,6 +284,7 @@ different. If a command refuses a historical or wrong-kind reference, follow
 its scoped canonical hint; do not treat the old reference as an alias.
 
 To admit work into your own fleet, retain one canonical UUID for the operation: §Task lifecycle.
+Every task belongs to a workstream: admit opens the task's own, or `--workstream ID` joins an open one.
 
 Only the fleet manager routes, delivers, or changes its fleet's assignments.
 Assign first; then deliver the exact assignment using an existing UTF-8

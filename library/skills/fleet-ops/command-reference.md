@@ -77,14 +77,26 @@ per-bot readiness budget with a positive number.
 Flags of the `workstream` verbs:
 `block ID --on
 human:NAME --note TEXT` records a declared wait; `unblock ID --note TEXT`
-restores that same ID to active.
+restores that same ID to active. `open --id` refuses the `ws_<32 hex>` form,
+which only a task's own workstream takes, and those do not count toward the
+active cap.
 
 ## Task lifecycle
 
 ```bash
 claudlobby --json task admit --title "Concrete outcome" --request-id ADMIT_UUID
+claudlobby --json task admit --title "Its follow-up" --workstream WORKSTREAM_ID --request-id ADMIT_UUID
 claudlobby --json task show TASK_ID
 ```
+
+Without `--workstream`, admit records the task's own workstream in the same
+batch: `ws_` and the task ID's 32 hex digits, titled like the task and owned by
+the fleet's manager. With it, the task joins that workstream, and admit refuses
+one that is archived, closed by the manager, or closed because every task in it
+has ended. So file a related follow-up with the first task's `data.workstream_id`
+before that task closes. `task admit`, `assign`, `reassign`, `withdraw`, `escalate`
+and `nudge`, and `assignment accept`, `reschedule` and each report, print the
+task's `workstream_id`.
 
 ```bash
 claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID

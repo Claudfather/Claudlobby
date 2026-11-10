@@ -17,6 +17,26 @@ from .request_receipts import (ReceiptError, RequestIntent, StagePlan, locked_re
                                semantic_digest)
 
 
+#: A task's own workstream, recorded by ``task admit`` in the task's own batch:
+#: ``ws_`` and the task ID's 32 hex digits, so a replay names the same one.
+#: ``workstream open`` mints ``ws-<slug>`` and refuses this form for ``--id``,
+#: and the active cap does not count it: it is one per task, not one per plan.
+TASK_WORKSTREAM_ID = re.compile(r"ws_[0-9a-f]{32}")
+
+
+def task_workstream_id(task_id: str) -> str:
+    """The ID of the workstream ``task admit`` opens for ``task_id``."""
+    if not re.fullmatch(r"wi_[0-9a-f]{32}", task_id):
+        raise ValueError("a task's own workstream needs a canonical task ID")
+    return "ws_" + task_id[3:]
+
+
+def _active(work) -> int:
+    """Active workstreams under the cap: those opened with ``workstream open``."""
+    return sum(row.get("status") == "active" and not TASK_WORKSTREAM_ID.fullmatch(wid)
+               for wid, row in work.items())
+
+
 class WorkstreamError(RuntimeError):
     def __init__(self, code: str, message: str):
         self.code = code
@@ -115,6 +135,9 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
         explicit = args.get("id")
         if explicit:
             wid = explicit
+            if TASK_WORKSTREAM_ID.fullmatch(wid):
+                raise WorkstreamError("invalid_argument", "--id ws_<32 hex digits> is the form of a "
+                                      "task's own workstream, which task admit opens; choose another ID")
             if wid in work or wid in archived:
                 raise WorkstreamError("conflict", "workstream ID already exists or was archived")
         else:
@@ -124,7 +147,7 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
                 wid, number = f"{stem}-{number}", number + 1
                 if len(wid) > 131:
                     raise WorkstreamError("conflict", "no available workstream ID within the slug bound")
-        if sum(row.get("status") == "active" for row in work.values()) >= maximum:
+        if _active(work) >= maximum:
             raise WorkstreamError("conflict", f"active workstreams are at the cap ({maximum})")
         owner = args.get("owner")
         payload = {"workstream_id": wid, "title": title,
@@ -167,7 +190,7 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days):
     elif verb == "unblock":
         if status != "blocked":
             raise WorkstreamError("conflict", "only blocked workstreams can be unblocked")
-        if sum(item.get("status") == "active" for item in work.values()) >= maximum:
+        if _active(work) >= maximum:
             raise WorkstreamError("conflict", f"active workstreams are at the cap ({maximum})")
         payload.update(event="unblocked", note=args["note"])
     elif verb == "close":

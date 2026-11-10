@@ -26,6 +26,11 @@ steps that follow:
 claudlobby --json task admit --title "Run the security audit" --repo org/repo-a --project PROJECT_KEY --request-id ADMIT_UUID
 ```
 
+Every admitted task belongs to a workstream: admit opens the task's own, or
+`--workstream ID` joins an open one. File the next related task with
+`--workstream` before the current one closes. Once every task in a workstream
+has ended, the workstream is closed and admit refuses to join it.
+
 `task admit` leaves queued fleet-owned work even when no worker is ready. A
 check-in decision uses `task assign TASK_ID --bot WORKER --checkin ck_...
 --request-id ASSIGN_UUID` *after* the check-in decision has committed. Do not

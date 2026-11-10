@@ -229,6 +229,7 @@ def task_outcome(result, *, fleet_name, release_id, notification_data=None, prov
     recording = "unchanged" if result.replayed else result.recording
     data = {"fleet": fleet_name, "task_id": result.task_id,
             "assignment_id": result.assignment_id, "state": result.task.state,
+            "workstream_id": result.task.workstream_id,
             "outcome": outcome, "recording": recording,
             "delivery": result.delivery, "notification": result.notification,
             "replayed": result.replayed, **(provenance or {})}

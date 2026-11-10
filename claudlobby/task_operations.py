@@ -31,7 +31,8 @@ from .request_facts import expected_fact, reconcile_facts
 from .request_receipts import (MessageRouteBinding, ReceiptConflict, RequestIntent,
                                StagePlan, locked_request, same_native_route, semantic_digest)
 from .task_queries import TaskNotFoundError, TaskQueryError, show_assignment, show_task
-from .task_state import TASK_EMITTER, Task
+from .task_state import TASK_EMITTER, Task, read_tasks
+from .workstream_operations import task_workstream_id
 
 if TYPE_CHECKING:
     from .context import Context
@@ -77,6 +78,10 @@ class TaskConflictError(TaskQueryError):
 
 class TaskOperationUnavailableError(TaskQueryError):
     code = "unavailable"
+
+
+class WorkstreamClosedError(TaskConflictError):
+    """Admit refused to join a workstream that has ended; nothing was recorded."""
 
 
 class TaskRecordingError(TaskQueryError):
@@ -230,6 +235,32 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
             raise TaskQueryError("workstream project differs from the selected task project")
 
 
+def _require_open_workstream(ctx, conn, workstream_id):
+    """Refuse a join to a workstream that is archived or closed.
+
+    Closed is a recorded close (``workstream close``) or a derived one: the
+    workstream holds a task, and every task in it has ended (the task
+    reducer's first terminal fact). Admit runs this before its request and
+    again as its batch's precondition, under the plane's write lock, so a
+    close that lands in between refuses the join instead of racing it.
+    """
+    ended = {row[0] for row in conn.execute(
+        "SELECT DISTINCT event FROM events WHERE kind='workstream' AND workstream_id=?"
+        " AND fleet_uid=? AND event IN ('closed', 'archived')", (workstream_id, ctx.fleet_uid))}
+    if ended:
+        raise WorkstreamClosedError(
+            f"workstream is {'archived' if 'archived' in ended else 'closed'}; admit the task "
+            "without --workstream, or into an open workstream")
+    task_ids = [row[0] for row in conn.execute(
+        "SELECT work_item_id FROM work_items WHERE workstream_id=? AND fleet_uid=?",
+        (workstream_id, ctx.fleet_uid))]
+    if task_ids and all(task.terminal_event is not None for task in
+                        read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=task_ids).tasks):
+        raise WorkstreamClosedError(
+            "workstream is closed: every task in it has ended; admit the task without "
+            "--workstream, or into an open workstream")
+
+
 def _provenance(ctx, conn, alias):
     # The context module owns identity resolution; this claim never substitutes
     # for the authoritative resolved caller frozen in the request receipt.
@@ -361,13 +392,24 @@ def _result(ctx, conn, receipt, replayed):
                                recipient_uid=receipt.intent.recipient_uid)
 
 
-def _commit(store, ctx, conn, receipt, raws, check_lock, *, admit_read=None):
+def _commit(store, ctx, conn, receipt, raws, check_lock, *, admit_read=None, precondition=None):
     from .plane.emit_api import emit_batch
     check_lock()
     store.begin_attempt()
     store.stage(0)  # durable unknown before SQLite; crashes never authorize blind replay
     try:
-        emit_batch(ctx.root, list(raws), require_commit=True)
+        # Only a join passes a precondition; every other batch keeps its call.
+        emit_batch(ctx.root, list(raws), require_commit=True,
+                   **({} if precondition is None else {"precondition": precondition}))
+    except WorkstreamClosedError:
+        # Raised only by the precondition, after BEGIN IMMEDIATE and before any
+        # row: the rolled-back batch is definitely absent. A failed outcome
+        # write leaves it unknown, which the next attempt reconciles.
+        try:
+            store.outcome(0, "unrecorded")
+        except OSError:
+            pass
+        raise
     except (sqlite3.Error, OSError) as exc:
         # Do not turn an exception into an unchanged result, even if it looks
         # like a connection failure. The next invocation reconciles exact IDs.
@@ -397,24 +439,48 @@ def _commit(store, ctx, conn, receipt, raws, check_lock, *, admit_read=None):
 def admit(ctx: TaskOperationContext, request_id: str, *, title: str, body: str | None = None,
           repo: str | None = None, project_key: str | None = None,
           workstream_id: str | None = None, by: str | None = None) -> TaskOperationResult:
-    """Admit fleet-owned intake, deliberately creating no assignment or message."""
+    """Admit fleet-owned intake, deliberately creating no assignment or message.
+
+    Every new task belongs to a workstream. Without ``workstream_id`` the
+    task's own batch also records a one-to-one workstream (its ID derives
+    from the task's, its title is the task's, the fleet's manager owns it and
+    the caller opened it), so both land or neither does. With one, the task
+    joins it, and admit refuses a workstream that is archived or closed.
+    """
     by_alias = _provenance_alias(ctx, by)
     semantic = semantic_digest(dict(title=title, body=body, repo=repo, project_key=project_key,
                                     workstream_id=workstream_id, by=by_alias))
+    own = workstream_id is None
     with locked_request(ctx.root, ctx.fleet_uid, request_id) as store:
-        previous = _existing(store, ctx, "task.admit", semantic)
+        previous = _existing(store, ctx, "task.admit", semantic, fact_count=2 if own else 1)
         tid = previous.intent.task_id if previous else mint_work_item_id()
         with _locked_task(store, tid) as check, _reader(ctx) as conn:
             if _replayed(store, previous, conn):
                 return _result(ctx, conn, previous, True)
             provenance = _provenance(ctx, conn, by)
-            _identities(ctx, conn, (ctx.caller, provenance))
-            _scope_links(ctx, conn, project_key, workstream_id, repo)
-            raw = _raw(ctx, request_id, "work_item", dict(work_item_id=tid, title=title, body=body,
-                       created_by=provenance.alias, repo=repo, project_key=project_key,
-                       workstream_id=workstream_id), previous)
-            receipt = _prepare(store, ctx, "task.admit", semantic, (raw,), tid, actors=(provenance,))
-            return _commit(store, ctx, conn, receipt, (raw,), check)
+            actors = (provenance,)
+            raws = ()
+            precondition = None
+            if own:
+                manager = ctx.bots.get(ctx.context.fleet.manager)
+                if manager is None:
+                    raise TaskQueryError("the fleet's manager is not a declared bot of the selected fleet")
+                actors += (manager,)
+                workstream_id = task_workstream_id(tid)
+                raws += (_raw(ctx, request_id, "workstream", dict(
+                    workstream_id=workstream_id, title=title, owner=manager.alias,
+                    opened_by=ctx.caller.alias, project_key=project_key), previous),)
+            _identities(ctx, conn, (ctx.caller, *actors))
+            _scope_links(ctx, conn, project_key, None if own else workstream_id, repo)
+            if not own:
+                _require_open_workstream(ctx, conn, workstream_id)
+                joined = workstream_id
+                precondition = lambda write: _require_open_workstream(ctx, write, joined)  # noqa: E731
+            raws += (_raw(ctx, request_id, "work_item", dict(work_item_id=tid, title=title, body=body,
+                     created_by=provenance.alias, repo=repo, project_key=project_key,
+                     workstream_id=workstream_id), previous, fact_index=len(raws)),)
+            receipt = _prepare(store, ctx, "task.admit", semantic, raws, tid, actors=actors)
+            return _commit(store, ctx, conn, receipt, raws, check, precondition=precondition)
 
 
 def assign(ctx: TaskOperationContext, request_id: str, task_id: str, *, bot_id: str,
