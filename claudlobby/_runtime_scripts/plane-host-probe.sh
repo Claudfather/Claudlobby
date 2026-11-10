@@ -146,29 +146,34 @@ case "$_swap" in ''|*[!0-9]*) _swap="" ;; esac
 [ -n "$_swap" ] && _add "$(_metric host.swap_used_mb "$_swap")"
 
 # host.swap_pages — pages swapped in and out since boot (vmstat pswpin/pswpout).
-# The out count is also the thrash check's reading (below); _swp_why says why
-# there is none.
-_swp_in=""; _swp_out=""; _swp_why=""
+# Each sample object here is built by awk, never in a bash word: bash 3.2
+# (macOS /bin/bash) brace-expands a {a,b} inside a quoted $( ) argument and
+# splits the object in two, which rejects the whole batch.
+_swp=""; _swp_why=""
 if [ -r "$PROC/vmstat" ]; then
-    read -r _swp_in _swp_out <<<"$(awk '$1 == "pswpin" && $2 ~ /^[0-9]+$/ { i = $2; hi = 1 }
+    _swp="$(awk '$1 == "pswpin" && $2 ~ /^[0-9]+$/ { i = $2; hi = 1 }
         $1 == "pswpout" && $2 ~ /^[0-9]+$/ { o = $2; ho = 1 }
-        END { if (hi && ho) printf "%s %s", i, o }' "$PROC/vmstat" 2>/dev/null)"
-    [ -n "$_swp_out" ] || _swp_why="no pswpin and pswpout numbers in $PROC/vmstat"
+        END { if (hi && ho) printf "{\"in\":%s,\"out\":%s}", i, o }' "$PROC/vmstat" 2>/dev/null)"
+    [ -n "$_swp" ] || _swp_why="no pswpin and pswpout numbers in $PROC/vmstat"
 else
     _swp_why="no $PROC/vmstat"
     [ "$_OS" = Darwin ] && _swp_why="$_swp_why (macOS)"
 fi
-[ -n "$_swp_out" ] && _add "$(_metric host.swap_pages "{\"in\":$_swp_in,\"out\":$_swp_out}")"
+[ -n "$_swp" ] && _add "$(_metric host.swap_pages "$_swp")"
+# The thrash check (below) reads the out count this sample carries: the number
+# after its last colon, less the closing brace. _swp_why says why there is none.
+_swp_out="${_swp##*:}"; _swp_out="${_swp_out%?}"
 
-# host.procs — processes runnable now, and blocked on IO now (stat). The thrash
-# alert carries the blocked count.
-_running=""; _blocked=""
+# host.procs — processes runnable now, and blocked on IO now (stat).
+_procs=""
 if [ -r "$PROC/stat" ]; then
-    read -r _running _blocked <<<"$(awk '$1 == "procs_running" && $2 ~ /^[0-9]+$/ { r = $2; hr = 1 }
+    _procs="$(awk '$1 == "procs_running" && $2 ~ /^[0-9]+$/ { r = $2; hr = 1 }
         $1 == "procs_blocked" && $2 ~ /^[0-9]+$/ { b = $2; hb = 1 }
-        END { if (hr && hb) printf "%s %s", r, b }' "$PROC/stat" 2>/dev/null)"
+        END { if (hr && hb) printf "{\"running\":%s,\"blocked\":%s}", r, b }' "$PROC/stat" 2>/dev/null)"
 fi
-[ -n "$_blocked" ] && _add "$(_metric host.procs "{\"running\":$_running,\"blocked\":$_blocked}")"
+[ -n "$_procs" ] && _add "$(_metric host.procs "$_procs")"
+# The thrash alert carries the blocked count, read from the sample the same way.
+_blocked="${_procs##*:}"; _blocked="${_blocked%?}"
 
 # host.cpu_ticks — iowait ticks since boot, and every CPU tick since boot, from
 # the aggregate cpu line. The iowait share of a minute is the difference of
