@@ -73,6 +73,6 @@ The per-type loop: (That loop is over **type strings**, never bot paths — the 
 | `unit_failed` | fleet-pulse, once an episode, for an owned unit in the failed state (#2532) | the fleet for one of its own units (bot `fleet`); the host for a host unit |
 | `compaction_not_proven` | keepalive, once a request: no compaction proven within 10 minutes of the `/compact` it typed (#1053) | the bot |
 | `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |
-| `disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
+| `disk_high`, `memory_high`, `memory_thrash`, `memory_thrash_unarmed`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
 | `public_write_guard_unarmed` | the public-write guard (opt-in), on each GitHub write it checks while the host has no term list | the bot |
 | `shadow_parity_diverged` | nothing now (the plane cutover's shadow) | kept so its old rows classify |

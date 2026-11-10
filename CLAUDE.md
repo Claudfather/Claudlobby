@@ -109,6 +109,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `tail-fleet.sh` — tail and grep every bot's logs
 - `disk-monitor.sh` — daily disk check; FLEET ALERT past threshold
 - `fleet-memory-check.sh` — daily fleet RSS vs available RAM; FLEET ALERT past the reserve floor
+- `memory-thrash.py` — the per-minute probe's swap thrash rule: one FLEET ALERT an episode, naming the largest bots
 - `host-health-check.sh` — alert on Pi under-voltage/throttling and SD/MMC storage stalls
 - `creds-check.sh` — validate fleet credentials, including GitHub App mode
 - `orphan-browser-reaper.sh` — Linux-only reap of browser processes orphaned by dead automation

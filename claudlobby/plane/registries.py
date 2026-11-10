@@ -316,10 +316,13 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
     # pages the manager and Telegram. Where each row lands is in the
     # fleet-observability protocol's table. From the host jobs: disk-monitor,
-    # fleet-memory-check, host-health-check (one of three types, by finding),
-    # update-claude-code and vault-sync.
+    # fleet-memory-check, plane-host-probe (swap thrash, once an episode, and a
+    # thrash line file it refuses, once a bad edit), host-health-check (one of
+    # three types, by finding), update-claude-code and vault-sync.
     "disk_high": "critical",
     "memory_high": "critical",
+    "memory_thrash": "critical",
+    "memory_thrash_unarmed": "critical",
     "undervoltage": "critical",
     "storage_stall": "critical",
     "host_health": "critical",
