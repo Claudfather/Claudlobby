@@ -1303,7 +1303,12 @@ done
 # not name before, so a second silence is never folded into the first. It ends
 # at the first sweep that names no bot. <fleet>.keepalive_silent.named holds the
 # names the episode's alert last went out with.
-_keepalive_silent_page() { emit_failure_alert "$BOTS_DIR" "keepalive_silent" "$1"; }
+# A send that reached nobody buys no window (#900): unless Telegram or the
+# manager's pane took it, no marker is written and the next sweep sends again.
+_keepalive_silent_page() {
+    emit_failure_alert "$BOTS_DIR" "keepalive_silent" "$1"
+    [ "${_ALERT_DELIVERED:-0}" -eq 1 ] || [ "${_ALERT_TMUX_REACHED:-0}" -eq 1 ]
+}
 _ks_named="$state_dir/${fleet}.keepalive_silent.named"
 if [ -n "$_ks_names" ]; then
     _ks_prev=$(cat "$_ks_named" 2>/dev/null || true)

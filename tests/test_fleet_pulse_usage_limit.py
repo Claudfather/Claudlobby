@@ -31,6 +31,9 @@ def _held(bot_dir, *, first: int, reset: int, text: str, tool_call: int):
     marker = bot_dir / "data" / ".last-tool-call"
     marker.touch()
     os.utime(marker, (tool_call, tool_call))
+    # keepalive is still watching the bot (#2862: activity_stuck judges only a
+    # watched bot)
+    (bot_dir / "data" / ".observed").touch()
 
 
 def _events(root, event):

@@ -8,9 +8,9 @@ Reference that the `fleet-observability` protocol points to: the event writers a
 |--------|--------|-----------|--------------|
 | Bot vitals | `claudlobby/_runtime_scripts/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
 | Fleet pulse | `claudlobby fleet pulse` (private `claudlobby/_runtime_scripts/fleet-pulse.sh` sweep) | Cron (every 5 min) | `pulse` |
-| Keepalive | `claudlobby/_runtime_scripts/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` and `data/.last-no-turn` markers, and `data/.limit` while a usage limit holds the bot (#996) |
+| Keepalive | `claudlobby/_runtime_scripts/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle`, `data/.last-no-turn`, `data/.observed` and `data/.observed-since` markers, and `data/.limit` while a usage limit holds the bot (#996) |
 
-The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes. keepalive also touches `data/.last-no-turn` on every tick that sees no turn running (IDLE, HELD or LIMIT) and never removes it, and `activity_stuck` times a stall from the later of `.last-no-turn` and `.last-tool-call`.
+The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes. keepalive also touches `data/.last-no-turn` on every tick that sees no turn running (IDLE, HELD or LIMIT) and never removes it. It touches `data/.observed` on every tick that settles a verdict on a live session, and `data/.observed-since` on its first such tick and on the first after a silence longer than `OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD` (default 600 s). `activity_stuck` is judged only while `.observed` is fresh, and times a stall from the latest of `.last-tool-call`, `.last-no-turn`, `.observed-since` and the session's `.spawn` (#2862).
 
 ## Where to Read
 
@@ -21,6 +21,7 @@ The idle marker is a special case: keepalive touches `data/.idle` when it classi
 Each row in the protocol keeps what its event means and what the manager does; the rest of the row is here.
 
 - `activity_stuck` — Uses marker-file mtime comparison, not pane regex.
+- `keepalive_silent` — fleet-pulse keeps the epoch it first saw each live, supervised bot unwatched in `state/pulse/<fleet>.<bot>.unwatched`, and the names it last sent in `<fleet>.keepalive_silent.named`; a bot named for the first time sends the alert again at once. It is raised through the FLEET ALERT primitive, so it reaches the manager's pane and the alert channel. The threshold is each bot's own (`OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD`; at `0` the sweep names the bot on stderr instead).
 - `usage_limit_held` — `reset` and `reset_epoch` name when it was due; `resume` says whether keepalive's one resume is `off`, `armed`, or already `tried`. While the menu is up, typed text goes to the menu, not the bot, so the framework's own sends refuse rather than type into it.
 - `pane_stuck` — Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`.
 - `crash_loop` — Before #1769 this read as "boot in flight" indefinitely and paged no one.
@@ -70,7 +71,7 @@ The per-type loop: (That loop is over **type strings**, never bot paths — the 
 | `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `usage_limit_held`, `pane_unknown`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
 | `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
 | `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
-| `bridge_down`, `channel_refused`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up or keepalive, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
+| `bridge_down`, `channel_refused`, `reload_failed`, `restart_failed`, `keepalive_failed`, `keepalive_silent`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up or keepalive, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
 | `unit_failed` | fleet-pulse, once an episode, for an owned unit in the failed state (#2532) | the fleet for one of its own units (bot `fleet`); the host for a host unit |
 | `compaction_not_proven` | keepalive, once a request: no compaction proven within 10 minutes of the `/compact` it typed (#1053) | the bot |
 | `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |

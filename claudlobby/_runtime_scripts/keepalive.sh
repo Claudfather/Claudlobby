@@ -933,10 +933,10 @@ fi
 # reads the absence of the .idle stamp below as a running turn, and pages
 # keepalive_silent for a live bot on which it goes stale. data/.observed-since is
 # where the watch that a stall may be charged began: the first watched tick, and
-# again only after a silence as long as the one that pages
-# (OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD, read as fleet-pulse reads it; 0 or
-# no number reads as its default, 600 s), so a late tick never restarts a hung
-# turn's clock.
+# again only after a silence longer than the wait after which fleet-pulse pages
+# keepalive_silent (OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD, read as fleet-pulse
+# reads it; 0 or no number reads as its default, 600 s), so a late tick never
+# restarts a hung turn's clock.
 _observed_after=$(bot_conf_get "$BOT_DIR" OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD 600)
 case "$_observed_after" in ''|0|*[!0-9]*) _observed_after=600 ;; esac
 if ! marker_age_within "$BOT_DIR/data/.observed" "$_observed_after"; then

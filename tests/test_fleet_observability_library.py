@@ -107,9 +107,15 @@ KEPT = (
 # the rule's part is pinned.
 DECISION = {
     "activity_stuck": (
-        "Bot has made **no tool call** for longer than its threshold, counted from its last tool call or the last tick keepalive saw no turn running, whichever is later, AND keepalive has not classified it as idle (no recent `data/.idle` marker).",
+        "Bot has made **no tool call** for longer than its threshold, counted from the latest of its last tool call, the last tick keepalive saw no turn running, the start of keepalive's current watch and the session's start, AND keepalive is watching it and has not classified it as idle (no recent `data/.idle` marker).",
         "Investigate; restart only if `safe-worker-restart` guards pass.",
-        "A bot whose input box holds text it never submitted, with no turn running, gets `input_held` instead (below).",
+        "A bot whose input box holds text it never submitted, with no turn running, gets `input_held` instead (below), and a bot keepalive is not watching is named in `keepalive_silent`.",
+    ),
+    "keepalive_silent": (
+        "**keepalive has stopped watching** live, supervised bots in this fleet, so `activity_stuck` is not judged for them; one alert an episode names them all, and comes again when another bot joins.",
+        "**Do not restart a bot for this alone**: it says keepalive stopped, not that the bot did.",
+        "Tell the operator: the fleet's keepalive timer is theirs to start, or to enroll again (`keepalive_failed` beside it means keepalive runs and fails).",
+        "A bot stopped through `bot stop`, or with no unit file or no session, is never named: its own alerts cover it.",
     ),
     "input_held": (
         "The bot's **input box holds text that was never submitted**, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s; `0` turns this page off), whether or not a turn is running: no message sent to the bot lands until the box is clear",

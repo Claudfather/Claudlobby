@@ -192,9 +192,10 @@ def test_every_pane_fixture_is_held_exactly_where_the_send_path_refuses(tmp_path
 def _hold(data, now, *, first, stamp=0, turn=False):
     """keepalive's markers for a box first seen holding text *first* seconds
     before *now* and re-stamped *stamp* seconds before it, under a running
-    turn or not."""
+    turn or not, by the tick that also stamped its watch (.observed, #2862)."""
     (data / ".held").write_text(f"{now - first}\n")
     os.utime(data / ".held", (now - stamp, now - stamp))
+    _age(data / ".observed", now, stamp)
     if turn:
         (data / ".held-turn").touch()
 

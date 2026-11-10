@@ -79,6 +79,7 @@ def test_a_pane_unreadable_past_the_threshold_raises_one_pane_unknown(tmp_path, 
         (data / ".unknown").write_text(f"{now - began}\n")
         _age(data / ".last-tool-call", now, 2 * HOUR)
         _age(data / ".idle", now, HOUR)
+        (data / ".observed").touch()  # keepalive watches it: .idle keeps it quiet (#2862)
     p = _pulse(root, _pulse_lib(tmp_path, tmp_path / "pages"), scratch_plane_env=scratch_plane_env)
     assert p.returncode == 0, p.stderr
     _await(root, "SELECT COUNT(*) FROM events WHERE event = 'pane_unknown'", 1)
