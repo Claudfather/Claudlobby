@@ -339,6 +339,6 @@ def test_a_reason_within_its_cap_whose_row_ingest_would_cut_is_refused(estate):
 
     request = str(uuid4())
     assert _move(ctx, task.task_id, target, request, reason=exact).task.workstream_id == target
-    assert conn.execute("SELECT detail_truncated, length(CAST(detail AS BLOB)) FROM events"
-                        " WHERE source_ref=?", (f"request:{request}",)).fetchone() == (0, 16_384)
+    assert tuple(conn.execute("SELECT detail_truncated, length(CAST(detail AS BLOB)) FROM events"
+                              " WHERE source_ref=?", (f"request:{request}",)).fetchone()) == (0, 16_384)
     assert _task(ctx, conn, task.task_id).workstream_id == target
