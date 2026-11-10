@@ -190,6 +190,31 @@ def _refused_at(rs) -> list:
     return [d["where"] for d in _of(rs, "heavy_slot_refused")]
 
 
+# --- the tests' own reader of the slot's record -----------------------------------
+
+def test_a_poll_between_the_lock_and_its_record_reads_no_record_yet(rs):
+    """_acquire creates the lock file empty and _write truncates it before
+    writing, so a poll can read it in between (#2125, #2866). CI hit that in the
+    scope test's poll (run 42850852913: JSONDecodeError). The tests read it as the
+    module's own _read does, as no record yet, and poll on."""
+    lock = rs.state / "slot-0.lock"
+    lock.write_text("")  # created by _acquire, not yet written
+    assert _record(rs) == {}
+    lock.write_text('{"state": "rel')  # caught mid-write
+    assert _record(rs) == {}
+    lock.write_text("")
+    reads = []
+
+    def poll():
+        reads.append(_record(rs))
+        if len(reads) == 2:  # the keeper's write lands
+            lock.write_text(json.dumps({"state": "released"}) + "\n")
+        return reads[-1].get("state") == "released"
+
+    _wait_for(poll)
+    assert reads == [{}, {}, {"state": "released"}]
+
+
 # --- the lines themselves ---------------------------------------------------------
 
 def test_the_shipped_lines_and_their_edges():
