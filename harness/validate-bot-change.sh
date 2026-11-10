@@ -475,7 +475,7 @@ val_seed_dispatch() {
     f="$(safe_mktemp)"
     cat > "$f" <<JSON
 {"events":[
-{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr"}},
+{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr","workstream_id":"ws-test"}},
 {"event_type":"assignment","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"assignment_id":"$asg","work_item_id":"$wi","assignee":"bot:$fleet/$bot","assigned_by":"bot:$fleet/$mgr"$deadline,"dispatch_msg_id":"$msg"}},
 {"event_type":"communication","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","sender":"bot:$fleet/$mgr","recipient_raw":"$bot","message_class":"task_request","command_type":"task","work_item_id":"$wi","assignment_id":"$asg","body":"$safe_body"}},
 {"event_type":"transmission","emitter":"dispatch-task","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","attempt_no":1,"carrier":"tmux","destination":"$bot","state":"pane_submitted"}}

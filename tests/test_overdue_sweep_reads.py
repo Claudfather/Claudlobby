@@ -76,7 +76,8 @@ def _assign(n, bot, seconds, *, ref, wi=None, expected_by=None):
     common = {"emitter": "dispatch-task", "fleet": F, "occurred_at": _at(seconds),
               **({"source_ref": ref} if ref is not None else {})}
     events = [] if wi else [{"event_type": "work_item", **common,
-                             "payload": {"work_item_id": wi_id, "title": "t", "created_by": MGR}}]
+                             "payload": {"work_item_id": wi_id, "title": "t", "created_by": MGR,
+                                         "workstream_id": "ws-test"}}]
     events.append({"event_type": "assignment", **common,
                    "payload": {"assignment_id": asg, "work_item_id": wi_id, "assignee": f"bot:{F}/{bot}",
                                "assigned_by": MGR,

@@ -852,6 +852,14 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
         payload = model.model_validate(env.payload)
     except ValidationError as exc:
         raise ContractViolation(exc.errors()) from exc
+    if env.event_type == "work_item" and env.origin == "live" and not payload.workstream_id:
+        # Every live task belongs to a workstream (#1053): admit records the
+        # task's own workstream, or joins an open one, in the task's batch.
+        # Legacy rows (imported history) may name none.
+        raise ContractViolation(
+            [{"loc": ("payload", "workstream_id"),
+              "msg": "a live work_item must name its workstream"}]
+        )
     if isinstance(payload, RegistrySnapshot) and payload.payload is not None:
         # the inner entity payload is typed per entity_type (§9b FINAL):
         # a snapshot whose payload fails its entity contract is a contract

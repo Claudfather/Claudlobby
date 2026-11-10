@@ -35,7 +35,7 @@ def _seed(root: Path, *, expected_by: str | None = FUTURE,
     batch = [
         {"event_type": "work_item", "emitter": "6b", "fleet": "example-fleet",
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": "bot:example-fleet/mgr"}},
+                     "created_by": "bot:example-fleet/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "6b", "fleet": "example-fleet",
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": "bot:example-fleet/w1",
@@ -135,7 +135,7 @@ def test_supplied_id_not_open_ingests_as_task_fact(tmp_path: Path):
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "6b", "fleet": "example-fleet",
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": "bot:example-fleet/mgr"}},
+                     "created_by": "bot:example-fleet/mgr", "workstream_id": "ws-test"}},
         {"event_type": "task", "emitter": "6b", "fleet": "example-fleet",
          "payload": {"work_item_id": wi, "event": "supplied_id_not_open",
                      "summary": "worker reported t-123 but it was not open"}},
