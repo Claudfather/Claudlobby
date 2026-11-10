@@ -1,9 +1,9 @@
 """`claudlobby host spec`: a host's facts, each with its source, and what its OS can enforce.
 
-Four fixtures stand for the hosts the reader has to tell apart: a Raspberry Pi 5 whose firmware
-disables the memory controller, a Mac, a Linux host with no systemd, and a Linux host whose
-controllers include memory. Every fact either has a value or says why it is unreadable; none
-stands in a 0.
+Fixtures stand for the hosts the reader has to tell apart: a Raspberry Pi 5 whose firmware
+disables the memory controller, a Mac, a Linux host with no systemd, a Linux host whose
+controllers include memory, a systemd host on cgroup v1 or hybrid, and one whose user runs no
+user manager. Every fact either has a value or says why it is unreadable; none stands in a 0.
 """
 
 from __future__ import annotations
@@ -47,6 +47,8 @@ class FixtureHost(Host):
         return value
 
     def listdir(self, path):
+        if isinstance(self.files.get(path), OSError):
+            raise self.files[path]
         if path not in self.dirs:
             return None
         prefix = path.rstrip("/") + "/"
@@ -76,9 +78,11 @@ SWAPS = ("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
          "/dev/zram0                              partition\t6291452\t\t5463012\t\t100\n"
          "/var/swap                               file\t\t4194300\t\t0\t\t-2\n")
 ROOT_FS = {"/": (1983 * GIB, 1745 * GIB, 1650 * GIB)}
+ROOT_MOUNT = "/dev/sda2 / ext4 rw,noatime 0 0\n"
 
 
-def linux_files(*, root="cpuset cpu io pids", manager="cpu pids", own="pids", cmdline="", pressure=()):
+def linux_files(*, root="cpuset cpu io pids", manager="cpu pids", own="pids", cmdline="", pressure=(), drop=()):
+    """A cgroup v2 systemd host's files; `drop` names path prefixes to leave out."""
     files = {
         "/proc/meminfo": MEMINFO,
         "/proc/swaps": SWAPS,
@@ -90,8 +94,7 @@ def linux_files(*, root="cpuset cpu io pids", manager="cpu pids", own="pids", cm
         "/etc/os-release": 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nID=debian\n',
         "/proc/sys/kernel/osrelease": "6.12.75+rpt-rpi-2712\n",
         "/proc/1/comm": "systemd\n",
-        "/proc/self/mounts": ("/dev/sda2 / ext4 rw,noatime 0 0\n"
-                              "cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime 0 0\n"),
+        "/proc/self/mounts": ROOT_MOUNT + "cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime 0 0\n",
         "/sys/fs/cgroup/cgroup.controllers": root + "\n",
         f"{MANAGER}/cgroup.controllers": manager + "\n",
         "/proc/self/cgroup": f"0::{OWN[len('/sys/fs/cgroup'):]}\n",
@@ -99,7 +102,7 @@ def linux_files(*, root="cpuset cpu io pids", manager="cpu pids", own="pids", cm
         "/proc/cmdline": f"console=tty1 root=/dev/sda2 rootfstype=ext4 {cmdline} rootwait\n",
     }
     files.update({f"/proc/pressure/{name}": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n" for name in pressure})
-    return files
+    return {path: text for path, text in files.items() if not path.startswith(drop)}
 
 
 SYSTEMD = {"which": {"systemd-run": "/usr/bin/systemd-run"}, "dirs": {"/run/systemd/system"}}
@@ -135,6 +138,42 @@ def mac():
                   ("sw_vers",): "ProductName:\t\tmacOS\nProductVersion:\t\t14.5\nBuildVersion:\t\t23F79\n",
                   ("ps", "-o", "comm=", "-p", "1"): "/sbin/launchd\n"},
         statvfs={"/System/Volumes/Data": (460 * GIB, 200 * GIB, 190 * GIB)})
+
+
+V1_MOUNTS = (ROOT_MOUNT
+             + "tmpfs /sys/fs/cgroup tmpfs ro,nosuid,nodev,noexec,mode=755 0 0\n"
+             "cgroup /sys/fs/cgroup/systemd cgroup rw,nosuid,nodev,noexec,relatime,xattr,name=systemd 0 0\n"
+             "cgroup /sys/fs/cgroup/memory cgroup rw,nosuid,nodev,noexec,relatime,memory 0 0\n")
+
+
+def legacy_host(layout):
+    """A systemd host on cgroup v1, or hybrid (v1 controllers, cgroup2 at /sys/fs/cgroup/unified). Its user
+    manager runs, but in the v1 layout, so nothing is where cgroup v2 keeps it at /sys/fs/cgroup."""
+    files = linux_files(drop=("/sys/fs/cgroup/",))
+    unit = OWN[len("/sys/fs/cgroup"):]
+    files.update({"/proc/self/mounts": V1_MOUNTS,
+                  "/proc/self/cgroup": f"4:memory:/user.slice/user-{UID}.slice/user@{UID}.service\n1:name=systemd:{unit}\n",
+                  f"/sys/fs/cgroup/systemd{unit}/cgroup.procs": "1234\n"})
+    if layout == "hybrid":
+        files["/proc/self/mounts"] += "cgroup2 /sys/fs/cgroup/unified cgroup2 rw,nosuid,nodev,noexec,relatime 0 0\n"
+        files["/proc/self/cgroup"] += f"0::{unit}\n"
+        files["/sys/fs/cgroup/unified/cgroup.controllers"] = "\n"
+    return FixtureHost("linux", files, statvfs=ROOT_FS, **SYSTEMD)
+
+
+def no_user_manager_host():
+    """A systemd host on cgroup v2 whose user runs no user manager: the caller sits in a login session."""
+    session = f"/user.slice/user-{UID}.slice/session-3.scope"
+    files = linux_files(cmdline="cgroup_disable=memory", drop=(f"{MANAGER}/",))
+    files.update({"/proc/self/cgroup": f"0::{session}\n", f"/sys/fs/cgroup{session}/cgroup.controllers": "pids\n"})
+    return FixtureHost("linux", files, statvfs=ROOT_FS, **SYSTEMD)
+
+
+def no_systemd_run_host():
+    """This Pi with no systemd-run on PATH."""
+    host = pi()
+    del host.on_path["systemd-run"]
+    return host
 
 
 def read(host, root=None):
@@ -267,6 +306,98 @@ def test_an_unreadable_controllers_file_leaves_the_cap_unknown():
     assert spec.facts["controllers_user_manager"].unreadable == "[Errno 13] Permission denied"
     assert rows["memory_cap"].state == rows["bot_throttle"].state == "unknown"
     assert rows["scope"].state == "available"
+
+
+@pytest.mark.parametrize(("path", "broken", "fact", "reason"), [
+    ("/proc/self/mounts", None, "cgroup", "/proc/self/mounts does not exist"),
+    (MANAGER, PermissionError(13, "Permission denied"), "user_manager", "[Errno 13] Permission denied"),
+], ids=["cgroup", "user_manager"])
+def test_an_unreadable_fact_a_holder_needs_leaves_its_rows_unknown_and_names_it(path, broken, fact, reason):
+    rows = read(pi(**{path: broken}))[1]
+    unknown = {"state": "unknown", "reason": f"the {fact} fact is unreadable: {reason}"}
+    assert rows["scope"] == rows["memory_cap"] == rows["bot_throttle"] == unknown
+
+
+@pytest.mark.parametrize("layout", ["v1", "hybrid"])
+def test_a_cgroup_v1_or_hybrid_host_names_cgroup_v2_for_the_throttle(layout):
+    facts, rows = read(legacy_host(layout))
+    assert facts["cgroup"]["value"] == layout and facts["controllers_root"]["value"] == "none"
+    assert facts["user_manager"]["value"] is False
+    assert states(rows) == {"scope": "unavailable", "memory_cap": "unavailable", "bot_throttle": "unavailable",
+                            "free_memory": "available", "pressure": "unavailable"}
+    assert rows["scope"]["reason"] == ("cgroup v2 is not mounted at /sys/fs/cgroup, so a heavy run is held by its "
+                                       "process group only")
+    assert rows["bot_throttle"]["reason"] == ("a MemoryHigh on a bot's unit cannot be set: cgroup v2 is not mounted "
+                                              "at /sys/fs/cgroup, and MemoryHigh needs it")
+
+
+@pytest.mark.parametrize(("host", "scope", "throttle"), [
+    (no_systemd_run_host, "systemd-run is not on PATH", "inert"),
+    (no_user_manager_host, "no systemd user manager runs for this user", "unavailable"),
+], ids=["no systemd-run", "no user manager"])
+def test_a_scope_needs_systemd_run_and_a_user_manager(host, scope, throttle):
+    rows = read(host())[1]
+    reason = f"{scope}, so a heavy run is held by its process group only"
+    assert rows["scope"] == {"state": "unavailable", "reason": reason}
+    assert rows["memory_cap"] == {"state": "unavailable",
+                                  "reason": f"a MemoryMax on a heavy run's scope cannot be set: {reason}"}
+    assert rows["bot_throttle"]["state"] == throttle
+    if throttle == "unavailable":
+        assert rows["bot_throttle"]["reason"] == ("a MemoryHigh on a bot's unit cannot be set: bots do not run "
+                                                  "under a systemd user manager here")
+
+
+@pytest.mark.parametrize("cmdline", ["console=tty1 rootwait\n", "console=tty1 cgroup_disable=hugetlb rootwait\n", None],
+                         ids=["no setting", "a setting that keeps memory", "unreadable"])
+def test_a_kernel_with_no_memory_controller_reads_inert_with_no_setting_to_name(cmdline):
+    rows = read(pi(**{"/proc/cmdline": cmdline}))[1]
+    for name, what in (("memory_cap", "a MemoryMax on a heavy run's scope"), ("bot_throttle", "a MemoryHigh on a bot's unit")):
+        assert rows[name] == {
+            "state": "inert",
+            "reason": f"{what} would be accepted and enforce nothing: the kernel offers no memory controller",
+            "changes_it": "a kernel and boot that provide the memory controller; the operator's"}
+
+
+def test_a_cgroup_disable_list_that_includes_memory_is_named():
+    rows = read(pi(**{"/proc/cmdline": "console=tty1 cgroup_disable=hugetlb,memory rootwait\n"}))[1]
+    assert rows["bot_throttle"]["reason"] == ("a MemoryHigh on a bot's unit would be accepted and enforce nothing: the "
+                                              "kernel offers no memory controller: its command line carries "
+                                              "cgroup_disable=hugetlb,memory")
+    assert "cgroup_enable=memory" in rows["bot_throttle"]["changes_it"]
+
+
+def test_an_unreadable_pressure_directory_leaves_pressure_unknown():
+    facts, rows = read(pi(**{"/proc/pressure": PermissionError(13, "Permission denied")}))
+    assert facts["pressure"] == {"source": "/proc/pressure", "unreadable": "[Errno 13] Permission denied"}
+    assert rows["pressure"] == {"state": "unknown",
+                                "reason": "the pressure fact is unreadable: [Errno 13] Permission denied"}
+
+
+def test_a_mac_without_vm_stat_leaves_the_memory_stop_unavailable():
+    host = mac()
+    del host.on_path["vm_stat"]
+    facts, rows = read(host)
+    assert facts["vm_stat"] == {"source": "PATH", "value": "none"}
+    assert rows["free_memory"] == {"state": "unavailable",
+                                   "reason": "vm_stat is not on PATH, so the memory stop cannot read free memory"}
+
+
+def test_a_filesystem_with_no_blocks_leaves_its_percent_out():
+    fs = read_spec(FixtureHost("linux", linux_files(), statvfs={"/": (0, 0, 0)}, **SYSTEMD)).facts["root_fs"]
+    assert fs.as_dict() == {"source": "statvfs /", "value": {"path": "/", "size_mib": 0}}
+    assert fs.line("root_fs") == "  root_fs: 0 MiB, percent used unknown: no blocks are in use or available [statvfs /]"
+
+
+def test_a_fact_the_host_has_nothing_for_reads_none_and_keeps_its_shape_in_json():
+    files = linux_files(root="cpu io memory pids", drop=("/sys/block/zram0/", f"{MANAGER}/"))
+    files.update({"/proc/1/comm": "tini\n", "/proc/self/cgroup": "0::/\n"})
+    facts = read_spec(FixtureHost("linux", files, statvfs=ROOT_FS)).facts
+    assert {name: (facts[name].value, facts[name].shown) for name in
+            ("zram", "systemd_run", "user_manager", "controllers_user_manager", "pressure", "kernel_cmdline")} == {
+        "zram": ([], "none"), "systemd_run": ("none", "none (not on PATH)"),
+        "user_manager": (False, "none (no user manager's cgroup)"),
+        "controllers_user_manager": ("none", "none (no user manager's cgroup)"),
+        "pressure": ([], "none (/proc/pressure is absent)"), "kernel_cmdline": ([], "none of these settings")}
 
 
 def test_another_platform_is_refused():
