@@ -417,3 +417,24 @@ def test_a_bot_keepalive_rightly_skips_is_never_named_and_zero_turns_the_alert_o
         r"\(OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD=0\)", r.stderr), r.stderr[-3000:]
     kept = sorted(p.name for p in fleet.state.glob(f"{F}.*.unwatched"))
     assert kept == [f"{F}.{n}.unwatched" for n in ("w1", "w6", "w7")], kept
+
+
+@needs_tmux
+def test_a_page_that_reached_nobody_is_sent_again_next_sweep(fleet, *, scratch_plane_env):
+    """Telegram refuses the send and no manager pane takes it: the alert reached
+    nobody, so it buys no window, and the next sweep sends it again. Once a
+    send goes through, the window holds."""
+    fleet.bot("w1")
+    _age(fleet.data("w1", ".observed-since"), int(time.time()), DAY)
+    fleet.unwatched("w1", ago=11 * MIN)
+    post = fleet.libdir / "tg-post.sh"
+    working = post.read_text()
+    post.write_text(working + "exit 3\n")
+    for sent in (1, 2):
+        fleet.sweep(scratch_plane_env)
+        assert len(fleet.pages()) == sent, fleet.pages()
+        assert not (fleet.state / f"{F}.keepalive_silent").exists()
+    post.write_text(working)
+    fleet.sweep(scratch_plane_env)
+    assert len(fleet.pages()) == 3, fleet.pages()
+    assert (fleet.state / f"{F}.keepalive_silent").exists()
