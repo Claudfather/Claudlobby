@@ -316,3 +316,29 @@ def test_a_task_stays_in_its_new_workstream_after_the_one_it_left_is_archived(es
     registry = _registry(ctx)
     assert own not in registry
     assert registry[target]["task_ids"] == registry[target]["open_task_ids"] == [task.task_id]
+
+
+def test_a_reason_within_its_cap_whose_row_ingest_would_cut_is_refused(estate):
+    """JSON writes most control characters as six bytes (`\\u00XX`), so a reason within its 4,096
+    bytes can make a row past the 16,384 bytes at which ingest cuts a system row's `data`, and one
+    cut row would refuse every task read of the fleet. The door measures the row as ingest encodes
+    it: a reason dense in control characters, and a row one byte over the cut, are refused with
+    nothing written, and a row of exactly the cut is recorded whole and read."""
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Dense reason")
+    target = _open(ctx, "Release")
+    shape = {"task_id": task.task_id, "from_workstream_id": task.task.workstream_id,
+             "to_workstream_id": target, "actor": ctx.caller.alias, "reason": ""}
+    room = 16_384 - len(json.dumps(shape, ensure_ascii=False).encode("utf-8"))
+    exact = "\x01" * (room // 6) + "x" * (room % 6)
+    for reason in ("\x1b" * 4_000, exact + "x"):
+        assert len(reason.encode("utf-8")) <= 4_096
+        with pytest.raises(tasks.TaskQueryError, match="over the plane's 16384"):
+            _move(ctx, task.task_id, target, reason=reason)
+    assert _moves(conn) == []
+
+    request = str(uuid4())
+    assert _move(ctx, task.task_id, target, request, reason=exact).task.workstream_id == target
+    assert conn.execute("SELECT detail_truncated, length(CAST(detail AS BLOB)) FROM events"
+                        " WHERE source_ref=?", (f"request:{request}",)).fetchone() == (0, 16_384)
+    assert _task(ctx, conn, task.task_id).workstream_id == target

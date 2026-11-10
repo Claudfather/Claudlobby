@@ -110,7 +110,8 @@ its fleet and project. One `task_moved` row names the task, the workstream it
 left, the one it joined, who moved it and why, and every read takes the task's
 workstream from its newest move. It refuses a target that is archived or closed.
 A workstream whose last open task moves out reads closed: `done` if a task it
-still holds completed, else `abandoned`.
+still holds completed, else `abandoned`. Nothing can join it after that, the
+moved task included, so moving the task back cannot undo a mistaken move.
 
 ```bash
 claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID

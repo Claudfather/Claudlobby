@@ -68,4 +68,10 @@ def test_task_move_through_the_command_records_one_move_and_replays_it(readers, 
     refused = _call(capsys, root, "task", "move", admitted["task_id"], "--workstream", own,
                     "--reason", "Back home", "--request-id", str(uuid4()), expected=4)
     assert refused["error"]["code"] == "conflict" and _moves(root) == 1
+    # A reason within its 4,096 bytes whose row ingest would cut is refused, and nothing is written.
+    second = _call(capsys, root, "workstream", "open", "Second target",
+                   "--request-id", str(uuid4()))["data"]["workstream_ids"][0]
+    dense = _call(capsys, root, "task", "move", admitted["task_id"], "--workstream", second,
+                  "--reason", "\x1b" * 4_000, "--request-id", str(uuid4()), expected=2)
+    assert dense["error"]["code"] == "invalid_argument" and _moves(root) == 1
 

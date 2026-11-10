@@ -705,7 +705,8 @@ def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream
     close, no derived one, not archived. The batch's precondition checks that
     again under the plane's write lock, so a close that lands in between
     refuses the move. A workstream whose last open task moves out reads
-    closed (the registry derives it).
+    closed (the registry derives it). A move whose row ingest would truncate
+    is refused before anything is written (``_require_whole_row``).
     """
     from .plane.registries import cap_for
 
@@ -733,9 +734,9 @@ def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream
                 _identities(ctx, conn, (ctx.caller, provenance))
                 _scope_links(ctx, conn, task.project_key, workstream_id, task.repo)
                 _require_open_workstream(ctx, conn, workstream_id, elsewhere=_MOVE_ELSEWHERE)
-                raw = _raw(ctx, request_id, "system",
-                           _moved(ctx, task, workstream_id, actor=provenance.alias, reason=reason),
-                           previous)
+                payload = _moved(ctx, task, workstream_id, actor=provenance.alias, reason=reason)
+                _require_whole_row(payload["data"])
+                raw = _raw(ctx, request_id, "system", payload, previous)
                 receipt = _prepare(store, ctx, "task.move", semantic, (raw,), task_id,
                                    actors=(provenance,))
                 return _commit(store, ctx, conn, receipt, (raw,), check,
@@ -755,6 +756,26 @@ def _moved(ctx, task, joined, *, actor, reason):
             "subject_alias": ctx.context.fleet.name,
             "data": {"task_id": task.task_id, "from_workstream_id": task.workstream_id,
                      "to_workstream_id": joined, "actor": actor, "reason": reason}}
+
+
+def _require_whole_row(data):
+    """Refuse a system row whose ``data`` ingest would truncate.
+
+    Ingest stores a system row's ``data`` as ``json.dumps(data,
+    ensure_ascii=False)`` and cuts it past ``cap_for("system", "data")`` bytes,
+    flagging ``detail_truncated`` (``plane/ingest.py``). JSON writes most
+    control characters as six bytes (``\\u00XX``), so a reason within its own
+    4,096-byte cap can still make a row past the cut, and ``read_moves`` refuses
+    a cut row, which refuses every task read in the fleet. So the door measures
+    the row as ingest encodes it, before the request is prepared.
+    """
+    from .plane.registries import cap_for
+
+    size, cap = len(json.dumps(data, ensure_ascii=False).encode("utf-8")), cap_for("system", "data")
+    if size > cap:
+        raise TaskQueryError(
+            f"the move's row would take {size} bytes, over the plane's {cap}: JSON writes most"
+            " control characters as six bytes, so shorten the reason or drop its control characters")
 
 
 def escalate(ctx: TaskOperationContext, request_id: str, task_id: str, *, question: str,
