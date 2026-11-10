@@ -22,12 +22,12 @@ lines (`#` starts a comment): `line_pages` (pages a minute), `minutes`, and the
 bounds they keep, `line_pages_max` and `minutes_max`, so that a typo cannot raise
 the line past every episode the host has had. There is no default: with no file
 the check does not run. The one off is the line `alert = off`; no number turns it
-off. A file with a name it does not know, a value that is not a positive number
-(a whole one for the minutes), a number missing or a bound broken is refused: the
-check does not run, and the probe pages the refusal once, so a bad edit is never
-a quiet off. read_lines is the one reader of the host's config, and the Rule it
-returns is all the rest takes, so moving the config elsewhere changes read_lines
-alone.
+off. A file with a name it does not know, a number given twice, a value that is
+not a positive number (a whole one for the minutes), a number missing or a bound
+broken is refused: the check does not run, and the probe pages the refusal once,
+so a bad edit is never a quiet off. read_lines is the one reader of the host's
+config, and the Rule it returns is all the rest takes, so moving the config
+elsewhere changes read_lines alone.
 
 `check` prints one tab-separated verdict on stdout, for the probe to act on:
 `skipped WHY`, `refused SINCE WHY` (the lines file is refused, since SINCE: the
@@ -42,7 +42,8 @@ alert stays unsent until the probe calls `delivered` with its episode, once a
 channel took it; until then each later reading of the episode returns `alert`
 again. A refusal is the same, with `delivered --refused SINCE`, and is a skip
 after it; a file that gives a rule, goes or says alert = off ends the refusal, so
-the next bad edit pages again.
+the next bad edit pages again. A refusal wins over a missing counter, so a gap in
+the counter does not page it again.
 
 `bots` names the largest bots by memory: each process of this user counts for the
 bot whose unit holds it or, walking up by parent link, an ancestor of it
@@ -121,6 +122,8 @@ def read_lines(f: Path):
         if not eq or name not in NUMBERS:
             raise Refused(f"{f} line {number} names no line (the names: "
                           f"{', '.join(NUMBERS)}, alert)")
+        if name in values:
+            raise Refused(f"{f} line {number}: {name} is given twice")
         try:
             number_value = float(value)
         except ValueError:
@@ -249,8 +252,8 @@ def _check(d: Path, args) -> int:
         state = _read_state(d)
         at = float(os.environ.get("MEMORY_THRASH_NOW") or time.time())
         rule, why, refused = _rule(d / LINES_FILE)
-        if args.skip is not None:
-            why, refused = args.skip, None
+        if args.skip is not None and refused is None:
+            why = args.skip
         if why is not None:
             return _quiet(d, state, at, why, refused)
         nxt, verdict = step(state, at, args.boot_id, args.out, rule)

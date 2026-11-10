@@ -237,6 +237,7 @@ def test_no_file_or_alert_off_is_a_skip_said_once(tmp_path, lines, why):
     (RULE + "line = 5\n", "{f} line 5 names no line (the names: line_pages, minutes,"
                           " line_pages_max, minutes_max, alert)"),
     (BAD_RULE, "{f} line 2: minutes needs a positive whole number"),
+    (RULE + "line_pages = 200\n", "{f} line 5: line_pages is given twice"),
     (RULE.replace("line_pages = 100", "line_pages = 0"), "{f} line 1: line_pages needs a positive number"),
     (RULE.replace("minutes_max = 3\n", ""), "{f} sets no minutes_max"),
     (RULE.replace("line_pages = 100", "line_pages = 1000000"),
@@ -284,6 +285,20 @@ def test_a_refusal_is_raised_until_a_channel_took_it_and_again_after_the_next_ba
     assert _fields(_check(state, 360, 0, lines=None)) == ["under", "0"]
     lines.write_text(BAD_RULE)
     assert _fields(_check(state, 420, 0, lines=None))[:2] == ["refused", "1970-01-01T00:07:00Z"]
+
+
+def test_a_refusal_wins_over_a_missing_counter_so_a_gap_does_not_page_it_again(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    lines = state / "lines"
+    lines.write_text(BAD_RULE)
+    gap = "no pswpout number in /proc/vmstat"
+    assert _fields(_check(state, 0, skip=gap, lines=None))[:2] == ["refused", "1970-01-01T00:00:00Z"]
+    assert _run("delivered", "--state-dir", str(state), "--refused", "1970-01-01T00:00:00Z").returncode == 0
+    refused = ["skipped", f"refused: {lines} line 2: minutes needs a positive whole number"]
+    assert _fields(_check(state, 60, 0, lines=None)) == refused
+    assert _fields(_check(state, 120, skip=gap, lines=None)) == refused
+    assert _fields(_check(state, 180, 0, lines=None)) == refused
 
 
 def test_a_comment_and_blank_lines_are_read_past(tmp_path):
