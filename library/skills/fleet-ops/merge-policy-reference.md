@@ -1,12 +1,18 @@
 # Merge policy reference
 
-Reference that the `merge-policy-auto-admin` guardrail points to: the measurements, incidents and reasons behind its rungs. The guardrail keeps every rule; this file adds none.
+Reference that the `merge-policy-auto-admin` and `merge-policy-auto-after-review` guardrails point to: the measurements, incidents and reasons behind their rungs. Each guardrail keeps every rule; this file adds none. "The guardrail" means `merge-policy-auto-admin`; the after-review guardrail's own words are marked as its own.
 
 ## Rung 0
 
 **Why this rung exists, and why the paragraphs below it were not enough.** This page already tells you to anchor your evidence to a head, in several places and at length. That did not help, because **the failure is not an operator forgetting to anchor — it is the anchor being reported stale by the surface the operator is told to read.** No amount of instruction to check the head fixes a head that answers wrongly.
 
 Measured on this estate: a PR head persisted at an **old** sha across **both** the GraphQL and REST surfaces, two reads each, while the branch ref sat one commit ahead. CI was green **on the old code** and the new commit had no checks at all. So every rung below — review, checks, mergeable — was answering truthfully about a commit that was no longer the branch tip, and would have passed.
+
+The `merge-policy-auto-after-review` guardrail's own words on this rung:
+
+**Measured on this estate:** a PR head persisted at an **old** sha across **both** the GraphQL and REST surfaces, two reads each, while the branch ref sat one commit ahead. CI was green **on the old code** and the new commit had no checks at all — so every rung below answered truthfully about a commit that was no longer the branch tip, and would have passed.
+
+This rung is a **mechanism, not a reminder**: telling an operator to anchor their evidence to a head cannot help when the surface they are told to read reports the head wrongly.
 
 ## Rung 1
 
@@ -60,6 +66,10 @@ On a PR that changes `.github/workflows/`:
 
 It can rename or replace any job, this one included, and the check's own warning about it is printed by code such a PR controls (in another repo it can re-point `uses:`).
 
+The `merge-policy-auto-after-review` guardrail's own words on branch protection:
+
+Measured across six repos of one estate via the repository **rulesets** API: five carry a ruleset covering branch deletion, non-fast-forward and pull-request rules — though only four are `enforcement: active`, the fifth being `disabled` and so covering nothing in practice; the sixth is on a plan that cannot have one. **Four of the five DECLARE an approval requirement and only three ENFORCE one**, the difference being that same disabled ruleset. **Not one of the five declares `required_status_checks`.** GitHub is enforcing *review* here and enforcing nothing about whether the tests ran, which is exactly the gap this rung covers.
+
 ## Rung 3
 
 On `mergeable`:
@@ -93,6 +103,12 @@ for expectedHeadOid (Could not coerce value "bda6de9" to GitObjectID)
 The merge did **not** proceed and the PR stayed `OPEN` — verified on a real merge. That direction is the right one: an abbreviation is *rejected*, never silently coerced or ignored. A flag that quietly no-opped on a malformed value would be worse than no flag, because the gate would report itself protected while protecting nothing — the same "reads green on the wrong thing" family as the stale head itself.
 
 `$PH` from rung 0 is already the full id, so **using one variable for both the anchor and the flag makes the abbreviation mistake unavailable by construction** — which is why this page hands you a variable rather than telling you to be careful.
+
+The `merge-policy-auto-after-review` guardrail's own words on the flag:
+
+This policy relies on branch protection to allow the merge, and protection does not check that the head you verified is the head you are merging — measured on this estate, not one ruleset of nine declares `required_status_checks` at all.
+
+The flag needs the full 40-character oid and **fails closed** on anything else (`Could not coerce value "bda6de9" to GitObjectID`; the merge does not proceed, verified on a real merge). An abbreviation is *rejected*, never silently ignored — which is the right direction, since a flag that quietly no-opped would leave the gate reporting itself protected while protecting nothing. `$PH` from rung 0 is already the full id, so **one variable for both the anchor and the flag makes that mistake unavailable by construction.**
 
 ## Why --admin
 
