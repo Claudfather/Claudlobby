@@ -109,13 +109,14 @@ DECISION = {
     "activity_stuck": (
         "Bot has made **no tool call** for longer than its threshold, counted from its last tool call or the last tick keepalive saw no turn running, whichever is later, AND keepalive has not classified it as idle (no recent `data/.idle` marker).",
         "Investigate; restart only if `safe-worker-restart` guards pass.",
-        "A bot whose input box holds text it never submitted gets `input_held` instead (below).",
+        "A bot whose input box holds text it never submitted, with no turn running, gets `input_held` instead (below).",
     ),
     "input_held": (
-        "The bot's **input box holds text that was never submitted** and no turn is running (keepalive's `HELD` verdict, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD`, default 300 s).",
-        "It is not hung, and **do not restart it**: a restart discards the text.",
+        "The bot's **input box holds text that was never submitted**, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s; `0` turns this page off), whether or not a turn is running: no message sent to the bot lands until the box is clear",
+        "A held box is not a hang, and **do not restart it**: a restart discards the text.",
         '**Look at its pane first**: where a menu shows (numbered options, "Enter to confirm"), an Enter picks an option, so press nothing.',
         "Otherwise ask an operator to press **one Enter** in its pane, wait about 10 s, and press **one more** only if the text is still there.",
+        "Under a running turn that Enter queues the text behind the turn.",
         "If it is still there after that, **stop and look**: a menu or a modal (a safeguards pause) may be taking the Enter.",
         "Never typed text, and do not message the bot first: a message typed into a held box joins the held text.",
     ),

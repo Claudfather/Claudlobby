@@ -893,13 +893,19 @@ usage_limit_tick() {
 
 # Liveness = active recently OR active now (err toward BUSY; see header). Primary:
 # a data/.last-tool-call marker within the recency window — rendering-immune, and
-# a short-circuit so a busy bot skips the pane capture entirely. Fallback: the
-# pane's "esc to interrupt" affordance, for a long think/long single call that
-# left no recent marker. The pane is only captured on the fallback path.
+# it decides BUSY without reading the pane. Fallback: the pane's "esc to
+# interrupt" affordance, for a long think/long single call that left no recent
+# marker. The pane is captured on every tick all the same, a busy one included,
+# because the input box is read on every tick (#2854, "The input box" below).
+_pane_read=0
+if pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null); then
+    _pane_read=1
+else
+    pane_content=""
+fi
 if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
     state=BUSY
 else
-    pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
     last_lines=$(echo "$pane_content" | tail -10)
     state=$(classify_pane "$last_lines")
     # #996: an IDLE or UNKNOWN pane is LIMIT when the bot's own hook recorded a
@@ -925,7 +931,7 @@ UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 
 # #2391: a tick with no turn running (IDLE, HELD or LIMIT) stamps
 # data/.last-no-turn, and no verdict removes it. Once the BUSY tick of a new
-# turn removes .idle, .held or .limit, it still says when keepalive last saw no
+# turn removes .idle or .limit, it still says when keepalive last saw no
 # turn running, which is where fleet-pulse starts that turn's stall clock. A
 # HELD tick whose whole screen shows a running turn stamps nothing: text typed
 # into a busy bot's box, a message on its way in, reads HELD on the last ten
@@ -935,41 +941,63 @@ case "$state" in
     HELD) pane_is_busy "$pane_content" || touch "$BOT_DIR/data/.last-no-turn" ;;
 esac
 
+# The input box (#2854): data/.held follows the box itself on every tick,
+# whatever the verdict. The box holds text that was never submitted when the
+# send path's own test says so (pane_send_verified refuses on pane_is_held or
+# pane_box_end_held, on the whole capture), so the page and the refusals read
+# the box the same way. The marker holds the epoch the box was first seen
+# holding text, is re-stamped on each tick it still does, and is removed once a
+# capture shows the box empty. A box held under a running turn counts: no
+# message typed into it lands, and a bot that keeps working never reaches the
+# HELD verdict. data/.held-turn, written before data/.held, says a turn was
+# running at that tick; fleet-pulse names it in the page and leaves a running
+# turn to activity_stuck. A capture that failed says nothing about the box, so
+# it changes neither marker.
+if [ "$_pane_read" = 1 ]; then
+    if pane_is_held "$pane_content" || pane_box_end_held "$pane_content"; then
+        if pane_is_busy "$pane_content"; then
+            touch "$BOT_DIR/data/.held-turn"
+        else
+            rm -f "$BOT_DIR/data/.held-turn"
+        fi
+        if [ -f "$BOT_DIR/data/.held" ]; then
+            touch "$BOT_DIR/data/.held"
+        else
+            date +%s > "$BOT_DIR/data/.held"
+        fi
+    elif [ -e "$BOT_DIR/data/.held" ] || [ -e "$BOT_DIR/data/.held-turn" ]; then
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.held-turn"
+    fi
+fi
+
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
-        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
         ;;
     LIMIT)
         # #996: held by a usage limit. Named, never IDLE: no data/.idle (so
         # fleet-pulse pages usage_limit_held instead of staying quiet), no
         # reload and no bridge heal into the pane. The one key path is
         # usage_limit_tick's resume, once per reset, when armed.
-        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held" "$BOT_DIR/data/.unknown"
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
         usage_limit_tick "$_ul_verdict"
         ;;
     HELD)
         # #2070: text sits in the input box and no turn runs. Name it, so the
         # page says what an operator does; send NOTHING into the box (no reload,
-        # no bridge heal). data/.held holds the epoch it was first seen, and is
-        # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
-        # stale marker.
+        # no bridge heal). data/.held is the box reading's, above.
         echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, then stop and look: a menu or modal may be taking the Enter; do not restart)" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
-        if [ -f "$BOT_DIR/data/.held" ]; then
-            touch "$BOT_DIR/data/.held"
-        else
-            date +%s > "$BOT_DIR/data/.held"
-        fi
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
-        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
+        rm -f "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
@@ -998,7 +1026,7 @@ case "$state" in
         ;;
     *)
         # Track consecutive UNKNOWN runs
-        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.limit"
+        rm -f "$BOT_DIR/data/.limit"
         # #997: data/.unknown holds the epoch of the run's first UNKNOWN tick
         # and is re-stamped every UNKNOWN tick, as data/.held is, so fleet-pulse
         # can page pane_unknown once a pane stays unreadable past its
