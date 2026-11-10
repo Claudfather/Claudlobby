@@ -47,7 +47,7 @@ def _selected_package_module(name: str):
     import importlib
     import sys
 
-    if name not in {"report_payload", "task_queries"}:
+    if name not in {"report_payload", "task_queries", "task_state"}:
         raise PlaneUnreachable("unsupported native package reader")
     native = os.path.dirname(os.path.realpath(__file__))
     if (os.path.basename(native) != "_runtime_scripts"
@@ -948,22 +948,40 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
 
 # --- the workstream registry from the plane (cutover A2) --------------------------
 # the registry the door once wrote as workstreams.json, materialized from the plane: {updated, workstreams: {id:
-# {id, fleet, title, project, status, owner_bot, next, task_ids, refs,
-# opened_ts, last_progress_ts, lease_expires_ts, renewals[, closed_ts]}}}. The
+# {id, fleet, title, project, status, owner_bot, next, task_ids, open_task_ids, refs,
+# opened_ts, last_progress_ts, lease_expires_ts, renewals[, closed_ts, closed_by]}}}. The
 # plane holds the construct (title, owner, project, opened instant) and the
 # verb events the same door lands (progressed.next_step, renewed.renewed_until
 # + note, blocked.note, closed.disposition, archived); an archived (pruned)
 # workstream is absent from the registry, as the prune verb drops it. The lease
 # of a never-renewed workstream is the opening instant plus the fleet's lease
 # days — the door computed it from the same knob when it opened the row.
+#
+# Its tasks (#1053) are the work items that name it, in admission order, with
+# the state the task reducer gives them (`task_state.read_tasks`, loaded from
+# the selected package as the escalation reader loads `task_queries`). Those
+# are the terminal facts admit's join check reads, so the two cannot disagree
+# about a close, and no copy of the rule lives here. A workstream that holds a
+# task and no open one reads closed: `done` if any of its tasks completed, else
+# `abandoned`, dated by the row that ended its last open task and closed by
+# `task:<ID>`. A recorded close (the manager's `workstream close`) wins. The
+# derived close also wins over a declared wait, as admit's refusal does: no
+# task can join the workstream any more. A task the reducer cannot resolve has
+# no terminal fact, so it keeps its workstream open. Each task's newest row
+# counts as its workstream's progress.
 WS_CONSTRUCTS_SQL = (
     "SELECT w.workstream_id, w.title, w.project_key, w.occurred_at, i.alias, w.goal FROM workstreams w"
     " LEFT JOIN identity_registry i ON i.uid = w.owner_uid"
     " WHERE w.fleet_uid = ? ORDER BY w.occurred_at, w.ingest_seq"
 )
 WS_EVENTS_SQL = (
-    "SELECT e.workstream_id, e.event, e.occurred_at, e.renewed_until, e.detail FROM events e"
+    "SELECT e.workstream_id, e.event, e.occurred_at, e.renewed_until, e.detail, a.alias FROM events e"
+    " LEFT JOIN identity_registry a ON a.uid = e.actor_uid"
     " WHERE e.kind = 'workstream' AND e.fleet_uid = ? ORDER BY e.ingest_seq"
+)
+WS_TASKS_SQL = (
+    "SELECT work_item_id, workstream_id FROM work_items"
+    " WHERE fleet_uid = ? AND workstream_id IS NOT NULL ORDER BY ingest_seq"
 )
 
 
@@ -981,21 +999,84 @@ def _plus_days(iso: str, days: int) -> str:
 EMPTY_REGISTRY = {"updated": "1970-01-01T00:00:00Z", "workstreams": {}}
 
 
+def _task_instants(task):
+    """Every instant the reducer holds for one task: its admission, its task
+    events, and its assignments' rows and events."""
+    yield task.occurred_at
+    for event in task.history:
+        yield event.occurred_at
+    for assignment in task.assignments:
+        yield assignment.occurred_at
+        for event in assignment.history:
+            yield event.occurred_at
+
+
+def _file_tasks(conn: sqlite3.Connection, uid: str, entries: dict, tasks) -> str:
+    """Fill each live entry's tasks and derive its close; return the newest
+    task row's instant ("" when there is none). *tasks* is the fleet's reducer
+    read that the caller already holds in this snapshot; None reads only the
+    tasks of these entries."""
+    if tasks is None:
+        ids = [tid for tid, wid in conn.execute(WS_TASKS_SQL, (uid,)).fetchall() if wid in entries]
+        if not ids:
+            return ""
+        try:
+            tasks = _selected_package_module("task_state").read_tasks(
+                conn, fleet_uid=uid, task_ids=ids).tasks
+        except ValueError as exc:
+            raise PlaneUnreachable(f"task state unreadable: {exc}") from exc
+    held: dict = {}
+    for task in sorted(tasks, key=lambda t: t.ingest_seq):
+        if task.workstream_id in entries:
+            held.setdefault(task.workstream_id, []).append(task)
+    newest = ""
+    for wid, members in held.items():
+        e = entries[wid]
+        e["task_ids"] = [t.task_id for t in members]
+        e["open_task_ids"] = [t.task_id for t in members if t.terminal_event is None]
+        last = max(legacy_ts(at) for t in members for at in _task_instants(t))
+        e["last_progress_ts"] = max(e["last_progress_ts"], last)
+        newest = max(newest, last)
+        if e["status"] in ("done", "abandoned") or e["open_task_ids"]:
+            continue
+        ended = max(members, key=lambda t: t.terminal_event.ingest_seq)
+        e["status"] = ("done" if any(t.terminal_event.event == "completed" for t in members)
+                       else "abandoned")
+        e["closed_ts"] = legacy_ts(ended.terminal_event.occurred_at)
+        e["closed_by"] = f"task:{ended.task_id}"
+    return newest
+
+
 def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int = 14,
-                        or_empty: bool = False) -> dict:
+                        or_empty: bool = False, tasks=None) -> dict:
     """The registry the door would have written, from the plane. A fleet the
     plane holds no identity for REFUSES (a wrong root is not 'nothing
     recorded') — except for the WRITER: the first open of a fresh fleet is
     exactly the call that must work, and the plane cannot hold the fleet's
     identity before its first row lands, so the door asks with or_empty and
     starts from the empty registry (F18 closure R1: there is no file to start
-    from any more)."""
+    from any more). *tasks* is the fleet's tasks from the task reducer, read
+    by the caller in this snapshot (the brief reads them anyway); None reads
+    the registry's own. Without a caller's transaction, the registry and its
+    tasks are read in one snapshot of their own."""
     try:
         uid = fleet_uid(conn, fleet)
     except PlaneUnreachable:
         if or_empty:
             return {**json.loads(json.dumps(EMPTY_REGISTRY)), "archived": []}
         raise
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
+    try:
+        return _registry(conn, uid, fleet, lease_days=lease_days, or_empty=or_empty, tasks=tasks)
+    finally:
+        if own:
+            conn.rollback()
+
+
+def _registry(conn: sqlite3.Connection, uid: str, fleet: str, *, lease_days: int,
+              or_empty: bool, tasks) -> dict:
     prefix = f"bot:{fleet}/"
     entries: dict = {}
     for wid, title, project, opened, owner_alias, goal in conn.execute(WS_CONSTRUCTS_SQL, (uid,)):
@@ -1004,13 +1085,14 @@ def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int
             "project": project or None, "status": "active",
             "owner_bot": (owner_alias.removeprefix(prefix) if owner_alias and owner_alias.startswith(prefix)
                           else (owner_alias or None)),
-            "next": goal or None, "task_ids": [], "refs": {"issues": [], "prs": []},
+            "next": goal or None, "task_ids": [], "open_task_ids": [],
+            "refs": {"issues": [], "prs": []},
             "opened_ts": legacy_ts(opened), "last_progress_ts": legacy_ts(opened),
             "lease_expires_ts": _plus_days(opened or "", lease_days), "renewals": [],
         }
     newest = max((e["opened_ts"] for e in entries.values()), default="")
     archived: set = set()
-    for wid, event, at, renewed_until, detail in conn.execute(WS_EVENTS_SQL, (uid,)):
+    for wid, event, at, renewed_until, detail, actor in conn.execute(WS_EVENTS_SQL, (uid,)):
         e = entries.get(wid)
         if e is None:
             continue
@@ -1042,10 +1124,13 @@ def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int
         elif event == "closed":
             e["status"] = data.get("disposition") or "done"
             e["closed_ts"] = ts
+            if actor:
+                e["closed_by"] = actor
         elif event == "archived":
             archived.add(wid)
     for wid in archived:
         entries.pop(wid, None)
+    newest = max(newest, _file_tasks(conn, uid, entries, tasks))
     out = {"updated": newest, "workstreams": entries}
     if or_empty:
         # the WRITER's view carries the archived ids too: a construct id is
