@@ -3828,15 +3828,19 @@ _IDLE_PATTERN_BASE='([>❯].{0,3}$|Remote Control act|Enter.*to close|Yes\/No|Al
 
 # pane_is_idle <pane_text>
 # Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
-# Used by fleet-pulse to avoid flagging a finished, at-prompt bot as
-# activity_stuck. Operators extend via KEEPALIVE_IDLE_PATTERNS.
+# Read by keepalive's classify_pane, by pane_compact_ready and by supervisor.sh's
+# idle check. Operators extend via KEEPALIVE_IDLE_PATTERNS.
 pane_is_idle() {
     local text="$1"
     local _idle_pattern="$_IDLE_PATTERN_BASE"
     if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_idle_pattern"
+    # A here-string, never a pipe into grep (#2428, #2863). grep -q exits at its
+    # first match; the pane lines still to be written then met a closed pipe, and
+    # under pipefail that failure read the match as a miss: an idle screen read
+    # as not idle.
+    grep -qE "$_idle_pattern" <<<"$text"
 }
 
 # Base busy-detection regex — single source of truth for keepalive.sh
