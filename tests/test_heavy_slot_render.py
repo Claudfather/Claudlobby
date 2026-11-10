@@ -133,7 +133,14 @@ def _of(rs, kind: str) -> list:
 
 
 def _record(rs) -> dict:
-    return json.loads((rs.state / "slot-0.lock").read_text())
+    """The slot's record, read as the module's own _read reads it (#2125, #2866): an
+    empty or half-written file is no record yet. _acquire creates the file empty and
+    _write truncates it before writing, so a poll can land between."""
+    try:
+        rec = json.loads((rs.state / "slot-0.lock").read_text() or "{}")
+    except ValueError:
+        return {}
+    return rec if isinstance(rec, dict) else {}
 
 
 def _last_line(text: str) -> str:
