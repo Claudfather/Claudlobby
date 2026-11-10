@@ -1183,7 +1183,7 @@ BOT_ID="$HELDB"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
-OBSERVABILITY_INPUT_HELD_THRESHOLD=0
+OBSERVABILITY_INPUT_HELD_THRESHOLD=1
 CONF
 # The held box in a live capture's shape (claude 2.1.285; the fixture
 # tests/fixtures/pane-states/input-held-cr.txt): the glyph and a no-break space,
@@ -1206,6 +1206,8 @@ heldb_pane=$(tmux capture-pane -t "$HELDB" -p 2>/dev/null || true)
 printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
 harness_check "#2070 no /reload keystroke went into the held box" "$r"
 
+# The page waits for the threshold, 1 s here (0 turns it off, #2854).
+sleep 1
 val_plane_ready "$ROOT" "$F2070"
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" val_pulse "$LIB_DIR" "$F2070" >/dev/null 2>&1 || true
 heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
