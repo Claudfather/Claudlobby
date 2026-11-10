@@ -122,8 +122,18 @@ def _write(args, destination, origin, selected, bindings):
         result = apply(ctx, args.workstream_action, data, request_id=request_id)
     return CommandOutput({"fleet": destination.fleet.name, **asdict(result), **selected.provenance},
                          release_id=runtime_release_id(release),
-                         lines=(f"{args.workstream_action}: {', '.join(result.workstream_ids) or '(none)'}; "
-                                f"recording={result.recording}; replayed={result.replayed}",))
+                         lines=write_lines(args.workstream_action, result))
+
+
+def write_lines(verb, result) -> tuple[str, ...]:
+    """The text view of a recorded verb. A close that withdrew queued tasks
+    names them on a line of their own: a person reading the text must see
+    every task the close ended, not only the workstream."""
+    lines = (f"{verb}: {', '.join(result.workstream_ids) or '(none)'}; "
+             f"recording={result.recording}; replayed={result.replayed}",)
+    if result.withdrawn_task_ids:
+        lines += (f"withdrawn by the close: {', '.join(result.withdrawn_task_ids)}",)
+    return lines
 
 
 def dispatch(args) -> CommandOutput:

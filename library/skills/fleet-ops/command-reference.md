@@ -79,7 +79,10 @@ Flags of the `workstream` verbs:
 human:NAME --note TEXT` records a declared wait; `unblock ID --note TEXT`
 restores that same ID to active. `open --id` refuses the `ws_<32 hex>` form,
 which only a task's own workstream takes, and those do not count toward the
-active cap.
+active cap. `close ID [--status done|abandoned]` refuses while a task in the
+workstream holds a live assignment, or is one the task reducer cannot resolve,
+and names each: end it first. Otherwise the close withdraws the workstream's
+queued tasks in its own batch, one row each naming the close, and prints them.
 
 ## Task lifecycle
 

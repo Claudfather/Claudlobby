@@ -669,13 +669,23 @@ def withdraw(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason
                     raise TaskConflictError("withdrawal's original assignment changed")
                 provenance = _provenance(ctx, conn, by)
                 _identities(ctx, conn, (ctx.caller, provenance))
-                # The reducer's work-level cancellation also closes every
-                # assignment preceding it; an assignment-only cancel queues work.
-                raw = _raw(ctx, request_id, "task", dict(work_item_id=task_id,
-                           event="cancelled", actor=provenance.alias, reason=reason), previous)
+                raw = _raw(ctx, request_id, "task",
+                           _withdrawal(task_id, actor=provenance.alias, reason=reason), previous)
                 receipt = _prepare(store, ctx, "task.withdraw", semantic, (raw,), task_id, aid,
                                    actors=(provenance,))
                 return _commit(store, ctx, conn, receipt, (raw,), check)
+
+
+def _withdrawal(task_id, *, actor, reason):
+    """The withdraw row's payload, a task-family row under ``TASK_EMITTER``.
+
+    It is the reducer's work-level cancellation: it names no assignment, so it
+    also closes every assignment before it, where an assignment-only cancel
+    queues the work again. ``task withdraw`` records one, and a workstream's
+    close records one for each queued task it withdraws
+    (``workstream_operations.py``).
+    """
+    return dict(work_item_id=task_id, event="cancelled", actor=actor, reason=reason)
 
 
 def escalate(ctx: TaskOperationContext, request_id: str, task_id: str, *, question: str,
