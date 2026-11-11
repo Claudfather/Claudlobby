@@ -937,19 +937,21 @@ defaults:
 
 A whole number of tokens from `100000` to `1000000` (default `700000`), or `auto`: the
 autocompact window, the context size Claude Code compacts the bot's conversation within. Claude
-Code compacts before the context reaches the window, keeping its own autocompact buffer free:
-33k tokens in `/context` on Claude Code 2.1.322, so about 667,000 tokens under the default. Can
-be set in `defaults:`; bot-level overrides.
+Code checks the context between requests and compacts once it has passed the window less its own
+autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k tokens. One large step,
+such as several file reads in one response, can carry the context past the window before that
+check, and if the compaction fails ("Not enough messages to compact"), the request still goes
+out. Can be set in `defaults:`; bot-level overrides.
 
 - **A number** composes a top-level `autoCompactWindow` into `settings.local.json`: the window
   for every model. Claude Code caps the window at the model's own context window, so a model
   with a 200,000-token window keeps its own. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the bot's
   environment takes precedence over the setting. Claude Code drops a value outside the range
   without a word, so the parser refuses one.
-- **The default, `700000`,** bounds how far one conversation grows before Claude Code compacts
-  it. With nothing set, a model with a native 1M window compacts at about 967,000 tokens: its
-  1M window less the buffer. The bound is a number of tokens, so it means the same on any host,
-  which is why it is a package default rather than a number each host tunes.
+- **The default, `700000`,** is the window a bot's conversation compacts within when no key is
+  set. With nothing set, a model with a native 1M window compacts within its 1M window: at about
+  967,000 tokens, Claude Code's docs say. The bound is a number of tokens, so it means the same
+  on any host, which is why it is a package default rather than a number each host tunes.
 - **`auto`** turns that bound off. It composes `modelSettings`, naming each model Claude Code
   gives a native 1M window `{"autoCompactWindow": "auto"}`: Claude Code's own window, the one it
   uses with nothing set.
