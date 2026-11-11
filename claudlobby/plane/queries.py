@@ -103,6 +103,26 @@ FLEET_REPORTS_SQL = (
     " ORDER BY c.occurred_at, c.ingest_seq"
 )
 
+# The workstream each of a fleet's reports names (#1053): the report's
+# communication records it in its own column, as the report's task stood when
+# the report was made. FLEET_REPORTS_SQL selects no workstream, and the stdlib
+# reader carries it byte for byte, so `fleet reports list --workstream` reads it
+# here instead: the same population, by the same WHERE text (pinned by test).
+# Binds as FLEET_REPORTS_SQL.
+FLEET_REPORT_WORKSTREAMS_SQL = (
+    "SELECT c.msg_id, c.workstream_id"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
+)
+
+# Whether the fleet ever recorded a workstream by this ID, whatever became of it:
+# open, closed or archived (an archive is an event; the construct row stays).
+# Binds (workstream_id, fleet_uid).
+FLEET_WORKSTREAM_RECORDED_SQL = (
+    "SELECT 1 FROM workstreams WHERE workstream_id = ? AND fleet_uid = ?"
+)
+
 # The newest READABLE `reports_acked` event among a set of uids (subject OR
 # actor — an ack lands on the viewer's own actor; the uids span every alias
 # variant the bot minted, the R2a rule). Decoded by SQLite: a row whose detail

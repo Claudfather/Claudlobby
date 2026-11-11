@@ -25,6 +25,10 @@ claudlobby --json assignment show ASSIGNMENT_ID
 claudlobby --json workstream list
 ```
 
+On the brief's `work`:
+Each item names its task's workstream (`workstream_id`, null for a task in no
+workstream), and the text view groups the open tasks by workstream.
+
 On the brief's `reports`:
 Unacknowledged report rows (`reports.unacked`) are in the fleet manager's view only, the
 oldest 50; any other view carries their number (`reports.count`) and the command that

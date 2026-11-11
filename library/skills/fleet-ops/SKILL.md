@@ -359,8 +359,9 @@ resend or mint a new UUID.
 
 Read recorded reports, including reports without assignments, with
 `claudlobby --json fleet reports list`. Add `--unacknowledged` for your own
-unseen terminal or status-unknown reports. A read does not acknowledge reports
-or change tasks.
+unseen terminal or status-unknown reports, and `--workstream ID` for the reports
+that name one workstream (each item names its `workstream_id`); the filters combine.
+A read does not acknowledge reports or change tasks.
 After reading an unfiltered `--unacknowledged` page, pass its `ack_cursor`
 unchanged to `claudlobby --json fleet reports ack --through ACK_CURSOR
 --request-id UUID`. Retain that UUID for the same acknowledgement. Follow
