@@ -47,7 +47,7 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status",
            **{("migration", name): f"migration.{name}" for name in
-              ("env", "data", "cron", "memory", "lessons", "workstreams")},
+              ("env", "data", "cron", "memory", "lessons", "workstreams", "workstream-backfill")},
            ("fleet", "reports", "submit"): "fleet.reports.submit",
            ("fleet", "reports", "list"): "fleet.reports.list",
            ("fleet", "reports", "ack"): "fleet.reports.ack",

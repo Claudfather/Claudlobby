@@ -83,6 +83,7 @@ active cap. `close ID [--status done|abandoned]` refuses while a task in the
 workstream holds a live assignment, or is one the task reducer cannot resolve,
 and names each: end it first. Otherwise the close withdraws the workstream's
 queued tasks in its own batch, one row each naming the close, and prints them.
+`close ID --dry-run` records nothing and prints the refusal or the tasks.
 
 ## Task lifecycle
 
