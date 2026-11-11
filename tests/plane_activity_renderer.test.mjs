@@ -361,6 +361,19 @@ test('missing, malformed, ambiguous and wrong linked task facts fall back to lit
   }
 });
 
+test('a nudged row that also names its task workstream pairs only when the workstream is well formed', () => {
+  const ws = `ws_${'4'.repeat(32)}`;
+  const named = thread();
+  named.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', workstream_id: ws });
+  assert.equal(api.nudgeReason(named.messages[0], named), 'Any update?');
+  for (const extra of [{ workstream_id: 'legacy-ws' }, { workstream_id: [ws] }, { workstream_id: null },
+    { workstream_id: ws.toUpperCase() }, { workstream: ws }, { workstream_id: ws, other: 1 }]) {
+    const t = thread();
+    t.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', ...extra });
+    assert.equal(api.nudgeReason(t.messages[0], t), null);
+  }
+});
+
 test('unsafe authored text is escaped in prose, title fallback and raw evidence', () => {
   const t = thread('<img src=x onerror=alert(1)>\n<script>bad()</script>'); t.title = null;
   const rendered = html(t);
