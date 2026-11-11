@@ -438,6 +438,11 @@ class TaskEvent(_Strict):
     pr_attribution_withheld: Optional[Literal[PR_WITHHELD_REASONS]] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
+    #: The task's workstream at the moment of this act (#1053), or None for a
+    #: task in none. It rides ``detail``: the task kind keeps the stream's
+    #: workstream column NULL (``KIND_MANIFEST``), so recording it needs no
+    #: schema change. METADATA, registered as such in ``registries``.
+    workstream_id: Optional[str] = Field(None, min_length=1)
 
 
 class SystemEvent(_Strict):

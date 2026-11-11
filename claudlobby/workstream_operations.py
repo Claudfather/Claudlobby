@@ -367,7 +367,7 @@ def _plan(ctx, verb, args, registry, request_id, now, maximum, days, open_tasks=
         reason = f"withdrawn by the close of workstream {wid} ({disposition})"
         return (wid,), [_event(ctx, request_id, 0, "workstream_event", payload, now)] + [
             _event(ctx, request_id, ordinal, "task",
-                   _withdrawal(task_id, actor=ctx.caller.alias, reason=reason), now,
+                   _withdrawal(task_id, actor=ctx.caller.alias, reason=reason, workstream_id=wid), now,
                    emitter=TASK_EMITTER)
             for ordinal, task_id in enumerate(sorted(task.task_id for task in open_tasks), 1)]
     else:

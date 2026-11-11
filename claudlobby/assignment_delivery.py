@@ -27,7 +27,7 @@ from .resources import PackageResources
 from .task_operations import (TaskConflictError, TaskOperationContext,
                               TaskRecordingError, _identities, _locked_task, _reader)
 from .task_queries import show_assignment
-from .task_state import TASK_EMITTER
+from .task_state import TASK_EMITTER, read_moves
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ def _current_assignment(ctx: TaskOperationContext, route: MessageRoute, view) ->
 
 def _communication(route: MessageRoute, body: MessageBody, request_id: str,
                    task_id: str, assignment_id: str, message_id: str,
-                   event_id: str, at: str) -> dict:
+                   event_id: str, at: str, workstream_id: str | None = None) -> dict:
     return {"event_type": "communication", "schema_version": PLANE_SCHEMA_VERSION,
             "emitter": TASK_EMITTER, "fleet": route.selected.fleet.name,
             "source_ref": f"request:{request_id}", "event_id": event_id,
@@ -97,7 +97,30 @@ def _communication(route: MessageRoute, body: MessageBody, request_id: str,
                         "recipient_raw": route.peer_destination.session,
                         "message_class": "task_request", "command_type": "task",
                         "work_item_id": task_id, "assignment_id": assignment_id,
+                        **({} if workstream_id is None else {"workstream_id": workstream_id}),
                         "body": body.text}}
+
+
+def _recorded_workstreams(conn, ctx: TaskOperationContext, task, previous):
+    """The workstreams a delivery's communication may name, in the order tried.
+
+    A first delivery names the task's workstream now (#1053). A retry
+    rebuilds its fact and must match the one first recorded, which named the
+    task's workstream then: one a move has since taken the task out of, or
+    none when a release before #1053 recorded it. So a retry also tries none,
+    then each workstream the task's moves name, and no other. The workstream
+    is the only field a retry's check relaxes; every other must still match.
+    """
+    yield task.workstream_id
+    if previous is None:
+        return
+    tried = {task.workstream_id}
+    moved = (side for move in read_moves(conn, fleet_uid=ctx.fleet_uid)
+             if move.task_id == task.task_id for side in (move.left, move.joined))
+    for workstream_id in (None, *moved):
+        if workstream_id not in tried:
+            tried.add(workstream_id)
+            yield workstream_id
 
 
 def _native_envelope(route: MessageRoute, body: MessageBody, task_id: str,
@@ -140,18 +163,23 @@ def deliver(ctx: TaskOperationContext, route: MessageRoute, package: PackageReso
                 message_id = previous.intent.message_id if previous else mint_msg_id()
                 event_id = (previous.intent.stages[0].facts[0].event_id
                             if previous else mint_event_id())
-                raw = _communication(route, body, request_id, task_id, assignment_id,
-                                     message_id, event_id, at)
-                item, _ = validate_item(raw, modes)
-                fact = expected_fact(item, host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid,
-                                     parties={ctx.caller.alias: ctx.caller.uid,
-                                              route.peer.alias: route.peer.uid})
-                intent = RequestIntent("assignment.deliver", 1, ctx.host_uid, ctx.fleet_uid,
-                                       ctx.caller.uid, route.peer.uid, semantic,
-                                       (StagePlan("recording", (fact,)), StagePlan("delivery")),
-                                       task_id=task_id, assignment_id=assignment_id,
-                                       message_id=message_id,
-                                       route=previous.intent.route if previous else route.receipt_binding())
+                # A retry tries each workstream its first record may name
+                # (``_recorded_workstreams``); every other field must match.
+                for workstream_id in _recorded_workstreams(conn, ctx, view.task, previous):
+                    raw = _communication(route, body, request_id, task_id, assignment_id,
+                                         message_id, event_id, at, workstream_id)
+                    item, _ = validate_item(raw, modes)
+                    fact = expected_fact(item, host_uid=ctx.host_uid, fleet_uid=ctx.fleet_uid,
+                                         parties={ctx.caller.alias: ctx.caller.uid,
+                                                  route.peer.alias: route.peer.uid})
+                    intent = RequestIntent("assignment.deliver", 1, ctx.host_uid, ctx.fleet_uid,
+                                           ctx.caller.uid, route.peer.uid, semantic,
+                                           (StagePlan("recording", (fact,)), StagePlan("delivery")),
+                                           task_id=task_id, assignment_id=assignment_id,
+                                           message_id=message_id,
+                                           route=previous.intent.route if previous else route.receipt_binding())
+                    if previous is None or previous.intent == intent:
+                        break
                 if previous is not None and previous.intent != intent:
                     raise ReceiptConflict("delivery fact or capture policy differs from frozen request")
                 proof = (reconcile_facts(conn, (fact,)).status if previous else "unrecorded")
