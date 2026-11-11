@@ -450,6 +450,7 @@ def _work_section(
         items.append({
             "task_id": task.task_id, "title": task.title, "state": task.state,
             "admitted_at": task.occurred_at,
+            "workstream_id": task.workstream_id,
             "deadline": assignment.expected_by if assignment else None,
             "assignment": ({
                 "assignment_id": assignment.assignment_id,
@@ -848,6 +849,29 @@ def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
 
+def _by_workstream(shown: list, items: list):
+    """The WORK rows grouped by workstream (#1053), as (header, item) pairs.
+
+    A group stands in its oldest shown task's place and keeps oldest first
+    inside it; the tasks in no workstream group under "no workstream". Each
+    header counts its group's open tasks, and says how many of them are shown
+    when the row limit cut some.
+    """
+    totals: dict = {}
+    for item in items:
+        totals[item.get("workstream_id")] = totals.get(item.get("workstream_id"), 0) + 1
+    groups: dict = {}
+    for item in shown:
+        groups.setdefault(item.get("workstream_id"), []).append(item)
+    for workstream_id, members in groups.items():
+        label = f"workstream {workstream_id}" if workstream_id else "no workstream"
+        total = totals[workstream_id]
+        count = f"{total}" if len(members) == total else f"{len(members)} of {total}"
+        yield f"  {label}: {count} open task(s)", members[0]
+        for item in members[1:]:
+            yield None, item
+
+
 def format_brief(brief: dict) -> str:
     """Sectioned plain text. Degraded fields are marked at the section header
     AND listed in full at the end — the inline marker is where the reader's eye
@@ -910,7 +934,9 @@ def format_brief(brief: dict) -> str:
         scope = "fleet intake" if work["scope"] == "fleet" else "assigned to this bot"
         out.append(f"  {scope}: {len(items)} open task(s)")
         shown, more = rows(items)
-        for item in shown:
+        for header, item in _by_workstream(shown, items):
+            if header:
+                out.append(header)
             out.append(
                 f"    {item['task_id']}  {item['state']}  {_row_text(item['title'])}"
             )

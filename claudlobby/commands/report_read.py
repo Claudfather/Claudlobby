@@ -127,6 +127,7 @@ def _read(args) -> CommandOutput:
     )
     from ..paths import InvalidPathSelector
     from ..plane.migrations import DowngradeError
+    from ..plane.queries import FLEET_REPORT_WORKSTREAMS_SQL, FLEET_WORKSTREAM_RECORDED_SQL
     from ..plane.schema_state import PendingMigrationError, require_current_schema
     from ..report_cursors import CursorError, decode_cursor, issue_cursor, validate_prefix
     from ..releases import ReleaseError
@@ -141,6 +142,8 @@ def _read(args) -> CommandOutput:
             raise CommandFailure("invalid_argument", "--bot requires one exact author")
         if args.status is not None and (not args.status or args.status != args.status.strip()):
             raise CommandFailure("invalid_argument", "--status requires one exact status")
+        if args.workstream is not None and (not args.workstream or args.workstream != args.workstream.strip()):
+            raise CommandFailure("invalid_argument", "--workstream requires one exact workstream ID")
         since = _since(args.since)
         destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
@@ -190,20 +193,44 @@ def _read(args) -> CommandOutput:
             prior_seq = ack["seq"] if ack else None
             prior_ack_seq = ack["landed_seq"] if ack else None
             eligible = (origin is not None and args.unacknowledged and args.bot is None
-                        and args.status is None and since is None)
+                        and args.status is None and since is None and args.workstream is None)
             cursor_identity = {"host_uid": bindings["host_uid"],
                                "fleet_uid": bindings["fleet_uid"], "viewer_uid": viewer_uid,
                                **selected.cursor_scope} if eligible else None
             scope = {"fleet_uid": bindings["fleet_uid"], "viewer_uid": viewer_uid,
                      "release_id": release_id, **selected.provenance, "author": args.bot, "status": args.status,
-                     "since": since, "unacknowledged": args.unacknowledged,
+                     "since": since, "workstream": args.workstream, "unacknowledged": args.unacknowledged,
                      "prior_seq": prior_seq, "prior_ack_event": prior_ack_seq}
             after = None if eligible else _after(args.cursor, scope, release_id)
             # An unacknowledged read starts at the viewer's read position, as
             # the ACK does: nothing at or below it is unacknowledged.
+            since_seq = prior_seq if args.unacknowledged else None
+            # The workstream each report names (#1053), read over report_rows'
+            # own population: the same WHERE and binds, in the same snapshot.
+            window = session.pr.since_form(since)
+            named = dict(session.conn.execute(FLEET_REPORT_WORKSTREAMS_SQL, (
+                bindings["fleet_uid"], destination.fleet.name, window, window,
+                since_seq, since_seq)).fetchall())
+            # An ID this fleet never recorded is most likely a typo, and an empty
+            # page would read as "no reports": refuse it. A workstream that was
+            # recorded, open, closed or archived, lists its reports, if any.
+            if (args.workstream is not None and args.workstream not in named.values()
+                    and session.conn.execute(FLEET_WORKSTREAM_RECORDED_SQL, (
+                        args.workstream, bindings["fleet_uid"])).fetchone() is None):
+                raise CommandFailure("not_found", "no workstream by that ID: this fleet recorded none, "
+                                     "and no report in this read names one", release_id=release_id,
+                                     hint="Read the fleet's workstreams with claudlobby --json workstream list.")
             rows = session.pr.report_rows(session.conn, destination.fleet.name,
                                           bot=args.bot, status=args.status, since=since,
-                                          since_seq=prior_seq if args.unacknowledged else None)
+                                          since_seq=since_seq)
+            if any(row["plane_msg_id"] not in named for row in rows):
+                # The two reads share their WHERE and their snapshot, so a row
+                # the first missed means they drifted apart: refuse, rather
+                # than call that report unnamed.
+                raise CommandFailure("conflict", "report workstreams differ from the report rows",
+                                     release_id=release_id)
+            if args.workstream is not None:
+                rows = [row for row in rows if named[row["plane_msg_id"]] == args.workstream]
             if args.unacknowledged:
                 rows = session.pr.unacked_rows(rows, prior_seq)
             # The shared reader's historical display order is event time. A
@@ -231,7 +258,7 @@ def _read(args) -> CommandOutput:
                 next_cursor = (_cursor(scope, (page[-1]["_seq"], page[-1]["plane_msg_id"]))
                                if len(rows) > args.limit else None)
                 ack_cursor = None
-            items = [_item(row) for row in page]
+            items = [{**_item(row), "workstream_id": named[row["plane_msg_id"]]} for row in page]
             lines = tuple(_line(item) for item in items)
         selected.check(destination.paths.root, package=destination.paths.package, message='active report selection changed during read')
         return CommandOutput({**selected.provenance, "fleet": destination.fleet.name, "viewer": viewer,
