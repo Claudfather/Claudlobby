@@ -937,11 +937,14 @@ defaults:
 
 A whole number of tokens from `100000` to `1000000` (default `700000`), or `auto`: the
 autocompact window, the context size Claude Code compacts the bot's conversation within. Claude
-Code checks the context between requests and compacts once it has passed the window less its own
-autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k tokens. One large step,
-such as several file reads in one response, can carry the context past the window before that
-check, and if the compaction fails ("Not enough messages to compact"), the request still goes
-out. Can be set in `defaults:`; bot-level overrides.
+Code checks its count of the context between requests and compacts once the count has passed the
+window less its own autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k
+tokens. The count can run below the real context: in a live run on 2.1.322 at a window of
+`100000`, reading files of numbers, Claude Code compacted with its count (`pre_tokens`) at
+83,661 while the context held about 95,000 tokens. One large step, such as several file reads in
+one response, can carry the context past the window before that check, and if the compaction
+fails ("Not enough messages to compact"), the request still goes out. Can be set in `defaults:`;
+bot-level overrides.
 
 - **A number** composes a top-level `autoCompactWindow` into `settings.local.json`: the window
   for every model. Claude Code caps the window at the model's own context window, so a model
