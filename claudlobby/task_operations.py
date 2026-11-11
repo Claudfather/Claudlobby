@@ -393,11 +393,13 @@ def _name_workstreams(ctx, raws):
     """Name the task's workstream on each task row and message about one task (#1053).
 
     A task-family row carries it in ``detail`` (``TaskEvent.workstream_id``),
-    and a communication about one task (a report, a nudge's ask, a comment)
-    in its own column. It is the workstream at the moment of the act, read
-    once per operation through the task reducer, moves included, under the
-    task lock the operation holds. A move and the backfill take that lock
-    too, so it cannot change before the write. A task in no workstream
+    and a communication about one task (a report, a nudge's ask, a comment,
+    the recheck's ask about an overdue task) in its own column. It is the
+    workstream at the moment of the act, read once per operation through the
+    task reducer, moves included. A task verb reads it under the task lock it
+    holds, and a move and the backfill take that lock too, so it cannot
+    change before the write. The recheck holds no task lock, so its asks name
+    each task's workstream as of that read. A task in no workstream
     (admitted before #1053 and not yet filed by the backfill) names none, and
     a row that already names one keeps it. Each payload is replaced in its
     raw, so the facts ``_prepare`` freezes are the rows ``_commit`` writes.

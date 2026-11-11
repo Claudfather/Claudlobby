@@ -61,7 +61,7 @@ def test_a_delivery_names_the_task_workstream_and_a_retry_after_a_move_matches_i
     tasks.move(ctx, str(uuid4()), task.task_id, workstream_id=target, reason="Belongs there")
     retried = deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
                                  retry_uncertain=True, transport=_uncertain_then_sent(calls))
-    assert retried.replayed and retried.delivery == "submitted" and len(calls) == 2
+    assert retried.delivery == "submitted" and retried.message_id == first.message_id and len(calls) == 2
     assert _receipt(route, request_id).intent == original.intent
     assert _column(conn, first.message_id) == first_ws, "the record keeps the workstream it was delivered in"
 
@@ -81,7 +81,7 @@ def test_a_delivery_retry_of_a_record_with_no_workstream_matches(estate, monkeyp
     assert first.delivery == "unknown" and _column(conn, first.message_id) is None
     retried = deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
                                  retry_uncertain=True, transport=_uncertain_then_sent(calls))
-    assert retried.replayed and retried.delivery == "submitted" and len(calls) == 2
+    assert retried.delivery == "submitted" and retried.message_id == first.message_id and len(calls) == 2
 
 
 @pytest.mark.parametrize("field, value", [("command_type", "query"), ("recipient_raw", "another-pane")])
@@ -131,5 +131,5 @@ def test_an_unlinked_report_names_no_workstream(estate):
         request_id=str(uuid4()), trusted_tiers={},
         transport=lambda *a, **k: TransportOutcome("submitted", native_returncode=0),
         notify=lambda *a, **k: "alerted", clear=lambda *a, **k: None)
-    assert conn.execute("SELECT message_class, work_item_id, workstream_id FROM communications"
-                        " WHERE msg_id=?", (sent.message_id,)).fetchone() == ("report", None, None)
+    assert tuple(conn.execute("SELECT message_class, work_item_id, workstream_id FROM communications"
+                              " WHERE msg_id=?", (sent.message_id,)).fetchone()) == ("report", None, None)
