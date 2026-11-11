@@ -106,6 +106,7 @@ def test_a_delivery_retry_that_differs_in_another_field_still_refuses(estate, mo
 
 
 def test_a_delivery_retry_naming_a_workstream_the_task_was_never_in_refuses(estate, monkeypatch):
+    """Even one another task has moved into: a retry tries only this task's own moves."""
     ctx, route, package, conn, task, assignment = _manager_delivery(estate)
     never, target = _open(ctx, "Never this task's"), _open(ctx, "Elsewhere")
     request_id, body, calls = str(uuid4()), MessageBody("Private delivery"), []
@@ -114,6 +115,8 @@ def test_a_delivery_retry_naming_a_workstream_the_task_was_never_in_refuses(esta
         deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
                            transport=_uncertain_then_sent(calls))
     tasks.move(ctx, str(uuid4()), task.task_id, workstream_id=target, reason="Belongs there")
+    other = tasks.admit(ctx, str(uuid4()), title="Another task")
+    tasks.move(ctx, str(uuid4()), other.task_id, workstream_id=never, reason="Belongs there")
     with pytest.raises(ReceiptConflict, match="differs from frozen request"):
         deliveries.deliver(ctx, route, package, request_id, assignment.assignment_id, body,
                            retry_uncertain=True, transport=_never_sends)
