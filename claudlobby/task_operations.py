@@ -385,8 +385,45 @@ def _raw(ctx, request_id, family, payload, receipt, *, fact_index=0):
             "event_id": receipt.intent.stages[0].facts[fact_index].event_id if receipt else mint_event_id()}
 
 
+#: The row families that name their task's workstream (#1053).
+_NAMES_WORKSTREAM = ("task", "communication")
+
+
+def _name_workstreams(ctx, raws):
+    """Name the task's workstream on each task row and message about one task (#1053).
+
+    A task-family row carries it in ``detail`` (``TaskEvent.workstream_id``),
+    and a communication about one task (a report, a nudge's ask, a comment,
+    the recheck's ask about an overdue task) in its own column. It is the
+    workstream at the moment of the act, read once per operation through the
+    task reducer, moves included. A task verb reads it under the task lock it
+    holds, and a move and the backfill take that lock too, so it cannot
+    change before the write. The recheck holds no task lock, so its asks name
+    each task's workstream as of that read. A task in no workstream
+    (admitted before #1053 and not yet filed by the backfill) names none, and
+    a row that already names one keeps it. Each payload is replaced in its
+    raw, so the facts ``_prepare`` freezes are the rows ``_commit`` writes.
+    """
+    def unnamed(raw):
+        payload = raw["payload"]
+        return (raw["event_type"] in _NAMES_WORKSTREAM and payload.get("work_item_id") is not None
+                and "workstream_id" not in payload)
+
+    task_ids = sorted({raw["payload"]["work_item_id"] for raw in raws if unnamed(raw)})
+    if not task_ids:
+        return
+    with _reader(ctx) as conn:
+        found = {task.task_id: task.workstream_id
+                 for task in read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=task_ids).tasks}
+    for raw in raws:
+        workstream_id = found.get(raw["payload"]["work_item_id"]) if unnamed(raw) else None
+        if workstream_id is not None:
+            raw["payload"] = {**raw["payload"], "workstream_id": workstream_id}
+
+
 def _prepare(store, ctx, operation, semantic, raws, task_id, assignment_id=None, recipient=None, actors=(),
              *, message_id=None, notification=False, route=None, expected_by=None):
+    _name_workstreams(ctx, raws)
     from .plane.emit_api import CONTENT_FIELDS, load_capture_config, validate_item
     modes = load_capture_config(ctx.root) if any(CONTENT_FIELDS.get(r["event_type"]) for r in raws) else {}
     parties = {actor.alias: actor.uid for actor in (ctx.caller, *actors)}
@@ -694,16 +731,21 @@ def withdraw(ctx: TaskOperationContext, request_id: str, task_id: str, *, reason
                 return _commit(store, ctx, conn, receipt, (raw,), check)
 
 
-def _withdrawal(task_id, *, actor, reason):
+def _withdrawal(task_id, *, actor, reason, workstream_id=None):
     """The withdraw row's payload, a task-family row under ``TASK_EMITTER``.
 
     It is the reducer's work-level cancellation: it names no assignment, so it
     also closes every assignment before it, where an assignment-only cancel
     queues the work again. ``task withdraw`` records one, and a workstream's
     close records one for each queued task it withdraws
-    (``workstream_operations.py``).
+    (``workstream_operations.py``), naming the workstream it closes, which
+    holds each of them. ``task withdraw``'s row names the task's workstream
+    through ``_name_workstreams``, as every task verb's row does.
     """
-    return dict(work_item_id=task_id, event="cancelled", actor=actor, reason=reason)
+    payload = dict(work_item_id=task_id, event="cancelled", actor=actor, reason=reason)
+    if workstream_id is not None:
+        payload["workstream_id"] = workstream_id
+    return payload
 
 
 def move(ctx: TaskOperationContext, request_id: str, task_id: str, *, workstream_id: str,

@@ -21,6 +21,7 @@ from claudlobby import task_operations as tasks
 from claudlobby import workstream_operations as ws
 from claudlobby.plane import emit_api
 from claudlobby.plane.ids import mint_assignment_id, mint_work_item_id
+from claudlobby.plane.identity import resolve_party
 from claudlobby.request_receipts import locked_request
 from claudlobby.task_state import TASK_EMITTER, read_tasks
 from tests.test_task_operations import _receipt, estate  # noqa: F401 — private real-Plane fixture
@@ -280,5 +281,35 @@ def test_only_the_manager_or_a_local_person_runs_the_backfill(estate):
     request = str(uuid4())
     with pytest.raises(ws.WorkstreamError, match="requires the current manager or local human") as refused:
         _backfill(replace(ctx, caller=ctx.bots["worker"]), request)
+    assert refused.value.code == "conflict"
+    assert _rows_of(conn, request) == 0 and _task(ctx, conn, task_id).workstream_id is None
+
+
+def test_a_task_with_no_canonical_id_is_left_and_named(estate):
+    """A task's own workstream is `ws_` and its ID's 32 hex digits, so a task whose ID is not the
+    canonical `wi_` form cannot have one: the plan leaves it and names why. The contract refuses
+    such an ID, and the table does not, so only a writer that bypasses the contract records one;
+    a direct SQL change stands in for it."""
+    ctx, conn = estate
+    task_id = _legacy(ctx, "Recorded by a direct writer")
+    conn.execute("UPDATE work_items SET work_item_id='legacy-17' WHERE work_item_id=?", (task_id,))
+    plan = ws.backfill_plan(conn, fleet_uid=ctx.fleet_uid)
+    assert plan.tasks == () and plan.left == (("legacy-17", "it has no canonical task ID"),)
+    assert _backfill(ctx).recording == "not_attempted"
+
+
+def test_the_backfill_refuses_a_fleet_whose_manager_is_not_a_declared_bot(estate):
+    """The apply records the fleet's manager as each new workstream's owner, so a fleet whose
+    manager is not among its declared bots refuses the whole batch, and nothing is recorded. A
+    local person runs it here, since no manager can."""
+    ctx, conn = estate
+    task_id = _legacy(ctx, "No owner to give it")
+    alias = "human:operator"
+    person = tasks.TaskActor(resolve_party(conn, alias, now="2026-09-28T00:00:00Z"), alias)
+    headless = replace(ctx, caller=person, caller_fleet_uid=None,
+                       bots={bot: actor for bot, actor in ctx.bots.items() if bot != "manager"})
+    request = str(uuid4())
+    with pytest.raises(ws.WorkstreamError, match="manager is not a declared bot") as refused:
+        _backfill(headless, request)
     assert refused.value.code == "conflict"
     assert _rows_of(conn, request) == 0 and _task(ctx, conn, task_id).workstream_id is None

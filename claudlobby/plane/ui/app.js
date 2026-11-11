@@ -200,7 +200,10 @@ function nudgeReason(m, thread) {
           || event.assignment_id !== m.assignment_id || event.ingest_seq !== m.ingest_seq - 1
           || typeof event.detail !== "string") return false;
       const detail = JSON.parse(event.detail);
-      return detail && Object.keys(detail).sort().join() === "by,reason"
+      // Since #1053 the row may also name the task's workstream: only a well-formed one passes.
+      const keys = detail && Object.keys(detail).sort().join();
+      return detail && (keys === "by,reason" || (keys === "by,reason,workstream_id"
+          && typeof detail.workstream_id === "string" && /^ws_[0-9a-f]{32}$/.test(detail.workstream_id)))
         && detail.by === body.by && detail.reason === body.reason;
     });
     return matches.length === 1 ? body.reason : null;
