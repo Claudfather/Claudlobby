@@ -303,7 +303,9 @@ reports may carry `--pr URL --pr-role authored|reviewed`, repeatable
 `--artifact URL` and `--issue URL`, and `--skill NAME`; a reviewed report names
 its verdict's URL with `--artifact`. Check each verb's help.
 The manager can inspect `task withdraw --help` and `task reassign --help` for
-reasoned changes. When open work waits on something outside its worker, the
+reasoned changes. The manager moves open work into another open workstream with
+`claudlobby --json task move TASK_ID --workstream ID --reason TEXT --request-id UUID`,
+and every read then shows the new workstream. When open work waits on something outside its worker, the
 manager moves its deadline on the same assignment, recording only:
 `claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none
 --reason TEXT --request-id UUID`. Every overdue reader takes the newest deadline,

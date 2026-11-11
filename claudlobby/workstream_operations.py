@@ -134,16 +134,16 @@ def _ids_from_facts(ctx, facts):
 def _open_tasks(ctx, conn, wid):
     """The workstream's tasks that have not ended, with the task reducer's
     state: the facts the registry's ``open_task_ids`` and admit's join check
-    read. A task the reducer cannot resolve has no terminal fact, so it is
-    open, with state None."""
-    from .task_state import TaskStateError, read_tasks
+    read. Its tasks are the ones after moves (#1053), so a task moved in is
+    the close's to refuse or withdraw, and one moved out is not. A task the
+    reducer cannot resolve has no terminal fact, so it is open, with state
+    None."""
+    from .task_state import TaskStateError, read_tasks, workstream_task_ids
 
-    ids = [row[0] for row in conn.execute(
-        "SELECT work_item_id FROM work_items WHERE workstream_id=? AND fleet_uid=?",
-        (wid, ctx.fleet_uid))]
-    if not ids:
-        return ()
     try:
+        ids, _moved_out = workstream_task_ids(conn, fleet_uid=ctx.fleet_uid, workstream_id=wid)
+        if not ids:
+            return ()
         snapshot = read_tasks(conn, fleet_uid=ctx.fleet_uid, task_ids=ids)
     except TaskStateError as exc:
         raise WorkstreamError("unavailable", f"the workstream's task state is unreadable: {exc}") from exc

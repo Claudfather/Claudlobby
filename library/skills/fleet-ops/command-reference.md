@@ -96,10 +96,22 @@ Without `--workstream`, admit records the task's own workstream in the same
 batch: `ws_` and the task ID's 32 hex digits, titled like the task and owned by
 the fleet's manager. With it, the task joins that workstream, and admit refuses
 one that is archived, closed by the manager, or closed because every task in it
-has ended. So file a related follow-up with the first task's `data.workstream_id`
-before that task closes. `task admit`, `assign`, `reassign`, `withdraw`, `escalate`
-and `nudge`, and `assignment accept`, `reschedule` and each report, print the
-task's `workstream_id`.
+has ended or moved out. So file a related follow-up with the first task's
+`data.workstream_id` before that task closes. `task admit`, `assign`, `reassign`,
+`withdraw`, `move`, `escalate` and `nudge`, and `assignment accept`, `reschedule`
+and each report, print the task's `workstream_id`.
+
+```bash
+claudlobby --json task move TASK_ID --workstream WORKSTREAM_ID --reason TEXT --request-id MOVE_UUID
+```
+
+The manager, or a local person, moves open work into another open workstream of
+its fleet and project. One `task_moved` row names the task, the workstream it
+left, the one it joined, who moved it and why, and every read takes the task's
+workstream from its newest move. It refuses a target that is archived or closed.
+A workstream whose last open task moves out reads closed: `done` if a task it
+still holds completed, else `abandoned`. Nothing can join it after that, the
+moved task included, so moving the task back cannot undo a mistaken move.
 
 ```bash
 claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID

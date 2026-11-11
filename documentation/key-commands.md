@@ -36,6 +36,7 @@ claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 claudlobby --json task withdraw TASK_ID --reason "…" --request-id UUID  # terminal withdrawal
 claudlobby --json task escalate TASK_ID --question "…" --request-id UUID  # non-terminal: ask a human
 claudlobby --json task nudge TASK_ID --reason TEXT --request-id UUID  # record a nudge and notify the fleet manager
+claudlobby --json task move TASK_ID --workstream ID --reason TEXT --request-id UUID  # move open work into another open workstream
 claudlobby --fleet <F> task recheck --request-id UUID [--dry-run]  # ask the manager about due work
 claudlobby --json --fleet F checkin <list|show> [...]  # check-in decisions and outcomes
 claudlobby --json --fleet F checkin record --file FILE [--selection-file FILE] --request-id UUID [--dry-run]  # commit before acting

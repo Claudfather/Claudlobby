@@ -366,12 +366,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "vault_sync": "notice",
     "audit_completed": "notice",
     # The Python writers' records: a local operator's first contact
-    # (operation_context), a task re-check and an empty one (task_recheck), and
-    # an empty workstream prune (workstream_operations).
+    # (operation_context), a task re-check and an empty one (task_recheck), an
+    # empty workstream prune (workstream_operations), and a manager's move of a
+    # task into another workstream (task_operations; every task read takes a
+    # task's workstream from its newest move, so it must never join
+    # retention's PRUNABLE_SYSTEM_EVENTS).
     "operator_first_seen": "notice",
     "task_recheck": "notice",
     "task_recheck_noop": "notice",
     "workstream_prune_noop": "notice",
+    "task_moved": "notice",
 }
 
 # ---------------------------------------------------------------------------
