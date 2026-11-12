@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 
-LIB = Path(__file__).resolve().parents[1] / "lib" / "lib-common.sh"
+LIB = Path(__file__).resolve().parents[1] / "claudlobby" / "_runtime_scripts" / "lib-common.sh"
 
 
 def _parse(tmp_path, content, *, show_value=False, after=""):
