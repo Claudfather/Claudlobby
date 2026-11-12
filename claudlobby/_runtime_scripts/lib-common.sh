@@ -1165,8 +1165,8 @@ resolve_bot_telegram_token() {
 # pair check both call it, so the path that pages a human and the check that
 # certifies it cannot read the same file differently (#1771, #1608). In a
 # subshell, so none of the file's other keys reach the caller; the parser's
-# skipped-line warnings are dropped because they quote the head of the line,
-# which for a malformed token line is the token; an unreadable file is simply no
+# skipped-line warnings are dropped, so a parser that ever quotes a malformed
+# token line again cannot print the token; an unreadable file is simply no
 # token, never a failing command the caller's ERR trap would record. Empty
 # output = no token there.
 channel_state_token() {
