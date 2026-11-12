@@ -7,6 +7,7 @@ import pytest
 from claudlobby.brief import build_brief, format_brief
 from claudlobby.commands.events import collect_plane_events, format_event_table, plane_events_conn
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 from tests.test_brief import root, paths, _fleet, _plane_carrier  # real isolated fixtures
 
 
@@ -19,6 +20,7 @@ def test_alert_window_tz_band_uses_instant_and_preserves_local_clock(paths, monk
             now = datetime(2026, 9, 2, 0, tzinfo=timezone.utc)
             local = timezone(timedelta(hours=offset))
             instants = [now - timedelta(hours=24, minutes=1), now - timedelta(hours=23, minutes=59)]
+            initialize_plane(paths.root)   # main's plane is migrated explicitly, never on first emit
             for i, at in enumerate(instants):
                 result = emit_batch(paths.root, [{
                     "event_type": "system", "emitter": "test", "fleet": "test-fleet", "source_ref": f"fleet-events:sha:boundary{i}",
