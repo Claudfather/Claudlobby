@@ -2068,3 +2068,17 @@ test('collapsing during a send preserves one request and exposes its unconfirmed
   assert.equal(new ActionState(h.storage).pending[0].request_id,request.request_id);
   assert.equal(h.get('work-body').value,'Hello');assert.equal(h.lookups.length,0);
 });
+
+for(const response of [null,{...context,version:99},'reject'])
+test(`unconfirmed action context offers neutral recovery without diagnosing a missing grant: ${response?.version||response}`,async()=>{
+  const h=harness({interactionContext(){if(response==='reject')throw Error('temporary');return response;}});
+  h.loop.setRoom('web');await settle();
+  const note=h.get('work-notice').textContent;
+  assert.match(note,/Actions could not be confirmed/);
+  assert.match(note,/recorded history.*no longer configured/);
+  assert.match(note,/Check connection.*Check action access/);
+  assert.match(note,/configuration and connection compatibility/);
+  assert.doesNotMatch(note,/grant.*missing|approve.*access/i);
+  assert.equal(h.get('work-send').disabled,true);
+  assert.equal(h.sends.length,0);
+});
