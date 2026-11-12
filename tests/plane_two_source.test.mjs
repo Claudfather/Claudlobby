@@ -181,6 +181,7 @@ test('overview deadline pauses only its source leg until explicit retry, preserv
   b.failures.set('/api/overview','timed_out');b.routes.set('/api/overview',null);
   const timed=await api.jget('/api/overview'),sourceB=timed.data.sources[1];
   assert.equal(sourceB.overview_retry_paused,true);assert.equal(sourceB.overview_read_at,lastRead);
+  assert.equal(sourceB.overview_failure_boundary,'carrier_deadline');
   assert.equal(sourceB.connection_state,'ready');assert.equal(timed.data.coverage.reachable,1);
   const counts=()=>[a,b].map(s=>s.calls.filter(c=>c.url==='/api/overview').length),before=counts();
   await b.reader.start(); // Ordinary authenticated status does not retry the aggregate.
@@ -211,6 +212,7 @@ test('exact server query timeout pauses only that overview without releasing its
   b.routes.set('/api/overview',{state:'unreadable',reason:'query_timeout',provenance:null,data:poison.data});
   const timed=await api.jget('/api/overview');
   assert.equal(timed.data.sources[1].state,'unreadable');
+  assert.equal(timed.data.sources[1].overview_failure_boundary,'server_query_budget');
   assert.equal(timed.data.sources[1].overview_retry_paused,true);
   assert.equal(timed.data.sources[1].connection_state,'ready');
   assert.equal(timed.data.sources[1].host,null);
@@ -226,6 +228,34 @@ test('exact server query timeout pauses only that overview without releasing its
   assert.equal(recovered.data.coverage.reachable,2);
   assert.equal(recovered.data.sources[1].overview_retry_paused,false);
   api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('overview diagnostics allowlist boundary evidence and retain it without additional reads',async()=>{
+  for (const [state,reason,carrier,expected] of [
+    ['unreadable','query_timeout',null,'server_query_budget'],
+    ['unavailable',null,'timed_out','carrier_deadline'],
+    ['unreadable','query_timeout','timed_out','unknown'],
+    ['unavailable','query_timeout',null,'unknown'],
+    ['unreadable','<private reason>',null,'unknown'],
+    ['ok','query_timeout',null,null],
+  ]) {
+    const {api,a,b}=await pair();
+    b.routes.set('/api/overview',state === 'ok' ? {...b.routes.get('/api/overview'),reason} :
+      {state,reason,overview_failure_boundary:'<untrusted>',private:'must not project'});
+    if (carrier) b.failures.set('/api/overview',carrier);
+    const response=await api.jget('/api/overview'),facts=response.data.sources[1];
+    assert.equal(facts.overview_failure_boundary,expected);
+    assert.equal(response.data.sources[0].overview_failure_boundary,null,'healthy source has no failed boundary');
+    assert.equal(facts.reason,undefined);assert.equal(facts.private,undefined);
+    if (facts.overview_retry_paused) {
+      const before=b.calls.filter(c=>c.url==='/api/overview').length;
+      const retained=await api.jget('/api/overview');
+      assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,before,'diagnostic projection does not retry paused source');
+      assert.equal(retained.data.sources[1].overview_failure_boundary,expected);
+      assert.equal(retained.data.sources[1].overview_checked_at,facts.overview_checked_at);
+    }
+    api.dispose();a.reader.dispose();b.reader.dispose();
+  }
 });
 
 test('rejected overview projection never becomes the last successful summary timestamp',async()=>{
@@ -461,9 +491,18 @@ test('renderer shows per-host availability and partial totals without inventing 
   env.data.sources[1].overview_retry_paused=true;
   env.data.sources[1].overview_checked_at='2026-10-28T19:00:00Z';
   env.data.sources[1].overview_read_at='2026-10-28T18:00:00Z';
-  context.interactionApi.retryOverview=()=>true;
+  let diagnosticRetries=0;context.interactionApi.retryOverview=()=>{diagnosticRetries++;return true;};
+  env.data.sources[1].overview_failure_boundary='server_query_budget';
   context.renderOverview(env);context.renderHeader(env);context.renderSummary(env);
   assert.match(nodes.get('overview').innerHTML,/Automatic summary retries paused/);
+  assert.match(nodes.get('overview').innerHTML,/<details[^>]*><summary>Summary diagnostics<\/summary>/);
+  assert.match(nodes.get('overview').innerHTML,/Computer query budget expired/);
+  env.data.sources[1].overview_failure_boundary='carrier_deadline';context.renderOverview(env);
+  assert.match(nodes.get('overview').innerHTML,/Browser read deadline expired/);
+  env.data.sources[1].overview_failure_boundary='<script>private<\/script>';context.renderOverview(env);
+  assert.match(nodes.get('overview').innerHTML,/Timeout boundary not identified/);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/<script>private/);
+  assert.equal(diagnosticRetries,0,'rendering diagnostics cannot request a retry');
   assert.match(nodes.get('overview').innerHTML,/data-overview-retry="b"/);
   assert.match(nodes.get('overview').innerHTML,/Retry summary for Host B/);
   assert.match(nodes.get('overview').innerHTML,/2026-10-28T18:00:00Z/);
