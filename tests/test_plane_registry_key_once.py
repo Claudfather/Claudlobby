@@ -10,16 +10,23 @@ Each row has its own stamp, so a stamp's count is its row's count.
 
 from collections import Counter
 import re
+import sqlite3
 
 import pytest
 
 from claudlobby.plane import registry_read as rr
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.queries import REG_CURRENT_KEYS_SQL, REG_CURRENT_POINT_SQL
+from claudlobby.plane.queries import (
+    REG_CHANGES_SQL, REG_CURRENT_KEYS_SQL, REG_CURRENT_POINT_SQL, REG_CURRENT_SQL, REG_HISTORY_SQL,
+)
 from claudlobby.plane.time import instant_key, register_instant_key
 from tests.test_plane_registry_read import BOT, _bot, _conn, _done, _root, _snap, _tomb
 
 OTHER = "bot:f/gilfoyle"
+# Before SQLite 3.35 queries.py leaves out MATERIALIZED, so a read computes
+# the key at each reference again: the same rows, at the old cost.
+hinted = pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 35, 0),
+                            reason="SQLite before 3.35.0 has no MATERIALIZED hint")
 
 
 def _emit(root, rows):
@@ -71,6 +78,7 @@ def _assert_at_most_once(calls, scope, read):
     assert per_row <= scope, (read, dict(per_row))
 
 
+@hinted
 def test_full_reads_compute_each_rows_key_at_most_once(tmp_path):
     root = _registry(tmp_path)
     with _conn(root) as conn:
@@ -86,6 +94,7 @@ def test_full_reads_compute_each_rows_key_at_most_once(tmp_path):
             _assert_at_most_once(calls, every_row, read)
 
 
+@hinted
 def test_point_and_history_reads_compute_only_their_entitys_keys(tmp_path):
     root = _registry(tmp_path)
     with _conn(root) as conn:
@@ -117,3 +126,21 @@ def test_write_side_current_reads_search_the_partition_index(tmp_path, sql, para
                         r" idx_registry_partition \(" + re.escape(bound) + r"\)$")
     assert any(search.match(step) for step in plan), plan
     assert not any(re.match(r"SCAN (TABLE )?(registry_snapshots|rs)\b", step) for step in plan), plan
+
+
+@hinted
+def test_each_read_returns_the_same_rows_without_the_materialized_hint(tmp_path):
+    # The text an older SQLite gets (queries.py drops the hint there) must be
+    # valid SQL and return exactly the rows the hinted text returns.
+    root = _registry(tmp_path)
+    with _conn(root) as conn:
+        register_instant_key(conn)
+        host, uid = conn.execute("SELECT host_uid, entity_uid FROM registry_snapshots"
+                                 " WHERE entity_alias = ? LIMIT 1", (BOT,)).fetchone()
+        for sql, params in ((REG_CURRENT_SQL, ()), (REG_CURRENT_KEYS_SQL, (host,)),
+                            (REG_CURRENT_POINT_SQL, (host, "bot", uid)),
+                            (REG_HISTORY_SQL, {"ident": BOT}), (REG_CHANGES_SQL, (50,))):
+            assert sql.count("effective AS MATERIALIZED (") == 1
+            plain = sql.replace("effective AS MATERIALIZED (", "effective AS (")
+            rows = conn.execute(sql, params).fetchall()
+            assert rows and conn.execute(plain, params).fetchall() == rows

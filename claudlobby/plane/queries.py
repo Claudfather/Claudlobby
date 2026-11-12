@@ -22,6 +22,7 @@ one place.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import sqlite3
 
 # presence's freshness horizon is the SAME constant the stale_task suppression
 # reads a heartbeat against — imported, not re-declared, so "a fresh recording"
@@ -887,8 +888,12 @@ _F11_COMPLETION_JOIN = (
 # bounds them in the CTE's own WHERE, on the partition columns only. Every
 # window here partitions by exactly those columns, so dropping whole
 # partitions first changes no window.
+# MATERIALIZED arrived in SQLite 3.35.0, and an older library rejects it as a
+# syntax error. There the hint is left out: the same text returns the same
+# rows and computes the key at each reference, as before #2887.
+_REG_MATERIALIZED = "MATERIALIZED " if sqlite3.sqlite_version_info >= (3, 35, 0) else ""
 _REG_EFFECTIVE_ROWS = (
-    "effective AS MATERIALIZED ("
+    "effective AS " + _REG_MATERIALIZED + "("
     " SELECT rs.ingest_seq, rs.host_uid, rs.entity_type, rs.entity_uid,"
     "  rs.tombstone, claudlobby_instant_key(rs.occurred_at) AS instant_key,"
     "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
