@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
-from types import SimpleNamespace
 
 import pytest
 from claudlobby import activation_state as state
@@ -39,7 +38,7 @@ def git_backup_host(current_runtime, monkeypatch):
 
 @pytest.mark.parametrize("with_update", [True, False])
 def test_git_backup_restore_keeps_authoring_and_inert_original_recovery_evidence(git_backup_host, tmp_path, with_update):
-    from claudlobby.host_backup import create_backup, inspect_backup, restore_backup, restore_status, restored_bootstrap
+    from claudlobby.host_backup import create_backup, inspect_backup, restore_backup, restore_status
     from claudlobby.plane.owner_source import bind_source, inspect_source, SourceNeedsBinding
     root, package, snapshot, update = git_backup_host
     bind_source(root)
@@ -90,8 +89,6 @@ def test_git_backup_restore_keeps_authoring_and_inert_original_recovery_evidence
     assert status["access_restored"] is False
     with pytest.raises(SourceNeedsBinding):
         inspect_source(restored)
-    with pytest.raises(state.ActivationRefusal, match="reviewed initialization"):
-        restored_bootstrap(restored, SimpleNamespace(release_id=None))
     with pytest.raises(state.ActivationRefusal, match="new absolute"):
         restore_backup(bundle, restored, replacing_retired_host=True)
 

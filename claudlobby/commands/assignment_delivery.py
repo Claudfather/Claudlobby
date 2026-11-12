@@ -38,20 +38,21 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
+    from ..request_ids import canonical_request_id
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
     from ..task_operations import TaskRecordingError, _reader
     from ..task_queries import TaskQueryError, show_assignment
     from ..task_state import TaskStateError
-    from .message_write import _body, _request_id, _bound_release
+    from .message_write import _body, _bound_release
     from ..application_messages import _effect_failure
 
     release_id = None
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no assignment delivery")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         if not isinstance(args.assignment_id, str) or not args.assignment_id.strip() or "\0" in args.assignment_id:
             raise CommandFailure("invalid_argument", "ASSIGNMENT_ID requires a task assignment reference")
         body = _body(SimpleNamespace(text=None, file=args.file))
@@ -159,9 +160,6 @@ def dispatch(args) -> CommandOutput:
                    if exc.recording == "committed" else
                    "assignment recording is unconfirmed; inspect the request")
         raise _effect_failure(code, message, data=data, request_id=request_id, release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

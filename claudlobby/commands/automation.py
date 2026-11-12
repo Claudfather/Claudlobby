@@ -2,18 +2,8 @@
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _request(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
+from ..request_ids import canonical_request_id
 
 
 def dispatch(args) -> CommandOutput:
@@ -26,14 +16,14 @@ def dispatch(args) -> CommandOutput:
                                      _local_operator_alias)
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
-    from .checkin import _scope, _runtime_hint
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+    from .checkin import _scope
 
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no bot automation state")
         action = args.automation_action
-        request_id = _request(args.request_id) if action != "status" else None
+        request_id = canonical_request_id(args.request_id) if action != "status" else None
         destination, origin, selected, _bindings = _scope(args)
         bot = args.bot_id
         if bot not in destination.fleet.bots:
@@ -82,9 +72,6 @@ def dispatch(args) -> CommandOutput:
         raise
     except AutomationStateError as exc:
         raise CommandFailure(exc.code, str(exc)) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from automation caller",
-                             hint=_runtime_hint()) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid automation root or fleet selector") from exc
     except OperationContextUnavailableError as exc:

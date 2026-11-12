@@ -475,7 +475,7 @@ val_seed_dispatch() {
     f="$(safe_mktemp)"
     cat > "$f" <<JSON
 {"events":[
-{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr"}},
+{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr","workstream_id":"ws-test"}},
 {"event_type":"assignment","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"assignment_id":"$asg","work_item_id":"$wi","assignee":"bot:$fleet/$bot","assigned_by":"bot:$fleet/$mgr"$deadline,"dispatch_msg_id":"$msg"}},
 {"event_type":"communication","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","sender":"bot:$fleet/$mgr","recipient_raw":"$bot","message_class":"task_request","command_type":"task","work_item_id":"$wi","assignment_id":"$asg","body":"$safe_body"}},
 {"event_type":"transmission","emitter":"dispatch-task","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","attempt_no":1,"carrier":"tmux","destination":"$bot","state":"pane_submitted"}}
@@ -1183,7 +1183,7 @@ BOT_ID="$HELDB"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
-OBSERVABILITY_INPUT_HELD_THRESHOLD=0
+OBSERVABILITY_INPUT_HELD_THRESHOLD=1
 CONF
 # The held box in a live capture's shape (claude 2.1.285; the fixture
 # tests/fixtures/pane-states/input-held-cr.txt): the glyph and a no-break space,
@@ -1206,6 +1206,8 @@ heldb_pane=$(tmux capture-pane -t "$HELDB" -p 2>/dev/null || true)
 printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
 harness_check "#2070 no /reload keystroke went into the held box" "$r"
 
+# The page waits for the threshold, 1 s here (0 turns it off, #2854).
+sleep 1
 val_plane_ready "$ROOT" "$F2070"
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" val_pulse "$LIB_DIR" "$F2070" >/dev/null 2>&1 || true
 heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
@@ -1924,6 +1926,38 @@ WRAPPER
 cat > "$_SC_BIN/tree.js" <<'TREE'
 require('child_process').spawnSync(__dirname + '/bun', [__dirname + '/wrapper.js', 'start'], {stdio: 'inherit'});
 TREE
+# _sc_await_slot <root pid> <pid file> <bound s>: wait until <pid file> names a
+# live process, the foreign poller holding the slot. Prints "held after N s"
+# and returns 0. Otherwise prints why not and returns 1: at once when the tree
+# has exited, else at <bound> seconds, naming the processes the tree still
+# runs, so a slow start reads as slow and a dead tree as dead. The tree is
+# three node processes, each started by the one before, in a process group of
+# its own (setsid below), which is how its processes are found.
+_sc_await_slot() {
+    local root="$1" pidfile="$2" bound="$3" start=$SECONDS holder tree listing
+    # shellcheck disable=SC2016  # an awk program, not shell
+    listing='$2 == g { s = $1; for (i = 3; i <= NF; i++) { sub(/.*\//, "", $i); s = s " " $i }; out = out (out == "" ? "" : "; ") s } END { print out }'
+    while :; do
+        holder=""
+        if [ -s "$pidfile" ]; then holder="$(tr -cd '0-9' < "$pidfile" 2>/dev/null)" || holder=""; fi
+        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+            printf 'held after %s s\n' "$((SECONDS - start))"
+            return 0
+        fi
+        if ! kill -0 "$root" 2>/dev/null; then
+            printf 'its tree (pid %s) exited after %s s, and no live process holds %s\n' \
+                "$root" "$((SECONDS - start))" "$pidfile"
+            return 1
+        fi
+        if [ "$((SECONDS - start))" -ge "$bound" ]; then
+            tree="$(ps -A -o pid=,pgid=,args= 2>/dev/null | awk -v g="$root" "$listing")" || tree=""
+            printf 'no live process held %s within %s s; its tree still runs: %s\n' \
+                "$pidfile" "$bound" "${tree:-nothing in its process group}"
+            return 1
+        fi
+        sleep 0.1
+    done
+}
 rm -f "$RB_DIR/state/bot.pid"
 # macOS has no `setsid` utility. The selected test interpreter creates the
 # owned process group before exec, so cleanup below still targets this fixture
@@ -1935,14 +1969,18 @@ env -i PATH="/usr/bin:/bin" TELEGRAM_STATE_DIR="$RB_DIR/state" "$VAL_PY" -I -B -
     'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$_SC_BIN/claude" "$_SC_BIN/tree.js" >/dev/null 2>&1 &
 _SC_ROOT_PID=$!
-# Wait for the foreign poller to actually hold the slot; without this the run can
-# race and assert against a bot.pid that does not exist yet, which would PASS for
-# the wrong reason (it would just be scenario 2b again).
+# Wait for the foreign poller to hold the slot before the boot. Without the
+# wait the boot meets an empty slot, which is scenario 2b again, and the flip
+# check below passes for the wrong reason. The old wait was a fixed 100 polls
+# of 0.05 s, and on CI the tree once took longer than that, so the boot ran
+# with no poller (#2716). Bounded at 30 s. A tree that never holds the slot
+# refuses every check in this scenario, naming why, instead of scoring them.
 _sc_ok=no
-for _ in $(seq 1 100); do
-    [ -s "$RB_DIR/state/bot.pid" ] && { _sc_ok=yes; break; }
-    sleep 0.05
-done
+if _sc_slot="$(_sc_await_slot "$_SC_ROOT_PID" "$RB_DIR/state/bot.pid" 30)"; then
+    _sc_ok=yes
+else
+    harness_refuse "the foreign-session poller fixture did not hold the slot: $_sc_slot"
+fi
 harness_check "foreign-session poller holds the slot before the boot (fixture precondition)" "$_sc_ok"
 # The bot-scoped question must answer `up` here -- that is exactly what misled the
 # gate. If this reads anything else the scenario is not reproducing #1530 and the
@@ -1969,6 +2007,7 @@ harness_check "  ...and bring-up still escalates BRIDGE_MISSING (no regression)"
 
 if [ "$fail" -gt "$_scope_fail_before" ]; then
     echo "  --- DIAGNOSTIC: #1530 session-scope checks failed ---"
+    echo "  [fixture wait] ${_sc_slot:-no answer}"
     if [ -s "$RB_DIR/state/bot.pid" ]; then
         _sc_pid="$(cat "$RB_DIR/state/bot.pid")"
         echo "  [foreign poller process]"
@@ -5261,9 +5300,9 @@ harness_check "#941 unarmed composition turns clauDNA's capture prompt off" "$r"
 r=no; "$VAL_PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("skillOverrides") != {"auto-mode-setup": "off"})' \
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
 harness_check "#1388 composed settings turn /auto-mode-setup and its offer off" "$r"
-r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); m = s.get("modelSettings") or {}; sys.exit(not ("claude-sonnet-5-5" in m and all(v == {"autoCompactWindow": "auto"} for v in m.values()) and "autoCompactWindow" not in s))' \
+r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); sys.exit(not (s.get("autoCompactWindow") == 700000 and "modelSettings" not in s))' \
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
-harness_check "#1388 composed settings keep Claude Code's own autocompact window and block its offer" "$r"
+harness_check "#1053 composed settings set the 700000-token autocompact window, which also blocks the #1388 offer" "$r"
 r=yes
 for _se_retired in SESSION_""DIGEST transcript-""digest; do
     grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true

@@ -200,7 +200,12 @@ function nudgeReason(m, thread) {
           || event.assignment_id !== m.assignment_id || event.ingest_seq !== m.ingest_seq - 1
           || typeof event.detail !== "string") return false;
       const detail = JSON.parse(event.detail);
-      return detail && Object.keys(detail).sort().join() === "by,reason"
+      // Since #1053 the row may also name the task's workstream, in any form a door minted
+      // (#2871): an imported or older registry can hold any string. The ID is never shown,
+      // so any non-empty string passes; the key set and the by and reason matches decide.
+      const keys = detail && Object.keys(detail).sort().join();
+      return detail && (keys === "by,reason" || (keys === "by,reason,workstream_id"
+          && typeof detail.workstream_id === "string" && detail.workstream_id !== ""))
         && detail.by === body.by && detail.reason === body.reason;
     });
     return matches.length === 1 ? body.reason : null;

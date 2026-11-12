@@ -23,14 +23,15 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..report_operations import AckError, ack_reports
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..request_ids import canonical_request_id
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_route_matches)
-    from .message_write import _request_id, _bound_release
+    from .message_write import _bound_release
 
     release_id = None
     provenance = {}
     try:
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no report read position")
         destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
@@ -57,9 +58,6 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure(exc.code, str(exc),
                              data={**(asdict(exc.result) if exc.result is not None else {}), **provenance},
                              release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid report root or fleet selector",
                              release_id=release_id) from exc

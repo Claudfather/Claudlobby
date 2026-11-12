@@ -21,7 +21,7 @@ from .supervision_inventory import (
     _environment, _darwin_source, _catalog, _wanted_by, _enablement,
 )
 from .supervision_runtime import (_call, assert_quiescent, assert_native_absent, unit_start_budget,
-                                  assert_private_endpoint_quiet)
+                                  assert_private_endpoint_quiet, RuntimeEvidenceError)
 
 
 def _hash(value):
@@ -361,6 +361,51 @@ def _preserved_mask_quiet(row, adapter):
                             target=row["target"], socket_path=socket).details
 
 
+_PAUSED = "paused, runtime mask preserved; installed publication withheld"
+
+
+def _paused_bot_decided(store, key, adapter):
+    """A bot this update left paused is a health error until someone decides (#2699).
+
+    The update starts nothing and publishes nothing over the mask: nothing proves
+    who placed it, or that the bot's session would resume. So the error keeps the
+    update pending, and every restore pass (`host update continue` included)
+    reads again whether a stop is recorded for the bot (`bot stop`) or it runs
+    again. Either one ends it.
+    """
+    from .stop_record import read_stop
+    record, progress, row = _row(store, key)
+    fleet, bot = row["declaration"].get("fleet"), row["declaration"].get("bot")
+    if read_stop(Path(row["bot_binding"][0])) is not None:
+        decided = "the bot's stop is recorded"
+    else:
+        installed = row["preserved_mask"]["installed_path"]
+        running = False
+        try:
+            state = _native(adapter, row, "svc_inventory_state", installed, key)
+            if state.split()[1:] == ["loaded", "active"]:
+                session = _native(adapter, row, "svc_bot_session_observe", *row["bot_binding"], installed, key)
+                running, state = session == "ready", f"{state}, session {session}"
+        except RuntimeEvidenceError as exc:
+            state = f"unreadable, {exc}"
+        if not running:
+            choice = (f"either resume it (claudlobby --fleet {fleet} bot start {bot}) or record that it "
+                      f"stays stopped (claudlobby --fleet {fleet} bot stop {bot}), and run "
+                      "claudlobby host update continue")
+            if state.split()[:2] == ["masked-runtime", "masked"]:
+                raise UpdateError(f"this update left bot {fleet}/{bot} paused: {key} keeps its runtime mask "
+                                  "and no stop is recorded for the bot, so its unit file was not published. "
+                                  f"Clear the mask (systemctl --user unmask --runtime {key}), then {choice}")
+            raise UpdateError(f"this update left bot {fleet}/{bot} down: {key} does not read as running "
+                              f"(native state: {state}) and no stop is recorded for the bot: {choice}")
+        decided = "the bot runs again"
+    outcome = f"{_PAUSED}; {decided}"
+    if progress.get("outcome") != outcome:
+        progress["outcome"] = outcome
+        store.save(record)
+    return progress
+
+
 def observe_quiet(store, key, adapter):
     """Fresh final observation; caller holds its exclusive maintenance fence."""
     record, progress, row = _row(store, key)
@@ -468,10 +513,20 @@ def restore_consumer(store, key, adapter, current_snapshot):
     if row.get("kind") == "added":
         return _restore_added(store, record, progress, row, adapter, current_snapshot)
     if row.get("preserved_mask"):
-        _preserved_mask_quiet(row, adapter)
-        progress["outcome"] = "paused, runtime mask preserved; installed publication withheld"
-        progress["restore"] = "done"
-        store.save(record)
+        if progress.get("restore") != "done":
+            _preserved_mask_quiet(row, adapter)
+            progress["outcome"] = _PAUSED
+            # The update's own work on this unit ends here: it publishes nothing
+            # over the mask, so the schedules still restore after it. A bot left
+            # paused is reported apart, below.
+            progress["restore"] = "done"
+            if row["bot_binding"]:
+                # Saved with "done", so a pass cut off before the bot is read
+                # leaves it to the next pass, whose read replaces or clears this.
+                progress["restore_error"] = "this update left the bot paused and has not read it since"
+            store.save(record)
+        if row["bot_binding"]:
+            return _paused_bot_decided(store, key, adapter)
         return progress
     if not row["installed"]:
         progress["restore"] = "done"
@@ -565,15 +620,20 @@ def restore_consumer(store, key, adapter, current_snapshot):
     desired = row["restore_native"]
     if row["bot_binding"] and row["disposition"] != "running":
         desired = " ".join(desired.split()[:2] + ["inactive"])
+    held = _held_start(row, key, desired)
     observed = _native(adapter, row, "svc_activation_snapshot", source, key)
     if progress["restore"] == "files":
         _darwin(adapter, restored)
         if row["bot_binding"] and row["disposition"] == "running":
             _prepare_bot_readiness(store, record, progress, row, adapter, current_snapshot["data_root"])
+        if held:
+            _hold_start(adapter, row, held)
         progress["restore"] = "pending"
         store.save(record)
         _native(adapter, row, "svc_activation_resume", source, key, desired,
                 timeout=unit_start_budget(source, source.read_bytes()))
+        if held:
+            _await_held_elapse(adapter, row, held)
         observed = _native(adapter, row, "svc_activation_snapshot", source, key)
         if (row["manager"] == "Darwin" and not row["scheduled"]
                 and (row["disposition"] == "running" or desired.endswith(" active"))
@@ -584,6 +644,8 @@ def restore_consumer(store, key, adapter, current_snapshot):
             _native(adapter, row, "svc_activation_start", source, key,
                     timeout=unit_start_budget(source, source.read_bytes()))
             observed = _native(adapter, row, "svc_activation_snapshot", source, key)
+    if held:
+        _release_held_start(adapter, row, source, held)
     expected = observed == desired
     if row["manager"] == "Darwin" and row["scheduled"]:
         expected = observed.split()[:2] == desired.split()[:2]
@@ -595,6 +657,111 @@ def restore_consumer(store, key, adapter, current_snapshot):
     progress["restore"] = "done"
     store.save(record)
     return progress
+
+
+# A restored timer must not run its job as catch-up. Started again in the same
+# user manager, a timer counts from its previous start on the systemd versions
+# upstream issue #31231 names (Debian 12's 252.39 among them), so every
+# calendar time since then runs its job at once; a Persistent=true timer counts
+# from its last run, so a time missed while the update held it runs at once
+# too. So a timer restored to running starts held:
+# runtime drop-ins give the timer one elapse at once (OnActiveSec=, without its
+# accuracy window or random delay), and give its service an ExecCondition= that
+# marks that elapse and skips the job. The elapse becomes the timer's last
+# trigger, so its calendar continues from the restore. The hold goes once the
+# mark is seen. A hold whose mark never comes stays, so the service skips every
+# run, and the restore reports the timer until a pass sees a mark and releases it.
+_HELD_START = "claudlobby-update-held-start.conf"
+_HELD_START_WAIT_S = 30
+
+
+def _held_start(row, key, desired):
+    """The hold for a Linux timer restored to running; None for anything else."""
+    import re
+    if row["manager"] != "Linux" or not key.endswith(".timer") or desired.split()[-1] != "active":
+        return None
+    service = row["declaration"].get("service")
+    if not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", service):
+        raise UpdateError("restored timer names no exact service")
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    if (not re.fullmatch(r"(/[A-Za-z0-9_.@-]+)+", str(runtime)) or runtime.is_symlink()
+            or not runtime.is_dir() or runtime.stat().st_uid != os.getuid()):
+        raise UpdateError("timer hold runtime directory is not this user's")
+    units = runtime / "systemd" / "user"
+    return {"service": service, "timer_hold": units / f"{key}.d" / _HELD_START,
+            "service_hold": units / f"{service}.d" / _HELD_START,
+            "mark": runtime / "claudlobby-update-held-start" / service}
+
+
+def _drop_ins(adapter, row, unit):
+    from .supervision_inventory import _key_values
+    props = _key_values(_native(adapter, row, "svc_inventory_properties", unit).splitlines())
+    if props.get("Id") != unit or "DropInPaths" not in props:
+        raise UpdateError("held unit properties are not exact")
+    return props["DropInPaths"].split()
+
+
+def _write_hold(path, text):
+    if path.parent.is_symlink():
+        raise UpdateError("timer hold directory is redirected")
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".update-hold-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(text)
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _hold_start(adapter, row, held):
+    """Write both drop-ins and load them before the timer starts."""
+    mark = held["mark"]
+    if mark.parent.is_symlink():
+        raise UpdateError("timer hold mark directory is redirected")
+    mark.parent.mkdir(mode=0o700, exist_ok=True)
+    mark.unlink(missing_ok=True)
+    _write_hold(held["timer_hold"], "[Timer]\nOnActiveSec=1us\nAccuracySec=1us\nRandomizedDelaySec=0\n")
+    _write_hold(held["service_hold"], f"[Service]\nExecCondition=\nExecCondition=/bin/sh -c ': >{mark}; exit 1'\n")
+    _native(adapter, row, "svc_activation_reload")
+    if _drop_ins(adapter, row, held["service"]) != [str(held["service_hold"])]:
+        raise UpdateError("restored timer's service did not load its hold")
+
+
+def _await_held_elapse(adapter, row, held):
+    """The started timer's one elapse, marked by its held service."""
+    import time
+    if _drop_ins(adapter, row, row["target"]) != [str(held["timer_hold"])]:
+        raise UpdateError("restored timer has not taken its held start: its hold did not load")
+    deadline = time.monotonic() + _HELD_START_WAIT_S
+    while not held["mark"].exists():
+        if time.monotonic() >= deadline:
+            raise UpdateError("restored timer has not taken its held start; its service stays held")
+        time.sleep(0.05)
+
+
+def _release_held_start(adapter, row, source, held):
+    """Remove the hold once its elapse is marked, or while the timer is not running."""
+    timer_hold, service_hold, mark = held["timer_hold"], held["service_hold"], held["mark"]
+    if not (timer_hold.exists() or service_hold.exists()
+            or str(service_hold) in _drop_ins(adapter, row, held["service"])
+            or str(timer_hold) in _drop_ins(adapter, row, row["target"])):
+        return
+    if (not mark.exists() and _native(adapter, row, "svc_activation_snapshot", source,
+                                      row["target"]).split()[-1] == "active"):
+        raise UpdateError("restored timer has not taken its held start; its service stays held")
+    for path in (timer_hold, service_hold):
+        path.unlink(missing_ok=True)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass  # the directory holds another drop-in
+    _native(adapter, row, "svc_activation_reload")
+    if str(service_hold) in _drop_ins(adapter, row, held["service"]):
+        raise UpdateError("released timer hold is still loaded")
+    mark.unlink(missing_ok=True)
 
 
 def observe_added_absence(row, adapter):

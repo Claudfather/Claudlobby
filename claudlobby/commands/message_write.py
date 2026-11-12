@@ -7,20 +7,9 @@ import os
 import re
 import sqlite3
 import stat
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
-
-
+from ..request_ids import canonical_request_id
 from ..runtime_admission import bound_runtime_release as _bound_release
 
 
@@ -124,14 +113,14 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
     from ..report_payload import ReportPayload, ReportPayloadError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_route_matches)
 
     release_id = None
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
         body = report = None
         if is_report:
@@ -203,9 +192,6 @@ def dispatch(args) -> CommandOutput:
     except ReportPayloadError as exc:
         raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
                              release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

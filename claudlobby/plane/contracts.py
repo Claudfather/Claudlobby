@@ -438,6 +438,11 @@ class TaskEvent(_Strict):
     pr_attribution_withheld: Optional[Literal[PR_WITHHELD_REASONS]] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
+    #: The task's workstream at the moment of this act (#1053), or None for a
+    #: task in none. It rides ``detail``: the task kind keeps the stream's
+    #: workstream column NULL (``KIND_MANIFEST``), so recording it needs no
+    #: schema change. METADATA, registered as such in ``registries``.
+    workstream_id: Optional[str] = Field(None, min_length=1)
 
 
 class SystemEvent(_Strict):
@@ -852,6 +857,14 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
         payload = model.model_validate(env.payload)
     except ValidationError as exc:
         raise ContractViolation(exc.errors()) from exc
+    if env.event_type == "work_item" and env.origin == "live" and not payload.workstream_id:
+        # Every live task belongs to a workstream (#1053): admit records the
+        # task's own workstream, or joins an open one, in the task's batch.
+        # Legacy rows (imported history) may name none.
+        raise ContractViolation(
+            [{"loc": ("payload", "workstream_id"),
+              "msg": "a live work_item must name its workstream"}]
+        )
     if isinstance(payload, RegistrySnapshot) and payload.payload is not None:
         # the inner entity payload is typed per entity_type (§9b FINAL):
         # a snapshot whose payload fails its entity contract is a contract

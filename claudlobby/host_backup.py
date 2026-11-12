@@ -380,29 +380,3 @@ def restore_backup(bundle: Path, root: Path, *, replacing_retired_host: bool) ->
         _write(staging / MARKER, _json(marker))
         _publish(staging, root)
         return marker
-
-
-def restored_bootstrap(root: Path, release) -> bool:
-    """Admit only the untouched restored database into ordinary bootstrap/migration."""
-    marker_path = root / MARKER
-    if not os.path.lexists(marker_path):
-        return False
-    restore_status(root)
-    marker = json.loads(marker_path.read_bytes())
-    if marker["schema"] == 2:
-        raise ActivationRefusal("Git restore requires reviewed initialization; archived configuration and update cannot resume")
-    if (marker.get("schema") != 1 or marker.get("replaces_retired_host") is not True
-            or marker.get("host_uid") != read_host_uid(root / "state")
-            or marker.get("release_id") != release.release_id):
-        raise ActivationRefusal("restore requires its original release and explicit host identity continuity")
-    database = db_file(root)
-    _private_file(database)
-    if _file_digest(database) != marker.get("database_sha256"):
-        raise ActivationRefusal("restored database changed before activation")
-    for path in database.parent.iterdir():
-        if path == database:
-            continue
-        _private_file(path)
-        if path.name not in ("plane.db-wal", "plane.db-shm") or path.name.endswith("-wal") and path.stat().st_size:
-            raise ActivationRefusal("restore activation requires no live owner, pending queues or new writes")
-    return True

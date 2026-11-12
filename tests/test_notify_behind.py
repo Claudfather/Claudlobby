@@ -33,6 +33,11 @@ GIT = [
     "user.name=test",
     "-c",
     "commit.gpgsign=false",
+    # Git 2.47 and later end a commit by detaching `git maintenance run --auto`, which still
+    # holds .git/objects/maintenance.lock after the commit returns. That races the test here
+    # that deletes origin (#2717).
+    "-c",
+    "maintenance.auto=false",
 ]
 
 CURL_STUB = (
@@ -174,6 +179,21 @@ class Harness:
 
     def events(self):
         return read_fleet_events(self.root)
+
+
+def test_harness_commits_start_no_git_maintenance(tmp_path, monkeypatch):
+    """A detached `git maintenance` would race the test that deletes origin (#2717)."""
+    trace = tmp_path / "trace2.jsonl"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _commit(repo, "seed")
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [event for event in events if event.get("event") == "start" and "commit" in event["argv"]], \
+        "the trace must see the commit, or its silence below proves nothing"
+    maintenance = [event["argv"] for event in events if "maintenance" in event.get("argv", [])]
+    assert not maintenance, maintenance
 
 
 class TestNotifyBehind:

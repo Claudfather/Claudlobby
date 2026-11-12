@@ -653,7 +653,6 @@ def test_native_owner_process_proof_fails_closed(native_owner_gateway, monkeypat
 def test_git_owner_service_uses_committed_native_binding_and_keeps_process_gate(
         native_owner_gateway, monkeypatch, defect):
     """Process admission grants no workspace capability and lasts one invocation."""
-    from claudlobby import supervision_inventory
     from claudlobby.plane import owner_service
     (adapter, _, _, _, _), host, stem = native_owner_gateway
     declaration, _ = host.by_name[stem + '.service']
@@ -672,12 +671,6 @@ def test_git_owner_service_uses_committed_native_binding_and_keeps_process_gate(
     probe.root, probe.package = adapter.root, adapter.package
     if defect is None:
         assert probe.authorize() == 'service-bound'
-        inventory = supervision_inventory.collect_enrollment(adapter.root, (declaration,), adapter=host,
-            only_names=frozenset({declaration.source.name})).require_complete()
-        from claudlobby.active_config import read_current_config
-        snapshot = read_current_config(adapter.root, installation=adapter.package.installation)
-        assert owner_service.managed_listeners(snapshot, inventory) == {
-            (stem, adapter.root / 'private-owner/owner.sock')}
     else:
         with pytest.raises(AccessDenied, match='generated_context_refused'):
             probe.authorize()

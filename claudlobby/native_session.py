@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 from uuid import UUID, uuid4
 
@@ -46,6 +47,17 @@ def _plain(path, *, directory=False):
     if info.st_uid != os.getuid() or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
         raise NativeSessionError("native session path is not owned")
     return path
+
+
+def _inside(value, bot_dir):
+    """The bot directory or a directory below it, named without redirection."""
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    try:
+        return path.is_relative_to(bot_dir) and path.resolve() == path
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _path(bot_dir):
@@ -126,6 +138,14 @@ def _binding(value, bot_dir, label, tmpdir, account=None):
     return value
 
 
+def _written(value):
+    """Whether the retained session has written its transcript."""
+    try:
+        return os.lstat(value["transcript"]).st_size > 0
+    except FileNotFoundError:
+        return False
+
+
 def _image(value, *, prefix=None):
     path = _plain(value["transcript"])
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -204,6 +224,27 @@ def _provider_session(bot_dir, account, current):
     return identity
 
 
+def _launch_identity(bot_dir, account, launch, current):
+    """The provider's proof that the observed pane runs this pending launch (#2748).
+
+    A launch stays pending when its SessionStart capture never lands. Both readers of such
+    a receipt adopt it by this one rule, checkpoint() and the readiness confirm
+    (_adopt_launch): the pane is not the process a resumed launch replaces, the exact PID
+    record of the pane process, at its own process start, names the session the receipt
+    retains, and that session has written its transcript.
+    """
+    if current["process"] == launch["process"]:
+        # A resumed launch keeps the process it replaces, whose record names the same session,
+        # until its own capture lands. Adopting that process would refuse the replacement's.
+        raise NativeSessionError("native pane is still the process the pending launch replaces")
+    identity = _provider_session(bot_dir, account, current)
+    if identity["sessionId"] != launch["session_id"]:
+        raise NativeSessionError("native provider session is not the pending launch")
+    if _plain(launch["transcript"]).lstat().st_size <= 0:
+        raise NativeSessionError("native transcript of the pending launch is empty")
+    return identity
+
+
 def _adopted_value(bot_dir, label, tmpdir, account, current, identity):
     from .isolation import transcript_slug
     sid = identity["sessionId"]
@@ -236,17 +277,25 @@ def checkpoint(bot_dir, label, tmpdir, adapter, *, operation_id, account=None):
     if account is None:
         account = checkpoint_account(bot_dir, label, adapter)
     original = read(bot_dir)
-    adopting = original is None or "provider_start" in original
     value = None if original is None else _binding(original, bot_dir, label, tmpdir, account)
+    # A launch stays pending when its SessionStart capture never lands (#2748). Adopt
+    # it from the provider's PID record, by the rule the readiness confirm uses.
+    pending = value is not None and value["pending"]
+    adopting = original is None or pending or "provider_start" in original
     current = observe(adapter, bot_dir, label, tmpdir, process_start=adopting)
     if adopting and not current["process_start"].startswith(("Darwin:", "Linux:")):
         raise NativeSessionError("native provider process domain is unsupported")
-    if original is not None and (value["pending"] or value["process"] != current["process"]
-            or adopting and value["provider_start"] != current["process_start"]):
+    if original is not None and not pending and (value["process"] != current["process"]
+            or "provider_start" in original and value["provider_start"] != current["process_start"]):
         raise NativeSessionError("native session is not the recorded process")
     if not current["idle"]:
         raise NativeSessionBusy("native session is busy or has queued input")
-    identity = _provider_session(bot_dir, account, current) if adopting else None
+
+    def provider(observed):
+        if pending:
+            return _launch_identity(bot_dir, account, original, observed)
+        return _provider_session(bot_dir, account, observed)
+    identity = provider(current) if adopting else None
     if adopting:
         value = _adopted_value(bot_dir, label, tmpdir, account, current, identity)
     image = _image(value)
@@ -257,7 +306,7 @@ def checkpoint(bot_dir, label, tmpdir, adapter, *, operation_id, account=None):
         raise NativeSessionError("native process changed during checkpoint observation")
     if not after["idle"]:
         raise NativeSessionBusy("native session became busy during checkpoint observation")
-    if adopting and _provider_session(bot_dir, account, after) != identity:
+    if adopting and provider(after) != identity:
         raise NativeSessionError("native provider session changed during adoption")
     value = {**value, "checkpoint": image}
     _write(bot_dir, value, expected=original)
@@ -288,22 +337,41 @@ def verify_live(bot_dir, proof, adapter):
         raise NativeSessionError("adopted provider session changed before stop; continue the same operation")
 
 
+def _new_session(bot_dir, label, tmpdir, account):
+    from .isolation import transcript_slug
+    sid = str(uuid4())
+    return {"schema": 1, "session_id": sid, "transcript": str(account / "projects" / transcript_slug(bot_dir) / (sid + ".jsonl")),
+            "account": str(account), "cwd": str(bot_dir), "label": label, "tmpdir": str(tmpdir), "process": None, "pending": True, "checkpoint": None}
+
+
+def renew(bot_dir, label, tmpdir, account):
+    """Retain a new identity in place of the current one (`bot restart --fresh`).
+
+    The next launch starts it as a fresh session, as it starts any launch that
+    never reached SessionStart; the retired transcript stays on disk. The
+    receipt is replaced only if it is still the one read here.
+    """
+    current = read(bot_dir)
+    value = _new_session(bot_dir, label, tmpdir, account)
+    _write(bot_dir, value, expected=current)
+    return value
+
+
 def launch(bot_dir, label, tmpdir, account):
     value = read(bot_dir)
     original = value
     if value is None:
         if (Path(bot_dir) / "data/.spawn").exists():
             raise NativeSessionError("older bot needs explicit native session adoption; no latest-session guess or handoff fallback")
-        from .isolation import transcript_slug
-        sid = str(uuid4())
-        value = {"schema": 1, "session_id": sid, "transcript": str(account / "projects" / transcript_slug(bot_dir) / (sid + ".jsonl")),
-                 "account": str(account), "cwd": str(bot_dir), "label": label, "tmpdir": str(tmpdir), "process": None, "pending": True, "checkpoint": None}
+        value = _new_session(bot_dir, label, tmpdir, account)
         mode = "fresh"
     else:
         _binding(value, bot_dir, label, tmpdir, account)
-        if value["process"] is None:
-            mode = "fresh"  # Retry a launch that never acquired a SessionStart receipt.
+        if value["process"] is None and not _written(value):
+            mode = "fresh"  # Retry a launch that never reached SessionStart: it wrote no transcript.
         else:
+            # A recorded process, or a launch whose session wrote its transcript though its
+            # capture never landed (#2748): --session-id refuses an id already in use.
             if value["checkpoint"] is not None and _image(value, prefix=value["checkpoint"]["size"]) != value["checkpoint"]:
                 raise NativeSessionError("native transcript changed before continuation launch")
             _image(value)
@@ -314,9 +382,11 @@ def launch(bot_dir, label, tmpdir, account):
 
 
 def capture(bot_dir, label, tmpdir, account, adapter, payload, *, caller):
+    # The payload names the session's current directory, which follows its shell
+    # into a checkout. The receipt keeps the bot directory a resume starts in.
     if (not isinstance(payload, dict) or payload.get("hook_event_name") != "SessionStart"
             or payload.get("source") not in {"startup", "resume", "clear", "compact"}
-            or not _uuid(payload.get("session_id")) or payload.get("cwd") != str(bot_dir)):
+            or not _uuid(payload.get("session_id")) or not _inside(payload.get("cwd"), bot_dir)):
         raise NativeSessionError("unsupported native SessionStart identity")
     current = observe(adapter, bot_dir, label, tmpdir, caller=caller)
     prior = _binding(read(bot_dir), bot_dir, label, tmpdir, account)
@@ -345,6 +415,33 @@ def confirm(bot_dir, *, expected=None):
     if value["process"] is None:
         raise NativeSessionError("native SessionStart has not confirmed the retained launch")
     return value
+
+
+def _adopt_launch(bot_dir, label, tmpdir, account, adapter, launch):
+    """Adopt a pending launch for the readiness confirm when its capture never lands (#2748).
+
+    A start waits for its launch's SessionStart capture by polling the confirm until the
+    readiness ceiling. When the capture never lands, the provider's PID record proves the
+    launch instead, by checkpoint()'s rule (_launch_identity), across two observations of
+    one pane process. Whatever it cannot prove leaves the receipt untouched and the launch
+    pending, as before: a refusal would end the wait at once, and a stale record that a
+    reused pid left must never end a wait the capture could still confirm. So a record
+    that contradicts the launch also waits out the ceiling.
+    """
+    try:
+        current = observe(adapter, bot_dir, label, tmpdir, process_start=True)
+        identity = _launch_identity(bot_dir, account, launch, current)
+        after = observe(adapter, bot_dir, label, tmpdir, process_start=True)
+        if (after["process"] != current["process"] or after["process_start"] != current["process_start"]
+                or _launch_identity(bot_dir, account, launch, after) != identity):
+            raise NativeSessionError("native provider session changed during adoption")
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise NativeSessionPending("native SessionStart has not confirmed the retained launch, "
+                                   "and its provider does not prove it yet: " + str(exc)) from exc
+    try:
+        _write(bot_dir, _adopted_value(bot_dir, label, tmpdir, account, current, identity), expected=launch)
+    except (ValueError, OSError):
+        pass  # The capture landed first, or the receipt moved on: confirm() reads what is there.
 
 
 def _context(package, root, bot_dir, label):
@@ -391,9 +488,12 @@ def entry(args):
         if args.action == "capture":
             capture(bot_dir, args.label, Path(args.tmpdir), account, Adapter(package), json.load(sys.stdin), caller=os.getpid())
         elif args.action == "confirm":
+            adapter = Adapter(package)
             expected = _binding(read(bot_dir), bot_dir, args.label, Path(args.tmpdir), account)
+            if expected["pending"]:
+                _adopt_launch(bot_dir, args.label, Path(args.tmpdir), account, adapter, expected)
             value = confirm(bot_dir, expected=expected)
-            current = observe(Adapter(package), bot_dir, args.label, Path(args.tmpdir))
+            current = observe(adapter, bot_dir, args.label, Path(args.tmpdir))
             if value["process"] != current["process"]:
                 raise NativeSessionError("native SessionStart process changed before readiness")
         else:

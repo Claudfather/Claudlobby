@@ -422,6 +422,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json assignment reschedule *)",
         "Bash(claudlobby --json task escalate *)",
         "Bash(claudlobby --json task nudge *)",
+        "Bash(claudlobby --json task move *)",
         "Bash(claudlobby --json workstream open *)",
         "Bash(claudlobby --json workstream progress *)",
         "Bash(claudlobby --json workstream renew *)",
@@ -444,6 +445,7 @@ def _expected_default_fleet_ops_allow() -> list[str]:
         "Bash(claudlobby --json bot logs solo)",
         "Bash(claudlobby --json bot logs solo --lines *)",
         "Bash(claudlobby --json bot restart solo)",
+        "Bash(claudlobby --json bot restart solo --fresh)",
     ]
 
 
@@ -518,6 +520,11 @@ class TestComposeSettingsLocal:
         worker_grants = compose_settings_local(worker, fleet, paths)["permissions"]["allow"]
         assert "Bash(claudlobby --json bot restart lead)" in lead_grants
         assert "Bash(claudlobby --json bot restart worker)" in lead_grants
+        # #2696: a fresh session is chosen through the same exact targets.
+        assert "Bash(claudlobby --json bot restart lead --fresh)" in lead_grants
+        assert "Bash(claudlobby --json bot restart worker --fresh)" in lead_grants
+        assert "Bash(claudlobby --json bot restart worker --fresh)" in worker_grants
+        assert "Bash(claudlobby --json bot restart lead --fresh)" not in worker_grants
         assert "Bash(claudlobby --json bot handoff worker)" in lead_grants
         assert "Bash(claudlobby --json bot handoff worker --check)" in lead_grants
         assert "Bash(claudlobby --json bot interrupt worker)" in lead_grants

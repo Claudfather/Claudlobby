@@ -89,7 +89,7 @@ official server instead.
      domain.
 7. **Set the two `.env` vars** (fleet `.env`, gitignored): `GA4_SA_KEY_PATH`,
    `GA4_PROPERTY_ID`.
-8. **Wire the MCP** — add `google-analytics` to a bot's `mcp:` list, the operator's `config plan` / `host activate` flow (see *Equipping a bot*). The first `uvx` run downloads the package into
+8. **Wire the MCP** — add `google-analytics` to a bot's `mcp:` list, then the operator's `host update apply` (see *Equipping a bot*). The first `uvx` run downloads the package into
    the uv cache — warm it once so first bot use isn't slow.
 
 ## Navigating the GCP Console (service-account setup)
@@ -223,7 +223,7 @@ GA4_SA_KEY_PATH=/abs/path/to/local/<fleet>/.secrets/<name>.json
 GA4_PROPERTY_ID=123456789
 ```
 
-Then stage with `claudlobby config plan`, review `claudlobby config diff PLAN_ID`,
-and activate with `claudlobby host activate PLAN_ID --install-directory PATH`. The 6 read-only tools compose in as auto-allowed
+Then the operator applies the reviewed change with `claudlobby host update apply FULL_COMMIT`
+from a shell outside any bot session. The 6 read-only tools compose in as auto-allowed
 `mcp__google-analytics__*` reads (no write tools, so nothing prompts unattended).
 `claudlobby host doctor` flags either `.env` var if missing.

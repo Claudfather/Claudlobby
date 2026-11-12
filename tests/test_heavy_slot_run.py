@@ -27,6 +27,7 @@ from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "claudlobby/_runtime_scripts" / "heavy-slot.py"
+LINUX = sys.platform.startswith("linux")  # where /proc gives a process's PSS
 
 # The stub job: records that it ran (and who, in STUB_LOG), traps TERM, sleeps
 # or waits for a file when asked, exits with a chosen code.
@@ -49,8 +50,13 @@ def se(tmp_path):
     stub = bin_dir / "pytest"
     stub.write_text(STUB)
     stub.chmod(0o755)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("MemTotal: 67108864 kB\nMemAvailable: 67108864 kB\n")
+    (proc / "loadavg").write_text("1.00 1.00 1.00 1/100 42\n")
     env = constructed_env(
         PATH=f"{bin_dir}:{os.environ['PATH']}",
+        HEAVY_SLOT_PROC=proc,
         HEAVY_SLOT_DIR=tmp_path / "state",
         HEAVY_SLOT_EVENTS_FILE=tmp_path / "events.jsonl",
         HEAVY_SLOT_BOOT_ID="this-boot",
@@ -522,6 +528,20 @@ class TestTheQueue:
         assert "ticket" not in takes[0]  # alpha took a free slot nobody waited for
         assert takes[1]["ticket"]["n"] == refused["n"] and takes[1]["ticket"]["waited_s"] >= 0
 
+    def test_each_release_says_how_long_its_run_waited_in_the_queue(self, se):
+        """From its ticket's issue to its take, and no time for a run that took a
+        free slot with no ticket (#1645)."""
+        p = _hold(se)
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 75
+        _age(se, 100, bots=("beta",))  # its ticket issued 100 s ago
+        assert _release(se, p) == 0
+        assert _run(se, "pytest", BOT_ID="beta").returncode == 0
+        rows = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_released"]
+        take = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_acquired"][-1]
+        assert rows[0]["waited_s"] == 0  # alpha took a free slot nobody waited for
+        assert 100 <= rows[1]["waited_s"] == take["ticket"]["waited_s"] < 160
+        assert _record(se)["waited_s"] == rows[1]["waited_s"]
+
     def test_the_off_switch_decides_on_the_slot_alone(self, se):
         se.state.mkdir(parents=True)
         (se.state / "no-queue").touch()
@@ -532,6 +552,9 @@ class TestTheQueue:
         assert _run(se, "pytest").returncode == 0  # alpha again: no turn is held for beta
         assert not (se.state / "queue.lock").exists()
         assert "QUEUE OFF" in _status(se).stdout
+        # no refusal held a ticket, so no run's wait is known: it is left out (#1645)
+        rows = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_released"]
+        assert len(rows) == 2 and not any("waited_s" in r for r in rows)
 
     def test_a_queue_lock_nobody_releases_falls_back_to_the_slots_alone(self, se, hs, monkeypatch):
         # A stopped process holding the queue's lock must not stop every heavy
@@ -541,10 +564,11 @@ class TestTheQueue:
         fcntl.flock(fd, fcntl.LOCK_EX)
         monkeypatch.setattr(hs, "QUEUE_LOCK_WAIT_S", 0.05)
         try:
-            got, _slots, mine, order, why = hs._decide(se.state, 1, "pytest", take=False)
+            got, _slots, mine, order, why, read = hs._decide(se.state, 1, "pytest", take=False)
         finally:
             os.close(fd)
-        assert (got, mine, order) == (True, None, [])
+        assert (got, mine, order, read) == (True, None, [], False)
+        assert hs._decide(se.state, 1, "pytest", take=False)[5] is True  # the lock free: read
         assert why == "queue.lock was not had within 0.05 s"
 
     def test_a_damaged_queue_file_is_an_empty_queue(self, se):
@@ -667,3 +691,360 @@ class TestOnThePlane:
         assert [t["ticket"]["n"] for t in takes if "ticket" in t] == [refused["beta"]["n"]]
         (dropped,) = [r["data"] for r in rows if r["type"] == "heavy_slot_ticket_dropped"]
         assert (dropped["ticket"]["n"], dropped["ticket"]["idle_s"]) == (refused["gamma"]["n"], 180)
+
+
+# --- the stop line (#2221) ----------------------------------------------------------
+
+
+def _arm(se, text=None, **lines) -> None:
+    """Write state/heavy-slot/run-lines: the given text, or fast lines for a test."""
+    se.state.mkdir(parents=True, exist_ok=True)
+    if text is None:
+        lines = {"stop_mib": 3800, "debounce_reads": 2, "poll_s": 0.1, "grace_s": 5, **lines}
+        text = "".join(f"{k} = {v}\n" for k, v in lines.items())
+    (se.state / "run-lines").write_text(text)
+
+
+def _mem(se, mib: int) -> None:
+    proc = se.tmp / "proc"
+    proc.mkdir(exist_ok=True)
+    tmp = proc / ".meminfo"
+    tmp.write_text(f"MemTotal:       16384000 kB\nMemAvailable:   {mib * 1024} kB\n")
+    os.replace(tmp, proc / "meminfo")
+    (proc / "loadavg").write_text("1.00 1.00 1.00 1/100 42\n")
+
+
+def _stub(se, text: str) -> None:
+    stub = se.tmp / "bin" / "pytest"
+    stub.write_text("#!/bin/bash\n" + text)
+    stub.chmod(0o755)
+
+
+def _gone(pid: int) -> bool:
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                         text=True).stdout.strip()
+    return out == "" or out.startswith("Z")
+
+
+def _pid_of(path: Path) -> int:
+    return int(_wait_for(lambda: path.exists() and path.read_text().strip() or None))
+
+
+class TestTheStopLine:
+    def test_with_no_run_lines_the_default_line_watches_the_run(self, se):
+        _stub(se, 'ps -o pgid= -p $$ | tr -d " " > "$STUB_DIR/pg.self"\n'
+                  'echo $$ > "$STUB_DIR/pid.self"\n'
+                  'touch "$STUB_DIR/ran.$$"\n')
+        assert _run(se, "pytest").returncode == 0
+        assert (se.tmp / "pg.self").read_text().strip() == (se.tmp / "pid.self").read_text().strip()
+        rec = _record(se)
+        assert rec["lines"]["stop_mib"] == 3800 and rec["lines_from"] == "default"
+        released = [e for e in _events(se) if e["type"] == "heavy_slot_released"][0]
+        assert set(released["data"]) == {"slot", "shape", "exit", "started_at", "duration_s",
+                                         "waited_s", "peak"}
+
+    def test_every_release_says_what_its_run_drew(self, se):
+        """MemAvailable at the start and at its lowest, and the job's largest PSS,
+        read on every plain run (#1645)."""
+        assert _run(se, "pytest", STUB_SLEEP=0.3).returncode == 0
+        (row,) = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_released"]
+        peak = row["peak"]
+        assert (peak["mem_available_mib_start"], peak["mem_available_mib_low"]) == (65536, 65536)
+        assert peak["readings"] >= 1 and peak["unreadable"] == 0
+        assert isinstance(peak.get("job_pss_mib_high"), int) == LINUX
+        assert row["waited_s"] == 0 and _record(se)["peak"] == peak
+
+    def test_an_armed_run_leads_a_session_of_its_own(self, se):
+        _arm(se)
+        _mem(se, 8000)
+        _stub(se, 'ps -o pgid= -p $$ | tr -d " " > "$STUB_DIR/pg.self"\n'
+                  'echo $$ > "$STUB_DIR/pid.self"\n'
+                  'ps -o pgid= -p $PPID | tr -d " " > "$STUB_DIR/pg.parent"\n'
+                  'touch "$STUB_DIR/ran.$$"\n')
+        assert _run(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc").returncode == 0
+        own = (se.tmp / "pid.self").read_text().strip()
+        assert (se.tmp / "pg.self").read_text().strip() == own
+        assert (se.tmp / "pg.parent").read_text().strip() != own
+
+    @pytest.mark.parametrize("text", [
+        "bogus = 1\n",
+        "stop_mib = lots\n",
+        "stop_mib = 0\n",
+        "stop_mib = 3800\ndebounce_reads = 0\n",
+        "stop_mib = 3800\ndebounce_reads = 1.5\n",
+        "stop_mib = 3800\npoll_s = 61\n",
+        None,  # a directory named run-lines
+    ])
+    def test_a_run_lines_file_it_cannot_read_refuses_before_the_slot(self, se, text):
+        if text is None:
+            (se.state / "run-lines").mkdir(parents=True)
+        else:
+            _arm(se, text)
+        r = _run(se, "pytest")
+        assert r.returncode == 2
+        assert "NOT RUN" in r.stderr and "2221" in r.stderr
+        assert _ran(se.tmp) == []
+        assert not (se.state / "slot-0.lock").exists()
+        (refused,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
+        assert refused["data"]["where"] == "lines"
+
+    def test_free_memory_under_the_line_stops_the_run_after_the_debounce(self, se):
+        _arm(se)
+        _mem(se, 8000)
+        p = _start(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc", STUB_WAIT=se.tmp / "never")
+        _wait_for(lambda: _ran(se.tmp))
+        time.sleep(0.4)
+        assert p.poll() is None
+        _mem(se, 3000)
+        assert p.wait(30) == 79
+        assert (se.tmp / "term").exists()
+        rec = _record(se)
+        assert rec["state"] == "released" and rec["exit"] == 79 and rec["ended"] == "stopped"
+        assert rec["stop"]["line"] == "stop_mib" and "3000" in rec["stop"]["reading"]
+        events = _events(se)
+        assert [e["type"] for e in events] == [
+            "heavy_slot_acquired", "heavy_slot_stopped", "heavy_slot_released"]
+        assert events[2]["data"]["stop"]["line"] == "stop_mib"
+        # a stopped run's row keeps every field and value it had before #1645, and
+        # gains the run's wait and the job's PSS, as every row does
+        row = events[2]["data"]
+        assert set(row) == {"slot", "shape", "exit", "started_at", "duration_s", "ended", "stop",
+                            "peak", "waited_s"}
+        assert (row["exit"], row["ended"], row["stop"], row["waited_s"]) == (
+            79, "stopped", rec["stop"], 0)
+        assert row["peak"] == rec["peak"] == events[1]["data"]["peak"]
+        peak = dict(row["peak"])
+        assert isinstance(peak.pop("job_pss_mib_high", None), int) == LINUX
+        assert set(peak) == {"mem_available_mib_start", "mem_available_mib_low", "readings",
+                             "unreadable"}
+        assert (peak["mem_available_mib_start"], peak["mem_available_mib_low"]) == (8000, 3000)
+        (se.state / "run-lines").unlink()
+        assert _run(se, "pytest").returncode == 0  # the slot is free
+
+    def test_an_armed_run_that_stays_over_the_line_ends_as_before(self, se):
+        _arm(se)
+        _mem(se, 8000)
+        r = _run(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc", STUB_RC=3, STUB_SLEEP=0.5)
+        assert r.returncode == 3
+        events = _events(se)
+        assert "heavy_slot_stopped" not in [e["type"] for e in events]
+        released = [e for e in events if e["type"] == "heavy_slot_released"][0]
+        assert set(released["data"]) == {"slot", "shape", "exit", "started_at", "duration_s",
+                                         "waited_s", "peak"}
+        assert released["data"]["peak"]["mem_available_mib_low"] == 8000
+        assert _record(se)["ended"] == "done"
+
+    def test_a_reading_that_fails_never_stops_the_run(self, se):
+        _arm(se)
+        (se.tmp / "proc" / "meminfo").unlink()  # no meminfo here
+        bad = se.tmp / "bad-vm-stat"
+        bad.write_text("#!/bin/sh\nexit 1\n")
+        bad.chmod(0o755)
+        r = _run(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc", HEAVY_SLOT_VM_STAT=bad,
+                 STUB_RC=5, STUB_SLEEP=0.6)
+        assert r.returncode == 5
+        peak = _record(se)["peak"]
+        assert peak["unreadable"] >= 1
+        assert "heavy_slot_stopped" not in [e["type"] for e in _events(se)]
+        # no reading of free memory succeeded: its figures are left out, never 0 (#1645)
+        assert "mem_available_mib_start" not in peak and "mem_available_mib_low" not in peak
+        (row,) = [e["data"] for e in _events(se) if e["type"] == "heavy_slot_released"]
+        assert row["peak"] == peak
+
+    def test_the_stop_reaches_a_process_that_left_the_group(self, se):
+        _arm(se)
+        _mem(se, 8000)
+        _stub(se, 'trap \'touch "$STUB_DIR/term"; exit 143\' TERM\n'
+                  'python3 -c \'import os, sys, time\n'
+                  'os.setsid()\n'
+                  'open(sys.argv[1], "w").write(str(os.getpid()))\n'
+                  'time.sleep(60)\' "$STUB_DIR/esc.pid" &\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc")
+        esc = _pid_of(se.tmp / "esc.pid")
+        time.sleep(0.5)  # a few readings walk it
+        _mem(se, 3000)
+        assert p.wait(30) == 79
+        _wait_for(lambda: _gone(esc))
+        (stopped,) = [e for e in _events(se) if e["type"] == "heavy_slot_stopped"]
+        assert stopped["data"]["escapees"] == 1 and stopped["data"]["still_running"] == []
+
+    def test_what_ignores_term_is_killed_after_the_grace(self, se):
+        _arm(se, grace_s=0.5)
+        _mem(se, 8000)
+        _stub(se, 'trap "" TERM\n'
+                  'bash -c \'trap "" TERM; echo $$ > "$STUB_DIR/ign.pid"; sleep 60\' &\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc")
+        ign = _pid_of(se.tmp / "ign.pid")
+        _mem(se, 3000)
+        assert p.wait(30) == 79
+        _wait_for(lambda: _gone(ign))
+        (stopped,) = [e for e in _events(se) if e["type"] == "heavy_slot_stopped"]
+        assert stopped["data"]["sigkill"] is True
+
+    def test_a_signal_to_an_armed_wrapper_reaches_its_whole_group(self, se):
+        _arm(se)
+        _mem(se, 8000)
+        _stub(se, 'trap \'touch "$STUB_DIR/term"; exit 143\' TERM\n'
+                  'sleep 60 &\n'
+                  'echo $! > "$STUB_DIR/bg.pid"\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest", HEAVY_SLOT_PROC=se.tmp / "proc")
+        bg = _pid_of(se.tmp / "bg.pid")
+        _wait_for(lambda: _ran(se.tmp))
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(30) in (143, -signal.SIGTERM)
+        _wait_for(lambda: _gone(bg))
+        assert (se.tmp / "term").exists()
+        assert _record(se)["state"] == "released"
+        assert "heavy_slot_stopped" not in [e["type"] for e in _events(se)]
+
+    def test_status_always_shows_the_run_line(self, se):
+        out = _status(se).stdout
+        assert "run line:" in out and "3800" in out and "(default)" in out
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert info["stop_mib"] == 3800 and info["file"] == "default"
+        _arm(se, "poll_s = 1\n")  # a file sets values over the defaults
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert info["stop_mib"] == 3800 and info["poll_s"] == 1
+        _arm(se, "bogus = 1\n")
+        assert "NOT ARMED" in _status(se).stdout
+        assert "error" in json.loads(_status(se, "--json").stdout)["run_lines"]
+
+
+# --- the host's bounds and its one off (#2790) -----------------------------------
+
+
+def _refusal(hs, d: Path, text: str) -> str:
+    """What run_lines refuses a run-lines file holding text with."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run-lines").write_text(text)
+    with pytest.raises(hs.LinesError) as refused:
+        hs.run_lines(d)
+    return str(refused.value)
+
+
+class TestTheHostsBounds:
+    def test_the_fallback_is_this_hosts_numbers_inside_its_own_bounds(self, hs):
+        assert hs.RUN_LINES == {
+            "stop_mib": 3800, "debounce_reads": 2, "poll_s": 2, "grace_s": 10,
+            "stop_mib_floor": 3000, "notice_within_s": 6, "stopped_within_s": 21, "stop": "on"}
+        render = hs.RENDER_LINES
+        assert (render["stop_mib"], render["poll_s"], render["stop_mib_floor"],
+                render["notice_within_s"]) == (3800, 2, 3000, 6)
+        assert "stopped_within_s" not in render and "stop" not in render  # no grace, no off
+        assert hs._bounds_broken(dict(hs.RUN_LINES)) is None
+        assert hs._bounds_broken(dict(render)) is None
+
+    def test_each_bound_holds_at_its_edge(self, hs):
+        run, render = dict(hs.RUN_LINES), dict(hs.RENDER_LINES)
+        assert hs._bounds_broken({**run, "stop_mib": 3000}) is None  # at the floor
+        assert "stop_mib_floor" in hs._bounds_broken({**run, "stop_mib": 2999.9})
+        assert hs._bounds_broken({**run, "debounce_reads": 3}) is None  # noticed in 6 s
+        assert "notice_within_s" in hs._bounds_broken({**run, "debounce_reads": 4})
+        assert hs._bounds_broken({**run, "grace_s": 17}) is None  # stopped in 4 + 17 s
+        assert "stopped_within_s" in hs._bounds_broken({**run, "grace_s": 17.5})
+        # 30 x 0.2 s is 6.000000000000001 in floats: still 6 s
+        assert hs._bounds_broken({**run, "debounce_reads": 30, "poll_s": 0.2, "grace_s": 15}) is None
+        assert hs._bounds_broken({**render, "poll_s": 6}) is None  # one reading is a render's notice
+        assert "notice_within_s" in hs._bounds_broken({**render, "poll_s": 6.5})
+        assert "stop_mib_floor" in hs._bounds_broken({**render, "stop_mib": 2999})
+
+    @pytest.mark.parametrize("text, bound", [
+        ("stop_mib = 2999\n", "stop_mib_floor"),  # under this host's floor
+        ("stop_mib_floor = 3500\nstop_mib = 3400\n", "stop_mib_floor"),  # under the file's own
+        ("stop_mib_floor = 3900\n", "stop_mib_floor"),  # a floor over this host's line
+        ("debounce_reads = 4\n", "notice_within_s"),  # 4 readings 2 s apart: 8 s
+        ("poll_s = 3.5\n", "notice_within_s"),  # 2 readings 3.5 s apart: 7 s
+        ("notice_within_s = 3\n", "notice_within_s"),  # this host's 4 s notice
+        ("grace_s = 17.5\n", "stopped_within_s"),  # 4 s + 17.5 s
+        ("stopped_within_s = 12\n", "stopped_within_s"),  # 4 s + 10 s
+        ("stop = off\nstop_mib = 100\n", "stop_mib_floor"),  # the off line excuses no number
+    ])
+    def test_a_run_lines_file_outside_its_bounds_is_refused(self, hs, tmp_path, text, bound):
+        why = _refusal(hs, tmp_path, text)
+        assert "breaks its bounds" in why and bound in why and "#2790" in why, why
+
+    @pytest.mark.parametrize("text", [
+        "stop = on\n", "stop = OFF\n", "stop = no\n", "stop = 0\n", "stop = false\n",
+        "stop =\n", "stop_mib = off\n", "stop_mib = 0\n", "stop_mib = -1\n",
+        "stop_mib = inf\n", "stop_mib = nan\n", "stop_mib_floor = 0\n",
+        "debounce_reads = inf\n", "grace_s = nan\n", "notice_within_s = inf\n",
+        "stopped_within_s = 0\n",
+    ])
+    def test_a_value_that_acts_as_an_off_stays_refused(self, hs, tmp_path, text):
+        _refusal(hs, tmp_path, text)
+
+    @pytest.mark.parametrize("text, said", [
+        ("stop_mib = 2999\n", "stop_mib_floor"),
+        ("stop = on\n", "stop takes one value, off"),
+    ])
+    def test_a_refused_file_refuses_every_run_before_the_slot(self, se, text, said):
+        _arm(se, text)
+        r = _run(se, "pytest")
+        assert r.returncode == 2, r.stderr
+        assert "NOT RUN" in r.stderr and said in r.stderr, r.stderr
+        assert _ran(se.tmp) == [] and not (se.state / "slot-0.lock").exists()
+        (refused,) = [e for e in _events(se) if e["type"] == "heavy_slot_refused"]
+        assert refused["data"]["where"] == "lines" and said in refused["data"]["why"]
+        assert "NOT ARMED" in _status(se).stdout
+
+    def test_a_file_sets_the_hosts_own_bounds(self, se):
+        _arm(se, "stop_mib_floor = 2000\nstop_mib = 2500\nnotice_within_s = 10\n"
+                 "stopped_within_s = 30\ndebounce_reads = 4\npoll_s = 0.1\ngrace_s = 20\n")
+        assert _run(se, "pytest").returncode == 0
+        lines = _record(se)["lines"]
+        assert (lines["stop_mib"], lines["stop_mib_floor"], lines["notice_within_s"],
+                lines["stopped_within_s"], lines["stop"]) == (2500, 2000, 10, 30, "on")
+
+    def test_the_off_line_is_the_one_off_and_says_so_on_every_run(self, se):
+        # fast lines: with the stop on, this host would stop the job in a fraction of a second
+        _arm(se, "# the host's one off\nstop = off\npoll_s = 0.1\n")
+        _mem(se, 3000)
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=0.6)
+        assert r.returncode == 3, r.stderr
+        assert "memory stop is OFF" in r.stderr and "stop = off" in r.stderr and "#2790" in r.stderr
+        rec = _record(se)
+        assert rec["lines"]["stop"] == "off" and rec["ended"] == "done"
+        # read all the same, under the line every time, and never stopped (#1645)
+        assert rec["peak"]["mem_available_mib_low"] == 3000 and rec["peak"]["readings"] >= 2
+        events = _events(se)
+        assert [e["type"] for e in events] == ["heavy_slot_acquired", "heavy_slot_released"]
+        assert events[0]["data"]["stop"] == "off" and events[1]["data"]["peak"] == rec["peak"]
+        # the control: the same lines and job with the stop on are stopped
+        _arm(se, "poll_s = 0.1\n")
+        r = _run(se, "pytest", STUB_RC=3, STUB_SLEEP=5)
+        assert r.returncode == 79, r.stderr
+        assert "memory stop is OFF" not in r.stderr
+        acquired = [e for e in _events(se) if e["type"] == "heavy_slot_acquired"]
+        assert len(acquired) == 2 and "stop" not in acquired[1]["data"]
+
+    def test_a_signal_still_reaches_the_whole_group_with_the_stop_off(self, se):
+        _arm(se, "stop = off\n")
+        _stub(se, 'trap \'touch "$STUB_DIR/term"; exit 143\' TERM\n'
+                  'sleep 60 &\n'
+                  'echo $! > "$STUB_DIR/bg.pid"\n'
+                  'touch "$STUB_DIR/ran.$$"\n'
+                  'while [ ! -e "$STUB_DIR/never" ]; do sleep 0.05; done\n')
+        p = _start(se, "pytest")
+        bg = _pid_of(se.tmp / "bg.pid")
+        _wait_for(lambda: _ran(se.tmp))
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(30) in (143, -signal.SIGTERM)
+        _wait_for(lambda: _gone(bg))
+        assert (se.tmp / "term").exists()
+        assert _record(se)["state"] == "released"
+
+    def test_status_shows_the_bounds_and_the_off_line(self, se):
+        out = _status(se).stdout
+        assert "floor 3000 MiB, notice within 6 s, stopped within 21 s (default)" in out, out
+        info = json.loads(_status(se, "--json").stdout)["run_lines"]
+        assert (info["stop"], info["stop_mib_floor"], info["notice_within_s"],
+                info["stopped_within_s"]) == ("on", 3000, 6, 21)
+        _arm(se, "stop = off\n")
+        assert "run line: OFF" in _status(se).stdout
+        assert json.loads(_status(se, "--json").stdout)["run_lines"]["stop"] == "off"

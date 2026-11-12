@@ -605,6 +605,20 @@ process-bound SessionStart confirms continuation before readiness is reported.
 Continuation sends neither a restore prompt nor the authored startup prompt. A
 new bot instead receives an explicit fresh UUID and its normal startup prompt.
 
+A planned restart can choose a fresh session instead: `bot restart BOT --fresh`,
+which the `restart` skill uses. It waits for the same idle prompt and session
+proof, then, last before the unit restarts, retains a new UUID in the receipt in
+place of the current one. The launch starts it with `--session-id`, as it retries
+any launch that never reached SessionStart; the retired process cannot claim it,
+and its transcript stays on disk. The restart succeeds only once SessionStart
+has confirmed the new UUID. Every fresh UUID, this one included, first submits
+`SESSION_RESUME_COMMAND` when `.claude/session.md` is under `RESUME_MAX_AGE_S`
+(86400 s) old, then the authored startup prompt. A self restart into a fresh
+session also requires a handoff under 300 s old, when it is requested and again
+after the idle wait. If the unit restart fails after the new UUID is retained,
+the old session runs on and a restart that would continue it refuses; `bot
+stop`, then `bot start`, starts the fresh session.
+
 Missing or invalid transcript/session evidence refuses before stopping a running
 bot. For a running pre-feature bot without a receipt, the same checkpoint owner
 can adopt its exact PID-keyed Claude provider record. It checks the configured

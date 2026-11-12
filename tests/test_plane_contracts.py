@@ -122,6 +122,7 @@ def test_caps_enforce_from_field_policy(monkeypatch):
             "work_item_id": "wi_" + "0" * 32, "title": "t",
             "created_by": "bot:example-fleet/alpha",
             "body": "longer than eight bytes",
+            "workstream_id": "ws-test",
         }))
     monkeypatch.setitem(
         registries.FIELD_POLICY, ("communication", "body"),
@@ -138,8 +139,57 @@ def test_work_item_body_cap_is_bytes():
         validate_request(_req("work_item", {
             "work_item_id": "wi_" + "0" * 32, "title": "t",
             "created_by": "bot:example-fleet/alpha", "body": fat,
+            "workstream_id": "ws-test",
         }))
 
+
+
+def _work_item(**over) -> dict:
+    payload = {"work_item_id": "wi_" + "0" * 32, "title": "t",
+               "created_by": "bot:example-fleet/alpha", "workstream_id": "ws-test", **over}
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def test_a_live_work_item_must_name_its_workstream():
+    """#1053: every live task belongs to a workstream. A live work_item with
+    none, or a blank one, is refused, and the refusal names the field."""
+    for payload in (_work_item(workstream_id=None), _work_item(workstream_id="")):
+        with pytest.raises(ContractViolation) as refused:
+            validate_request(_req("work_item", payload))
+        assert refused.value.errors == [{"loc": ("payload", "workstream_id"),
+                                         "msg": "a live work_item must name its workstream"}]
+    env, payload = validate_request(_req("work_item", _work_item()))
+    assert env.origin == "live" and payload.workstream_id == "ws-test"
+
+
+def test_a_legacy_work_item_may_name_no_workstream():
+    """The rule is for live rows: imported history keeps what it carried."""
+    env, payload = validate_request({**_req("work_item", _work_item(workstream_id=None)),
+                                     "origin": "legacy"})
+    assert env.origin == "legacy" and payload.workstream_id is None
+
+
+def test_a_batch_whose_task_names_no_workstream_records_nothing(tmp_path):
+    """The door validates every request before its one transaction, so a
+    task's batch (its workstream, then the task) whose task names none
+    leaves no row at all, the workstream's included."""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.plane_setup import initialize_plane
+
+    initialize_plane(tmp_path)
+    workstream = _req("workstream", {"workstream_id": "ws-test", "title": "t",
+                                     "opened_by": "bot:example-fleet/alpha"})
+    with pytest.raises(ContractViolation):
+        emit_batch(tmp_path, [workstream, _req("work_item", _work_item(workstream_id=None))],
+                   require_commit=True)
+    conn = connect(db_path(tmp_path))
+    try:
+        counts = [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  for table in ("workstreams", "work_items")]
+    finally:
+        conn.close()
+    assert counts == [0, 0]
 
 def test_receiver_acknowledged_is_gone():
     # 22 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B)

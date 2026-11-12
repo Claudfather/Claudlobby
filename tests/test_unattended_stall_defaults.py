@@ -10,9 +10,11 @@ entry.
 
 On a model with a native 1M window, Claude Code can also end a turn past 200k
 tokens on an offer to autocompact earlier. A window set outside user settings
-stops it, so every bot composes `modelSettings` naming each such model "auto":
-Claude Code's own window, the one it uses with nothing set. A fleet or a bot
-sets `auto_compact_window` to a number to choose a window instead.
+stops it. Every bot composes a top-level `autoCompactWindow` of 700000 tokens,
+a bound on how far a conversation grows before Claude Code compacts it (#1053).
+A fleet or a bot sets `auto_compact_window` to another number, or to `auto`,
+which turns the bound off and composes `modelSettings` naming each such model
+"auto": Claude Code's own window, the one it uses with nothing set.
 """
 
 from __future__ import annotations
@@ -127,12 +129,31 @@ def test_a_fleet_default_arms_the_capture_prompt_and_a_bot_entry_wins(fleet_dir:
     }
 
 
-def test_every_bot_names_claude_codes_own_window_for_each_1m_model(fleet_dir: Path):
-    # "auto" is the value Claude Code reads as its own window, so the window is
-    # the one it uses with nothing set; no top-level key, which would cap every
-    # model's window instead.
+def test_with_no_key_every_bot_composes_the_700000_token_window(fleet_dir: Path):
+    # A top-level autoCompactWindow, which Claude Code caps at each model's own
+    # window, and no modelSettings, whose entries would replace it model by model.
+    assert "auto_compact_window" not in (fleet_dir / "fleet.yaml").read_text()
+    assert _windows(fleet_dir) == {b: (None, 700000) for b in BOTS}
+
+
+def test_a_bot_built_without_the_parser_takes_the_same_window():
+    from dataclasses import fields
+
+    from claudlobby.config import BotConfig
+
+    default = next(f.default for f in fields(BotConfig) if f.name == "auto_compact_window")
+    assert default == 700000
+
+
+def test_auto_turns_the_window_off_and_composes_no_top_level_key(fleet_dir: Path):
+    # "auto" is the value Claude Code reads as its own window, so each native-1M
+    # model gets the window it uses with nothing set; no top-level key, which
+    # would cap every model's window instead.
     assert "claude-sonnet-5-5" in NATIVE_1M_MODELS
+    _write(fleet_dir, "defaults", "auto_compact_window: auto")
     assert _windows(fleet_dir) == {b: (AUTO, None) for b in BOTS}
+    _write(fleet_dir, "worker-1", "auto_compact_window: 600000")
+    assert _windows(fleet_dir) == {"lead": (AUTO, None), "worker-1": (None, 600000)}
 
 
 def test_a_number_sets_the_window_and_a_bot_entry_wins(fleet_dir: Path):
@@ -150,6 +171,7 @@ def test_the_bounds_claude_code_accepts_are_accepted(fleet_dir: Path, value):
 
 @pytest.mark.parametrize("value", [
     # Claude Code drops each of these without a word, and the offer would return.
+    # Today the parser refuses each one, and the default does not change that.
     "99999", "1000001", "400k", '"400000"', "450000.5", "true", "null", "AUTO",
 ])
 def test_a_window_claude_code_would_drop_is_refused(fleet_dir: Path, value):

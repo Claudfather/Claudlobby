@@ -190,7 +190,6 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch
     from ..task_operations import TaskRecordingError
     from ..task_queries import TaskQueryError
     from ..task_recheck import RecheckUnresolved
@@ -208,9 +207,6 @@ def dispatch(args) -> CommandOutput:
                              data={"recording": exc.recording,
                                    "request_persisted": exc.request_persisted,
                                    "message_id": exc.message_id}) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint) from exc
     except (OperationContextUnavailableError, PendingMigrationError, DowngradeError,
             sqlite3.Error, OSError) as exc:
         raise CommandFailure("unavailable", "recheck identity or Plane storage is unavailable",

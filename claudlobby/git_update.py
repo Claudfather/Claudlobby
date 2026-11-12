@@ -20,10 +20,12 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -750,6 +752,35 @@ def _verify_inherited_lock(path, fd):
     os.set_inheritable(fd, False)
 
 
+#: Seconds a stage process may run without finishing a unit, or, in a stage with no
+#: units, at all. The longest honest step is a bot's 900 s capture wait (#2734).
+_STAGE_TIMEOUT = 1200
+#: Seconds between looks at the record while a stage runs.
+_STAGE_POLL = 5
+#: The stages that work through units, and the progress field a finished one sets.
+_STAGE_UNITS = {"quiesce": "stop", "restore": "restore"}
+
+
+def _interruption(exc, stage):
+    """Why a stage process ended without a result: the retained record's detail (#2702).
+
+    A refusal keeps the stage's own last words. An interruption has none of its
+    own, so its cause comes last, after whatever the process wrote before it
+    stopped, in the same 2000 characters.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        waited = "no unit finished" if stage in _STAGE_UNITS else "no result"
+        cause = f"interrupted: {waited} within {exc.timeout:g} s; the stage process was stopped"
+        output = exc.stderr or b""
+    else:
+        cause = f"interrupted: the stage process could not run: {exc}"
+        output = b""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    output = output.strip()
+    return output[-(2000 - len(cause) - 1):] + "\n" + cause if output else cause
+
+
 _STAGE_IMPORT = """import pathlib,sys
 source=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(source))
 import claudlobby
@@ -760,6 +791,54 @@ if pathlib.Path(update_entry.__file__).resolve()!=source/'claudlobby/update_entr
     raise SystemExit('application stage entry differs from explicit source')
 raise SystemExit(update_entry.main(sys.argv[2:]))
 """
+
+
+def _finished_units(store, stage):
+    """How many units the record says this stage has finished; 0 while it cannot be read as units (#2734).
+
+    A unit with a restore error has not finished: if every unit fails, the stage
+    must still stop and tell someone. A record that cannot be read is no news, and
+    never stops a stage by itself.
+    """
+    try:
+        record = store.load()
+    except UpdateError:
+        return 0
+    consumers = record.get("consumers") if record is not None else None
+    if not isinstance(consumers, dict):
+        return 0
+    field = _STAGE_UNITS[stage]
+    return sum(isinstance(progress, dict) and progress.get(field) == "done" and "restore_error" not in progress
+               for progress in consumers.values())
+
+
+def _run_stage(store, stage, command, **options):
+    """Run one stage process to its end, stopping it if `_STAGE_TIMEOUT` s pass with no unit finished.
+
+    This watches finished units and not every save: a stage failing each unit in
+    turn saves as often as a healthy one. The pipes are read all the while, and
+    what the process wrote goes up with the timeout, as subprocess.run's does.
+    """
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options) as process:
+        try:
+            counted = stage in _STAGE_UNITS
+            best = _finished_units(store, stage) if counted else 0
+            deadline = time.monotonic() + _STAGE_TIMEOUT
+            while True:
+                try:
+                    output, errors = process.communicate(timeout=_STAGE_POLL)
+                except subprocess.TimeoutExpired as exc:
+                    finished = _finished_units(store, stage) if counted else 0
+                    if finished > best:
+                        best, deadline = finished, time.monotonic() + _STAGE_TIMEOUT
+                    elif time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(command, _STAGE_TIMEOUT, output=exc.output,
+                                                        stderr=exc.stderr) from None
+                else:
+                    return subprocess.CompletedProcess(command, process.returncode, output, errors)
+        except BaseException:
+            process.kill()
+            raise
 
 
 def _application_stage(store, stage, *, source=None, python=None, runtime_fd=None, initialization=None, convert_sealed=False):
@@ -791,12 +870,15 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
     clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
                  CLAUDLOBBY_ROOT=str(store.root), PYTHONDONTWRITEBYTECODE="1")
     try:
-        result = subprocess.run([str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
-                                cwd=store.root, env=clean, pass_fds=tuple(inherited),
-                                capture_output=True, text=True, timeout=900)
+        result = _run_stage(store, stage, [str(python), "-I", "-B", "-c", _STAGE_IMPORT, str(source), *args],
+                            cwd=store.root, env=clean, pass_fds=tuple(inherited))
     except (OSError, subprocess.SubprocessError) as exc:
-        if store.load() is None:
+        record = store.load()
+        if record is None:
             raise UpdateError(f"application stage {stage} interrupted before an update operation was recorded") from exc
+        # Keep why, as a refusal does: status shows it, and the job's notice names it (#2702).
+        record["stage_error"] = {"stage": stage, "detail": _interruption(exc, stage)}
+        store.save(record)
         raise UpdateError(f"application stage {stage} interrupted; continue the same operation") from exc
     if result.returncode:
         record = store.load()
@@ -900,10 +982,38 @@ def _prepare_quiet_support(store):
             raise UpdateError("retained native quiet support changed")
         _write(destination, content)
         hashes[name] = _digest(content)
+    notice = _retain_notice_support(store, directory)
     if _head(store.installation) != record["before"]:
         raise UpdateError("source changed while retaining native quiet support")
     record["quiet_support"] = hashes
+    if notice is not None:
+        record["notice_support"] = notice
     store.save(record)
+
+
+def _retain_notice_support(store, directory):
+    """Retain the alert door's scripts beside the quiet support: their digests, or None.
+
+    The job's notice runs these copies, the previous release's, which carried this
+    host's alerts until the update began, not the ones a failed update has just
+    installed (#2715). Best effort: a script that is missing or cannot be copied
+    never stops the update, and its notice then runs the live checkout's.
+    """
+    hashes = {}
+    try:
+        for name in _NOTICE_SUPPORT:
+            source = store.installation.native / name
+            if source.is_symlink() or not source.is_file():
+                return None
+            content = source.read_bytes()
+            destination = _plain(directory / name)
+            if destination.exists() and destination.read_bytes() != content:
+                return None
+            _write(destination, content)
+            hashes[name] = _digest(content)
+    except (OSError, UpdateError):
+        return None
+    return hashes
 
 
 def _independent_quiet(store):
@@ -1007,13 +1117,13 @@ def _run_prepared_update(store):
         # Phase=quiesce fences new native starts. Drain those admitted before
         # that transition before trusting the frozen bot disposition. Release
         # the lock again so existing bots can record their handoff via the CLI.
-        with _exclusive_runtime(store):
+        with _exclusive_runtime(store, "drain"):
             pass
         _prepare_quiet_support(store)
         _application_stage(store, "quiesce")
     record = store.load()
     if record["phase"] in {"quiesce", "git", "environment", "publish", "commit"}:
-        with _exclusive_runtime(store) as fd:
+        with _exclusive_runtime(store, "cutover") as fd:
             record = store.load()
             actual = _head(store.installation)
             if record["phase"] == "quiesce":
@@ -1046,8 +1156,171 @@ def _run_prepared_update(store):
     return cleanup_candidate(store)
 
 
+#: Seconds between tries for the runtime lock. flock keeps no queue, so a writer
+#: that keeps trying takes the first free moment between its readers (#2734).
+_RUNTIME_POLL = 0.05
+#: Seconds between readings of who holds it, for this wait's row in the record.
+_RUNTIME_SCAN = 30
+#: Seconds the updater waits before it names the holders to the alert chat, and goes
+#: on waiting: the longest a bounded reader can ask for (brief --startup-wait).
+_RUNTIME_TELL = 300
+#: Seconds it waits in all before it refuses, with their names. A run that stops leaves
+#: the fence up, and at the second lock the fleet down, so this covers a night.
+_RUNTIME_STOP = 6 * 60 * 60
+#: Holders one line of text names. The record keeps them all.
+_HOLDERS_NAMED = 3
+#: Where Linux reads what each process has open, and macOS's way to ask.
+_PROC = Path("/proc")
+_LSOF = "/usr/sbin/lsof"
+
+
+def _holder(unit, comm, pid, running_s):
+    return {"unit": unit, "comm": "".join(letter for letter in comm if letter.isprintable()),
+            "pid": pid, "running_s": running_s}
+
+
+def _has_open(fds, lock):
+    """Whether a process's fd directory links to `lock`.
+
+    It reads each link and opens nothing: a stat would reach through every fd
+    this user holds, a dead mount's too, and could hang the wait.
+    """
+    for fd in os.listdir(fds):
+        try:
+            if os.readlink(fds / fd) == str(lock):
+                return True
+        except OSError:  # closed while this reads
+            continue
+    return False
+
+
+def _proc_holders(lock):
+    """Linux: what has `lock` open, one row per unit, naming its oldest process.
+
+    A child that inherited the fd holds the lock as its taker did, after the taker
+    has exited too, which is why this reads fds and not /proc/locks: that names the
+    dead pid. A process this user cannot read is passed over: the file is 0600.
+    """
+    uptime = float((_PROC / "uptime").read_text().split()[0])
+    ticks = os.sysconf("SC_CLK_TCK")
+    rows = {}
+    for name in os.listdir(_PROC):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        process = _PROC / name
+        try:
+            if not _has_open(process / "fd", lock):
+                continue
+            comm = (process / "comm").read_text(errors="replace").strip()
+            unit = (process / "cgroup").read_text(errors="replace").strip().rsplit("/", 1)[-1]
+            started = int((process / "stat").read_text(errors="replace").rpartition(")")[2].split()[19]) / ticks
+        except (OSError, ValueError, IndexError):  # gone, or not this user's
+            continue
+        row = _holder(unit or None, comm, int(name), max(0, round(uptime - started)))
+        key = row["unit"] or row["comm"]
+        if key not in rows or row["running_s"] > rows[key]["running_s"]:
+            rows[key] = row
+    return list(rows.values())
+
+
+def _lsof_holders(lock):
+    """macOS: what has `lock` open, as lsof gives it: a pid and a command, with no unit or age."""
+    listing = subprocess.run([_LSOF, "-F", "pc", "--", str(lock)], capture_output=True, text=True,
+                             errors="replace", timeout=10).stdout
+    rows, pid = [], None
+    for line in listing.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("c") and pid != os.getpid():
+            rows.append(_holder(None, line[1:], pid, None))
+    return rows
+
+
+def _lock_holders(lock):
+    """What holds the runtime lock, apart from this process; [] when that cannot be read (#2734).
+
+    A row is a unit, the kernel's short command name, a pid and an age, and never an
+    argument or the environment: these rows reach a chat, and a reader's arguments
+    can carry a secret.
+    """
+    try:
+        return _proc_holders(lock) if sys.platform == "linux" else _lsof_holders(lock)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return []
+
+
+def _holder_text(rows):
+    """Holders for one line of text: the longest running first, and how many more the record has."""
+    if not rows:
+        return "a holder that could not be named"
+    def name(row):
+        who = f"{row['comm']} pid {row['pid']}"
+        if row["running_s"] is not None:
+            who += f", running {row['running_s']} s"
+        return f"{row['unit']} ({who})" if row["unit"] else who
+    shown = sorted(rows, key=lambda row: row["running_s"] or 0, reverse=True)[:_HOLDERS_NAMED]
+    more = len(rows) - len(shown)
+    return ", ".join(name(row) for row in shown) + (f", and {more} more" if more else "")
+
+
+def _waiting_text(root, record, gate, waited, holders):
+    """The notice for a wait past `_RUNTIME_TELL`, each holder redacted as a cause is (#2715)."""
+    text = (f"FLEET ALERT: host update {record['request_id']} is waiting for the runtime lock "
+            f"(root {root}, phase {record['phase']}): held after {waited:.0f} s by "
+            f"{_redacted(_holder_text(holders))}. It goes on by itself when they finish; nothing needs running.")
+    return text + " Whatever it stopped stays down until then." if gate == "cutover" else text
+
+
+def _record_wait(store, row):
+    record = store.load()
+    record.pop("runtime_wait", None)
+    record.setdefault("runtime_waits", []).append(row)
+    store.save(record)
+
+
+def _wait_for_readers(store, fd, lock, gate):
+    """Take the runtime lock at the first free moment between readers, and record the wait (#2734).
+
+    Telling someone does not end the wait: a run that left would leave the fence
+    up, with no timer able to continue it, and past the second lock the fleet down.
+    """
+    started, told, scanned, seen = time.monotonic(), False, None, {}
+    row = {"gate": gate, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            break
+        now = time.monotonic()
+        waited = now - started
+        stopping, telling = waited >= _RUNTIME_STOP, not told and waited >= _RUNTIME_TELL
+        if stopping or telling or scanned is None or now - scanned >= _RUNTIME_SCAN:
+            scanned, holders = now, _lock_holders(lock)
+            for holder in holders:
+                key = holder["unit"] or holder["comm"]
+                if key not in seen or (holder["running_s"] or 0) >= (seen[key]["running_s"] or 0):
+                    seen[key] = holder
+        if stopping:
+            _record_wait(store, {**row, "outcome": "refused", "seconds": round(waited, 1),
+                                 "told": told, "holders": list(seen.values())})
+            raise UpdateError(f"runtime is still in use after {waited:.0f} s by {_holder_text(holders)}; "
+                              "continue after admitted readers finish")
+        if telling:
+            told = True
+            record = store.load()
+            record["runtime_wait"] = {**row, "seconds": round(waited, 1), "holders": holders}
+            store.save(record)
+            _notify(store, "this update is waiting for the runtime lock",
+                    lambda latest: _waiting_text(store.root, latest, gate, waited, holders))
+        time.sleep(_RUNTIME_POLL)
+    _record_wait(store, {**row, "outcome": "taken", "seconds": round(time.monotonic() - started, 1),
+                         "told": told, "holders": list(seen.values())})
+
+
 @contextmanager
-def _exclusive_runtime(store):
+def _exclusive_runtime(store, gate):
     lock = _plain(store.state / "runtime-use.lock")
     fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -1055,10 +1328,7 @@ def _exclusive_runtime(store):
         if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
                 or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)):
             raise UpdateError("runtime exclusion file changed")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise UpdateError("runtime is still in use; continue after admitted readers finish") from exc
+        _wait_for_readers(store, fd, lock, gate)
         yield fd
     finally:
         os.close(fd)
@@ -1384,28 +1654,285 @@ def apply_or_continue(installation, *, target=None, initialization=None, prepare
             raise UpdateBusyError("update lock is occupied; native attachment is not established") from None
         return {"update": latest, "job": {"request_id": record["request_id"], **observed, "dispatch": "attached"}}
 
-def _run_native_update(installation):
-    """Fixed job entry: kernel membership, then the one resumable coordinator."""
-    with UpdateStore(installation, wait=True) as store:
-        jobs, independent, adapter = _retained_job(store)
+
+#: The notice's PATH: the alert door needs curl and jq, wherever the host keeps them.
+_NOTICE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+#: Seconds the notice may take. tg-post.sh gives Telegram 6 of them.
+_NOTICE_TIMEOUT = 30
+#: Seconds the alert door has to end after its limit's SIGTERM, before SIGKILL (#2715).
+_NOTICE_GRACE = 3
+#: The alert door's scripts, retained beside the quiet support, which already holds
+#: the supervisor.sh that lib-common.sh sources (#2715).
+_NOTICE_SUPPORT = ("lib-common.sh", "cli-context.sh", "tg-post.sh")
+# The installation's own alert door, the one every host job's FLEET ALERT uses:
+# lib-common's resolve_alert_target picks the chat and its sender as one pair,
+# and tg-post.sh posts to Telegram. When that pair refuses, the notice walks on
+# to every other bot with an alert chat, in the resolver's own scan order, until
+# one accepts (#2715). bash runs tg-post.sh, since a retained copy is not
+# executable. Its output is the one protocol line below: tg-post can echo a
+# carrier's error, and with it a token.
+_NOTICE = r'''
+set -u
+door=$1 bots=$2
+. "$door/lib-common.sh" >/dev/null 2>&1 || { printf 'unavailable\tlib-common.sh did not load\n'; exit 0; }
+set +e
+message=''; IFS= read -r -d '' message
+resolve_alert_target "$bots" any >/dev/null 2>&1
+if [ -z "${_alert_chat_id:-}" ]; then
+    printf 'unconfigured\t%s\n' "${_alert_refusal:-no alert chat was found}"
+    exit 0
+fi
+tab=$(printf '\t') tried='' refused=0 last=0
+post() {  # <chat> <sender state dir> <token> <label>: one try per pair; exits once one accepts
+    case "$tried" in *"<$1$tab$2>"*) return 0 ;; esac
+    tried="$tried<$1$tab$2>"
+    TELEGRAM_GROUP_CHAT_ID="$1" TELEGRAM_STATE_DIR="$2" TELEGRAM_BOT_TOKEN="$3" \
+        /bin/bash "$door/tg-post.sh" "$message" >/dev/null 2>&1
+    last=$?
+    if [ "$last" -eq 0 ]; then
+        if [ "$refused" -gt 0 ]; then
+            printf 'carrier_accepted\t%s, after %s refused\n' "$4" "$refused"
+        else
+            printf 'carrier_accepted\t%s\n' "$4"
+        fi
+        exit 0
+    fi
+    refused=$((refused + 1))
+}
+scan() {  # each bot of one bots dir with an alert chat, as first_bot_with_conf reads them
+    local bot chat
+    [ -n "$1" ] && [ -d "$1" ] || return 0
+    for bot in "$1"/*/; do
+        [ -d "$bot" ] || continue
+        chat=$(bot_conf_get "$bot" TELEGRAM_GROUP_CHAT_ID "")
+        [ -n "$chat" ] || continue
+        post "$chat" "$(bot_conf_get_path "$bot" TELEGRAM_STATE_DIR "")" "" "scan:bot:$(basename "$bot")"
+    done
+}
+post "$_alert_chat_id" "${_alert_state_dir:-}" "${_alert_token:-}" "${_alert_target_src:-}"
+# The walk of first_bot_with_conf_any_fleet: this bots dir, then every fleet's.
+scan "$bots"
+while IFS= read -r dir; do
+    [ "$dir" = "$bots" ] || scan "$dir"
+done <<EOF
+$(host_fleet_bots_dirs 2>/dev/null)
+EOF
+if [ "$refused" -gt 1 ]; then
+    printf 'failed\ttg-post.sh exit %s, the last of %s recipients\n' "$last" "$refused"
+else
+    printf 'failed\ttg-post.sh exit %s\n' "$last"
+fi
+'''
+#: Shapes of a credential, which the notice never quotes (#2715): a chat is a wider
+#: audience than `host update status`, which keeps the whole line.
+_SECRET_SET = re.compile(r"(?i)([a-z0-9_.-]{0,40}(?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key"
+                         r"|credential)[a-z0-9_.-]{0,40}[\"']?\s*[=:]\s*[\"']?)[^\s\"',;]+")
+_CREDENTIALS = re.compile(
+    r"(?i:\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,})"  # an HTTP authorization value
+    r"|(?<=://)[^\s/@]+(?=@)"  # a URL's user and password
+    r"|(?<![0-9])[0-9]{5,}:[A-Za-z0-9_-]{20,}"  # a Telegram bot token, in an API URL too
+    r"|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{16,}"  # GitHub
+    r"|xox[abposr]-[A-Za-z0-9-]{10,}"  # Slack
+    r"|sk-[A-Za-z0-9_-]{16,}"  # OpenAI-style
+    r"|AKIA[0-9A-Z]{16}")  # AWS
+_OPAQUE = re.compile(r"[A-Za-z0-9_+=-]{24,}")
+
+
+def _redacted(text):
+    """`text` with each run shaped like a credential replaced by [redacted] (#2715).
+
+    A value set for a key named like a secret, an authorization value, a URL's
+    password, a Telegram token, the prefixed keys of GitHub, Slack, OpenAI-style
+    services and AWS, and any other run of 24 or more characters that mixes upper
+    and lower case and digits, as opaque keys do. A hex digest, a commit, a
+    request id and a path do not mix them, and stay.
+    """
+    text = _SECRET_SET.sub(r"\1[redacted]", text)
+    text = _CREDENTIALS.sub("[redacted]", text)
+    return _OPAQUE.sub(lambda match: "[redacted]" if all(re.search(kind, match.group(0))
+                       for kind in ("[a-z]", "[A-Z]", "[0-9]")) else match.group(0), text)
+
+
+def _unfinished_text(root, record, failure):
+    """The notice for a job run that left the update unfinished, or None when it finished.
+
+    Each cause it quotes is redacted, then clipped (#2715).
+    """
+    if record is None or record["phase"] == "done" and not record.get("health_errors"):
+        return None
+    def clip(value, limit=300):
+        return _redacted(" ".join(str(value).split()))[:limit]
+    errors = record.get("health_errors") or {}
+    if failure is not None:
+        cause = clip(failure) or type(failure).__name__
+        error = record.get("stage_error")
+        if (isinstance(error, dict) and isinstance(error.get("detail"), str) and error["detail"].strip()
+                and f"application stage {error.get('stage')} " in str(failure)):
+            cause += f" ({clip(error['detail'].strip().splitlines()[-1])})"
+    elif errors:
+        first = sorted(errors)[0]
+        cause = f"{len(errors)} unit(s) reported a health error; {first}: {clip(errors[first])}"
+    else:
+        cause = "it stopped before it finished"
+    return (f"FLEET ALERT: host update {record['request_id']} did not finish "
+            f"(root {root}, phase {record['phase']}): {cause}. Whatever it stopped and has not "
+            "restored stays down: read claudlobby host update status, then run claudlobby host "
+            "update continue from a shell outside any bot session.")
+
+
+def _notice_door(store, record):
+    """The scripts directory the notice runs, and a note when it is not the retained one.
+
+    The copies retained beside the quiet support run while each still matches its
+    digest (#2715). An update prepared before they were retained runs the live
+    checkout's, as before; one whose retained copies changed runs them too, and
+    says so.
+    """
+    retained = record.get("notice_support")
+    if retained is None:
+        return store.installation.native, None
+    try:
+        directory = _plain(store.work / ("quiet-" + record["request_id"]))
+        expected = {**retained, "supervisor.sh": record["quiet_support"]["supervisor.sh"]}
+        if set(retained) == set(_NOTICE_SUPPORT) and all(
+                _digest((directory / name).read_bytes()) == digest for name, digest in expected.items()):
+            return directory, None
+    except (OSError, KeyError, TypeError, UpdateError):
+        pass
+    return store.installation.native, "its retained alert scripts changed, so the live checkout's ran"
+
+
+def _stop_door(process):
+    """Stop an alert door past its limit: SIGTERM first, then SIGKILL for what is left (#2715).
+
+    On SIGTERM each bash in the door runs its EXIT trap, where lib-common removes
+    its scratch directory, tg-post.sh's token-bearing curl config among it; a
+    SIGKILL skips that. TMPDIR cannot keep that directory private: macOS's mktemp
+    puts it in the per-user temp directory whatever TMPDIR says. macOS also sends
+    nothing to a group that holds an unreaped zombie, failing with EPERM, so a
+    refused signal is sent again, and the door's own bash is reaped while the
+    group is watched. A child that ignores SIGTERM can hold the bash waiting on
+    it past the grace (macOS's bash 3.2 ran the trap only once it ended), and the
+    SIGKILL then ends both without the cleanup.
+    """
+    for number, grace in ((signal.SIGTERM, _NOTICE_GRACE), (signal.SIGKILL, 5)):
+        deadline = time.monotonic() + grace
+        sent = False
+        while time.monotonic() < deadline:
+            process.poll()
+            try:
+                os.killpg(process.pid, 0 if sent else number)
+                sent = True
+            except ProcessLookupError:
+                deadline = None
+                break
+            except PermissionError:
+                pass
+            time.sleep(0.05)
+        if deadline is None:
+            break
+    try:
+        process.communicate(timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _send_notice(store, door, text):
+    """Post one line through the alert door in `door`: (status, detail)."""
+    command = ["/bin/bash", "--noprofile", "--norc", "-c", _NOTICE, "update-notice",
+               str(door), str(store.root / "runtime/bots")]
+    environment = {"PATH": _NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()),
+                   "CLAUDLOBBY_ROOT": str(store.root), "PLANE_EMIT_DISABLED": "1"}
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, cwd=store.root, env=environment,
+                                   start_new_session=True)
+    except OSError as exc:
+        return "failed", f"bash did not start: {exc}"
+    try:
+        output, _ = process.communicate(text.encode() + b"\0", timeout=_NOTICE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _stop_door(process)
+        return "failed", f"no answer within {_NOTICE_TIMEOUT} s"
+    status, _, detail = output.decode("utf-8", "replace").strip().partition("\t")
+    if status not in {"carrier_accepted", "failed", "unconfigured", "unavailable"}:
+        return "failed", "the alert door gave no answer"
+    return status, detail
+
+
+def _notify(store, subject, compose):
+    """Post `compose(record)` through the alert door and say so on stderr; it never raises (#2702)."""
+    note = None
+    try:
         record = store.load()
-        binding = record.get("updater_job")
-        if binding is None:
-            raise UpdateError("independent native job has no retained binding")
-        jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
-                                      native_target=binding["target"])
-        _check_bound_job(store, jobs, independent, adapter)
-        dispatch = record.get("job_dispatch")
-        if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
-            raise UpdateError("native updater lacks its original dispatch intent")
-        record["job_dispatch"] = {**dispatch, "state": "entered"}
-        store.save(record)
+        text = compose(record)
+        if text is None:
+            return
+        door, note = _notice_door(store, record)
+        status, detail = _send_notice(store, door, text)
+    except Exception as exc:  # a notice must never replace the update's own result
+        status, detail = "failed", type(exc).__name__
+    note = f"; {note}" if note else ""
+    if status == "carrier_accepted":
+        print(f"claudlobby update: posted that {subject} ({detail}{note})", file=sys.stderr)
+    else:
+        print(f"claudlobby update: nobody was told that {subject}: {status}"
+              + (f": {detail}" if detail else "") + note, file=sys.stderr)
+
+
+def _notify_unfinished(store, failure):
+    """Tell a human, once per job run, that this run left the update unfinished (#2702).
+
+    This job is the one process still running when an update cannot finish: the
+    bots, the plane daemon and every timer that would page someone (fleet-pulse,
+    keepalive) are among what it stopped. So it posts the notice itself, to
+    Telegram, which nothing the update stops carries. The notice never changes
+    the run's own outcome.
+    """
+    _notify(store, "this update did not finish", lambda record: _unfinished_text(store.root, record, failure))
+
+
+def _run_native_update(installation):
+    """Fixed job entry: kernel membership, then the one resumable coordinator.
+
+    A run that leaves the update unfinished posts one notice before it exits, a
+    refused run included (#2715), unless the refusal says this process may not
+    be the update's job.
+    """
+    with UpdateStore(installation, wait=True) as store:
+        failure, speaks, entered = None, True, False
         try:
-            return run_prepared_update(store)
-        finally:
+            jobs, independent, adapter = _retained_job(store)
             record = store.load()
-            record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
+            # A process that has not shown it is the job may be a hand-run `_run`
+            # that took this lock while the job waits for it: it speaks for no
+            # update, and the job reports its own run.
+            speaks = False
+            binding = record.get("updater_job")
+            if binding is None:
+                raise UpdateError("independent native job has no retained binding")
+            jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
+                                          native_target=binding["target"])
+            speaks = True
+            _check_bound_job(store, jobs, independent, adapter)
+            dispatch = record.get("job_dispatch")
+            if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
+                raise UpdateError("native updater lacks its original dispatch intent")
+            record["job_dispatch"] = {**dispatch, "state": "entered"}
             store.save(record)
+            entered = True
+            return run_prepared_update(store)
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            if entered:
+                record = store.load()
+                record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
+                store.save(record)
+            if speaks:
+                _notify_unfinished(store, failure)
+
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv

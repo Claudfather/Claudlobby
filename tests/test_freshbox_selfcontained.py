@@ -341,34 +341,6 @@ def test_has_failures_true_only_for_fail_severity():
     assert not has_failures([])
 
 
-def test_format_report_renders_clean_summary_and_findings(tmp_path):
-    """The report reads as self-contained when clean, and names the drift otherwise."""
-    from claudlobby.freshbox import format_report
-
-    root = tmp_path / "claudlobby"
-    _build_library(root)
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
-
-    clean = _fleet({"w": BotConfig(bot_id="w", name="w", expertise=["eng"])}, manager="w")
-    clean_out = format_report(clean, audit_fleet(clean, paths))
-    assert "self-contained" in clean_out.lower()
-
-    drifty = _fleet(
-        {
-            "d": BotConfig(
-                bot_id="d",
-                name="d",
-                expertise=["eng"],
-                tool_permissions=ToolPermissionsConfig(allow=["mcp__x__*"]),
-            )
-        },
-        manager="d",
-    )
-    drifty_out = format_report(drifty, audit_fleet(drifty, paths))
-    assert "mcp__x__*" in drifty_out
-    assert "d" in drifty_out
-
-
 def test_rich_multisource_bot_audits_clean(tmp_path):
     """A bot drawing grants from expertise + integration + guardrail + channel
     audits clean — the gate must not false-alarm on a well-formed bot."""
@@ -885,18 +857,6 @@ def test_strict_blocks_warn_but_not_info():
     assert exits_nonzero(warn, strict=True)  # ...but blocks under --strict
     fail = [Finding("b", "denied_value", FAIL, "x")]
     assert exits_nonzero(fail, strict=False)  # FAIL always blocks
-
-
-def test_format_report_renders_info_lines():
-    from claudlobby.freshbox import INFO, Finding, format_report
-
-    fleet = _fleet({"kev": _kev()}, manager="kev")
-    out = format_report(
-        fleet, [Finding("kev", "external_ref", INFO, "mount data → /mnt/x")]
-    )
-    assert "[info]" in out
-    assert "/mnt/x" in out
-    assert "0 fail" in out and "1 fail" not in out
 
 
 def test_clean_bot_with_used_external_has_no_fail(tmp_path):

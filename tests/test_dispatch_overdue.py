@@ -119,7 +119,7 @@ class _Plane:
         events = [
             {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
              "occurred_at": at, "payload": {"work_item_id": wi, "title": str(row.get("task") or "t"),
-                                            "created_by": f"bot:{F}/lead"}},
+                                            "created_by": f"bot:{F}/lead", "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,
              "occurred_at": at, "payload": payload_asg},
             {"event_type": "communication", "emitter": "dispatch-task", "fleet": F, "source_ref": ref,

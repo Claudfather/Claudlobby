@@ -94,7 +94,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
             boot_brief_armed,
             boot_brief_switch.arm
             if boot_brief_switch is not None
-            else "bots.<bot>.brief.on_start: true in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
+            else "bots.<bot>.brief.on_start: true in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA",
         )
     )
 

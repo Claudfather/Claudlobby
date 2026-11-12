@@ -46,6 +46,11 @@ def _source_installation(tmp_path):
     (source / "claudlobby/_runtime_scripts/fixture.sh").write_text("#!/bin/sh\nexit 0\n")
     (source / "library/voices/example.md").write_text("example voice\n")
     _run(["git", "init", "--quiet", source], tmp_path)
+    # Git 2.47 and later end a commit, fetch or merge by detaching `git maintenance run --auto`,
+    # which still holds .git/objects/maintenance.lock after the command returns. A test that then
+    # deletes this checkout can list that file and find it gone at its unlink (#2717), so no
+    # command in this repository starts that maintenance.
+    _run(["git", "-C", source, "config", "maintenance.auto", "false"], tmp_path)
     _run(["git", "-C", source, "add", "."], tmp_path)
     _run(["git", "-C", source, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
           "commit", "--quiet", "-m", "Fixture source"], tmp_path)
@@ -54,6 +59,23 @@ def _source_installation(tmp_path):
     installation.data_root.mkdir()
     write_installation(installation)
     return installation
+
+
+def test_source_fixture_repository_starts_no_git_maintenance(tmp_path, monkeypatch):
+    """Neither the fixture's commit nor a later one in its repository starts `git maintenance`,
+    which since Git 2.47 outlives the command and races the tests that delete the checkout (#2717)."""
+    trace = tmp_path / "trace2.jsonl"
+    untraced = constructed_env
+    monkeypatch.setattr(sys.modules[__name__], "constructed_env",
+                        lambda **env: untraced(GIT_TRACE2_EVENT=trace, **env))
+    installation = _source_installation(tmp_path)
+    _run(["git", "-C", installation.source, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "--allow-empty", "-m", "Later commit"], tmp_path)
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    commits = [event for event in events if event.get("event") == "start" and "commit" in event["argv"]]
+    assert len(commits) == 2, "the trace must see both commits, or its silence below proves nothing"
+    maintenance = [event["argv"] for event in events if "maintenance" in event.get("argv", [])]
+    assert not maintenance, maintenance
 
 
 def test_source_resources_execute_from_explicit_installation_outside_checkout(tmp_path):

@@ -3828,15 +3828,19 @@ _IDLE_PATTERN_BASE='([>❯].{0,3}$|Remote Control act|Enter.*to close|Yes\/No|Al
 
 # pane_is_idle <pane_text>
 # Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
-# Used by fleet-pulse to avoid flagging a finished, at-prompt bot as
-# activity_stuck. Operators extend via KEEPALIVE_IDLE_PATTERNS.
+# Read by keepalive's classify_pane, by pane_compact_ready and by supervisor.sh's
+# idle check. Operators extend via KEEPALIVE_IDLE_PATTERNS.
 pane_is_idle() {
     local text="$1"
     local _idle_pattern="$_IDLE_PATTERN_BASE"
     if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_idle_pattern"
+    # A here-string, never a pipe into grep (#2428, #2863). grep -q exits at its
+    # first match; the pane lines still to be written then met a closed pipe, and
+    # under pipefail that failure read the match as a miss: an idle screen read
+    # as not idle.
+    grep -qE "$_idle_pattern" <<<"$text"
 }
 
 # Base busy-detection regex — single source of truth for keepalive.sh
@@ -3955,6 +3959,53 @@ _pane_region_is_menu() {
         END { exit !found }'
 }
 
+# pane_compact_ready <pane_text>
+# The whole-screen idle test #1053's executor reads before it types /compact
+# (keepalive.sh, compact_tick): on the tick's capture, and again on a capture
+# taken under the pane's send lock just before the keys. Four facts, each a
+# veto, read in this order on the WHOLE screen, never keepalive's last ten
+# lines: no running turn (pane_is_busy; a task list or an agent tree drawn under
+# the activity line pushes it out of those ten lines), no menu or dialog
+# (pane_is_menu), no text in the input box (pane_is_held, pane_box_end_held),
+# and an input prompt (pane_input_region finds the box, and pane_is_idle reads
+# the screen idle). pane_is_idle alone proves nothing: it reads most running
+# turns' screens as idle too, so it is the last leg, after the vetoes.
+#
+# Prints nothing and returns 0 when all four hold. Otherwise prints the first
+# that failed (busy, menu, held, no_prompt) and returns 1, or no_utf8_locale
+# when the host has no UTF-8 locale to read under. The locale is pinned
+# (_pane_utf8_locale): under LC_ALL=C pane_is_idle reads frames idle that it
+# does not under UTF-8, and keepalive's own unit runs under en_US.UTF-8.
+pane_compact_ready() {
+    local text="$1" region
+    _pane_utf8_locale || { printf 'no_utf8_locale'; return 1; }
+    local -x LC_ALL="$_PANE_UTF8_LOCALE"
+    if pane_is_busy "$text"; then printf 'busy'; return 1; fi
+    if pane_is_menu "$text"; then printf 'menu'; return 1; fi
+    if pane_is_held "$text" || pane_box_end_held "$text"; then printf 'held'; return 1; fi
+    region=$(pane_input_region "$text")
+    if [ -z "$region" ] || ! pane_is_idle "$text"; then printf 'no_prompt'; return 1; fi
+    return 0
+}
+
+# _pane_utf8_locale
+# Sets _PANE_UTF8_LOCALE to the UTF-8 locale pane_compact_ready reads under:
+# en_US.UTF-8, the one keepalive's unit runs under, where the host has it, else
+# C.UTF-8, in either spelling `locale -a` lists. Read once per shell; returns 1,
+# setting nothing, when the host has neither.
+_PANE_UTF8_LOCALE=""
+_pane_utf8_locale() {
+    [ -z "$_PANE_UTF8_LOCALE" ] || return 0
+    local have name
+    have=$'\n'"$(locale -a 2>/dev/null || true)"$'\n'
+    for name in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
+        case "$have" in
+            *$'\n'"$name"$'\n'*) _PANE_UTF8_LOCALE="$name"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # _held_box_squeezed <region>
 # The input box's own text, from pane_input_region's first line (the glyph line)
 # to the rule drawn under the box, with the glyph and every blank (space, tab,
@@ -4047,13 +4098,65 @@ bot_dir_for_session() {
     printf '%s' "$target"
 }
 
+# The host compaction slot's own reader, asked about one bot (#1053, build PR
+# 6): compaction-slot.py's status(), the function behind its `status --json`,
+# so the rule for a live lease stays written once, in the slot. argv: the slot
+# script, the fleet, the bot. One line on stdout, and exit 0, always: `held
+# <seconds left>`, `free`, or `unreadable <why>`. claudlobby/message_transport.py
+# runs the same text with no shell; a test holds the two equal, so change both.
+_COMPACTION_LEASE_PY='# compaction-lease (#1053)
+import importlib.util, sys
+def answer(path, fleet, bot):
+    spec = importlib.util.spec_from_file_location("compaction_slot", path)
+    slot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(slot)
+    out = slot.status()[1]
+    lease = out.get("lease") or {}
+    if out.get("state") != "held" or (lease.get("fleet"), lease.get("bot")) != (fleet, bot):
+        return "free"
+    left = lease.get("left_s")
+    return "held %.1f" % (left if isinstance(left, (int, float)) else 0.0)
+try:
+    print(answer(*sys.argv[1:4]))
+except Exception as e:
+    print("unreadable %s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]))
+'
+
+# compaction_lease_left <fleet> <bot>
+# Whether a Claude Code compaction is in flight for <fleet>/<bot>, by the host
+# compaction slot (compaction-slot.py, beside this file), whose lease the
+# build's executor takes just before it types /compact (#1053, build PR 6).
+# Prints the seconds left on a live lease that names the bot, and returns 0.
+# Returns 1, printing nothing, when none does: no slot in this release, no
+# lease, another bot's or another fleet's, one that has ended (released, at its
+# end, or taken before a host reset), or a record the slot cannot read, which
+# holds nothing by the slot's own rule. Returns 3, saying why on stderr, when
+# the slot cannot be asked at all (no python3, no data root); the callers then
+# go on as they did before the slot, so a broken reader never stops a send. A
+# bot is named as its lease names it: its fleet and its ID, which is also the
+# name of its tmux session. A python3 start per call: bot_is_busy asks only
+# once the marker and the pane have read the bot idle.
+compaction_lease_left() {
+    local fleet="${1:-}" bot="${2:-}" slot="$_LIB_COMMON_DIR/compaction-slot.py" out
+    [ -n "$fleet" ] && [ -n "$bot" ] && [ -f "$slot" ] || return 1
+    out=$(python3 -I -S -c "$_COMPACTION_LEASE_PY" "$slot" "$fleet" "$bot" 2>/dev/null || true)
+    case "$out" in
+        'held '*) printf '%s\n' "${out#held }"; return 0 ;;
+        free) return 1 ;;
+    esac
+    printf 'compaction_lease_left: the compaction slot could not be read for %s/%s (%s); read as no compaction in flight\n' \
+        "$fleet" "$bot" "${out:-no answer from python3}" >&2
+    return 3
+}
+
 # bot_is_busy <socket> <session> [bot_dir]
 # THE busy check for keystroke injectors. Marker-first: a data/.last-tool-call
 # fresher than KEEPALIVE_ACTIVE_WINDOW_S (default _ACTIVE_WINDOW_DEFAULT)
 # reads BUSY without touching tmux (rendering-immune, and the common case for
-# a working bot). Fallback: capture the pane and apply pane_is_busy. bot_dir
-# is resolved from the session name when not supplied; when unresolvable the
-# pane alone decides.
+# a working bot). Fallback: capture the pane and apply pane_is_busy; a pane it
+# reads idle is still busy while a compaction lease names the bot
+# (compaction_lease_left). bot_dir is resolved from the session name when not
+# supplied; when unresolvable the pane and the lease decide.
 # Returns 0 = busy (do NOT inject), 1 = not busy; rc 2 on empty session.
 bot_is_busy() {
     local socket="${1:-}" session="${2:-}" bot_dir="${3:-}"
@@ -4067,9 +4170,18 @@ bot_is_busy() {
     if [ -n "$bot_dir" ] && marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
         return 0
     fi
-    local pane
+    local pane fleet
     pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
-    pane_is_busy "$pane"
+    pane_is_busy "$pane" && return 0
+    # #1053 (build PR 6): the slot's lease decides for a compacting bot. On
+    # Claude Code 2.1.319 its pane's footer draws "esc to interrupt" while the box
+    # is empty or shows queued messages, but not while typed text sits in the box,
+    # and its "Compacting conversation…" line is not the activity line's shape.
+    # The bot's fleet comes from its own bot.conf; its ID is its session's name.
+    fleet="${FLEET_NAME:-}"
+    [ -z "$bot_dir" ] || fleet=$(bot_conf_get "$bot_dir" FLEET_NAME "$fleet")
+    compaction_lease_left "$fleet" "$session" >/dev/null && return 0
+    return 1
 }
 
 # marker_is_newer <marker_a> <marker_b>
@@ -4350,12 +4462,16 @@ session_md_handoff_epoch() {
     # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    # A missing or unparseable field is settled inside each substitution: on
+    # bash 3.2 a failure there fires an ERR trap set by the caller, however the
+    # call is guarded.
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
     [ -f "$file" ] || return 1
     iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
-        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//' || true)
     if [ -n "$iso" ]; then
-        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+        epoch=$(iso_to_epoch "$iso" || true)
+        [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
 }
@@ -4438,6 +4554,39 @@ session_command_status() {
     _session_command_resolve "$@" || rc=$?
     printf '%s' "$_SESSION_COMMAND_STATUS"
     return "$rc"
+}
+
+# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks>
+# A fresh native session (`bot restart --fresh`, or any launch that mints a new
+# UUID) first restores the bot's saved handoff, so a fresh session means an
+# empty context, not a lost one (#2696). It sends SESSION_RESUME_COMMAND (empty
+# sends nothing) as its own submission before the authored startup, while the
+# handoff's last_updated, else its mtime, is under RESUME_MAX_AGE_S (86400) old.
+# Exact continuation already holds the conversation and sends nothing. Success
+# is submission evidence only, never a completed resume.
+fresh_session_resume() {
+    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6"
+    local handoff="$2/.claude/session.md" max_age="${RESUME_MAX_AGE_S:-86400}" epoch=""
+    local command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    [ "$mode" = fresh ] && [ -f "$handoff" ] || return 0
+    case "$max_age" in ''|*[!0-9]*) max_age=86400 ;; esac
+    epoch="$(session_md_handoff_epoch "$handoff" || true)"
+    case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$(( $(date +%s) - epoch ))" -ge "$max_age" ]; then
+        printf '%s RESUME SKIP — fresh session; handoff older than %ss, starting clean\n' \
+            "$(ts_iso)" "$max_age" >> "$log"
+        return 0
+    fi
+    if ! _session_command_resolve "$command" "$bot_dir"; then
+        printf '%s RESUME SKIP — fresh session and handoff, but no resume command [%s]; it stays at %s\n' \
+            "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$handoff" >> "$log"
+        emit_fleet_event resume_skipped startup \
+            "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$handoff\"}" || true
+        return 0
+    fi
+    printf '%s RESUME — injecting resume command [%s; fresh session]: %s\n' \
+        "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+    _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
 }
 
 _startup_send() {

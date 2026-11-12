@@ -30,7 +30,7 @@ def dispatch(args):
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError, require_current_schema
     from ..request_receipts import ReceiptError
-    from ..runtime_admission import (ReleaseMismatch, RuntimeIdentity, mutation_admission,
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_provenance)
     from .message_write import _bound_release
     from ..task_operations import TaskRecordingError
@@ -38,7 +38,7 @@ def dispatch(args):
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
     from .host_owner import _GENERATED, _approve, _terminal
-    from ..application_tasks import _request_id
+    from ..request_ids import canonical_request_id
 
     release_id = None
     provenance = {}
@@ -47,7 +47,7 @@ def dispatch(args):
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no task permissions")
         if verb not in {"show", "check"}:
-            _request_id(args.request_id)
+            canonical_request_id(args.request_id)
         scope = _scope(args.scope_file) if verb in {"request", "check"} else None
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         root = selected.paths.root
@@ -140,8 +140,6 @@ def dispatch(args):
         raise CommandFailure("unavailable", str(exc), release_id=release_id,
             data={"recording": exc.recording, "execution": "not_requested",
                   "request_id": exc.request_id}) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", str(exc), release_id=release_id) from exc
     except TaskQueryError as exc:
         raise CommandFailure(exc.code, str(exc), release_id=release_id) from exc
     except (ActivationError, ReceiptError, TaskStateError, PlanError, OperationContextError) as exc:

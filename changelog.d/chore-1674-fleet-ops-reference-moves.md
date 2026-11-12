@@ -1,0 +1,3 @@
+### Changed — the fleet-ops guide moves its status table and three descriptions to its command reference (#1674)
+
+Every bot's `CLAUDE.md` ends with the fleet-ops guide, so every call carries all of it. Four pieces of its reference text are now in `library/skills/fleet-ops/command-reference.md`, word for word, each behind a one-line pointer: the deadline watch's table of what each status means, what `start`, `restart` and `stop` do, the brief's note on unacknowledged report rows, and what `project list` and `project show` print. Every rule sentence and command block stays in the guide, word for word. By Claude Code's `/context`, the composed guide went from 7,073 to 6,469 tokens a call; whether bots act as well with those pieces one file away is not measured.

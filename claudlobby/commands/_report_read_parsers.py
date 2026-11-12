@@ -1,14 +1,8 @@
 """Dependency-light grammar for the read-only fleet report list."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".report_read", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".report_read")
 
 
 def register_report_read_subparsers(children):
@@ -16,6 +10,7 @@ def register_report_read_subparsers(children):
     listing.add_argument("--json", action="store_true", help="One schema-1 result object")
     listing.add_argument("--bot", metavar="AUTHOR", help="Filter by report author, not viewer")
     listing.add_argument("--status", metavar="STATUS", help="Filter by recorded report status")
+    listing.add_argument("--workstream", metavar="ID", help="Only reports that name this workstream")
     listing.add_argument("--since", metavar="TIME", help="RFC3339 instant with an offset")
     listing.add_argument("--unacknowledged", action="store_true",
                          help="Show reports beyond this viewer's recorded read position")

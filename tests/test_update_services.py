@@ -247,15 +247,16 @@ def test_candidate_consumer_placement_change_refuses_before_effects():
 
 
 class AddedNative(Native):
-    def __init__(self, directory):
+    def __init__(self, directory, *others):
         super().__init__()
         self.directory = directory
+        self.others = others
         self.state = "not-found not-found inactive"
         self.fail_start = False
 
     def read(self, function, *args):
         assert function == "svc_inventory_catalog"
-        return f"manager\tLinux\ndirectory\t{self.directory}\n"
+        return "".join(["manager\tLinux\n", *(f"directory\t{item}\n" for item in (self.directory, *self.others))])
 
     def call(self, function, *args, timeout=30):
         if function == "svc_inventory_catalog":
@@ -426,10 +427,11 @@ def test_launchd_bot_waits_for_original_readiness_without_replaying_start(tmp_pa
     assert native.ready_timeouts == [240] * len(ready)
 
 
-def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
+@pytest.mark.parametrize("linked", [False, True])
+def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path, linked):
     from claudlobby.supervision_inventory import UnitDeclaration
-    directory = tmp_path / "native"
-    directory.mkdir()
+    directory, shared, link = _linked_search_list(tmp_path)
+    others = (link, shared) if linked else ()
     source = tmp_path / "generated.service"
     content = b"[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n"
     item = {"sha256": hashlib.sha256(content).hexdigest(), "mode": 0o644,
@@ -437,9 +439,10 @@ def test_freeze_new_consumer_binds_absence_and_persistent_enablement(tmp_path):
             "fleet": None, "bot": None, "service": None, "enroll": True}
     snapshot = {"supervision": {"manager": "Linux", "domain": "", "directory": str(directory)}}
     declaration = UnitDeclaration(source, "host", tmp_path, "", (), None, None, None)
-    native = AddedNative(directory)
+    native = AddedNative(directory, *others)
     row = services._freeze_added(snapshot, native, directory, declaration, item, content, set())
     assert row["kind"] == "added" and row["absence"]["absent"]
+    assert row["search_directories"] == [str(path) for path in (directory, *others)]
     assert "saved_native" not in row and row["installed"] == []
     assert row["enablement"]["path"] == str(directory / "default.target.wants" / source.name)
     assert not Path(row["destination"]).exists()
@@ -460,6 +463,72 @@ def test_independent_absence_rejects_changed_native_witnesses(tmp_path, drift):
     with pytest.raises(RuntimeEvidenceError):
         assert_native_absent(native, manager="Linux", domain="user/123" if drift == "domain" else "",
                              target=target, installed_file=directory / target, search_directories=[directory])
+
+
+def _linked_search_list(tmp_path):
+    """A plain install directory, a directory outside it, and a link to that directory."""
+    directory, shared, link = tmp_path / "native", tmp_path / "shared", tmp_path / "linked"
+    directory.mkdir()
+    shared.mkdir()
+    link.symlink_to(shared)
+    return directory, shared, link
+
+
+def _absence_witnesses(directories, state, *, manager="Linux", domain=""):
+    """What the manager answers to one absence check: its catalog, then the unit's state."""
+    catalog = "".join([f"manager\t{manager}\n", f"domain\t{domain}\n" if domain else "",
+                       *(f"directory\t{item}\n" for item in directories)])
+
+    def call(function, *_args, **_kwargs):
+        stdout = catalog if function == "svc_inventory_catalog" else state
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+    return SimpleNamespace(call=call)
+
+
+@pytest.mark.parametrize("manager,domain,target,name,state", [
+    ("Linux", "", "example.service", "example.service", "not-found not-found inactive"),
+    ("Darwin", "gui/501", "gui/501/example", "example.plist", "unchanged unloaded inactive"),
+])
+def test_independent_absence_accepts_a_link_on_the_search_list(tmp_path, manager, domain, target, name, state):
+    from claudlobby.supervision_runtime import assert_native_absent
+    directory, shared, link = _linked_search_list(tmp_path)
+    directories = [directory, link, shared]
+    evidence = assert_native_absent(_absence_witnesses(directories, state, manager=manager, domain=domain),
+                                    manager=manager, domain=domain, target=target,
+                                    installed_file=directory / name, search_directories=directories)
+    assert evidence.details["absent"] is True
+
+
+@pytest.mark.parametrize("unit,state,refusal", [
+    ("file", "not-found not-found inactive", "already exists"),
+    ("dangling link", "not-found not-found inactive", "already exists"),
+    ("only the manager sees it", "disabled loaded inactive", "absence is unproved"),
+])
+def test_independent_absence_sees_a_unit_behind_a_linked_directory(tmp_path, unit, state, refusal):
+    from claudlobby.supervision_runtime import assert_native_absent, RuntimeEvidenceError
+    directory, shared, link = _linked_search_list(tmp_path)
+    if unit == "file":
+        (shared / "example.service").write_text("[Service]\nExecStart=/bin/true\n")
+    elif unit == "dangling link":
+        (shared / "example.service").symlink_to(tmp_path / "gone")
+    directories = [directory, link]
+    with pytest.raises(RuntimeEvidenceError, match=refusal):
+        assert_native_absent(_absence_witnesses(directories, state), manager="Linux", domain="",
+                             target="example.service", installed_file=directory / "example.service",
+                             search_directories=directories)
+
+
+@pytest.mark.parametrize("placement", ["link", "under a link", "relative entry"])
+def test_independent_absence_refuses_a_bad_placement(tmp_path, placement):
+    from claudlobby.supervision_runtime import assert_native_absent, RuntimeEvidenceError
+    directory, shared, link = _linked_search_list(tmp_path)
+    (shared / "user").mkdir()
+    directories = {"link": [link], "under a link": [link / "user"],
+                   "relative entry": [directory, Path("relative")]}[placement]
+    native = _absence_witnesses(directories, "not-found not-found inactive")
+    with pytest.raises(RuntimeEvidenceError, match="invalid frozen native placement"):
+        assert_native_absent(native, manager="Linux", domain="", target="example.service",
+                             installed_file=directories[0] / "example.service", search_directories=directories)
 
 
 # Shared native contracts survive removal of the activation coordinator.
@@ -983,9 +1052,8 @@ svc_activation_resume "$file" "$target" "$saved"
     assert unit.read_text() == "[Service]\nExecStart=/bin/true\n"
 
 
-@pytest.mark.parametrize("active", ["inactive", "failed"])
-def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it(tmp_path, monkeypatch, active):
-    """Pi quiet/masked rows retain physical absence despite old enabled intent."""
+def _paused_bot(tmp_path, monkeypatch, active="inactive"):
+    """Pi quiet/masked bot row, frozen by conversion: no unit file, its runtime mask kept."""
     row = intent(tmp_path)
     generated = tmp_path / "generated" / row["target"]
     generated.parent.mkdir()
@@ -1000,7 +1068,8 @@ def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it
     mask.symlink_to("/dev/null")
     mask_snapshot = {"path": str(mask), "resolved": "/dev/null", "link": "/dev/null", "mode": mask.lstat().st_mode & 0o777,
                      "sha256": hashlib.sha256(b"").hexdigest(), "content": {"base64": ""}}
-    declaration = {**row["declaration"], "source": str(generated), "scope": "bot", "service": None}
+    declaration = {**row["declaration"], "source": str(generated), "scope": "bot", "service": None,
+                   "fleet": "example", "bot": "worker"}
     observed = {"target": row["target"], "installed": [], "generated": row["generated"], "declaration": declaration,
                 "properties": [["UnitFileState", "masked-runtime"], ["LoadState", "masked"], ["ActiveState", active]]}
     parked = {str(installed): {"target": row["target"], "snapshot": row["installed"][0], "phase": "bots",
@@ -1026,16 +1095,149 @@ def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it
     adapter.read = lambda *_: "catalog"
     adapter.state = "masked-runtime masked " + active
     frozen, = services.freeze_service_intent(None, adapter, tmp_path, baseline=baseline)
-    assert calls[0]["historical_parked"] == parked
+    return SimpleNamespace(frozen=frozen, adapter=adapter, calls=calls, parked=parked, installed=installed,
+                           mask=mask, mask_snapshot=mask_snapshot, generated=generated, content=content)
+
+
+@pytest.mark.parametrize("active", ["inactive", "failed"])
+def test_pending_conversion_freezes_actual_mask_and_never_publishes_or_starts_it(tmp_path, monkeypatch, active):
+    """Pi quiet/masked rows retain physical absence despite old enabled intent."""
+    case = _paused_bot(tmp_path, monkeypatch, active)
+    frozen, adapter = case.frozen, case.adapter
+    assert case.calls[0]["historical_parked"] == case.parked
     assert frozen["installed"] == [] and frozen["disposition"] == "stopped"
     assert frozen["saved_native"] == frozen["restore_native"] == adapter.state
-    assert frozen["preserved_mask"]["snapshot"] == mask_snapshot and "legacy_parked" not in frozen
+    assert frozen["preserved_mask"]["snapshot"] == case.mask_snapshot and "legacy_parked" not in frozen
     store = Store(tmp_path, frozen)
     services.quiesce_consumer(store, frozen["target"], adapter)
-    services.restore_consumer(store, frozen["target"], adapter, {})
+    # It stays paused, and the restore names it rather than reporting it done (#2699).
+    with pytest.raises(UpdateError, match=f"left bot example/worker paused: {frozen['target']} keeps its runtime mask"):
+        services.restore_consumer(store, frozen["target"], adapter, {})
+    assert store.record["consumers"][frozen["target"]]["restore"] == "done"
     assert {name for name, _ in adapter.calls} == {"svc_inventory_state", "svc_activation_quiet"}
-    assert not installed.exists() and mask.is_symlink() and os.readlink(mask) == "/dev/null"
-    assert generated.read_bytes() == content
+    assert not case.installed.exists() and case.mask.is_symlink() and os.readlink(case.mask) == "/dev/null"
+    assert case.generated.read_bytes() == case.content
+
+
+class UnitStates(Native):
+    """Native state per unit, so a paused bot and a timer restore side by side."""
+
+    def __init__(self, states):
+        super().__init__()
+        self.states = dict(states)
+
+    def call(self, function, *args, timeout=30):
+        self.calls.append((function, args))
+        output = ""
+        if function == "svc_bot_session_observe":
+            output = self.session
+        elif function == "svc_activation_pause":
+            self.states[args[1]] = "masked-runtime masked inactive"
+        elif function == "svc_activation_resume":
+            self.states[args[1]] = args[2]
+        elif function in {"svc_activation_snapshot", "svc_inventory_state"}:
+            output = self.states[args[1]]
+        elif function == "svc_activation_quiet":
+            output = "inactive\tno-cgroup-witness" if self.states[args[1]].endswith(" inactive") else "unknown"
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+
+def _at_restore(store, tmp_path, monkeypatch):
+    """The update's configuration is committed, and its restore stage runs next."""
+    from claudlobby import update_operation
+    store.root, store.installation = tmp_path, None
+    store.record.update(phase="restore", config_committed=True, target="target",
+                        candidate_config={"fingerprint": "candidate"})
+    monkeypatch.setattr(update_operation, "read_current_config", lambda *_args, **_kwargs: {"fingerprint": "candidate"})
+
+
+def _paused_update(tmp_path, monkeypatch):
+    """An update at its restore stage over the paused bot and a parked timer, which restores after it."""
+    case = _paused_bot(tmp_path, monkeypatch)
+    bot = case.frozen
+    (tmp_path / "timer").mkdir()
+    timer = intent(tmp_path / "timer")
+    unit = Path(timer["installed"][0]["path"])
+    unit.rename(unit.with_name("job.timer"))
+    timer["target"] = "job.timer"
+    timer["installed"][0].update(path=str(unit.with_name("job.timer")), resolved=str(unit.with_name("job.timer")))
+    declarations(monkeypatch, timer)
+    store = Store(tmp_path, bot)
+    store.record["consumers"][timer["target"]] = {"intent": timer}
+    store.record["scope"] = services.consumer_scope([bot, timer])
+    adapter = UnitStates({bot["target"]: "masked-runtime masked inactive", timer["target"]: "disabled loaded inactive"})
+    for key in (bot["target"], timer["target"]):
+        services.quiesce_consumer(store, key, adapter)
+    _at_restore(store, tmp_path, monkeypatch)
+    return case, bot, timer, store, adapter
+
+
+@pytest.mark.parametrize("decision", ["stop", "start"])
+def test_a_bot_left_paused_keeps_the_update_pending_until_it_runs_or_its_stop_is_recorded(tmp_path, monkeypatch, decision):
+    """#2699: the update reported done with four bots down. It names each one until someone decides."""
+    from claudlobby import update_operation
+    from claudlobby.stop_record import write_stop
+    case, bot, timer, store, adapter = _paused_update(tmp_path, monkeypatch)
+
+    first = update_operation.restore_operation(store, adapter)
+    error = first["health_errors"][bot["target"]]
+    assert set(first["health_errors"]) == {bot["target"]}
+    assert error.startswith(f"this update left bot example/worker paused: {bot['target']} keeps its runtime mask")
+    assert f"systemctl --user unmask --runtime {bot['target']}" in error
+    assert "claudlobby --fleet example bot start worker" in error and "claudlobby --fleet example bot stop worker" in error
+    # The decision does not hold the schedules back: the timer restores after the bot as before.
+    assert first["consumers"][timer["target"]]["restore"] == "done" and adapter.states[timer["target"]] == "disabled loaded inactive"
+
+    # Continuing without a decision changes nothing; a reboot that drops the mask leaves the bot down all the same.
+    assert update_operation.restore_operation(store, adapter)["health_errors"] == first["health_errors"]
+    case.mask.unlink()
+    adapter.states[bot["target"]] = "not-found not-found inactive"
+    rebooted = update_operation.restore_operation(store, adapter)["health_errors"]
+    assert set(rebooted) == {bot["target"]}
+    assert rebooted[bot["target"]].startswith(f"this update left bot example/worker down: {bot['target']} does not read as running")
+
+    if decision == "stop":
+        write_stop(tmp_path, by="operator", reason=None, request_id="00000000-0000-4000-8000-000000000001")
+    else:
+        # An active unit is not yet a running bot: its session must answer ready.
+        case.installed.write_bytes(case.content)
+        adapter.states[bot["target"]] = "enabled loaded active"
+        starting = update_operation.restore_operation(store, adapter)["health_errors"]
+        assert set(starting) == {bot["target"]} and "(native state: enabled loaded active, session absent)" in starting[bot["target"]]
+        # The real observer answers unknown while the unit is active and its session not yet up: still down.
+        adapter.session = "unknown"
+        starting = update_operation.restore_operation(store, adapter)["health_errors"]
+        assert set(starting) == {bot["target"]} and "(native state: enabled loaded active, session unknown)" in starting[bot["target"]]
+        adapter.session = "ready"
+    done = update_operation.restore_operation(store, adapter)
+    assert done["phase"] == "done" and done["health_errors"] == {}
+    assert done["consumers"][bot["target"]]["outcome"] == services._PAUSED + (
+        "; the bot's stop is recorded" if decision == "stop" else "; the bot runs again")
+    effects = {"svc_activation_pause", "svc_activation_resume", "svc_activation_start", "svc_activation_clear_runtime_mask"}
+    assert not [name for name, args in adapter.calls if name in effects and args[1] == bot["target"]]
+
+
+def test_a_restore_pass_cut_off_before_the_paused_bot_is_read_names_it_on_the_next_pass(tmp_path, monkeypatch):
+    """A kill, a power cut or the restore child's time limit can stop a pass mid-read; the next pass reads the bot."""
+    from claudlobby import update_operation
+    _, bot, timer, store, adapter = _paused_update(tmp_path, monkeypatch)
+
+    class Cut(BaseException):
+        pass
+
+    def call(function, *args, timeout=30, read=adapter.call):
+        if store.record["consumers"][bot["target"]].get("restore") == "done":
+            raise Cut(function)
+        return read(function, *args, timeout=timeout)
+    adapter.call = call
+    with pytest.raises(Cut, match="svc_inventory_state"):
+        update_operation.restore_operation(store, adapter)
+    del adapter.call
+    assert store.record["phase"] == "restore" and store.record["consumers"][bot["target"]]["restore"] == "done"
+    resumed = update_operation.restore_operation(store, adapter)
+    assert set(resumed["health_errors"]) == {bot["target"]}
+    assert resumed["health_errors"][bot["target"]].startswith(f"this update left bot example/worker paused: {bot['target']}")
+    assert resumed["consumers"][timer["target"]]["restore"] == "done"
 
 
 @pytest.mark.parametrize("kind,previous,desired", [
@@ -1053,6 +1255,9 @@ def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeyp
         original.rename(original.with_suffix(".timer"))
         row["target"] = original.with_suffix(".timer").name
         row["installed"][0].update(path=str(original.with_suffix(".timer")), resolved=str(original.with_suffix(".timer")))
+        # The restored intent only: the held start of a timer restored to
+        # running has its own tests in test_update_timer_catch_up.py.
+        monkeypatch.setattr(services, "_held_start", lambda *_: None)
     installed = Path(row["installed"][0]["path"])
     generated = tmp_path / "generated" / row["target"]
     generated.parent.mkdir()
@@ -1099,6 +1304,17 @@ def test_completed_old_producer_pause_restores_original_intent(tmp_path, monkeyp
     if kind == "preexisting_mask":
         assert frozen["preserved_mask"]["snapshot"] == mask_snapshot and frozen["installed"] == []
         assert frozen["restore_native"] == desired and not installed.exists()
+        # Not a bot, so the restore keeps the mask as before: paused, and no health error (#2699).
+        from claudlobby import update_operation
+        frozen["phase"] = "producers"  # a real row's phase, from its candidate; the restore loop orders by it
+        store = Store(tmp_path, frozen)
+        _at_restore(store, tmp_path, monkeypatch)
+        adapter.calls.clear()
+        done = update_operation.restore_operation(store, adapter)
+        assert done["phase"] == "done" and done["health_errors"] == {}
+        assert done["consumers"][frozen["target"]]["restore"] == "done" and done["consumers"][frozen["target"]]["outcome"] == services._PAUSED
+        assert {name for name, _ in adapter.calls} == {"svc_inventory_state", "svc_activation_quiet"}
+        assert not installed.exists() and mask.is_symlink()
         return
     assert "preserved_mask" not in frozen and frozen["legacy_parked"] == parked[str(installed)]
     assert frozen["saved_native"] == "masked-runtime masked inactive" and frozen["restore_native"] == desired

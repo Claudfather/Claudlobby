@@ -26,6 +26,7 @@ def dispatch(args) -> CommandOutput:
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
     from .report_read import _item as report_item
+    from .task_read import _task_page
 
     release_id = None
     try:
@@ -102,7 +103,7 @@ def dispatch(args) -> CommandOutput:
         viewer = f"bot:{destination.fleet.name}/{viewer_bot}"
         data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
                 "viewer": viewer, "viewer_uid": viewer_uid, "viewer_selection": selected_by,
-                "work": {"items": [asdict(task) for task in page.work],
+                "work": {**_task_page(page.work),
                          "issues": [asdict(issue) for issue in page.issues]},
                 "reports": {"items": reports, "ack_cursor": None,
                             "read_position": {"acked_through_seq": page.prior_seq,

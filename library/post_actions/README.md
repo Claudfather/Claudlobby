@@ -44,8 +44,8 @@ news, send that as a separate message.
 ```
 
 Note that `claudlobby/_runtime_scripts/pre-stop-handoff.sh` — the script a `pre-stop-handoff.md` post_action would
-naturally wrap — already exists and runs today, invoked directly via the bot's systemd
-`ExecStop` (see the script's own header comment). A `post_actions/pre-stop-handoff.md`
+naturally wrap — already exists and runs today when a manager requests `claudlobby bot handoff BOT`;
+no bot unit runs it at `ExecStop`, and a plain restart reads no handoff. A `post_actions/pre-stop-handoff.md`
 file would add bot-facing prose on top of that existing mechanism; it just hasn't been
 written yet.
 

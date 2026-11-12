@@ -525,6 +525,10 @@ case "$_wait_rc" in
         ;;
 esac
 
+# A fresh native session first resumes from the saved handoff, ahead of the
+# authored startup below; exact continuation sends nothing here (#2696).
+fresh_session_resume "$_native_mode" "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
 # an input box, and treating it as a proxy for that is what #860 was. Measured:

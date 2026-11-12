@@ -527,7 +527,9 @@ def restore_operation(store, adapter):
         if progress.get("restore") == "done" and not progress.get("restore_error"):
             continue
         try:
-            if progress.get("restore") != "done":
+            # A bot this update left paused stays a health error until it runs
+            # again or its stop is recorded, so every pass reads it again (#2699).
+            if progress.get("restore") != "done" or progress["intent"].get("preserved_mask"):
                 restore_consumer(store, key, adapter, current)
             if progress.get("checkpoint") is not None:
                 from .bot_operations import retire_planned_checkpoint

@@ -208,6 +208,15 @@ def _fleet_ops() -> str:
     return _flat(_span(_text("library/skills/fleet-ops/SKILL.md"), "**The deadline watch.**", "**Ending it.**"))
 
 
+def _status_table() -> str:
+    """The status table the guide's deadline watch points at: its command reference's §Deadline watch."""
+    text = _text("library/skills/fleet-ops/command-reference.md")
+    assert "\n## Deadline watch\n" in text, "no ## Deadline watch section"
+    start = text.index("\n## Deadline watch\n")
+    end = text.find("\n## ", start + 1)
+    return _flat(text[start:end if end != -1 else len(text)])
+
+
 def test_report_back_tells_a_worker_what_orphaned_means_and_what_clears_it():
     para = _report_back()
     assert "`orphaned`" in para and "`overdue`" in para and "restarted after the dispatch" in para
@@ -235,19 +244,20 @@ def test_a_workers_composed_instructions_carry_the_paragraph(fleet_dir):
 
 
 def test_fleet_ops_explains_every_attention_status():
-    section = _fleet_ops()
+    section, table = _fleet_ops(), _status_table()
+    assert "is in §Deadline watch" in section              # the guide points at the table
     for cell in ("`not_due`", "`overdue`", "`orphaned` (`respawned_after_dispatch`)", "`past_due` (`progress_grace`)",
                  "`past_due` (`max_age_cap`)", "`unknown`"):
-        assert cell in section, cell
+        assert cell in table, cell
     assert "on any assignment of yours" in section          # the clock is the bot's, not the assignment's
     assert "past-deadline assignments dispatched before it" in section     # and only those (the claims above)
     assert "one dispatched after it waits for a newer report" in section
-    assert "no progress since its dispatch in the last 45 minutes" in section
-    assert "held back by a progress report made since its dispatch and under 45 minutes old" in section
+    assert "no progress since its dispatch in the last 45 minutes" in table
+    assert "held back by a progress report made since its dispatch and under 45 minutes old" in table
     assert "`block` is not progress" in section
     assert "`complete`, `fail` and `return` end the assignment" in section
     assert "`assignment reschedule`" in section and "`block --reason`" in section
-    assert "task nudge" not in section
+    assert "task nudge" not in section and "task nudge" not in table
 
 
 def test_the_status_skill_points_at_that_explanation():
@@ -370,7 +380,7 @@ def test_the_numbers_the_surfaces_print_are_the_matchers_defaults(capsys):
     doors = load_lib_module("dispatch-overdue")
     assert (doors.DEFAULT_PROGRESS_GRACE_S, doors.DEFAULT_OVERDUE_MAX_AGE_S) == (GRACE_S, CAP_S)
     minutes, hours = f"{GRACE_S // 60} minutes", f"{CAP_S // 3600} hours"
-    assert minutes in _report_back() and minutes in _fleet_ops() and hours in _fleet_ops()
+    assert minutes in _report_back() and minutes in _fleet_ops() and hours in _status_table()
     progress_help = _help(capsys, "assignment", "progress")
     assert minutes in progress_help and hours in progress_help
     assert minutes in BOOT_ORPHANED_HINT
@@ -382,6 +392,6 @@ def test_every_attention_status_the_brief_can_print_is_in_the_skill():
     body = source[source.index("def assignment_attention"):source.index("def overdue_all")]
     statuses = set(re.findall(r'status="(\w+)"', body)) | set(re.findall(r'"status": "(\w+)"', body))
     assert statuses == {"not_due", "past_due", "overdue", "orphaned", "unknown"}, statuses   # the scan sees all five
-    section = _fleet_ops()
+    section = _status_table()
     for status in sorted(statuses):
         assert f"`{status}`" in section, status

@@ -1,19 +1,9 @@
 """Dependency-light grammar for the first generated-bot message mutation."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command, lambda: import_module(".message_write", __package__).dispatch(args),
-                   json_output=args.json, request_id=args.request_id)
-
-
-def _ack_dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".report_write", __package__).dispatch(args),
-                   json_output=args.json, request_id=args.request_id)
+_dispatch = lazy(".message_write", request_id=True)
+_ack_dispatch = lazy(".report_write", request_id=True)
 
 
 def register_message_write_subparsers(children):

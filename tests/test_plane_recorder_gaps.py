@@ -33,7 +33,7 @@ def _seed_db(root: Path) -> None:
     emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "f",
                        "occurred_at": datetime.now(timezone.utc).isoformat(),
                        "payload": {"work_item_id": "wi_" + "a" * 32,
-                                   "title": "t", "created_by": "bot:f/mgr"}}])
+                                   "title": "t", "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}])
 
 
 def _spool(root: Path) -> Path:

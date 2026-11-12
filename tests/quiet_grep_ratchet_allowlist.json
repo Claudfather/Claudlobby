@@ -2,7 +2,7 @@
   "claudlobby/_runtime_scripts/boot-capture.sh": 1,
   "claudlobby/_runtime_scripts/check-npx-cache.sh": 3,
   "claudlobby/_runtime_scripts/code-audit-sweep.sh": 2,
-  "claudlobby/_runtime_scripts/lib-common.sh": 6,
+  "claudlobby/_runtime_scripts/lib-common.sh": 5,
   "claudlobby/_runtime_scripts/reconcile-fleet.sh": 1,
   "claudlobby/_runtime_scripts/selfstart-snapshot.sh": 2,
   "claudlobby/_runtime_scripts/setup-github-app.sh": 1,

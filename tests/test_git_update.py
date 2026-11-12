@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -79,7 +82,7 @@ def test_application_stage_recovery_clears_only_the_matching_successful_error(up
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        monkeypatch.setattr(updater.subprocess, "run", stage)
+        monkeypatch.setattr(updater, "_run_stage", stage)
         interpreter = Path(sys.executable).resolve()
         with pytest.raises(UpdateError, match="render refused"):
             updater._application_stage(store, "render", python=interpreter)
@@ -87,9 +90,39 @@ def test_application_stage_recovery_clears_only_the_matching_successful_error(up
         assert store.load()["stage_error"] == error
         with pytest.raises(UpdateError, match="render interrupted"):
             updater._application_stage(store, "render", python=interpreter)
+        # The stage's newest failure is the one that stands, an interruption included (#2702).
+        error = {"stage": "render", "detail": "interrupted: no result within 900 s; the stage process was stopped"}
         assert store.load()["stage_error"] == error
         assert updater._application_stage(store, "prepare", python=interpreter)["stage_error"] == error
         recovered = updater._application_stage(store, "render", python=interpreter)
+        assert "stage_error" not in recovered and store.load() == original
+
+
+@pytest.mark.parametrize("interruption, detail", [
+    (subprocess.TimeoutExpired("restore", 900, stderr=b"restoring example.service\n"),
+     "restoring example.service\ninterrupted: no unit finished within 900 s; the stage process was stopped"),
+    (OSError(12, "Cannot allocate memory"),
+     "interrupted: the stage process could not run: [Errno 12] Cannot allocate memory"),
+], ids=["timeout", "oserror"])
+def test_an_interrupted_stage_keeps_why_until_the_same_stage_succeeds(update, monkeypatch, interruption, detail):
+    """#2702: an interruption records its cause in the retained record, as a refusal does."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        outcomes = iter([interruption, subprocess.CompletedProcess([], 0, "", "")])
+        def stage(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(updater, "_run_stage", stage)
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._application_stage(store, "restore", python=interpreter)
+        # What `host update status` prints is this record.
+        assert read_update(installation)["stage_error"] == {"stage": "restore", "detail": detail}
+        recovered = updater._application_stage(store, "restore", python=interpreter)
         assert "stage_error" not in recovered and store.load() == original
 
 
@@ -101,7 +134,7 @@ def test_invalid_authorization_response_keeps_original_stage_error(update, monke
         record["stage_error"] = {"stage": "authorize", "detail": "original authorization refusal"}
         store.save(record)
         outcomes = iter(["invalid-json", json.dumps({"directory": "/native", "revision": before})])
-        monkeypatch.setattr(updater.subprocess, "run", lambda *_args, **_kwargs:
+        monkeypatch.setattr(updater, "_run_stage", lambda *_args, **_kwargs:
                             subprocess.CompletedProcess([], 0, next(outcomes), ""))
         interpreter = Path(sys.executable).resolve()
         with pytest.raises(UpdateError, match="no bound installation context"):
@@ -538,8 +571,10 @@ def test_independent_quiet_rechecks_added_consumer_absence(update, occupied):
             assert store.load()["quiet"]["example.service"]["identity"] == record["scope"]["example.service"]
 
 
-def test_runner_waits_for_previously_admitted_start_before_quiescing(update):
+def test_runner_waits_for_previously_admitted_start_before_quiescing(update, monkeypatch):
     import fcntl
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0)
     from claudlobby.git_update import run_prepared_update
     installation, _, _, commit = update
     _, target = _runner_source(installation, commit)
@@ -553,6 +588,314 @@ def test_runner_waits_for_previously_admitted_start_before_quiescing(update):
                 run_prepared_update(store)
             assert "trace" not in store.load()
             assert "quiet_support" not in store.load()
+
+
+_HOLD = '''import fcntl, os, subprocess, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_SH)
+if sys.argv[2:] == ["child"]:
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], pass_fds=(fd,))
+    print("ready", child.pid, flush=True)
+    raise SystemExit
+print("ready", os.getpid(), flush=True)
+sys.stdin.read()
+'''
+
+
+class _Holder:
+    """A real child process holding LOCK_SH on a lock file until released."""
+
+    def __init__(self, lock, *arguments, env=None):
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _HOLD, str(lock), *arguments], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, env={**os.environ, **(env or {})})
+        ready = self.process.stdout.readline().split()
+        assert ready[:1] == ["ready"], ready
+        self.pid = int(ready[1])
+
+    def release(self):
+        if not self.process.stdin.closed:
+            self.process.stdin.close()
+        self.process.wait(timeout=10)
+
+    def close(self):
+        if self.process.stdin and not self.process.stdin.closed:
+            self.process.stdin.close()
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=10)
+        self.process.stdout.close()
+
+
+@pytest.fixture
+def holders():
+    started = []
+
+    def start(lock, *arguments, env=None):
+        holder = _Holder(lock, *arguments, env=env)
+        started.append(holder)
+        return holder
+    yield start
+    for holder in started:
+        holder.close()
+
+
+@pytest.fixture
+def polls(monkeypatch):
+    """Counts the updater's own lock polls and runs `at[n]` on the n-th, so no test orders events by sleeping."""
+    import types
+    from claudlobby import git_update as updater
+    real = time.sleep
+    state = types.SimpleNamespace(count=0, at={})
+
+    def sleep(seconds):
+        if seconds == updater._RUNTIME_POLL:
+            state.count += 1
+            action = state.at.pop(state.count, None)
+            if action is not None:
+                action()
+        real(seconds)
+    monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.01)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+    monkeypatch.setattr(time, "sleep", sleep)
+    return state
+
+
+def _quiesced(installation, store, target):
+    record = prepare(store, target, consumers={"example.service": {"intent": {
+        "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+    record["phase"] = "quiesce"
+    store.save(record)
+    lock = store.state / "runtime-use.lock"
+    lock.touch()
+    return record, lock
+
+
+def _notices(monkeypatch, store=None, seen=None, polls=None):
+    """Stub the alert door; each text is kept, with what the record and the poll count read when it was sent."""
+    from claudlobby import git_update as updater
+    texts = []
+
+    def send(_store, _door, text):
+        texts.append(text)
+        if store is not None:
+            seen.append((store.load().get("runtime_wait"), polls.count if polls is not None else None))
+        return "carrier_accepted", "stub"
+    monkeypatch.setattr(updater, "_send_notice", send)
+    return texts
+
+
+def test_runner_waits_through_a_reader_and_records_both_gates(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[3] = reader.release
+        # Three polls must read above 0.0 s at the record's 0.1 s rounding.
+        monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.05)
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        drain, cutover = result["runtime_waits"]
+        assert drain["gate"] == "drain" and drain["outcome"] == "taken" and drain["told"] is False
+        assert drain["seconds"] > 0 and reader.pid in [row["pid"] for row in drain["holders"]]
+        assert cutover["gate"] == "cutover" and cutover["outcome"] == "taken" and cutover["holders"] == []
+        assert "runtime_wait" not in result
+
+
+def test_runner_goes_on_only_after_the_last_of_two_overlapping_readers(update, holders, polls):
+    """#2734: the lock is taken at the first free moment between readers, and only then."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        first, second = holders(lock), holders(lock)
+        before_last = []
+
+        def last():
+            before_last.extend(row["gate"] for row in store.load().get("runtime_waits", []))
+            second.release()
+        polls.at[3], polls.at[9] = first.release, last
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        assert before_last == []  # no gate went on while the second reader held the lock
+        drain, cutover = result["runtime_waits"]
+        named = {row["pid"] for row in drain["holders"]}
+        assert drain["gate"] == "drain" and named and named <= {first.pid, second.pid}
+        assert cutover["gate"] == "cutover" and cutover["holders"] == []
+
+
+def test_runner_tells_once_past_the_tell_bound_and_keeps_waiting(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    with UpdateStore(installation) as store:
+        record, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[30] = reader.release
+        seen = []
+        texts = _notices(monkeypatch, store, seen, polls)
+        result = updater.run_prepared_update(store)
+        assert len(texts) == 1
+        waiting, at_notice = seen[0]
+        assert reader.pid in [row["pid"] for row in waiting["holders"]]
+        assert polls.count - at_notice >= 3  # it kept polling after it told
+        assert texts[0].startswith(f"FLEET ALERT: host update {record['request_id']} is waiting for the "
+                                   f"runtime lock (root {store.root}, phase quiesce): held after ")
+        assert texts[0].endswith("It goes on by itself when they finish; nothing needs running.")
+        assert result["phase"] == "done" and "runtime_wait" not in result
+        assert result["runtime_waits"][0]["told"] is True
+
+
+def test_runner_refuses_at_the_stop_bound_naming_the_holder_then_continues(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.05)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert f"pid {reader.pid}" in str(refused.value)
+        assert store.load()["runtime_waits"][-1]["outcome"] == "refused"
+        assert store.load()["phase"] == "quiesce"
+        reader.release()
+        monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+        assert updater.run_prepared_update(store)["phase"] == "done"
+
+
+def test_a_holders_arguments_and_environment_reach_no_text_or_record(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    token = "ghp_" + "A1b2C3d4" * 4
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.3)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock, token, env={"EXAMPLE_API_TOKEN": token})
+        texts = _notices(monkeypatch)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert len(texts) == 1 and f"pid {reader.pid}" in texts[0] and f"pid {reader.pid}" in str(refused.value)
+        for text in (*texts, str(refused.value), (store.state / "update.json").read_text()):
+            assert token not in text and token[-8:] not in text
+
+
+def test_a_child_that_inherited_the_lock_is_named_after_its_taker_exited(tmp_path, holders):
+    from claudlobby import git_update as updater
+    lock = tmp_path / "runtime-use.lock"
+    lock.touch()
+    taker = holders(lock, "child")
+    taker.process.wait(timeout=10)  # the taker is gone; its child still holds the lock
+    pids = [row["pid"] for row in updater._lock_holders(lock)]
+    assert taker.pid in pids
+    assert taker.process.pid not in pids
+
+
+def test_a_failing_notice_does_not_end_the_wait(update, holders, polls, monkeypatch, capsys):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+
+    def broken(*_):
+        raise RuntimeError("door down")
+    monkeypatch.setattr(updater, "_send_notice", broken)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[30] = holders(lock).release
+        assert updater.run_prepared_update(store)["phase"] == "done"
+    assert "nobody was told that this update is waiting for the runtime lock" in capsys.readouterr().err
+
+
+def test_lsof_output_parses_into_holders_and_a_missing_lsof_reads_as_none(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    fake = tmp_path / "lsof"
+    fake.write_text(f"#!/bin/sh\nprintf 'p111\\ncfoo\\nf3\\np222\\ncbar baz\\nf4\\np{os.getpid()}\\ncself\\nf5\\n'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(updater, "_LSOF", str(fake))
+    assert updater._lsof_holders(tmp_path / "lock") == [
+        {"unit": None, "comm": "foo", "pid": 111, "running_s": None},
+        {"unit": None, "comm": "bar baz", "pid": 222, "running_s": None}]
+    monkeypatch.setattr(updater, "_LSOF", str(tmp_path / "absent"))
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    assert updater._lock_holders(tmp_path / "lock") == []
+    assert updater._holder_text([]) == "a holder that could not be named"
+
+
+def test_proc_holders_fold_a_unit_to_its_oldest_and_skip_what_does_not_hold_the_lock(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    proc, lock = tmp_path / "proc", tmp_path / "runtime-use.lock"
+    proc.mkdir()
+    (proc / "uptime").write_text("1000.00 500.00\n")
+    ticks = os.sysconf("SC_CLK_TCK")
+
+    def process(pid, comm, cgroup, age=None, links=str(lock)):
+        directory = proc / str(pid)
+        directory.mkdir()
+        (directory / "comm").write_text(comm + "\n")
+        (directory / "cgroup").write_text(cgroup + "\n")
+        started = int((1000 - (age or 0)) * ticks)
+        (directory / "stat").write_text(f"{pid} ({comm}) S " + " ".join(["0"] * 18) + f" {started} 0 0\n")
+        if links is not None:
+            (directory / "fd").mkdir()
+            (directory / "fd" / "3").symlink_to(links)
+    process(101, "young", "0::/user.slice/app-a.service", 100)
+    process(102, "old", "0::/user.slice/app-a.service", 300)
+    process(103, "we) ird", "0::/", 10)
+    process(104, "nofd", "0::/user.slice/app-b.service", 50, links=None)
+    process(105, "elsewhere", "0::/user.slice/app-c.service", 50, links="/elsewhere")
+    monkeypatch.setattr(updater, "_PROC", proc)
+    listdir = os.listdir
+    expected = [{"unit": "app-a.service", "comm": "old", "pid": 102, "running_s": 300},
+                {"unit": None, "comm": "we) ird", "pid": 103, "running_s": 10}]
+    for reverse in (False, True):  # whichever process of a unit is read first, its oldest is named
+        monkeypatch.setattr(updater.os, "listdir", lambda path, reverse=reverse: sorted(
+            listdir(path), reverse=reverse) if Path(path) == proc else listdir(path))
+        assert sorted(updater._proc_holders(lock), key=lambda row: row["pid"]) == expected
+
+
+def test_holder_text_names_the_longest_running_and_counts_the_rest():
+    from claudlobby import git_update as updater
+    rows = [updater._holder(None, "c", pid, running) for pid, running in
+            ((1, 10), (2, 50), (3, 30), (4, 20), (5, 40))]
+    assert updater._holder_text(rows) == ("c pid 2, running 50 s, c pid 5, running 40 s, "
+                                          "c pid 3, running 30 s, and 2 more")
+    assert updater._holder_text([updater._holder(None, "comm", 1, None)]) == "comm pid 1"
+    assert updater._holder_text([updater._holder("u.service", "comm", 1, 5)]) == "u.service (comm pid 1, running 5 s)"
+
+
+def test_waiting_text_adds_the_stays_down_sentence_only_at_the_cutover():
+    from claudlobby import git_update as updater
+    record, rows = {"request_id": "r1", "phase": "git"}, [updater._holder(None, "c", 1, 5)]
+    sentence = "Whatever it stopped stays down until then."
+    assert updater._waiting_text("/root", record, "cutover", 12.4, rows).endswith(sentence)
+    drain = updater._waiting_text("/root", record, "drain", 12.4, rows)
+    assert sentence not in drain and drain.endswith("nothing needs running.")
+    token = "ghp_" + "A1b2C3d4" * 4
+    named = updater._waiting_text("/root", record, "drain", 12.4, [updater._holder(token, "c", 1, 5)])
+    assert token not in named and "by [redacted] (c pid 1, running 5 s)." in named
+
+
+def test_the_record_keeps_a_holder_seen_at_any_scan_at_its_longest_running(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_SCAN", 0)
+    answers = [[updater._holder("a", "c", 1, 1)],
+               [updater._holder("a", "c", 1, 5), updater._holder("b", "c", 2, 1)], []]
+    monkeypatch.setattr(updater, "_lock_holders", lambda lock: answers.pop(0) if answers else [])
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[3] = holders(lock).release
+        result = updater.run_prepared_update(store)
+        assert {(row["unit"], row["running_s"]) for row in result["runtime_waits"][0]["holders"]} == {
+            ("a", 5), ("b", 1)}
 
 
 def test_completed_candidate_cleanup_preserves_dirty_work_then_removes_owned_checkout(update):
@@ -703,6 +1046,642 @@ def test_native_runner_checks_membership_before_operation_and_uses_waiting_lock(
     assert waits == [True]
     assert read_update(installation)["job_dispatch"]["state"] == "pending"
 
+
+CHAT = "-1001234567890"
+TOKEN = "8888888:AAAAAAAAAAAAAAAAAAAA"
+# Every attempt is logged. A sender with no channel dir has no token (tg-post's exit 1);
+# a refusal, the host's or one sender's, is the carrier's (exit 3).
+TELEGRAM_STUB = """#!/bin/bash
+printf '%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" >> "$CLAUDLOBBY_ROOT/telegram-attempts"
+[ -n "$TELEGRAM_STATE_DIR" ] && [ -d "$TELEGRAM_STATE_DIR" ] || exit 1
+[ ! -e "$CLAUDLOBBY_ROOT/telegram-refuses" ] && [ ! -e "$TELEGRAM_STATE_DIR/refuses" ] || exit 3
+printf '%s|%s|%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "${TELEGRAM_BOT_TOKEN:-<none>}" "$1" \\
+    >> "$CLAUDLOBBY_ROOT/telegram-capture"
+"""
+
+
+def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None, retained=False, damaged=(),
+                units=("example.service",)):
+    """An update in phase restore whose job runs `restore` as the target's restore stage.
+
+    The target checkout carries the real alert door (lib-common.sh and the
+    supervisor.sh it sources) beside a tg-post.sh: a stub that records what it
+    is handed, or the real one. The alert chat is a bot of another fleet's tree,
+    as on a multi-fleet host, where a host job finds it. `python`, when given,
+    replaces the environment's interpreter with that script. `retained` puts the
+    same door in the previous release, whose quiet support retains it at
+    quiesce, as a real update does (#2715); `damaged` names the door's scripts
+    that the target breaks. `units` names its consumers.
+    """
+    from claudlobby import git_update as updater
+    installation, before, _, commit = update
+    repository = Path(__file__).resolve().parents[1]
+    package = installation.source / "claudlobby"
+    def door():
+        for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", *(("tg-post.sh",) if real_carrier else ())):
+            shutil.copy2(repository / "claudlobby/_runtime_scripts" / name, package / "_runtime_scripts" / name)
+        if not real_carrier:
+            (package / "_runtime_scripts/tg-post.sh").write_text(TELEGRAM_STUB)
+            (package / "_runtime_scripts/tg-post.sh").chmod(0o755)
+    if retained:
+        door()
+        shutil.copy2(repository / "claudlobby/supervision_runtime.py", package / "supervision_runtime.py")
+        before = commit("Notice fixture previous release")
+    shutil.copy2(repository / "claudlobby/git_update.py", package / "git_update.py")
+    door()
+    for name in damaged:
+        (package / "_runtime_scripts" / name).write_text("exit 9 (\n")
+    (package / "update_entry.py").write_text(
+        "import pathlib,sys,time\n"
+        "from .git_update import UpdateStore\n"
+        "from .installation import read_installation\n"
+        "def main(args):\n"
+        "    directory,stage,fd,parent,request,*_=args\n"
+        "    store=UpdateStore.from_parent(read_installation(pathlib.Path(directory)),fd=int(fd),\n"
+        "                                  parent_pid=int(parent),request_id=request)\n"
+        "    record=store.load()\n"
+        f"    {restore}\n"
+        "    store.save(record)\n"
+        "    store.__exit__()\n"
+        "    return 0\n")
+    target = commit("Notice fixture target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    interpreter = installation.environment / "bin/python"
+    interpreter.parent.mkdir(parents=True)
+    if python is None:
+        interpreter.symlink_to(Path(sys.executable).resolve())
+    else:
+        interpreter.write_text(python)
+        interpreter.chmod(0o755)
+    bot = installation.data_root / "local/example/runtime/bots/worker"
+    bot.mkdir(parents=True)
+    channel = installation.data_root / "channel"
+    channel.mkdir()
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bot / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="worker"\n'
+                                  f'export TELEGRAM_GROUP_CHAT_ID="{CHAT}"\n'
+                                  f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    with UpdateStore(installation) as store:
+        prepare(store, target, consumers={unit: {"intent": {
+            "installed": [{"path": str(installation.data_root / unit)}], "bot_binding": None}} for unit in units})
+        if retained:
+            record = store.load()
+            record["phase"] = "quiesce"
+            store.save(record)
+            updater._prepare_quiet_support(store)
+        _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.data_root)
+        record = store.load()
+        record.update(phase="restore", maintenance=False, config_committed=True,
+                      job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+    jobs.verify_update_job_runner = lambda *_args, **_kwargs: {"native_member": True}
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    return installation, channel
+
+
+def _posted(installation):
+    capture = installation.data_root / "telegram-capture"
+    return [line.split("|", 3) for line in capture.read_text().splitlines()] if capture.exists() else []
+
+
+def _attempts(installation):
+    attempts = installation.data_root / "telegram-attempts"
+    return [tuple(line.split("|", 1)) for line in attempts.read_text().splitlines()] if attempts.exists() else []
+
+
+def _alert_bot(bots, name, chat):
+    """A channel bot with an alert chat, and a sender of its own beside its fleet's bots."""
+    channel = bots.parent / f"{name}-channel"
+    channel.mkdir(parents=True)
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bots / name).mkdir(parents=True)
+    (bots / name / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="{name}"\n'
+                                          f'export TELEGRAM_GROUP_CHAT_ID="{chat}"\n'
+                                          f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    return channel
+
+
+HANG = 'print("restoring example.service", file=sys.stderr, flush=True); time.sleep(60)'
+
+
+@pytest.mark.parametrize("ending", ["interrupted", "cannot_start", "health_error", "carrier_refused", "done"])
+def test_an_update_job_that_ends_unfinished_tells_the_alert_chat_once(update, monkeypatch, capsys, ending):
+    """#2702: the job posts one notice through Telegram when its run leaves the update unfinished.
+
+    Every timer that would page someone is among what the update stopped, so
+    the job itself tells the host's alert chat, as a host job's FLEET ALERT
+    does. A run that finishes posts nothing, and a refused post never replaces
+    the run's own outcome.
+    """
+    from claudlobby import git_update as updater
+    restore = {"interrupted": HANG, "cannot_start": HANG, "carrier_refused": HANG,
+               "health_error": 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})',
+               "done": 'record.update(phase="done")'}[ending]
+    # A broken environment: the stage process cannot start at all.
+    broken = "#!/nonexistent/interpreter\n" if ending == "cannot_start" else None
+    installation, channel = _notice_job(update, monkeypatch, restore, python=broken)
+    if ending == "carrier_refused":
+        (installation.data_root / "telegram-refuses").touch()
+    if ending in {"interrupted", "cannot_start", "carrier_refused"}:
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._run_native_update(installation)
+    else:
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["job_dispatch"]["state"] == "finished"
+    posted = _posted(installation)
+    stderr = capsys.readouterr().err
+    if ending == "done":
+        assert posted == [] and "this update did not finish" not in stderr
+        return
+    if ending == "carrier_refused":
+        assert posted == []
+        assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3" in stderr
+        return
+    assert len(posted) == 1
+    chat, state, token, text = posted[0]
+    # The pair resolve_alert_target found for a host-scoped alert; tg-post reads the token itself.
+    assert (chat, state, token) == (CHAT, str(channel), "<none>")
+    assert text.startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                           f"(root {installation.data_root}, phase {record['phase']}): ")
+    assert text.endswith("read claudlobby host update status, then run claudlobby host update continue "
+                         "from a shell outside any bot session.")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+    if ending == "interrupted":
+        assert record["stage_error"] == {"stage": "restore", "detail":
+            "restoring example.service\ninterrupted: no unit finished within 3 s; the stage process was stopped"}
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: no unit finished within 3 s; the stage process was stopped)") in text
+    elif ending == "cannot_start":
+        assert record["stage_error"]["stage"] == "restore"
+        assert record["stage_error"]["detail"].startswith("interrupted: the stage process could not run: ")
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: the stage process could not run: ") in text
+    else:
+        assert "1 unit(s) reported a health error; example.service: unit failed to start" in text
+
+
+def _lines(*lines):
+    """Statements for `_notice_job`'s restore slot: the later lines sit at the entry's own indent."""
+    return "\n    ".join(lines)
+
+
+def _each_unit(field, value, pause, *more):
+    return _lines('for unit in sorted(record["consumers"]):',
+                  f'    record["consumers"][unit][{field!r}] = {value!r}', '    store.save(record)',
+                  f'    time.sleep({pause})', *more)
+
+
+UNITS = ("example.service", "b.service", "c.service")
+
+
+def test_a_restore_that_keeps_finishing_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: the limit is time without a finished unit; 3 s of work under a 2.5 s limit is healthy."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("restore", "done", 1.0, 'record.update(phase="done")'),
+                                  units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "done" and "stage_error" not in record
+
+
+def test_a_quiesce_that_keeps_stopping_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: quiesce counts finished units too, by its own field."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("stop", "done", 1.0), units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    with UpdateStore(installation) as store:
+        updater._application_stage(store, "quiesce")
+        assert "stage_error" not in store.load()
+
+
+def test_a_restore_failing_every_unit_is_stopped_at_the_limit(update, monkeypatch, tmp_path):
+    """#2734: a unit with a restore error has not finished, and saving is not progress.
+
+    Its three failures end by 0.9 s, and 1.0 s after them it would reach `reached`:
+    past a 1.5 s limit counted from its start, but 0.5 s before the limit a stage
+    that counted those failures as finished would set from the last of them.
+    """
+    from claudlobby import git_update as updater
+    reached = tmp_path / "reached-the-end"
+    restore = _lines('for unit in sorted(record["consumers"]):',
+                     "    time.sleep(0.3)",
+                     '    record["consumers"][unit].update(restore="done", restore_error="unit failed")',
+                     "    store.save(record)",
+                     "time.sleep(1.0)",
+                     f"pathlib.Path({str(reached)!r}).touch()",
+                     HANG)
+    installation, _ = _notice_job(update, monkeypatch, restore, units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    detail = read_update(installation)["stage_error"]["detail"]
+    assert detail.endswith("interrupted: no unit finished within 1.5 s; the stage process was stopped")
+    assert not reached.exists()
+
+
+def test_a_hanging_stage_is_stopped_at_the_limit_with_what_it_wrote(update, monkeypatch, tmp_path):
+    """#2734: the timeout carries the stage limit, not the poll, and the process is gone."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    pidfile = tmp_path / "pid"
+    script = ("import os,sys,time\n"
+              "sys.stderr.write('restoring example.service\\n'); sys.stderr.flush()\n"
+              f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n"
+              "time.sleep(30)\n")
+    installation = update[0]
+    started = time.monotonic()
+    with UpdateStore(installation) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "restore", [sys.executable, "-c", script])
+    assert time.monotonic() - started < 10
+    assert raised.value.timeout == updater._STAGE_TIMEOUT
+    errors = raised.value.stderr
+    assert "restoring example.service" in (errors.decode() if isinstance(errors, bytes) else errors)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+
+
+def test_a_stage_without_units_keeps_a_plain_limit(update, monkeypatch):
+    """#2734: no unit to finish, so no look at the record resets the limit."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1)
+    started = time.monotonic()
+    with UpdateStore(update[0]) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "render", [sys.executable, "-c", "import time; time.sleep(10)"])
+    assert time.monotonic() - started < 5
+    assert updater._interruption(raised.value, "render") == \
+        "interrupted: no result within 1 s; the stage process was stopped"
+    assert updater._interruption(raised.value, "restore") == \
+        "interrupted: no unit finished within 1 s; the stage process was stopped"
+
+
+def test_an_unreadable_record_counts_no_units_and_stops_nothing(update, monkeypatch, tmp_path):
+    """#2734: no news is not bad news; the stage runs on while the record cannot be read."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        path = installation.data_root / "state/update.json"
+        good = path.read_bytes()
+        path.write_bytes(b"{not json")
+        try:
+            assert updater._finished_units(store, "restore") == 0
+        finally:
+            path.write_bytes(good)
+        odd = store.load()
+        for consumers in (None, {"example.service": "done"}):  # consumers nothing validates
+            odd["consumers"] = consumers
+            store.save(odd)
+            assert updater._finished_units(store, "restore") == 0
+        path.write_bytes(good)
+        script = ("import pathlib,time\n"
+                  f"path=pathlib.Path({str(path)!r}); good=path.read_bytes()\n"
+                  "path.write_bytes(b'{not json'); time.sleep(0.6); path.write_bytes(good)\n")
+        result = updater._run_stage(store, "restore", [sys.executable, "-c", script])
+        assert result.returncode == 0 and path.read_bytes() == good
+
+
+def test_a_stage_that_exits_nonzero_hands_its_text_to_the_refusal_path(update, monkeypatch):
+    """#2734: the pipes still reach the caller as text, and a refusal keeps the stage's stderr."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'sys.exit("restore refused unit")')
+    with UpdateStore(installation) as store:
+        result = updater._run_stage(store, "render", [sys.executable, "-c",
+                                    "import sys; print('out'); print('err', file=sys.stderr); sys.exit(6)"])
+        assert (result.returncode, result.stdout, result.stderr) == (6, "out\n", "err\n")
+        with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+            updater._application_stage(store, "restore")
+        assert store.load()["stage_error"] == {"stage": "restore", "detail": "restore refused unit\n"}
+
+
+def test_the_notice_rides_the_real_tg_post_under_the_jobs_own_environment(update, monkeypatch, capsys, tmp_path):
+    """#2702: the real carrier works from the job's constructed environment, token read from its file."""
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, HANG, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in\n'
+        '    --config) cat "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        '    -d|--data-urlencode) printf "%s\\n" "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf '%s' '{\"ok\":true,\"result\":{\"message_id\":42}}'\n")
+    (fake / "curl").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    with pytest.raises(UpdateError, match="restore interrupted"):
+        updater._run_native_update(installation)
+    sent = (installation.data_root / "curl-capture").read_text()
+    assert f"https://api.telegram.org/bot{TOKEN}/sendMessage" in sent
+    assert f"chat_id={CHAT}" in sent
+    assert "text=FLEET ALERT: host update " in sent and "restore interrupted" in sent
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
+
+
+FINISHED_UNHEALTHY = 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})'
+
+
+def test_the_notice_walks_on_to_the_next_alert_recipient_until_one_accepts(update, monkeypatch, capsys):
+    """#2715: a recipient that refuses does not end the notice.
+
+    The resolver's pair is tried first: a bot whose conf was cut mid-write, with
+    a stray quote in its chat and no sender. The worker's sender refuses at the
+    carrier. The next bot with an alert chat, in the resolver's own order, takes it.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    bots = installation.data_root / "local/example/runtime/bots"
+    (bots / "alpha").mkdir()
+    (bots / "alpha/bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="alpha"\nexport TELEGRAM_GROUP_CHAT_ID="{CHAT}')
+    (channel / "refuses").touch()
+    sender = _alert_bot(bots, "zeta", CHAT)
+    updater._run_native_update(installation)
+    assert _attempts(installation) == [(f'"{CHAT}', ""), (CHAT, str(channel)), (CHAT, str(sender))]
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:3] == [CHAT, str(sender), "<none>"]
+    assert "posted that this update did not finish (scan:bot:zeta, after 2 refused)" in capsys.readouterr().err
+
+
+def test_the_notice_tries_each_alert_recipient_once_in_the_resolvers_own_order(update, monkeypatch, capsys, tmp_path):
+    """#2715: the walk is resolve_alert_target's own, not a second copy of it.
+
+    Every recipient refuses. The notice tries each pair once, in the order the
+    resolver itself gives when each bot it picks loses its chat in turn: the
+    root's bots, then each fleet's, a nested fleet's last.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    root = installation.data_root
+    (root / "telegram-refuses").touch()
+    _alert_bot(root / "runtime/bots", "root-bot", CHAT)
+    (root / "local/alpha/runtime/bots/no-chat").mkdir(parents=True)
+    _alert_bot(root / "local/alpha/runtime/bots", "alpha-bot", "-1009999999999")
+    _alert_bot(root / "local/system/inner/runtime/bots", "nested-bot", CHAT)
+    updater._run_native_update(installation)
+    attempts = _attempts(installation)
+    assert len(attempts) == len(set(attempts)) == 4
+    assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3, the last of 4 recipients" \
+        in capsys.readouterr().err
+    script = ('. "$1/lib-common.sh" >/dev/null 2>&1 || exit 9; resolve_alert_target "$2" any >/dev/null 2>&1; '
+              'printf "%s|%s" "${_alert_chat_id:-}" "${_alert_state_dir:-}"')
+    environment = {"PATH": updater._NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()), "TMPDIR": str(tmp_path),
+                   "CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "1"}
+    resolved = []
+    while True:
+        pick = subprocess.run(["/bin/bash", "-c", script, "resolve", str(installation.native), str(root / "runtime/bots")],
+                              env=environment, capture_output=True, text=True, check=True).stdout
+        if pick == "|":
+            break
+        resolved.append(tuple(pick.split("|", 1)))
+        confs = [conf for conf in root.glob("**/runtime/bots/*/bot.conf")
+                 if f'TELEGRAM_STATE_DIR="{resolved[-1][1]}"' in conf.read_text()]
+        assert len(confs) == 1 and len(resolved) <= 4
+        confs[0].write_text("".join(line for line in confs[0].read_text().splitlines(keepends=True)
+                                    if "TELEGRAM_GROUP_CHAT_ID" not in line))
+    assert attempts == resolved
+
+
+def test_the_notice_runs_the_alert_door_retained_before_the_cutover(update, monkeypatch, capsys):
+    """#2715: the scripts a failed update installed are not the ones that tell someone.
+
+    The previous release's lib-common.sh, cli-context.sh and tg-post.sh are
+    retained beside the quiet support at quiesce. The target breaks two of them,
+    and the notice still goes out, through the retained copies.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True,
+                                        damaged=("lib-common.sh", "tg-post.sh"))
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"])
+    assert set(record["notice_support"]) == {"lib-common.sh", "cli-context.sh", "tg-post.sh"}
+    for name, digest in record["notice_support"].items():
+        assert updater._digest((retained / name).read_bytes()) == digest
+    updater._run_native_update(installation)
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:2] == [CHAT, str(channel)]
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
+
+
+def test_the_notice_never_runs_a_retained_alert_door_that_changed(update, monkeypatch, capsys):
+    """#2715: a retained copy that no longer matches its digest is not run; the live door is, and the job says so."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True)
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"]) / "tg-post.sh"
+    retained.write_text("#!/bin/bash\nexit 0\n")  # it would claim a post it never made
+    updater._run_native_update(installation)
+    assert len(_posted(installation)) == 1
+    assert ("posted that this update did not finish (scan:bot:worker; its retained alert scripts changed, "
+            "so the live checkout's ran)") in capsys.readouterr().err
+
+
+def test_quiet_support_never_waits_for_an_alert_door_the_previous_release_lacks(update):
+    """#2715: retaining the alert door is best effort; without it the update goes on, and the notice runs the live one."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    (package / "_runtime_scripts/supervisor.sh").write_text("svc_activation_quiet() { return 3; }\n")
+    before = commit("Previous release without an alert door")
+    (installation.source / "templates/candidate.txt").write_text("next release\n")
+    target = commit("Target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        updater._prepare_quiet_support(store)
+        record = store.load()
+        assert set(record["quiet_support"]) == {"supervisor.sh", "supervision_runtime.py"}
+        assert "notice_support" not in record
+        assert updater._notice_door(store, record) == (installation.native, None)
+
+
+REFUSALS = {
+    "retained_support": "retained independent updater support changed",
+    "bound_job": "native updater differs from retained operation binding/domain",
+    "dispatch_intent": "native updater lacks its original dispatch intent",
+    "membership": "updater caller is external to its exact native job or membership is unknown",
+    "binding": "independent native job has no retained binding",
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(REFUSALS))
+def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_not_be_the_job(
+        update, monkeypatch, capsys, refusal):
+    """#2715: a refusal that leaves the update unfinished is told, as a run that ends is.
+
+    A run refused for its retained support, its bound unit or its dispatch intent
+    posts one notice naming the refusal. A process that has not shown it is the
+    job (no binding, or membership refused or unknown) may be a hand-run `_run`
+    that took the lock while the job waits for it: it posts nothing, and the job
+    reports its own run. No refused run enters the dispatch.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'record.update(phase="done")')
+    message = REFUSALS[refusal]
+    def refuse(*_args, **_kwargs):
+        raise UpdateError(message)
+    if refusal == "retained_support":
+        monkeypatch.setattr(updater, "_retained_job", refuse)
+    elif refusal == "bound_job":
+        monkeypatch.setattr(updater, "_check_bound_job", refuse)
+    elif refusal == "membership":
+        updater._retained_job(None)[0].verify_update_job_runner = refuse
+    else:
+        with UpdateStore(installation) as store:
+            record = store.load()
+            record.pop("job_dispatch" if refusal == "dispatch_intent" else "updater_job")
+            store.save(record)
+    with pytest.raises(UpdateError, match=f"^{re.escape(message)}$"):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "restore"
+    assert record.get("job_dispatch") == (None if refusal == "dispatch_intent" else {"state": "pending", "attempt": 1})
+    posted, stderr = _posted(installation), capsys.readouterr().err
+    if refusal in {"membership", "binding"}:
+        assert posted == [] and "did not finish" not in stderr
+        return
+    assert len(posted) == 1
+    assert posted[0][3].startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                                   f"(root {installation.data_root}, phase restore): {message}. ")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+
+
+@pytest.mark.parametrize("carrier", ["stalls", "stalls_ignoring_sigterm"])
+def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(update, monkeypatch, capsys, tmp_path,
+                                                                                carrier):
+    """#2702, #2715: the notice's time limit holds, and stopping it leaves no token-bearing file.
+
+    The real tg-post.sh writes its curl config, which holds the token, into
+    lib-common's scratch directory, which its EXIT trap removes; a SIGKILL skips
+    that trap. macOS's mktemp puts that directory where it likes, whatever TMPDIR
+    says, and so does the stand-in here, so no private TMPDIR can catch it. The
+    door gets SIGTERM first, and SIGKILL after a grace for whatever ignores it.
+    A carrier that ignores SIGTERM is promised only that it ends: the bash
+    waiting on it may run its trap only once it ends, which on macOS's bash 3.2
+    was after the SIGKILL.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in --config) printf "%s\\n" "$2" > "$CLAUDLOBBY_ROOT/curl-config"; shift 2 ;; *) shift ;; esac\n'
+        "done\n"
+        'printf "%s\\n" "$$" > "$CLAUDLOBBY_ROOT/curl-pid"\n'
+        + ("trap '' TERM\n" if carrier == "stalls_ignoring_sigterm" else "")
+        + "exec sleep 60\n")
+    (fake / "curl").chmod(0o755)
+    (fake / "mktemp").write_text('#!/bin/bash\nunset TMPDIR\nPATH=/usr/bin:/bin exec mktemp "$@"\n')
+    (fake / "mktemp").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    monkeypatch.setattr(updater, "_NOTICE_TIMEOUT", 2)
+    monkeypatch.setattr(updater, "_NOTICE_GRACE", 1)
+    started = time.monotonic()
+    updater._run_native_update(installation)
+    elapsed = time.monotonic() - started
+    config = Path((installation.data_root / "curl-config").read_text().strip())
+    left = config.exists()
+    if left:  # remove what a kill leaves, the fixture's token included
+        shutil.rmtree(config.parent, ignore_errors=True)
+    assert not left or carrier == "stalls_ignoring_sigterm", "the token-bearing curl config outlived the notice"
+    assert elapsed < 30
+    assert "nobody was told that this update did not finish: failed: no answer within 2 s" in capsys.readouterr().err
+    pid, deadline = int((installation.data_root / "curl-pid").read_text()), time.monotonic() + 10
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the carrier outlived the notice's limit"
+        time.sleep(0.1)
+
+
+def test_a_notice_that_raises_never_replaces_the_runs_own_error(update, monkeypatch, capsys):
+    """#2702: whatever the notice raises, the run raises its own error."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, HANG)
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the alert door exploded")
+    monkeypatch.setattr(updater, "_send_notice", explode)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    assert "nobody was told that this update did not finish: failed: RuntimeError" in capsys.readouterr().err
+    assert _posted(installation) == []
+
+
+def test_the_notice_never_quotes_text_shaped_like_a_credential(update, monkeypatch):
+    """#2715: the chat never gets what a refused stage printed in a credential's shape.
+
+    The record keeps the stage's whole last line, for `host update status`.
+    """
+    from claudlobby import git_update as updater
+    line = ("restore refused: POST https://api.telegram.org/bot8888888:AAAAAAAAAAAAAAAAAAAA/sendMessage with "
+            "ghp_xxxxxxxxxxxxxxxxxxxx and API_PASSWORD=hunter2 for example.service at "
+            "b486af4a7f9eb656c772083457f3a407d2b992e0")
+    installation, _ = _notice_job(update, monkeypatch, f"print({line!r}, file=sys.stderr); raise SystemExit(6)")
+    with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+        updater._run_native_update(installation)
+    assert read_update(installation)["stage_error"]["detail"].strip().splitlines()[-1] == line
+    (posted,) = _posted(installation)
+    for secret in ("AAAAAAAAAAAAAAAAAAAA", "ghp_xxxxxxxxxxxxxxxxxxxx", "hunter2"):
+        assert secret not in posted[3]
+    assert ("api.telegram.org/bot[redacted]/sendMessage with [redacted] and API_PASSWORD=[redacted] "
+            "for example.service at b486af4a7f9eb656c772083457f3a407d2b992e0") in posted[3]
+
+
+@pytest.mark.parametrize("text, shown", [
+    ("token rejected: 8888888:AAAAAAAAAAAAAAAAAAAA", "token rejected: [redacted]"),
+    ("export TELEGRAM_BOT_TOKEN='8888888:AAAAAAAAAAAAAAAAAAAA'", "export TELEGRAM_BOT_TOKEN='[redacted]'"),
+    ('{"password": "hunter2"}', '{"password": "[redacted]"}'),
+    ("url:password=hunter2", "url:password=[redacted]"),
+    ("api-key: abc123", "api-key: [redacted]"),
+    ("Authorization: Bearer abcdefgh12345678", "Authorization: [redacted]"),
+    ("fetch https://user:hunter2@example.invalid/repo.git", "fetch https://[redacted]@example.invalid/repo.git"),
+    ("push refused for ghp_xxxxxxxxxxxxxxxxxxxx", "push refused for [redacted]"),
+    ("github_pat_" + "x" * 30, "[redacted]"),
+    ("xoxb-0000000000-xxxxxxxxxxxx", "[redacted]"),
+    ("sk-" + "x" * 30, "[redacted]"),
+    ("AKIA" + "X" * 16, "[redacted]"),
+    ("key Q2xhdWRsb2JieUV4YW1wbGVLZXkx ok", "key [redacted] ok"),
+    # what a notice needs, which no credential shape takes
+    ("commit b486af4a7f9eb656c772083457f3a407d2b992e0", None),
+    ("request 00000000-0000-4000-8000-000000000001", None),
+    ("sha256 " + "4e5a6562" * 8, None),
+    ("/opt/example/claudlobby/local/example/runtime/bots/worker/bot.conf", None),
+    ("restoring com.claudlobby.update.0123456789abcdef.service", None),
+    ("interrupted: no result within 900 s; the stage process was stopped", None),
+])
+def test_the_notice_redacts_each_credential_shape_and_keeps_what_it_needs(text, shown):
+    """#2715: the shapes the redaction takes, and what it leaves for the reader."""
+    from claudlobby.git_update import _redacted
+    assert _redacted(text) == (text if shown is None else shown)
+
+
+def test_the_notice_redacts_before_it_clips():
+    """#2715: a token cut by the 300-character clip is redacted whole, never left as a prefix."""
+    from claudlobby.git_update import _unfinished_text
+    failure = UpdateError("x" * 290 + " 8888888:AAAAAAAAAAAAAAAAAAAA")
+    text = _unfinished_text("/root", {"request_id": "request", "phase": "restore"}, failure)
+    assert "8888888" not in text
+    assert "x" * 290 + " [redacted. Whatever it stopped" in text
 
 @pytest.mark.parametrize("initialize", [False, True])
 def test_public_continue_attaches_original_operation_without_mutable_application(update, monkeypatch, initialize):
@@ -1709,7 +2688,7 @@ def test_application_authorization_failure_without_record_reports_actual_boundar
             if failure == "interrupted":
                 raise subprocess.TimeoutExpired("authorize", 900)
             return subprocess.CompletedProcess([], 6, "", "earlier traceback\n  inventory refused unknown native state\x00  \n")
-        monkeypatch.setattr(updater.subprocess, "run", refused)
+        monkeypatch.setattr(updater, "_run_stage", refused)
         with pytest.raises(UpdateError) as raised:
             updater._application_stage(store, "authorize", python=Path(sys.executable).resolve())
         message = str(raised.value)

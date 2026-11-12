@@ -42,7 +42,7 @@ def _seed_conversation(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "Review PR #7768",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": "f",
          "payload": {"assignment_id": f"asg_{H}", "work_item_id": f"wi_{H}",
                      "assignee": worker, "assigned_by": mgr,
@@ -324,7 +324,7 @@ def test_channel_grouped_histories_use_key_indexes_and_keep_chronology(tmp_path,
         rows.extend([
             {"event_type": "work_item", "emitter": "t", "fleet": "f",
              "payload": {"work_item_id": f"wi_{key}", "title": "Recorded task",
-                         "created_by": "bot:f/mgr"}},
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
             {"event_type": "communication", "emitter": "t", "fleet": "f",
              "payload": {"msg_id": f"msg_{key}", "sender": "bot:f/mgr",
                          "recipient": "bot:f/worker", "message_class": "chat",
@@ -518,7 +518,7 @@ def _seed_one_sided(root, tagged_side):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "One-sided tag",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "f",
          "payload": {"msg_id": "msg_" + "e" * 32, "sender": "bot:f/mgr",
                      "recipient": "bot:f/w1", "message_class": "task_request",
@@ -555,7 +555,7 @@ def _seed_reply_lineage(root, *, depth=1, padding=120):
     task = _lineage_id("wi", 1)
     rows = [{"event_type": "work_item", "emitter": "t", "fleet": "f",
              "payload": {"work_item_id": task, "title": "Recorded task",
-                         "created_by": "bot:f/mgr"}}]
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}]
     for number in range(depth):
         rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
             "payload": {"msg_id": _lineage_id("msg", number + 1),
@@ -615,7 +615,8 @@ def test_unresolved_reply_lineage_never_assigns_task(tmp_path, fault):
         emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t",
             "fleet": "g" if fault == "wrong_fleet" else "f",
             "payload": {"work_item_id": _lineage_id("wi", 2),
-                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr"}}],
+                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr",
+                        "workstream_id": "ws-test"}}],
             require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         if fault == "missing":
@@ -655,7 +656,7 @@ def test_incomplete_lineage_keeps_only_a_messages_own_valid_task(tmp_path, sibli
     if sibling_task:
         rows.insert(0, {"event_type": "work_item", "emitter": "t", "fleet": "f",
             "payload": {"work_item_id": _lineage_id("wi", sibling_task),
-                        "title": "Other task", "created_by": "bot:f/mgr"}})
+                        "title": "Other task", "created_by": "bot:f/mgr", "workstream_id": "ws-test"}})
     emit_batch(tmp_path, rows, require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
@@ -685,7 +686,7 @@ def test_reply_lineage_emitting_fleet_cannot_authorize_task(tmp_path, incomplete
     task = _lineage_id("wi", 2)
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
         "payload": {"work_item_id": task, "title": "Unrelated emitting-fleet task",
-                    "created_by": "bot:g/mgr"}}], require_commit=True)
+                    "created_by": "bot:g/mgr", "workstream_id": "ws-test"}}], require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         # Both recorded parties remain in f. Only the emitting fleet matches g.
         conn.execute("UPDATE communications SET fleet_uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
@@ -1046,7 +1047,7 @@ def _seed_twins(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "t", "fleet": fleet,
              "payload": {"assignment_id": "asg_" + h * 32,
                          "work_item_id": "wi_" + h * 32,
@@ -1183,7 +1184,7 @@ def _seed_cross_fleet(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross",
-                     "created_by": "bot:engineering/lead"}},
+                     "created_by": "bot:engineering/lead", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "engineering",
          "payload": {"msg_id": "msg_" + "e" * 32,
                      "sender": "bot:engineering/lead",
@@ -1267,7 +1268,7 @@ def _seed_twins_with_deadlines(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             asg,
             {"event_type": "communication", "emitter": "t", "fleet": fleet,
              "payload": {"msg_id": "msg_" + h * 32, "sender": mgr,
@@ -1500,7 +1501,7 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
     emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": title,
-                     "created_by": mgr}}]) + [
+                     "created_by": mgr, "workstream_id": "ws-test"}}]) + [
         assignment,
         {"event_type": "communication", "emitter": "t", "fleet": fleet,
          "payload": {"msg_id": "msg_" + stem, "sender": mgr,
@@ -1666,7 +1667,7 @@ def _canonical_delivery(root: Path, h: str, *, tx_state: str | None,
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": fleet,
          "payload": {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
                      "assignee": worker, "assigned_by": mgr,
@@ -1919,10 +1920,10 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": queued, "title": "Unassigned intake",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": moved, "title": "Move this task",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"assignment_id": first, "work_item_id": moved,
                      "assignee": "bot:g/worker", "assigned_by": "bot:f/mgr"}},
@@ -1975,7 +1976,7 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": f"wi_{i:032x}", "title": f"Later {i}",
-                     "created_by": "bot:f/mgr"}}
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}
         for i in range(201)], require_commit=True)
     capped = client.get("/api/tasks?fleet=f").json()["data"]
     assert len(capped["tasks"]) == 200 and capped["truncated"] is True
@@ -1997,10 +1998,10 @@ def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "claudlobby.tasks.v999",
                           "fleet": "f", "payload": {"work_item_id": task_id,
                                                      "title": "Unknown producer",
-                                                     "created_by": "bot:f/mgr"}},
+                                                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
                           "payload": {"work_item_id": ambiguous, "title": "Ambiguous workers",
-                                      "created_by": "bot:f/mgr"}},
+                                      "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          *({"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
                             "payload": {"assignment_id": "asg_" + stem * 32,
                                         "work_item_id": ambiguous,

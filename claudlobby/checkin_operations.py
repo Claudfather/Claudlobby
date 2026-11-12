@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -33,17 +32,6 @@ class CheckinError(RuntimeError):
 def _inspect(request_id: str) -> str:
     return (f"inspect claudlobby --json request show {request_id}; "
             "then retry the same --request-id, never a new one")
-
-
-def _proof(root, fact):
-    from .plane.db import connect_ro, db_file
-    from .plane.schema_state import require_current_schema
-    from .request_facts import reconcile_facts
-
-    with closing(connect_ro(db_file(root))) as conn:
-        conn.execute("BEGIN")
-        require_current_schema(conn)
-        return reconcile_facts(conn, (fact,))
 
 
 def _result(ctx, request_id, checkin_id, *, persisted, replayed):
@@ -86,6 +74,7 @@ def record_checkin(ctx, selected, decision: dict, selection: dict | None, *,
     from .plane import PLANE_SCHEMA_VERSION
     from .plane.emit_api import emit_batch, validate_item
     from .plane.ids import derive_uid
+    from .report_operations import _proof
     from .request_facts import expected_fact
     from .request_receipts import (ReceiptBusy, ReceiptError, RequestIntent, StagePlan,
                                    locked_request, semantic_digest)

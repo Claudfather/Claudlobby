@@ -45,16 +45,43 @@ def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFai
                           data={**data, "cause": cause})
 
 
+def _canonical_uuid(value: str) -> bool:
+    from uuid import UUID
+
+    try:
+        return str(UUID(value)) == value
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def own_compaction_lines(result) -> tuple[str, ...]:
+    """What a bot's `compact` on itself recorded (#1053). It never types."""
+    who = f"{result.fleet}/{result.bot}"
+    request_id = (result.request or {}).get("request_id")
+    line = {
+        "requested": f"{who}: compaction requested (request {request_id}); nothing was typed, "
+                     "and nothing acts on a request yet.",
+        "pending": f"{who}: a compaction request is already pending (request {request_id}); "
+                   "nothing new was recorded.",
+        "replayed": f"{who}: this request ID was already recorded; nothing new was recorded.",
+        "cancelled": f"{who}: compaction request {request_id} cancelled.",
+        "none_pending": f"{who}: no compaction request is pending; nothing was cancelled.",
+    }[result.outcome]
+    if result.recording == "degraded":
+        line += " Its plane row did not land; the request file stands."
+    return (line,)
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
                                   set_bot_running)
+    from ..compact_request import CompactRequestResult
     from ..config_plan import PlanError
     from ..context import resolve_paths
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
     if args.seed:
@@ -73,6 +100,9 @@ def dispatch(args) -> CommandOutput:
             check_reason(reason)
         except StopRecordError as exc:
             raise CommandFailure("invalid_argument", str(exc)) from exc
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and not _canonical_uuid(request_id):
+        raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
     data = {"fleet": args.fleet, "bot": args.bot_id, "requested": action,
             "native_outcome": "unattempted", "runtime_state": "unknown"}
     try:
@@ -82,11 +112,13 @@ def dispatch(args) -> CommandOutput:
         elif action == "handoff":
             result = handoff_bot(root=root, fleet=args.fleet, bot=args.bot_id)
         elif action in {"interrupt", "compact"}:
-            result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action)
+            result = control_bot(root=root, fleet=args.fleet, bot=args.bot_id, control=action,
+                                 request_id=request_id, cancel=getattr(args, "cancel", False))
         else:
             result = set_bot_running(root=root, fleet=args.fleet, bot=args.bot_id,
                                      running=running, restart=action == "restart",
-                                     ceiling=ceiling, reason=reason)
+                                     ceiling=ceiling, reason=reason,
+                                     fresh=getattr(args, "fresh", False))
     except BotLifecycleError as exc:
         if exc.source_revision is not None:
             data.update(source_revision=exc.source_revision, config_fingerprint=exc.config_fingerprint)
@@ -113,16 +145,16 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("unavailable", message, data=data, release_id=exc.release_id,
                                  hint=hint) from exc
         if exc.unavailable:
-            message = str(exc) if action == "stop" else "bot native or session readiness cannot be established"
+            # A refused stop or restart says why (#2748): a restart refusal is often a
+            # checkpoint refusal, and the generic line hid which.
+            message = (str(exc) if action in {"stop", "restart"}
+                       else "bot native or session readiness cannot be established")
             raise CommandFailure("unavailable", message,
                                  data=data,
                                  hint="inspect the exact private session; use bot restart for an intentional bounce") from exc
         raise CommandFailure("conflict", str(exc), data=data) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid bot root or fleet selector", data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "bot operation requires the selected executable and release",
-                             data=data) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected bot release differs from this executable", data=data) from exc
     except (ActivationError, PlanError, OperationContextError) as exc:
@@ -143,6 +175,10 @@ def dispatch(args) -> CommandOutput:
                  if result.handoff == "saved" else
                  f"{result.fleet}/{result.bot}: handoff skipped ({result.reason}); no new handoff verified.",)
         return CommandOutput(data, release_id=result.release_id, lines=lines)
+    if action == "compact" and isinstance(result, CompactRequestResult):
+        data = asdict(result)
+        data["native_outcome"] = "unattempted"
+        return CommandOutput(data, release_id=result.release_id, lines=own_compaction_lines(result))
     if action in {"interrupt", "compact"}:
         data = asdict(result)
         data["native_outcome"] = "submitted"
@@ -155,8 +191,13 @@ def dispatch(args) -> CommandOutput:
         lines = (f"{result.fleet}/{result.bot}: de-enrolled and stopped; "
                  "the declared bot and retained identity remain selected.",)
     elif result.state == "requested":
-        lines = (f"{result.fleet}/{result.bot}: self restart requested; "
+        kind = " into a fresh session" if result.handoff == "fresh_session" else ""
+        lines = (f"{result.fleet}/{result.bot}: self restart{kind} requested; "
                  f"request={result.request_id}; final outcome in {result.log_path}.",)
+    elif action == "restart" and result.handoff == "fresh_session":
+        lines = (f"{result.fleet}/{result.bot}: restarted into a fresh session; readiness="
+                 f"{result.readiness}; it resumes from the saved handoff when that is recent "
+                 "enough (the RESUME line in its startup.log says which).",)
     elif action == "restart":
         lines = (f"{result.fleet}/{result.bot}: supervised session restarted; "
                  f"readiness={result.readiness}; handoff={result.handoff}.",)

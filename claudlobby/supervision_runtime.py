@@ -150,8 +150,11 @@ def assert_native_absent(adapter, *, manager: str, domain: str, target: str, ins
     """
     file = Path(installed_file)
     directories = tuple(Path(item) for item in search_directories)
+    # Only the install directory must be unredirected. The rest of the list is the
+    # manager's and can hold a packaged link; the checks below read through it.
     if (manager not in {"Linux", "Darwin"} or not directories or file.parent not in directories
-            or any(not item.is_absolute() or item.resolve() != item for item in directories)):
+            or any(not item.is_absolute() for item in directories)
+            or file.parent.resolve() != file.parent):
         raise RuntimeEvidenceError("absence", target, "invalid frozen native placement")
     catalog = _call(adapter, "svc_inventory_catalog", target)
     lines = catalog.splitlines()
