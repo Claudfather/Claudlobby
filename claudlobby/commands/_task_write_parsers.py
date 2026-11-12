@@ -150,9 +150,15 @@ def register_task_write_subparsers(task_children, assignment_children):
     rescheduling.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
     for verb in ("progress", "block", "return", "complete", "fail"):
+        help_text = ("Complete the whole task and notify the fleet manager" if verb == "complete"
+                     else "Record a linked report, then notify the fleet manager")
+        description = (_PROGRESS_HELP if verb == "progress" else
+                       "Closes the whole task, not only this assignment. If implementation or review "
+                       "is an intermediate step, report assignment progress and let the manager "
+                       "reassign the same open task. Complete only after the reviewed outcome is verified."
+                       if verb == "complete" else None)
         reporting = _route(assignment_children, verb, "assignment." + verb,
-                           "Record a linked report, then notify the fleet manager",
-                           description=_PROGRESS_HELP if verb == "progress" else None)
+                           help_text, description=description)
         reporting.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
         reporting.add_argument("--summary" if verb in ("progress", "complete") else "--reason",
                                required=True, metavar="TEXT")

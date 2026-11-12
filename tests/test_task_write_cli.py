@@ -687,3 +687,13 @@ def test_git_generated_task_writes_use_current_provenance_and_same_request(activ
                      "--request-id", str(uuid4()))
     assert accepted["data"]["state"] == "active" and accepted["release_id"] is None
     assert accepted["data"]["config_fingerprint"] == snapshot["fingerprint"]
+
+
+def test_complete_help_warns_about_terminal_task_and_review_handoff(capsys):
+    with pytest.raises(SystemExit) as exited:
+        main(["assignment", "complete", "--help"])
+    assert exited.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Closes the whole task, not only this assignment" in text
+    assert "assignment progress" in text and "reassign the same open task" in text
+    assert "after the reviewed outcome is verified" in text
