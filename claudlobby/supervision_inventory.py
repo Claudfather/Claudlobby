@@ -110,7 +110,7 @@ class Adapter:
         "svc_activation_stop_private_server",
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
         "svc_bot_control_exact",
-        "svc_host_job_run_exact",
+        "svc_host_job_run_exact", "svc_job_witness", "svc_job_stop_exact", "svc_job_reload",
         "svc_update_job_enroll_exact", "svc_update_job_run_exact", "svc_update_job_exec",
     })
 

@@ -452,3 +452,46 @@ def test_status_missing_and_empty_recorded_fields_have_same_shape(tmp_path, caps
     assert absent.keys() == present.keys()
     assert {k: v for k, v in absent.items() if k not in {"root", "preactivation"}} == {
         k: v for k, v in present.items() if k not in {"root", "preactivation"}}
+
+
+def test_public_fleet_job_stop_dispatches_exact_selected_root_and_fleet(tmp_path, monkeypatch, capsys):
+    from claudlobby import job_operations
+    calls = []
+    def stop(root, name, *, fleet):
+        calls.append((root, name, fleet))
+        return job_operations.JobStop(name, fleet, "a" * 40, "b" * 64,
+                                     ({"target": "private.fleet-pulse.service", "outcome": "absent"},))
+    monkeypatch.setattr(job_operations, "stop_job", stop)
+    body = call(capsys, ["--root", str(tmp_path), "--fleet", "selected",
+                        "host", "supervision", "stop", "--fleet-job", "fleet-pulse", "--json"])
+    assert body["command"] == "host.supervision.stop"
+    assert body["data"]["fleet"] == "selected" and body["data"]["enrollment"] == "absent"
+    assert calls == [(tmp_path.resolve(), "fleet-pulse", "selected")]
+
+
+@pytest.mark.parametrize("scope,selector", [
+    (["--fleet", "selected"], ["--host-job", "plane-daemon"]),
+    (["--seed"], ["--fleet-job", "fleet-pulse"]),
+    (["--fleet", "selected", "--seed"], ["--fleet-job", "fleet-pulse"]),
+])
+def test_public_job_stop_keeps_host_and_seed_scope_restrictions(tmp_path, monkeypatch, capsys, scope, selector):
+    from claudlobby import job_operations
+    monkeypatch.setattr(job_operations, "stop_job", lambda *a, **k: pytest.fail("invalid scope reached lifecycle"))
+    body = call(capsys, ["--root", str(tmp_path), *scope,
+                        "host", "supervision", "stop", *selector, "--json"], expected=2)
+    assert body["error"]["code"] == "invalid_argument"
+    assert "host preparation rejects" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("blocker", ["redirected-state", "bot-caller"])
+def test_public_fleet_job_stop_preserves_state_and_operator_guards(tmp_path, monkeypatch, capsys, blocker):
+    from claudlobby import job_operations
+    monkeypatch.setattr(job_operations, "stop_job", lambda *a, **k: pytest.fail("blocked caller reached lifecycle"))
+    if blocker == "redirected-state":
+        elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+        (tmp_path / "state").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        monkeypatch.setenv("BOT_ID", "worker")
+    body = call(capsys, ["--root", str(tmp_path), "--fleet", "selected",
+                        "host", "supervision", "stop", "--fleet-job", "fleet-pulse", "--json"], expected=4)
+    assert body["error"]["code"] == "conflict"

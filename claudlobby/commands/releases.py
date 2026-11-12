@@ -19,8 +19,8 @@ import stat
 from ..command_result import CommandFailure, CommandOutput
 
 
-def _host_root(args) -> Path:
-    if args.fleet is not None or args.seed:
+def _host_root(args, *, allow_fleet: bool = False) -> Path:
+    if args.seed or (args.fleet is not None and not allow_fleet):
         raise CommandFailure("invalid_argument", "invalid argument: host preparation rejects --fleet and --seed")
     value = args.root if args.root is not None else os.environ.get("CLAUDLOBBY_ROOT")
     if not value:

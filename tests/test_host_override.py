@@ -169,7 +169,7 @@ def test_git_host_job_uses_committed_family_and_exact_installed_service(tmp_path
 
     domain = f"{domain_kind}/{os.getuid()}" if domain_kind else ""
     root, directory = tmp_path / "data", tmp_path / "units"
-    root.mkdir(); directory.mkdir()
+    root.mkdir(); (root / "state").mkdir(); directory.mkdir()
     installation = Installation(tmp_path / "installation", root)
     package = replace(source_package(), installation=installation, native=installation.native,
                       artifact_id="", source_revision="a" * 40)
@@ -301,3 +301,383 @@ def test_host_job_run_refuses_generated_caller_and_retired_pull_root(tmp_path, m
     retired = json.loads(capsys.readouterr().out)
     assert "retired" in retired["error"]["message"]
     assert retired["data"]["native_outcome"] == "unattempted"
+
+
+def _stop_family(tmp_path, monkeypatch, *, manager="Linux", name="log-rotation", abandon=False, activity="inactive"):
+    """An existing committed native family; no native process is started."""
+    import os
+    import plistlib
+    from dataclasses import replace
+    from claudlobby import job_operations as jobs
+    from claudlobby.config_units import unit_family
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime, wrap_unit_argv, unit_systemd_command, unit_systemd_environment
+    from claudlobby.supervision_inventory import FileSnapshot
+    root, directory = tmp_path / "data", tmp_path / "units"
+    root.mkdir(); (root / "state").mkdir(); directory.mkdir()
+    installation = Installation(tmp_path / "installation", root)
+    package = replace(source_package(), installation=installation, native=installation.native,
+                      artifact_id="", source_revision="a" * 40)
+    fleet = None if name == "plane-daemon" else "sample"
+    stem = "private-" + name if fleet is None else "com.private." + name
+    env = {"CLAUDLOBBY_ROOT": str(root), "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+           "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    command = ([str(installation.cli), "--root", str(root), "plane", "serve"] if fleet is None
+               else [str(installation.native / {"log-rotation": "log-rotate-fleet.sh", "keepalive": "keepalive-all.sh"}[name]), fleet])
+    argv = wrap_unit_argv(env, unit=stem, phase="ingest" if fleet is None else "producers",
+                         mode="exec" if fleet is None else "oneshot", argv=command)
+    definition = {"Label": stem, "WorkingDirectory": str(root), "EnvironmentVariables": env,
+                  "ProgramArguments": list(argv), "AbandonProcessGroup": abandon}
+    if fleet:
+        definition["StartInterval"] = 60
+    service = (f"[Service]\nWorkingDirectory={root}\nExecStart={unit_systemd_command(argv)}\n"
+               + "".join(unit_systemd_environment(k, v) + "\n" for k, v in env.items())
+               + ("KillMode=process\n" if abandon else ""))
+    files = {stem + ".plist": (plistlib.dumps(definition), 0o644), stem + ".service": (service.encode(), 0o644)}
+    if fleet:
+        files[stem + ".timer"] = (f"[Timer]\nUnit={stem}.service\n".encode(), 0o644)
+    generated = root / "generated"; generated.mkdir()
+    rows = unit_family(files, destination=generated, scope="host" if fleet is None else "fleet",
+                       phase="ingest" if fleet is None else "producers", fleet=fleet)
+    for filename, (content, mode) in files.items():
+        for folder in (generated, directory):
+            (folder / filename).write_bytes(content); (folder / filename).chmod(mode)
+    domain = f"gui/{os.getuid()}" if manager == "Darwin" else ""
+    current = GitCurrentRuntime(installation, "a" * 40, "b" * 64, {
+        "installation": str(installation.directory), "data_root": str(root), "units": rows,
+        "supervision": {"manager": manager, "domain": domain, "directory": str(directory)}})
+    calls = []
+    class Native:
+        package = None
+        failure = None
+        def read(self, function, *args):
+            if function == "svc_inventory_catalog":
+                return (f"manager\t{manager}\ndomain\t{domain}\ndirectory\t{directory}\n"
+                        + ("PID\tStatus\tLabel\n" if manager == "Darwin" else ""))
+            assert function == "svc_job_witness"
+            return "pid\t0\ngroup\t\n"
+        def call(self, function, *args, **kwargs):
+            calls.append((function, args))
+            if self.failure:
+                self.failure(function, args)
+            return subprocess.CompletedProcess([], 0, "reloaded\n" if function == "svc_job_reload"
+                                               else "effect-attempted\nstopped\n", "")
+    native = Native(); native.package = package
+    def inventory(root, declarations, **kwargs):
+        units = [SimpleNamespace(declaration=d, target=(domain + "/" + d.source.stem if domain else d.source.name),
+                    installed=((FileSnapshot.read(directory / d.source.name),) if (directory / d.source.name).exists() else ()),
+                    properties=(("LoadState", "loaded"), ("ActiveState", activity))) for d in declarations]
+        return SimpleNamespace(require_complete=lambda: SimpleNamespace(units=units))
+    monkeypatch.setattr(host_run, "collect_enrollment", inventory)
+    monkeypatch.setattr(jobs, "assert_quiescent", lambda *a, **k: None)
+    monkeypatch.setattr(jobs, "assert_native_absent", lambda *a, **k: None)
+    return jobs, current, native, fleet, directory, calls
+
+
+def test_job_stop_removes_whole_family_timer_first_and_keeps_declarations(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    result = jobs._stop(current, "log-rotation", fleet, native)
+    assert [row["outcome"] for row in result.members] == ["absent", "absent"]
+    stops = [args[2] for function, args in calls if function == "svc_job_stop_exact"]
+    assert stops == ["com.private.log-rotation.timer", "com.private.log-rotation.service"]
+    assert not list(directory.glob("*.timer")) and not list(directory.glob("*.service"))
+    assert (current.installation.data_root / "generated/com.private.log-rotation.service").exists()
+    assert result.configuration_changed is False
+
+
+@pytest.mark.parametrize("problem", ["abandon", "partial", "foreign-link", "dormant"])
+def test_job_stop_refuses_entire_family_before_any_effect(tmp_path, monkeypatch, problem):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch, name="keepalive", abandon=problem == "abandon")
+    if problem == "partial":
+        (directory / "com.private.keepalive.service").unlink()
+    if problem == "foreign-link":
+        wants = directory / "timers.target.wants"; wants.mkdir()
+        (wants / "com.private.keepalive.timer").symlink_to(tmp_path / "foreign")
+    if problem == "dormant":
+        for row in current.snapshot["units"]:
+            row["enroll"] = False
+    with pytest.raises((jobs.JobStopError, host_run.HostJobError)):
+        jobs._stop(current, "keepalive", fleet, native)
+    assert calls == []
+    assert (directory / "com.private.keepalive.timer").exists()
+
+
+def test_job_stop_preserves_unknown_partial_effect_and_changed_node(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    def failure(function, args):
+        if function == "svc_job_stop_exact" and args[2].endswith(".service"):
+            raise subprocess.TimeoutExpired("owned unit", 1)
+    native.failure = failure
+    with pytest.raises(jobs.JobStopError) as error:
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert error.value.attempted
+    assert [row["outcome"] for row in error.value.data["members"]] == ["absent", "unknown"]
+    assert (directory / "com.private.log-rotation.service").exists()
+
+
+@pytest.mark.parametrize("replacement", ["unlink-recreate", "rename"])
+def test_job_stop_does_not_unlink_definition_replaced_during_native_stop(tmp_path, monkeypatch, replacement):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    def replace_node(function, args):
+        if function == "svc_job_stop_exact":
+            file = Path(args[1]); content = file.read_bytes()
+            if replacement == "rename":
+                other = file.with_suffix(".replacement")
+                other.write_bytes(content); other.replace(file)
+            else:
+                file.unlink(); file.write_bytes(content)
+    native.failure = replace_node
+    with pytest.raises(jobs.JobStopError, match="changed"):
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert (directory / "com.private.log-rotation.timer").exists()
+    assert len(calls) == 1
+
+
+def test_job_run_and_stop_share_fail_fast_effect_lock(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    with host_run.job_effect_lock(current.installation.data_root):
+        with pytest.raises(host_run.HostJobError, match="another job effect"):
+            with host_run.job_effect_lock(current.installation.data_root):
+                pytest.fail("concurrent effect admitted")
+    assert calls == []
+
+
+def test_job_process_witness_refuses_detached_descendant_and_surviving_group(monkeypatch):
+    import os
+    from claudlobby import job_operations as jobs
+    uid = os.getuid()
+    monkeypatch.setattr(jobs, "_process_table", lambda: {900: (1, 900, uid, "start"), 901: (900, 901, uid, "child")})
+    with pytest.raises(jobs.JobStopError, match="descendant"):
+        jobs._capture_group(900)
+    monkeypatch.setattr(jobs, "_process_table", lambda: {900: (1, 900, uid, "start"), 901: (900, 900, uid, "child")})
+    witness = jobs._capture_group(900)
+    monkeypatch.setattr(jobs, "_process_table", lambda: {901: (1, 900, uid, "child")})
+    with pytest.raises(jobs.JobStopError, match="remain"):
+        jobs._group_quiet(witness)
+    monkeypatch.setattr(jobs, "_process_table", lambda: {})
+    jobs._group_quiet(witness)
+
+
+def test_public_job_stop_requires_explicit_fleet_and_operator(tmp_path, monkeypatch, capsys):
+    assert main(["--root", str(tmp_path), "host", "supervision", "stop", "--fleet-job", "keepalive", "--json"]) == 2
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["error"]["code"] == "invalid_argument"
+    monkeypatch.setenv("BOT_ID", "worker")
+    assert main(["--root", str(tmp_path), "host", "supervision", "stop", "--host-job", "plane-daemon", "--json"]) == 4
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
+
+
+def test_job_stop_refuses_stale_runtime_before_binding(tmp_path, monkeypatch):
+    from claudlobby import job_operations as jobs
+    from claudlobby.activation_state import ActivationError
+    @contextmanager
+    def fenced(*a, **k):
+        raise ActivationError("runtime maintenance is active")
+        yield
+    monkeypatch.setattr(jobs, "mutation_admission", fenced)
+    monkeypatch.setattr(jobs.RuntimeIdentity, "current", lambda: object())
+    monkeypatch.setattr(jobs, "_bind", lambda *a: pytest.fail("fenced mutation reached native ownership"))
+    with pytest.raises(ActivationError, match="maintenance"):
+        jobs.stop_job(tmp_path, "plane-daemon")
+
+
+@pytest.mark.parametrize("problem", ["none", "foreign-endpoint", "held-lock", "surviving-group"])
+def test_darwin_recorder_stop_binds_pid_endpoint_lock_and_group_before_unlink(tmp_path, monkeypatch, problem):
+    import fcntl
+    import os
+    from claudlobby.plane import daemon
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch, manager="Darwin", name="plane-daemon")
+    sock = daemon.socket_path(current.installation.data_root)
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    lock = daemon.lock_path(sock)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    uid = os.getuid()
+    table = {900: (1, 900, uid, "original"), 901: (900, 900, uid, "child")}
+    monkeypatch.setattr(jobs, "_process_table", lambda: table.copy())
+    info = {"root": str(current.installation.data_root), "pid": 900 if problem != "foreign-endpoint" else 999,
+            "installation": str(current.installation.directory), "source_revision": current.revision,
+            "cli": str(current.installation.cli)}
+    monkeypatch.setattr(daemon, "probe_daemon_info", lambda path: info)
+    old_read = native.read
+    native.read = lambda function, *args: "pid\t900\ngroup\t\n" if function == "svc_job_witness" else old_read(function, *args)
+    endpoint_probes = []
+    monkeypatch.setattr(jobs, "assert_private_endpoint_quiet", lambda path, **k: endpoint_probes.append(path))
+    def stopped(function, args):
+        if function == "svc_job_stop_exact":
+            assert args[3] == "900"
+            if problem != "held-lock":
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            if problem != "surviving-group":
+                table.clear()
+    native.failure = stopped
+    if problem == "surviving-group":
+        monkeypatch.setattr(jobs, "_await_group_quiet", jobs._group_quiet)
+    try:
+        if problem == "none":
+            result = jobs._stop(current, "plane-daemon", None, native)
+            assert result.members[0]["outcome"] == "absent"
+            assert not (directory / "private-plane-daemon.plist").exists()
+            assert endpoint_probes == [sock]
+        else:
+            with pytest.raises(jobs.JobStopError) as error:
+                jobs._stop(current, "plane-daemon", None, native)
+            assert error.value.attempted is (problem != "foreign-endpoint")
+            assert (directory / "private-plane-daemon.plist").exists()
+            if problem == "foreign-endpoint":
+                assert calls == []
+    finally:
+        os.close(fd)
+
+
+def test_public_job_run_and_stop_both_refuse_held_job_effect_lock(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield current
+    for module in (host_run, jobs):
+        monkeypatch.setattr(module, "mutation_admission", admitted)
+        monkeypatch.setattr(module.RuntimeIdentity, "current", lambda: object())
+    monkeypatch.setattr(host_run, "_run_git_job", lambda *a: pytest.fail("concurrent run entered binding"))
+    monkeypatch.setattr(jobs, "_stop", lambda *a: pytest.fail("concurrent stop entered binding"))
+    with host_run.job_effect_lock(current.installation.data_root):
+        with pytest.raises(host_run.HostJobError, match="another job effect"):
+            host_run.run_host_job(current.installation.data_root, "plane-prune", adapter=native)
+        with pytest.raises(host_run.HostJobError, match="another job effect"):
+            jobs.stop_job(current.installation.data_root, "log-rotation", fleet=fleet, adapter=native)
+    assert calls == []
+
+
+@pytest.mark.parametrize("has_witness", [False, True])
+def test_running_oneshot_stop_requires_native_pid_and_cgroup_before_effect(tmp_path, monkeypatch, has_witness):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch, activity="activating")
+    old_read = native.read
+    if has_witness:
+        native.read = lambda function, *args: ("pid\t900\ngroup\t/user.slice/private-job\n"
+            if function == "svc_job_witness" else old_read(function, *args))
+        result = jobs._stop(current, "log-rotation", fleet, native)
+        assert all(member["outcome"] == "absent" for member in result.members)
+    else:
+        with pytest.raises(jobs.JobStopError, match="lacks native process/cgroup") as error:
+            jobs._stop(current, "log-rotation", fleet, native)
+        assert not error.value.attempted and calls == []
+        assert (directory / "com.private.log-rotation.timer").exists()
+
+
+def test_job_stop_rechecks_enablement_node_after_witness_capture_before_effect(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    wants = directory / "timers.target.wants"; wants.mkdir()
+    link = wants / "com.private.log-rotation.timer"
+    link.symlink_to(directory / "com.private.log-rotation.timer")
+    old_read = native.read
+    def changed(function, *args):
+        if function == "svc_job_witness" and link.resolve() == directory / "com.private.log-rotation.timer":
+            link.unlink(); link.symlink_to(tmp_path / "foreign")
+        return old_read(function, *args)
+    native.read = changed
+    with pytest.raises(jobs.JobStopError, match="enablement node changed") as error:
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert not error.value.attempted and calls == []
+    assert (directory / "com.private.log-rotation.timer").exists()
+
+
+@pytest.mark.parametrize("failure", [None, "native", "preflight"])
+def test_job_stop_pins_original_definition_nodes_and_closes_on_every_exit(tmp_path, monkeypatch, failure):
+    import os
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    opened = []
+    real_open = os.open
+    def observe_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path).parent == directory:
+            opened.append((fd, os.fstat(fd)))
+        return fd
+    monkeypatch.setattr(jobs.os, "open", observe_open)
+    def check_pins(function, args):
+        if function == "svc_job_stop_exact":
+            assert len(opened) == 2
+            for fd, original in opened:
+                assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (original.st_dev, original.st_ino)
+            if failure == "native":
+                raise OSError("native refusal")
+    native.failure = check_pins
+    if failure == "preflight":
+        (directory / "default.target.wants").mkdir()
+        (directory / "default.target.wants" / "com.private.log-rotation.service").symlink_to(tmp_path / "foreign")
+    if failure:
+        with pytest.raises(jobs.JobStopError):
+            jobs._stop(current, "log-rotation", fleet, native)
+    else:
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert len(opened) == 2
+    for fd, _ in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    if failure == "preflight":
+        assert calls == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "native", "preflight", "unlink-recreate", "rename"])
+def test_job_stop_pins_enablement_symlink_until_exit(tmp_path, monkeypatch, outcome):
+    import os
+    import stat
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    wants = directory / "timers.target.wants"; wants.mkdir()
+    target = directory / "com.private.log-rotation.timer"
+    link = wants / target.name; link.symlink_to(target)
+    original = link.lstat()
+    pinned = []
+    real_open = os.open
+    def observe_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == link:
+            pinned.append(fd)
+            info = os.fstat(fd)
+            assert stat.S_ISLNK(info.st_mode)
+            assert (info.st_dev, info.st_ino) == (original.st_dev, original.st_ino)
+        return fd
+    monkeypatch.setattr(jobs.os, "open", observe_open)
+    def check_pin(function, args):
+        if function != "svc_job_stop_exact":
+            return
+        assert len(pinned) == 1
+        fd = pinned[0]
+        assert os.fstat(fd).st_ino == original.st_ino
+        if outcome == "native":
+            raise OSError("native refusal")
+        if Path(args[1]) == target and outcome in {"unlink-recreate", "rename"}:
+            if outcome == "rename":
+                other = wants / "replacement"; other.symlink_to(target); other.replace(link)
+            else:
+                link.unlink(); link.symlink_to(target)
+            assert os.fstat(fd).st_nlink == 0
+            assert link.lstat().st_ino != original.st_ino
+    native.failure = check_pin
+    if outcome == "preflight":
+        (directory / "default.target.wants").mkdir()
+        (directory / "default.target.wants" / "com.private.log-rotation.service").symlink_to(tmp_path / "foreign")
+    if outcome == "success":
+        jobs._stop(current, "log-rotation", fleet, native)
+        assert not link.is_symlink()
+    else:
+        with pytest.raises(jobs.JobStopError):
+            jobs._stop(current, "log-rotation", fleet, native)
+        assert link.is_symlink()
+    assert len(pinned) == 1
+    with pytest.raises(OSError):
+        os.fstat(pinned[0])
+    if outcome == "preflight":
+        assert calls == []
+
+
+def test_job_stop_refuses_enablement_without_supported_symlink_pin(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    wants = directory / "timers.target.wants"; wants.mkdir()
+    link = wants / "com.private.log-rotation.timer"
+    link.symlink_to(directory / link.name)
+    monkeypatch.delattr(jobs.os, "O_PATH", raising=False)
+    monkeypatch.delattr(jobs.os, "O_SYMLINK", raising=False)
+    with pytest.raises(jobs.JobStopError, match="symlink identity pinning is unsupported"):
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert calls == [] and link.is_symlink()

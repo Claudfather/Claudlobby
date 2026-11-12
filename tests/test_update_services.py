@@ -1617,3 +1617,44 @@ TMUX_BIN=fixture_tmux; export TMUX_BIN
     assert observations.read_text().splitlines().count("attempt") == 1
     assert not poll.exists(), "fatal/past-ceiling confirmation was polled again"
     assert receipt.read_bytes() == original
+
+
+@pytest.mark.parametrize("manager,name,scope", [
+    ("Darwin", "private-plane-daemon.plist", "host"),
+    ("Darwin", "com.private.keepalive.plist", "fleet"),
+    ("Linux", "com.private.keepalive.timer", "fleet"),
+    ("Linux", "com.private.keepalive.service", "fleet"),
+])
+def test_ordinary_update_preserves_existing_job_absence_with_enroll_true(tmp_path, monkeypatch, manager, name, scope):
+    row = intent(tmp_path)
+    Path(row["installed"][0]["path"]).unlink()
+    row.update(target=name, manager=manager, installed=[], saved_native=(
+        "unchanged unloaded inactive" if manager == "Darwin" else "not-found not-found inactive"))
+    row["declaration"].update(scope=scope, fleet="private" if scope == "fleet" else None,
+                              service=name.removesuffix(".timer") + ".service" if name.endswith(".timer") else None)
+    # Freeze the current inventory as absent before supplying an enroll:true
+    # candidate. This is the same ordinary update path, not added consumers.
+    row["properties"] = list({"UnitFileState": "unchanged" if manager == "Darwin" else "not-found",
+                              "LoadState": "unloaded" if manager == "Darwin" else "not-found",
+                              "ActiveState": "inactive"}.items())
+    if manager == "Darwin":
+        import plistlib
+        row["generated"]["content"] = {"base64": base64.b64encode(plistlib.dumps({
+            "Label": name.removesuffix(".plist"), "ProgramArguments": ["/bin/true"]})).decode()}
+    monkeypatch.setattr(services.platform, "system", lambda: manager)
+    monkeypatch.setattr(services, "current_git_declarations", lambda *a: ())
+    monkeypatch.setattr(services, "collect_enrollment", lambda *a, **k: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(payload=lambda: {"units": [deepcopy(row)]})))
+    row = services.freeze_service_intent({"data_root": str(tmp_path)}, Native(), tmp_path)[0]
+    assert row["installed"] == []
+    # A normal source update retains declared enrollment policy; installed
+    # absence, not a config-removal/intent marker, prevents re-enrollment.
+    candidate = {"revision": "b" * 40, "units": [{"enroll": True, **row["declaration"]}]}
+    store, native = Store(tmp_path, row), Native()
+    def no_reenrollment(*args):
+        pytest.fail("absent retained job must not seek a definition for native restore")
+    monkeypatch.setattr(services, "current_git_declarations", no_reenrollment)
+    result = services.restore_consumer(store, name, native, candidate)
+    assert result["restore"] == "done"
+    assert native.calls == []
+    assert Path(row["generated"]["path"]).exists()

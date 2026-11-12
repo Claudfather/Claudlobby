@@ -1237,3 +1237,30 @@ def test_native_ignore_missing_working_directory_never_uses_callers_cwd(tmp_path
         else:
             with pytest.raises(InventoryError, match="owned consumer|working directory"):
                 obs.collect().require_complete()
+
+
+@pytest.mark.parametrize("policy", ["false-gui-0", "false-gui-1", "true-system", "missing", "duplicate", "nested", "malformed", "unknown"])
+def test_job_stop_effective_launchd_child_policy_uses_captured_properties_only(tmp_path, policy):
+    from claudlobby.job_operations import darwin_native_children_owned
+    capture = json.loads((FIXTURES / "launchctl-job-child-policy-native.json").read_text())
+    target = "gui/501/fixture"
+    source = {"Label": "fixture", "ProgramArguments": ["/bin/true"],
+              "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
+    observed = observed_print(target, source, tmp_path / "fixture.plist", active=False)
+    value = capture["false_gui"][int(policy[-1])] if policy.startswith("false-gui") else capture["true_system"]
+    observed = observed.replace("\tproperties = <redacted>", "\tproperties = " + value)
+    if policy == "missing":
+        observed = observed.replace("\tproperties = " + value + "\n", "")
+    if policy == "duplicate":
+        observed = observed.replace("\tproperties = " + value, ("\tproperties = " + value + "\n") * 2)
+    if policy == "nested":
+        observed = observed.replace("\tproperties = " + value, "\tproperties = {\n\t\tproperties = inferred program\n\t}")
+    if policy == "malformed":
+        observed = observed.replace(value, "runatload||inferred program")
+    if policy == "unknown":
+        observed = observed.replace(value, "inferred program | unfamiliar child policy")
+    if policy == "duplicate":
+        with pytest.raises(InventoryError):
+            darwin_native_children_owned(observed, target)
+    else:
+        assert darwin_native_children_owned(observed, target) is policy.startswith("false-gui")
