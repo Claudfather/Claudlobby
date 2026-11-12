@@ -54,7 +54,7 @@ def private_fleet(tmp_path, monkeypatch):
         probes.append(argv)
         pytest.fail("registry/provider subprocess must not run in this fixture")
     monkeypatch.setattr(mcp_packages, "_probe", no_probe)
-    fleet = FleetConfig(name="example", service_prefix="fixture", bots={
+    fleet = FleetConfig(name="example", service_prefix="fixture", manager="one", bots={
         "one": BotConfig(bot_id="one", name="One", expertise=["engineering"],
                          channels=[], mcp=[McpEntry("sample")])},
         system_defaults=SystemDefaultsConfig(enabled=False, protocols=False))
