@@ -123,7 +123,7 @@ fleet:
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
       skill_overrides: {<skill>: "<state>"}  # OPTIONAL — settings.local skillOverrides, merged per skill (default: {auto-mode-setup: "off"})
-      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: auto)
+      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: 700000)
       remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -935,26 +935,39 @@ defaults:
 
 ### `bots.<name>.auto_compact_window`
 
-`auto` (the default) or a whole number of tokens from `100000` to `1000000`: the context size
-Claude Code compacts the bot's conversation at by itself. Can be set in `defaults:`; bot-level
-overrides.
+A whole number of tokens from `100000` to `1000000` (default `700000`), or `auto`: the
+autocompact window, the context size Claude Code compacts the bot's conversation within. Claude
+Code checks its count of the context between requests and compacts once the count has passed the
+window less its own autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k
+tokens. The count can run below the real context: in a live run on 2.1.322 at a window of
+`100000`, reading files of numbers, Claude Code compacted with its count (`pre_tokens`) at
+83,661 while the context held about 95,000 tokens. One large step, such as several file reads in
+one response, can carry the context past the window before that check, and if the compaction
+fails ("Not enough messages to compact"), the request still goes out. Can be set in `defaults:`;
+bot-level overrides.
 
-- **`auto`** composes `modelSettings` into `settings.local.json`, naming each model Claude Code
-  gives a native 1M window `{"autoCompactWindow": "auto"}`. That is Claude Code's own window, the
-  one it uses with nothing set, so the bot compacts when it did before. What it stops (#1388): on
-  such a model, Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier
-  … Want to autocompact at 400k tokens instead?". No one at a bot's pane answers it, and the
-  answer is kept per account and model in the global config that every bot running as that user
-  shares, so a new account or a new model asks again. A window set in local settings stops the
-  asking.
-- **A number** composes `autoCompactWindow`: the bot compacts as its context nears that many
-  tokens, or its model's own window when that is smaller. It stops the asking too. Claude Code
-  drops a value outside the range without a word, so the parser refuses one.
+- **A number** composes a top-level `autoCompactWindow` into `settings.local.json`: the window
+  for every model. Claude Code caps the window at the model's own context window, so a model
+  with a 200,000-token window keeps its own. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the bot's
+  environment takes precedence over the setting. Claude Code drops a value outside the range
+  without a word, so the parser refuses one.
+- **The default, `700000`,** is the window a bot's conversation compacts within when no key is
+  set. With nothing set, a model with a native 1M window compacts within its 1M window: at about
+  967,000 tokens, Claude Code's docs say. The bound is a number of tokens, so it means the same
+  on any host, which is why it is a package default rather than a number each host tunes.
+- **`auto`** turns that bound off. It composes `modelSettings`, naming each model Claude Code
+  gives a native 1M window `{"autoCompactWindow": "auto"}`: Claude Code's own window, the one it
+  uses with nothing set.
+- **Either form stops an offer nobody answers** (#1388). On a model with a native 1M window,
+  Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier … Want to
+  autocompact at 400k tokens instead?". The answer is kept per account and model in the global
+  config that every bot running as that user shares, so a new account or a new model asks again.
+  A window set in local settings stops the asking.
 
-A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with `auto`
-on those models, with a number on any model. Set it here instead. The models are
-`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry; a
-model Claude Code adds later can ask again until it is added there.
+A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with a
+number on any model, with `auto` on the models below. Set it here instead. The models are
+`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry;
+under `auto`, a model Claude Code adds later can ask again until it is added there.
 
 ```yaml
 defaults:
