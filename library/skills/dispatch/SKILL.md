@@ -27,6 +27,15 @@ unavailable evidence does not mean idle.
 Use a separate UUID for each distinct operation; retain it for inspection or
 replay of that same operation. Unknown delivery never authorizes an automatic
 resend. An ordinary question uses `message send`, not a new task assignment.
+For implementation followed by independent review under one task, tell the
+engineer to report `assignment progress` when implementation is ready, not
+`assignment complete`: complete closes the whole task. Reassign that same open
+task to the reviewer and deliver its returned successor assignment. The reviewer
+accepts it and reports a verdict with progress. Verify the evidence, then
+reassign the task to yourself, accept that final assignment and complete it.
+Do not complete before review or create another task to bypass terminal work.
+The fleet-ops guide owns this lifecycle and its request/receipt rules.
+
 Summarize the verified outcome in the original human thread. A busy, silent or
 unavailable worker is not permission to restart it; respect explicit holds and
 use the safe-worker-restart protocol when recovery is needed.
