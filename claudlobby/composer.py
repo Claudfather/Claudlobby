@@ -538,7 +538,9 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
     """
     from .loader import iter_integration_grants
 
-    identities = _mcp_identities_by_fragment(bot)
+    # Refuse ambiguous wiring before any grant is rewritten (#1808): _instance_rules
+    # rewrites one entry at a time, so it cannot tell when two identities name one server.
+    expand_mcp_entries(bot.mcp)
     grants: list[str] = []
     # Folder-aware (dir/ expansion) so generate resolves the same grant set the
     # validator shape-checks — the reader is shared with validator.py.
