@@ -271,6 +271,104 @@ def test_envelope_budget_includes_success_and_error_provenance(tmp_path, monkeyp
     assert set(result["provenance"]) == {"db", "checked_at"}
 
 
+
+@pytest.mark.parametrize("phase,statement", [
+    ("reports_since", "_REPORTS_SINCE_SQL"),
+    ("task_summary", None),
+])
+def test_overview_timeout_diagnostic_retains_real_interrupted_phase(tmp_path, monkeypatch, phase, statement):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    ticks = []
+    def clock():
+        ticks.append(len(ticks) * 0.25)
+        return ticks[-1]
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=clock))
+    diagnostic = view._OverviewQueryDiagnostic()
+    def expensive(conn):
+        return diagnostic.run(phase, lambda: conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+            " SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n").fetchone())
+    result = view._envelope(tmp_path, expensive, diagnostic=diagnostic)
+    assert result["reason"] == "query_timeout" and "data" not in result
+    detail = result["query_diagnostic"]
+    assert set(detail) == {"version", "phase", "statement", "elapsed_ms",
+                           "phase_elapsed_ms", "progress_callbacks"}
+    assert detail["version"] == 1
+    assert (detail["phase"], detail["statement"]) == (phase, statement)
+    assert 10_000 <= detail["elapsed_ms"] <= 86_400_000
+    assert 0 <= detail["phase_elapsed_ms"] <= detail["elapsed_ms"]
+    assert 0 < detail["progress_callbacks"] <= 1_000_000
+    assert all(type(detail[k]) is int for k in
+               ("elapsed_ms", "phase_elapsed_ms", "progress_callbacks"))
+    # A fresh request neither inherits the failed phase nor exposes timings.
+    ticks.clear()
+    healthy = view._envelope(tmp_path, lambda c: c.execute("SELECT 7").fetchone()[0],
+                             diagnostic=view._OverviewQueryDiagnostic())
+    assert healthy["state"] == "ok" and healthy["data"] == 7
+    assert "query_diagnostic" not in healthy
+
+
+@pytest.mark.parametrize("outcome", ["ok", "unknown", "detail", "short"])
+def test_overview_diagnostic_provenance_keeps_the_shared_deadline(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    elapsed = 0.0
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    def body(conn):
+        nonlocal elapsed
+        elapsed = 9.0
+        if outcome == "unknown":
+            raise view.UnknownFleet("private fleet must not escape")
+        if outcome == "detail":
+            raise view.TaskDetailError("unknown", "private task must not escape")
+        return {"private": "must not escape"}
+    def provenance(root, conn):
+        nonlocal elapsed
+        elapsed = 10.0
+        if outcome == "short":
+            return {"head": conn.execute("SELECT 1").fetchone()[0]}
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    monkeypatch.setattr(view, "_provenance", provenance)
+    result = view._envelope(tmp_path, body, diagnostic=view._OverviewQueryDiagnostic())
+    assert result["reason"] == "query_timeout" and "data" not in result
+    detail = result["query_diagnostic"]
+    assert (detail["phase"], detail["statement"]) == ("provenance", None)
+    assert (detail["elapsed_ms"], detail["phase_elapsed_ms"]) == (10_000, 1_000)
+    # Explicit deadline checks are not SQLite VM callback invocations.
+    assert (detail["progress_callbacks"] == 0) == (outcome == "short")
+
+
+@pytest.mark.parametrize("bad", [None, [], {"phase": "private"},
+    {"version": 1, "phase": "reports_since", "statement": "private SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": True,
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": float("nan"),
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 2, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 1, "progress_callbacks": 1_000_001},
+], ids=["missing", "array", "unknown", "sql", "boolean", "nan", "phase-time", "work-bound"])
+def test_overview_timeout_diagnostic_rejects_noncanonical_fields(bad):
+    from claudlobby.plane import view
+
+    assert view._safe_query_diagnostic(bad) is None
+    class DoNotStringify:
+        def __str__(self):
+            pytest.fail("diagnostic stringified arbitrary data")
+    assert view._safe_query_diagnostic({"version": 1, "phase": DoNotStringify(),
+        "statement": None, "elapsed_ms": 1, "phase_elapsed_ms": 1,
+        "progress_callbacks": 0}) is None
+
+
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     initialize_plane(tmp_path)
