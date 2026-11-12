@@ -2,18 +2,8 @@
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _request(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
+from ..request_ids import canonical_request_id
 
 
 def dispatch(args) -> CommandOutput:
@@ -33,7 +23,7 @@ def dispatch(args) -> CommandOutput:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no bot automation state")
         action = args.automation_action
-        request_id = _request(args.request_id) if action != "status" else None
+        request_id = canonical_request_id(args.request_id) if action != "status" else None
         destination, origin, selected, _bindings = _scope(args)
         bot = args.bot_id
         if bot not in destination.fleet.bots:

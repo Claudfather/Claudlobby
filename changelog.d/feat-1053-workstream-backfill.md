@@ -1,0 +1,7 @@
+### Added — `migration workstream-backfill`: every open task gets a workstream (#1053)
+
+`claudlobby --fleet F migration workstream-backfill` lists each open task that has no open workstream. That is a task admitted before every task had a workstream, or one a close left open in the workstream it ended, before a close checked its tasks. `--apply --request-id UUID` files each such task into its own workstream, the one `task admit` now opens for every new task. One batch records, for each task, that workstream's row (the task's title and project, with the fleet's manager as owner) and a `task_moved` row into it. A task in an open workstream stays where it is, and an ended task is never filed. A task the task reducer cannot resolve, or whose own workstream already exists, is left and named. The batch rechecks each task under the plane's write lock, so a task moved or ended in between refuses the batch, and nothing is recorded. Run it once per fleet after the update: a second run finds nothing to file and records nothing. Only a local person or the fleet's manager runs it, and no bot is granted it.
+
+### Changed — `workstream close --dry-run` reads the workstream's tasks (#1053)
+
+A close's dry run prints the refusal the close would raise, or the queued tasks it would withdraw, and still records nothing. A close now checks each task lock it holds just before its write, as each task verb checks its own, so a lock file replaced in between refuses the close.

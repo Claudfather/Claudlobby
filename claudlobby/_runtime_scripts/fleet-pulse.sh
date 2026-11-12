@@ -63,8 +63,9 @@ mkdir -p "$state_dir"
 # enough that one delivery has stopped being a live signal. The 2026-07-27
 # outage ran ~360 ticks on a single delivery. Set 0 to disable.
 _RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
-# keepalive re-stamps data/.held on every HELD tick (one a minute), so a marker
-# older than five ticks means keepalive stopped seeing a held box (#2070).
+# keepalive re-stamps data/.held on every tick that sees its box hold text (one
+# a minute), so a marker older than five ticks means keepalive stopped seeing a
+# held box (#2070, #2854).
 _HELD_FRESH_S=300
 # A bot stopped on purpose gets a reminder, never a page (#2243 F5): one push to
 # its manager once it has been stopped this many days, then one every as many
@@ -954,36 +955,42 @@ for bot_dir in "$BOTS_DIR"/*/; do
     marker="$bot_dir/data/.last-tool-call"
     idle_marker="$bot_dir/data/.idle"
     last_no_turn_marker="$bot_dir/data/.last-no-turn"
-    # #2070: keepalive writes data/.held while the bot's input box holds text
-    # that was never submitted and no turn runs (its HELD verdict). That bot is
-    # not hung: an operator Enter submits the text, and a restart would discard
-    # it. So it gets input_held, naming that remedy, instead of activity_stuck's
-    # "likely hung mid-task". Only while keepalive keeps re-stamping the marker
-    # (a stale one says nothing about the box now), and only once it has held
-    # for the threshold, since a send in flight holds its text for a moment.
+    # #2070, #2854: keepalive keeps data/.held (the epoch it first saw text in
+    # the bot's input box, re-stamped each tick it still does, whatever its
+    # verdict) and data/.held-turn while a turn runs above it. No message typed
+    # into such a box lands, so a fresh hold pages past
+    # OBSERVABILITY_INPUT_HELD_THRESHOLD (default 300 s; 0 turns the page off),
+    # however many tool calls the bot makes. A hold with no turn running is not
+    # a hang (an Enter submits the text, a restart discards it), so it keeps
+    # activity_stuck quiet, page or no page; a running turn is still judged.
     held_marker="$bot_dir/data/.held"
     # A bot stopped on purpose, with no session, has no turn to be stuck in: its
     # markers stopped at the stop, and reading them would call the stop a hang.
     _no_turn=0
     if [ "$_stopped" -eq 1 ] && [ "$_session_alive" -eq 0 ]; then _no_turn=1; fi
-    _held=0
-    if [ "$_no_turn" -eq 0 ] && [ -f "$held_marker" ] \
-        && marker_age_within "$held_marker" "$_HELD_FRESH_S" \
-        && { [ ! -f "$marker" ] || marker_is_newer "$held_marker" "$marker"; }; then
-        _held=1
+    _held_turn=""
+    if [ "$_no_turn" -eq 0 ] && marker_age_within "$held_marker" "$_HELD_FRESH_S"; then
+        _held_turn=none
+        [ ! -f "$bot_dir/data/.held-turn" ] || _held_turn=running
     fi
-    if [ "$_held" = 1 ]; then
-        _clear_current_bot "activity_alerted"
+    if [ -n "$_held_turn" ]; then
+        [ "$_held_turn" = running ] || _clear_current_bot "activity_alerted"
         held_threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_INPUT_HELD_THRESHOLD 300)
+        case "$held_threshold" in ''|*[!0-9]*) held_threshold=300 ;; esac
         now_epoch=$(date +%s)
         held_since=$(head -c 20 "$held_marker" 2>/dev/null | tr -cd '0-9' || true)
         [ -n "$held_since" ] || held_since=$now_epoch
         held_for=$(( now_epoch - held_since ))
-        if [ "$held_for" -ge "$held_threshold" ]; then
+        if [ "$held_threshold" -eq 0 ]; then
+            _clear_current_bot "held_alerted"
+            echo "fleet-pulse: ${bot_id}'s input box has held text for ${held_for}s; input_held is off (OBSERVABILITY_INPUT_HELD_THRESHOLD=0)" >&2
+        elif [ "$held_for" -ge "$held_threshold" ]; then
+            _held_what="and no turn is running"
+            [ "$_held_turn" = none ] || _held_what="while a turn is running, so no message sent to it lands until the box is clear (an Enter queues the text behind the turn)"
             emit_fleet_event "input_held" "pulse" \
-                '{"held_since_epoch":'"$held_since"',"held_seconds":'"$held_for"'}' "$bot_dir" "$bot_id"
+                '{"held_since_epoch":'"$held_since"',"held_seconds":'"$held_for"',"turn":"'"$_held_turn"'"}' "$bot_dir" "$bot_id"
             _alert_current_bot "held_alerted" input_held \
-                "its input box holds text that was never submitted, and no turn is running (${held_for}s). Remedy: look at its pane first: where a menu shows (numbered options, Enter to confirm), an Enter would choose one, so press nothing. Otherwise an operator presses Enter in its pane, and one more only if the text is still there after about 10 s. If it is still there after that, stop and look: a menu or a modal may be taking the Enter. Never typed text, and do not restart (a restart discards the text)."
+                "its input box holds text that was never submitted, ${_held_what} (${held_for}s). Remedy: look at its pane first: where a menu shows (numbered options, Enter to confirm), an Enter would choose one, so press nothing. Otherwise an operator presses Enter in its pane, and one more only if the text is still there after about 10 s. If it is still there after that, stop and look: a menu or a modal may be taking the Enter. Never typed text, and do not restart (a restart discards the text)."
         fi
     else
         _clear_current_bot "held_alerted"
@@ -1074,7 +1081,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     else
         _clear_current_bot "unknown_alerted"
     fi
-    if [ "$_held" = 0 ] && [ "$_limited" = 0 ] && [ "$_no_turn" -eq 0 ] && [ -f "$marker" ]; then
+    if [ "$_held_turn" != none ] && [ "$_limited" = 0 ] && [ "$_no_turn" -eq 0 ] && [ -f "$marker" ]; then
         # If idle marker is newer than tool-call marker, bot is idle — skip
         if ! marker_is_newer "$idle_marker" "$marker"; then
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)

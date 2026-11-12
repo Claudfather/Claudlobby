@@ -58,7 +58,7 @@ def test_f11_anomaly_token_is_not_a_lifecycle_status(tmp_path):
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "f11", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": "bot:f/a"}},
+                     "created_by": "bot:f/a", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "f11", "fleet": "f",
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": "bot:f/w", "assigned_by": "bot:f/a",

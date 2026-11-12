@@ -571,8 +571,10 @@ def test_independent_quiet_rechecks_added_consumer_absence(update, occupied):
             assert store.load()["quiet"]["example.service"]["identity"] == record["scope"]["example.service"]
 
 
-def test_runner_waits_for_previously_admitted_start_before_quiescing(update):
+def test_runner_waits_for_previously_admitted_start_before_quiescing(update, monkeypatch):
     import fcntl
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0)
     from claudlobby.git_update import run_prepared_update
     installation, _, _, commit = update
     _, target = _runner_source(installation, commit)
@@ -586,6 +588,314 @@ def test_runner_waits_for_previously_admitted_start_before_quiescing(update):
                 run_prepared_update(store)
             assert "trace" not in store.load()
             assert "quiet_support" not in store.load()
+
+
+_HOLD = '''import fcntl, os, subprocess, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_SH)
+if sys.argv[2:] == ["child"]:
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], pass_fds=(fd,))
+    print("ready", child.pid, flush=True)
+    raise SystemExit
+print("ready", os.getpid(), flush=True)
+sys.stdin.read()
+'''
+
+
+class _Holder:
+    """A real child process holding LOCK_SH on a lock file until released."""
+
+    def __init__(self, lock, *arguments, env=None):
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _HOLD, str(lock), *arguments], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, env={**os.environ, **(env or {})})
+        ready = self.process.stdout.readline().split()
+        assert ready[:1] == ["ready"], ready
+        self.pid = int(ready[1])
+
+    def release(self):
+        if not self.process.stdin.closed:
+            self.process.stdin.close()
+        self.process.wait(timeout=10)
+
+    def close(self):
+        if self.process.stdin and not self.process.stdin.closed:
+            self.process.stdin.close()
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=10)
+        self.process.stdout.close()
+
+
+@pytest.fixture
+def holders():
+    started = []
+
+    def start(lock, *arguments, env=None):
+        holder = _Holder(lock, *arguments, env=env)
+        started.append(holder)
+        return holder
+    yield start
+    for holder in started:
+        holder.close()
+
+
+@pytest.fixture
+def polls(monkeypatch):
+    """Counts the updater's own lock polls and runs `at[n]` on the n-th, so no test orders events by sleeping."""
+    import types
+    from claudlobby import git_update as updater
+    real = time.sleep
+    state = types.SimpleNamespace(count=0, at={})
+
+    def sleep(seconds):
+        if seconds == updater._RUNTIME_POLL:
+            state.count += 1
+            action = state.at.pop(state.count, None)
+            if action is not None:
+                action()
+        real(seconds)
+    monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.01)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+    monkeypatch.setattr(time, "sleep", sleep)
+    return state
+
+
+def _quiesced(installation, store, target):
+    record = prepare(store, target, consumers={"example.service": {"intent": {
+        "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+    record["phase"] = "quiesce"
+    store.save(record)
+    lock = store.state / "runtime-use.lock"
+    lock.touch()
+    return record, lock
+
+
+def _notices(monkeypatch, store=None, seen=None, polls=None):
+    """Stub the alert door; each text is kept, with what the record and the poll count read when it was sent."""
+    from claudlobby import git_update as updater
+    texts = []
+
+    def send(_store, _door, text):
+        texts.append(text)
+        if store is not None:
+            seen.append((store.load().get("runtime_wait"), polls.count if polls is not None else None))
+        return "carrier_accepted", "stub"
+    monkeypatch.setattr(updater, "_send_notice", send)
+    return texts
+
+
+def test_runner_waits_through_a_reader_and_records_both_gates(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[3] = reader.release
+        # Three polls must read above 0.0 s at the record's 0.1 s rounding.
+        monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.05)
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        drain, cutover = result["runtime_waits"]
+        assert drain["gate"] == "drain" and drain["outcome"] == "taken" and drain["told"] is False
+        assert drain["seconds"] > 0 and reader.pid in [row["pid"] for row in drain["holders"]]
+        assert cutover["gate"] == "cutover" and cutover["outcome"] == "taken" and cutover["holders"] == []
+        assert "runtime_wait" not in result
+
+
+def test_runner_goes_on_only_after_the_last_of_two_overlapping_readers(update, holders, polls):
+    """#2734: the lock is taken at the first free moment between readers, and only then."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        first, second = holders(lock), holders(lock)
+        before_last = []
+
+        def last():
+            before_last.extend(row["gate"] for row in store.load().get("runtime_waits", []))
+            second.release()
+        polls.at[3], polls.at[9] = first.release, last
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        assert before_last == []  # no gate went on while the second reader held the lock
+        drain, cutover = result["runtime_waits"]
+        named = {row["pid"] for row in drain["holders"]}
+        assert drain["gate"] == "drain" and named and named <= {first.pid, second.pid}
+        assert cutover["gate"] == "cutover" and cutover["holders"] == []
+
+
+def test_runner_tells_once_past_the_tell_bound_and_keeps_waiting(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    with UpdateStore(installation) as store:
+        record, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[30] = reader.release
+        seen = []
+        texts = _notices(monkeypatch, store, seen, polls)
+        result = updater.run_prepared_update(store)
+        assert len(texts) == 1
+        waiting, at_notice = seen[0]
+        assert reader.pid in [row["pid"] for row in waiting["holders"]]
+        assert polls.count - at_notice >= 3  # it kept polling after it told
+        assert texts[0].startswith(f"FLEET ALERT: host update {record['request_id']} is waiting for the "
+                                   f"runtime lock (root {store.root}, phase quiesce): held after ")
+        assert texts[0].endswith("It goes on by itself when they finish; nothing needs running.")
+        assert result["phase"] == "done" and "runtime_wait" not in result
+        assert result["runtime_waits"][0]["told"] is True
+
+
+def test_runner_refuses_at_the_stop_bound_naming_the_holder_then_continues(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.05)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert f"pid {reader.pid}" in str(refused.value)
+        assert store.load()["runtime_waits"][-1]["outcome"] == "refused"
+        assert store.load()["phase"] == "quiesce"
+        reader.release()
+        monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+        assert updater.run_prepared_update(store)["phase"] == "done"
+
+
+def test_a_holders_arguments_and_environment_reach_no_text_or_record(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    token = "ghp_" + "A1b2C3d4" * 4
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.3)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock, token, env={"EXAMPLE_API_TOKEN": token})
+        texts = _notices(monkeypatch)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert len(texts) == 1 and f"pid {reader.pid}" in texts[0] and f"pid {reader.pid}" in str(refused.value)
+        for text in (*texts, str(refused.value), (store.state / "update.json").read_text()):
+            assert token not in text and token[-8:] not in text
+
+
+def test_a_child_that_inherited_the_lock_is_named_after_its_taker_exited(tmp_path, holders):
+    from claudlobby import git_update as updater
+    lock = tmp_path / "runtime-use.lock"
+    lock.touch()
+    taker = holders(lock, "child")
+    taker.process.wait(timeout=10)  # the taker is gone; its child still holds the lock
+    pids = [row["pid"] for row in updater._lock_holders(lock)]
+    assert taker.pid in pids
+    assert taker.process.pid not in pids
+
+
+def test_a_failing_notice_does_not_end_the_wait(update, holders, polls, monkeypatch, capsys):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+
+    def broken(*_):
+        raise RuntimeError("door down")
+    monkeypatch.setattr(updater, "_send_notice", broken)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[30] = holders(lock).release
+        assert updater.run_prepared_update(store)["phase"] == "done"
+    assert "nobody was told that this update is waiting for the runtime lock" in capsys.readouterr().err
+
+
+def test_lsof_output_parses_into_holders_and_a_missing_lsof_reads_as_none(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    fake = tmp_path / "lsof"
+    fake.write_text(f"#!/bin/sh\nprintf 'p111\\ncfoo\\nf3\\np222\\ncbar baz\\nf4\\np{os.getpid()}\\ncself\\nf5\\n'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(updater, "_LSOF", str(fake))
+    assert updater._lsof_holders(tmp_path / "lock") == [
+        {"unit": None, "comm": "foo", "pid": 111, "running_s": None},
+        {"unit": None, "comm": "bar baz", "pid": 222, "running_s": None}]
+    monkeypatch.setattr(updater, "_LSOF", str(tmp_path / "absent"))
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    assert updater._lock_holders(tmp_path / "lock") == []
+    assert updater._holder_text([]) == "a holder that could not be named"
+
+
+def test_proc_holders_fold_a_unit_to_its_oldest_and_skip_what_does_not_hold_the_lock(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    proc, lock = tmp_path / "proc", tmp_path / "runtime-use.lock"
+    proc.mkdir()
+    (proc / "uptime").write_text("1000.00 500.00\n")
+    ticks = os.sysconf("SC_CLK_TCK")
+
+    def process(pid, comm, cgroup, age=None, links=str(lock)):
+        directory = proc / str(pid)
+        directory.mkdir()
+        (directory / "comm").write_text(comm + "\n")
+        (directory / "cgroup").write_text(cgroup + "\n")
+        started = int((1000 - (age or 0)) * ticks)
+        (directory / "stat").write_text(f"{pid} ({comm}) S " + " ".join(["0"] * 18) + f" {started} 0 0\n")
+        if links is not None:
+            (directory / "fd").mkdir()
+            (directory / "fd" / "3").symlink_to(links)
+    process(101, "young", "0::/user.slice/app-a.service", 100)
+    process(102, "old", "0::/user.slice/app-a.service", 300)
+    process(103, "we) ird", "0::/", 10)
+    process(104, "nofd", "0::/user.slice/app-b.service", 50, links=None)
+    process(105, "elsewhere", "0::/user.slice/app-c.service", 50, links="/elsewhere")
+    monkeypatch.setattr(updater, "_PROC", proc)
+    listdir = os.listdir
+    expected = [{"unit": "app-a.service", "comm": "old", "pid": 102, "running_s": 300},
+                {"unit": None, "comm": "we) ird", "pid": 103, "running_s": 10}]
+    for reverse in (False, True):  # whichever process of a unit is read first, its oldest is named
+        monkeypatch.setattr(updater.os, "listdir", lambda path, reverse=reverse: sorted(
+            listdir(path), reverse=reverse) if Path(path) == proc else listdir(path))
+        assert sorted(updater._proc_holders(lock), key=lambda row: row["pid"]) == expected
+
+
+def test_holder_text_names_the_longest_running_and_counts_the_rest():
+    from claudlobby import git_update as updater
+    rows = [updater._holder(None, "c", pid, running) for pid, running in
+            ((1, 10), (2, 50), (3, 30), (4, 20), (5, 40))]
+    assert updater._holder_text(rows) == ("c pid 2, running 50 s, c pid 5, running 40 s, "
+                                          "c pid 3, running 30 s, and 2 more")
+    assert updater._holder_text([updater._holder(None, "comm", 1, None)]) == "comm pid 1"
+    assert updater._holder_text([updater._holder("u.service", "comm", 1, 5)]) == "u.service (comm pid 1, running 5 s)"
+
+
+def test_waiting_text_adds_the_stays_down_sentence_only_at_the_cutover():
+    from claudlobby import git_update as updater
+    record, rows = {"request_id": "r1", "phase": "git"}, [updater._holder(None, "c", 1, 5)]
+    sentence = "Whatever it stopped stays down until then."
+    assert updater._waiting_text("/root", record, "cutover", 12.4, rows).endswith(sentence)
+    drain = updater._waiting_text("/root", record, "drain", 12.4, rows)
+    assert sentence not in drain and drain.endswith("nothing needs running.")
+    token = "ghp_" + "A1b2C3d4" * 4
+    named = updater._waiting_text("/root", record, "drain", 12.4, [updater._holder(token, "c", 1, 5)])
+    assert token not in named and "by [redacted] (c pid 1, running 5 s)." in named
+
+
+def test_the_record_keeps_a_holder_seen_at_any_scan_at_its_longest_running(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_SCAN", 0)
+    answers = [[updater._holder("a", "c", 1, 1)],
+               [updater._holder("a", "c", 1, 5), updater._holder("b", "c", 2, 1)], []]
+    monkeypatch.setattr(updater, "_lock_holders", lambda lock: answers.pop(0) if answers else [])
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[3] = holders(lock).release
+        result = updater.run_prepared_update(store)
+        assert {(row["unit"], row["running_s"]) for row in result["runtime_waits"][0]["holders"]} == {
+            ("a", 5), ("b", 1)}
 
 
 def test_completed_candidate_cleanup_preserves_dirty_work_then_removes_owned_checkout(update):

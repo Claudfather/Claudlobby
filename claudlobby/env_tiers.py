@@ -88,7 +88,6 @@ class Resolution(NamedTuple):
     #: around, and a secret that never enters the structure cannot leak out of
     #: it. Presence is the whole question anyway.
     assignments: tuple[tuple[str, bool], ...] = ()
-    origin_hint: str = ""  #: filled by the register; not known here
 
     @property
     def empty(self) -> bool:

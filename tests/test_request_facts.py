@@ -26,7 +26,8 @@ def batch(tmp_path):
     raws = [
         {"event_type": "work_item", "payload": {
             "work_item_id": "wi_" + "1" * 32, "title": "Authored private task title",
-            "created_by": "bot:example/manager", "body": "Authored private task body"}},
+            "created_by": "bot:example/manager", "body": "Authored private task body",
+            "workstream_id": "ws-test"}},
         {"event_type": "assignment", "payload": {
             "assignment_id": "asg_" + "2" * 32, "work_item_id": "wi_" + "1" * 32,
             "assignee": "bot:example/worker", "assigned_by": "bot:example/manager"}},

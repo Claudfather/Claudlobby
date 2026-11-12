@@ -277,7 +277,7 @@ Consistent, reliable message output across all bots. The fleet-wide policy is **
 
 ### The policy: plain text, no `parseMode`
 
-Do **not** pass `parseMode`, and do **not** wrap output in `**bold**`, `_italic_`, or `` `backticks` ``. Send plain text. Technical identifiers (`chart_uuid`, `~/path`) then render correctly with no escaping, and there are no silent failures from a missed escape character. The bash helper `$CLAUDLOBBY_ROOT/lib/tg-post.sh` sends plain text by default; the Telegram MCP `reply` tool should be called *without* `parseMode`.
+Do **not** pass `parseMode`, and do **not** wrap output in `**bold**`, `_italic_`, or `` `backticks` ``. Send plain text. Technical identifiers (`chart_uuid`, `~/path`) then render correctly with no escaping, and there are no silent failures from a missed escape character. The bash helper `$CLAUDLOBBY_NATIVE_DIR/tg-post.sh` sends plain text by default; the Telegram MCP `reply` tool should be called *without* `parseMode`.
 
 This is codified as a shipped protocol — `library/protocols/telegram-formatting.md` — which the example fleet composes into every bot via `defaults.protocols: [..., telegram-formatting]`. There's also a shared partial (`library/skills/_telegram-formatting.md`) that skills can reference.
 

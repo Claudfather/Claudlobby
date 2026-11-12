@@ -417,8 +417,6 @@ def _env_read_re(home: str | None = None) -> re.Pattern:
     return re.compile(_COMMAND + dirs + _ENV_FILE)
 
 
-ENV_READ = _env_read_re()
-
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FENCE = re.compile(r"\s*(`{3,}|~{3,})")
 #: Where a clause ends in prose. A negation in another clause of the line

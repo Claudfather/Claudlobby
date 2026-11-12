@@ -26,7 +26,7 @@ from pathlib import Path
 from claudlobby import defaults
 from claudlobby.composer import compose_bot
 from claudlobby.config import BotConfig, FleetConfig, SystemDefaultsConfig
-from tests.package_fixtures import git_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -313,3 +313,36 @@ class TestTheAvailabilityGate:
 # "every registered entry resolves to a library file" belongs to the registry,
 # not to this entry, and lives in `test_defaults_registry.py` where the library
 # path is already bound and it is asserted for all twelve types.
+
+
+class TestTheVaultFormsReasonsReachEveryBotThatComposesIt:
+    """The vault form points at its reasons in `fleet-ops/vault-reference.md`,
+    which every bot links. Unlike the sentinel tests above it reads the real
+    protocol and skill directory, and it composes a manager and a worker, which
+    `_compose`'s one-bot fleet cannot."""
+
+    def test_a_manager_and_a_worker_get_the_pointer_and_the_file_it_names(self, tmp_path):
+        root = _root(tmp_path)
+        real = source_package().library / "protocols" / "shared-documentation-vault.md"
+        (root / "library" / "protocols" / "shared-documentation-vault.md").write_bytes(real.read_bytes())
+        install_real_template(root)
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        bots = {
+            bot_id: BotConfig(
+                bot_id=bot_id,
+                name=bot_id,
+                expertise=["eng"],
+                guardrails=list(defaults.resolve("guardrails")),
+                claudron_vault_path="/tmp/example-vault",
+            )
+            for bot_id in ("lead", "worker-1")
+        }
+        fleet = FleetConfig(manager="lead", name="t", service_prefix="p", bots=bots)
+        pointer = ".claude/skills/fleet-ops/vault-reference.md"
+        for bot_id, bot in bots.items():
+            assert bot.skills == [], bot_id  # nothing declared: fleet-ops comes to every bot
+            bot_dir = compose_bot(bot, fleet, paths, log=lambda _m: None)
+            claude_md = (bot_dir / "CLAUDE.md").read_text()
+            assert pointer in claude_md, bot_id
+            moved = "Obvious garbage would be safer."  # moved, not copied
+            assert moved in (bot_dir / pointer).read_text() and moved not in claude_md, bot_id

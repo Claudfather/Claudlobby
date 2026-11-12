@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Sonnet 5.5 · API Usage Billing
+ ▝▝   ▝▝   /work/example/scratch/cwd
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ Say hello pr4-live-P1-782b45ec.
+
+
+
+
+
+
+
+
+
+
+● Leavening… (running Stop hook · 0s · ↓ 8 tokens)
+                                                            ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents

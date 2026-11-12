@@ -5,9 +5,9 @@ environment facts, domain knowledge — into the Claudron vault through the type
 write door (``claudron capture --type knowledge --stdin --json``). Behavior-class
 lessons (imperative bot-steering) are NOT migrated: a vault pointer cannot steer
 behavior, so they re-home to ``library/protocols/`` / ``library/guardrails/`` and
-keep rendering in-context. The per-note verdicts are the triage ledger at
-``documentation/plans/2026-07-23-l3-lessons-triage-ledger.md``; the classification
-below is that ledger's machine mirror (a test asserts the two never drift).
+keep rendering in-context. The per-note verdicts are the classification below
+(``REFERENTIAL_LESSONS`` and ``BEHAVIOR_LESSONS``); a test asserts that every note
+keeps exactly one.
 
 Dry-run by default (prints the capture plan, needs no ``claudron``); ``--apply``
 shells the write door per note and branches on ``data.action`` per

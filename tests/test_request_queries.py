@@ -42,11 +42,13 @@ def test_real_task_receipt_has_separate_exact_conflict_and_pruned_proof(estate):
     assert len(view.semantic_sha256) == 64 and view.observed_attempt == 1
     assert len(view.stages) == 1
     assert view.stages[0].recorded_status == "committed"
-    assert view.stages[0].proof.status == "committed" and view.stages[0].proof.matched == 1
+    assert view.stages[0].proof.status == "committed" and view.stages[0].proof.matched == 2
+    facts = view.stages[0].expected_facts
+    assert [fact.family for fact in facts] == ["workstream", "work_item"]  # its own workstream, then the task (#1053)
     assert view.transmissions == () and conn.total_changes == before_changes
     assert receipt_path.read_bytes() == saved
 
-    event_id = view.stages[0].expected_facts[0].event_id
+    event_id = facts[1].event_id
     conn.execute("UPDATE work_items SET title='Changed' WHERE event_id=?", (event_id,))
     altered = queries.read_request(ctx.root, ctx.fleet_uid, request_id)
     assert altered.stages[0].recorded_status == "committed"

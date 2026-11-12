@@ -725,7 +725,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     emit(fresh, {"event_type": "work_item", "emitter": "t9",
                  "fleet": "f", "payload": {
                      "work_item_id": "wi_" + "9" * 32, "title": "t",
-                     "created_by": "bot:f/a"}})
+                     "created_by": "bot:f/a", "workstream_id": "ws-test"}})
     # An initialized plane with no daemon records no hook or timer emit, so
     # "never armed" is ATTENTION, and so is anything staged meanwhile (S5a-02).
     r2 = _doctor(fresh)
@@ -1507,7 +1507,7 @@ def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_
     def work(suffix):
         return _finalize({"event_type": "work_item", "emitter": "old-task-writer", "fleet": "example-fleet",
                           "payload": {"work_item_id": "wi_" + suffix * 32, "title": "old conditional work",
-                                      "created_by": "bot:example-fleet/alpha"}})
+                                      "created_by": "bot:example-fleet/alpha", "workstream_id": "ws-test"}})
 
     spool = spool_write(tmp_path, [work("1")], "previous outage")
     _stage(staged, "approved.batch", [work("2")])

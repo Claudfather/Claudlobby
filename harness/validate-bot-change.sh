@@ -475,7 +475,7 @@ val_seed_dispatch() {
     f="$(safe_mktemp)"
     cat > "$f" <<JSON
 {"events":[
-{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr"}},
+{"event_type":"work_item","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"work_item_id":"$wi","title":"$safe_body","created_by":"bot:$fleet/$mgr","workstream_id":"ws-test"}},
 {"event_type":"assignment","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"assignment_id":"$asg","work_item_id":"$wi","assignee":"bot:$fleet/$bot","assigned_by":"bot:$fleet/$mgr"$deadline,"dispatch_msg_id":"$msg"}},
 {"event_type":"communication","emitter":"dispatch-task","source_ref":"dispatch-log:$tid","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","sender":"bot:$fleet/$mgr","recipient_raw":"$bot","message_class":"task_request","command_type":"task","work_item_id":"$wi","assignment_id":"$asg","body":"$safe_body"}},
 {"event_type":"transmission","emitter":"dispatch-task","fleet":"$fleet","occurred_at":"$iso","payload":{"msg_id":"$msg","attempt_no":1,"carrier":"tmux","destination":"$bot","state":"pane_submitted"}}
@@ -1183,7 +1183,7 @@ BOT_ID="$HELDB"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
-OBSERVABILITY_INPUT_HELD_THRESHOLD=0
+OBSERVABILITY_INPUT_HELD_THRESHOLD=1
 CONF
 # The held box in a live capture's shape (claude 2.1.285; the fixture
 # tests/fixtures/pane-states/input-held-cr.txt): the glyph and a no-break space,
@@ -1206,6 +1206,8 @@ heldb_pane=$(tmux capture-pane -t "$HELDB" -p 2>/dev/null || true)
 printf '%s' "$heldb_pane" | grep -q '/reload' && r=no || r=yes
 harness_check "#2070 no /reload keystroke went into the held box" "$r"
 
+# The page waits for the threshold, 1 s here (0 turns it off, #2854).
+sleep 1
 val_plane_ready "$ROOT" "$F2070"
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F2070" val_pulse "$LIB_DIR" "$F2070" >/dev/null 2>&1 || true
 heldb_ev=$(val_events "$ROOT" "$F2070" "$HELDB")
@@ -5298,9 +5300,9 @@ harness_check "#941 unarmed composition turns clauDNA's capture prompt off" "$r"
 r=no; "$VAL_PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("skillOverrides") != {"auto-mode-setup": "off"})' \
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
 harness_check "#1388 composed settings turn /auto-mode-setup and its offer off" "$r"
-r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); m = s.get("modelSettings") or {}; sys.exit(not ("claude-sonnet-5-5" in m and all(v == {"autoCompactWindow": "auto"} for v in m.values()) and "autoCompactWindow" not in s))' \
+r=no; "$VAL_PY" -c 'import json, sys; s = json.load(open(sys.argv[1])); sys.exit(not (s.get("autoCompactWindow") == 700000 and "modelSettings" not in s))' \
     "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=yes
-harness_check "#1388 composed settings keep Claude Code's own autocompact window and block its offer" "$r"
+harness_check "#1053 composed settings set the 700000-token autocompact window, which also blocks the #1388 offer" "$r"
 r=yes
 for _se_retired in SESSION_""DIGEST transcript-""digest; do
     grep -q "$_se_retired" "$SE_CONF" "$SE_ROOT/runtime/bots/lead/.claude/settings.local.json" && r=no || true

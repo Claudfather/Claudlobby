@@ -7,14 +7,9 @@ description: Governs how decision forks in /forge plans progress from open to lo
 
 Decision forks are the explicit choice-points in a `/forge` plan where multiple viable approaches exist and a ratifier must lock a direction before implementation begins. This protocol governs how forks move through their lifecycle, how ratification is recorded, and how `/ironclad` determines convergence.
 
-## Fork States
+The state diagram, example lock and reopen comments, and sample `Evidence:` fields are in `$BOT_DIR/.claude/skills/_decision-fork-examples.md`. Every rule is here.
 
-```
-open  ──►  leaning  ──►  locked (ratified)
-  ▲                          │
-  │                          ▼
-  └──────── reopened ◄───────┘
-```
+## Fork States
 
 | State | Meaning |
 |-------|---------|
@@ -33,14 +28,6 @@ The designated ratifier (specified in the fork's `Ratifier:` field) locks a fork
 [FORK-LOCK F<N>] <chosen option letter> — <rationale>
 ```
 
-Examples:
-
-```
-[FORK-LOCK F1] (a) — clauDNA skills, claudlobby orchestration. Follows the /adversarial-review precedent and keeps lenses usable standalone.
-
-[FORK-LOCK F3] (a) — PR-comment threading with resolved tags. Simpler than fingerprinting, leverages GitHub's existing model.
-```
-
 Rules:
 
 - Only the designated ratifier (or the human, who can ratify anything) may lock a fork.
@@ -53,14 +40,6 @@ Any reviewer can reopen a locked fork by posting a PR comment with new evidence:
 
 ```
 [FORK-REOPEN F<N>] <new evidence or changed assumption>
-```
-
-Examples:
-
-```
-[FORK-REOPEN F4] Extension-check now also verifies file paths (PR #122), which changes the overlap analysis for plan-only vs plan-plus-codebase.
-
-[FORK-REOPEN F2] The fleet now supports webhook-triggered dispatches, which makes push mode viable without persistent state.
 ```
 
 Rules:
@@ -80,17 +59,7 @@ Every state transition is recorded:
 | `locked` → `reopened` | The `[FORK-REOPEN]` PR comment (link to comment) |
 | `reopened` → `locked` | A new `[FORK-LOCK]` PR comment |
 
-The plan document's `Evidence:` field for each fork accumulates links to all relevant comments. After locking:
-
-```markdown
-- **Evidence:** [Locked by ratifier](https://github.com/org/repo/pull/118#issuecomment-123456)
-```
-
-After reopen + re-lock:
-
-```markdown
-- **Evidence:** [Original lock](https://github.com/org/repo/pull/118#issuecomment-123456) → [Reopened](https://github.com/org/repo/pull/118#issuecomment-234567) → [Re-locked](https://github.com/org/repo/pull/118#issuecomment-345678)
-```
+The plan document's `Evidence:` field for each fork accumulates links to all relevant comments.
 
 ## Convergence Rule
 

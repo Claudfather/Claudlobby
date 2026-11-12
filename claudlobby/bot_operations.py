@@ -37,6 +37,8 @@ from .operation_context import resolve_operation_scope
 from .plane.emit_api import emit_batch
 from .plane.fleet_events import fleet_event_request
 from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission
+from .compact_request import (CompactRequestError, CompactRequestResult,
+                              record_own_compaction)
 from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
@@ -972,15 +974,49 @@ def check_handoff(*, root: Path, fleet: str | None, bot: str) -> BotHandoffCheck
                            source_revision=snapshot["revision"], config_fingerprint=snapshot["fingerprint"])
 
 
+def _request_own_compaction(root: Path, identity, destination, origin, bot: str, *,
+                            request_id: str | None, cancel: bool) -> CompactRequestResult:
+    """#1053: a bot's `compact` on itself records a request in its own data/ and
+    types nothing, since its own turn is running while it runs this CLI. It
+    takes no lifecycle lock: it touches no unit and no session."""
+    if origin.fleet.name != destination.fleet.name or bot not in destination.fleet.bots:
+        raise BotLifecycleError("self compaction target differs from generated origin")
+    if request_id is None:
+        raise BotLifecycleError("a request for your own compaction needs --request-id UUID")
+    from .transcript_usage import current_context
+
+    with mutation_admission(root, identity=identity,
+                            expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
+        try:
+            outcome, request, recording = record_own_compaction(
+                root, fleet=destination.fleet.name, bot=bot,
+                bot_dir=destination.paths.bot_runtime(bot), request_id=request_id, cancel=cancel,
+                context=lambda: current_context(destination.paths, destination.fleet, bot))
+        except CompactRequestError as exc:
+            raise BotLifecycleError(str(exc)) from exc
+        return _bot_result(CompactRequestResult, release, destination.fleet.name, bot,
+                           _release_id(release), "compact", outcome, request, recording)
+
+
 def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
                 identity: RuntimeIdentity | None = None,
-                adapter: Adapter | None = None) -> BotControlResult:
-    """Submit one explicit control to an exact selected private session."""
+                adapter: Adapter | None = None, request_id: str | None = None,
+                cancel: bool = False) -> BotControlResult | CompactRequestResult:
+    """Submit one explicit control to an exact selected private session, or, for a
+    bot's `compact` on itself, record its request and type nothing (#1053)."""
     if control not in {"interrupt", "compact"}:
         raise BotLifecycleError("unsupported bot control")
     if not isinstance(bot, str) or not bot or Path(bot).name != bot or bot in {".", ".."}:
         raise BotLifecycleError("supply one exact bot ID")
     identity = identity or RuntimeIdentity.current()
+    if control == "compact":
+        destination, origin = resolve_operation_scope(root=root, fleet=fleet)
+        if origin is not None and origin.bot_id == bot:
+            return _request_own_compaction(root, identity, destination, origin, bot,
+                                           request_id=request_id, cancel=cancel)
+    if request_id is not None or cancel:
+        raise BotLifecycleError("--request-id and --cancel belong to a bot's request "
+                                "for its own compaction")
     with mutation_admission(root, identity=identity,
                             expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
         with _operation_lock(root):
