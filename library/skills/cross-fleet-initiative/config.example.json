@@ -3,14 +3,14 @@
   "managers": [
     {
       "name": "lead",
-      "tmux_session": "lead",
+      "fleet": "product",
       "telegram_handle": "@fleet_lead_bot",
       "project_root": "/path/to/fleet/lead",
       "fleet_repos": ["repo-a", "repo-b"]
     },
     {
       "name": "eng-manager",
-      "tmux_session": "eng-manager",
+      "fleet": "engineering",
       "telegram_handle": "@fleet_eng_manager_bot",
       "project_root": "/path/to/fleet/eng-manager",
       "fleet_repos": ["repo-c", "repo-d"]

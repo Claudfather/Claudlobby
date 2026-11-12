@@ -6,7 +6,7 @@ format; this file is the boundary at the seam — what belongs here, what must n
 **What belongs here.** Composition inputs: `expertise/` (roles), `skills/` (fleet-operations
 commands), `mcp/` (wire-config fragments, `${ENV_VAR}` placeholders only), `guardrails/`,
 `protocols/` (workflow patterns), `principles/`, `resources/` (non-secret environment facts),
-`post_actions/`.
+`post_actions/`, `voices/` (personality overlays).
 
 **What must never land here.**
 
@@ -21,4 +21,4 @@ commands), `mcp/` (wire-config fragments, `${ENV_VAR}` placeholders only), `guar
 
 **Placement test** (one line): does it *wire or operate* the fleet? → stays. Is it *true about
 the world*? → vault. Is it *how to engineer*? → clauDNA. Full algorithm: Claudron repo,
-`documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+`documentation/decisions/005-claudfather-boundary-separation.md` §10.3.

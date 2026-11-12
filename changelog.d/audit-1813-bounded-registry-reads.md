@@ -1,0 +1,3 @@
+### Fixed — a registry history or changes read no longer decodes the whole registry (#1813)
+
+`claudlobby plane registry --history ALIAS` fetched and decoded every entity's snapshots and then kept only the requested one's. It now selects the requested entity's partitions in SQL and filters them only after the window functions, so a later alias still closes the earlier alias's interval, and each host keeps its own; it decodes only those rows. `--changes N` puts its LIMIT in SQL, outside LAG, so the first change returned still has its predecessor; a limit of 0 skips the query, and a negative or non-integer limit is refused. Rows, ordering, tombstones and the F11 completion rule are unchanged, and there is no migration.

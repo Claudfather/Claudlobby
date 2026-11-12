@@ -1,6 +1,6 @@
 name: conformance
 
-# Boundary phase L4 — the two conformance surfaces that the default test.yml lane
+# Boundary phase L4 — the conformance surfaces that the default test.yml lane
 # (which installs only `.[dev]`) cannot cover:
 #   * vault-tests   — the R3 hook-snippet parity gate + the N-bot contention test,
 #                     which importorskip/skipif on the [vault] extra and so SKIP
@@ -8,6 +8,8 @@ name: conformance
 #                     installs the pinned engine so they actually run.
 #   * rename-map    — the F8 drift gate: a live value in CLAUDNA_SKILL_RENAMES must
 #                     still name a real clauDNA skills/ dir.
+#   * claudron-refs — every Claudron path or URL this repo names must exist in
+#                     Claudron at the revision in claudlobby/contracts/claudron-docs.ref.
 #
 # NOTE for the repo admin: add `vault-tests` to the branch's REQUIRED status checks
 # so the R3 drift protection is real (a required check, not just present).
@@ -34,17 +36,24 @@ jobs:
       - name: Install git (the N-bot contention test drives real vault clones)
         run: sudo apt-get update && sudo apt-get install -y git
       - name: Install package + the pinned [vault] extra (claudron)
-        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.2.0 —
-        # bump tracked in #680). Parity holds against the pin; the gate fails if
+        # The pin lives in pyproject's [vault] extra (F1 lock, currently v0.9.0 —
+        # bump policy: documentation/integrations/claudron-integration.md). Parity holds against the pin; the gate fails if
         # the composer's rendered copy ever drifts from it.
         run: pip install -e '.[dev,vault]'
+      - name: Prepare installed resources in disposable checkout
+        run: python tests/prepare_resources.py --disposable-checkout "$PWD"
       - name: Run the vault-mode gate (snippet parity + contention)
-        run: pytest -q -m vault
+        # A quarantined vault test runs in quarantine.yml instead (where the
+        # [vault] extra is absent, so it skips there too until it is fixed).
+        run: pytest -q -m "vault and not quarantine"
 
   # ── F8 rename-map drift gate (stale-live-values only) ─────────────────────
-  # Local-first: clauDNA is checked out and the gate is pointed at it. The
-  # checkout is non-fatal — if clauDNA is unreachable the gate skips-with-notice
-  # (exit 0), because this is CI convenience, never a required hosted dependency.
+  # Local-first: clauDNA is checked out and the gate is pointed at it. If clauDNA
+  # does not answer, the job skips with notice (exit 0), because this is CI
+  # convenience, never a required hosted dependency. The job reads clauDNA's
+  # default branch and has no ref of its own, so only an outage or a clauDNA that
+  # no longer answers at this name reaches that skip. A clauDNA that answers must
+  # be checked out and hold a skills/ dir, or the job fails (#2539).
   rename-map-gate:
     runs-on: ubuntu-latest
     steps:
@@ -54,16 +63,100 @@ jobs:
           python-version: '3.11'
       - name: Install package
         run: pip install -e '.[dev]'
+      - name: Ask whether clauDNA answers
+        id: claudna-reach
+        run: |
+          if git ls-remote --exit-code https://github.com/Claudfather/clauDNA.git HEAD > /dev/null; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo '::notice::SKIP rename-map - clauDNA unreachable (local-first)'
+          fi
       - name: Check out clauDNA (the consumed skill surface; marketplace-latest)
-        id: claudna
-        continue-on-error: true
+        if: steps.claudna-reach.outputs.reachable == 'true'
         uses: actions/checkout@v4
         with:
           repository: Claudfather/clauDNA
           path: .claudna-checkout
       - name: Run the rename-map drift gate
-        # CLAUDNA_SKILLS_DIR points the gate at the checkout; if the checkout step
-        # failed the dir is absent and the gate prints SKIP and exits 0 (local-first).
+        if: steps.claudna-reach.outputs.reachable == 'true'
+        # CLAUDNA_SKILLS_DIR points the gate at the checkout. The module skips when
+        # that dir is absent (local-first); here the checkout succeeded, so an absent
+        # skills/ dir fails the job instead.
         env:
           CLAUDNA_SKILLS_DIR: ${{ github.workspace }}/.claudna-checkout/skills
-        run: python -m claudlobby.conformance rename-map
+        run: |
+          [ -d "$CLAUDNA_SKILLS_DIR" ] || { echo "::error::rename-map: the clauDNA checkout has no skills/ directory"; exit 1; }
+          python -m claudlobby.conformance rename-map
+
+  # P3 export contract: optional hosted convenience, never a required check.
+  # A clauDNA that does not answer skips with notice, so a sibling outage cannot
+  # block merges. A clauDNA that answers must hold the ref in
+  # claudlobby/contracts/claudna.ref: the checkout is not continue-on-error, so a
+  # mistyped ref or a tag not cut yet fails the job instead of reading green while
+  # checking nothing (#2539). A ref file that is missing or empty fails the job
+  # before it asks whether clauDNA answers, so an outage does not hide it (#2550).
+  export-contract-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: pip install -e '.[dev]'
+      - name: Read consumed clauDNA ref
+        id: export-ref
+        # A checkout given an empty ref takes clauDNA's default branch, and it trims the input of
+        # Unicode whitespace first, a byte-order mark included. A ref holds a visible ASCII
+        # character, so the file must too; LC_ALL=C gives the same answer on every runner.
+        run: |
+          LC_ALL=C grep -q '[[:graph:]]' claudlobby/contracts/claudna.ref || { echo "::error::export-contract: claudlobby/contracts/claudna.ref is missing or empty"; exit 1; }
+          echo "ref=$(cat claudlobby/contracts/claudna.ref)" >> "$GITHUB_OUTPUT"
+      - name: Ask whether clauDNA answers
+        id: export-reach
+        run: |
+          if git ls-remote --exit-code https://github.com/Claudfather/clauDNA.git HEAD > /dev/null; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo '::notice::SKIP export-contract - clauDNA unreachable (local-first)'
+          fi
+      - name: Check out clauDNA export contract
+        if: steps.export-reach.outputs.reachable == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Claudfather/clauDNA
+          ref: ${{ steps.export-ref.outputs.ref }}
+          path: .claudna-export-checkout
+      - name: Run released export contract gate
+        if: steps.export-reach.outputs.reachable == 'true'
+        run: python -m claudlobby.conformance export-contract .claudna-export-checkout
+
+  # Claudron paths and URLs: the docs, docstrings and instruction files here name files in the Claudron
+  # repo, and nothing else checks that they exist. Claudron is checked out at the revision in
+  # claudlobby/contracts/claudron-docs.ref (one full sha; documentation/integrations/claudron-integration.md
+  # says who moves it and when), and the check fails when a reference does not resolve there. Unlike the
+  # clauDNA gates it does not skip when its checkout is unavailable: a gate that cannot read Claudron has not
+  # passed, and a ref file holding a sha Claudron lacks would otherwise merge green. A failed fetch fails the
+  # job; a re-run costs less than a pass that checked nothing. Stdlib only, so there is no package to install.
+  claudron-refs-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read the Claudron revision the references are checked at
+        id: claudron-ref
+        run: |
+          ref=$(python3 -m claudlobby.claudron_refs --print-ref)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Check out Claudron at that revision
+        uses: actions/checkout@v4
+        with:
+          repository: Claudfather/Claudron
+          ref: ${{ steps.claudron-ref.outputs.ref }}
+          path: .claudron-checkout
+      - name: Resolve every Claudron path this repo names
+        run: python3 -m claudlobby.claudron_refs --claudron .claudron-checkout

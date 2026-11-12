@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 FIXTURES="$SCRIPT_DIR/fixtures/pane-states"
 PASS=0; FAIL=0; TOTAL=0
 
@@ -27,9 +27,13 @@ assert_eq() {
 
 export PANE_SEND_SETTLE_S=0 PANE_SEND_VERIFY_TICKS=2
 export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6 PANE_RECOVER_TICKS=2
+# The wait for the box to show the payload before the Enter (#1236; 10s in
+# production). A traced send needs a frame that shows its payload before the
+# verify ticks it records, or its Enter is withheld and there is nothing to trace.
+export PANE_SEND_SHOWN_TICKS=2
 export _PANE_VERIFY_POLL_S=0
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
@@ -37,6 +41,7 @@ SENT_LOG="$TMPD/sent.log"; PANE_SCRIPT="$TMPD/panes"
 export BOT_DIR="$TMPD/synth-bot" BOT_ID="synthetic.traceprobe"
 export CLAUDLOBBY_ROOT="$TMPD/synth-root"
 mkdir -p "$BOT_DIR/data"
+TYPED="$TMPD/typed.txt"; printf '%s\n' "> hello world payload" > "$TYPED"
 
 bot_tmux() {
     shift
@@ -44,10 +49,19 @@ bot_tmux() {
         send-keys) shift 3; printf '%s\n' "$*" >> "$SENT_LOG" ;;
         capture-pane)
             local remaining fixture
+            # The pre-write look observes the last readiness frame. Future
+            # frames describe the authored payload after send-keys, not input
+            # that existed before it. Keep this snapshot across subshells.
+            if [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ] &&
+                [ ! -s "$SENT_LOG" ] && [ -s "$TMPD/last-ready" ]; then
+                fixture=$(cat "$TMPD/last-ready")
+                cat "$fixture"; return 0
+            fi
             remaining=$(cat "$PANE_SCRIPT")
             fixture=$(printf '%s\n' "$remaining" | head -1)
             printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
             [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+            printf '%s' "$fixture" > "$TMPD/last-ready"
             cat "$fixture"
             ;;
         *) return 0 ;;
@@ -55,28 +69,35 @@ bot_tmux() {
 }
 
 echo "== trace is off by default =="
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
 unset PANE_VERIFY_TRACE
 pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
 assert_eq "nothing is written when the knob is unset" "0" "$(find "$TMPD" -name 'tick-*.pane' | wc -l | tr -d ' ')"
 
 echo "== decisions are identical with the trace on =="
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
-pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
+# The payload the frame really holds, so both runs reach the verify and its
+# retry: text, Enter and the retry Enter, the trace on or off. Two Enters in
+# all: the bound is not under test here, only that the trace changes nothing.
+export PANE_SEND_ENTER_TRIES=2
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
+pane_send_verified sock sess "/claudna:session resume --auto" >/dev/null 2>&1 || true
 sends_off=$(wc -l < "$SENT_LOG" | tr -d ' ')
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$FIXTURES/input-stuck-literal.txt" > "$PANE_SCRIPT"
 export PANE_VERIFY_TRACE="$TMPD/trace1.jsonl"
-pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
+pane_send_verified sock sess "/claudna:session resume --auto" >/dev/null 2>&1 || true
 sends_on=$(wc -l < "$SENT_LOG" | tr -d ' ')
+assert_eq "the send reached the verify and its retry" "3" "$sends_off"
 assert_eq "the same keystrokes are sent with the trace on as off" "$sends_off" "$sends_on"
-unset PANE_VERIFY_TRACE
+unset PANE_VERIFY_TRACE PANE_SEND_ENTER_TRIES
 
 echo "== a tick record carries what tells the three candidates apart =="
-: > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
+rm -f "$TMPD/last-ready"; : > "$SENT_LOG"; printf '%s\n' "$FIXTURES/input-placeholder-hint.txt" "$TYPED" "$FIXTURES/input-clean-submit.txt" > "$PANE_SCRIPT"
 TRACE_DIR="$TMPD/trace2"; export PANE_VERIFY_TRACE="$TRACE_DIR"
 pane_send_verified sock sess "hello world payload" >/dev/null 2>&1 || true
 unset PANE_VERIFY_TRACE
-rec=$(pane_trace_render "$TRACE_DIR" | head -1)
+# sed, not head: a reader that exits early SIGPIPEs the renderer, and under
+# pipefail that ends the suite instead of failing an assertion.
+rec=$(pane_trace_render "$TRACE_DIR" | sed -n 1p)
 for f in tick box held region_present region_lines payload_len floor candidate lines pane_b64; do
     case "$rec" in *"\"$f\""*) got=yes ;; *) got=no ;; esac
     assert_eq "rendered record carries $f" "yes" "$got"
@@ -91,8 +112,11 @@ first_pane=$(cat "$TRACE_DIR/tick-1.pane" 2>/dev/null || printf 'MISSING')
 expected_pane=$(cat "$FIXTURES/input-clean-submit.txt")
 assert_eq "tick-1.pane is the frame verbatim, not a derived record" \
     "$(printf '%s' "$expected_pane" | cksum)" "$(printf '%s' "$first_pane" | cksum)"
-assert_eq "the tick file holds no derived fields" "no" \
-    "$(case "$first_pane" in *candidate*|*ge_floor*|*substr*) echo yes ;; *) echo no ;; esac)"
+derived=no
+if [[ "$first_pane" == *candidate* || "$first_pane" == *ge_floor* || "$first_pane" == *substr* ]]; then
+    derived=yes
+fi
+assert_eq "the tick file holds no derived fields" "no" "$derived"
 
 echo "== each candidate classifies distinctly =="
 # no-region: pre-draw pane, no glyph at all -> the render-lag shape
@@ -132,6 +156,13 @@ for fx in "$FIXTURES"/*.txt; do
     done
 done
 assert_eq "trace verdict agrees with pane_holds_unsubmitted on all $checked pane/payload pairs" "0" "$mismatch"
+# A box taller than the pane has no prompt line in view (#2669): its payload's
+# end right above the rule is held, as pane_holds_unsubmitted reads it.
+printf '%s\n' "  line two of a tall payload" "  TALL2669 END" "$(printf '\342\224\200%.0s' 1 2 3 4 5 6 7 8)" "  footer" > "$TMPD/tall.txt"
+assert_eq "a tall box showing the payload's end above its rule classifies held" "held" \
+    "$(_pane_trace_candidate "$(cat "$TMPD/tall.txt")" "line one"$'\n'"line two of a tall payload"$'\n'"TALL2669 END")"
+assert_eq "...and one showing another payload's end does not" "no-region" \
+    "$(_pane_trace_candidate "$(cat "$TMPD/tall.txt")" "some other payload")"
 
 echo
 echo "TOTAL=$TOTAL PASS=$PASS FAIL=$FAIL"

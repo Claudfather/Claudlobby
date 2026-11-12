@@ -5,13 +5,13 @@ environment facts, domain knowledge — into the Claudron vault through the type
 write door (``claudron capture --type knowledge --stdin --json``). Behavior-class
 lessons (imperative bot-steering) are NOT migrated: a vault pointer cannot steer
 behavior, so they re-home to ``library/protocols/`` / ``library/guardrails/`` and
-keep rendering in-context. The per-note verdicts are the triage ledger at
-``documentation/plans/2026-07-23-l3-lessons-triage-ledger.md``; the classification
-below is that ledger's machine mirror (a test asserts the two never drift).
+keep rendering in-context. The per-note verdicts are the classification below
+(``REFERENTIAL_LESSONS`` and ``BEHAVIOR_LESSONS``); a test asserts that every note
+keeps exactly one.
 
 Dry-run by default (prints the capture plan, needs no ``claudron``); ``--apply``
 shells the write door per note and branches on ``data.action`` per
-docs/CLI_CONTRACT.md §capture — ``created``/``updated`` land, ``suggest_*`` are
+Claudron documentation/specs/CLI_CONTRACT.md §capture — ``created``/``updated`` land, ``suggest_*`` are
 listed for a human (NEVER ``--force``), ``rejected`` is an error. Idempotent:
 re-running ``--apply`` dedup-routes every note to ``suggest_update``.
 """
@@ -95,7 +95,7 @@ class CaptureMapping:
         return not self.problems
 
     def stdin_payload(self) -> dict:
-        """The ``--stdin`` JSON envelope (docs/CLI_CONTRACT.md §capture fields)."""
+        """The ``--stdin`` JSON envelope (Claudron documentation/specs/CLI_CONTRACT.md §capture fields)."""
         return {
             "type": "knowledge",
             "title": self.title,
@@ -245,7 +245,7 @@ def cmd_lessons_migrate(args) -> int:
     plan = build_capture_plan(lessons_dir, fleet=fleet)
     tier = f"fleet '{fleet}'" if fleet else "_shared/"
 
-    log.info("=== lessons-migrate plan ===")
+    log.info("=== migration lessons plan ===")
     log.info("lessons dir: %s", lessons_dir)
     log.info("target tier: %s", tier)
     log.info(

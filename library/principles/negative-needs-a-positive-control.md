@@ -17,6 +17,6 @@ It is the most expensive mistake available, because a probe that cannot see stil
 - **Suspect the tidy row.** Three-for-three is more often a broken reader than a real estate-wide finding.
 - **Without a positive control, say "unverified", not "absent".** Different claims; only one is yours to make.
 
-Worked example — three ways one probe silently measures nothing, with the shapes: `lib/gh-mention-guard.sh`, beside the writer matcher. Vault: *Empty is a verdict*; *Never report confidently on a region your method cannot observe*.
+Worked example — three ways one probe silently measures nothing, with the shapes: `claudlobby/_runtime_scripts/gh-mention-guard.sh`, beside the writer matcher. Vault: *Empty is a verdict*; *Never report confidently on a region your method cannot observe*.
 
 *Proposed by kev and clog; the failure modes were hit for real by ari, clog and dara.*

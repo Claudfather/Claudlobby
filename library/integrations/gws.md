@@ -28,4 +28,5 @@ Supersedes the deprecated `gmail.json` fragment.
 - OAuth credentials are per-instance — each instance needs its own `CREDENTIALS_DIR`
 - `start_google_auth` opens a browser URL; headless environments need the URL copied manually
 - Gmail search uses Google's search syntax, not regex
+- `workspace-mcp` v2.3.0 documents the `query` of `search_gmail_messages`: "Results include drafts unless the query excludes them (e.g. in:sent or -in:drafts)." Google's reference for the native connector's `search_threads` says "Drafts are explicitly excluded by default by the tool." (`library/integrations/gmail.md`) and lists `in:sent` too, so by the two references a query with `in:sent` returns no drafts on either backend.
 - Calendar operations use RFC3339 timestamps

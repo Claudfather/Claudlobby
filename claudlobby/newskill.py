@@ -1,9 +1,9 @@
-"""`claudlobby new-skill` — interactive skill scaffolding.
+"""`claudlobby library create --kind skill` — interactive skill scaffolding.
 
 Two modes:
 
-  Interactive:     `claudlobby new-skill`              (prompts for each field)
-  Non-interactive: `claudlobby new-skill --name X ...` (all flags up front)
+  Interactive:     `claudlobby library create --kind skill`              (prompts for each field)
+  Non-interactive: `claudlobby library create --kind skill --name X ...` (all flags up front)
 
 Creates a skill directory under `library/skills/<name>/` containing a SKILL.md
 with proper YAML frontmatter (name, description, argument-hint), H1 heading,
@@ -13,6 +13,7 @@ and placeholder content.
 from __future__ import annotations
 import logging
 import re
+import json
 
 from .prompts import ask as _ask
 
@@ -24,9 +25,9 @@ def render_skill(name: str, description: str, argument_hint: str | None) -> str:
     lines: list[str] = []
     lines.append("---")
     lines.append(f"name: {name}")
-    lines.append(f'description: "{description}"')
+    lines.append(f"description: {json.dumps(description, ensure_ascii=False)}")
     if argument_hint:
-        lines.append(f'argument-hint: "{argument_hint}"')
+        lines.append(f"argument-hint: {json.dumps(argument_hint, ensure_ascii=False)}")
     lines.append("---")
     lines.append("")
     # H1 heading — title-cased from the slug
@@ -50,7 +51,7 @@ def render_skill(name: str, description: str, argument_hint: str | None) -> str:
 
 def interactive_collect() -> tuple[str, str, str | None]:
     """Walk the user through skill creation. Returns (name, description, argument_hint)."""
-    print("\n=== claudlobby new-skill — interactive ===\n")
+    print("\n=== claudlobby library create --kind skill — interactive ===\n")
 
     name = _ask("Skill name (lowercase, e.g. 'deploy-status')", allow_empty=False)
     while not re.match(r"^[a-z][a-z0-9_-]*$", name):

@@ -1,7 +1,8 @@
-"""The generate-time registry emitter (Phase 2b — spec §9b/§18).
+"""The registry emitter (Phase 2b — spec §9b/§18), run by activation.
 
-One SCAN per generate: assemble the §9b entity payloads from the composed
-fleet state, emit them as `registry_snapshot` events (cause=generate, one
+One SCAN per fleet per activated configuration: assemble the §9b entity
+payloads from the composed fleet state, emit them as `registry_snapshot`
+events (cause=generate, one
 scan_id), diff the db's prior entity set against what this scan enumerated
 to emit TOMBSTONES (deletion is the one underivable operation), then close
 with the `scan_completed` declaration that makes those tombstones valid
@@ -21,15 +22,13 @@ declaration names its scope string.
 
 Default ON since the defaults flip (chunk N): a keyframe of what the fleet IS
 is what every metric sample joins to, and a plane whose registry lane never
-ran renders an estate of unnamed uids. The knob is an opt-OUT —
-``PLANE_EMIT_ENABLED=0`` in the ``.env`` tier suppresses the scan, resolved
-through the runtime's own tier cascade (the SAME resolution the composer uses
-for timer arming). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
-``bot.conf`` (runtime doors and hooks read it) but does NOT reach generate-time
-scans — the .env tier reaches BOTH, so it is the single carrier worth using.
-``PLANE_EMIT_DISABLED=1`` is the ruled harness exemption and still silences
-this like every other door. The generate hook is NON-BLOCKING (a scan failure
-logs and never breaks generate).
+ran renders an estate of unnamed uids. First-fleet setup REQUIRES the scan
+and refuses the values that would turn it off (activation_scan_refusal says
+which and why). Only the retired generate hook, which the harness still drives,
+reads them as an opt-out; it is NON-BLOCKING (a scan failure logs and never
+breaks generate). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
+``bot.conf`` (runtime doors and hooks read it) but does NOT reach the scan —
+only the .env tier does, through the runtime's own tier cascade.
 
 F11 boundary: this emitter enforces the PREVENTION half — incomplete
 enumerations never tombstone, empty-but-complete tombstones its scope.
@@ -54,7 +53,7 @@ from pathlib import Path
 
 from ..claude_version import measure as measure_claude_version
 from ..claudron_compat import COMPAT_FLOOR
-from ..paths import _iter_fleet_dirs
+from ..paths import INSTRUCTION_FILE_NAMES, _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
@@ -144,13 +143,10 @@ def host_payload(paths) -> dict:
         ram_mb = 0
     # The version the fleet launches, from the runtime's own reader (#1772).
     claude = measure_claude_version(paths)
-    try:
-        clv = subprocess.run(
-            ["git", "-C", str(paths.root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        clv = ""
-    system_yaml = paths.root / "claudlobby" / "system.yaml"
+    # The mutable data directory's Git revision says nothing about the package
+    # performing composition. This is artifact provenance, not a host release ID.
+    clv = paths.package.artifact_id
+    system_yaml = paths.package.system_yaml
     # paths._iter_fleet_dirs — the ONE nested-aware fleet walk. The shipped
     # depth-1 glob measured [] on the live nested-vault host (gauntlet r1);
     # spec: "fleet aliases from manifests — NEVER process inference".
@@ -263,7 +259,6 @@ def _mission_file(paths, rel: str | None) -> dict | None:
 
 
 def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
-    managers = sorted({t.manager for t in fleet.teams.values() if t.manager})
     defaults = fleet.defaults or {}
     tier_lists = {}
     for k in ("skills", "mcp", "guardrails", "protocols", "expertise",
@@ -274,7 +269,7 @@ def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
         "service_prefix": fleet.service_prefix,
         "mission": fleet.mission,
         "mission_file": _mission_file(paths, fleet.mission_file),
-        "manager": managers[0] if len(managers) == 1 else managers,
+        "manager": fleet.manager,
         "groups": [
             {"name": t.name, "manager": t.manager,
              "members": sorted(t.workers), "mission": None}
@@ -376,8 +371,9 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         # EFFECTIVE sets, through the composer's own resolvers (one
         # definition): the composer auto-pairs an integration for every MCP
         # with a matching integrations/<name>.md and adds the available
-        # default protocols at compose time, and a protocol's requires.skills
-        # brings a skill along with it (spec §10) — none of which the
+        # default protocols at compose time, and a protocol's or an
+        # integration's requires: brings skills (and, for an integration,
+        # protocols) along with it (spec §10) — none of which the
         # DECLARED lists carry, so a keyframe of bot.integrations/bot.protocols/
         # bot.skills read every auto-paired integration, default protocol and
         # required skill as "unused" in the inventory while composed into the
@@ -433,11 +429,20 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "vault_rev": vault_rev,
         "schema_version": _SCHEMA,
     }
+    # #2145: the agent CLI rides only when it carries information — a non-claude
+    # bot. generate writes with its own contract, but a keyframe spooled on a
+    # busy db is drained by the daemon, and a daemon older than this field
+    # quarantines the key (#1724); a claude keyframe keeps the shape every
+    # daemon accepts, and absence reads as claude.
+    agent_cli = {"agent_cli": bot.agent_cli} if bot.agent_cli != "claude" else {}
+    payload.update(agent_cli)
     # declared = the declaration's stable projection (equipment + org +
-    # posture + model), independent of composed artifacts
+    # posture + model), independent of composed artifacts. The agent CLI is a
+    # declaration fact, hashed only when present, so a claude bot's hash is
+    # byte-identical to the one before #2145.
     payload["declared_hash"] = canonical_hash(
         {"org": org, "equipment": equipment, "posture": posture,
-         "model": payload["model"], "effort": bot.effort})
+         "model": payload["model"], "effort": bot.effort, **agent_cli})
     return payload
 
 
@@ -448,16 +453,19 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
     tombstones)."""
     items: list[tuple[str, dict]] = []
     skipped = 0
-    shared_root = paths.root / "library"
+    shared_root = paths.base_library
     for kind in _library_kinds(paths):
         for base in paths.library_search_dirs(kind):
             if not base.is_dir():
                 continue
-            is_shared = str(base).startswith(str(shared_root))
+            is_shared = base.is_relative_to(shared_root)
             tier = "shared" if is_shared else "fleet-overlay"
             prefix = "shared" if is_shared else fleet_name
             for entry in sorted(base.iterdir()):
-                if entry.name.startswith(".") or entry.name == "README.md":
+                # A folder's CLAUDE.md/AGENTS.md describes the folder and is
+                # never an item in it (library/voices/ carries one, #2150).
+                if (entry.name.startswith(".") or entry.name == "README.md"
+                        or entry.name in INSTRUCTION_FILE_NAMES):
                     continue
                 try:
                     if entry.is_dir():
@@ -578,10 +586,67 @@ def assemble_entities(paths, fleet, vault_rev):
     return entities, not skipped
 
 
-def run_generate_scan(paths, fleet) -> dict | None:
-    """Emit one generate-cause registry scan for *fleet*. Returns the summary
-    dict, or None when a tier has turned the scan OFF. Raises only upward
-    through the non-blocking hook in cmd_generate."""
+def _has_ingest_history(conn) -> bool:
+    """An empty family is not a new database: retention keeps the ledger.
+
+    Its AUTOINCREMENT watermark and identities also forbid treating removed
+    ledger rows as a fresh host. This probe never creates a host identity.
+    """
+    return bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM ingest_ledger)"
+        " OR EXISTS(SELECT 1 FROM sqlite_sequence"
+        " WHERE name = 'ingest_ledger' AND seq > 0)"
+        " OR EXISTS(SELECT 1 FROM identity_registry)"
+    ).fetchone()[0])
+
+
+class RegistryScanError(RuntimeError):
+    """Activation cannot admit writers; acknowledged partial chunks remain."""
+
+    def __init__(self, reason: str, summary: dict):
+        self.summary = summary
+        super().__init__(reason)
+
+
+def activation_scan_refusal(paths, fleet) -> str | None:
+    """Why first-fleet setup's scan of *fleet* would refuse before its first emission, or None.
+
+    The setup's identity bindings join to the keyframes the scan commits, so
+    there a silenced or opted-out scan is a refusal, never a skip. Each check
+    reads only this process's environment or the fleet's .env tier cascade, so
+    the update's prepare stage asks before it stops or starts anything, with
+    the update record already written, and
+    run_generate_scan(require_commit=True) asks again at the scan. The text is
+    written for the operator and says only what clears the refusal. Unsetting
+    an exported value does, and host update continue then resumes the retained
+    update. Nothing does for a tier value: the update froze its .env tiers as
+    inputs, so an edit stops at the changed-input check, and nothing discards
+    the update. The operator starts over with a new installation and data root.
+    """
+    from .. import env_tiers as _env_tiers
+    needs = "the registry scan that first-fleet setup needs before it starts any bot"
+    resume = "run host update continue"
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        return (f"PLANE_EMIT_DISABLED=1 in this command's environment silences {needs};"
+                f" unset it, then {resume}")
+    if os.environ.get("PLANE_EMIT_ENABLED") == "0":
+        return (f"PLANE_EMIT_ENABLED=0 in this command's environment opts out of {needs};"
+                f" unset it, then {resume}")
+    try:
+        cascade = _env_tiers.resolve(paths, fleet_name=fleet.name)
+    except _env_tiers.ResolverUnavailable:
+        return (f"the check for {needs} cannot resolve fleet {fleet.name}'s .env tiers to read"
+                f" PLANE_EMIT_ENABLED; {resume} once they resolve")
+    if _env_tiers.resolves_to(cascade, "PLANE_EMIT_ENABLED", "0"):
+        return (f"PLANE_EMIT_ENABLED=0 in {cascade['PLANE_EMIT_ENABLED'].path} opts fleet"
+                f" {fleet.name} out of {needs}; this update froze that file, so no step clears"
+                " the refusal, neither an edit nor host update continue; remove that line,"
+                " then start over with a new installation and data root")
+    return None
+
+
+def _generate_scan_on(paths, fleet) -> bool:
+    """Whether the generate hook's scan (require_commit=False) runs for *fleet*."""
     # The flag resolves through the runtime's OWN .env tier cascade —
     # env_tiers, exactly as the composer resolves the SAME variable for timer
     # stamps. (The shipped check once read fleet.defaults["env"], a tier the
@@ -599,7 +664,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # PLANE_EMIT_DISABLED=1 is the ruled harness exemption, honored here like
     # every other door.
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
-        return None
+        return False
     from .. import env_tiers as _env_tiers
     try:
         _res = _env_tiers.resolve(
@@ -619,7 +684,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
                      " PLANE_EMIT_ENABLED=0 is set in this process's"
                      " environment — NOT scanning (an explicit opt-out is"
                      " honored without the resolver)", exc)
-            return None
+            return False
         log.warning("registry scan: env resolver unreachable (%s) — scanning"
                     " anyway (on by default; PLANE_EMIT_ENABLED=0 opts out)",
                     exc)
@@ -628,6 +693,37 @@ def run_generate_scan(paths, fleet) -> dict | None:
         log.info("registry scan: OFF for this fleet (PLANE_EMIT_ENABLED=0 at"
                  " the %s tier) — no keyframes recorded for this generate",
                  _res.tier)
+        return False
+    return True
+
+
+def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | None:
+    """Emit one generate-cause registry scan for *fleet*. Returns the summary
+    dict, or None when a tier has turned the scan OFF. Raises only upward
+    through the non-blocking hook in cmd_generate.
+
+    First-fleet setup passes require_commit=True after exact ingest/config
+    readiness, before starting any bot or producer. That mode refuses
+    disabled/unavailable recording (activation_scan_refusal, which the setup
+    also asks before it stops or starts anything) and incomplete enumeration before the first
+    emission; success is complete=True, recording='committed', with every
+    <=50-event chunk confirmed.
+    RegistryScanError.summary discloses acknowledged partial chunks; an exception
+    during a chunk leaves its commit unknown, never definitely absent. Keep the
+    coordinator pending on any failure. A later scan reuses canonical hash
+    suppression for existing keyframes; this is not an all-fleet transaction or
+    a second activation journal. The caller owns selected release/source paths.
+    """
+    summary = {"scan_id": None, "entities": None, "tombstoned": 0, "complete": False,
+               "foreign_host_rows": 0, "outcomes": {}, "recording": "not_attempted",
+               "attempted_chunks": 0, "committed_chunks": 0, "event_count": None}
+    def refuse(reason, recording="not_attempted"):
+        raise RegistryScanError(reason, {**summary, "recording": recording})
+    if require_commit:
+        reason = activation_scan_refusal(paths, fleet)
+        if reason is not None:
+            refuse(reason)
+    elif not _generate_scan_on(paths, fleet):
         return None
 
     from .emit_api import emit_batch
@@ -636,6 +732,13 @@ def run_generate_scan(paths, fleet) -> dict | None:
     scan_id = f"scan-{uuid.uuid4().hex[:12]}"
     vault_rev = _vault_rev(paths)
     entities, complete = assemble_entities(paths, fleet, vault_rev)
+    summary.update(scan_id=scan_id, entities=len(entities), complete=complete)
+    if require_commit:
+        required = {("host", platform.node()), ("fleet", fleet.name)} | {
+            ("bot", f"bot:{fleet.name}/{bot}") for bot in fleet.bots}
+        if not complete or not required <= {(kind, alias) for kind, alias, _ in entities}:
+            summary["complete"] = False
+            refuse("activation registry enumeration is incomplete")
 
     def snap(etype, alias, payload, tombstone=False):
         body = {"entity_type": etype, "entity_alias": alias,
@@ -661,6 +764,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
         # db_path(): its mkdir is a write this read path must not carry)
         seen = {(t, a) for t, a, _ in entities}
         if db.is_file():
+            conn = None
             try:
                 from .db import connect_ro
                 conn = connect_ro(db)
@@ -669,18 +773,22 @@ def run_generate_scan(paths, fleet) -> dict | None:
                 # ensure_ MINTS on absence (mkdir+write — a write this read
                 # path must not carry, r2 probed), and a fresh uid would
                 # filter every row into a FALSE CLEAN. Absent/invalid file
-                # -> the diff is skipped LOUDLY, never silently empty.
+                # -> the diff is skipped LOUDLY, never silently empty, unless
+                # explicit SQL initialization left a genuinely new database.
                 uid_file = Path(root) / "state" / "host-uid"
                 try:
                     this_host = uid_file.read_text().strip()
                 except OSError:
                     this_host = ""
-                if not this_host:
+                if not this_host and _has_ingest_history(conn):
                     log.warning(
                         "registry scan: host-uid unreadable at %s —"
                         " tombstone diff SKIPPED (cannot scope rows to this"
                         " host)", uid_file)
                     raise sqlite3.Error("host-uid unreadable")
+                # With no durable history there is nothing to scope or
+                # tombstone. The normal emit below creates the first uid via
+                # ensure_host_uid; this read-side probe never mints one.
                 rows = conn.execute(
                     "SELECT entity_type, entity_uid, entity_alias, tombstone,"
                     " MAX(ingest_seq) FROM registry_snapshots"
@@ -705,7 +813,6 @@ def run_generate_scan(paths, fleet) -> dict | None:
                     (cr["entity_type"], cr["entity_uid"])
                     for cr in conn.execute(REG_CURRENT_KEYS_SQL,
                                            (this_host,))}
-                conn.close()
                 for r in rows:
                     if (r["entity_type"], r["entity_uid"]) not in current_keys:
                         continue   # effectively deleted — nothing to re-claim
@@ -721,6 +828,12 @@ def run_generate_scan(paths, fleet) -> dict | None:
             except sqlite3.Error as exc:
                 log.warning("registry scan: tombstone diff skipped (%s)", exc)
                 complete = False
+            finally:
+                if conn is not None:
+                    conn.close()
+    summary.update(complete=complete, tombstoned=tombstoned, foreign_host_rows=foreign_rows)
+    if require_commit and not complete:
+        refuse("activation registry prior-state inventory is incomplete")
 
     # the vault alias comes FROM THE ASSEMBLY (the chunk-B extraction left
     # `vp` dangling — NameError on every vault-armed scan; found live) and
@@ -755,8 +868,34 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # One cold-path CLI spawn + transaction per chunk; 50 keeps a ~190-event
     # fleet scan to ~4 spawns while staying far under any payload cap.
     _CHUNK = 50
+    summary["event_count"] = len(events)
     for i in range(0, len(events), _CHUNK):
-        outcomes.extend(emit_batch(root, events[i:i + _CHUNK]))
+        chunk = events[i:i + _CHUNK]
+        if not require_commit:
+            outcomes.extend(emit_batch(root, chunk))
+            continue
+        summary["attempted_chunks"] += 1
+        try:
+            batch = emit_batch(root, chunk, require_commit=True)
+        except Exception as exc:
+            raise RegistryScanError("activation registry chunk did not prove committed recording",
+                                    {**summary, "recording": "unknown"}) from exc
+        if not isinstance(batch, list):
+            refuse("activation registry chunk has no complete outcome list", "unknown")
+        statuses = []
+        for outcome in batch:
+            status = getattr(outcome, "status", "unknown")
+            status = status if isinstance(status, str) else "unknown"
+            statuses.append(status)
+            counts = summary["outcomes"]
+            counts[status] = counts.get(status, 0) + 1
+        if len(batch) != len(chunk):
+            refuse("activation registry chunk has incomplete outcomes", "unknown")
+        if any(s not in ("committed", "duplicate") for s in statuses):
+            refuse("activation registry chunk has uncommitted or incomplete outcomes", "uncommitted")
+        summary["committed_chunks"] += 1
+    if require_commit:
+        return {**summary, "recording": "committed"}
     by_status: dict[str, int] = {}
     for o in outcomes:
         by_status[o.status] = by_status.get(o.status, 0) + 1

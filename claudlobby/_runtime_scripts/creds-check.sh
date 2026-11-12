@@ -1,0 +1,852 @@
+#!/bin/bash
+# Credential keepalive — pings fleet-critical credentials and alerts on state
+# transitions (ok→fail, fail→ok) AND on a state that persists (#1095). Run daily
+# by a scheduled service (launchd on macOS, systemd timer on Linux).
+#
+# Transition-only alerting could not express steady state: a credential that
+# failed and STAYED failed alerted once and then went quiet forever, so failure
+# duration and alarm volume ran in opposite directions. A persistent fail now
+# re-surfaces on a decaying ladder (1, 3, 7 days, then weekly) carrying its AGE,
+# and a persistent SKIP re-surfaces from day 3 — a check that can never run is a
+# permanent hole, not a skip.
+#
+# Why: PATs / API tokens / MCP keys silently expire and only fail on
+# next use, so an outage surfaces whenever a bot happens to need that
+# credential. A daily probe shrinks that window to 24h and routes the
+# failure to Telegram so the human sees it before the next bot trips it.
+#
+# Adding a new provider: drop in a `check_<name>` function that calls
+# `record_and_alert <provider> <status> <detail>`, or `record_probe` for what
+# the provider answered, then add it to the CHECKS list. Status is "ok" /
+# "fail" / "skip" / "unknown"
+# (skip = required env var missing — no transition alert, but re-surfaces
+# once it has persisted past day 3; unknown = the provider gave no verdict,
+# see record_probe; see next_alert_day).
+#
+# Env vars consulted (selected mode reads host/root/fleet tiers; a direct
+# source-only call reads its chosen .env file):
+#   GITHUB_PERSONAL_ACCESS_TOKEN   — fleet GitHub PAT
+#   RAILWAY_PERSONAL_TOKEN         — Railway ACCOUNT token; answers `me`
+#   RAILWAY_PERSONAL_PROJECT_TOKEN — Railway WORKSPACE token; answers
+#                                    `projects`, and CANNOT answer `me`
+#
+# `RAILWAY_API_TOKEN` is deliberately absent: it was dead, and checking it
+# alone is what made this alert fire daily against two working tokens.
+#
+# Telegram: every declared bot with a TELEGRAM_BOT_HANDLE gets a per-bot
+# getMe validation — see check_telegram_tokens.
+#
+# There is deliberately NO MCP probe here (#1096). The one that used to live
+# here gated on MCP_PROBE_URL, which was set in no fleet config, no bot.conf
+# and no .env anywhere -- so it had never run, and recorded `skip` forever. It
+# was also structurally near-empty: it probed ONE streamable-HTTP endpoint, and
+# 14 of the 15 MCP fragments in library/mcp are stdio, which has no URL to probe
+# at all. Fully configured it would have covered one server of fifteen.
+#
+# Note this is NOT covered by `claudlobby host credentials reconcile`, which is static: it
+# answers whether a credential is declared, has a value, and has an equipped
+# consumer, and never contacts a provider. Nothing here validates that an MCP
+# server's credential actually WORKS. That gap is real and predates this
+# deletion by the whole life of the probe; removing a check that never ran does
+# not widen it, but it should be named rather than left looking covered.
+
+set -euo pipefail
+
+# An activated timer enters the selected CLI first. The CLI holds mutation
+# admission and supplies the reviewed fleet path and roster on re-entry below;
+# a direct source-only invocation retains the historical private probe path.
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+if [ "${1:-}" = "--selected-release" ]; then
+    echo "legacy release execution is retired; use the managed Git CLI" >&2
+    exit 2
+fi
+if _claudlobby_runtime_bound && [ -z "${CLAUDLOBBY_ROOT:-}" ]; then
+    echo "creds-check: current timer has no data root" >&2
+    exit 2
+fi
+CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+if [ "${1:-}" != "--admitted-runtime" ] && _claudlobby_runtime_bound; then
+    _cc_timer_fleet="${1:-${CLAUDLOBBY_FLEET:-}}"
+    _claudlobby_require_native "$LIB_DIR" || exit $?
+    [ -n "$_cc_timer_fleet" ] && [ "$_cc_timer_fleet" = "${CLAUDLOBBY_FLEET:-}" ] \
+        && [ -n "${FLEET_ROOT:-}" ] && [ "$#" -le 1 ] || {
+        echo "creds-check: selected timer context is incomplete" >&2
+        exit 2
+    }
+    exec "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --fleet "$_cc_timer_fleet" \
+        host credentials check
+fi
+
+# Composed fleet timers pass the fleet name positionally on ExecStart
+# (composer contract — same as fleet-pulse/log-rotate-fleet); the composed
+# unit env also carries CLAUDLOBBY_FLEET, the fallback for argless runs.
+# Used by the per-bot Telegram check to enumerate + namespace the right
+# fleet; other checks are fleet-agnostic.
+FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
+SELECTED_BOTS=""
+_cc_admitted=0
+if [ "${1:-}" = "--admitted-runtime" ]; then
+    _claudlobby_parse_runtime_scope credentials "$LIB_DIR" "$@" || exit $?
+    _cc_admitted=1
+    FLEET_ARG="$_CL_RUNTIME_FLEET"
+    _cc_fleet_root="$_CL_RUNTIME_FLEET_ROOT" _cc_bots_dir="$_CL_RUNTIME_BOTS_DIR"
+    for _cc_bot in ${_CL_RUNTIME_BOTS[@]+"${_CL_RUNTIME_BOTS[@]}"}; do
+        SELECTED_BOTS="${SELECTED_BOTS}${SELECTED_BOTS:+$'\n'}$_cc_bot"
+    done
+fi
+
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+install_error_trap ""
+check_fleet_dir() {
+    if [ -n "${_cc_fleet_root:-}" ]; then
+        printf '%s\n' "$_cc_fleet_root"
+    else
+        resolve_fleet_dir "$FLEET_ARG"
+    fi
+}
+check_bots_dir() {
+    if [ -n "${_cc_bots_dir:-}" ]; then
+        printf '%s\n' "$_cc_bots_dir"
+    else
+        resolve_bots_dir "$FLEET_ARG"
+    fi
+}
+# Resolve the .env tier THIS FLEET ACTUALLY READS (#1104).
+#
+# This line used to be `${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}` — always the
+# ROOT .env, while the script is invoked per-fleet (`creds-check.sh <fleet>`,
+# the composed-timer contract just above). Fleet-tier credentials were therefore
+# invisible to it by construction, and resolution fell through to whatever was
+# ambient. Measured consequence: a VALID Railway token sat in a fleet .env the
+# check never opened while the check FAILed against a stale ambient one, and an
+# operator learned to disbelieve the checker.
+#
+# The legacy direct entry keeps its one-file source. Selected timer/operator
+# entry instead reads env_tier_present_files, the same cascade a bot starts
+# with, so the public check and reconcile agree on host/root/fleet precedence.
+ENV_FILE="${CLAUDLOBBY_ENV:-}"
+if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
+    _cc_fleet_dir="$(check_fleet_dir 2>/dev/null || true)"
+    if [ -n "$_cc_fleet_dir" ] && [ -f "$_cc_fleet_dir/.env" ]; then
+        ENV_FILE="$_cc_fleet_dir/.env"
+    fi
+fi
+ENV_FILE="${ENV_FILE:-$CLAUDLOBBY_ROOT/.env}"
+LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/state/logs/creds-check.log}"
+STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
+mkdir -p "$(dirname "$STATE")"
+TG_POST="$LIB_DIR/tg-post.sh"
+
+# Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
+# the source of truth for runtime credentials. Parse it safely before any check.
+if [ "$_cc_admitted" -eq 1 ]; then
+    # A tier cannot redirect a selected probe after its paths were checked.
+    readonly CLAUDLOBBY_ROOT FLEET_ROOT FLEET_ARG LIB_DIR \
+        CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_INSTALLATION CLAUDLOBBY_NATIVE_ADMITTED \
+        CLAUDLOBBY_NATIVE_DIR CLAUDLOBBY_CLI \
+        CLAUDLOBBY_CREDS_LOG CLAUDLOBBY_CREDS_STATE \
+        _cc_admitted _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE
+    # A selected check must see the same tier cascade as a boot, never an
+    # ambient token from the operator shell that a bot would not receive.
+    unset BOT_ID BOT_NAME BOT_DIR BOT_SERVICE TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
+    unset GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN GITHUB_PAT \
+        RAILWAY_PERSONAL_TOKEN RAILWAY_PERSONAL_PROJECT_TOKEN \
+        GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH
+    _cc_alert_chat="${TELEGRAM_GROUP_CHAT_ID:-}"
+    readonly _cc_alert_chat
+    while IFS= read -r _cc_env_tier; do
+        parse_env_file "$_cc_env_tier"
+    done < <(env_tier_present_files "" "$FLEET_ARG")
+    # Escalation and sender hints are unrelated to this selected fleet check.
+    unset FLEET_PULSE_ESCALATION_CHAT_ID FLEET_PULSE_ESCALATION_STATE_DIR \
+        TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
+    if [ -n "$_cc_alert_chat" ]; then
+        export TELEGRAM_GROUP_CHAT_ID="$_cc_alert_chat"
+    else
+        unset TELEGRAM_GROUP_CHAT_ID
+    fi
+else
+    parse_env_file "$ENV_FILE"
+fi
+
+JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
+CURL="$(command -v curl || echo /usr/bin/curl)"
+
+mkdir -p "$(dirname "$LOG")"
+[ -f "$STATE" ] || echo '{}' > "$STATE"
+
+ts() { date -Iseconds; }
+log() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
+_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }  # bash 3.2 has no ${var,,}
+
+# ---------------------------------------------------------------------
+# State + alert plumbing
+# ---------------------------------------------------------------------
+
+# Day-mark the current run must reach before its NEXT alert (#1095).
+#
+# Transition-only alerting cannot express steady state: a credential that fails
+# and STAYS failed alerts once and is silent forever, so the longer an outage
+# lasts the quieter the system gets about it. Re-surfacing on a DECAYING ladder
+# keeps the noise-control intent -- a flapping credential still does not spam --
+# while making "dead for a week" impossible to miss.
+#
+# fail: 1, 3, 7 days, then weekly. The first mark is short because a fail that
+#   survives one day is already past "transient".
+# skip: 3, 7 days, then weekly, and no transition alert at all. A skip on the
+#   first tick is usually a provider a fleet has not configured yet, which is
+#   not news. A skip that is STILL there after three days is a check that can
+#   never run -- a permanent hole wearing a skip's clothing -- and that is news
+#   exactly once, then weekly. This is why our own github_pat has been silent:
+#   it is a skip, not a fail, so a fail-only fix would not have surfaced it.
+# unknown: the fail ladder, and no transition alert (#2424). A provider that is
+#   down says nothing about a credential, but a day with no verdict is past
+#   "transient" for the same reason a fail is.
+next_alert_day() {
+    local status="$1" sent="$2"
+    case "$status" in
+        fail|unknown)
+            # `sent` counts LADDER re-surfaces only. The ok->fail transition
+            # alert is a separate event and deliberately does NOT consume a
+            # rung, so both entry paths share one accounting.
+            #
+            # Merging 0 and 1 into a single due=1 bucket was a real bug (#1169).
+            # It is invisible on a fresh transition, which hardcoded sent=1 and
+            # so never evaluated 0 at all. But a credential INHERITED already
+            # failing with no history genuinely evaluates sent=0 on day 0, earns
+            # sent=1 by firing on day 1, and then the merged bucket read sent=1
+            # as still-pre-transition and fired AGAIN on day 2 — a ladder of
+            # 1,2,3,7 against a documented 1,3,7. Measured on exactly the
+            # credential this change was written about, which is in that state.
+            case "$sent" in
+                0) printf '1' ;;
+                1) printf '3' ;;
+                2) printf '7' ;;
+                *) printf '%s' $(( 7 * (sent - 1) )) ;;
+            esac ;;
+        skip)
+            case "$sent" in
+                0) printf '3' ;;
+                1) printf '7' ;;
+                *) printf '%s' $(( 7 * sent )) ;;
+            esac ;;
+        *) printf '999999' ;;
+    esac
+}
+
+# Atomically write one provider's entry to the shared state file. This is the
+# critical section run under with_lock, so it must be a command (function), not
+# an inline block — with_lock invokes "$@".
+#
+# An unknown also records its reason, and under .verdict the entry of the
+# verdict before it, whose run record_and_alert continues (#2424).
+_write_state() {
+    local provider="$1" status="$2" detail="$3" now="$4" since="${5:-0}" alerts="${6:-0}" reason="${7:-}"
+    if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
+        --argjson since "$since" --argjson alerts "$alerts" --arg r "$reason" \
+        '.[$k] as $old
+         | .[$k] = {status: $s, detail: $d, ts: $t, since_epoch: $since, alerts: $alerts}
+         | if $s == "unknown" then .[$k] += {reason: $r,
+               verdict: (if $old.status == "unknown" then $old.verdict else $old end)}
+           else . end' "$STATE" > "$STATE.tmp"; then
+        mv "$STATE.tmp" "$STATE"
+    else
+        # Silent state corruption is the worst failure mode here — the next tick
+        # would read a stale previous status and miss the transition. Surface it loudly.
+        rm -f "$STATE.tmp"
+        log "STATE WRITE FAILED for $provider — $status will not transition"
+    fi
+}
+
+record_and_alert() {
+    local provider="$1" status="$2" detail="$3" reason="${4:-}"
+    local prev now now_epoch since sent days due alert_text=""
+    # The run this record continues: the epoch it began, the alerts it has
+    # produced and its status. An unknown continues the unknown before it, and a
+    # verdict (ok, fail, skip) continues the last VERDICT, which an unknown keeps
+    # under .verdict (#2424): a fail keeps its age through an outage, and a fail
+    # that recovers during one still reads RECOVERED. Epoch and count default to
+    # 0, so a state file written before #1095 upgrades cleanly: the first tick
+    # after the upgrade starts a fresh run rather than crashing or back-dating
+    # one. The status comes last, so an empty one cannot shift the others.
+    local run='.[$k] | if $s != "unknown" and .status == "unknown" then .verdict else . end
+        | "\(.since_epoch // 0) \(.alerts // 0) \(.status // "")"'
+    read -r since sent prev <<< "$("$JQ" -r --arg k "$provider" --arg s "$status" "$run" "$STATE")"
+    now="$(ts)"
+    # An epoch is stamped at WRITE time rather than parsed back out of `ts`
+    # later: `date -Iseconds` emits an offset form (…-04:00) that iso_to_epoch
+    # only parses on GNU date. Reparsing would work on Linux and silently fail
+    # on macOS, which is a first-class host here.
+    now_epoch="$(date +%s)"
+
+    if [ "$status" != "$prev" ]; then
+        # Status changed: a new run starts here.
+        since="$now_epoch"
+        sent=0
+    fi
+    [ "$since" -gt 0 ] 2>/dev/null || since="$now_epoch"
+
+    days=$(( (now_epoch - since) / 86400 ))
+
+    case "$status" in
+        fail)
+            if [ "$prev" != "fail" ]; then
+                # Transition alert, unchanged. It does NOT advance `sent`: the
+                # ladder counts re-surfaces, and hardcoding a rung here is what
+                # made the two entry paths disagree (#1169).
+                alert_text="creds-check: $provider FAIL — $detail"
+            else
+                due="$(next_alert_day fail "$sent")"
+                if [ "$days" -ge "$due" ]; then
+                    # Steady-state re-surface. The AGE is the point: "fail since
+                    # yesterday" and "fail since last month" are different
+                    # operational facts, and only one of them is an emergency.
+                    alert_text="creds-check: $provider STILL FAILING after ${days}d — $detail"
+                    sent=$(( sent + 1 ))
+                fi
+            fi
+            ;;
+        ok)
+            if [ "$prev" = "fail" ]; then
+                alert_text="creds-check: $provider RECOVERED"
+            fi
+            sent=0
+            ;;
+        skip|unknown)
+            # No transition alert: a skip on the first tick is usually a
+            # provider this fleet has not configured, and an unknown is a
+            # provider that is down (#2424); neither is news about the
+            # credential. One that PERSISTS re-surfaces: a skip is a check that
+            # can never run, an unknown a credential with no verdict.
+            if [ "$prev" = "$status" ]; then
+                due="$(next_alert_day "$status" "$sent")"
+                if [ "$days" -ge "$due" ]; then
+                    if [ "$status" = "skip" ]; then
+                        alert_text="creds-check: $provider has been SKIPPED for ${days}d — $detail. A check that never runs is a permanent hole, not a skip: either configure it or remove the check."
+                    else
+                        alert_text="creds-check: $provider UNVERIFIED for ${days}d — $detail. The provider has given no verdict on this credential since, which is no evidence it is dead."
+                    fi
+                    sent=$(( sent + 1 ))
+                fi
+            fi
+            ;;
+    esac
+
+    # Serialize state-file writes so concurrent ticks can't corrupt the shared
+    # file. Portable mutex — flock where present, mkdir spinlock otherwise. A raw
+    # flock is not portable: it's a Linux util-linux binary, absent on stock
+    # macOS, where the bare call breaks the scheduled run (#709).
+    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now" "$since" "$sent" "$reason"
+
+    log "$provider $status${reason:+ [$reason]} ($detail)${days:+ [${days}d in state]}"
+
+    if [ -n "$alert_text" ]; then
+        "$TG_POST" "$alert_text" >> "$LOG" 2>&1 || \
+            log "tg-post failed for $provider $status"
+    fi
+}
+
+# ---------------------------------------------------------------------
+# What a probe learned: a rejection, or no verdict at all (#2424)
+# ---------------------------------------------------------------------
+# A probe that did not succeed either got a REJECTION from the provider or got
+# NO ANSWER: no HTTP answer, a timeout, a 429, a 5xx, a body that is not the
+# provider's own. No answer is recorded `unknown` (reason no_answer), never
+# `fail`: an outage, or a host off the network, is not a dead credential.
+#
+# A rejection is a verdict only while the provider is healthy. Inside Railway's
+# 2026-10-21 outage both tokens answered "Not Authorized" in a 200 body, the
+# answer a revoked token gets, so the answer alone cannot tell the two apart.
+# Before a rejection is recorded `fail`, the provider's status page is read
+# (provider_incident), and an open incident on the API the probe uses records
+# `unknown` (reason provider_degraded) instead. The next run probes again: a
+# token still refused once the incident is closed alerts as a failure then.
+#
+# The status page is evidence for `unknown` only, never for `ok`, and a page
+# that cannot be read is no evidence: the rejection stays `fail`, so a host
+# with no network to the page never loses a real rejection to it.
+
+# probe_outcome <code>: noanswer or reject, for a probe that did not succeed.
+# <code> is curl's HTTP status, the curl_err(...) put in its place, or a
+# Telegram answer's error_code, which is empty or "?" when the body was not
+# Telegram's JSON.
+probe_outcome() {
+    case "$1" in
+        ''|'?'|000|429|5[0-9][0-9]|curl_err*) printf 'noanswer' ;;
+        *) printf 'reject' ;;
+    esac
+}
+
+# provider_incident <provider>: print the title of an open incident on the API
+# the probes use, or nothing: when there is none, when the provider publishes
+# no status page, and whenever its page cannot be read. Always exits 0, and
+# reads each provider's page at most once a run.
+#
+# Measured live 2026-10-21: status.railway.com/api/status serves JSON whose
+# activeIncidents list the components each affects with an impact for each;
+# the probes' GraphQL endpoint is the component "API — backboard.railway.com".
+# githubstatus.com is a standard status page whose "API Requests" component
+# carries its live status; only a status word that means degraded counts, so a
+# missing or unfamiliar one is no evidence. Telegram publishes none
+# (status.telegram.org redirects to its API documentation), so a Telegram
+# rejection is a verdict.
+provider_incident() {
+    local cache="$_LC_TMPDIR/incident.$1" url rule code
+    if [ ! -e "$cache" ]; then
+        : > "$cache"
+        case "$1" in
+            railway)
+                url='https://status.railway.com/api/status'
+                rule='[.activeIncidents[] | select(.resolvedAt == null)
+                       | select(any(.components[]; (.name // "" | startswith("API") or contains("backboard"))
+                                                   and .impact != "OPERATIONAL"))
+                       | .title] | first' ;;
+            github)
+                url='https://www.githubstatus.com/api/v2/summary.json'
+                rule='if any(.components[]; .name == "API Requests"
+                                           and (.status | IN("degraded_performance", "partial_outage",
+                                                             "major_outage", "under_maintenance")))
+                      then ([.incidents[] | select(any(.components[]; .name == "API Requests")) | .name]
+                            | first) // "API Requests degraded"
+                      else null end' ;;
+            *) return 0 ;;
+        esac
+        code="$("$CURL" -s -o "$cache.page" -w '%{http_code}' --max-time 10 "$url")" || code=""
+        if [ "$code" = "200" ]; then
+            "$JQ" -r "($rule) // empty | .[0:120]" "$cache.page" > "$cache" 2>/dev/null || : > "$cache"
+        fi
+    fi
+    cat "$cache"
+}
+
+# record_probe <key> <provider> <noanswer|reject> <detail>: record a probe that
+# did not succeed, for the credential under state key <key>, as above.
+# <provider> names the status page to read: railway, github or telegram.
+record_probe() {
+    local key="$1" provider="$2" outcome="$3" detail="$4" incident
+    if [ "$outcome" = "noanswer" ]; then
+        record_and_alert "$key" "unknown" "$detail" "no_answer"
+        return
+    fi
+    incident="$(provider_incident "$provider")"
+    if [ -n "$incident" ]; then
+        record_and_alert "$key" "unknown" \
+            "$detail, during an open incident on the provider's API: $incident" "provider_degraded"
+    else
+        record_and_alert "$key" "fail" "$detail"
+    fi
+}
+
+# ---------------------------------------------------------------------
+# Provider checks
+# ---------------------------------------------------------------------
+
+# App-auth P4 (#1274): probe a fleet that mints App installation tokens at
+# use time instead of holding a static PAT. Reached only when GITHUB_APP_*
+# config is present (the gate is in check_github_pat), so an App-less fleet
+# never lands here even though the helper ships estate-wide in lib/.
+_check_github_app() {
+    # Mint helper-DIRECT via the P1 mint CLI (D1: never `git credential fill`,
+    # whose pathless context would serve whatever ambient config answers). A
+    # mint failure has already emitted an auth_mint_failed event from the
+    # helper, so this records the fleet-level verdict without re-alerting it.
+    # A failed mint cannot say whether GitHub refused it or never answered, so
+    # it reads as a rejection and GitHub's status page decides (record_probe).
+    local token
+    if ! token="$("$LIB_DIR/mint-github-token.sh" 2>/dev/null)" || [ -z "$token" ]; then
+        record_probe "github_pat" github reject \
+            "GITHUB_APP_* configured but installation-token mint failed (see auth_mint_failed events)"
+        return
+    fi
+    # Probe an authenticated INSTALLATION endpoint. /user 403s a ghs_ token
+    # ('Resource not accessible by integration'), so it cannot be reused here
+    # (D13); /installation/repositories requires the token and returns 200 on
+    # a healthy install. 401 (bad JWT/mint) and 403 (scope) are distinguished
+    # because their remedies differ.
+    local code curl_err_file auth_cfg
+    curl_err_file=$(safe_mktemp)
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Accept: application/vnd.github+json" \
+        "X-GitHub-Api-Version: 2022-11-28")"
+    code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
+        --config "$auth_cfg" \
+        --max-time 10 \
+        https://api.github.com/installation/repositories 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    case "$code" in
+        200) record_and_alert "github_pat" "ok" "App installation token OK (HTTP 200 on /installation/repositories)" ;;
+        401) record_probe "github_pat" github reject "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
+        403) record_probe "github_pat" github reject "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
+        *)   record_probe "github_pat" github "$(probe_outcome "$code")" "App token probe: HTTP $code on /installation/repositories" ;;
+    esac
+}
+
+check_github_pat() {
+    local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
+    if [ -z "$token" ]; then
+        # No static token — but an App-mode fleet mints one at use time. Gate
+        # on CONFIG presence (all three vars), never on the helper file: the
+        # helper is a shared-lib/ install, so file-existence would make every
+        # App-less fleet attempt a doomed mint. This is the App half of #1213's
+        # 'a declared integration is a fail, not a skip' — the fleet declared
+        # App auth, so absence of a working token is a fail, not a skip.
+        # Boundary: reads only the .env tier (the vars are exported by
+        # parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY
+        # in the helper's ~/.config/claudlobby/github-app.conf fallback reads
+        # as skip here — composed fleets always wire .env, so this bites only
+        # hand-configured operator/cron installs.
+        if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] \
+                && [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
+            _check_github_app
+            return
+        fi
+        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
+        return
+    fi
+    local code
+    local curl_err_file auth_cfg
+    curl_err_file=$(safe_mktemp)
+    # auth_curl_cfg (lib-common, App-auth P1): the one owner of the
+    # tokens-never-ride-argv invariant, escaping included.
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Accept: application/vnd.github+json")"
+    code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
+        --config "$auth_cfg" \
+        --max-time 10 \
+        https://api.github.com/user 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    if [ "$code" = "200" ]; then
+        record_and_alert "github_pat" "ok" "HTTP 200"
+    else
+        record_probe "github_pat" github "$(probe_outcome "$code")" "HTTP $code on /user"
+    fi
+}
+
+# The Railway tokens a fleet may declare, and the query each is DEFINITIONALLY
+# able to answer. Format: VARNAME|graphql query|scope.
+#
+# ONE PROBE FOR ALL TOKENS IS THE BUG, not a simplification. Railway issues two
+# kinds of token and they answer different questions. Measured against the live
+# API, 2026-08-31:
+#
+#   RAILWAY_PERSONAL_TOKEN          me -> OK          projects -> OK
+#   RAILWAY_PERSONAL_PROJECT_TOKEN  me -> Not Authorized   projects -> OK
+#
+# A workspace-scoped token cannot answer `me` BY CONSTRUCTION — it is not bound
+# to an account — so probing it with `me` reports a working credential as dead.
+# `projects` happens to satisfy both, and using it everywhere would still be
+# wrong: a probe matched to the token's declared SCOPE also catches an account
+# token silently replaced by a workspace one, which `projects` alone cannot see.
+_railway_token_specs() {
+    cat <<'SPEC'
+RAILWAY_PERSONAL_TOKEN|me{email}|account
+RAILWAY_PERSONAL_PROJECT_TOKEN|projects{edges{node{id}}}|workspace
+SPEC
+}
+
+# One Railway token, probed with its own query. Records under its own key.
+_check_one_railway_token() {
+    local varname="$1" query="$2" scope="$3"
+    local provider token resp_body code curl_err_file auth_cfg
+    provider="railway_$(_lc "${varname#RAILWAY_}")"
+    # Indirect expansion: bash 3.2 has no nameref, and this file targets it.
+    eval "token=\"\${$varname:-}\""
+
+    if [ -z "$token" ]; then
+        record_and_alert "$provider" "skip" "$varname not declared"
+        return
+    fi
+
+    resp_body=$(safe_mktemp)
+    curl_err_file=$(safe_mktemp)
+    # auth_curl_cfg is the one owner of the tokens-never-ride-argv invariant,
+    # escaping included. The hand-rolled printf this replaces duplicated it.
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Content-Type: application/json")"
+    code="$("$CURL" -sS -o "$resp_body" -w '%{http_code}' \
+        -X POST https://backboard.railway.app/graphql/v2 \
+        --config "$auth_cfg" \
+        --max-time 10 \
+        -d "{\"query\":\"query{$query}\"}" 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+
+    if [ "$code" != "200" ]; then
+        record_probe "$provider" railway "$(probe_outcome "$code")" "$varname: HTTP $code on /graphql/v2"
+        return
+    fi
+    # A REJECTED Railway token still answers 200 — the refusal rides in the
+    # body as a GraphQL error. Measured on all three tokens: every failure
+    # above was HTTP 200. A status-only check calls a dead token healthy.
+    if "$JQ" -e '.errors' "$resp_body" >/dev/null 2>&1; then
+        local err
+        err="$("$JQ" -r '.errors[0].message // "unknown error"' "$resp_body" | head -c 120)"
+        record_probe "$provider" railway reject "$varname ($scope): $err on $query"
+        return
+    fi
+    # Only an answer that carries data is ok (#2424). A 200 with neither data
+    # nor an error, such as an error page, is no answer, never a working token.
+    if ! "$JQ" -e '.data' "$resp_body" >/dev/null 2>&1; then
+        record_probe "$provider" railway noanswer "$varname ($scope): HTTP 200 with no data on $query"
+        return
+    fi
+    record_and_alert "$provider" "ok" "$varname ($scope): $query answered"
+}
+
+# Railway credential check — PER TOKEN, because "Railway" is not one credential.
+#
+# This check used to read RAILWAY_API_TOKEN alone and probe it with `me`. That
+# token is dead, so the check raised a FLEET ALERT every day while two other
+# Railway tokens worked, and the operator learned to ignore it. That is the
+# same failure the tier comment at the top of this file records — "a VALID
+# Railway token sat in a fleet .env the check never opened while the check
+# FAILed against a stale ambient one, and an operator learned to disbelieve the
+# checker". That version was fixed for TIERS; the identical defect returned as
+# MULTIPLE TOKENS and produced the identical consequence for the same person.
+#
+# So the unit of truth is a TOKEN, never the provider: each declared token gets
+# its own state key, its own verdict and its own alert naming it. One dead
+# token among several working ones is not "Railway is broken".
+check_railway_token() {
+    local spec varname query scope
+    while IFS='|' read -r varname query scope; do
+        [ -n "$varname" ] || continue
+        _check_one_railway_token "$varname" "$query" "$scope"
+    done <<EOF
+$(_railway_token_specs)
+EOF
+}
+
+check_telegram_tokens() {
+    # Per-bot Telegram token validation (#502). A channel bot whose token
+    # was revoked/regenerated — or resolves EMPTY through the env tiers
+    # (#492, an empty later-tier stub shadowing a lower-tier value) — sits
+    # deaf with no credential signal. Token resolution is the lib-common
+    # SSOT shared with bridge_state (resolve_bot_telegram_token), so this
+    # check validates exactly the token the bot runs with. One getMe per
+    # channel bot per daily tick; the token rides a curl config file,
+    # never argv; only ok/error_code is ever recorded.
+    local bots_dir fleet_dir
+    bots_dir="$(check_bots_dir)"
+    [ -d "$bots_dir" ] || return 0
+
+    # Filter through the declared-bots SSOT (same as fleet-pulse/keepalive-all)
+    # so stale/cross-fleet residue dirs never fire false token alerts.
+    local declared_bots
+    fleet_dir="$(check_fleet_dir)" || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    declared_bots="${SELECTED_BOTS:-$(parse_fleet_bots "$fleet_dir/fleet.yaml")}"
+
+    local d bot key handle token resp okflag username errcode declared_username
+    for d in "$bots_dir"/*/; do
+        [ -f "$d/bot.conf" ] || continue
+        bot="$(basename "$d")"
+        bot_in_fleet "$bot" "$declared_bots" || continue
+        handle="$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" || true
+        [ -n "$handle" ] || continue  # not a channel bot
+
+        # Fleet-namespaced state key: multi-fleet hosts share one state file,
+        # fleets may legitimately reuse bot names, and the alert text must say
+        # which fleet's bot failed. Root mode keeps the bare key.
+        key="telegram_${FLEET_ARG:+${FLEET_ARG}_}${bot}"
+
+        token="$(resolve_bot_telegram_token "$d")" || true
+
+        if [ -z "$token" ]; then
+            # A declared throwaway/canary (EXPECT_NO_TOKEN=1) has no token by
+            # design — an expected skip, not an outage. Real channel bots (no
+            # marker) still alert below: an empty credential IS a fault.
+            if bot_expects_no_token "$d"; then
+                record_and_alert "$key" "skip" "EXPECT_NO_TOKEN — no Telegram token by design"
+                continue
+            fi
+            # Configured for Telegram but no credential reaches it: an
+            # outage, not a skip — alert.
+            record_and_alert "$key" "fail" \
+                "token resolves empty across env tiers (var named in bot.conf)"
+            continue
+        fi
+
+        resp="$(_telegram_api "$token" getMe)"
+        if [ -z "$resp" ]; then
+            record_probe "$key" telegram noanswer "getMe no response (network or timeout)"
+            continue
+        fi
+
+        okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag=false
+        if [ "$okflag" != "true" ]; then
+            errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "?"' 2>/dev/null)" || errcode="?"
+            record_probe "$key" telegram "$(probe_outcome "$errcode")" "getMe error_code=$errcode"
+            continue
+        fi
+
+        username="$(printf '%s' "$resp" | "$JQ" -r '.result.username // ""' 2>/dev/null)" || username=""
+        # Compare against the DECLARED @username, never TELEGRAM_BOT_HANDLE. The
+        # handle is channel identity — a state-dir slug that defaults to bot_id —
+        # and a slug is not a username. Measured on a live 9-bot fleet: every bot
+        # held a CORRECT, distinct token whose getMe answered @example_*_bot while
+        # the slug read @<bot_id>, so comparing those declares all nine cross-wired
+        # and edge-alerts once per bot, on the channel that must stay trustworthy
+        # (#1095). TELEGRAM_BOT_USERNAME is emitted only when a fleet spells the
+        # handle out, so empty means UNKNOWN, not mismatched: skip the comparison
+        # and let getMe above still prove the token. A fleet that declares one
+        # keeps the full cross-wire check, including when it equals the bot_id.
+        # See #1097/#1107.
+        declared_username="$(bot_conf_get "$d" TELEGRAM_BOT_USERNAME "")"
+        if [ -n "$username" ] && [ -n "$declared_username" ] \
+           && [ "$(_lc "$username")" != "$(_lc "$declared_username")" ]; then
+            # Valid token for the WRONG bot — cross-wired .env.
+            record_and_alert "$key" "fail" \
+                "getMe answers @$username but bot.conf declares @$declared_username (cross-wired token)"
+            continue
+        fi
+
+        record_and_alert "$key" "ok" "getMe ok (@$username)"
+    done
+}
+
+# ---------------------------------------------------------------------
+# Telegram Bot API probe (shared)
+# ---------------------------------------------------------------------
+# _telegram_api <token> <method> [chat_id]: echo the response body (empty on no
+# response). The token, and the chat id when given, ride a curl config file,
+# never argv. Shared by check_telegram_tokens and resolve_delivery_token (getMe)
+# and check_alert_pair (getChat), so the argv-safety + timeout invariant lives
+# in one place.
+_telegram_api() {
+    local _tok="$1" _method="$2" _chat="${3:-}" _cfg _resp
+    _cfg="$(safe_mktemp)"
+    printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$_tok" "$_method" > "$_cfg"
+    [ -z "$_chat" ] || printf 'data = "chat_id=%s"\n' "$_chat" >> "$_cfg"
+    _resp="$("$CURL" -sS --max-time 10 --config "$_cfg" 2>/dev/null)" || _resp=""
+    rm -f "$_cfg"
+    printf '%s' "$_resp"
+}
+
+# ---------------------------------------------------------------------
+# Alert target: one (chat, sender) pair, and the sender's own token (#542, #1771)
+# ---------------------------------------------------------------------
+# record_and_alert delivers via tg-post. The target is resolved FIRST, through
+# the shared resolver, as one pair: the chat and the channel state dir of a bot
+# IN it. Fleet-scoped, so a fleet's creds alert never routes to another fleet's
+# channel. A refused pair exports NOTHING -- not even the unit's own chat -- so
+# no alert goes out on a split pair; check_alert_pair reports the refusal. A
+# selected run passes the activated roster the CLI handed it, so an edit to
+# fleet.yaml since activation cannot choose the sender (#2515); a direct run
+# has none, and the resolver reads fleet.yaml.
+resolve_alert_target "$(check_bots_dir)" fleet "$SELECTED_BOTS"
+# shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
+if [ -n "$_alert_chat_id" ]; then
+    export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
+    export TELEGRAM_STATE_DIR="$_alert_state_dir"
+else
+    unset TELEGRAM_GROUP_CHAT_ID TELEGRAM_STATE_DIR
+fi
+
+# resolve_delivery_token sets _delivery_token / _delivery_state_dir /
+# _delivery_bot to the first declared channel bot IN the resolved chat (its own
+# TELEGRAM_GROUP_CHAT_ID is that chat) whose token getMe confirms live, the token
+# resolved through the token SSOT (resolve_bot_telegram_token, which reaches the
+# fleet's real tokens). That is #542's skip of a dead sender, kept INSIDE the
+# pair: a live token of a bot outside the chat is the split that silenced one
+# fleet's alerts for two months while getMe called it healthy (#1771). All empty
+# when no bot in the chat has a live token -- tg-post then reads the pair's own
+# state dir, and check_alert_pair reports what is wrong.
+resolve_delivery_token() {
+    _delivery_token=""
+    _delivery_state_dir=""
+    _delivery_bot=""
+    local _dir _declared _d _tok _fdir
+    [ -n "${_alert_chat_id:-}" ] || return 0
+    _dir="$(check_bots_dir)"
+    [ -d "$_dir" ] || return 0
+    _fdir="$(check_fleet_dir)" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    _declared="${SELECTED_BOTS:-$(parse_fleet_bots "$_fdir/fleet.yaml")}"
+    for _d in "$_dir"/*/; do
+        [ -f "$_d/bot.conf" ] || continue
+        bot_in_fleet "$(basename "$_d")" "$_declared" || continue
+        [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
+        [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
+        _tok="$(resolve_bot_telegram_token "$_d")" || true
+        [ -n "$_tok" ] || continue
+        if [ "$(_telegram_api "$_tok" getMe | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
+            _delivery_token="$_tok"
+            _delivery_state_dir="$(bot_conf_get_path "$_d" TELEGRAM_STATE_DIR "")"
+            _delivery_bot="$(basename "$_d")"
+            return 0
+        fi
+    done
+}
+
+# The sender's token, exported with ITS state dir so record_and_alert's tg-post
+# sends as that bot, unless the resolver kept a session's own (_alert_token).
+# shellcheck disable=SC2154  # set by resolve_alert_target (sourced lib-common)
+if [ -z "$_alert_token" ]; then
+    unset TELEGRAM_BOT_TOKEN
+    resolve_delivery_token
+    if [ -n "$_delivery_token" ]; then
+        export TELEGRAM_BOT_TOKEN="$_delivery_token"
+        if [ -n "$_delivery_state_dir" ]; then
+            export TELEGRAM_STATE_DIR="$_delivery_state_dir"
+            _alert_state_dir="$_delivery_state_dir"
+        fi
+        _alert_target_src="${_alert_target_src}, delivered by bot:${_delivery_bot}"
+        # Wording is a tested contract (test_creds_check_telegram.py): this
+        # breadcrumb firing iff a token was exported is the only observable
+        # that distinguishes a dropped empty-token guard.
+        log "alert delivery token resolved for scheduled Telegram alerts"
+    fi
+fi
+
+# check_alert_pair: can the resolved (chat, sender) pair actually deliver? getMe
+# proves a token is live, not that its bot can see the chat -- a live token of a
+# bot outside the fleet chat is exactly what getMe certified healthy every day
+# for two months (#1771). One getChat per daily tick; only ok / error_code /
+# description and the pair's source label are recorded, never an id or a token.
+# A failure is also raised through emit_failure_alert, because the Telegram leg
+# of record_and_alert is the very pair that just failed.
+check_alert_pair() {
+    local key="telegram_alert_pair${FLEET_ARG:+_${FLEET_ARG}}" token resp okflag errcode desc
+    if [ -n "${_alert_refusal:-}" ]; then
+        record_and_alert "$key" "fail" "alert target REFUSED: ${_alert_refusal}"
+        emit_failure_alert "$(check_bots_dir)" "alert_target_refused" "creds-check: ${_alert_refusal}"
+        return 0
+    fi
+    # No chat declared anywhere: nothing to pair (the per-bot checks still run).
+    [ -n "${_alert_chat_id:-}" ] || return 0
+    token="${TELEGRAM_BOT_TOKEN:-}"
+    [ -n "$token" ] || token="$(channel_state_token "${_alert_state_dir:-}")"
+    if [ -z "$token" ]; then
+        record_and_alert "$key" "fail" "the alert pair's sender holds no token (sender: ${_alert_target_src})"
+        emit_failure_alert "$(check_bots_dir)" "alert_pair_unreachable" "creds-check: the alert pair's sender holds no token (sender: ${_alert_target_src})"
+        return 0
+    fi
+    resp="$(_telegram_api "$token" getChat "$_alert_chat_id")"
+    okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag="false"
+    if [ "$okflag" = "true" ]; then
+        record_and_alert "$key" "ok" "getChat ok (sender: ${_alert_target_src})"
+        return 0
+    fi
+    errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "none"' 2>/dev/null)" || errcode="none"
+    desc="$(printf '%s' "$resp" | "$JQ" -r '.description // empty' 2>/dev/null | cut -c1-120)" || desc=""
+    record_and_alert "$key" "fail" "getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
+    emit_failure_alert "$(check_bots_dir)" "alert_pair_unreachable" \
+        "creds-check: the fleet alert chat is not reachable by its sender -- getChat error_code=${errcode}${desc:+ ($desc)} (sender: ${_alert_target_src})"
+}
+
+# ---------------------------------------------------------------------
+# Run all checks
+# ---------------------------------------------------------------------
+
+CHECKS=(check_github_pat check_railway_token check_telegram_tokens check_alert_pair)
+
+for fn in "${CHECKS[@]}"; do
+    "$fn" || log "$fn raised (non-fatal)"
+done
+
+log "tick complete (${#CHECKS[@]} checks)"
+[ "$_cc_admitted" -eq 0 ] || printf 'tick-complete\n'

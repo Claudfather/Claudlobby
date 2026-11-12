@@ -11,10 +11,13 @@ sampler, so the wiring is proven, not just the kernel.
 
 from __future__ import annotations
 
+from tests.package_fixtures import source_package
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from tests.plane_setup import initialize_plane
 
 from claudlobby.plane.presence import (
     STALE_AFTER_S, derive_presence, presence_counts,
@@ -143,6 +146,7 @@ def test_presence_endpoint_joins_both_halves(tmp_path):
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
     # a registry keyframe (so the heartbeat's subject resolves to an alias)
     # + a heartbeat sample for the same instance
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,
@@ -170,7 +174,7 @@ def test_presence_endpoint_joins_both_halves(tmp_path):
         async def stop(self):
             pass
 
-    client = TestClient(create_app(root, sampler=_Sampler()))
+    client = TestClient(create_app(root, sampler=_Sampler(), package=source_package()))
     body = client.get("/api/presence").json()
     assert body["state"] == "ok"
     bots = {b["alias"]: b for b in body["data"]["bots"]}
@@ -193,6 +197,7 @@ def test_stale_horizon_follows_the_keepalive_active_window(tmp_path,
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,
@@ -229,7 +234,7 @@ def test_stale_horizon_follows_the_keepalive_active_window(tmp_path,
             pass
 
     monkeypatch.setenv("KEEPALIVE_ACTIVE_WINDOW_S", "60")
-    client = TestClient(create_app(root, sampler=_S()))
+    client = TestClient(create_app(root, sampler=_S(), package=source_package()))
     bot = client.get("/api/presence").json()["data"]["bots"][0]
     assert bot["presence"] == "stale"       # 90s > 60s window
 
@@ -260,7 +265,7 @@ def test_presence_endpoint_discloses_a_dead_recorded_half(tmp_path):
         async def stop(self):
             pass
 
-    body = TestClient(create_app(root, sampler=_S())).get(
+    body = TestClient(create_app(root, sampler=_S(), package=source_package())).get(
         "/api/presence").json()
     assert body["state"] != "ok"
     assert body["data"]["recorded_unavailable"] is True
@@ -301,6 +306,7 @@ def test_poison_heartbeat_value_never_crashes_the_panel(tmp_path):
 
     good = "bot:f/good"
     poison = "bot:f/poison"
+    initialize_plane(root)
     emit_batch(root, [_kf(good), _kf(poison),
                       _hbs(good, {"state": "BUSY", "marker_age_s": 1}),
                       _hbs(poison, 42)])          # scalar value — committed
@@ -319,7 +325,7 @@ def test_poison_heartbeat_value_never_crashes_the_panel(tmp_path):
         async def stop(self):
             pass
 
-    body = TestClient(create_app(root, sampler=_S())).get(
+    body = TestClient(create_app(root, sampler=_S(), package=source_package())).get(
         "/api/presence").json()
     assert body["state"] == "ok"           # no 500
     by = {b["alias"]: b["presence"] for b in body["data"]["bots"]}
@@ -338,6 +344,7 @@ def test_a_raising_sampler_never_takes_the_recorded_half_down(tmp_path):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
          "payload": {"entity_type": "bot", "entity_alias": BOT,
@@ -363,7 +370,7 @@ def test_a_raising_sampler_never_takes_the_recorded_half_down(tmp_path):
         async def stop(self):
             pass
 
-    body = TestClient(create_app(root, sampler=_Raises())).get(
+    body = TestClient(create_app(root, sampler=_Raises(), package=source_package())).get(
         "/api/presence").json()
     assert body["state"] == "ok"                       # no 500
     assert body["data"]["sampler_available"] is False  # disclosed degraded

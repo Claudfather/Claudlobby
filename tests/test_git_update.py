@@ -1,0 +1,2702 @@
+"""Mechanical update recovery against real disposable Git repositories."""
+
+from copy import deepcopy
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import pytest
+
+from claudlobby.installation import install_launcher, install_updater
+from claudlobby.git_update import UpdateError, UpdateStore, read_update
+from tests.conftest import constructed_env
+from tests.test_package_resources import _run, _source_installation
+
+
+LOCK = b"example==1.0 --hash=sha256:" + b"a" * 64 + b"\n"
+SHA = "b" * 64
+
+
+@pytest.fixture
+def update(tmp_path):
+    installation = _source_installation(tmp_path)
+    (installation.source / "requirements-runtime.lock").write_bytes(LOCK)
+    def commit(message):
+        _run(["git", "-C", installation.source, "add", "."], tmp_path)
+        _run(["git", "-C", installation.source, "-c", "user.name=Example", "-c",
+              "user.email=example@example.invalid", "commit", "--quiet", "-m", message], tmp_path)
+        return installation.preflight()
+    before = commit("Current dependencies")
+    (installation.source / "templates/candidate.txt").write_text("target bytes\n")
+    target = commit("Target source")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], tmp_path)
+    return installation, before, target, commit
+
+
+def prepare(store, target, *, consumers=None, initialization=None):
+    from claudlobby.git_update import _digest
+    request = "00000000-0000-4000-8000-000000000001"
+    if initialization is not None:
+        store.prepare_target(target, request_id=request, initialization_scope=initialization)
+    scope = {"example.service": SHA}
+    if consumers is not None:
+        consumers = deepcopy(consumers)
+        for key, item in consumers.items():
+            item["intent"]["target"] = key
+        scope = {key: _digest(json.dumps(item["intent"], sort_keys=True, separators=(",", ":")).encode())
+                 for key, item in consumers.items()}
+    record = store.prepare(target, config_fingerprint=SHA, scope=scope, request_id=request)
+    if consumers is not None:
+        record["consumers"] = consumers
+        store.save(record)
+    return record
+
+
+def quiet(store):
+    record = store.load()
+    record["phase"] = "quiesce"
+    record["quiet"] = {key: {"identity": identity, "evidence_sha256": "c" * 64}
+                       for key, identity in record["scope"].items()}
+    store.save(record)
+    store.begin_cutover()
+
+
+def test_application_stage_recovery_clears_only_the_matching_successful_error(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        outcomes = iter([
+            subprocess.CompletedProcess([], 6, "", "render refused"),
+            subprocess.TimeoutExpired("render", 900),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ])
+        def stage(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(updater, "_run_stage", stage)
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="render refused"):
+            updater._application_stage(store, "render", python=interpreter)
+        error = {"stage": "render", "detail": "render refused"}
+        assert store.load()["stage_error"] == error
+        with pytest.raises(UpdateError, match="render interrupted"):
+            updater._application_stage(store, "render", python=interpreter)
+        # The stage's newest failure is the one that stands, an interruption included (#2702).
+        error = {"stage": "render", "detail": "interrupted: no result within 900 s; the stage process was stopped"}
+        assert store.load()["stage_error"] == error
+        assert updater._application_stage(store, "prepare", python=interpreter)["stage_error"] == error
+        recovered = updater._application_stage(store, "render", python=interpreter)
+        assert "stage_error" not in recovered and store.load() == original
+
+
+@pytest.mark.parametrize("interruption, detail", [
+    (subprocess.TimeoutExpired("restore", 900, stderr=b"restoring example.service\n"),
+     "restoring example.service\ninterrupted: no unit finished within 900 s; the stage process was stopped"),
+    (OSError(12, "Cannot allocate memory"),
+     "interrupted: the stage process could not run: [Errno 12] Cannot allocate memory"),
+], ids=["timeout", "oserror"])
+def test_an_interrupted_stage_keeps_why_until_the_same_stage_succeeds(update, monkeypatch, interruption, detail):
+    """#2702: an interruption records its cause in the retained record, as a refusal does."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        outcomes = iter([interruption, subprocess.CompletedProcess([], 0, "", "")])
+        def stage(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(updater, "_run_stage", stage)
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._application_stage(store, "restore", python=interpreter)
+        # What `host update status` prints is this record.
+        assert read_update(installation)["stage_error"] == {"stage": "restore", "detail": detail}
+        recovered = updater._application_stage(store, "restore", python=interpreter)
+        assert "stage_error" not in recovered and store.load() == original
+
+
+def test_invalid_authorization_response_keeps_original_stage_error(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["stage_error"] = {"stage": "authorize", "detail": "original authorization refusal"}
+        store.save(record)
+        outcomes = iter(["invalid-json", json.dumps({"directory": "/native", "revision": before})])
+        monkeypatch.setattr(updater, "_run_stage", lambda *_args, **_kwargs:
+                            subprocess.CompletedProcess([], 0, next(outcomes), ""))
+        interpreter = Path(sys.executable).resolve()
+        with pytest.raises(UpdateError, match="no bound installation context"):
+            updater._application_stage(store, "authorize", python=interpreter)
+        assert store.load() == record
+        authorized = updater._application_stage(store, "authorize", python=interpreter)
+        assert authorized == {"directory": "/native", "revision": before, "interpreter": str(interpreter)}
+        assert "stage_error" not in store.load()
+
+
+def test_update_freezes_target_and_resumes_after_git_effect_before_receipt(update, monkeypatch):
+    installation, before, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        assert record["before"] == before and record["target"] == target
+        assert record["dependencies"]["prepared"] is True
+        assert record["maintenance"] is False
+        quiet(store)
+        save = store.save
+        monkeypatch.setattr(store, "save", lambda _record: (_ for _ in ()).throw(OSError("interrupted save")))
+        with pytest.raises(OSError, match="interrupted"):
+            store.cutover_git()
+        assert installation.preflight() == target
+        monkeypatch.setattr(store, "save", save)
+    with UpdateStore(installation) as resumed:
+        assert prepare(resumed, target)["target"] == target
+        resumed.cutover_git()
+        assert resumed.load()["git_complete"] is True
+        assert resumed.load()["maintenance"] is True
+
+
+def test_update_rejects_dirty_wrong_and_non_fast_forward_source(update):
+    installation, before, target, commit = update
+    (installation.source / "untracked.txt").write_text("keep local work\n")
+    with UpdateStore(installation) as store:
+        with pytest.raises(UpdateError, match="dirty"):
+            prepare(store, target)
+    assert not (installation.data_root / "state/update.json").exists()
+    (installation.source / "untracked.txt").unlink()
+    (installation.source / "different.txt").write_text("divergent source\n")
+    other = commit("Other branch")
+    with UpdateStore(installation) as store:
+        with pytest.raises(UpdateError, match="fast-forward"):
+            prepare(store, target)
+    assert installation.preflight() == other
+
+
+def test_update_cutover_requires_exact_quiet_scope_and_unchanged_preview(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        with pytest.raises(UpdateError, match="quiet"):
+            store.begin_cutover()
+        changed = deepcopy(record)
+        changed["config_fingerprint"] = "d" * 64
+        with pytest.raises(UpdateError, match="frozen"):
+            store.save(changed)
+        changed = deepcopy(record)
+        changed["quiet"] = {"example.service": {"identity": "d" * 64, "evidence_sha256": "c" * 64}}
+        store.save(changed)
+        with pytest.raises(UpdateError, match="quiet"):
+            store.begin_cutover()
+        quiet(store)
+        (installation.source / "templates/candidate.txt").write_text("foreign edit\n")
+        with pytest.raises(UpdateError, match="dirty"):
+            store.cutover_git()
+        assert (installation.source / "templates/candidate.txt").read_text() == "foreign edit\n"
+
+
+def test_changed_dependencies_are_not_claimed_prepared_or_installed(update):
+    installation, before, _, commit = update
+    (installation.source / "requirements-runtime.lock").write_bytes(LOCK.replace(b"1.0", b"2.0"))
+    target = commit("Changed dependencies")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        assert record["dependencies"]["prepared"] is False
+        with pytest.raises(UpdateError, match="dependencies"):
+            quiet(store)
+        assert installation.preflight() == before
+        assert "example==" not in (installation.data_root / "state/update.json").read_text()
+
+
+def test_update_lock_and_changed_frozen_files_refuse(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        with pytest.raises(UpdateError, match="running"):
+            with UpdateStore(installation):
+                pass
+        quiet(store)
+        (store.work / "dependencies-target.lock").write_bytes(b"changed frozen input")
+        with pytest.raises(UpdateError, match="dependency"):
+            store.cutover_git()
+
+
+def test_update_never_changes_git_without_lock_or_at_unexpected_head(update):
+    installation, _, target, commit = update
+    with pytest.raises(UpdateError, match="lock"):
+        UpdateStore(installation).cutover_git()
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        quiet(store)
+        (installation.source / "unexpected.txt").write_text("foreign committed work\n")
+        other = commit("Unexpected HEAD")
+        with pytest.raises(UpdateError, match="actual Git HEAD"):
+            store.cutover_git()
+        assert installation.preflight() == other
+
+
+def test_completed_update_does_not_become_a_historical_global_gate(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="done", maintenance=False)
+        store.save(record)
+        next_record = store.prepare(target, config_fingerprint=SHA, scope={"example.service": SHA},
+                                    request_id="00000000-0000-4000-8000-000000000002")
+        assert next_record["phase"] == "prepare" and not next_record["quiet"]
+        assert next_record["request_id"] != record["request_id"]
+
+
+def test_standalone_update_status_needs_neither_source_nor_runtime(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+    interpreter = Path(sys.executable).resolve()
+    install_launcher(installation, interpreter=interpreter)
+    install_updater(installation, interpreter=interpreter)
+    shutil.rmtree(installation.source)
+    outcome = subprocess.run([str(installation.cli), "--json", "host", "update", "status"],
+                             env=constructed_env(), cwd=installation.data_root,
+                             capture_output=True, text=True, timeout=10)
+    assert outcome.returncode == 0, outcome.stderr
+    assert json.loads(outcome.stdout)["update"]["target"] == target
+    assert read_update(installation)["phase"] == "prepare"
+    default_status = subprocess.run([str(installation.cli), "host", "update"], env=constructed_env(),
+                                    cwd=installation.data_root, capture_output=True, text=True, timeout=10)
+    assert default_status.returncode == 0, default_status.stderr
+    assert json.loads(default_status.stdout)["read_only"] is True
+    assert json.loads(default_status.stdout)["update"]["target"] == target
+
+
+def _tiny_wheel(directory, version):
+    """A real, dependency-free wheel, built locally without a build backend."""
+    import base64
+    import csv
+    import hashlib
+    import io
+    import zipfile
+    stem = f"example-{version}.dist-info"
+    files = {"example.py": f"VERSION = {version!r}\n".encode(),
+             f"{stem}/METADATA": f"Metadata-Version: 2.1\nName: example\nVersion: {version}\n".encode(),
+             f"{stem}/WHEEL": b"Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    rows = [[name, "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("="),
+             str(len(content))] for name, content in files.items()]
+    rows.append([f"{stem}/RECORD", "", ""])
+    record = io.StringIO()
+    csv.writer(record).writerows(rows)
+    files[f"{stem}/RECORD"] = record.getvalue().encode()
+    wheel = directory / f"example-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return f"example=={version} --hash=sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}\n".encode()
+
+
+def test_unchanged_dependencies_perform_no_install_or_python_observation(update, monkeypatch):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        monkeypatch.setattr(store, "_dependency_run", lambda _: pytest.fail("unchanged lock ran Python/pip"))
+        assert store.prepare_dependencies(interpreter=Path("/unavailable"))["dependencies"]["prepared"]
+        quiet(store)
+        store.cutover_git()
+        record = store.load()
+        record["phase"] = "environment"
+        store.save(record)
+        store.cutover_environment()
+        assert store.load()["dependencies"]["environment_complete"]
+
+
+def test_dependency_wheels_preflight_and_offline_final_path_interruption(update, tmp_path, monkeypatch):
+    installation, _, _, commit = update
+    wheels = tmp_path / "fixture-wheels"
+    wheels.mkdir()
+    old_lock = _tiny_wheel(wheels, "1.0")
+    new_lock = _tiny_wheel(wheels, "2.0")
+    (installation.source / "requirements-runtime.lock").write_bytes(old_lock)
+    before = commit("Real wheel baseline")
+    (installation.source / "requirements-runtime.lock").write_bytes(new_lock)
+    target = commit("Real wheel target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], tmp_path)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        run = store._dependency_run
+        def local_download(arguments):
+            if "download" in arguments:
+                arguments = [*arguments, "--no-index", "--find-links", wheels]
+            return run(arguments)
+        monkeypatch.setattr(store, "_dependency_run", local_download)
+        prepared = store.prepare_dependencies(interpreter=Path(sys.executable).resolve())
+        assert prepared["maintenance"] is False
+        assert installation.preflight() == before
+        assert not installation.environment.exists()
+        foreign = deepcopy(prepared)
+        foreign["dependencies"]["proof"]["binding"]["request_id"] = "00000000-0000-4000-8000-000000000099"
+        store.save(foreign)
+        with pytest.raises(UpdateError, match="proof"):
+            store.verify_dependencies()
+        store.save(prepared)
+        quiet(store)
+        store.cutover_git()
+        record = store.load()
+        record["phase"] = "environment"
+        store.save(record)
+        install = store._install_dependencies
+        def interrupted(python, name):
+            # Venv exists at its final path when the process is interrupted.
+            assert python == installation.environment / "bin/python"
+            raise OSError("interrupted environment install")
+        monkeypatch.setattr(store, "_install_dependencies", interrupted)
+        with pytest.raises(OSError, match="interrupted"):
+            store.cutover_environment()
+        assert (installation.environment / "bin/python").exists()
+        monkeypatch.setattr(store, "_install_dependencies", install)
+    with UpdateStore(installation) as resumed:
+        resumed.cutover_environment()  # No network, application imports, or temporary-env rename.
+        assert resumed.load()["dependencies"]["environment_complete"] is True
+        output = _run([installation.environment / "bin/python", "-I", "-c",
+                       "import example; print(example.VERSION)"], tmp_path)
+        assert "2.0" in output
+        cached = next((resumed.work / "wheels-target").glob("*.whl"))
+        cached.write_bytes(b"changed immutable wheel")
+        with pytest.raises(UpdateError, match="immutable"):
+            resumed.verify_dependencies()
+
+
+def test_target_and_dependencies_prepare_before_immutable_render_scope(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        staged = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001")
+        assert staged["config_fingerprint"] is None and staged["scope"] == {}
+        assert not staged["finalized"]
+        with pytest.raises(UpdateError):
+            changed = deepcopy(staged)
+            changed["phase"] = "quiesce"
+            store.save(changed)
+        frozen = store.finalize_prepare(config_fingerprint=SHA, scope={"example.service": SHA})
+        assert frozen["finalized"]
+        with pytest.raises(UpdateError, match="frozen"):
+            store.finalize_prepare(config_fingerprint="d" * 64, scope={})
+        changed = deepcopy(frozen)
+        changed["finalized"] = False
+        changed["config_fingerprint"] = None
+        changed["scope"] = {}
+        with pytest.raises(UpdateError, match="frozen"):
+            store.save(changed)
+
+
+def test_completed_health_errors_keep_unknown_effect_evidence(update):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="done", health_errors={"example.service": "unknown native start"})
+        store.save(record)
+        with pytest.raises(UpdateError, match="evidence"):
+            store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000002")
+        assert store.load()["request_id"] == record["request_id"]
+
+
+def test_application_preparation_finalizes_the_original_staged_target(update, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import update_operation
+    installation, _, target, _ = update
+    current = {"identities": {}, "fingerprint": "c" * 64, "units": []}
+    rendered = SimpleNamespace(revision=target, fingerprint=SHA, check_inputs=lambda: None)
+    monkeypatch.setattr(update_operation, "read_current_config", lambda *_a, **_k: current)
+    monkeypatch.setattr(update_operation, "read_registry_identity_bindings", lambda *_a, **_k: {})
+    monkeypatch.setattr(update_operation, "snapshot_from_plan", lambda *_a, **_k: current)
+    monkeypatch.setattr(update_operation, "validate_candidate_consumers", lambda *_, baseline: None if baseline is None else pytest.fail("unexpected conversion baseline"))
+    monkeypatch.setattr(update_operation, "_schema", lambda *_: 14)
+    monkeypatch.setattr(update_operation, "_catalog", lambda *_: (update_operation.platform.system(), "", [], set(), {}))
+    monkeypatch.setattr(update_operation, "freeze_service_intent", lambda *_a, **_k: [])
+    monkeypatch.setattr(update_operation, "prepare_publication", lambda *_: None)
+    with UpdateStore(installation) as store:
+        staged = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001")
+        result = update_operation.prepare_operation(
+            store, rendered, SimpleNamespace(package=None, read=lambda *_: "catalog"), installation.data_root,
+            Path(sys.executable), staged["request_id"])
+        assert result["request_id"] == staged["request_id"]
+        assert result["finalized"] and result["phase"] == "quiesce"
+        assert result["config_fingerprint"] == SHA
+
+
+def test_inherited_update_lock_validates_parent_and_remains_owned(update):
+    import os
+    installation, _, target, _ = update
+    module = Path(__file__).resolve().parents[1] / "claudlobby/git_update.py"
+    script = """import importlib.util,pathlib,sys,types
+spec=importlib.util.spec_from_file_location('independent_update',sys.argv[1])
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+installation=types.SimpleNamespace(directory=pathlib.Path(sys.argv[2]),data_root=pathlib.Path(sys.argv[3]))
+store=module.UpdateStore.from_parent(installation,fd=int(sys.argv[4]),parent_pid=int(sys.argv[5]),request_id=sys.argv[6])
+store.__exit__()
+"""
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        arguments = [sys.executable, "-I", "-B", "-c", script, str(module), str(installation.directory),
+                     str(installation.data_root), str(store._fd), str(os.getpid()), record["request_id"]]
+        outcome = subprocess.run(arguments, pass_fds=(store._fd,), capture_output=True, text=True, timeout=10)
+        assert outcome.returncode == 0, outcome.stderr
+        with pytest.raises(UpdateError, match="running"):
+            with UpdateStore(installation):
+                pass
+        arguments[-2] = str(os.getpid() + 999999)
+        outcome = subprocess.run(arguments, pass_fds=(store._fd,), capture_output=True, text=True, timeout=10)
+        assert outcome.returncode != 0 and "parent" in outcome.stderr
+
+
+def _runner_source(installation, commit):
+    root = Path(__file__).resolve().parents[1]
+    package = installation.source / "claudlobby"
+    for name in ("git_update.py", "supervision_runtime.py"):
+        shutil.copy2(root / "claudlobby" / name, package / name)
+    (package / "_runtime_scripts/supervisor.sh").write_text(
+        'svc_activation_quiet() { printf "inactive\\tcgroup-empty\\n"; }\n')
+    entry = '''import json,pathlib,sys
+from .git_update import UpdateStore,_verify_inherited_lock
+from .installation import read_installation
+VERSION = "OLD"
+def main(args):
+    directory,stage,fd,parent,request,*runtime=args
+    installation=read_installation(pathlib.Path(directory))
+    store=UpdateStore.from_parent(installation,fd=int(fd),parent_pid=int(parent),request_id=request)
+    record=store.load()
+    record.setdefault("trace",[]).append([stage,VERSION])
+    if stage in {"quiet","publish"}:
+        _verify_inherited_lock(store.state/"runtime-use.lock",int(runtime[0]))
+    if stage=="quiesce":
+        record["consumers"]["example.service"]["stop"]="done"
+    elif stage=="quiet":
+        record["quiet"]={key:{"identity":value,"evidence_sha256":"c"*64} for key,value in record["scope"].items()}
+    elif stage=="publish":
+        record.update(phase="restore",maintenance=False,config_committed=True)
+    elif stage=="restore":
+        record.update(phase="done")
+    store.save(record)
+    store.__exit__()
+    return 0
+'''
+    (package / "update_entry.py").write_text(entry)
+    before = commit("Independent runner fixture current")
+    (package / "update_entry.py").write_text(entry.replace('VERSION = "OLD"', 'VERSION = "TARGET"'))
+    target = commit("Independent runner fixture target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    python = installation.environment / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(Path(sys.executable).resolve())
+    return before, target
+
+
+def test_runner_uses_old_then_fresh_target_process_under_shared_parent_lock(update):
+    from claudlobby.git_update import run_prepared_update
+    installation, _, _, commit = update
+    before, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target, consumers={"example.service": {"intent": {
+            "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+        record["phase"] = "quiesce"
+        store.save(record)
+        (store.state / "runtime-use.lock").touch()
+        result = run_prepared_update(store)
+        assert result["phase"] == "done" and result["config_committed"]
+        assert installation.preflight() == target
+        assert result["trace"] == [["quiesce", "OLD"], ["quiet", "OLD"],
+                                    ["publish", "TARGET"], ["restore", "TARGET"]]
+
+
+def test_runner_reobserves_quiet_after_git_effect_before_environment_resume(update):
+    from claudlobby.git_update import run_prepared_update, _prepare_quiet_support
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target, consumers={"example.service": {"intent": {
+            "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+        record["phase"] = "quiesce"
+        store.save(record)
+        (store.state / "runtime-use.lock").touch()
+        _prepare_quiet_support(store)
+        quiet(store)
+        store.cutover_git()  # Interrupted with record still at git, actual target.
+        support = store.work / ("quiet-" + record["request_id"]) / "supervisor.sh"
+        support.write_text('svc_activation_quiet() { return 3; }\n')
+        with pytest.raises(UpdateError, match="quiet implementation changed"):
+            run_prepared_update(store)
+        assert store.load()["phase"] == "git"
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_independent_quiet_rechecks_added_consumer_absence(update, occupied):
+    """Uninstalled additions must still be absent after an interrupted cutover."""
+    import shlex
+    from claudlobby.git_update import _prepare_quiet_support, _independent_quiet
+    installation, _, _, commit = update
+    units = installation.data_root / "units"
+    units.mkdir()
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    catalog = "manager\tLinux\ndirectory\t" + str(units)
+    (package / "_runtime_scripts/supervisor.sh").write_text(
+        "svc_inventory_catalog() { printf '%s\\n' " + shlex.quote(catalog) + "; }\n"
+        "svc_inventory_state() { printf 'not-found not-found inactive\\n'; }\n"
+        "svc_activation_quiet() { return 99; }\n")
+    target = commit("Retained read-only absence observer")
+    with UpdateStore(installation) as store:
+        record = prepare(store, target, consumers={"example.service": {"intent": {
+            "kind": "added", "installed": [], "bot_binding": None,
+            "manager": "Linux", "domain": "", "destination": str(units / "example.service"),
+            "search_directories": [str(units)]}}})
+        record["phase"] = "quiesce"
+        store.save(record)
+        _prepare_quiet_support(store)
+        if occupied:
+            (units / "example.service").write_text("foreign service")
+            with pytest.raises(RuntimeError, match="already exists"):
+                _independent_quiet(store)
+            assert store.load()["quiet"] == {}
+        else:
+            _independent_quiet(store)
+            assert store.load()["quiet"]["example.service"]["identity"] == record["scope"]["example.service"]
+
+
+def test_runner_waits_for_previously_admitted_start_before_quiescing(update, monkeypatch):
+    import fcntl
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0)
+    from claudlobby.git_update import run_prepared_update
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        with (store.state / "runtime-use.lock").open("w") as reader:
+            fcntl.flock(reader.fileno(), fcntl.LOCK_SH)
+            with pytest.raises(UpdateError, match="still in use"):
+                run_prepared_update(store)
+            assert "trace" not in store.load()
+            assert "quiet_support" not in store.load()
+
+
+_HOLD = '''import fcntl, os, subprocess, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_SH)
+if sys.argv[2:] == ["child"]:
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], pass_fds=(fd,))
+    print("ready", child.pid, flush=True)
+    raise SystemExit
+print("ready", os.getpid(), flush=True)
+sys.stdin.read()
+'''
+
+
+class _Holder:
+    """A real child process holding LOCK_SH on a lock file until released."""
+
+    def __init__(self, lock, *arguments, env=None):
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _HOLD, str(lock), *arguments], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, env={**os.environ, **(env or {})})
+        ready = self.process.stdout.readline().split()
+        assert ready[:1] == ["ready"], ready
+        self.pid = int(ready[1])
+
+    def release(self):
+        if not self.process.stdin.closed:
+            self.process.stdin.close()
+        self.process.wait(timeout=10)
+
+    def close(self):
+        if self.process.stdin and not self.process.stdin.closed:
+            self.process.stdin.close()
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=10)
+        self.process.stdout.close()
+
+
+@pytest.fixture
+def holders():
+    started = []
+
+    def start(lock, *arguments, env=None):
+        holder = _Holder(lock, *arguments, env=env)
+        started.append(holder)
+        return holder
+    yield start
+    for holder in started:
+        holder.close()
+
+
+@pytest.fixture
+def polls(monkeypatch):
+    """Counts the updater's own lock polls and runs `at[n]` on the n-th, so no test orders events by sleeping."""
+    import types
+    from claudlobby import git_update as updater
+    real = time.sleep
+    state = types.SimpleNamespace(count=0, at={})
+
+    def sleep(seconds):
+        if seconds == updater._RUNTIME_POLL:
+            state.count += 1
+            action = state.at.pop(state.count, None)
+            if action is not None:
+                action()
+        real(seconds)
+    monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.01)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+    monkeypatch.setattr(time, "sleep", sleep)
+    return state
+
+
+def _quiesced(installation, store, target):
+    record = prepare(store, target, consumers={"example.service": {"intent": {
+        "installed": [{"path": str(installation.data_root / "example.service")}], "bot_binding": None}}})
+    record["phase"] = "quiesce"
+    store.save(record)
+    lock = store.state / "runtime-use.lock"
+    lock.touch()
+    return record, lock
+
+
+def _notices(monkeypatch, store=None, seen=None, polls=None):
+    """Stub the alert door; each text is kept, with what the record and the poll count read when it was sent."""
+    from claudlobby import git_update as updater
+    texts = []
+
+    def send(_store, _door, text):
+        texts.append(text)
+        if store is not None:
+            seen.append((store.load().get("runtime_wait"), polls.count if polls is not None else None))
+        return "carrier_accepted", "stub"
+    monkeypatch.setattr(updater, "_send_notice", send)
+    return texts
+
+
+def test_runner_waits_through_a_reader_and_records_both_gates(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[3] = reader.release
+        # Three polls must read above 0.0 s at the record's 0.1 s rounding.
+        monkeypatch.setattr(updater, "_RUNTIME_POLL", 0.05)
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        drain, cutover = result["runtime_waits"]
+        assert drain["gate"] == "drain" and drain["outcome"] == "taken" and drain["told"] is False
+        assert drain["seconds"] > 0 and reader.pid in [row["pid"] for row in drain["holders"]]
+        assert cutover["gate"] == "cutover" and cutover["outcome"] == "taken" and cutover["holders"] == []
+        assert "runtime_wait" not in result
+
+
+def test_runner_goes_on_only_after_the_last_of_two_overlapping_readers(update, holders, polls):
+    """#2734: the lock is taken at the first free moment between readers, and only then."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        first, second = holders(lock), holders(lock)
+        before_last = []
+
+        def last():
+            before_last.extend(row["gate"] for row in store.load().get("runtime_waits", []))
+            second.release()
+        polls.at[3], polls.at[9] = first.release, last
+        result = updater.run_prepared_update(store)
+        assert result["phase"] == "done"
+        assert before_last == []  # no gate went on while the second reader held the lock
+        drain, cutover = result["runtime_waits"]
+        named = {row["pid"] for row in drain["holders"]}
+        assert drain["gate"] == "drain" and named and named <= {first.pid, second.pid}
+        assert cutover["gate"] == "cutover" and cutover["holders"] == []
+
+
+def test_runner_tells_once_past_the_tell_bound_and_keeps_waiting(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    with UpdateStore(installation) as store:
+        record, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        polls.at[30] = reader.release
+        seen = []
+        texts = _notices(monkeypatch, store, seen, polls)
+        result = updater.run_prepared_update(store)
+        assert len(texts) == 1
+        waiting, at_notice = seen[0]
+        assert reader.pid in [row["pid"] for row in waiting["holders"]]
+        assert polls.count - at_notice >= 3  # it kept polling after it told
+        assert texts[0].startswith(f"FLEET ALERT: host update {record['request_id']} is waiting for the "
+                                   f"runtime lock (root {store.root}, phase quiesce): held after ")
+        assert texts[0].endswith("It goes on by itself when they finish; nothing needs running.")
+        assert result["phase"] == "done" and "runtime_wait" not in result
+        assert result["runtime_waits"][0]["told"] is True
+
+
+def test_runner_refuses_at_the_stop_bound_naming_the_holder_then_continues(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.05)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert f"pid {reader.pid}" in str(refused.value)
+        assert store.load()["runtime_waits"][-1]["outcome"] == "refused"
+        assert store.load()["phase"] == "quiesce"
+        reader.release()
+        monkeypatch.setattr(updater, "_RUNTIME_STOP", 20)
+        assert updater.run_prepared_update(store)["phase"] == "done"
+
+
+def test_a_holders_arguments_and_environment_reach_no_text_or_record(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    token = "ghp_" + "A1b2C3d4" * 4
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+    monkeypatch.setattr(updater, "_RUNTIME_STOP", 0.3)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        reader = holders(lock, token, env={"EXAMPLE_API_TOKEN": token})
+        texts = _notices(monkeypatch)
+        with pytest.raises(UpdateError, match="still in use") as refused:
+            updater.run_prepared_update(store)
+        assert len(texts) == 1 and f"pid {reader.pid}" in texts[0] and f"pid {reader.pid}" in str(refused.value)
+        for text in (*texts, str(refused.value), (store.state / "update.json").read_text()):
+            assert token not in text and token[-8:] not in text
+
+
+def test_a_child_that_inherited_the_lock_is_named_after_its_taker_exited(tmp_path, holders):
+    from claudlobby import git_update as updater
+    lock = tmp_path / "runtime-use.lock"
+    lock.touch()
+    taker = holders(lock, "child")
+    taker.process.wait(timeout=10)  # the taker is gone; its child still holds the lock
+    pids = [row["pid"] for row in updater._lock_holders(lock)]
+    assert taker.pid in pids
+    assert taker.process.pid not in pids
+
+
+def test_a_failing_notice_does_not_end_the_wait(update, holders, polls, monkeypatch, capsys):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_TELL", 0.05)
+
+    def broken(*_):
+        raise RuntimeError("door down")
+    monkeypatch.setattr(updater, "_send_notice", broken)
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[30] = holders(lock).release
+        assert updater.run_prepared_update(store)["phase"] == "done"
+    assert "nobody was told that this update is waiting for the runtime lock" in capsys.readouterr().err
+
+
+def test_lsof_output_parses_into_holders_and_a_missing_lsof_reads_as_none(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    fake = tmp_path / "lsof"
+    fake.write_text(f"#!/bin/sh\nprintf 'p111\\ncfoo\\nf3\\np222\\ncbar baz\\nf4\\np{os.getpid()}\\ncself\\nf5\\n'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(updater, "_LSOF", str(fake))
+    assert updater._lsof_holders(tmp_path / "lock") == [
+        {"unit": None, "comm": "foo", "pid": 111, "running_s": None},
+        {"unit": None, "comm": "bar baz", "pid": 222, "running_s": None}]
+    monkeypatch.setattr(updater, "_LSOF", str(tmp_path / "absent"))
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    assert updater._lock_holders(tmp_path / "lock") == []
+    assert updater._holder_text([]) == "a holder that could not be named"
+
+
+def test_proc_holders_fold_a_unit_to_its_oldest_and_skip_what_does_not_hold_the_lock(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    proc, lock = tmp_path / "proc", tmp_path / "runtime-use.lock"
+    proc.mkdir()
+    (proc / "uptime").write_text("1000.00 500.00\n")
+    ticks = os.sysconf("SC_CLK_TCK")
+
+    def process(pid, comm, cgroup, age=None, links=str(lock)):
+        directory = proc / str(pid)
+        directory.mkdir()
+        (directory / "comm").write_text(comm + "\n")
+        (directory / "cgroup").write_text(cgroup + "\n")
+        started = int((1000 - (age or 0)) * ticks)
+        (directory / "stat").write_text(f"{pid} ({comm}) S " + " ".join(["0"] * 18) + f" {started} 0 0\n")
+        if links is not None:
+            (directory / "fd").mkdir()
+            (directory / "fd" / "3").symlink_to(links)
+    process(101, "young", "0::/user.slice/app-a.service", 100)
+    process(102, "old", "0::/user.slice/app-a.service", 300)
+    process(103, "we) ird", "0::/", 10)
+    process(104, "nofd", "0::/user.slice/app-b.service", 50, links=None)
+    process(105, "elsewhere", "0::/user.slice/app-c.service", 50, links="/elsewhere")
+    monkeypatch.setattr(updater, "_PROC", proc)
+    listdir = os.listdir
+    expected = [{"unit": "app-a.service", "comm": "old", "pid": 102, "running_s": 300},
+                {"unit": None, "comm": "we) ird", "pid": 103, "running_s": 10}]
+    for reverse in (False, True):  # whichever process of a unit is read first, its oldest is named
+        monkeypatch.setattr(updater.os, "listdir", lambda path, reverse=reverse: sorted(
+            listdir(path), reverse=reverse) if Path(path) == proc else listdir(path))
+        assert sorted(updater._proc_holders(lock), key=lambda row: row["pid"]) == expected
+
+
+def test_holder_text_names_the_longest_running_and_counts_the_rest():
+    from claudlobby import git_update as updater
+    rows = [updater._holder(None, "c", pid, running) for pid, running in
+            ((1, 10), (2, 50), (3, 30), (4, 20), (5, 40))]
+    assert updater._holder_text(rows) == ("c pid 2, running 50 s, c pid 5, running 40 s, "
+                                          "c pid 3, running 30 s, and 2 more")
+    assert updater._holder_text([updater._holder(None, "comm", 1, None)]) == "comm pid 1"
+    assert updater._holder_text([updater._holder("u.service", "comm", 1, 5)]) == "u.service (comm pid 1, running 5 s)"
+
+
+def test_waiting_text_adds_the_stays_down_sentence_only_at_the_cutover():
+    from claudlobby import git_update as updater
+    record, rows = {"request_id": "r1", "phase": "git"}, [updater._holder(None, "c", 1, 5)]
+    sentence = "Whatever it stopped stays down until then."
+    assert updater._waiting_text("/root", record, "cutover", 12.4, rows).endswith(sentence)
+    drain = updater._waiting_text("/root", record, "drain", 12.4, rows)
+    assert sentence not in drain and drain.endswith("nothing needs running.")
+    token = "ghp_" + "A1b2C3d4" * 4
+    named = updater._waiting_text("/root", record, "drain", 12.4, [updater._holder(token, "c", 1, 5)])
+    assert token not in named and "by [redacted] (c pid 1, running 5 s)." in named
+
+
+def test_the_record_keeps_a_holder_seen_at_any_scan_at_its_longest_running(update, holders, polls, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    _, target = _runner_source(installation, commit)
+    monkeypatch.setattr(updater, "_RUNTIME_SCAN", 0)
+    answers = [[updater._holder("a", "c", 1, 1)],
+               [updater._holder("a", "c", 1, 5), updater._holder("b", "c", 2, 1)], []]
+    monkeypatch.setattr(updater, "_lock_holders", lambda lock: answers.pop(0) if answers else [])
+    with UpdateStore(installation) as store:
+        _, lock = _quiesced(installation, store, target)
+        polls.at[3] = holders(lock).release
+        result = updater.run_prepared_update(store)
+        assert {(row["unit"], row["running_s"]) for row in result["runtime_waits"][0]["holders"]} == {
+            ("a", 5), ("b", 1)}
+
+
+def test_completed_candidate_cleanup_preserves_dirty_work_then_removes_owned_checkout(update):
+    from claudlobby.git_update import cleanup_candidate
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        source = store.work / ("candidate-" + record["request_id"])
+        _run(["git", "-C", installation.source, "worktree", "add", "--detach", source, target], store.root)
+        record.update(phase="done", candidate_source=str(source))
+        store.save(record)
+        foreign = source / "foreign.txt"
+        foreign.write_text("retain")
+        with pytest.raises(UpdateError, match="changed"):
+            cleanup_candidate(store)
+        assert foreign.read_text() == "retain"
+        foreign.unlink()
+        assert cleanup_candidate(store)["candidate_cleaned"]
+        assert not source.exists()
+        listing = _run(["git", "-C", installation.source, "worktree", "list", "--porcelain"], store.root)
+        assert str(source) not in listing
+
+
+def test_retained_job_support_loads_canonical_owners_without_source_or_environment(update):
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    root = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(root / name, installation.source / "claudlobby" / name)
+    for name in ("supervisor.sh", "supervisor-caller.py"):
+        shutil.copy2(root / "_runtime_scripts" / name, installation.native / name)
+    before = commit("Current fixed native updater support")
+    (installation.source / "templates/candidate.txt").write_text("next fixed support\n")
+    target = commit("Target fixed native updater support")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        updater._prepare_job_support(store)
+        installation.source.rename(installation.directory / "source-unavailable")
+        jobs, independent, adapter = updater._retained_job(store)
+        assert independent.data_root == installation.data_root
+        assert Path(jobs.__file__).parent == adapter.package.native
+        assert hasattr(jobs, "verify_update_job_runner")
+        from types import SimpleNamespace
+        foreign = SimpleNamespace(directory=installation.directory,
+                                  data_root=installation.data_root / "another-host")
+        with pytest.raises(UpdateError, match="installation record differs"):
+            jobs.update_job_definition(foreign, manager="Linux", domain="", install_directory=store.root)
+        assert not installation.environment.exists()
+        support = adapter.package.native / "supervisor-caller.py"
+        support.write_text("foreign membership predicate")
+        with pytest.raises(UpdateError, match="support changed"):
+            updater._retained_job(store)
+
+
+def _bound_native_job(store, state="inactive"):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    record = store.load()
+    directory = store.root / "native"
+    directory.mkdir(exist_ok=True)
+    job = SimpleNamespace(manager="Linux", target="example-updater.service",
+                          source=store.installation.bin / "example-updater.service",
+                          installed=directory / "example-updater.service", content=b"fixed native job")
+    record.update(native_install_directory=str(directory), updater_job={
+        "manager": job.manager, "target": job.target, "source": str(job.source),
+        "installed": str(job.installed), "sha256": updater._digest(job.content)})
+    store.save(record)
+    jobs = SimpleNamespace(_definition=lambda *_args, **_kwargs: job,
+        observe_update_job=lambda *_args, **_kwargs: {"target": job.target, "state": state})
+    return jobs, job
+
+
+@pytest.mark.parametrize("state", ["running", "starting", "inactive", "failed"])
+def test_dispatch_reconciles_same_job_and_retains_original_request(update, monkeypatch, state):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, job = _bound_native_job(store, state)
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+        observed, dispatch = updater._dispatch_update_job(store)
+        assert store.load()["request_id"] == record["request_id"]
+        if state in {"running", "starting"}:
+            assert observed["dispatch"] == "attached" and dispatch is None
+            assert store.load()["job_dispatch"]["attempt"] == 1
+        else:
+            # Native inactivity permits resuming the same coordinator, whose
+            # canonical operation reconciles original business-effect receipts.
+            assert observed is None and dispatch[0] is jobs
+            assert store.load()["job_dispatch"] == {"state": "pending", "attempt": 2}
+
+
+def test_unknown_job_observation_does_not_dispatch_or_replace_receipt(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+        jobs.observe_update_job = lambda *_args, **_kwargs: (_ for _ in ()).throw(UpdateError("unknown native state"))
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+        original = store.load()
+        with pytest.raises(UpdateError, match="unknown native"):
+            updater._dispatch_update_job(store)
+        assert store.load() == original
+
+
+def test_public_apply_authorizes_before_record_candidate_or_native_effects(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    calls = []
+    def refused(_store, stage, **_kwargs):
+        calls.append(stage)
+        raise UpdateError("operator ancestry refused")
+    monkeypatch.setattr(updater, "_application_stage", refused)
+    monkeypatch.setattr(updater, "prepare_candidate_render", lambda *_args, **_kwargs: pytest.fail("candidate effect before authority"))
+    with pytest.raises(UpdateError, match="operator ancestry"):
+        updater.apply_or_continue(installation, target=target)
+    assert calls == ["authorize"] and read_update(installation) is None
+    assert installation.preflight() == before
+
+
+def test_native_runner_checks_membership_before_operation_and_uses_waiting_lock(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+    jobs.verify_update_job_runner = lambda *_args, **_kwargs: (_ for _ in ()).throw(UpdateError("external native caller"))
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+    monkeypatch.setattr(updater, "run_prepared_update", lambda *_: pytest.fail("external caller reached coordinator"))
+    waits = []
+    def store_factory(current, *, wait=False):
+        waits.append(wait)
+        return UpdateStore(current, wait=wait)
+    monkeypatch.setattr(updater, "UpdateStore", store_factory)
+    with pytest.raises(UpdateError, match="external native"):
+        updater._run_native_update(installation)
+    assert waits == [True]
+    assert read_update(installation)["job_dispatch"]["state"] == "pending"
+
+
+CHAT = "-1001234567890"
+TOKEN = "8888888:AAAAAAAAAAAAAAAAAAAA"
+# Every attempt is logged. A sender with no channel dir has no token (tg-post's exit 1);
+# a refusal, the host's or one sender's, is the carrier's (exit 3).
+TELEGRAM_STUB = """#!/bin/bash
+printf '%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" >> "$CLAUDLOBBY_ROOT/telegram-attempts"
+[ -n "$TELEGRAM_STATE_DIR" ] && [ -d "$TELEGRAM_STATE_DIR" ] || exit 1
+[ ! -e "$CLAUDLOBBY_ROOT/telegram-refuses" ] && [ ! -e "$TELEGRAM_STATE_DIR/refuses" ] || exit 3
+printf '%s|%s|%s|%s\\n' "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "${TELEGRAM_BOT_TOKEN:-<none>}" "$1" \\
+    >> "$CLAUDLOBBY_ROOT/telegram-capture"
+"""
+
+
+def _notice_job(update, monkeypatch, restore, *, real_carrier=False, python=None, retained=False, damaged=(),
+                units=("example.service",)):
+    """An update in phase restore whose job runs `restore` as the target's restore stage.
+
+    The target checkout carries the real alert door (lib-common.sh and the
+    supervisor.sh it sources) beside a tg-post.sh: a stub that records what it
+    is handed, or the real one. The alert chat is a bot of another fleet's tree,
+    as on a multi-fleet host, where a host job finds it. `python`, when given,
+    replaces the environment's interpreter with that script. `retained` puts the
+    same door in the previous release, whose quiet support retains it at
+    quiesce, as a real update does (#2715); `damaged` names the door's scripts
+    that the target breaks. `units` names its consumers.
+    """
+    from claudlobby import git_update as updater
+    installation, before, _, commit = update
+    repository = Path(__file__).resolve().parents[1]
+    package = installation.source / "claudlobby"
+    def door():
+        for name in ("lib-common.sh", "supervisor.sh", "cli-context.sh", *(("tg-post.sh",) if real_carrier else ())):
+            shutil.copy2(repository / "claudlobby/_runtime_scripts" / name, package / "_runtime_scripts" / name)
+        if not real_carrier:
+            (package / "_runtime_scripts/tg-post.sh").write_text(TELEGRAM_STUB)
+            (package / "_runtime_scripts/tg-post.sh").chmod(0o755)
+    if retained:
+        door()
+        shutil.copy2(repository / "claudlobby/supervision_runtime.py", package / "supervision_runtime.py")
+        before = commit("Notice fixture previous release")
+    shutil.copy2(repository / "claudlobby/git_update.py", package / "git_update.py")
+    door()
+    for name in damaged:
+        (package / "_runtime_scripts" / name).write_text("exit 9 (\n")
+    (package / "update_entry.py").write_text(
+        "import pathlib,sys,time\n"
+        "from .git_update import UpdateStore\n"
+        "from .installation import read_installation\n"
+        "def main(args):\n"
+        "    directory,stage,fd,parent,request,*_=args\n"
+        "    store=UpdateStore.from_parent(read_installation(pathlib.Path(directory)),fd=int(fd),\n"
+        "                                  parent_pid=int(parent),request_id=request)\n"
+        "    record=store.load()\n"
+        f"    {restore}\n"
+        "    store.save(record)\n"
+        "    store.__exit__()\n"
+        "    return 0\n")
+    target = commit("Notice fixture target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    interpreter = installation.environment / "bin/python"
+    interpreter.parent.mkdir(parents=True)
+    if python is None:
+        interpreter.symlink_to(Path(sys.executable).resolve())
+    else:
+        interpreter.write_text(python)
+        interpreter.chmod(0o755)
+    bot = installation.data_root / "local/example/runtime/bots/worker"
+    bot.mkdir(parents=True)
+    channel = installation.data_root / "channel"
+    channel.mkdir()
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bot / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="worker"\n'
+                                  f'export TELEGRAM_GROUP_CHAT_ID="{CHAT}"\n'
+                                  f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    with UpdateStore(installation) as store:
+        prepare(store, target, consumers={unit: {"intent": {
+            "installed": [{"path": str(installation.data_root / unit)}], "bot_binding": None}} for unit in units})
+        if retained:
+            record = store.load()
+            record["phase"] = "quiesce"
+            store.save(record)
+            updater._prepare_quiet_support(store)
+        _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.data_root)
+        record = store.load()
+        record.update(phase="restore", maintenance=False, config_committed=True,
+                      job_dispatch={"state": "pending", "attempt": 1})
+        store.save(record)
+        jobs, _ = _bound_native_job(store)
+    jobs.verify_update_job_runner = lambda *_args, **_kwargs: {"native_member": True}
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    return installation, channel
+
+
+def _posted(installation):
+    capture = installation.data_root / "telegram-capture"
+    return [line.split("|", 3) for line in capture.read_text().splitlines()] if capture.exists() else []
+
+
+def _attempts(installation):
+    attempts = installation.data_root / "telegram-attempts"
+    return [tuple(line.split("|", 1)) for line in attempts.read_text().splitlines()] if attempts.exists() else []
+
+
+def _alert_bot(bots, name, chat):
+    """A channel bot with an alert chat, and a sender of its own beside its fleet's bots."""
+    channel = bots.parent / f"{name}-channel"
+    channel.mkdir(parents=True)
+    (channel / ".env").write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\n")
+    (bots / name).mkdir(parents=True)
+    (bots / name / "bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="{name}"\n'
+                                          f'export TELEGRAM_GROUP_CHAT_ID="{chat}"\n'
+                                          f'export TELEGRAM_STATE_DIR="{channel}"\n')
+    return channel
+
+
+HANG = 'print("restoring example.service", file=sys.stderr, flush=True); time.sleep(60)'
+
+
+@pytest.mark.parametrize("ending", ["interrupted", "cannot_start", "health_error", "carrier_refused", "done"])
+def test_an_update_job_that_ends_unfinished_tells_the_alert_chat_once(update, monkeypatch, capsys, ending):
+    """#2702: the job posts one notice through Telegram when its run leaves the update unfinished.
+
+    Every timer that would page someone is among what the update stopped, so
+    the job itself tells the host's alert chat, as a host job's FLEET ALERT
+    does. A run that finishes posts nothing, and a refused post never replaces
+    the run's own outcome.
+    """
+    from claudlobby import git_update as updater
+    restore = {"interrupted": HANG, "cannot_start": HANG, "carrier_refused": HANG,
+               "health_error": 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})',
+               "done": 'record.update(phase="done")'}[ending]
+    # A broken environment: the stage process cannot start at all.
+    broken = "#!/nonexistent/interpreter\n" if ending == "cannot_start" else None
+    installation, channel = _notice_job(update, monkeypatch, restore, python=broken)
+    if ending == "carrier_refused":
+        (installation.data_root / "telegram-refuses").touch()
+    if ending in {"interrupted", "cannot_start", "carrier_refused"}:
+        with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+            updater._run_native_update(installation)
+    else:
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["job_dispatch"]["state"] == "finished"
+    posted = _posted(installation)
+    stderr = capsys.readouterr().err
+    if ending == "done":
+        assert posted == [] and "this update did not finish" not in stderr
+        return
+    if ending == "carrier_refused":
+        assert posted == []
+        assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3" in stderr
+        return
+    assert len(posted) == 1
+    chat, state, token, text = posted[0]
+    # The pair resolve_alert_target found for a host-scoped alert; tg-post reads the token itself.
+    assert (chat, state, token) == (CHAT, str(channel), "<none>")
+    assert text.startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                           f"(root {installation.data_root}, phase {record['phase']}): ")
+    assert text.endswith("read claudlobby host update status, then run claudlobby host update continue "
+                         "from a shell outside any bot session.")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+    if ending == "interrupted":
+        assert record["stage_error"] == {"stage": "restore", "detail":
+            "restoring example.service\ninterrupted: no unit finished within 3 s; the stage process was stopped"}
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: no unit finished within 3 s; the stage process was stopped)") in text
+    elif ending == "cannot_start":
+        assert record["stage_error"]["stage"] == "restore"
+        assert record["stage_error"]["detail"].startswith("interrupted: the stage process could not run: ")
+        assert ("application stage restore interrupted; continue the same operation "
+                "(interrupted: the stage process could not run: ") in text
+    else:
+        assert "1 unit(s) reported a health error; example.service: unit failed to start" in text
+
+
+def _lines(*lines):
+    """Statements for `_notice_job`'s restore slot: the later lines sit at the entry's own indent."""
+    return "\n    ".join(lines)
+
+
+def _each_unit(field, value, pause, *more):
+    return _lines('for unit in sorted(record["consumers"]):',
+                  f'    record["consumers"][unit][{field!r}] = {value!r}', '    store.save(record)',
+                  f'    time.sleep({pause})', *more)
+
+
+UNITS = ("example.service", "b.service", "c.service")
+
+
+def test_a_restore_that_keeps_finishing_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: the limit is time without a finished unit; 3 s of work under a 2.5 s limit is healthy."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("restore", "done", 1.0, 'record.update(phase="done")'),
+                                  units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "done" and "stage_error" not in record
+
+
+def test_a_quiesce_that_keeps_stopping_units_runs_past_the_stage_limit(update, monkeypatch):
+    """#2734: quiesce counts finished units too, by its own field."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, _each_unit("stop", "done", 1.0), units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 2.5)
+    with UpdateStore(installation) as store:
+        updater._application_stage(store, "quiesce")
+        assert "stage_error" not in store.load()
+
+
+def test_a_restore_failing_every_unit_is_stopped_at_the_limit(update, monkeypatch, tmp_path):
+    """#2734: a unit with a restore error has not finished, and saving is not progress.
+
+    Its three failures end by 0.9 s, and 1.0 s after them it would reach `reached`:
+    past a 1.5 s limit counted from its start, but 0.5 s before the limit a stage
+    that counted those failures as finished would set from the last of them.
+    """
+    from claudlobby import git_update as updater
+    reached = tmp_path / "reached-the-end"
+    restore = _lines('for unit in sorted(record["consumers"]):',
+                     "    time.sleep(0.3)",
+                     '    record["consumers"][unit].update(restore="done", restore_error="unit failed")',
+                     "    store.save(record)",
+                     "time.sleep(1.0)",
+                     f"pathlib.Path({str(reached)!r}).touch()",
+                     HANG)
+    installation, _ = _notice_job(update, monkeypatch, restore, units=UNITS)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    detail = read_update(installation)["stage_error"]["detail"]
+    assert detail.endswith("interrupted: no unit finished within 1.5 s; the stage process was stopped")
+    assert not reached.exists()
+
+
+def test_a_hanging_stage_is_stopped_at_the_limit_with_what_it_wrote(update, monkeypatch, tmp_path):
+    """#2734: the timeout carries the stage limit, not the poll, and the process is gone."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1.5)
+    pidfile = tmp_path / "pid"
+    script = ("import os,sys,time\n"
+              "sys.stderr.write('restoring example.service\\n'); sys.stderr.flush()\n"
+              f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n"
+              "time.sleep(30)\n")
+    installation = update[0]
+    started = time.monotonic()
+    with UpdateStore(installation) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "restore", [sys.executable, "-c", script])
+    assert time.monotonic() - started < 10
+    assert raised.value.timeout == updater._STAGE_TIMEOUT
+    errors = raised.value.stderr
+    assert "restoring example.service" in (errors.decode() if isinstance(errors, bytes) else errors)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+
+
+def test_a_stage_without_units_keeps_a_plain_limit(update, monkeypatch):
+    """#2734: no unit to finish, so no look at the record resets the limit."""
+    from claudlobby import git_update as updater
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 1)
+    started = time.monotonic()
+    with UpdateStore(update[0]) as store:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            updater._run_stage(store, "render", [sys.executable, "-c", "import time; time.sleep(10)"])
+    assert time.monotonic() - started < 5
+    assert updater._interruption(raised.value, "render") == \
+        "interrupted: no result within 1 s; the stage process was stopped"
+    assert updater._interruption(raised.value, "restore") == \
+        "interrupted: no unit finished within 1 s; the stage process was stopped"
+
+
+def test_an_unreadable_record_counts_no_units_and_stops_nothing(update, monkeypatch, tmp_path):
+    """#2734: no news is not bad news; the stage runs on while the record cannot be read."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    monkeypatch.setattr(updater, "_STAGE_POLL", 0.05)
+    monkeypatch.setattr(updater, "_STAGE_TIMEOUT", 3)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        path = installation.data_root / "state/update.json"
+        good = path.read_bytes()
+        path.write_bytes(b"{not json")
+        try:
+            assert updater._finished_units(store, "restore") == 0
+        finally:
+            path.write_bytes(good)
+        odd = store.load()
+        for consumers in (None, {"example.service": "done"}):  # consumers nothing validates
+            odd["consumers"] = consumers
+            store.save(odd)
+            assert updater._finished_units(store, "restore") == 0
+        path.write_bytes(good)
+        script = ("import pathlib,time\n"
+                  f"path=pathlib.Path({str(path)!r}); good=path.read_bytes()\n"
+                  "path.write_bytes(b'{not json'); time.sleep(0.6); path.write_bytes(good)\n")
+        result = updater._run_stage(store, "restore", [sys.executable, "-c", script])
+        assert result.returncode == 0 and path.read_bytes() == good
+
+
+def test_a_stage_that_exits_nonzero_hands_its_text_to_the_refusal_path(update, monkeypatch):
+    """#2734: the pipes still reach the caller as text, and a refusal keeps the stage's stderr."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'sys.exit("restore refused unit")')
+    with UpdateStore(installation) as store:
+        result = updater._run_stage(store, "render", [sys.executable, "-c",
+                                    "import sys; print('out'); print('err', file=sys.stderr); sys.exit(6)"])
+        assert (result.returncode, result.stdout, result.stderr) == (6, "out\n", "err\n")
+        with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+            updater._application_stage(store, "restore")
+        assert store.load()["stage_error"] == {"stage": "restore", "detail": "restore refused unit\n"}
+
+
+def test_the_notice_rides_the_real_tg_post_under_the_jobs_own_environment(update, monkeypatch, capsys, tmp_path):
+    """#2702: the real carrier works from the job's constructed environment, token read from its file."""
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, HANG, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in\n'
+        '    --config) cat "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        '    -d|--data-urlencode) printf "%s\\n" "$2" >> "$CLAUDLOBBY_ROOT/curl-capture"; shift 2 ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf '%s' '{\"ok\":true,\"result\":{\"message_id\":42}}'\n")
+    (fake / "curl").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    with pytest.raises(UpdateError, match="restore interrupted"):
+        updater._run_native_update(installation)
+    sent = (installation.data_root / "curl-capture").read_text()
+    assert f"https://api.telegram.org/bot{TOKEN}/sendMessage" in sent
+    assert f"chat_id={CHAT}" in sent
+    assert "text=FLEET ALERT: host update " in sent and "restore interrupted" in sent
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
+
+
+FINISHED_UNHEALTHY = 'record.update(phase="done", health_errors={"example.service": "unit failed to start"})'
+
+
+def test_the_notice_walks_on_to_the_next_alert_recipient_until_one_accepts(update, monkeypatch, capsys):
+    """#2715: a recipient that refuses does not end the notice.
+
+    The resolver's pair is tried first: a bot whose conf was cut mid-write, with
+    a stray quote in its chat and no sender. The worker's sender refuses at the
+    carrier. The next bot with an alert chat, in the resolver's own order, takes it.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    bots = installation.data_root / "local/example/runtime/bots"
+    (bots / "alpha").mkdir()
+    (bots / "alpha/bot.conf").write_text(f'export TELEGRAM_BOT_HANDLE="alpha"\nexport TELEGRAM_GROUP_CHAT_ID="{CHAT}')
+    (channel / "refuses").touch()
+    sender = _alert_bot(bots, "zeta", CHAT)
+    updater._run_native_update(installation)
+    assert _attempts(installation) == [(f'"{CHAT}', ""), (CHAT, str(channel)), (CHAT, str(sender))]
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:3] == [CHAT, str(sender), "<none>"]
+    assert "posted that this update did not finish (scan:bot:zeta, after 2 refused)" in capsys.readouterr().err
+
+
+def test_the_notice_tries_each_alert_recipient_once_in_the_resolvers_own_order(update, monkeypatch, capsys, tmp_path):
+    """#2715: the walk is resolve_alert_target's own, not a second copy of it.
+
+    Every recipient refuses. The notice tries each pair once, in the order the
+    resolver itself gives when each bot it picks loses its chat in turn: the
+    root's bots, then each fleet's, a nested fleet's last.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    root = installation.data_root
+    (root / "telegram-refuses").touch()
+    _alert_bot(root / "runtime/bots", "root-bot", CHAT)
+    (root / "local/alpha/runtime/bots/no-chat").mkdir(parents=True)
+    _alert_bot(root / "local/alpha/runtime/bots", "alpha-bot", "-1009999999999")
+    _alert_bot(root / "local/system/inner/runtime/bots", "nested-bot", CHAT)
+    updater._run_native_update(installation)
+    attempts = _attempts(installation)
+    assert len(attempts) == len(set(attempts)) == 4
+    assert "nobody was told that this update did not finish: failed: tg-post.sh exit 3, the last of 4 recipients" \
+        in capsys.readouterr().err
+    script = ('. "$1/lib-common.sh" >/dev/null 2>&1 || exit 9; resolve_alert_target "$2" any >/dev/null 2>&1; '
+              'printf "%s|%s" "${_alert_chat_id:-}" "${_alert_state_dir:-}"')
+    environment = {"PATH": updater._NOTICE_PATH, "LC_ALL": "C", "HOME": str(Path.home()), "TMPDIR": str(tmp_path),
+                   "CLAUDLOBBY_ROOT": str(root), "PLANE_EMIT_DISABLED": "1"}
+    resolved = []
+    while True:
+        pick = subprocess.run(["/bin/bash", "-c", script, "resolve", str(installation.native), str(root / "runtime/bots")],
+                              env=environment, capture_output=True, text=True, check=True).stdout
+        if pick == "|":
+            break
+        resolved.append(tuple(pick.split("|", 1)))
+        confs = [conf for conf in root.glob("**/runtime/bots/*/bot.conf")
+                 if f'TELEGRAM_STATE_DIR="{resolved[-1][1]}"' in conf.read_text()]
+        assert len(confs) == 1 and len(resolved) <= 4
+        confs[0].write_text("".join(line for line in confs[0].read_text().splitlines(keepends=True)
+                                    if "TELEGRAM_GROUP_CHAT_ID" not in line))
+    assert attempts == resolved
+
+
+def test_the_notice_runs_the_alert_door_retained_before_the_cutover(update, monkeypatch, capsys):
+    """#2715: the scripts a failed update installed are not the ones that tell someone.
+
+    The previous release's lib-common.sh, cli-context.sh and tg-post.sh are
+    retained beside the quiet support at quiesce. The target breaks two of them,
+    and the notice still goes out, through the retained copies.
+    """
+    from claudlobby import git_update as updater
+    installation, channel = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True,
+                                        damaged=("lib-common.sh", "tg-post.sh"))
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"])
+    assert set(record["notice_support"]) == {"lib-common.sh", "cli-context.sh", "tg-post.sh"}
+    for name, digest in record["notice_support"].items():
+        assert updater._digest((retained / name).read_bytes()) == digest
+    updater._run_native_update(installation)
+    posted = _posted(installation)
+    assert len(posted) == 1 and posted[0][:2] == [CHAT, str(channel)]
+    assert "posted that this update did not finish (scan:bot:worker)" in capsys.readouterr().err
+
+
+def test_the_notice_never_runs_a_retained_alert_door_that_changed(update, monkeypatch, capsys):
+    """#2715: a retained copy that no longer matches its digest is not run; the live door is, and the job says so."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, retained=True)
+    record = read_update(installation)
+    retained = installation.data_root / "state/update-work" / ("quiet-" + record["request_id"]) / "tg-post.sh"
+    retained.write_text("#!/bin/bash\nexit 0\n")  # it would claim a post it never made
+    updater._run_native_update(installation)
+    assert len(_posted(installation)) == 1
+    assert ("posted that this update did not finish (scan:bot:worker; its retained alert scripts changed, "
+            "so the live checkout's ran)") in capsys.readouterr().err
+
+
+def test_quiet_support_never_waits_for_an_alert_door_the_previous_release_lacks(update):
+    """#2715: retaining the alert door is best effort; without it the update goes on, and the notice runs the live one."""
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    (package / "_runtime_scripts/supervisor.sh").write_text("svc_activation_quiet() { return 3; }\n")
+    before = commit("Previous release without an alert door")
+    (installation.source / "templates/candidate.txt").write_text("next release\n")
+    target = commit("Target")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        updater._prepare_quiet_support(store)
+        record = store.load()
+        assert set(record["quiet_support"]) == {"supervisor.sh", "supervision_runtime.py"}
+        assert "notice_support" not in record
+        assert updater._notice_door(store, record) == (installation.native, None)
+
+
+REFUSALS = {
+    "retained_support": "retained independent updater support changed",
+    "bound_job": "native updater differs from retained operation binding/domain",
+    "dispatch_intent": "native updater lacks its original dispatch intent",
+    "membership": "updater caller is external to its exact native job or membership is unknown",
+    "binding": "independent native job has no retained binding",
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(REFUSALS))
+def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_not_be_the_job(
+        update, monkeypatch, capsys, refusal):
+    """#2715: a refusal that leaves the update unfinished is told, as a run that ends is.
+
+    A run refused for its retained support, its bound unit or its dispatch intent
+    posts one notice naming the refusal. A process that has not shown it is the
+    job (no binding, or membership refused or unknown) may be a hand-run `_run`
+    that took the lock while the job waits for it: it posts nothing, and the job
+    reports its own run. No refused run enters the dispatch.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'record.update(phase="done")')
+    message = REFUSALS[refusal]
+    def refuse(*_args, **_kwargs):
+        raise UpdateError(message)
+    if refusal == "retained_support":
+        monkeypatch.setattr(updater, "_retained_job", refuse)
+    elif refusal == "bound_job":
+        monkeypatch.setattr(updater, "_check_bound_job", refuse)
+    elif refusal == "membership":
+        updater._retained_job(None)[0].verify_update_job_runner = refuse
+    else:
+        with UpdateStore(installation) as store:
+            record = store.load()
+            record.pop("job_dispatch" if refusal == "dispatch_intent" else "updater_job")
+            store.save(record)
+    with pytest.raises(UpdateError, match=f"^{re.escape(message)}$"):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["phase"] == "restore"
+    assert record.get("job_dispatch") == (None if refusal == "dispatch_intent" else {"state": "pending", "attempt": 1})
+    posted, stderr = _posted(installation), capsys.readouterr().err
+    if refusal in {"membership", "binding"}:
+        assert posted == [] and "did not finish" not in stderr
+        return
+    assert len(posted) == 1
+    assert posted[0][3].startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
+                                   f"(root {installation.data_root}, phase restore): {message}. ")
+    assert "posted that this update did not finish (scan:bot:worker)" in stderr
+
+
+@pytest.mark.parametrize("carrier", ["stalls", "stalls_ignoring_sigterm"])
+def test_a_notice_that_hangs_is_stopped_at_its_limit_and_leaves_no_token_behind(update, monkeypatch, capsys, tmp_path,
+                                                                                carrier):
+    """#2702, #2715: the notice's time limit holds, and stopping it leaves no token-bearing file.
+
+    The real tg-post.sh writes its curl config, which holds the token, into
+    lib-common's scratch directory, which its EXIT trap removes; a SIGKILL skips
+    that trap. macOS's mktemp puts that directory where it likes, whatever TMPDIR
+    says, and so does the stand-in here, so no private TMPDIR can catch it. The
+    door gets SIGTERM first, and SIGKILL after a grace for whatever ignores it.
+    A carrier that ignores SIGTERM is promised only that it ends: the bash
+    waiting on it may run its trap only once it ends, which on macOS's bash 3.2
+    was after the SIGKILL.
+    """
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY, real_carrier=True)
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  case "$1" in --config) printf "%s\\n" "$2" > "$CLAUDLOBBY_ROOT/curl-config"; shift 2 ;; *) shift ;; esac\n'
+        "done\n"
+        'printf "%s\\n" "$$" > "$CLAUDLOBBY_ROOT/curl-pid"\n'
+        + ("trap '' TERM\n" if carrier == "stalls_ignoring_sigterm" else "")
+        + "exec sleep 60\n")
+    (fake / "curl").chmod(0o755)
+    (fake / "mktemp").write_text('#!/bin/bash\nunset TMPDIR\nPATH=/usr/bin:/bin exec mktemp "$@"\n')
+    (fake / "mktemp").chmod(0o755)
+    monkeypatch.setattr(updater, "_NOTICE_PATH", f"{fake}:{updater._NOTICE_PATH}")
+    monkeypatch.setattr(updater, "_NOTICE_TIMEOUT", 2)
+    monkeypatch.setattr(updater, "_NOTICE_GRACE", 1)
+    started = time.monotonic()
+    updater._run_native_update(installation)
+    elapsed = time.monotonic() - started
+    config = Path((installation.data_root / "curl-config").read_text().strip())
+    left = config.exists()
+    if left:  # remove what a kill leaves, the fixture's token included
+        shutil.rmtree(config.parent, ignore_errors=True)
+    assert not left or carrier == "stalls_ignoring_sigterm", "the token-bearing curl config outlived the notice"
+    assert elapsed < 30
+    assert "nobody was told that this update did not finish: failed: no answer within 2 s" in capsys.readouterr().err
+    pid, deadline = int((installation.data_root / "curl-pid").read_text()), time.monotonic() + 10
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the carrier outlived the notice's limit"
+        time.sleep(0.1)
+
+
+def test_a_notice_that_raises_never_replaces_the_runs_own_error(update, monkeypatch, capsys):
+    """#2702: whatever the notice raises, the run raises its own error."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, HANG)
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the alert door exploded")
+    monkeypatch.setattr(updater, "_send_notice", explode)
+    with pytest.raises(UpdateError, match="^application stage restore interrupted; continue the same operation$"):
+        updater._run_native_update(installation)
+    assert "nobody was told that this update did not finish: failed: RuntimeError" in capsys.readouterr().err
+    assert _posted(installation) == []
+
+
+def test_the_notice_never_quotes_text_shaped_like_a_credential(update, monkeypatch):
+    """#2715: the chat never gets what a refused stage printed in a credential's shape.
+
+    The record keeps the stage's whole last line, for `host update status`.
+    """
+    from claudlobby import git_update as updater
+    line = ("restore refused: POST https://api.telegram.org/bot8888888:AAAAAAAAAAAAAAAAAAAA/sendMessage with "
+            "ghp_xxxxxxxxxxxxxxxxxxxx and API_PASSWORD=hunter2 for example.service at "
+            "b486af4a7f9eb656c772083457f3a407d2b992e0")
+    installation, _ = _notice_job(update, monkeypatch, f"print({line!r}, file=sys.stderr); raise SystemExit(6)")
+    with pytest.raises(UpdateError, match="^application stage restore refused; continue the retained operation$"):
+        updater._run_native_update(installation)
+    assert read_update(installation)["stage_error"]["detail"].strip().splitlines()[-1] == line
+    (posted,) = _posted(installation)
+    for secret in ("AAAAAAAAAAAAAAAAAAAA", "ghp_xxxxxxxxxxxxxxxxxxxx", "hunter2"):
+        assert secret not in posted[3]
+    assert ("api.telegram.org/bot[redacted]/sendMessage with [redacted] and API_PASSWORD=[redacted] "
+            "for example.service at b486af4a7f9eb656c772083457f3a407d2b992e0") in posted[3]
+
+
+@pytest.mark.parametrize("text, shown", [
+    ("token rejected: 8888888:AAAAAAAAAAAAAAAAAAAA", "token rejected: [redacted]"),
+    ("export TELEGRAM_BOT_TOKEN='8888888:AAAAAAAAAAAAAAAAAAAA'", "export TELEGRAM_BOT_TOKEN='[redacted]'"),
+    ('{"password": "hunter2"}', '{"password": "[redacted]"}'),
+    ("url:password=hunter2", "url:password=[redacted]"),
+    ("api-key: abc123", "api-key: [redacted]"),
+    ("Authorization: Bearer abcdefgh12345678", "Authorization: [redacted]"),
+    ("fetch https://user:hunter2@example.invalid/repo.git", "fetch https://[redacted]@example.invalid/repo.git"),
+    ("push refused for ghp_xxxxxxxxxxxxxxxxxxxx", "push refused for [redacted]"),
+    ("github_pat_" + "x" * 30, "[redacted]"),
+    ("xoxb-0000000000-xxxxxxxxxxxx", "[redacted]"),
+    ("sk-" + "x" * 30, "[redacted]"),
+    ("AKIA" + "X" * 16, "[redacted]"),
+    ("key Q2xhdWRsb2JieUV4YW1wbGVLZXkx ok", "key [redacted] ok"),
+    # what a notice needs, which no credential shape takes
+    ("commit b486af4a7f9eb656c772083457f3a407d2b992e0", None),
+    ("request 00000000-0000-4000-8000-000000000001", None),
+    ("sha256 " + "4e5a6562" * 8, None),
+    ("/opt/example/claudlobby/local/example/runtime/bots/worker/bot.conf", None),
+    ("restoring com.claudlobby.update.0123456789abcdef.service", None),
+    ("interrupted: no result within 900 s; the stage process was stopped", None),
+])
+def test_the_notice_redacts_each_credential_shape_and_keeps_what_it_needs(text, shown):
+    """#2715: the shapes the redaction takes, and what it leaves for the reader."""
+    from claudlobby.git_update import _redacted
+    assert _redacted(text) == (text if shown is None else shown)
+
+
+def test_the_notice_redacts_before_it_clips():
+    """#2715: a token cut by the 300-character clip is redacted whole, never left as a prefix."""
+    from claudlobby.git_update import _unfinished_text
+    failure = UpdateError("x" * 290 + " 8888888:AAAAAAAAAAAAAAAAAAAA")
+    text = _unfinished_text("/root", {"request_id": "request", "phase": "restore"}, failure)
+    assert "8888888" not in text
+    assert "x" * 290 + " [redacted. Whatever it stopped" in text
+
+@pytest.mark.parametrize("initialize", [False, True])
+def test_public_continue_attaches_original_operation_without_mutable_application(update, monkeypatch, initialize):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        scope = {"directory": str(store.root / "native"),
+                 "manifests": [str(store.root / "fleet.yaml")]} if initialize else None
+        record = prepare(store, target, initialization=scope)
+        record.update(phase="environment", maintenance=True, job_support={}, consumers={"example.service": {"intent": {
+            "installed": [{"path": str(store.root / "example.service")}], "bot_binding": None}}})
+        store.save(record)
+        jobs, _ = _bound_native_job(store, "running")
+    installation.source.rename(installation.directory / "source-unavailable")
+    monkeypatch.setattr(updater, "_application_stage", lambda *_args, **_kwargs: pytest.fail("continuation imported mutable app"))
+    adapter = SimpleNamespace(call=lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, adapter))
+    result = updater.apply_or_continue(installation)
+    assert result["job"]["dispatch"] == "attached"
+    assert result["update"]["request_id"] == record["request_id"]
+    assert result["update"]["target"] == target and result["update"]["maintenance"]
+    assert result["update"].get("initialization_scope") == scope
+
+
+def test_copied_native_runner_verifies_retained_binding_without_src_or_env(update):
+    """Fixture native observations only; no live native manager is called."""
+    import hashlib
+    import shlex
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    root = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(root / name, installation.source / "claudlobby" / name)
+    shutil.copy2(root / "_runtime_scripts/supervisor-caller.py", installation.native / "supervisor-caller.py")
+    directory = installation.data_root / "native"
+    directory.mkdir()
+    label = "com.claudlobby.update." + hashlib.sha256(str(installation.directory).encode()).hexdigest()[:16]
+    target = label + ".service"
+    values = {"Id": target, "LoadState": "loaded", "ActiveState": "active", "UnitFileState": "static",
+        "FragmentPath": str(directory / target), "DropInPaths": "", "NeedDaemonReload": "no",
+        "Triggers": "", "TriggeredBy": "", "WorkingDirectory": str(installation.directory),
+        "Environment": "", "ExecStart": "fixture D-Bus command; exact argv is typed separately"}
+    properties = "\n".join(f"{key}={value}" for key, value in values.items())
+    typed = json.dumps({"type": "a(sasbttttuii)", "data": [[str(installation.bin / "claudlobby-update"),
+        [str(installation.bin / "claudlobby-update"), "_run"], False, 0, 0, 0, 0, 0, 0, 0]]})
+    catalog = f"manager\tLinux\ndirectory\t{directory}\n"
+    fixture_native = (
+        "svc_inventory_catalog() { printf '%s' " + shlex.quote(catalog) + "; }\n"
+        "svc_inventory_properties() { printf '%s' " + shlex.quote(properties) + "; }\n"
+        "svc_inventory_state() { printf 'static loaded active\\n'; }\n"
+        "svc_update_job_exec() { printf '%s' " + shlex.quote(typed) + "; }\n"
+        "svc_activation_assert_external() { return 1; }\n")
+    (installation.native / "supervisor.sh").write_text(fixture_native)
+    before = commit("Retained fixture native observation provider")
+    (installation.source / "templates/candidate.txt").write_text("candidate fixture\n")
+    target_commit = commit("Candidate fixture update")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    install_updater(installation, interpreter=Path(sys.executable).resolve())
+    with UpdateStore(installation) as store:
+        record = prepare(store, target_commit)
+        record.update(phase="quiesce", consumers={})
+        store.save(record)
+        jobs, independent, adapter = updater._prepare_job_support(store)
+        job = jobs.update_job_definition(independent, manager="Linux", domain="", install_directory=directory)
+        for path in (job.source, job.installed):
+            path.write_bytes(job.content)
+            path.chmod(0o644)
+        assert type(independent) is not type(store.installation)
+        jobs.bind_update_job(store, adapter, directory)
+        record = store.load()
+        # A mechanical recovery can positively admit its native job without
+        # src/env. Missing Git source then refuses safely before publication.
+        record.update(phase="environment", maintenance=True, git_complete=True,
+                      job_dispatch={"state": "pending", "attempt": 1}, native_install_directory=str(directory))
+        store.save(record)
+    installation.source.rename(installation.directory / "source-unavailable")
+    assert not installation.environment.exists()
+    result = subprocess.run([str(installation.bin / "claudlobby-update"), "_run"],
+        env=constructed_env(), capture_output=True, text=True, timeout=30)
+    assert result.returncode == 6
+    assert "ModuleNotFoundError" not in result.stderr and "Traceback" not in result.stderr
+    retained = read_update(installation)
+    assert retained["request_id"] == record["request_id"]
+    assert retained["job_dispatch"]["state"] == "finished"  # Membership gate was passed.
+    assert retained["phase"] == "environment" and retained["maintenance"]
+
+
+def test_public_continue_attaches_while_native_runner_holds_update_lock(update, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", consumers={})
+        store.save(record)
+        jobs, _ = _bound_native_job(store, "running")
+        adapter = SimpleNamespace(call=lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, adapter))
+        result = updater.apply_or_continue(installation, target=target)
+        assert result["job"]["dispatch"] == "attached"
+        assert result["update"]["request_id"] == record["request_id"]
+        with pytest.raises(UpdateError, match="frozen target"):
+            updater.apply_or_continue(installation, target="f" * 40)
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_explicit_same_commit_apply_renders_config_but_continue_retains_completed_receipt(update, monkeypatch, changed):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, before, _, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    authored = installation.data_root / 'authored-fleet.yaml'
+    authored.write_text('original configuration')
+    with UpdateStore(installation) as store:
+        original = prepare(store, before)
+        original.update(phase='done', maintenance=False)
+        store.save(original)
+    calls = []
+    def application(store, stage, **kwargs):
+        calls.append(stage)
+        assert stage in {'authorize', 'retire-render'}
+        if stage == 'authorize':
+            return {'interpreter': sys.executable, 'directory': str(store.root / 'units')}
+        assert store.load()['request_id'] == original['request_id']
+    monkeypatch.setattr(updater, '_application_stage', application)
+    def render(store, **kwargs):
+        calls.append(('render', authored.read_text()))
+        row = store.load()
+        assert row['request_id'] != original['request_id'] and row['before'] == row['target'] == before
+        row['candidate_render'] = 'd' * 64
+        store.save(row)
+    monkeypatch.setattr(updater, 'prepare_candidate_render', render)
+    def prepare_application(store, **kwargs):
+        calls.append('prepare')
+        row = store.finalize_prepare(config_fingerprint='d' * 64, scope={})
+        row.update(phase='quiesce', native_install_directory=str(kwargs['install_directory']),
+                   previous_config='e' * 64, candidate_config={'fingerprint': ('f' if changed else 'e') * 64})
+        store.save(row)
+    monkeypatch.setattr(updater, 'prepare_application_operation', prepare_application)
+    def bind(store, *_args):
+        calls.append('bind-job')
+        row = store.load(); row['updater_job'] = {}; store.save(row)
+    jobs = SimpleNamespace(prepare_update_job=lambda *_a: calls.append('prepare-job'), bind_update_job=bind)
+    monkeypatch.setattr(updater, '_prepare_job_support', lambda _store: (jobs, installation, None))
+    monkeypatch.setattr(updater, '_dispatch_update_job', lambda _store: ({'dispatch': 'prepared'}, None))
+    continued = updater.apply_or_continue(installation)
+    assert continued['dispatch'] == 'nothing_pending' and continued['update'] == original
+    assert calls == ['authorize']
+    calls.clear()
+    if changed:
+        authored.write_text('reviewed configuration change')
+    else:
+        # Equal desired snapshot does not prove owned generated bytes are intact.
+        (installation.data_root / 'generated.txt').write_text('edited generated bytes')
+    result = updater.apply_or_continue(installation, target=before)
+    assert calls[:4] == ['authorize', 'retire-render', ('render', authored.read_text()), 'prepare']
+    assert result['update']['request_id'] != original['request_id']
+    assert result['job']['dispatch'] == 'prepared' and calls[4:] == ['prepare-job', 'bind-job']
+    assert result['update']['phase'] == 'quiesce'
+
+
+@pytest.mark.parametrize('defect', [None, 'foreign', 'foreign-blob', 'changed', 'pending', 'health-errors'])
+def test_completed_render_retirement_preserves_unknown_or_pending_scratch(update, defect):
+    from claudlobby.config_plan import ConfigPlanBuilder, PlanError
+    from claudlobby.update_entry import _retire_completed_render
+    installation, before, _, _ = update
+    with UpdateStore(installation) as store:
+        builder = ConfigPlanBuilder(store.root, effects={})
+        builder.file(store.root / 'generated.txt', b'owned generated bytes')
+        rendered = builder.freeze(before)
+        record = store.prepare(before, config_fingerprint=rendered.fingerprint, scope={},
+                               request_id='00000000-0000-4000-8000-000000000001')
+        record.update(phase='done', maintenance=False)
+        if defect == 'pending':
+            record['phase'] = 'quiesce'
+        if defect == 'health-errors':
+            record['health_errors'] = ['unknown stop']
+        store.save(record)
+        if defect == 'foreign':
+            (rendered.directory / 'foreign.txt').write_text('retain')
+        if defect == 'foreign-blob':
+            (rendered.directory / 'files' / ('f' * 64)).write_text('retain')
+        if defect == 'changed':
+            (rendered.directory / 'render.json').write_text('{}')
+        if defect is not None:
+            with pytest.raises((UpdateError, PlanError)):
+                _retire_completed_render(store)
+            assert rendered.directory.exists() and store.load() == record
+        else:
+            _retire_completed_render(store)
+            retired = store.load()
+            assert not rendered.directory.exists() and retired['request_id'] == record['request_id']
+            assert retired['render_retirement']['fingerprint'] == rendered.fingerprint
+            _retire_completed_render(store)  # Crash after retirement, before new preparation.
+            assert store.load() == retired
+
+
+@pytest.mark.parametrize('remaining_change', [None, 'foreign', 'bytes', 'mode', 'link'])
+def test_completed_render_retirement_resumes_partial_deletion_without_deleting_foreign_paths(update, monkeypatch,
+                                                                                           remaining_change):
+    from claudlobby.config_plan import ConfigPlanBuilder
+    from claudlobby.update_entry import _retire_completed_render
+    installation, before, _, _ = update
+    with UpdateStore(installation) as store:
+        builder = ConfigPlanBuilder(store.root, effects={})
+        builder.file(store.root / 'generated.txt', b'owned generated bytes')
+        rendered = builder.freeze(before)
+        record = store.prepare(before, config_fingerprint=rendered.fingerprint, scope={},
+                               request_id='00000000-0000-4000-8000-000000000001')
+        record.update(phase='done', maintenance=False)
+        store.save(record)
+        unlink = Path.unlink
+        def interrupted(path, *args, **kwargs):
+            unlink(path, *args, **kwargs)
+            if path.parent == rendered.directory / 'files':
+                raise OSError('interrupted after first owned blob deletion')
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'unlink', interrupted)
+            with pytest.raises(OSError, match='interrupted'):
+                _retire_completed_render(store)
+        retained = store.load()
+        assert retained['render_retirement']['fingerprint'] == rendered.fingerprint
+        assert not list((rendered.directory / 'files').iterdir())
+        manifest = rendered.directory / 'render.json'
+        if remaining_change == 'foreign':
+            (rendered.directory / 'foreign.txt').write_text('retain foreign bytes')
+        elif remaining_change == 'bytes':
+            manifest.write_text('{}')
+        elif remaining_change == 'mode':
+            manifest.chmod(0o644)
+        elif remaining_change == 'link':
+            manifest.unlink()
+            manifest.symlink_to(store.root / 'generated.txt')
+        if remaining_change is not None:
+            with pytest.raises(UpdateError):
+                _retire_completed_render(store)
+            assert manifest.exists() or manifest.is_symlink()
+            assert store.load() == retained
+            if remaining_change == 'foreign':
+                assert (rendered.directory / 'foreign.txt').read_text() == 'retain foreign bytes'
+        else:
+            _retire_completed_render(store)
+            assert not rendered.directory.exists() and store.load() == retained
+
+
+@pytest.mark.parametrize("defect", ["missing", "extra", "target", "intent"])
+def test_independent_quiet_refuses_changed_consumer_consent_before_native_reads(update, monkeypatch, defect):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target, consumers={"example.service": {"intent": {
+            "installed": [], "bot_binding": None}}})
+        if defect == "missing":
+            record["consumers"].clear()
+        elif defect == "extra":
+            record["consumers"]["foreign.service"] = {"intent": {"target": "foreign.service"}}
+        elif defect == "target":
+            record["consumers"]["example.service"]["intent"]["target"] = "foreign.service"
+        else:
+            record["consumers"]["example.service"]["intent"]["installed"] = [{"path": "/foreign.service"}]
+        store.save(record)
+        monkeypatch.setattr(updater.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("native read"))
+        with pytest.raises(UpdateError, match="original consent"):
+            updater._independent_quiet(store)
+        assert store.load()["quiet"] == {}
+
+
+def test_initialization_scope_is_frozen_before_configuration_finalization(update):
+    installation, _, target, _ = update
+    scope = {"directory": str(installation.data_root / "native"),
+             "manifests": [str(installation.data_root / "fleet.yaml")]}
+    with UpdateStore(installation) as store:
+        staged = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001",
+                                      initialization_scope=scope)
+        assert staged["initialization_scope"] == scope and not staged["finalized"]
+        other = {**scope, "manifests": [str(store.root / "other/fleet.yaml")]}
+        with pytest.raises(UpdateError, match="original frozen"):
+            store.prepare_target(target, request_id=staged["request_id"], initialization_scope=other)
+        changed = store.load()
+        changed["initialization_scope"] = other
+        with pytest.raises(UpdateError, match="frozen initialization"):
+            store.save(changed)
+        store.finalize_prepare(config_fingerprint=SHA, scope={})
+        changed = store.load()
+        changed["initialize"] = False
+        with pytest.raises(UpdateError, match="invalid or unsupported"):
+            store.save(changed)
+        assert store.load()["initialization_scope"] == scope
+        assert store.load()["request_id"] == staged["request_id"]
+
+
+@pytest.mark.parametrize("defect", ["relative", "duplicate", "not-manifest", "mixed-fields"])
+def test_initialization_rejects_malformed_scope_before_record_or_native_effects(update, monkeypatch, defect):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    scope = {"directory": str(installation.data_root / "native"),
+             "manifests": [str(installation.data_root / "fleet.yaml")]}
+    if defect == "relative":
+        scope["directory"] = "relative"
+    elif defect == "duplicate":
+        scope["manifests"] *= 2
+    elif defect == "not-manifest":
+        scope["manifests"] = [str(installation.data_root / "projects.yaml")]
+    else:
+        scope["release_id"] = "r-" + "a" * 64
+    monkeypatch.setattr(updater, "_application_stage", lambda *_args, **_kwargs: pytest.fail("authorize"))
+    with pytest.raises(UpdateError, match="initialization"):
+        updater.apply_or_continue(installation, target=target, initialization=scope)
+    assert read_update(installation) is None
+
+
+@pytest.mark.parametrize("defect", [None, "bot", "active-config", "unobserved-directory"])
+def test_initial_authority_uses_cold_operator_gate_and_observed_native_placement(update, monkeypatch, defect):
+    import platform
+    from types import SimpleNamespace
+    from claudlobby import update_entry, supervision_inventory
+    from claudlobby.commands import operator_context
+    from claudlobby.command_result import CommandFailure
+    installation, before, _, _ = update
+    manifest = installation.data_root / "fleet.yaml"
+    manifest.write_text("fleet: {name: example}\n")
+    directory = installation.data_root.parent / "native-units"
+    scope = {"directory": str(directory), "manifests": [str(manifest)]}
+    events = []
+    package = SimpleNamespace(source_revision=before)
+    if defect == "bot":
+        monkeypatch.setenv("BOT_ID", "worker")
+    else:
+        monkeypatch.setattr(operator_context, "require_operator_context", lambda root=None:
+                            events.append(("operator", root)))
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    observed = directory if defect != "unobserved-directory" else directory.parent / "other-native"
+    def read(function):
+        events.append(function)
+        return f"manager\tLinux\ndirectory\t{observed}\n"
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _: SimpleNamespace(read=read))
+    with UpdateStore(installation) as store:
+        if defect == "active-config":
+            (store.state / "config.json").write_text("unrelated active evidence")
+        if defect is None:
+            assert update_entry._authorize_initialization(store, scope, package) == {
+                "directory": str(directory), "revision": before}
+            assert events == [("operator", None), "svc_inventory_catalog"]
+        elif defect == "bot":
+            with pytest.raises(CommandFailure, match="operator shell"):
+                update_entry._authorize_initialization(store, scope, package)
+            assert events == []
+        elif defect == "active-config":
+            with pytest.raises(UpdateError, match="existing active"):
+                update_entry._authorize_initialization(store, scope, package)
+            assert events == [("operator", None)]
+        else:
+            with pytest.raises(UpdateError, match="not observed"):
+                update_entry._authorize_initialization(store, scope, package)
+        assert store.load() is None
+        assert not (store.root / "state/plane/plane.db").exists()
+
+
+def test_initial_apply_authorizes_before_effects_and_continue_retains_same_scope_request(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    manifest = installation.data_root / "fleet.yaml"
+    manifest.write_text("fleet: {name: example}\n")
+    scope = {"directory": str(installation.data_root.parent / "native"), "manifests": [str(manifest)]}
+    calls = []
+    def authorize(store, stage, **kwargs):
+        assert stage == "authorize" and kwargs == {"initialization": scope}
+        calls.append("authorize")
+        if store.load() is not None:
+            assert store.load()["initialization_scope"] == scope
+        return {"directory": scope["directory"], "interpreter": str(Path(sys.executable).resolve()),
+                "revision": before}
+    monkeypatch.setattr(updater, "_application_stage", authorize)
+    def interrupt(store, **_kwargs):
+        assert calls[-1] == "authorize"
+        assert store.load()["initialization_scope"] == scope
+        calls.append("candidate")
+        raise OSError("preparation interrupted before dependencies")
+    monkeypatch.setattr(updater, "prepare_candidate_render", interrupt)
+    with pytest.raises(OSError, match="preparation interrupted"):
+        updater.apply_or_continue(installation, target=target, initialization=scope)
+    original = read_update(installation)
+    with pytest.raises(OSError, match="preparation interrupted"):
+        updater.apply_or_continue(installation)
+    assert read_update(installation)["request_id"] == original["request_id"]
+    assert read_update(installation)["initialization_scope"] == scope
+    with pytest.raises(UpdateError, match="original frozen"):
+        updater.apply_or_continue(installation, initialization={**scope, "directory": scope["directory"] + "-other"})
+    assert calls == ["authorize", "candidate", "authorize", "candidate"]
+    assert installation.preflight() == before
+
+
+@pytest.mark.parametrize("replace_after_dispatch", [False, True])
+def test_first_install_preview_retains_original_operation_for_continue(update, monkeypatch, replace_after_dispatch):
+    from types import SimpleNamespace
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    scope = {"directory": str(installation.data_root / "native"),
+             "manifests": [str(installation.data_root / "fleet.yaml")]}
+    calls = []
+    def authorize(_store, stage, **kwargs):
+        assert stage == "authorize" and kwargs == {"initialization": scope}
+        return {"directory": scope["directory"], "interpreter": str(Path(sys.executable).resolve())}
+    def render(store, **_kwargs):
+        calls.append("render")
+        record = store.load(); record["candidate_render"] = SHA; store.save(record)
+    def finalize(store, **_kwargs):
+        calls.append("finalize")
+        record = store.load()
+        store.prepare(target, config_fingerprint=SHA, scope={}, request_id=record["request_id"])
+        record = store.load()
+        record.update(phase="quiesce", native_install_directory=scope["directory"])
+        store.save(record)
+    def support(store):
+        calls.append("native")
+        jobs, job = _bound_native_job(store)
+        jobs.prepare_update_job = lambda *_: None
+        jobs.bind_update_job = lambda *_: None
+        def run(*_args, **_kwargs):
+            if replace_after_dispatch:
+                replacement = read_update(installation)
+                replacement["request_id"] = "00000000-0000-4000-8000-000000000099"
+                updater._write(store.state / "update.json", json.dumps(replacement).encode())
+            return {"dispatch": "started"}
+        jobs.run_update_job = run
+        return jobs, installation, SimpleNamespace()
+    monkeypatch.setattr(updater, "_application_stage", authorize)
+    monkeypatch.setattr(updater, "prepare_candidate_render", render)
+    monkeypatch.setattr(updater, "prepare_application_operation", finalize)
+    monkeypatch.setattr(updater, "_prepare_job_support", support)
+    monkeypatch.setattr(updater, "_retained_job", lambda store: support(store))
+    result = updater.apply_or_continue(installation, target=target, initialization=scope, prepare_only=True)
+    with UpdateStore(installation) as borrowed:
+        prepared = updater._prepare_update_locked(borrowed, target=target, initialization=scope, prepare_only=True)
+        assert prepared == result["update"]
+        with pytest.raises(updater.UpdateBusyError):
+            with UpdateStore(installation):
+                pytest.fail("first preparation released its authoring lock")
+    assert result["dispatch"] == "prepared" and calls == ["render", "finalize"]
+    original = result["update"]
+    assert original["phase"] == "quiesce" and original["initialization_scope"] == scope
+    assert "updater_job" not in original and installation.preflight() == before
+    if replace_after_dispatch:
+        with pytest.raises(UpdateError, match=original["request_id"]):
+            updater.apply_or_continue(installation, expected_request_id=original["request_id"])
+        assert read_update(installation)["request_id"] == "00000000-0000-4000-8000-000000000099"
+        return
+    resumed = updater.apply_or_continue(installation, expected_request_id=original["request_id"])
+    assert resumed["job"]["dispatch"] == "started" and "native" in calls
+    assert resumed["update"]["request_id"] == original["request_id"]
+    assert resumed["update"]["initialization_scope"] == scope
+    assert calls.count("render") == calls.count("finalize") == 1
+    with pytest.raises(UpdateError, match="undispatched first-install"):
+        updater.apply_or_continue(installation, prepare_only=True)
+
+
+def test_preview_refuses_noninitial_or_busy_operations_without_effects(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with pytest.raises(UpdateError, match="process lock"):
+        updater._prepare_update_locked(UpdateStore(installation), target=target, prepare_only=True)
+    with pytest.raises(UpdateError, match="undispatched first-install"):
+        updater.apply_or_continue(installation, target=target, prepare_only=True)
+    assert read_update(installation) is None
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        with pytest.raises(updater.UpdateBusyError, match="original operation"):
+            updater.apply_or_continue(installation, prepare_only=True)
+        assert store.load() == original
+    with pytest.raises(UpdateError, match="explicit boolean"):
+        updater.apply_or_continue(installation, prepare_only="yes")
+    assert read_update(installation) == original
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_expected_request_refuses_replacement_before_effects(update, monkeypatch, busy):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    def no_effect(*_args, **_kwargs):
+        pytest.fail("replacement operation must not be authorized, prepared or dispatched")
+    monkeypatch.setattr(updater, "_application_stage", no_effect)
+    monkeypatch.setattr(updater, "_retained_job", no_effect)
+    monkeypatch.setattr(updater, "_prepare_job_support", no_effect)
+    with UpdateStore(installation) as store:
+        original = prepare(store, target)
+        replacement = deepcopy(original)
+        replacement["request_id"] = "00000000-0000-4000-8000-000000000099"
+        updater._write(store.state / "update.json", json.dumps(replacement).encode())
+        if busy:
+            with pytest.raises(UpdateError, match=original["request_id"]):
+                updater.apply_or_continue(installation, expected_request_id=original["request_id"])
+    if not busy:
+        with pytest.raises(UpdateError, match=original["request_id"]):
+            updater.apply_or_continue(installation, expected_request_id=original["request_id"])
+    assert read_update(installation) == replacement
+
+
+def test_initial_render_uses_original_manifests_and_candidate_resources_with_final_runtime_paths(update, monkeypatch):
+    from claudlobby import update_entry, active_config
+    from claudlobby.resources import get_resources
+    installation, _, target, _ = update
+    root_manifest = installation.data_root / "fleet.yaml"
+    root_manifest.write_text("fleet: {name: example}\n")
+    overlay = installation.data_root / "local/second"
+    overlay.mkdir(parents=True)
+    (overlay / "fleet.yaml").write_text("fleet: {name: second}\n")
+    scope = {"directory": str(installation.data_root.parent / "native"),
+             "manifests": [str(root_manifest), str(overlay / "fleet.yaml")]}
+    with UpdateStore(installation) as store:
+        record = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001",
+                                      initialization_scope=scope)
+        source = store.work / "candidate"
+        _run(["git", "-C", installation.source, "worktree", "add", "--detach", source, target], store.root)
+        package = get_resources(installation=installation, checkout=source)
+        monkeypatch.setattr(active_config, "read_current_config", lambda *_args, **_kwargs:
+                            pytest.fail("initial render cannot read sealed/current configuration"))
+        paths = update_entry._render_paths(store, record, package)
+        assert {str(path.fleet_yaml) for path in paths} == set(scope["manifests"])
+        assert all(path.package.library == source / "library" for path in paths)
+        assert all(path.package.source_revision == target for path in paths)
+        assert all(path.package.runtime_native == installation.native for path in paths)
+        assert all(path.package.runtime_library == installation.source / "library" for path in paths)
+        assert store.load()["request_id"] == record["request_id"]
+
+
+def _prepared_update_remote(update, tmp_path):
+    """A new commit exists only in an explicit local Git remote, never fetched yet."""
+    from claudlobby.git_update import _digest
+    installation, before, _, _ = update
+    remote = tmp_path / "trusted-remote"
+    _run(["git", "clone", "--quiet", "--no-hardlinks", installation.source, remote], tmp_path)
+    _run(["git", "-C", remote, "checkout", "--quiet", "-b", "updates", update[2]], tmp_path)
+    (remote / "templates/day-two.txt").write_text("new upstream source\n")
+    _run(["git", "-C", remote, "add", "."], tmp_path)
+    _run(["git", "-C", remote, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "-m", "Day-two update"], tmp_path)
+    target = _run(["git", "-C", remote, "rev-parse", "HEAD"], tmp_path).strip()
+    interpreter = Path(sys.executable).resolve()
+    receipt = {"schema": 1, "purpose": "installation-preparation-only",
+        "installation": str(installation.directory), "data_root": str(installation.data_root),
+        "remote": str(remote), "ref": "refs/heads/updates", "interpreter": str(interpreter),
+        "interpreter_sha256": _digest(interpreter.read_bytes()), "revision": before,
+        "lock_sha256": _digest(LOCK), "environment_owned": True, "complete": True}
+    (installation.directory / "preparation.json").write_text(json.dumps(receipt))
+    install_launcher(installation, interpreter=interpreter)
+    return installation, before, target, receipt
+
+
+def _stop_after_public_target(monkeypatch):
+    """Substitute authorization/candidate boundaries, retaining real Git/UpdateStore."""
+    from claudlobby import git_update as updater
+    calls = []
+    def application(store, stage, **kwargs):
+        calls.append(stage)
+        assert stage == "authorize"
+        return {"directory": str(store.root / "native"), "interpreter": str(Path(sys.executable).resolve())}
+    monkeypatch.setattr(updater, "_application_stage", application)
+    def render(store, **kwargs):
+        raise UpdateError("target frozen before candidate effects")
+    monkeypatch.setattr(updater, "prepare_candidate_render", render)
+    return calls
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("after_update", [False, True])
+def test_public_apply_fetches_missing_commit_only_from_prepared_source(
+        update, tmp_path, monkeypatch, explicit, after_update):
+    from claudlobby import git_update as updater
+    installation, before, target, receipt = _prepared_update_remote(update, tmp_path)
+    if after_update:
+        _run(["git", "-C", installation.source, "checkout", "--quiet", update[2]], tmp_path)
+        before = update[2]  # The completed bootstrap receipt intentionally keeps its initial revision.
+    assert updater._git(installation, "cat-file", "-e", target, check=False).returncode != 0
+    calls = _stop_after_public_target(monkeypatch)
+    actual_git, fetches = updater._git, []
+    def git(current, *args, **kwargs):
+        if args[0] == "fetch":
+            assert calls == ["authorize"] and read_update(installation) is None
+            fetches.append(args)
+        return actual_git(current, *args, **kwargs)
+    monkeypatch.setattr(updater, "_git", git)
+    # Ambient Git selectors cannot redirect either preflight or fetch.
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "foreign.git"))
+    with pytest.raises(UpdateError, match="target frozen before candidate"):
+        updater.apply_or_continue(installation, target=target if explicit else None, from_prepared_remote=True)
+    record = read_update(installation)
+    assert record["before"] == before and record["target"] == target
+    assert record["phase"] == "prepare" and record["maintenance"] is False
+    assert fetches == [("fetch", "--no-tags", "--no-recurse-submodules", "--",
+                        receipt["remote"], target if explicit else receipt["ref"])]
+    assert installation.preflight() == before
+    assert not (installation.source / "templates/day-two.txt").exists()
+
+
+def test_public_apply_pending_uses_original_request_without_receipt_or_refetch(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, _, receipt = _prepared_update_remote(update, tmp_path)
+    target = update[2]
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+    # A moved/unavailable preparation source cannot alter an already frozen operation.
+    (installation.directory / "preparation.json").unlink()
+    calls = _stop_after_public_target(monkeypatch)
+    monkeypatch.setattr(updater, "_fetch_prepared_target", lambda *_: pytest.fail("pending operation refetched"))
+    with pytest.raises(UpdateError, match="target frozen before candidate"):
+        updater.apply_or_continue(installation, from_prepared_remote=True,
+                                  expected_request_id=record["request_id"])
+    assert read_update(installation) == record and calls == ["authorize"]
+    with pytest.raises(UpdateError, match="existing frozen target"):
+        updater.apply_or_continue(installation, target="f" * 40, from_prepared_remote=True)
+    assert read_update(installation) == record
+
+
+@pytest.mark.parametrize("defect", ["root", "alias", "incomplete", "redirected", "dirty"])
+def test_public_fetch_refuses_changed_preparation_or_dirty_source_before_network(
+        update, tmp_path, monkeypatch, defect):
+    from claudlobby import git_update as updater
+    installation, before, target, receipt = _prepared_update_remote(update, tmp_path)
+    path = installation.directory / "preparation.json"
+    if defect == "root":
+        receipt["data_root"] = str(tmp_path / "another-root")
+    elif defect == "alias":
+        receipt["remote"] = "origin"
+    elif defect == "incomplete":
+        receipt["complete"] = False
+    elif defect == "redirected":
+        path.rename(tmp_path / "foreign-preparation.json")
+        path.symlink_to(tmp_path / "foreign-preparation.json")
+    elif defect == "dirty":
+        (installation.source / "untracked.txt").write_text("keep operator work\n")
+    if defect != "redirected":
+        path.write_text(json.dumps(receipt))
+    _stop_after_public_target(monkeypatch)
+    actual_git = updater._git
+    def git(current, *args, **kwargs):
+        assert args[0] != "fetch", "refused inputs reached fetch"
+        return actual_git(current, *args, **kwargs)
+    monkeypatch.setattr(updater, "_git", git)
+    with pytest.raises(UpdateError):
+        updater.apply_or_continue(installation, target=target, from_prepared_remote=True)
+    assert read_update(installation) is None
+    if defect == "dirty":
+        assert (installation.source / "untracked.txt").read_text() == "keep operator work\n"
+    else:
+        assert installation.preflight() == before
+
+
+def test_public_fetch_operator_refusal_precedes_remote_resolution(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = _prepared_update_remote(update, tmp_path)
+    def refused(*_args, **_kwargs):
+        raise UpdateError("operator ancestry refused")
+    monkeypatch.setattr(updater, "_application_stage", refused)
+    monkeypatch.setattr(updater, "_fetch_prepared_target", lambda *_: pytest.fail("fetch preceded authority"))
+    with pytest.raises(UpdateError, match="operator ancestry"):
+        updater.apply_or_continue(installation, target=target, from_prepared_remote=True)
+    assert read_update(installation) is None
+
+
+@pytest.mark.parametrize("arguments, target, fetch", [
+    (["apply"], None, True), (["apply", "a" * 40], "a" * 40, True),
+    (["continue"], None, False),
+])
+def test_public_update_parser_opts_only_apply_into_prepared_remote(update, monkeypatch, capsys,
+                                                                  arguments, target, fetch):
+    from claudlobby import git_update as updater
+    installation = update[0]
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    monkeypatch.setattr(updater, "__file__", str(installation.bin / "update.py"))
+    seen = []
+    def apply(current, **kwargs):
+        seen.append((current.directory, current.data_root, kwargs))
+        return {"update": None}
+    monkeypatch.setattr(updater, "apply_or_continue", apply)
+    assert updater.main(["--root", str(installation.data_root), "host", "update", *arguments]) == 0
+    assert seen == [(installation.directory, installation.data_root,
+                     {"target": target, "from_prepared_remote": fetch, "convert_sealed": False, "prepare_only": False})]
+    assert json.loads(capsys.readouterr().out) == {"update": None}
+
+
+def test_public_remote_fetch_failure_does_not_prepare_or_cutover(update, tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, _, receipt = _prepared_update_remote(update, tmp_path)
+    receipt["remote"] = str(tmp_path / "unavailable-remote")
+    (installation.directory / "preparation.json").write_text(json.dumps(receipt))
+    calls = _stop_after_public_target(monkeypatch)
+    with pytest.raises(UpdateError, match="Git observation or cutover refused"):
+        updater.apply_or_continue(installation, from_prepared_remote=True)
+    assert calls == ["authorize"] and read_update(installation) is None
+    assert installation.preflight() == before
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_conversion_retires_selector_before_effect_and_resumes_rename_without_new_request(update, monkeypatch, interrupt):
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    monkeypatch.setattr(updater, "_application_stage", lambda store, stage: None)
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        (store.state / "activation.lock").touch()
+        save = store.save
+        if interrupt:
+            def interrupted(record):
+                if record.get("conversion_selector", {}).get("retired"):
+                    raise OSError("death after rename")
+                save(record)
+            monkeypatch.setattr(store, "save", interrupted)
+            with pytest.raises(OSError, match="death after rename"):
+                with updater._conversion_fence(store):
+                    pytest.fail("no effect may precede retirement receipt")
+            assert not selected.exists()
+            monkeypatch.setattr(store, "save", save)
+        with updater._conversion_fence(store):
+            archive = updater.assert_conversion_retired(store)
+            assert not selected.exists()
+            assert Path(archive["path"]).read_bytes() == raw
+            assert store.load()["request_id"] == "00000000-0000-4000-8000-000000000001"
+        assert Path(archive["path"]).read_bytes() == raw
+        selected.write_bytes(raw)  # Reopened old authority is never silently adopted.
+        with pytest.raises(UpdateError):
+            updater.assert_conversion_retired(store)
+
+
+def test_conversion_drains_legacy_admission_before_retiring_selector(update, monkeypatch):
+    import fcntl
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    monkeypatch.setattr(updater, "_application_stage", lambda store, stage: None)
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        with (store.state / "activation.lock").open("w") as admitted:
+            fcntl.flock(admitted.fileno(), fcntl.LOCK_SH)
+            with pytest.raises(UpdateError, match="old activation or admitted work"):
+                with updater._conversion_fence(store):
+                    pytest.fail("old admitted work must drain first")
+            assert selected.read_bytes() == raw
+            assert store.load().get("conversion_selector") is None
+        with updater._conversion_fence(store):
+            updater.assert_conversion_retired(store)
+
+
+def test_conversion_requires_explicit_preview_before_any_effect(update):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with pytest.raises(UpdateError, match="prepare-only"):
+        updater.apply_or_continue(installation, target=target, convert_sealed=True)
+    assert read_update(installation) is None
+
+
+def test_conversion_preview_freezes_original_evidence_before_candidate_and_continue_reuses_it(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, before, target, _ = update
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    scope = {"selection": {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                           "plan_id": "p-" + "b" * 64}, "selector_sha256": SHA,
+             "evidence": {str(installation.data_root / "original.json"): SHA}}
+    calls = []
+    def authorize(store, stage, **kwargs):
+        assert stage == "authorize" and kwargs == {"convert_sealed": True}
+        calls.append("authorize")
+        return {"directory": str(installation.directory / "native"), "revision": before,
+                "interpreter": str(Path(sys.executable).resolve()), "conversion_scope": scope}
+    monkeypatch.setattr(updater, "_application_stage", authorize)
+    def interrupt(store, **kwargs):
+        assert store.load()["conversion_scope"] == scope
+        calls.append("candidate")
+        raise OSError("candidate interruption")
+    monkeypatch.setattr(updater, "prepare_candidate_render", interrupt)
+    with pytest.raises(OSError, match="candidate interruption"):
+        updater.apply_or_continue(installation, target=target, convert_sealed=True, prepare_only=True)
+    original = read_update(installation)
+    with pytest.raises(OSError, match="candidate interruption"):
+        updater.apply_or_continue(installation)
+    assert read_update(installation)["request_id"] == original["request_id"]
+    assert read_update(installation)["conversion_scope"] == scope
+    assert calls == ["authorize", "candidate", "authorize", "candidate"]
+
+
+
+def test_conversion_changed_history_under_legacy_ex_preserves_original_selector(update, monkeypatch):
+    import fcntl
+    import hashlib
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    selection = {"schema": 1, "activation_id": "original", "release_id": "r-" + "a" * 64,
+                 "plan_id": "p-" + "b" * 64}
+    raw = json.dumps(selection).encode()
+    scope = {"selection": selection, "selector_sha256": hashlib.sha256(raw).hexdigest(),
+             "evidence": {str(installation.data_root / "historical.json"): SHA}}
+    with UpdateStore(installation) as store:
+        store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001", conversion_scope=scope)
+        selected = store.state / "selected-release.json"
+        selected.write_bytes(raw)
+        (store.state / "activation.lock").touch()
+        def check(held, stage):
+            assert held is store and stage == "conversion-check"
+            assert selected.read_bytes() == raw
+            for name in ("activation-pending.lock", "activation.lock"):
+                with (store.state / name).open("r") as other:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(other.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            raise UpdateError("another sealed lifecycle is unfinished")
+        monkeypatch.setattr(updater, "_application_stage", check)
+        with pytest.raises(UpdateError, match="unfinished"):
+            with updater._conversion_fence(store):
+                pytest.fail("no retirement or quiescence after changed history")
+        assert selected.read_bytes() == raw
+        assert store.load().get("conversion_selector") is None
+        assert not list(store.work.glob("sealed-selector-*"))
+
+
+@pytest.mark.parametrize("wrong_head", [False, True])
+def test_conversion_check_entry_requires_original_before_revision(update, monkeypatch, wrong_head):
+    import os
+    from claudlobby import update_entry as entry, update_operation, resources, supervision_inventory
+    installation, before, target, _ = update
+    assert before != target
+    with UpdateStore(installation) as parent:
+        record = prepare(parent, target)
+        # Exercise main's real stage/source/revision routing against the fixture
+        # Git checkout; only process-origin and package/native boundaries differ.
+        monkeypatch.setattr(entry, "__file__", str(installation.source / "claudlobby/update_entry.py"))
+        monkeypatch.setattr(entry.sys, "executable", str(installation.environment / "bin/python"))
+        def inherited(cls, actual, *, fd, parent_pid, request_id):
+            assert actual == installation and fd == parent._fd
+            assert parent_pid == os.getpid() and request_id == record["request_id"]
+            borrowed = UpdateStore(actual)
+            borrowed._fd = os.dup(fd)
+            return borrowed
+        monkeypatch.setattr(UpdateStore, "from_parent", classmethod(inherited))
+        package, adapter, calls = object(), object(), []
+        monkeypatch.setattr(resources, "get_resources", lambda **kwargs: package)
+        monkeypatch.setattr(supervision_inventory, "Adapter", lambda actual: adapter if actual is package else None)
+        monkeypatch.setattr(update_operation, "check_conversion_before_retirement",
+                            lambda store, actual: calls.append((store.load()["request_id"], actual)))
+        if wrong_head:
+            _run(["git", "-C", installation.source, "checkout", "--quiet", target], installation.source.parent)
+        args = [str(installation.directory), "conversion-check", str(parent._fd), str(os.getpid()), record["request_id"]]
+        if wrong_head:
+            with pytest.raises(UpdateError, match="required Git revision"):
+                entry.main(args)
+            assert calls == []
+        else:
+            assert entry.main(args) == 0
+            assert calls == [(record["request_id"], adapter)]
+        parent._assert_locked()
+
+
+@pytest.mark.parametrize("case", ["retained_gui", "initial", "foreign_uid", "wrong_label", "unknown_gui", "background_from_gui"])
+def test_retained_job_uses_only_its_frozen_same_uid_gui_domain_without_application(update, monkeypatch, case):
+    import base64
+    import os
+    from claudlobby import git_update as updater
+    installation, _, _, commit = update
+    source = Path(__file__).resolve().parents[1] / "claudlobby"
+    for name in ("update_job.py", "supervision_inventory.py", "resources.py", "installation.py", "supervision_runtime.py"):
+        shutil.copy2(source / name, installation.source / "claudlobby" / name)
+    for name in ("supervisor.sh", "supervisor-caller.py"):
+        shutil.copy2(source / "_runtime_scripts" / name, installation.native / name)
+    before = commit("Retain exact native updater support")
+    (installation.source / "templates/candidate.txt").write_text("next support\n")
+    target = commit("Next support")
+    _run(["git", "-C", installation.source, "checkout", "--quiet", before], installation.data_root)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record["phase"] = "quiesce"
+        store.save(record)
+        jobs, _, _ = updater._prepare_job_support(store)
+        native_directory = store.root / "native"
+        native_directory.mkdir()
+        if case != "initial":
+            executable = installation.bin / "claudlobby-update"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            domain = f"user/{os.getuid()}" if case == "background_from_gui" else f"gui/{os.getuid()}"
+            job = jobs.update_job_definition(installation, manager="Darwin", domain=domain,
+                                             install_directory=native_directory)
+            binding = {"manager": "Darwin", "target": job.target, "source": str(job.source),
+                "installed": str(job.installed), "sha256": updater._digest(job.content),
+                "content_base64": base64.b64encode(job.content).decode("ascii")}
+            if case == "foreign_uid":
+                binding["target"] = f"gui/{os.getuid() + 1}/" + job.target.rsplit("/", 1)[1]
+            elif case == "wrong_label":
+                binding["target"] += "-foreign"
+            record = store.load()
+            record.update(updater_job=binding, native_install_directory=str(native_directory))
+            store.save(record)
+        original = store.load()
+        installation.source.rename(installation.directory / "source-unavailable")
+        calls = []
+        def native_runner(argv, **kwargs):
+            # Exercise the real Adapter's command construction; no native binary runs.
+            assert argv[-1] == "svc_inventory_catalog"
+            selected = argv[:3] == ["/bin/launchctl", "asuser", str(os.getuid())]
+            calls.append(selected)
+            if selected and case == "unknown_gui":
+                return subprocess.CompletedProcess(argv, 3, "", "unavailable")
+            observed = "gui" if selected or case == "background_from_gui" else "user"
+            output = f"manager\tDarwin\ndomain\t{observed}/{os.getuid()}\ndirectory\t{native_directory}\nPID\tStatus\tLabel\n"
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        import_module = updater.importlib.import_module
+        def copied_module(name, *args, **kwargs):
+            module = import_module(name, *args, **kwargs)
+            if name.endswith(".supervision_inventory"):
+                monkeypatch.setattr(module.Adapter, "_run", staticmethod(native_runner))
+            return module
+        monkeypatch.setattr(updater.importlib, "import_module", copied_module)
+        if case in {"foreign_uid", "wrong_label", "unknown_gui", "background_from_gui"}:
+            with pytest.raises(UpdateError, match="retained updater|retained updater job"):
+                updater._retained_job(store)
+        else:
+            _, retained, adapter = updater._retained_job(store)
+            assert retained.data_root == installation.data_root
+            assert adapter._selected_gui_uid == (os.getuid() if case == "retained_gui" else None)
+        assert calls == ({"retained_gui": [False, True], "unknown_gui": [False, True],
+                          "background_from_gui": [False]}.get(case, []))
+        assert store.load() == original and not installation.environment.exists()
+
+
+@pytest.mark.parametrize("defect", [None, "removed_mask", "new_definition", "live_socket"])
+def test_independent_quiet_rechecks_preserved_mask_before_cutover(update, defect):
+    """Retained checks cannot skip a quiet mask because installed definitions are absent."""
+    import hashlib
+    import os
+    import socket
+    import tempfile
+    from claudlobby.git_update import _prepare_quiet_support, _independent_quiet
+
+    installation, _, _, commit = update
+    package = installation.source / "claudlobby"
+    shutil.copy2(Path(__file__).resolve().parents[1] / "claudlobby/supervision_runtime.py",
+                 package / "supervision_runtime.py")
+    (package / "_runtime_scripts/supervisor.sh").write_text(
+        "svc_inventory_state() { printf 'masked-runtime masked inactive\\n'; }\n"
+        "svc_activation_quiet() { printf 'inactive\\tno-cgroup-witness\\n'; }\n")
+    target = commit("Retained masked quiet observer")
+    installed = installation.data_root / "example.service"
+    mask = installation.data_root / "runtime-mask" / "example.service"
+    mask.parent.mkdir()
+    mask.symlink_to("/dev/null")
+    saved = {"path": str(mask), "resolved": "/dev/null", "mode": mask.lstat().st_mode & 0o777,
+             "link": "/dev/null", "content": {"base64": ""}, "sha256": hashlib.sha256(b"").hexdigest()}
+    with tempfile.TemporaryDirectory(prefix="mask-", dir="/tmp") as temporary:
+        tmpdir = Path(temporary).resolve()
+        endpoint = tmpdir / f"tmux-{os.getuid()}" / "example"
+        endpoint.parent.mkdir()
+        server = None
+        try:
+            with UpdateStore(installation) as store:
+                record = prepare(store, target, consumers={"example.service": {"intent": {
+                    "installed": [], "bot_binding": [str(installation.data_root), "example", str(tmpdir)],
+                    "preserved_mask": {"snapshot": saved, "installed_path": str(installed)}}}})
+                record["phase"] = "quiesce"
+                store.save(record)
+                _prepare_quiet_support(store)
+                if defect == "removed_mask":
+                    mask.unlink()
+                elif defect == "new_definition":
+                    installed.write_text("foreign native definition")
+                elif defect == "live_socket":
+                    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    server.bind(str(endpoint)); server.listen(1)
+                if defect:
+                    with pytest.raises(UpdateError if defect != "live_socket" else RuntimeError,
+                                       match="mask" if defect != "live_socket" else "socket"):
+                        _independent_quiet(store)
+                    assert store.load()["quiet"] == {} and store.load()["phase"] == "quiesce"
+                else:
+                    _independent_quiet(store)
+                    assert store.load()["quiet"]["example.service"]["identity"] == record["scope"]["example.service"]
+                    assert mask.is_symlink() and not installed.exists()
+        finally:
+            if server is not None:
+                server.close()
+
+
+@pytest.mark.parametrize("failure", ["refusal", "interrupted"])
+def test_application_authorization_failure_without_record_reports_actual_boundary(update, monkeypatch, failure):
+    from claudlobby import git_update as updater
+    installation, before, _, _ = update
+    with UpdateStore(installation) as store:
+        assert store.load() is None
+        def refused(*_args, **_kwargs):
+            if failure == "interrupted":
+                raise subprocess.TimeoutExpired("authorize", 900)
+            return subprocess.CompletedProcess([], 6, "", "earlier traceback\n  inventory refused unknown native state\x00  \n")
+        monkeypatch.setattr(updater, "_run_stage", refused)
+        with pytest.raises(UpdateError) as raised:
+            updater._application_stage(store, "authorize", python=Path(sys.executable).resolve())
+        message = str(raised.value)
+        assert "no update operation was recorded" in message or "before an update operation was recorded" in message
+        assert "continue" not in message and "retained operation" not in message
+        if failure == "refusal":
+            assert "exit 6" in message and "inventory refused unknown native state" in message
+            assert "traceback" not in message and "\x00" not in message
+        assert store.load() is None
+    monkeypatch.undo()
+    assert installation.preflight() == before

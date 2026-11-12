@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: "Periodic code-quality sweep across fleet repos. Picks the stalest repo, runs the appropriate audit skill via a subagent, records findings. Scheduled via cron or manually."
+description: "Use when the scheduled code sweep fires, or you are asked to audit the fleet's stalest repo or for the sweep's status. Periodic code-quality sweep across fleet repos. Picks the stalest repo, runs the appropriate audit skill via a subagent, records findings. Scheduled via cron or manually."
 argument-hint: "[<repo-name>] [--type tech-debt|security-audit|docs-review|data-model-audit] [run|status]"
 ---
 

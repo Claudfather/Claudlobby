@@ -1,4 +1,4 @@
-"""#644 P4 real-boot gate — pytest wrapper for lib/freshbox-boot-gate.sh.
+"""#644 P4 real-boot gate — pytest wrapper for harness/freshbox-boot-gate.sh.
 
 A gated job, not a per-PR blocker (Fork F4(c) / Risk R4). Gating follows the
 repo's in-suite idiom (there is no workflow_dispatch/schedule precedent): the
@@ -18,19 +18,35 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.conftest import realboot_skip_reason
+from tests.conftest import REALBOOT_HOST_CREDS, realboot_skip_reason
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HARNESS = REPO_ROOT / "lib" / "freshbox-boot-gate.sh"
+HARNESS = REPO_ROOT / "harness" / "freshbox-boot-gate.sh"
 
 # Shared real-boot dep contract (claude, jq, claudron, host auth) lives in
 # conftest.realboot_skip_reason so it cannot drift between harness wrappers.
 _skip_reason = realboot_skip_reason("FRESHBOX_REALBOOT")
 
 
+def test_realboot_wrapper_keeps_checked_auth_path_with_private_home(monkeypatch, tmp_path):
+    class Captured(Exception):
+        pass
+
+    def capture(_argv, **kwargs):
+        assert kwargs["env"]["HOME"] == str(tmp_path)
+        assert kwargs["env"]["CLAUDLOBBY_REALBOOT_HOST_CREDS"] == str(REALBOOT_HOST_CREDS)
+        raise Captured
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", capture)
+    with pytest.raises(Captured):
+        test_freshbox_boot_gate()
+
+
 @pytest.mark.skipif(bool(_skip_reason), reason=_skip_reason)
 def test_freshbox_boot_gate():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     result = subprocess.run(
         ["bash", str(HARNESS)],
         capture_output=True,

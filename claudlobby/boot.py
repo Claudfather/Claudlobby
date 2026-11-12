@@ -46,7 +46,7 @@ class BootPolicy:
 
 
 # The readiness ceiling's floor (F3/F4). `resolve_boot_policy` never derives
-# `ready_timeout_s` below this, and it is also the literal `lib/start-bot.sh`
+# `ready_timeout_s` below this, and it is also the literal `claudlobby/_runtime_scripts/start-bot.sh`
 # falls back to when `RC_READY_TIMEOUT_S` is absent or unparseable in an
 # un-regenerated bot.conf that predates the key -- bash cannot import a
 # Python constant, so that file names the same number twice by hand (the

@@ -13,10 +13,6 @@ of it, so it is excluded. Getting this wrong is not hypothetical -- the
 measurement that produced this test counted expertise/guardrails/protocols with a
 bare ``*.md`` glob and reported each one high by exactly that file.
 
-``lib/`` is claimed as "bash lifecycle scripts", so it counts ``*.sh`` plus the
-extensionless files carrying a bash shebang, and excludes the ``.py`` modules and
-``CLAUDE.md``. Counting every file in ``lib/`` would silently absorb the Python
-doors into a figure the README calls bash.
 """
 
 from __future__ import annotations
@@ -36,26 +32,6 @@ def _md_members(category: str) -> list[Path]:
     return sorted(p for p in (LIBRARY / category).glob("*.md") if p.name != "README.md")
 
 
-def _bash_scripts() -> list[Path]:
-    """``lib/*.sh`` plus extensionless files with a bash shebang."""
-    out = []
-    for p in sorted((REPO / "lib").iterdir()):
-        if not p.is_file():
-            continue
-        if p.suffix == ".sh":
-            out.append(p)
-        elif not p.suffix:
-            try:
-                first = p.read_text(encoding="utf-8", errors="replace").split("\n", 1)[
-                    0
-                ]
-            except OSError:  # pragma: no cover - unreadable file
-                continue
-            if first.startswith("#!") and "bash" in first:
-                out.append(p)
-    return out
-
-
 def _actual() -> dict[str, int]:
     return {
         "expertise profiles": len(_md_members("expertise")),
@@ -68,7 +44,6 @@ def _actual() -> dict[str, int]:
         "MCP fragments": len(sorted((LIBRARY / "mcp").glob("*.json"))),
         "guardrails": len(_md_members("guardrails")),
         "protocols": len(_md_members("protocols")),
-        "bash lifecycle scripts": len(_bash_scripts()),
     }
 
 

@@ -1,4 +1,4 @@
-"""claudlobby doctor — pre-flight fleet health diagnostic.
+"""claudlobby host doctor — pre-flight fleet health diagnostic.
 
 Consolidates checks from creds-check.sh, check-npx-cache.sh, and
 reconcile-fleet.sh into a single Python entry point with structured output.
@@ -18,13 +18,20 @@ from pathlib import Path
 from . import dotenv
 from .claudron_compat import (
     CLAUDRON_INTEGRATION_URL,
+    CLAUDRON_DOCTOR_TIMEOUT_S,
+    MigrationReader,
+    VaultMigrationState,
+    _run as _compat_run,
+    _claudron_probe,
+    vault_migration_reader,
     COMPAT_FLOOR,
     PROBE_API,
     PROBE_VERB_PREFIX,
 )
 from .config import FleetConfig
+from .context import native_environment
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
-from .validator import validate
+from .validator import validate, warning_summary
 
 log = logging.getLogger(__name__)
 
@@ -165,7 +172,7 @@ def check_mcp_packages(fleet: FleetConfig, paths: Paths, report: DoctorReport) -
     The offline half of the package check, and the half worth a doctor rung:
     it costs no network call, and on the shared library every declaration found
     dead so far was an unpinned one. Deliberately does NOT probe the registry —
-    `claudlobby doctor` is run to answer a question quickly, and the network
+    `claudlobby host doctor` is run to answer a question quickly, and the network
     signal is opt-in at compose time where its cost is a considered choice.
 
     WARN, never fail. An unpinned package is unverified, not broken: measured
@@ -251,6 +258,12 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
             text=True,
             timeout=30,
             cwd=str(paths.root),
+            env={
+                **os.environ,
+                **native_environment(paths),
+                "FLEET_NAME": paths.fleet_name or "",
+                "BOT_DIR": "",
+            },
         )
         if result.returncode == 0:
             report.add("npx-cache", "pass", "all MCP packages cached (npx + uvx)")
@@ -267,9 +280,119 @@ def check_npx_cache(paths: Paths, report: DoctorReport) -> None:
 # ----------------------------------------------------------------------
 
 
+def _check_composed_launches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """What each bot WILL launch: its composed `.mcp.json` (#1991 review).
+
+    A `node` entry inside a `state/mcp/npm/` copy whose script is gone is a
+    server that will not start at the bot's next session, and nothing else says
+    so: the plan below reads what config staging would compose NOW, which is the npx
+    fallback. Every bot is read, armed or not, because a bot disarmed without a
+    new activation still launches whatever its file names. A fleet with no composed
+    direct launch adds no line."""
+    from . import mcp_direct
+
+    marker = mcp_direct.INSTALL_ROOT
+    seen = 0
+    dead: list[str] = []
+    for bot in fleet.bots.values():
+        try:
+            composed = json.loads((paths.bot_runtime(bot.bot_id) / ".mcp.json").read_text())
+        except FileNotFoundError:
+            continue  # never generated: there is nothing to launch yet
+        except (OSError, ValueError) as exc:
+            report.add("mcp-launch-composed", "warn",
+                       f"{bot.bot_id}: .mcp.json unreadable ({exc.__class__.__name__})")
+            continue
+        for name, server in (composed.get("mcpServers") or {}).items():
+            args = server.get("args") or []
+            if server.get("command") != "node" or not args:
+                continue
+            entry = Path(str(args[0]))
+            # By its path SEGMENTS, not a prefix of this run's root: a file
+            # composed under another spelling of the root is still a copy.
+            parts = entry.parts
+            if not any(parts[i:i + len(marker)] == marker for i in range(len(parts))):
+                continue
+            seen += 1
+            if not entry.is_file():
+                dead.append(f"{bot.bot_id}/{name} ({entry})")
+    if dead:
+        shown = ", ".join(dead[:4]) + (f" (+{len(dead) - 4} more)" if len(dead) > 4 else "")
+        report.add("mcp-launch-composed", "fail",
+                   f"{len(dead)} composed MCP server(s) will not start: the state/mcp copy"
+                   f" they launch is gone: {shown} — inspect the owned copy;"
+                   " `host cache warm` may report it unusable, so stage and activate"
+                   " a config plan to publish the npx fallback if it cannot be restored")
+    elif seen:
+        report.add("mcp-launch-composed", "pass",
+                   f"{seen} composed direct launch(es): every entry point exists")
+
+
+def check_mcp_launch(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """#1604: an armed bot's npx servers launch directly, or this names each one
+    still carrying an npm wrapper and why.
+
+    It reads the composer's own plan (`mcp_launch_plan`), so doctor and
+    config staging cannot disagree. No armed bot adds no line: off is the shipped
+    default, and the switches rung already names it with its arm line. The
+    composed files are read first and separately (`mcp-launch-composed`),
+    because the plan cannot see a copy removed after compose."""
+    from . import mcp_direct
+    from .composer import mcp_launch_plan
+    from .mcp_grammar import GrammarUnavailable
+
+    _check_composed_launches(fleet, paths, report)
+    armed = [b for b in fleet.bots.values() if b.mcp_direct_launch]
+    if not armed:
+        return
+    left: list[str] = []
+    fixable = False
+    try:
+        for bot in armed:
+            _merged, fallbacks = mcp_launch_plan(bot, paths)
+            for name, _spec, why in fallbacks:
+                left.append(f"{bot.bot_id}/{name} ({why})")
+                fixable = fixable or why == mcp_direct.NOT_INSTALLED
+    except (GrammarUnavailable, ValueError, OSError) as exc:
+        report.add("mcp-launch", "warn", f"could not read the launch plan: {exc}")
+        return
+    if not left:
+        report.add("mcp-launch", "pass",
+                   f"{len(armed)} armed bot(s): every npx server launches directly")
+        return
+    shown = ", ".join(left[:6]) + (f" (+{len(left) - 6} more)" if len(left) > 6 else "")
+    fix = (" — run `claudlobby --fleet <fleet> host cache warm`, then stage and activate"
+           " a new config plan" if fixable else "")
+    report.add("mcp-launch", "warn",
+               f"{len(left)} server(s) on armed bot(s) still launch through npx: {shown}{fix}")
+
+
 def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
     """Check systemd/launchd enrollment and tmux session presence per bot."""
     import platform
+
+    if paths.package.installation is not None:
+        from .status import _current_service_observations, _check_tmux_sessions, _SVC_UNDETERMINED
+        bots = list(fleet.bots)
+        observed = _current_service_observations(fleet, paths, bots)
+        live = _check_tmux_sessions(fleet, paths, bots)
+        unknown = [bot for bot, (_, state, enrolled) in observed.items()
+                   if state == _SVC_UNDETERMINED or enrolled is None]
+        absent = [bot for bot, (_, _, enrolled) in observed.items() if enrolled is False]
+        # launchd's launcher may exit while its private bot session survives;
+        # the lifecycle owner's _confirm_running accepts this same native case.
+        down = [bot for bot, (active, state, enrolled) in observed.items()
+                if enrolled and (bot not in live or not active and not (
+                    platform.system() == "Darwin" and state == "inactive"))]
+        if unknown:
+            report.add("services", "warn", "native binding/state unverified: " + ", ".join(unknown))
+        if absent:
+            report.add("services", "warn", "bot(s) not enrolled: " + ", ".join(absent))
+        if down:
+            report.add("services", "fail", "bot(s) enrolled but not running: " + ", ".join(down))
+        if not unknown and not absent and not down:
+            report.add("services", "pass", f"{len(bots)} bot(s) observed enrolled and running; process source revision unobserved")
+        return
 
     is_linux = platform.system() == "Linux"
     is_mac = platform.system() == "Darwin"
@@ -403,12 +526,12 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 #:
 #: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
 #: endpoint answers nothing about access -- probe the OPERATION you need. The
-#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
+#: GitHub App branch in `claudlobby/_runtime_scripts/creds-check.sh` already embodies this (it probes
 #: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
 #: Durable home for the rule: Claudlobby#1400.
 #:
 #: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
-#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
+#: also exists in bash, as `_railway_token_specs` in `claudlobby/_runtime_scripts/creds-check.sh`, and
 #: the two cannot share a literal across languages. A previous version carried
 #: the comment "matches creds-check.sh" -- a copy kept in sync by hand, which
 #: went stale the moment the bash side was fixed, and that is how `doctor` came
@@ -647,37 +770,42 @@ _LOOP_DEGRADATION_WINDOW_DAYS = 7
 
 
 def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
-    """Run *argv*, returning (returncode, stdout). Absent binary ⇒ (127, "")."""
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout
-    except FileNotFoundError:
-        return 127, ""
-    except (subprocess.TimeoutExpired, OSError):
-        return 1, ""
+    """Shared subprocess adapter, also used by the floor and git checks."""
+    return _compat_run(argv, timeout=timeout)
 
 
-def _claudron_probe(vault: str) -> tuple[str, str]:
-    """Claudron's sanctioned capability probe (CLI_CONTRACT §Capability probe).
+def _claudron_doctor(vault: str, state: VaultMigrationState) -> list[tuple[str, str, str]]:
+    """Render shared CLI state, retaining all of doctor's existing diagnostics."""
+    name = "claudron-doctor"
 
-    Returns (status, detail) for a doctor row. Branches on the exit code, never
-    on message text: 0 ⇒ envelope on stdout, 3 ⇒ engine present but no vault.
-    """
-    rc, out = _run(["claudron", "status", "--json", "--vault", vault])
-    if rc == 3:
-        return "warn", f"claudron installed but no vault resolved at {vault}"
-    if rc != 0:
-        return "warn", f"`claudron status --json` exited {rc} for {vault}"
-    try:
-        data = json.loads(out)["data"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return "warn", "`claudron status --json` did not return the CLI envelope"
-    # engine_version does not exist before 0.3.0 — index it defensively.
-    version = data.get("engine_version", "unknown (pre-0.3.0)")
-    return "pass", (
-        f"engine {version}, vault {data.get('root', vault)} "
-        f"({data.get('total_docs', '?')} notes)"
+    def of(code: str) -> list[str]:
+        return [message for finding_code, message in state.findings if finding_code == code]
+
+    others = sorted({code for code, _ in state.findings} - {"D001", "D007", "D008"})
+    tail = (
+        f"; {len(others)} other finding(s) ({', '.join(others)}): `claudron doctor --vault "
+        f"{vault}` has the detail"
+        if others else ""
     )
+    fmt = f"vault format {state.vault_format}, engine format {state.engine_format}"
+    if state.status == "unknown":
+        rows = [(name, "warn", state.detail + tail)]
+    elif state.status == "pending":
+        shown = ", ".join(f"{ident} ({title})" for ident, title in state.pending[:4])
+        more = f" (+{len(state.pending) - 4} more)" if len(state.pending) > 4 else ""
+        count = len(state.pending) or len(of("D001"))
+        rows = [(name, "warn", (
+            f"{vault}: {fmt}: {count} migration(s) pending: {shown or 'see D001'}{more} — a "
+            f"human applies them with `claudron doctor --vault {vault} --fix`; claudlobby "
+            f"never runs it{tail}"
+        ))]
+    elif state.status == "old_format":
+        rows = [(name, "warn", f"{vault}: {fmt}, and nothing is pending{tail}")]
+    else:
+        rows = [(name, "pass", f"{vault}: {fmt}, no migration pending{tail}")]
+    for code in ("D007", "D008"):
+        rows.extend((f"{name}: {code}", "warn", f"{vault}: {message}") for message in of(code))
+    return rows
 
 
 def _floor_row_state(cap, cli_present: bool) -> tuple[str, str]:
@@ -774,14 +902,18 @@ def _loop_evidence(vault: str) -> tuple[str, str]:
     return ("warn" if degraded else "pass"), f"{vault}: " + "; ".join(bits)
 
 
-def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+def check_claudron(
+    fleet: FleetConfig, paths: Paths, report: DoctorReport, *,
+    migration_reader: MigrationReader | None = None,
+) -> None:
     """The claudron door check ``claudron_compat``'s docstring promises.
 
     Silent for a fleet with no vault-wired bot — nothing to diagnose. For a
     vault-wired fleet it reports, in order: CLI presence, the engine capability
-    probe, every COMPAT_FLOOR row as met/unmet/parked, and per-vault
+    probe, every COMPAT_FLOOR row as met/unmet/parked, per-vault
     loop-execution evidence so a wired-but-dead session loop is visible in
-    steady state.
+    steady state, and, for each vault this host holds, what `claudron doctor`
+    says only a human should act on (`_claudron_doctor`; never `--fix`).
 
     Warn-level throughout, deliberately: a host can be composing for a fleet it
     does not itself run, and a diagnostic that fails the whole doctor run on
@@ -796,9 +928,20 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         return
 
     cli_present = shutil.which("claudron") is not None
+    if migration_reader is None:
+        migration_reader = vault_migration_reader(run=_run, timeout=CLAUDRON_DOCTOR_TIMEOUT_S)
     if cli_present:
         report.add("claudron-cli", "pass", f"{len(wired)} vault-wired bot(s)")
-        status, detail = _claudron_probe(sorted(set(wired.values()))[0])
+        first_vault = sorted(set(wired.values()))[0]
+        if Path(first_vault).expanduser().is_dir():
+            state = migration_reader(first_vault)
+            status, detail = state.probe_status, state.probe_detail
+        else:
+            # Preserve the engine row without asking doctor about a vault this
+            # host does not hold; the loop row owns that absence.
+            status, detail, _ = _claudron_probe(
+                first_vault, run=_run, timeout=min(10.0, CLAUDRON_DOCTOR_TIMEOUT_S)
+            )
         report.add("claudron-engine", status, detail)
     else:
         report.add(
@@ -815,6 +958,11 @@ def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     for vault in sorted(set(wired.values())):
         status, detail = _loop_evidence(vault)
         report.add("claudron-loop", status, detail)
+        # A vault this host does not hold is the loop row's to report; the
+        # engine is only asked about one it can reach.
+        if cli_present and Path(vault).expanduser().is_dir():
+            for row in _claudron_doctor(vault, migration_reader(vault)):
+                report.add(*row)
 
 
 # ----------------------------------------------------------------------
@@ -828,7 +976,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
     empty answer for this fleet's workstreams is LEGITIMATE on its own --
     nothing downstream can raise it from inside that read -- only a
     comparison against the file can. Outlives the importer
-    (`claudlobby plane import-workstreams`): once every fleet is imported
+    (`claudlobby migration workstreams`): once every fleet is imported
     this rung goes quiet, and it is what catches the NEXT stranded file
     from the next store that moves without its data.
 
@@ -882,7 +1030,7 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
             "fail",
             f"{len(missing)} row(s) in {resid.name} the plane does not hold"
             f" ({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''})"
-            f" -- run `claudlobby --fleet {fleet.name} plane import-workstreams`",
+            f" -- run `claudlobby --fleet {fleet.name} migration workstreams --apply`",
         )
     else:
         report.add(
@@ -896,6 +1044,37 @@ def check_workstream_residual(fleet: FleetConfig, paths: Paths, report: DoctorRe
 # ----------------------------------------------------------------------
 # Check: fleet.yaml validates
 # ----------------------------------------------------------------------
+
+
+def check_session_export(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """Read the same per-bot progress files granted to the monitor's jq door."""
+    from .source_state import SOURCE_OK, SOURCE_UNREADABLE, probe_source
+    from .session_export import STALL_AFTER, _instant
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    for bot in fleet.bots:
+        path = paths.fleet_state / "session-export" / f"{bot}.json"
+        probe = probe_source(path)
+        if probe.state != SOURCE_OK:
+            if probe.state == SOURCE_UNREADABLE:
+                report.add("session-export", "warn", f"{path} exists but cannot be read")
+            continue
+        try:
+            state = json.loads(path.read_text())
+            if not isinstance(state, dict):
+                raise ValueError("state must be an object")
+            failures, pending = state.get("consecutive_failures", 0), state.get("pending", 0)
+            if type(failures) is not int or type(pending) is not int:
+                raise ValueError("invalid failure or pending count")
+            if failures >= STALL_AFTER:
+                report.add("session-export-stalled", "warn", f"{bot}: {state.get('last_failure')} ({path})")
+            last_ack = _instant(state.get("last_ack_at"), datetime.min.replace(tzinfo=timezone.utc))
+            if pending > 0 and (now - last_ack).total_seconds() > 86400:
+                report.add("session-export-cursor-age", "warn", f"{bot}: {pending} pending; last ack {state.get('last_ack_at')} ({path})")
+            if state.get("last_skip"):
+                report.add("session-export", "pass", f"{bot}: skipped: {state['last_skip']} ({path})")
+        except (OSError, ValueError, TypeError) as exc:
+            report.add("session-export", "warn", f"{path}: invalid or unreadable JSON: {exc}")
 
 
 def check_switches(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
@@ -1133,21 +1312,20 @@ def check_manifest_provenance(
     # silent for a fleet with no vault-wired bot: there is no runtime whose
     # inputs could have moved, and "regenerate to record what this runtime was
     # composed from" is nonsense addressed to a runtime that does not exist.
-    # doctor already has rungs for "you have not generated yet".
+    # doctor already has rungs for a fleet with no activated runtime yet.
     if not paths.runtime_bots.is_dir() or not any(paths.runtime_bots.iterdir()):
         return
 
     prov = read_manifest_provenance(paths)
     if prov is None:
         report.add("manifest-provenance", "warn",
-                   "composed by a claudlobby without provenance — run `generate` "
-                   "to record what this runtime was composed from")
+                   "composed by a claudlobby without provenance — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>` to record its source")
         return
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
         report.add("manifest-provenance", "warn",
                    f"provenance schema {prov.get('schema')!r} is not the "
                    f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
-                   "interpreting it; run `generate` to re-record")
+                   "interpreting it; stage a config plan for a sealed release and activate the returned plan to re-record")
         return
 
     changed = changed_manifest_inputs(fleet, paths, prov)
@@ -1159,8 +1337,7 @@ def check_manifest_provenance(
                    f"manifest changed since the running fleet was composed "
                    f"({', '.join(changed)}; composed {prov.get('composed_at')})"
                    + (f"; {how}" if how else "") +
-                   " — run `generate`, then restart the bots that read it at "
-                   "session start (bot.conf and CLAUDE.md are read once, at startup)")
+                   " — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`; activation restarts bots that read bot.conf and CLAUDE.md at session start")
         return
 
     # Compose-time conditions are reported even when nothing has changed since:
@@ -1175,10 +1352,11 @@ def check_manifest_provenance(
 
 
 def check_fleet_validation(
-    fleet: FleetConfig, paths: Paths, report: DoctorReport
+    fleet: FleetConfig, paths: Paths, report: DoctorReport, *,
+    migration_reader: MigrationReader | None = None,
 ) -> None:
     """Run the standard fleet validator and surface errors/warnings."""
-    val_report = validate(fleet, paths)
+    val_report = validate(fleet, paths, migration_reader=migration_reader)
     if val_report.has_errors:
         report.add(
             "fleet-yaml",
@@ -1186,10 +1364,12 @@ def check_fleet_validation(
             f"{len(val_report.errors)} error(s): {val_report.errors[0][:100]}",
         )
     elif val_report.warnings:
+        # Named by category, never a bare count: a new KIND of warning landing
+        # inside an unchanged total is exactly what a count cannot show (#1663).
         report.add(
             "fleet-yaml",
             "warn",
-            f"{len(val_report.warnings)} warning(s)",
+            f"{warning_summary(val_report)} — `claudlobby config validate` prints each",
         )
     else:
         report.add("fleet-yaml", "pass", "fleet.yaml valid")
@@ -1263,7 +1443,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
     report = DoctorReport()
     # Resolved ONCE for the three rungs that ask the same question (#1680):
     # ignition_doors goes through the switch cascade, which shells out to
-    # lib/env-tiers.sh. Falling back to None rather than guarding here keeps
+    # claudlobby/_runtime_scripts/env-tiers.sh. Falling back to None rather than guarding here keeps
     # the HOIST itself from becoming a new failure point — where a resolver
     # failure surfaces is then whatever it is on main. Deliberately not a
     # claim about WHICH rung that is: on a fleet with a leaf manager
@@ -1275,26 +1455,29 @@ def run_doctor(fleet: FleetConfig, paths: Paths, *,
         doors = ignition_doors(fleet, paths)
     except Exception:  # noqa: BLE001 — a health command never crashes early
         doors = None
-    check_fleet_validation(fleet, paths, report)
+    migration_reader = vault_migration_reader(run=_run, timeout=CLAUDRON_DOCTOR_TIMEOUT_S)
+    check_fleet_validation(fleet, paths, report, migration_reader=migration_reader)
     check_manifest_provenance(fleet, paths, report)
     check_delivery(fleet, paths, report, run=delivery)
     check_goal_binding(fleet, paths, report, doors=doors)
     check_switches(fleet, paths, report)
+    check_session_export(fleet, paths, report)
     check_ignition(fleet, paths, report, doors=doors)
     check_env_vars(fleet, paths, report)
     check_mcp_configs(fleet, paths, report)
     check_mcp_packages(fleet, paths, report)
     check_npx_cache(paths, report)
+    check_mcp_launch(fleet, paths, report)
     check_services(fleet, paths, report)
     check_credentials(fleet, paths, report)
-    check_claudron(fleet, paths, report)
+    check_claudron(fleet, paths, report, migration_reader=migration_reader)
     check_workstream_residual(fleet, paths, report)
     return report
 
 
 def format_report(report: DoctorReport) -> str:
     """Format the doctor report for terminal output."""
-    lines = ["", "=== claudlobby doctor ===", ""]
+    lines = ["", "=== claudlobby host doctor ===", ""]
     for check in report.checks:
         if check.status == "pass":
             icon = "PASS"

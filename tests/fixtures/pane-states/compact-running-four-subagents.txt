@@ -1,0 +1,24 @@
+
+
+● Stand-in reply.
+
+✻ Crunched for 0s · done 11:58 PM
+
+❯ Run four agents pr4-live-AGENTS-a7b71dce.
+
+● Running 4 agents…
+   ├ Stand-in agent 1 · 0 tool uses
+   │ ⎿  Initializing…
+   ├ Stand-in agent 2 · 0 tool uses
+   │ ⎿  Initializing…
+   ├ Stand-in agent 3 · 0 tool uses
+   │ ⎿  Initializing…
+   └ Stand-in agent 4 · 0 tool uses
+     ⎿  Initializing…
+
+
+  Waiting for permission…
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt
