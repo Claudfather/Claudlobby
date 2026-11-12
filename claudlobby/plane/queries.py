@@ -22,6 +22,7 @@ one place.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import sqlite3
 
 # presence's freshness horizon is the SAME constant the stale_task suppression
 # reads a heartbeat against — imported, not re-declared, so "a fresh recording"
@@ -875,12 +876,30 @@ _F11_COMPLETION_JOIN = (
 
 # Malformed/naive historical instants are excluded from chronology; stored
 # timestamps and payload/hash bytes are unchanged (see plane.time).
-_REG_EFFECTIVE = (
-    "effective AS ("
-    " SELECT rs.*, claudlobby_instant_key(rs.occurred_at) AS instant_key,"
+#
+# `effective` holds only what the windows below read: the SCD partition, the
+# ordering pair (instant_key, ingest_seq), the tombstone flag and F11
+# validity. It is MATERIALIZED so each row's key is computed once (#2887):
+# inlined, SQLite evaluated the Python key function again at every reference
+# to instant_key, three calls a row. The windows run over these narrow rows
+# and each read joins registry_snapshots back on ingest_seq for the rows it
+# returns, so no payload passes through a window's sort. A materialized CTE
+# takes no pushdown from the query around it: a read that wants fewer rows
+# bounds them in the CTE's own WHERE, on the partition columns only. Every
+# window here partitions by exactly those columns, so dropping whole
+# partitions first changes no window.
+# MATERIALIZED arrived in SQLite 3.35.0, and an older library rejects it as a
+# syntax error. There the hint is left out: the same text returns the same
+# rows and computes the key at each reference, as before #2887.
+_REG_MATERIALIZED = "MATERIALIZED " if sqlite3.sqlite_version_info >= (3, 35, 0) else ""
+_REG_EFFECTIVE_ROWS = (
+    "effective AS " + _REG_MATERIALIZED + "("
+    " SELECT rs.ingest_seq, rs.host_uid, rs.entity_type, rs.entity_uid,"
+    "  rs.tombstone, claudlobby_instant_key(rs.occurred_at) AS instant_key,"
     "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
-    " FROM registry_snapshots rs)"
+    " FROM registry_snapshots rs"
 )
+_REG_EFFECTIVE = _REG_EFFECTIVE_ROWS + ")"
 
 # Current state per SCD partition: the latest F11-valid row wins; when that
 # row is a (valid) tombstone the entity is absent from current. An INVALID
@@ -888,17 +907,20 @@ _REG_EFFECTIVE = (
 # remains current. Ordering is (instant_key(occurred_at), ingest_seq), the ONE
 # SCD ordering (line 145: first-hand snapshots carry null observed_at, and
 # ingest_seq breaks producer-timestamp ties) — current is simply its tail.
-REG_CURRENT_SQL = (
-    "WITH " + _REG_EFFECTIVE + ", latest AS ("
-    " SELECT e.*, ROW_NUMBER() OVER ("
+_REG_CURRENT_FROM_EFFECTIVE = (
+    ", latest AS ("
+    " SELECT e.ingest_seq, e.tombstone, ROW_NUMBER() OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
     "   ORDER BY e.instant_key DESC, e.ingest_seq DESC) AS rn"
     " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
-    " SELECT host_uid, entity_type, entity_uid, entity_alias, payload,"
-    " payload_hash, cause, scan_id, vault_rev, occurred_at, ingest_seq"
-    " FROM latest WHERE rn = 1 AND tombstone = 0"
-    " ORDER BY entity_type, entity_alias"
+    " SELECT rs.host_uid, rs.entity_type, rs.entity_uid, rs.entity_alias,"
+    " rs.payload, rs.payload_hash, rs.cause, rs.scan_id, rs.vault_rev,"
+    " rs.occurred_at, rs.ingest_seq"
+    " FROM latest l JOIN registry_snapshots rs ON rs.ingest_seq = l.ingest_seq"
+    " WHERE l.rn = 1 AND l.tombstone = 0"
+    " ORDER BY rs.entity_type, rs.entity_alias"
 )
+REG_CURRENT_SQL = "WITH " + _REG_EFFECTIVE + _REG_CURRENT_FROM_EFFECTIVE
 
 # WRITE-SIDE forms of REG_CURRENT (chunk-B gauntlet, probed SEV-1 + r3):
 # every write-side suppression decision must ask what the READER would
@@ -910,15 +932,18 @@ REG_CURRENT_SQL = (
 # row's payload_hash: row-is-None = effectively deleted; the hash is what
 # the ingest gate compares against. The KEYS form is the emitter's bulk
 # read for tombstone eligibility. Both live HERE so zero Lane-C SQL is
-# assembled anywhere else.
+# assembled anywhere else. Each is REG_CURRENT's own text with a partition
+# bound inside `effective`, so the POINT form reads one entity's rows and
+# the KEYS form one host's, each on idx_registry_partition.
 REG_CURRENT_POINT_SQL = (
-    "SELECT payload_hash FROM (" + REG_CURRENT_SQL + ")"
-    " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ? LIMIT 1"
+    "SELECT payload_hash FROM (WITH " + _REG_EFFECTIVE_ROWS
+    + " WHERE rs.host_uid = ? AND rs.entity_type = ? AND rs.entity_uid = ?)"
+    + _REG_CURRENT_FROM_EFFECTIVE + ") LIMIT 1"
 )
 
 REG_CURRENT_KEYS_SQL = (
-    "SELECT entity_type, entity_uid FROM (" + REG_CURRENT_SQL + ")"
-    " WHERE host_uid = ?"
+    "SELECT entity_type, entity_uid FROM (WITH " + _REG_EFFECTIVE_ROWS
+    + " WHERE rs.host_uid = ?)" + _REG_CURRENT_FROM_EFFECTIVE + ")"
 )
 
 # SCD2 windows: each F11-valid row opens at its occurred_at and closes at
@@ -928,22 +953,24 @@ REG_CURRENT_KEYS_SQL = (
 # Select complete partitions first: a later alias must still close an old
 # alias's window. Only after LEAD may :ident select the returned rows.
 REG_HISTORY_SQL = (
-    "WITH " + _REG_EFFECTIVE + ", selected AS ("
+    "WITH selected AS ("
     " SELECT DISTINCT host_uid, entity_type, entity_uid"
-    " FROM registry_snapshots WHERE entity_alias = :ident OR entity_uid = :ident),"
+    " FROM registry_snapshots WHERE entity_alias = :ident OR entity_uid = :ident), "
+    + _REG_EFFECTIVE_ROWS +
+    " WHERE (rs.host_uid, rs.entity_type, rs.entity_uid) IN"
+    " (SELECT host_uid, entity_type, entity_uid FROM selected)),"
     " history AS ("
-    " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
-    " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
-    " e.occurred_at AS valid_from,"
-    " LEAD(e.occurred_at) OVER ("
+    " SELECT e.ingest_seq, e.instant_key, LEAD(e.ingest_seq) OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.instant_key, e.ingest_seq) AS valid_to,"
-    " e.ingest_seq"
-    " FROM effective e JOIN selected s"
-    " ON s.host_uid = e.host_uid AND s.entity_type = e.entity_type"
-    " AND s.entity_uid = e.entity_uid WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
-    " SELECT * FROM history WHERE entity_alias = :ident OR entity_uid = :ident"
-    " ORDER BY entity_type, entity_alias, claudlobby_instant_key(valid_from), ingest_seq"
+    "   ORDER BY e.instant_key, e.ingest_seq) AS next_seq"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
+    " SELECT rs.host_uid, rs.entity_type, rs.entity_uid, rs.entity_alias,"
+    " rs.tombstone, rs.payload, rs.payload_hash, rs.cause, rs.scan_id,"
+    " rs.occurred_at AS valid_from, nx.occurred_at AS valid_to, rs.ingest_seq"
+    " FROM history h JOIN registry_snapshots rs ON rs.ingest_seq = h.ingest_seq"
+    " LEFT JOIN registry_snapshots nx ON nx.ingest_seq = h.next_seq"
+    " WHERE rs.entity_alias = :ident OR rs.entity_uid = :ident"
+    " ORDER BY rs.entity_type, rs.entity_alias, h.instant_key, h.ingest_seq"
 )
 
 # Consecutive rows in a partition ARE the diff view (spec line 143). This
@@ -957,18 +984,18 @@ REG_HISTORY_SQL = (
 # LIMIT bounds returned payloads, not the SQL window's partition input.
 REG_CHANGES_SQL = (
     "WITH " + _REG_EFFECTIVE + ", ordered AS ("
-    " SELECT e.*,"
-    "  LAG(e.payload) OVER w AS prev_payload,"
-    "  LAG(e.payload_hash) OVER w AS prev_hash,"
-    "  LAG(e.tombstone) OVER w AS prev_tombstone"
-    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL"
-    " WINDOW w AS (PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.instant_key, e.ingest_seq))"
-    " SELECT entity_type, entity_alias, entity_uid, tombstone, payload,"
-    " prev_payload, prev_tombstone, cause, scan_id,"
-    " occurred_at, ingest_seq"
-    " FROM ordered"
-    " ORDER BY ingest_seq DESC LIMIT ?"
+    " SELECT e.ingest_seq, LAG(e.ingest_seq) OVER ("
+    "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.instant_key, e.ingest_seq) AS prev_seq"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
+    " SELECT rs.entity_type, rs.entity_alias, rs.entity_uid, rs.tombstone,"
+    " rs.payload, pv.payload AS prev_payload, pv.tombstone AS prev_tombstone,"
+    " rs.cause, rs.scan_id, rs.occurred_at, rs.ingest_seq"
+    " FROM (SELECT ingest_seq, prev_seq FROM ordered"
+    "  ORDER BY ingest_seq DESC LIMIT ?) o"
+    " JOIN registry_snapshots rs ON rs.ingest_seq = o.ingest_seq"
+    " LEFT JOIN registry_snapshots pv ON pv.ingest_seq = o.prev_seq"
+    " ORDER BY o.ingest_seq DESC"
 )
 
 # Trust: tombstones the F11 join does NOT validate. Nonzero means a scan
