@@ -15,9 +15,9 @@ not from a pane.
   Claude Code reads as none set, so the footer is the same under it.
 - In `N% until auto-compact`, N is the share left of the room up to the point
   where Claude Code compacts: the window less the autocompact buffer that
-  `/context` shows (33k tokens on 2.1.322). In `NN% context used`, N is the
-  share used, out of the window less the up-to-20,000 tokens Claude Code keeps
-  for its output.
+  `claude -p "/context"` shows (33k tokens on 2.1.322). In `NN% context used`,
+  N is the share used, out of the window less the up-to-20,000 tokens Claude
+  Code keeps for its output.
 - With autocompact off, the footer reads `Context low (N% remaining)` instead.
 - Where either form starts to render has not been measured.
 
