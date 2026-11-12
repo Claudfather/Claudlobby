@@ -1,0 +1,3 @@
+### Added — summary timeout diagnostics show the active overview phase
+
+When an overview read reaches its existing server query budget, its handled timeout can carry a static phase or statement label, bounded request and phase elapsed times, and a bounded SQLite progress callback count. The existing collapsed Summary diagnostics disclosure shows these fields only for an unambiguous server timeout; closing owner admission still wins. The fields contain no SQL, parameters, rows or host identifiers, make no additional read or retry, and do not isolate SQL cost or diagnose other endpoints. Seeing them on a connected computer requires the updated backend to be loaded and the matching UI to be published.

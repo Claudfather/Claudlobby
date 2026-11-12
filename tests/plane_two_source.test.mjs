@@ -258,6 +258,30 @@ test('overview diagnostics allowlist boundary evidence and retain it without add
   }
 });
 
+test('overview query details admit only static finite server diagnostics without new reads',async()=>{
+  const good={version:1,phase:'reports_since',statement:'_REPORTS_SINCE_SQL',elapsed_ms:10000,phase_elapsed_ms:7500,progress_callbacks:12};
+  for (const [detail,carrier,expected] of [
+    [good,null,good], [{...good,phase:'task_summary',statement:null},null,{...good,phase:'task_summary',statement:null}],
+    [undefined,null,null], [{...good,private:'must not project'},null,null],
+    [{...good,phase:'<private>'},null,null], [{...good,statement:'SELECT private'},null,null],
+    [{...good,elapsed_ms:'10000'},null,null], [{...good,elapsed_ms:Infinity},null,null],
+    [{...good,elapsed_ms:NaN},null,null], [{...good,elapsed_ms:true},null,null],
+    [{...good,phase_elapsed_ms:10001},null,null], [{...good,progress_callbacks:1000001},null,null],
+    [good,'timed_out',null],
+  ]) {
+    const {api,a,b}=await pair();
+    b.routes.set('/api/overview',{state:'unreadable',reason:'query_timeout',query_diagnostic:detail});
+    if (carrier) b.failures.set('/api/overview',carrier);
+    const response=await api.jget('/api/overview');
+    assert.deepEqual(response.data.sources[1].overview_query_diagnostic,expected);
+    assert.equal(response.data.sources[0].overview_query_diagnostic,null);
+    const count=b.calls.filter(c=>c.url==='/api/overview').length;
+    assert.deepEqual((await api.jget('/api/overview')).data.sources[1].overview_query_diagnostic,expected);
+    assert.equal(b.calls.filter(c=>c.url==='/api/overview').length,count);
+    api.dispose();a.reader.dispose();b.reader.dispose();
+  }
+});
+
 test('rejected overview projection never becomes the last successful summary timestamp',async()=>{
   const {api,a,b}=await pair();
   b.routes.set('/api/overview',ok({fleets:[{alias:'team',uid:fleet,bots:1}],totals:{bots:1}})); // Missing required host.
@@ -497,6 +521,18 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.match(nodes.get('overview').innerHTML,/Automatic summary retries paused/);
   assert.match(nodes.get('overview').innerHTML,/<details[^>]*><summary>Summary diagnostics<\/summary>/);
   assert.match(nodes.get('overview').innerHTML,/Computer query budget expired/);
+  env.data.sources[1].overview_query_diagnostic={version:1,phase:'reports_since',statement:'_REPORTS_SINCE_SQL',elapsed_ms:10000,phase_elapsed_ms:7000,progress_callbacks:12};
+  context.renderOverview(env);
+  assert.match(nodes.get('overview').innerHTML,/Active at budget check: Report count \(statement\)/);
+  assert.match(nodes.get('overview').innerHTML,/10000 ms/);
+  assert.match(nodes.get('overview').innerHTML,/7000 ms/);
+  assert.match(nodes.get('overview').innerHTML,/SQLite progress callbacks: 12/);
+  env.data.sources[1].overview_query_diagnostic={version:1,phase:'task_summary',statement:null,elapsed_ms:10000,phase_elapsed_ms:7000,progress_callbacks:12};
+  context.renderOverview(env);assert.match(nodes.get('overview').innerHTML,/Task summary \(helper\)/);
+  env.data.sources[1].overview_query_diagnostic.phase={toString(){throw new Error('must not stringify diagnostic');}};
+  context.renderOverview(env);assert.doesNotMatch(nodes.get('overview').innerHTML,/Active at budget check:/);
+  env.data.sources[1].overview_query_diagnostic={version:1,phase:'reports_since',statement:'_REPORTS_SINCE_SQL',elapsed_ms:'<private>',phase_elapsed_ms:7000,progress_callbacks:12};
+  context.renderOverview(env);assert.doesNotMatch(nodes.get('overview').innerHTML,/Active at budget check:|<private>/);
   env.data.sources[1].overview_failure_boundary='carrier_deadline';context.renderOverview(env);
   assert.match(nodes.get('overview').innerHTML,/Browser read deadline expired/);
   env.data.sources[1].overview_failure_boundary='<script>private<\/script>';context.renderOverview(env);
