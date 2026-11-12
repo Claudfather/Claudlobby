@@ -439,7 +439,7 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         from claudlobby import switches as sw
 
         row = sw.by_key("mcp-direct-launch")
-        assert "host cache warm" in row.arm and "host activate" in row.arm
+        assert "host cache warm" in row.arm and "host update apply FULL_COMMIT_SHA" in row.arm
         assert "restart" in row.arm
         assert "next tool call" not in row.arm and "next tool call" not in row.disarm
 
@@ -449,7 +449,7 @@ class TestTheSwitchIsNamedWhereTheOperatorLooks:
         from claudlobby import switches as sw
 
         row = sw.by_key("shared-config-isolation")
-        assert "config plan" in row.arm and "host activate" in row.arm
+        assert "host update apply FULL_COMMIT_SHA" in row.arm
         assert "next tool call" in row.arm and "next tool call" in row.disarm
         assert "at the bot's next restart" not in row.arm
 
@@ -521,8 +521,12 @@ class TestDoctorReadsTheComposedFile:
     def _compose(self, fleet_dir: Path, bot: str = "lead") -> Path:
         from claudlobby.composer import compose_bot
 
+        from claudlobby.paths import Paths
+        from tests.package_fixtures import git_package
+
         fleet = load_test_fleet(fleet_dir)
-        return compose_bot(fleet.bots[bot], fleet, make_paths(fleet_dir), log=lambda m: None)
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
+        return compose_bot(fleet.bots[bot], fleet, paths, log=lambda m: None)
 
     def _checks(self, fleet_dir: Path) -> dict:
         from claudlobby.doctor import DoctorReport, check_mcp_launch

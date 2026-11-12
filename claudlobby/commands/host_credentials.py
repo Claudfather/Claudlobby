@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
 
 
 def _reconcile(args) -> CommandOutput:
@@ -47,7 +48,6 @@ def _check(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
 
     if args.seed:
         raise CommandFailure("invalid_argument", "selected credential check cannot use the seed fleet")
@@ -60,15 +60,24 @@ def _check(args) -> CommandOutput:
                                    "unknown" if exc.effect_attempted else "unattempted"}) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet or root selector") from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "credential check requires the selected executable") from exc
     except (ActivationError, PlanError, ReleaseError, OperationContextError) as exc:
-        raise CommandFailure("conflict", "selected credential scope cannot be verified") from exc
+        # The unit's failure alert points at its journal, so the cause goes there
+        # under the refusal: an activation holding the host clears by itself (#2515).
+        raise CommandFailure("conflict", "selected credential scope cannot be verified",
+                             hint=str(exc)) from exc
+    lines = [f"{result.fleet}: credential probe tick completed; inspect "
+             f"{result.state_path} for provider status."]
+    if result.fleet_source_changed:
+        lines.append((f"{result.fleet}: fleet.yaml differs from current configuration; this run probed "
+                      "the committed roster. Apply the authored change through host update."
+                      if runtime_provenance(result) else
+                      f"{result.fleet}: fleet.yaml has changed since activation; this run probed "
+                      "the activated roster, and the change is probed once it is activated."))
     return CommandOutput({"fleet": result.fleet, "native_outcome": result.checks,
                           "credential_health": result.health,
-                          "state_path": str(result.state_path)}, result.release_id,
-                         (f"{result.fleet}: credential probe tick completed; inspect "
-                          f"{result.state_path} for provider status.",))
+                          "fleet_source_changed": result.fleet_source_changed,
+                          "state_path": str(result.state_path), **runtime_provenance(result)}, result.release_id,
+                         tuple(lines))
 
 
 def dispatch(args) -> CommandOutput:

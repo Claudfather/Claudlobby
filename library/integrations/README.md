@@ -23,11 +23,11 @@ For each external service a bot interacts with, an optional `<service>.md` doc t
 
 **CLI-based:** not auto-paired. List `integrations: [vercel, railway]` explicitly in the bot's stanza.
 
-To override auto-pairing, list `integrations: [...]` explicitly.
+An explicit `integrations:` list adds to auto-pairing; it never replaces it. A bot with `mcp: [github]` and `integrations: [vercel]` gets both docs.
 
 ## Frontmatter fields
 
-Every real integration file has YAML frontmatter with a `title:` matching its H1 (see the worked example below) — none of the 16 shipped files skip this. Two more fields show up in practice:
+Every real integration file has YAML frontmatter with a `title:` matching its H1 (see the worked example below) — none of the 16 shipped files skip this. The permission rule lists `tool_grants:`, `ask_grants:` and `deny_grants:` are described under Grant contract below. Two more fields show up in practice:
 
 - **`type: mcp|cli`** — labels which of the two flavors above the file is. Present on 12 of 16 files; the 4 that omit it (`github.md`, `homeassistant.md`, `notion.md`, `shopify.md`) fit one flavor just as clearly. Nothing in `composer.py`/`validator.py` reads this field — it's documentation-only, applied inconsistently even as that. Add it for clarity, but don't rely on it being enforced.
 - **`env_contract:`** — a real, code-consumed map of environment variables this integration needs, e.g. (`snowflake.md`):
@@ -48,7 +48,7 @@ Every real integration file has YAML frontmatter with a `title:` matching its H1
 
   `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, default_tier: host|root|fleet|bot, secret, source}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md` for the full field reference and the `secret` test. **`secret` is required here too**: `type: cli` integrations such as `neon.md`, `railway.md` and `snowflake.md` have no paired MCP fragment, so this is their ONLY declaration surface, and a gate that skipped it could never reach `RAILWAY_PERSONAL_TOKEN` or `SNOWFLAKE_PRIVATE_KEY`. A var declared on BOTH surfaces must carry the SAME `secret` value — the validator rejects a disagreement, because `required_vars` yields both records and the fail-loud rung would read whichever it saw first) to fold these vars into the fleet's environment-variable contract, which `claudlobby host doctor` checks against `.env`. 10 of 25 files use it today — add it whenever an integration depends on env vars not already declared by a paired MCP fragment. (The figure read `5 of 16` and had been stale for some time independently of any one change; a count in prose is a fact with a shelf life, so treat it as indicative and re-derive before citing it. **Anchor the pattern** — `grep -rl '^env_contract:' library/integrations/*.md`: the unanchored form over-counts by matching prose ABOUT the field, including this file, and `meta-business.md`'s frontmatter comment explaining why it deliberately declares none. A file is counted for declining to have the thing, which is how the `11` this sentence used to read got there.)
 
-**A `type: cli` integration with NO `env_contract:` at all is invisible to the credential machinery**, and that is a third class distinct from "entry exists but lacks `secret`" — adding a field to an entry cannot help a var that has no entry. `collect_env_contracts` never sees it, so it is never scaffolded into a `.env`, never checked by `doctor`, and can never fail loud. A prose mention in a skill is **not** a declaration.
+**A `type: cli` integration with NO `env_contract:` at all is invisible to the credential machinery**, and that is a third class distinct from "entry exists but lacks `secret`" — adding a field to an entry cannot help a var that has no entry. `collect_env_contracts` never sees it, so it is never scaffolded into a `.env`, never checked by `host doctor`, and can never fail loud. A prose mention in a skill is **not** a declaration.
 
 Estate audit (#1226): `vercel.md` and `digitalocean.md` declare no contract. Exactly one real credential is affected — `VERCEL_TOKEN`, present in a fleet `.env` and used as `vercel ls --token=$VERCEL_TOKEN` by `library/skills/deploy-status/`.
 
@@ -71,6 +71,23 @@ tool_grants:
 ```
 
 Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. For an MCP-paired integration the prefix is rewritten per instance (`gws` + instance `personal` → `mcp__gws-personal__*`); a connector-backed grant (`mcp__claude_ai_*`, no wire fragment) is emitted literally. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash`. Validation is folder-aware: a `dir/` folder-expansion equip resolves every member integration's contract, so a malformed grant nested in an expanded folder is not silently skipped.
+
+An integration may also declare `ask_grants:` and `deny_grants:` beside `tool_grants:`. Each entry is one Claude Code permission rule, and a list that would not compose as written (a value that is not a list, or an entry that is not a rule) is an error naming the integration; a bare `Bash` is not flagged in either list. `library/skills/README.md` has the longer contract. `ask_grants` are composed into `permissions.ask`: Claude Code asks before running a matching call in every permission mode, auto included, even where an allow rule also matches, and the fleet grants one by naming the same rule, in exact text, under `tool_permissions.allow`, which drops it from `permissions.ask` (for an `mcp__` rule, the per-instance name it is composed under). `deny_grants` are appended to `permissions.deny`: a matching call is refused in every permission mode, and no allow rule overrides it. An `mcp__<name>__` rule in either list is rewritten per server instance exactly as a `tool_grants` entry is, and the read-only contract (`documentation/decisions/permissions-model.md`, "Read-Only MCP Contracts") does not apply to these lists: asking about or refusing a write tool is what they are for. A rule matches the command's text, so it stops the plain form of a call and not every way of making it; do not present one as the only gate on a change.
+
+## Requirements (`requires:`)
+
+An integration can bring the skills and protocols it needs, so that one entry equips all of them:
+
+```yaml
+---
+title: Gadget
+requires:
+  skills: [gadget]
+  protocols: [gadget-incidents]
+---
+```
+
+A bot that equips the integration, by listing it under `integrations:` or through auto-pairing, composes as if it had declared those skills and protocols itself: each skill is linked under `.claude/skills/` and granted in `settings.local.json`, and each protocol becomes a section of `CLAUDE.md`. The skills a required protocol requires in turn come too. A name the bot already declares is not added twice. Deleting the integration removes what it brought, except what the bot declares itself. A required name that no library holds is a `config validate` error, reported once for the file however many bots equip the integration, and even when none does.
 
 ## Example
 

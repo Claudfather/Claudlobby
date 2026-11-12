@@ -45,6 +45,9 @@ TIERS = ("host", "root", "fleet", "bot")
 #: test cannot walk an unbounded history; stated rather than silent, and the
 #: failure message names the bound it searched.
 _HISTORY_SCAN_CAP = 60
+# start-bot.sh moved from lib/ in #1989, and `git log -- <path>` does not follow
+# a move, so the history search names both paths.
+_START_BOT_PATHS = ("claudlobby/_runtime_scripts/start-bot.sh", "lib/start-bot.sh")
 
 # The pre-#1226 inline block from claudlobby/_runtime_scripts/start-bot.sh, transcribed verbatim.
 # `test_the_transcription_is_faithful` pins it against git history so this
@@ -172,7 +175,7 @@ def test_the_transcription_is_faithful() -> None:
     drifted toward the new behaviour would make the agreement test compare the
     new door with itself — green, and evidence of nothing.
 
-    Asserts that SOME revision of ``claudlobby/_runtime_scripts/start-bot.sh`` carried all four legacy
+    Asserts that SOME revision of start-bot.sh, at either of its paths, carried all four legacy
     lines together, rather than pinning one SHA. A single-SHA pin is only
     correct until this change lands (after which HEAD holds the new block) and
     ``git log -S`` returns the commit that INTRODUCED a string, which for these
@@ -193,7 +196,7 @@ def test_the_transcription_is_faithful() -> None:
     """
     log = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "log", "--format=%H", "-n", str(_HISTORY_SCAN_CAP),
-         "--", "claudlobby/_runtime_scripts/start-bot.sh"],
+         "--", *_START_BOT_PATHS],
         capture_output=True, text=True, timeout=120,
     )
     if log.returncode != 0 or not log.stdout.strip():
@@ -208,20 +211,22 @@ def test_the_transcription_is_faithful() -> None:
     for line in wanted:
         assert line in LEGACY_BLOCK, f"transcription lost: {line}"
     for sha in shas:
-        blob = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show", f"{sha}:claudlobby/_runtime_scripts/start-bot.sh"],
-            capture_output=True, text=True, timeout=60,
-        ).stdout
-        if all(line in blob for line in wanted):
-            return
+        for path in _START_BOT_PATHS:
+            blob = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "show", f"{sha}:{path}"],
+                capture_output=True, text=True, timeout=60,
+            ).stdout
+            if all(line in blob for line in wanted):
+                return
+    paths = " or ".join(_START_BOT_PATHS)
     if _history_is_truncated():
         pytest.skip(
             f"history is truncated (shallow clone; {len(shas)} revision(s) of "
-            f"claudlobby/_runtime_scripts/start-bot.sh reachable) — cannot distinguish a drifted "
+            f"{paths} reachable) — cannot distinguish a drifted "
             f"transcription from a block that predates the clone depth"
         )
     pytest.fail(
-        f"no revision among the last {len(shas)} touching claudlobby/_runtime_scripts/start-bot.sh carried "
+        f"no revision among the last {len(shas)} touching {paths} carried "
         f"the transcribed legacy block — the transcription has drifted"
     )
 

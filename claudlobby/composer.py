@@ -38,6 +38,10 @@ from .context import native_environment
 from .resources import selected_cli
 from .config import (
     GITHUB_APP_ENV_VARS,
+    _has_telegram_channel,
+    telegram_channel_rel,
+    telegram_handle,
+    DEFAULT_SESSION_RESUME_COMMAND,
     BotConfig,
     FleetConfig,
     load_fleet,
@@ -48,7 +52,7 @@ from .config import (
     HOST_OVERRIDE_ENV,
     host_override_path,
 )
-from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, NATIVE_1M_MODELS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -56,6 +60,7 @@ from .loader import (
     iter_guardrail_permissions,
     iter_library_requires,
     iter_skill_grants,
+    load_library_item,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -355,6 +360,28 @@ def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
     return contract
 
 
+def _mcp_deprecation(paths: Paths, name: str) -> str | None:
+    """The ``_deprecated`` note of MCP fragment *name*, or ``None`` when it is current.
+
+    A deprecated fragment still composes for a bot that lists it: its server is
+    wired, and its ``_permissions_contract`` still grants its reads and keeps its
+    writes prompting. The note names what to use instead, and ``config validate``
+    repeats it for the bots that list the fragment. A ``_deprecated`` key with no
+    note still marks the fragment. Malformed JSON reads as current, as it does for
+    :func:`_load_mcp_contract`; :func:`compose_mcp_json` refuses that fragment.
+    """
+    try:
+        frag = _load_mcp_fragment(name, paths)
+    except ValueError:
+        return None
+    if not isinstance(frag, dict) or "_deprecated" not in frag:
+        return None
+    note = frag["_deprecated"]
+    if isinstance(note, str) and note.strip():
+        return note.strip()
+    return "no replacement is named"
+
+
 def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     """Resolve MCP permission patterns from fragment _permissions_contract fields.
 
@@ -499,19 +526,49 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
         if not tool_grants:
             continue
         _assert_read_only_grants(name, tool_grants, paths)
-        entry = next((e for e in bot.mcp if e.name == name), None)
-        if entry is None:
-            grants.extend(tool_grants)
-            continue
-        prefix = f"mcp__{name}__"
-        for grant in tool_grants:
-            if grant.startswith(prefix):
-                rest = grant[len(prefix) :]
-                for instance in entry.instances:
-                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
-            else:
-                grants.append(grant)
+        grants.extend(_instance_rules(bot, name, tool_grants))
     return grants
+
+
+def _instance_rules(bot: BotConfig, name: str, rules: list[str]) -> list[str]:
+    """``rules`` with each ``mcp__<name>__`` prefix rewritten per instance.
+
+    Applies when a ``bot.mcp`` entry shares the integration's name (``default`` ->
+    ``mcp__<name>__``; named -> ``mcp__<name>-<instance>__``); every other rule,
+    and every rule of an integration with no such entry, is kept as written.
+    """
+    entry = next((e for e in bot.mcp if e.name == name), None)
+    if entry is None:
+        return list(rules)
+    prefix = f"mcp__{name}__"
+    out: list[str] = []
+    for rule in rules:
+        if rule.startswith(prefix):
+            rest = rule[len(prefix) :]
+            for instance in entry.instances:
+                out.append(f"mcp__{entry.output_name(instance)}__{rest}")
+        else:
+            out.append(rule)
+    return out
+
+
+def _resolve_integration_rules(bot: BotConfig, paths: Paths, key: str) -> list[str]:
+    """The ``ask_grants`` or ``deny_grants`` (``key``) of the bot's effective integrations.
+
+    #2476. An ``mcp__<name>__`` rule is rewritten per instance, as a grant is in
+    :func:`_resolve_integration_grants`, so it names the server the bot runs: a
+    rule left naming another server would never match, and an ask or deny that
+    never matches fails open. The read-only contract does not apply: asking about
+    or refusing a write tool is what these lists are for.
+    """
+    from .loader import iter_integration_grants
+
+    rules: list[str] = []
+    for name, declared in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths), key=key
+    ):
+        rules.extend(_instance_rules(bot, name, declared))
+    return rules
 
 
 # ----------------------------------------------------------------------
@@ -582,19 +639,6 @@ def _channel_plugins(channels: list[str]) -> list[str]:
     return plugins
 
 
-def _has_telegram_channel(channels: list[str]) -> bool:
-    """True when a bot launches with a Telegram channel.
-
-    A channel entry names the channel either bare (``telegram``) or as a
-    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
-    both mean the same channel. ``channels: []`` — the documented way to declare
-    a bot with no channel — yields False.
-    """
-    return any(
-        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
-    )
-
-
 def account_dir(bot: BotConfig, fleet: FleetConfig) -> str:
     """The Claude config dir *bot* runs with, as the manifest spells it (often
     ``~/.claude``): its account's dir, else the fleet's default account. One
@@ -629,43 +673,6 @@ def _account_enabled_plugins(bot: BotConfig, fleet: FleetConfig, paths: Paths) -
     ):
         raise ValueError(f"selected account enabledPlugins at {source} must map names to booleans")
     return set(enabled)
-
-
-def telegram_channel_rel(handle: str) -> str:
-    """A channel bot's Telegram state dir, relative to the home dir: the ONE
-    definition behind its three consumers (#1786), which need it in two forms.
-    ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
-    exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
-    (#976); ``access.json`` and ``fleet_alert_sender_state_dir`` take it
-    absolute, as ``Path.home() / <this>``."""
-    return f".claude/channels/telegram-{handle}"
-
-
-def telegram_handle(bot: BotConfig) -> str | None:
-    """This bot's Telegram handle, or None when it is not a channel bot.
-
-    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
-    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
-    since #43; the readers of the handle VARIABLE never did. So a fleet using
-    the documented default composed a working state dir, a live bridge, and no
-    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
-    the bot had no channel at all: bridge_state returned `no_handle` for a
-    provably live bridge, halting rolling-restart on its first bot (#1107), and
-    creds-check's Telegram probe skipped every bot on the host (#1097). One
-    resolver, so the default cannot drift apart again.
-
-    Returns None for a bot with no Telegram channel AND no declared handle —
-    the genuine non-channel class, which must stay expressible because
-    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
-    (#901) both rest on it. An explicitly declared handle still wins outright,
-    channel or not: it names an existing state dir, and silently re-pointing
-    that path would orphan a live channel.
-    """
-    if bot.telegram.handle:
-        return bot.telegram.handle
-    if _has_telegram_channel(bot.channels):
-        return bot.bot_id
-    return None
 
 
 def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
@@ -862,7 +869,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 """
     app = bot.github_app
     if app:
-        app_helper = paths.lib / "git-credential-github-app"
+        app_helper = paths.package.runtime_native / "git-credential-github-app"
         # One fork for every scoped-vs-generic artifact below: None = all of
         # github.com. App tokens are HTTPS-only either way, which is what the
         # insteadOf rewrites are for.
@@ -1012,7 +1019,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    config_dir = account_dir(bot, fleet)
+    config_dir = str(account_settings_path(bot, fleet, paths).parent)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
@@ -1340,15 +1347,41 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
         )
 
+    # #2145 P3: clauDNA reads these at session open. Its summary_gate checks
+    # SESSION_SUMMARY before the bot/headless gate (project.py): harvest alone
+    # cannot summarize a bot. Always compose 0 for an unarmed bot (disabled).
+    lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
+    if bot.claudna.harvest is not None:
+        lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+    # #941: clauDNA's PreCompact hook refuses every other compaction until
+    # /claudna:capture runs, and nobody at a bot's pane runs it. Its own default
+    # is on, so compose 0 unless the fleet arms it.
+    lines.append(f"export CLAUDNA_PRECOMPACT_REFLECT={1 if bot.claudna.precompact_reflect else 0}")
+    # #1053: 1 where this compose adds the engine's session-loop hooks, PreCompact
+    # among them, by the same test as the hook merge, so the two cannot disagree.
+    lines.append(f"export CLAUDRON_SESSION_LOOP={1 if claudron_session_loop_composed(bot, bot_dir) else 0}")
+
+    # Default only when absent: inherited values and later .env tiers keep
+    # their existing precedence, including explicit-empty resume disabling.
+    # An authored bot.env assignment below retains its existing literal form.
+    if "SESSION_RESUME_COMMAND" not in bot.env:
+        lines.append('export SESSION_RESUME_COMMAND="${SESSION_RESUME_COMMAND-'
+                     + _configured_resume_command(bot) + '}"')
+
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
     plugins_required = list(fleet.plugins.required)
+    if fleet.plugins.startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
+    if fleet.plugins.startup_policy == "verify-existing":
+        lines.append("export FLEET_PLUGIN_STARTUP_POLICY=verify-existing")
     for _chan_plugin in _channel_plugins(bot.channels):
         if _chan_plugin not in plugins_required:
             plugins_required.append(_chan_plugin)
     if plugins_required:
-        lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+        if fleet.plugins.startup_policy == "manage":
+            lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
             f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
@@ -1437,9 +1470,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # A bot with no declared prompt begins through the universal fleet-ops
         # skill, whose exact grants cover context show and brief. Two forms,
         # because the brief can arrive two ways:
-        #   - brief.on_start armed: the bot's own SessionStart hook already
-        #     injected its brief, so the prompt points at what is already in
-        #     context rather than naming a read the bot must run itself.
+        #   - brief.on_start armed: reuse the hook's usable payload, with one
+        #     bounded normal read only when that payload did not arrive.
         #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
         # (claudlobby/_runtime_scripts/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
@@ -1447,7 +1479,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         # here would run as a real command substitution at every boot,
         # not render as text.
         preface = (
-            "Welcome back. Read your CLAUDE.md and invoke /fleet-ops. "
+            "Welcome back. Read your CLAUDE.md, including its automatically supplied "
+            "fleet-ops section. If that section is unavailable, invoke /fleet-ops; "
+            "reconsult /fleet-ops when needed. "
             "Run claudlobby --json context show to confirm your generated "
             "fleet and bot. If a read refuses, report its error and stop; "
             "do not guess context from environment variables. "
@@ -1455,7 +1489,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         if _boot_brief_armed(bot):
             default = (
                 preface + "Then read the fleet-brief you were given at session "
-                "start. If it shows open rows of "
+                "start. Reuse a usable injected brief even if individual sections "
+                "are unavailable. Only if no usable boot payload arrived or the "
+                "hook printed fleet-brief unavailable (rc ...), run "
+                "claudlobby --json brief --startup-wait 120 once with a Bash tool "
+                "timeout of 180000 ms. If that read refuses, report its error and "
+                "stop; do not activate or resend anything. If the brief shows open rows of "
                 "yours, continue them and report; if anything is blocked, "
                 "say so. Otherwise idle and await messages."
             )
@@ -1466,7 +1505,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             # characters, not the glyph (measured via a real
             # private composition).
             default = (
-                preface + "Then run claudlobby --json brief and act on what it "
+                preface + "Then run claudlobby --json brief --startup-wait 120 "
+                "once with a Bash tool timeout of 180000 ms. Act on what it "
                 "shows: continue your own open rows, report anything "
                 "blocked, then idle and await messages."
             )
@@ -1528,7 +1568,7 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
 # ----------------------------------------------------------------------
 
 
-def _scheduler_tool_path() -> str:
+def _scheduler_tool_path(paths: Paths | None = None) -> str:
     """PATH for composed timer units so their jobs can resolve fleet tools.
 
     systemd and launchd hand a scheduled job a minimal PATH that excludes
@@ -1548,8 +1588,10 @@ def _scheduler_tool_path() -> str:
     cannot override its CLI. Other tool directories preserve their ordering.
     """
     home = Path.home()
+    installation = paths.package.installation if paths is not None else None
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     segments = [
-        str(selected_cli().parent),
+        str(cli.parent),
         "/usr/local/bin",
         "/usr/bin",
         "/bin",
@@ -1651,6 +1693,19 @@ def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Pat
                 continue
             _add(src.name, src)
     return linked
+
+
+def compose_fleet_ops_orientation(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Load the effective guide as library prose, without frontmatter or grants."""
+    skills = resolve_effective_skills(bot, fleet, paths,
+                                      is_manager=bot.bot_id in fleet.manager_bots())
+    source = resolve_skill_sources(paths, skills, _log.warning).get("fleet-ops")
+    if source is None:
+        raise ValueError("the universal fleet-ops skill is unavailable")
+    item = load_library_item(source / "SKILL.md")
+    if item is None or not item.body.strip():
+        raise ValueError("the universal fleet-ops guide is empty")
+    return item.body
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1951,7 +2006,8 @@ def resolve_effective_protocols(
 ) -> list[str]:
     """The protocols a bot is ACTUALLY composed with: the declared list plus
     the system defaults that are available to this fleet (manager-role
-    defaults only for a manager), then the fleet-fit exclusions applied to
+    defaults only for a manager) and the ``requires.protocols`` entries of
+    its effective integrations, then the fleet-fit exclusions applied to
     the FINAL list. ONE definition: the compose path and the plane's
     registry keyframe both call this, so what the registry records is what
     the bot runs with — a keyframe of the declared-only list read every
@@ -1968,6 +2024,7 @@ def resolve_effective_protocols(
     facts = defaults.Facts(
         shared_docs=paths.shared_docs is not None,
         vault_wired=bot_is_vault_wired(bot),
+        telegram_channel=_has_telegram_channel(bot.channels),
     )
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
@@ -1976,6 +2033,16 @@ def resolve_effective_protocols(
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
+    # An integration brings the protocols its ``requires.protocols`` names, so
+    # one ``integrations:`` line equips them and deleting the line removes
+    # them. They join before the exclusions, which apply to them as they do
+    # to a declared protocol.
+    for _name, requires in iter_library_requires(
+        paths, "integrations", resolve_effective_integrations(bot, paths)
+    ):
+        for required in requires.get("protocols", []):
+            if required not in protocol_names:
+                protocol_names.append(required)
     return defaults.resolve_exclusions(protocol_names, facts)
 
 
@@ -2015,7 +2082,8 @@ def resolve_effective_skills(
     ``fleet-ops`` guide, ``briefing`` when it equips a ``briefing:`` stanza,
     the registry's skill defaults for the bot's roles (``status`` for every
     manager, #2010) unless the fleet or the bot switched them off, and every
-    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+    ``requires.skills`` entry of its EFFECTIVE protocols and integrations
+    (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -2045,6 +2113,7 @@ def resolve_effective_skills(
             shared_docs=paths.shared_docs is not None,
             vault_wired=bot_is_vault_wired(bot),
             available_skills=frozenset(paths.expand_skill_folder("")),
+            telegram_channel=_has_telegram_channel(bot.channels),
         )
         for name in defaults.resolve(
             "skills", default_roles(bot, fleet, is_manager=is_manager)
@@ -2054,7 +2123,11 @@ def resolve_effective_skills(
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
-    for _name, requires in iter_library_requires(paths, "protocols", protocol_names):
+    integration_names = resolve_effective_integrations(bot, paths)
+    for _name, requires in (
+        *iter_library_requires(paths, "protocols", protocol_names),
+        *iter_library_requires(paths, "integrations", integration_names),
+    ):
         for required in requires.get("skills", []):
             if required not in skills:
                 skills.append(required)
@@ -2099,10 +2172,10 @@ def composed_text_sources(
 ) -> list[tuple[Path, str]]:
     """``(source file, text)`` for everything a bot is TOLD: the expertise,
     voice and library items its CLAUDE.md composes, the charter a manager
-    composes, and every markdown file of every skill it is linked (the text a
-    skill hands the model). Scripts are left out on purpose: the model runs a
-    script, it does not retype its lines, and a deny rule never gates what a
-    script does itself."""
+    composes, every markdown file of every skill it is linked and the shared
+    partials beside those skills (the text a skill hands the model). Scripts
+    are left out on purpose: the model runs a script, it does not retype its
+    lines, and a deny rule never gates what a script does itself."""
     ctx = _bot_template_context(bot, fleet, paths)
     is_manager = bot.bot_id in fleet.manager_bots()
     out: list[tuple[Path, str]] = []
@@ -2136,6 +2209,8 @@ def composed_text_sources(
     for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
         for md in sorted(src.rglob("*.md")):
             _add_file(md)
+    for partial in paths.skill_partials().values():
+        _add_file(partial)
     return out
 
 
@@ -2157,6 +2232,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+    # The role test compose_settings_local denies the sudo family on.
+    privilege_runners = () if is_manager else PRIVILEGE_RUNNERS
 
     # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
     # than named here. This used to be a literal `append("shared-documentation")`
@@ -2241,6 +2318,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
+        privilege_runners=privilege_runners,
+        fleet_ops_body=compose_fleet_ops_orientation(bot, fleet, paths),
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
@@ -2319,16 +2398,22 @@ PUBLIC_WRITE_GUARD_MATCHER = "Bash|mcp__.*github.*"
 
 
 @functools.cache
-def _brief_cli_probe() -> tuple[str | None, str]:
+def _brief_cli_probe(installation=None, source: Path | None = None) -> tuple[str | None, str]:
     """Certify and pin the selected release CLI, never a stale PATH entry."""
     try:
-        exe = str(selected_cli())
+        exe = str(selected_cli(installation=installation) if installation is not None else selected_cli())
     except RuntimeError as exc:
         return None, str(exc)
     try:
-        r = subprocess.run(
-            [exe, "brief", "--help"], capture_output=True, text=True, timeout=15
-        )
+        # Probe candidate code, but emit the stable destination. The active
+        # installation may still be running the previous commit during render.
+        argv = [exe, "brief", "--help"]
+        if installation is not None:
+            argv = [sys.executable, "-I", "-B", "-c",
+                    "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
+                    "runpy.run_module('claudlobby',run_name='__main__')",
+                    str(source), "brief", "--help"]
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"probing `claudlobby brief --help` failed: {e}"
     if r.returncode != 0:
@@ -2370,7 +2455,8 @@ def _with_brief_boot_hook(
     fleet_arg = f" --fleet {fleet}" if fleet else ""
     fallback = (
         f'echo "fleet-brief unavailable (rc $?) — '
-        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
+        f'claudlobby{fleet_arg} brief --bot {bot_id} --startup-wait 120; '
+        f'use a Bash tool timeout of 180000 ms for this one read"'
     )
     cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
     out = {k: list(v) for k, v in hooks.items()}
@@ -2519,6 +2605,19 @@ def _claudron_hook_vault_root(bot: BotConfig, bot_dir: Path) -> str | None:
     return str(bot_dir / Path(bot.claudron_vault_path).expanduser())
 
 
+def claudron_session_loop_composed(bot: BotConfig, bot_dir: Path) -> bool:
+    """Whether a compose adds the engine's session-loop hooks, its ``hook
+    pre-compact`` among them, to this bot's settings (#1053).
+
+    One test for the three places that state it: the hook merge in
+    ``compose_settings_local``, ``CLAUDRON_SESSION_LOOP`` in ``bot.conf``, and
+    ``bot show``'s ``precompact`` block. The loop resolves on and a vault root
+    resolves; an explicit ``claudron_session_loop: true`` with no vault composes
+    no hook, so it reads false here too.
+    """
+    return _session_loop_enabled(bot) and _claudron_hook_vault_root(bot, bot_dir) is not None
+
+
 def _claudron_hook_entries(executable: str, vault_root: str) -> dict[str, list]:
     """The engine's session-loop hook entries in Claude Code settings shape.
 
@@ -2605,6 +2704,33 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
+def _configured_resume_command(bot: BotConfig) -> str:
+    """Authored command, not runtime discovery; preserve explicit empty."""
+    return bot.env.get("SESSION_RESUME_COMMAND", DEFAULT_SESSION_RESUME_COMMAND)
+
+
+def _resolve_resume_permission(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                               effective_skills: list[str]) -> list[str]:
+    """Grant only the configured entry's whole Skill invocation.
+
+    Equipment is authored here; installed/callable proof remains the runtime
+    capability owner's job. No .env/account reads or native permission matcher.
+    A runtime-only override needs its own explicit tool_permissions.allow.
+    """
+    first = _configured_resume_command(bot).partition(" ")[0]
+    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
+        return []
+    name = first[1:]
+    if ":" in name:
+        plugin = name.split(":", 1)[0]
+        selected = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+        if not any(ref.split("@", 1)[0] == plugin for ref in selected):
+            return []
+    elif name not in resolve_skill_sources(paths, effective_skills, _log.warning):
+        return []
+    return [f"Skill({name})"]
+
+
 def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     """Auto-derive Skill() permission patterns from a resolved skill list.
 
@@ -2620,7 +2746,9 @@ def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     return patterns
 
 
-def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+def _resolve_skill_grants(
+    skills: list[str], paths: Paths, key: str = "tool_grants"
+) -> list[str]:
     """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
@@ -2631,11 +2759,12 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
     ``tool_grants`` path; de-duplication against the allow list happens in
     :func:`compose_settings_local`. Takes the EFFECTIVE skill list
     (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
-    reason as :func:`_resolve_skill_permissions`.
+    reason as :func:`_resolve_skill_permissions`. ``key`` reads the skills'
+    ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, skills)
+        for _name, grants in iter_skill_grants(paths, skills, key=key)
         for grant in grants
     ]
 
@@ -2666,8 +2795,10 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             "Bash(claudlobby --json assignment deliver *)",
             "Bash(claudlobby --json task withdraw *)",
             "Bash(claudlobby --json task reassign *)",
+            "Bash(claudlobby --json assignment reschedule *)",
             "Bash(claudlobby --json task escalate *)",
             "Bash(claudlobby --json task nudge *)",
+            "Bash(claudlobby --json task move *)",
             "Bash(claudlobby --json workstream open *)",
             "Bash(claudlobby --json workstream progress *)",
             "Bash(claudlobby --json workstream renew *)",
@@ -2696,16 +2827,21 @@ def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
             grants.append(f"Bash(claudlobby --json bot logs {target})")
             grants.append(f"Bash(claudlobby --json bot logs {target} --lines *)")
             grants.append(f"Bash(claudlobby --json bot handoff {target})")
+            grants.append(f"Bash(claudlobby --json bot handoff {target} --check)")
             grants.append(f"Bash(claudlobby --json bot interrupt {target})")
             grants.append(f"Bash(claudlobby --json bot compact {target})")
             for verb in ("start", "stop", "restart"):
                 grants.append(f"Bash(claudlobby --json bot {verb} {target})")
+            grants.append(f"Bash(claudlobby --json bot stop {target} --reason *)")
             grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
-    # Any generated bot can request only its own context-preserving restart.
+            grants.append(f"Bash(claudlobby --json bot restart {target} --fresh)")
+    # Any generated bot can request only its own restart: continuing its session,
+    # or into a fresh one that resumes from its saved handoff (#2696).
     grants.append(f"Bash(claudlobby --json bot session {bot.bot_id})")
     grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id})")
     grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id} --lines *)")
     grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id} --fresh)")
     return grants
 
 
@@ -2817,6 +2953,21 @@ def _resolve_guardrail_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
+#: The sudo family, which a worker may not run and its fleet manager may: a
+#: worker's settings deny each command (``WORKER_SUDO_DENY``), and its
+#: CLAUDE.md names them with what to do when the deny refuses one.
+PRIVILEGE_RUNNERS = ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
+
+#: The sudo family a worker's settings deny, each command by bare name and by
+#: absolute path. A guard rail, not a wall: the routes it cannot see are in
+#: ``documentation/decisions/permissions-model.md`` (Workers' privilege denies).
+WORKER_SUDO_DENY = tuple(
+    f"Bash({prefix}{name} *)"
+    for name in PRIVILEGE_RUNNERS
+    for prefix in ("", "/usr/bin/", "/bin/")
+)
+
+
 def _assert_grant_superset(bot_id: str, legacy: list[str], new: list[str]) -> None:
     """Fail generation unless the new integration ``tool_grants`` cover every legacy grant.
 
@@ -2870,16 +3021,27 @@ def compose_settings_local(
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Operator-only destructive doors are never bot equipment. These narrow
-    # command denies catch ordinary direct invocations before the CLI guard;
-    # native ancestry still supplies the selected-host accidental-context check.
+    # Operator-only doors, destructive or deciding for a human, are never bot
+    # equipment. These narrow command denies catch ordinary direct invocations
+    # before the CLI guard; native ancestry still supplies the selected-host
+    # accidental-context check. A bot's own permission verbs (request, check,
+    # show) stay reachable.
     deny_patterns.extend((
         "Bash(claudlobby bot remove *)", "Bash(claudlobby * bot remove *)",
         "Bash(claudlobby fleet move *)", "Bash(claudlobby * fleet move *)",
         "Bash(claudlobby host job run *)", "Bash(claudlobby * host job run *)",
         "Bash(claudlobby host repos pull *)", "Bash(claudlobby * host repos pull *)",
         "Bash(claudlobby host channels approve*)", "Bash(claudlobby * host channels approve*)",
+        "Bash(claudlobby host owner *)", "Bash(claudlobby * host owner *)",
+        "Bash(claudlobby task permission approve*)", "Bash(claudlobby * task permission approve*)",
+        "Bash(claudlobby task permission decline*)", "Bash(claudlobby * task permission decline*)",
+        "Bash(claudlobby task permission revoke*)", "Bash(claudlobby * task permission revoke*)",
     ))
+
+    # Workers may not raise their own privileges; the fleet manager may.
+    is_manager = bot.bot_id in fleet.manager_bots()
+    if not is_manager:
+        deny_patterns.extend(WORKER_SUDO_DENY)
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
     # dir. Two rules, both DOUBLE-slash, and every part of that shape is a fix
@@ -2963,7 +3125,19 @@ def compose_settings_local(
     # alone already covers legacy, the precondition for cutting _permissions_contract.
     legacy_grants = _resolve_mcp_permissions(bot, paths)
     integration_grants = _resolve_integration_grants(bot, paths)
-    _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
+    # A deprecated fragment keeps granting its reads from its own contract until it
+    # is removed, and no integration is meant to cover them, so the gate skips it.
+    deprecated = tuple(
+        f"mcp__{entry.output_name(instance)}__"
+        for entry in bot.mcp
+        if _mcp_deprecation(paths, entry.name) is not None
+        for instance in entry.instances
+    )
+    _assert_grant_superset(
+        bot.bot_id,
+        [g for g in legacy_grants if not g.startswith(deprecated)],
+        integration_grants,
+    )
     _append_unique(allow_patterns, (*legacy_grants, *integration_grants))
 
     # Layer 4: Channel/plugin tools (auto-derived from config)
@@ -2971,13 +3145,12 @@ def compose_settings_local(
 
     # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
     # declared, plus every requires.skills entry of the bot's effective
-    # protocols, spec §10 — computed once and shared with layer 5b so a
-    # required skill is granted exactly like a declared one, never only
-    # linked (cycle-1 B8)).
-    effective_skills = resolve_effective_skills(
-        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
-    )
+    # protocols and integrations, spec §10 — computed once and shared with
+    # layer 5b so a required skill is granted exactly like a declared one,
+    # never only linked (cycle-1 B8)).
+    effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
+    _append_unique(allow_patterns, _resolve_resume_permission(bot, fleet, paths, effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
@@ -3005,6 +3178,25 @@ def compose_settings_local(
     bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
 
+    # Ask and deny rules that skills and integrations declare (#2476). An ask
+    # rule prompts in every permission mode, auto included, even where an allow
+    # rule also matches, so no library grant can allow what a source asks about.
+    # The fleet grants an asked rule by naming it, exactly, under
+    # tool_permissions.allow, which drops it from the ask list. A list that would
+    # not compose as written raises ValueError naming its source
+    # (loader._read_tool_grants), so no rule of it reaches the settings.
+    fleet_allow = set(bot.tool_permissions.allow)
+    ask_patterns: list[str] = []
+    _append_unique(
+        ask_patterns, _resolve_skill_grants(effective_skills, paths, key="ask_grants")
+    )
+    _append_unique(ask_patterns, _resolve_integration_rules(bot, paths, "ask_grants"))
+    ask_patterns = [p for p in ask_patterns if p not in fleet_allow]
+    _append_unique(
+        deny_patterns, _resolve_skill_grants(effective_skills, paths, key="deny_grants")
+    )
+    _append_unique(deny_patterns, _resolve_integration_rules(bot, paths, "deny_grants"))
+
     # Ensure base tools are present whenever allow list is non-empty
     # (settings.local.json allow REPLACES global — without these, bots lose basic access)
     if allow_patterns:
@@ -3015,7 +3207,9 @@ def compose_settings_local(
     # L1 source guard (#702) — an ALLOW grant carrying an absolute path must
     # anchor it (${FLEET_ROOT}/…) or declare it (external_paths), same as any
     # other source value: granting access to a raw absolute is the self-containment
-    # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
+    # violation (it dangles the moment the fleet runs elsewhere). An ASK rule is
+    # held to the same line (#2476): one that dangles stops matching, and the
+    # command it gated then runs unasked, by the classifier in auto. Deny grants are
     # restrictions, not wiring-to-a-path, so they are not classified — which also
     # sidesteps the composer-derived sibling-isolation denies above (a resolved
     # absolute the composer emits, never a source). No composer-derived allow layer
@@ -3031,7 +3225,7 @@ def compose_settings_local(
     )
 
     grant_findings: list[SourceFinding] = []
-    for grant in allow_patterns:
+    for grant in allow_patterns + ask_patterns:
         for denied in classify_grant_paths(grant, bot.external_paths):
             grant_findings.append(
                 SourceFinding(
@@ -3045,15 +3239,17 @@ def compose_settings_local(
     if grant_findings:
         raise source_findings_error(bot.bot_id, grant_findings)
 
+    # Keys in evaluation order: deny, then ask, then allow. ``ask`` is written
+    # only when a rule survives, so a bot with none keeps the old file shape.
+    permissions: dict = {}
     if deny_patterns:
-        permissions: dict = {"deny": deny_patterns}
-        if allow_patterns:
-            permissions["allow"] = allow_patterns
+        permissions["deny"] = deny_patterns
+    if ask_patterns:
+        permissions["ask"] = ask_patterns
+    if allow_patterns:
+        permissions["allow"] = allow_patterns
+    if permissions:
         settings["permissions"] = permissions
-    elif allow_patterns:
-        settings["permissions"] = {
-            "allow": allow_patterns,
-        }
 
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}
@@ -3091,7 +3287,9 @@ def compose_settings_local(
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
     bot_hooks = bot.hooks
     if bot.brief_on_start:
-        exe, why = _brief_cli_probe()
+        installation = paths.package.installation
+        exe, why = (_brief_cli_probe(installation, paths.package.system_yaml.parent.parent)
+                    if installation is not None else _brief_cli_probe())
         if exe is None:
             raise ValueError(
                 f"bot {bot.bot_id}: brief.on_start is set but the installed "
@@ -3114,13 +3312,21 @@ def compose_settings_local(
         bot_hooks = _with_heavy_slot_hook(bot_hooks)
     if bot.public_write_guard:
         bot_hooks = _with_public_write_guard_hook(bot_hooks)
+    # Native continuation metadata is lifecycle state, independent of optional
+    # model skills/brief hooks. The hook is silent and never requests a turn.
+    installation = paths.package.installation
+    if installation is not None:
+        bot_hooks = {key: list(value) for key, value in bot_hooks.items()}
+        capture = shlex.join([str(installation.cli), "--root", str(paths.root), "_native-session", "capture",
+                              str(bot_dir), f"{fleet.service_prefix}.{bot.bot_id}", _TMUX_TMPDIR])
+        bot_hooks.setdefault("SessionStart", []).append({"command": capture, "timeout": 10})
     hooks = _compose_hooks(bot_hooks)
     # No vault, no hooks: an explicit `claudron_session_loop: true` with no
     # `claudron_vault_path` has no address to render. The engine refuses to
     # install such a loop (Claudron #183), and the validator errors on it, so
     # generate stops before it gets here; the loud refusal is the validator's.
     vault_root = _claudron_hook_vault_root(bot, bot_dir)
-    if _session_loop_enabled(bot) and vault_root is not None:
+    if claudron_session_loop_composed(bot, bot_dir):
         executable, warning = _resolve_claudron_executable()
         if warning:
             _log.warning("bot %s: %s", bot.bot_id, warning)
@@ -3137,7 +3343,7 @@ def compose_settings_local(
         plugin: plugin in selected_plugins
         for plugin in sorted(inherited_plugins | selected_plugins)
     }
-    if fleet.plugins.marketplaces:
+    if fleet.plugins.marketplaces and fleet.plugins.startup_policy == "manage":
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
     # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.
@@ -3159,6 +3365,27 @@ def compose_settings_local(
     settings["skipDangerousModePermissionPrompt"] = (
         bot.skip_dangerous_mode_permission_prompt
     )
+
+    # #1388: once auto mode has blocked several actions, Claude Code ends a turn
+    # on "Teach auto mode about your environment?", which nobody at a bot's pane
+    # answers, and an accepted draft would land in the host-shared
+    # ~/.claude/settings.json. "off" removes /auto-mode-setup and that offer.
+    # fleet.yaml-overridable per skill, under defaults: or per bot.
+    if bot.skill_overrides:
+        settings["skillOverrides"] = dict(bot.skill_overrides)
+
+    # #1388: on a model with a native 1M window, Claude Code can end a turn past
+    # 200k tokens on "Want to autocompact at 400k tokens instead?", which nobody
+    # at a bot's pane answers. The answer is kept per account and model, so a
+    # new one asks again. A window set outside user settings stops the asking.
+    # "auto" names Claude Code's own window for each model it can ask about, the
+    # window it uses with nothing set; a number caps every model's window.
+    if bot.auto_compact_window == "auto":
+        settings["modelSettings"] = {
+            model: {"autoCompactWindow": "auto"} for model in NATIVE_1M_MODELS
+        }
+    else:
+        settings["autoCompactWindow"] = bot.auto_compact_window
 
     return settings
 
@@ -4152,6 +4379,64 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
 _FLEET_PULSE_JOB = "fleet-pulse"
 
+#: The fleet's failure template (#2522). Every service the composer generates
+#: for a fleet job names it in OnFailure=, so a job that fails on every run is
+#: heard: systemd starts one instance per failed unit, named for it, and the
+#: instance runs the selected release's `fleet notify`. Bot services stay out
+#: (fleet-pulse watches them), and so do host jobs and launchd, which has no
+#: OnFailure=: fleet-pulse reports a failed one of those once an episode (#2532).
+JOB_FAILED_TEMPLATE = "job-failed"
+#: The `--event` the template's alert carries. `fleet notify` records a
+#: `fleet_alert` whose data names it, so `event list --type fleet_alert` finds it.
+JOB_FAILED_EVENT = "job_failed"
+# A bound for one alert. The CLI refuses at once while an activation holds the
+# host lock, and each of its two channels has its own 8 s limit.
+_JOB_FAILED_TIMEOUT_S = 120
+
+
+def job_failed_template(prefix: str) -> str:
+    """The unit name of a fleet's failure template: ``<prefix>.job-failed@.service``."""
+    return f"{prefix}.{JOB_FAILED_TEMPLATE}@.service"
+
+
+def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, paths: Paths,
+                               plane_env: dict[str, str] | None = None) -> str:
+    """Write the fleet's failure template beside its job units; return its stem.
+
+    The instance calls the selected CLI directly, not through the unit-start
+    wrapper, whose argv names exactly one unit: `fleet notify` takes its own
+    admission, bound to the committed Git runtime. ``%i`` is the
+    failed unit's name. The template has no OnFailure= of its own: an instance
+    whose alert fails stays failed, and fleet-pulse reports it (#2532). It has
+    no [Install] section: only OnFailure= starts it.
+    """
+    environment = native_environment(paths)
+    argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+            "--fleet", fleet_name, "fleet", "notify", "--level", "alert",
+            "--event", JOB_FAILED_EVENT]
+    # Quoted by hand so that its %i specifiers reach systemd, which puts the
+    # failed unit's name there; unit_systemd_command would escape them.
+    message = '"%i failed: journalctl --user -u %i"'
+    lines = [
+        "# Generated by claudlobby — do not hand-edit.",
+        "[Unit]",
+        f"Description=claudlobby job-failed alert for %i ({fleet_name})",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        f"WorkingDirectory={paths.root}",
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
+        unit_systemd_environment("PATH", _scheduler_tool_path(paths)),
+        unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name),
+        # The plane switch lines every fleet job unit carries (job_baseline_env).
+        *(unit_systemd_environment(key, value) for key, value in (plane_env or {}).items()),
+        f"TimeoutStartSec={_JOB_FAILED_TIMEOUT_S}",
+        f"ExecStart={unit_systemd_command(argv)} \"--message\" {message}",
+    ]
+    name = job_failed_template(prefix)
+    (timers_dir / name).write_text("\n".join(lines) + "\n")
+    return name.removesuffix(".service")
+
 
 def _native_script_argv(script: str, environment: dict[str, str]) -> list[str]:
     """Tokenize declared syntax before inserting literal selected paths."""
@@ -4173,6 +4458,7 @@ def _write_service_units(
     *, create_runtime_dirs: bool = True,
     host_override: str | None = None,
     phase: str | None = None,
+    owner_config: dict | None = None,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -4213,6 +4499,29 @@ def _write_service_units(
         raise source_findings_error(_svc_id, _svc_findings)
 
     environment = native_environment(paths)
+    command = None
+    resident_cli = {
+        "plane-daemon": ("plane-daemon.sh", "serve", (("PLANE_SOCKET", "--socket"),
+                                                     ("PLANE_DRAIN_INTERVAL", "--drain-interval"))),
+        "plane-view": ("plane-view.sh", "view", (("PLANE_VIEW_HOST", "--host"),
+                                               ("PLANE_VIEW_PORT", "--port"))),
+    }
+    if name in resident_cli:
+        launcher, verb, options = resident_cli[name]
+        if _native_script_argv(script, environment) == [str(paths.package.runtime_native / launcher)]:
+            # A shell wrapper would re-enter the ordinary CLI and hold its
+            # reader lock for the daemon lifetime. Direct admitted CLI exec
+            # releases startup exclusion before the resident process runs.
+            command = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"], "plane", verb]
+            for key, flag in options:
+                if environment.get(key):
+                    command.extend([flag, environment[key]])
+    if owner_config is not None:
+        from .plane.owner_service import service_command
+        command = service_command(paths.root, environment["CLAUDLOBBY_CLI"], owner_config)
+        # This is a host-only operator server, not a generated fleet caller.
+        # Keep the CLI's refusal of all bot/fleet selectors unchanged.
+        environment.pop("FLEET_ROOT", None)
     if host_override is not None:
         environment[HOST_OVERRIDE_ENV] = host_override
     script_expanded = script
@@ -4221,9 +4530,10 @@ def _write_service_units(
         script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
     argv = wrap_unit_argv(environment, unit=service_name,
                           phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
-                          argv=_native_script_argv(script, environment))
-    exec_start = unit_systemd_command(argv) if "CLAUDLOBBY_RELEASE_ID" in environment else script_expanded
-    tool_path = _scheduler_tool_path()
+                          argv=command if command is not None else _native_script_argv(script, environment))
+    guarded = "CLAUDLOBBY_INSTALLATION" in environment
+    exec_start = unit_systemd_command(argv) if command is not None or guarded else script_expanded
+    tool_path = _scheduler_tool_path(paths)
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
     # one exit line is the only record of a stale-daemon exit (a process that
@@ -4320,8 +4630,10 @@ def _write_timer_units(
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
+    time_limit: tuple[int, int] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
+    on_failure: str | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -4337,6 +4649,8 @@ def _write_timer_units(
     plist ignores them. ``exec_args`` appends extra positional arguments after
     the fleet name on both the systemd ``ExecStart`` and the launchd
     ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
+    ``on_failure`` names the unit systemd starts when the service fails (the
+    fleet's failure template, #2522); the plist has no equivalent.
     """
     # L1 source guard (#702) — a timer's script is a compose source. A
     # $CLAUDLOBBY_ROOT-anchored script (the shape system.yaml / fleet jobs use)
@@ -4377,18 +4691,20 @@ def _write_timer_units(
             argv.append(fleet_name)
         argv.extend(exec_args or [])
     argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
-    if "CLAUDLOBBY_RELEASE_ID" in environment or (fleet_name and name == _FLEET_PULSE_JOB):
+    if ("CLAUDLOBBY_INSTALLATION" in environment
+            or (fleet_name and name == _FLEET_PULSE_JOB)):
         exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value
     # (see _scheduler_tool_path, #798); the parity test asserts they match.
-    tool_path = _scheduler_tool_path()
+    tool_path = _scheduler_tool_path(paths)
 
     # --- systemd service unit ---
     service_lines = [
         "# Generated by claudlobby — do not hand-edit.",
         "[Unit]",
         f"Description=claudlobby {name} ({scope})",
+        *([f"OnFailure={on_failure}"] if on_failure else []),
         "",
         "[Service]",
         f"Type={svc_type}",
@@ -4426,6 +4742,11 @@ def _write_timer_units(
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
         service_lines.append(unit_systemd_environment(var, value))
+    if time_limit:
+        # The job's own bound: systemd ends a run its command cannot stop, then
+        # waits TimeoutStopSec= in each kill phase.
+        service_lines.append(f"TimeoutStartSec={time_limit[0]}")
+        service_lines.append(f"TimeoutStopSec={time_limit[1]}")
     if abandon_children:
         # The script backgrounds work that must outlive the job (keepalive's
         # per-bot plane emit, reaped on its own clock). With the default
@@ -5142,8 +5463,14 @@ def compose_fleet_timers(
     expected_jobs = {f"{prefix}.{name}" for name in timers} if emit_defaults else set()
     if sweep_on:
         expected_jobs.add(f"{prefix}.code-audit-sweep")
+    # Every fleet that reaches this point composes at least one job unit, and
+    # each names the fleet's failure template (#2522). The template is pruned
+    # with the job units: its stem is one dotless segment after the prefix.
+    expected_jobs.add(job_failed_template(prefix).removesuffix(".service"))
     n_expected_jobs = len(expected_jobs)
-    composed_jobs: set[str] = set()
+    composed_jobs: set[str] = {
+        _write_job_failed_template(timers_dir, prefix, fleet.name, paths, job_baseline_env)}
+    on_failure = f"{prefix}.{JOB_FAILED_TEMPLATE}@%n.service"
 
     if emit_defaults:
         slot = _host_timer_slot(paths)
@@ -5152,6 +5479,12 @@ def compose_fleet_timers(
         seconds = _calendar_seconds(
             {name: _resolve_timer_schedule(cfg, merged_defaults)
              for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
+        # Imported here: at module level it would add the CLI's runtime modules to
+        # composer's. The pulse bounds its own runs (claudlobby/fleet_pulse.py).
+        from .fleet_pulse import UNIT_STOP_S, unit_time_limit
+
+        pulse_limit = (unit_time_limit(fleet.fleet_pulse.timeout_s if fleet.fleet_pulse else None),
+                       UNIT_STOP_S)
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
@@ -5172,7 +5505,9 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                time_limit=pulse_limit if name == _FLEET_PULSE_JOB else None,
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
+                on_failure=on_failure,
             )
             composed_jobs.add(f"{prefix}.{name}")
         dormant = [
@@ -5200,6 +5535,7 @@ def compose_fleet_timers(
             fleet.name,
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
+            on_failure=on_failure,
         )
         composed_jobs.add(f"{prefix}.code-audit-sweep")
 
@@ -5261,6 +5597,7 @@ def compose_fleet_timers(
                 exec_args=[bot_id, slot],
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
                 extra_env=briefing_extra_env,
+                on_failure=on_failure,
             )
             composed_briefing.add(unit)
     _reconcile_briefing_units(
@@ -5468,6 +5805,8 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             _prune_host_units(timers_dir, unit)
             continue
         if cfg.get("unit") == "service":
+            if name == "plane-owner" and cfg.get("script") != "$CLAUDLOBBY_CLI":
+                raise ValueError("plane-owner uses the sealed owner CLI; configure its origin and paths, not script")
             # Resident host services (first tenant: the plane ingest daemon).
             # Dormancy is COMPOSE-time, not enroll-time, and that is a safety
             # property rather than a style choice: setup-system's macOS leg
@@ -5487,6 +5826,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                 create_runtime_dirs=output_dir is None,
                 host_override=host_override,
                 phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
+                owner_config=cfg if name == "plane-owner" else None,
             )
             continue
         sched = _resolve_timer_schedule(cfg, {}, host_slot, host_seconds.get(name))

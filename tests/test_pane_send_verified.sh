@@ -149,10 +149,19 @@ bot_tmux() {
             ;;
         capture-pane)
             local remaining fixture
-            remaining=$(cat "$PANE_SCRIPT")
-            fixture=$(printf '%s\n' "$remaining" | head -1)
-            printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
-            [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+            # The pre-write look observes the last readiness frame. Future
+            # frames describe the authored payload after send-keys, not input
+            # that existed before it. Keep this snapshot across subshells.
+            if [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ] &&
+                [ ! -s "$SENT_LOG" ] && [ -s "$TMPD/last-ready" ]; then
+                fixture=$(cat "$TMPD/last-ready")
+            else
+                remaining=$(cat "$PANE_SCRIPT")
+                fixture=$(printf '%s\n' "$remaining" | head -1)
+                printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
+                [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+                printf '%s' "$fixture" > "$TMPD/last-ready"
+            fi
             # Classify for the order log by the same signal the gate uses, so the
             # log cannot disagree with the code about what "drawn" means.
             if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
@@ -168,6 +177,7 @@ bot_tmux() {
 # _send_prep <fixture...>: a clean slate for one send (empty logs and chunk
 # dir) and the frames the stub's captures return, in order.
 _send_prep() {
+    rm -f "$TMPD/last-ready"
     : > "$SENT_LOG"; : > "$ORDER_LOG"; : > "$RAW_LOG"
     rm -f "$CHUNK_DIR"/*; CHUNK_N=0
     printf '%s\n' "$@" > "$PANE_SCRIPT"
@@ -274,7 +284,7 @@ echo "=== pane_send_verified: retry fires only on positive evidence ==="
 # readiness wait, the wait for the payload to show, the verify after the Enter,
 # the verify after the retry. A box that holds it for good is no submit at all
 # (#1236; the bounded Enters below).
-stuck_then_gone() { printf '%s\n' "$1" "$1" "$1" "$FIXTURES/input-clean-submit.txt"; }
+stuck_then_gone() { printf '%s\n' "$HINT" "$1" "$1" "$FIXTURES/input-clean-submit.txt"; }
 r=$(run_send_rc '/claudna:session resume --auto' $(stuck_then_gone "$FIXTURES/input-stuck-literal.txt"))
 assert_eq "literal text stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
 
@@ -286,6 +296,17 @@ assert_eq "collapsed-paste pane contains none of the payload text" "0" "$r"
 # One chunk, as this placeholder case was built: an explicit 900, whatever the default.
 r=$(PANE_SEND_CHUNK_BYTES=900 run_send_rc "$big" $(stuck_then_gone "$FIXTURES/input-stuck-collapsed-paste.txt"))
 assert_eq "collapsed paste stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
+# The same in a long pane (#2428). The marker check piped the pane into
+# grep -q, which exits at the marker; the rest of the pane then met a closed
+# pipe, and pipefail read the marker as absent, so the held paste read as
+# submitted and the retry Enter never went out ("2 0"). One 2 MiB line below
+# the box outlasts any pipe; one line, not many, because the fallback that runs
+# when the marker is missed forks once per line.
+long_frame="$TMPD/input-stuck-collapsed-paste-long.txt"
+{ cat "$FIXTURES/input-stuck-collapsed-paste.txt"
+  awk 'BEGIN { s = "x"; while (length(s) < 2097152) s = s s; print s }'; } > "$long_frame"
+r=$(PANE_SEND_CHUNK_BYTES=900 run_send_rc "$big" $(stuck_then_gone "$long_frame"))
+assert_eq "collapsed paste stuck in a 2 MiB pane -> Enter resent, then submitted" "3 0" "$r"
 
 r=$(run_send 'PROBE763TRANSCRIPT reply ok' $(sent_frames 'PROBE763TRANSCRIPT reply ok'))
 assert_eq "clean submit (text visible in transcript) -> NO spurious Enter" "2" "$r"
@@ -354,15 +375,20 @@ r=$(env -u PANE_READY_TICKS bash -c '
     printf "%s\n" "$(pane_await_input_box sock nosuchsession)"' _ "$LIB_DIR")
 assert_eq "unarmed: the wait is off inside the function, not just in the env" "unwaited" "$r"
 
-# And the arming is SCOPED. A bare `export` would outlive the two cold-boot sends
-# and hand the 45s budget to bridge_bringup_verify's failure alert, which targets
-# the MANAGER pane through bot_tmux_send — a 45s block plus a recovery poll inside
-# ExecStart, for an alert about this bot being unreachable. Assert the property
-# (per-call prefix, no process-wide export) rather than one literal line, so a
-# requote or rename does not redden a behaviourally identical change.
-r=$(grep -cE '^[[:space:]]*PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"[[:space:]]*\\?$' \
+# The launcher passes its boot budget into the shared injection owner. The
+# owner must scope that value to the pane send, preserving the caller value.
+r=$(grep -cF 'startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"' \
     "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
-assert_eq "start-bot arms the wait per call, once for each cold-boot send" "2" "$r"
+assert_eq "start-bot passes its boot budget to the shared injector" "1" "$r"
+r=$(bash -c '
+    . "$1/lib-common.sh"
+    pane_send_verified() { printf "%s/" "$PANE_READY_TICKS"; }
+    inject_stamp() { printf stamp; }
+    boot_send_settled() { :; }
+    PANE_READY_TICKS=200
+    _startup_send unused sock session unused 37 startup STARTUP payload
+    printf "%s" "$PANE_READY_TICKS"' _ "$LIB_DIR")
+assert_eq "shared startup send arms the wait per call and preserves inherited value" "37/200" "$r"
 r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
 assert_eq "start-bot never exports it process-wide (it would leak past the sends)" "0" "$r"
 
@@ -602,6 +628,84 @@ assert_eq "mid-turn: the text and one Enter" "send:text send:Enter" \
 r=$(grep -cE '"event": ?"send_retry"' "$CAPTURE" || true)
 assert_eq "mid-turn: no retry Enter into the queue hint" "0" "$r"
 
+echo "=== #2669: a box taller than the pane shows the payload's end above its rule ==="
+
+# The one-prompt bootstrap is taller than the 80x24 pane start-bot creates.
+# Claude Code draws in the alternate screen, so the top of such a box, prompt
+# line included, is gone, and what stays in view is its last lines, its bottom
+# rule and the footer (measured, claude 2.1.316 at 80x24). These frames have
+# that shape, built from the payload: TALL shows its last 21 lines, PARTIAL an
+# interior window whose end is still unread.
+tall_payload='set +H; FLEET_STARTUP_BOOTSTRAP_V1'
+for i in $(seq 2 29); do
+    tall_payload="$tall_payload"$'\n'"line $i of a startup prompt taller than the pane"
+done
+tall_payload="$tall_payload"$'\n'"FLEET_STARTUP_INSTRUCTIONS_END Z2669"
+RULE=$(printf '\342\224\200%.0s' $(seq 80))
+FOOTER=$(printf '%s\n' "  $(printf '\342\217\265\342\217\265') auto mode on (shift+tab to cycle)" \
+    "                                                    Not logged in")
+tall_frame() {  # <out> <lines of the payload, from the top> <lines shown>
+    { printf '%s\n' "$tall_payload" | head -n "$2" | tail -n "$3" | sed 's/^/  /'
+      printf '%s\n%s\n' "$RULE" "$FOOTER"; } > "$1"
+}
+TALL="$TMPD/tall-shown.txt"; tall_frame "$TALL" 30 21
+PARTIAL="$TMPD/tall-partial.txt"; tall_frame "$PARTIAL" 25 21
+assert_eq "fixture: the tall frame has no prompt line" "" "$(pane_input_region "$(cat "$TALL")")"
+r=$(pane_box_end_shows_payload "$(cat "$TALL")" "$tall_payload" && echo yes || echo no)
+assert_eq "fixture: the tall frame shows the payload's end above its rule" "yes" "$r"
+r=$(pane_box_end_shows_payload "$(cat "$PARTIAL")" "$tall_payload" && echo yes || echo no)
+assert_eq "fixture: the partial frame does not" "no" "$r"
+r=$(pane_box_end_shows_payload "$(cat "$HINT")" "$tall_payload" && echo yes || echo no)
+assert_eq "a frame with a prompt line is pane_input_region's, not the box end's" "no" "$r"
+enters() { grep -c '^send:Enter$' "$ORDER_LOG" || true; }
+
+# (a) The end shows above the rule: one Enter, and the box seen empty after it.
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$TALL" "$FIXTURES/input-clean-submit.txt")
+assert_eq "tall box: the Enter follows the frame showing the end" "yes" "$(enter_follows tall-shown.txt)"
+assert_eq "tall box: one Enter, reported submitted (rc 0)" "1 0" "$(enters) ${r#* }"
+
+# (b) An interior window is not the end: no Enter, rc 3, as #1236 (c).
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$PARTIAL")
+assert_eq "tall box, end unread: no Enter, no submit (rc 3)" "0 3" "$(enters) ${r#* }"
+r=$(grep -cE '"reason": ?"payload-not-shown"' "$CAPTURE" || true)
+assert_eq "tall box, end unread: recorded as payload-not-shown" "1" "$r"
+
+# (c) The box still shows the end after the Enter: retried, then rc 3, never a
+# submit. Before #2669 the verify read a glyph-less frame as gone.
+cap_reset
+r=$(run_send_rc "$tall_payload" "$HINT" "$TALL")
+assert_eq "tall box held past every Enter: four Enters, no submit (rc 3)" "4 3" "$(enters) ${r#* }"
+r=$(grep -cE '"reason": ?"payload-still-in-box"' "$CAPTURE" || true)
+assert_eq "tall box held past every Enter: recorded as still in the box" "1" "$r"
+
+# (d) Controls: the payload's end in view, but not as a box's last lines. No
+# rule under it (a shell's echo), or other lines between it and the rule (a
+# transcript above a dialog's rule): no Enter.
+grep -vF "$RULE" "$TALL" > "$TMPD/tall-norule.txt"
+{ printf '%s\n' "$tall_payload" | tail -n 17 | sed 's/^/  /'
+  printf '%s\n' "" "$(printf '\342\217\272') Skill(provider:session)" "$RULE" \
+      " Do you want to proceed?" "   Yes" "   No"; } > "$TMPD/tall-notedge.txt"
+for f in tall-norule.txt tall-notedge.txt; do
+    cap_reset
+    r=$(run_send_rc "$tall_payload" "$HINT" "$TMPD/$f")
+    assert_eq "control $f: the end not at a box's bottom edge, no Enter (rc 3)" "0 3" "$(enters) ${r#* }"
+done
+
+# (e) A tall box that already holds text, as a withheld bootstrap leaves it,
+# takes no new payload: its end would show the new payload's end, and the Enter
+# would submit both.
+r=$(pane_box_end_held "$(cat "$TALL")" && echo yes || echo no)
+assert_eq "fixture: a tall box holding text reads as held" "yes" "$r"
+r=$(pane_box_end_held "$(cat "$HINT")" && echo yes || echo no)
+assert_eq "fixture: a drawn empty box does not" "no" "$r"
+cap_reset
+r=$(run_send_rc "short payload Z2669" "$TALL")
+assert_eq "tall box holding text: nothing typed, no Enter (rc 4)" "0 4" "$r"
+r=$(grep -cE '"reason": ?"recipient-input-held"' "$CAPTURE" || true)
+assert_eq "tall box holding text: recorded as recipient-input-held" "1" "$r"
+
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 
 # Two ticks: still stuck on the first capture, cleared by the second. The old
@@ -611,7 +715,7 @@ echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 # tick, because the readiness wait took the first; the order is asserted now.
 export PANE_SEND_VERIFY_TICKS=3
 r=$(run_send '/claudna:session resume --auto' \
-        "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-stuck-literal.txt" \
+        "$HINT" "$FIXTURES/input-stuck-literal.txt" \
         "$FIXTURES/input-stuck-literal.txt" "$FIXTURES/input-clean-submit.txt")
 assert_eq "box clears on a later poll tick -> NO retry" "2" "$r"
 r=$(awk '/^send:Enter$/ { e = 1; next }
@@ -624,7 +728,7 @@ export PANE_SEND_VERIFY_TICKS=1
 # backwards would make the cheap setting the most wasteful one AND fire a ghost
 # Enter into an idle pane on every send.
 export PANE_SEND_VERIFY_TICKS=0
-r=$(run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt")
+r=$(run_send '/claudna:session resume --auto' "$HINT" "$FIXTURES/input-stuck-literal.txt")
 assert_eq "PANE_SEND_VERIFY_TICKS=0 disables the verify (no blind resend)" "2" "$r"
 export PANE_SEND_VERIFY_TICKS=1
 
@@ -1169,6 +1273,17 @@ assert_eq "the wire proof sha is sha256_prefixed(sanitize(payload))" \
     "$(sha256_prefixed "$_expect_safe")" "${PLANE_WIRE_SHA256:-}"
 assert_eq "the wire proof byte length is len(safe), trailer EXCLUDED" \
     "$(printf '%s' "$_expect_safe" | wc -c | tr -d ' ')" "${PLANE_WIRE_BYTES:-}"
+# Globals and the cross-process proof file describe sent bytes only. A held
+# preflight prepares proof but must erase it in the caller after the refusal.
+export PLANE_WIRE_OUT="$TMPD/refused-wire"
+printf 'stale proof\n' > "$PLANE_WIRE_OUT"
+run_bot_send "NEW BODY" "$FIXTURES/input-stuck-literal.txt"
+assert_eq "held bot send preserves its rc4 contract" "4" "$BOT_SEND_RC"
+assert_eq "held bot send clears prepared digest" "" "${PLANE_WIRE_SHA256:-}"
+assert_eq "held bot send clears prepared length" "" "${PLANE_WIRE_BYTES:-}"
+assert_eq "held bot send clears cross-process wire proof" "0" "$(wc -c < "$PLANE_WIRE_OUT" | tr -d ' ')"
+assert_eq "held bot send types nothing" "0" "$(wc -l < "$SENT_LOG" | tr -d ' ')"
+unset PLANE_WIRE_OUT
 unset PLANE_MSG_ID
 
 echo ""
@@ -1187,11 +1302,59 @@ r=$(boot_send_settled RESUME 0 "$blog"; echo "rc=$?")
 assert_eq "rc 0: the boot goes on" "rc=0" "$r"
 r=$(boot_send_settled RESUME 1 "$blog"; echo "rc=$?")
 assert_eq "rc 1: returned, so set -e still ends the boot" "rc=1" "$r"
-assert_eq "only the withheld Enter is logged" "1" "$(wc -l < "$blog" | tr -d ' ')"
-# Both boot sends go through it: the property, not one literal line.
-r=$(grep -cE '^[[:space:]]*boot_send_settled (RESUME|STARTUP) "\$_send_rc" "\$LOG"$' \
-    "$SCRIPT_DIR/../claudlobby/_runtime_scripts/start-bot.sh" || true)
-assert_eq "start-bot settles both of its boot sends" "2" "$r"
+r=$(boot_send_settled STARTUP 4 "$blog"; echo "rc=$?")
+assert_eq "rc 4: a held resume does not abort the following startup" "rc=0" "$r"
+r=$(grep -c 'STARTUP — NOT SENT: the input box already held text' "$blog" || true)
+assert_eq "rc 4: the startup log distinguishes no new input" "1" "$r"
+assert_eq "both withheld and refused boot sends are logged" "2" "$(wc -l < "$blog" | tr -d ' ')"
+# The shared send owner passes the actual send status to the settlement owner.
+# A withheld Enter must be recorded as NOT SUBMITTED, without aborting startup.
+r=$(bash -c '
+    . "$1/lib-common.sh"
+    pane_send_verified() { return 3; }
+    inject_stamp() { printf stamp; }
+    _startup_send unused sock session "$2" 37 bootstrap BOOTSTRAP payload
+    printf "rc=%s" "$?"' _ "$LIB_DIR" "$TMPD/shared-startup.log")
+assert_eq "shared startup send settles a withheld Enter without aborting" "rc=0" "$r"
+r=$(grep -c 'BOOTSTRAP — NOT SUBMITTED' "$TMPD/shared-startup.log" || true)
+assert_eq "shared startup send preserves the actual send outcome in its log" "1" "$r"
+
+echo "=== fresh occupied input refuses every new payload, including while busy ==="
+for held in input-stuck-literal.txt input-stuck-wrapped.txt input-stuck-collapsed-paste.txt input-typed-busy.txt; do
+    r=$(run_send_rc 'NEW PAYLOAD' "$FIXTURES/$held")
+    assert_eq "$held: no keystrokes and definite refusal" "0 4" "$r"
+done
+r=$(grep -cF 'pane_send: recipient-input-held; no payload or Enter was sent' "$SEND_ERR" || true)
+assert_eq "the refusal says that nothing was sent" "1" "$r"
+# Empty input during a running turn remains usable; its queue hint is chrome,
+# not an authored input hold. The payload disappearing into that queue submits.
+r=$(run_send_rc 'ordinary queued message' $(sent_frames 'ordinary queued message' "$FIXTURES/input-queued-hint.txt" "$FIXTURES/input-queued-hint.txt"))
+assert_eq "queued hint remains writable and is not mistaken for held input" "2 0" "$r"
+
+echo "=== a menu on screen refuses every new payload: nothing is typed into it ==="
+# A menu reads typed keys as choices: a digit can choose an option by its number
+# and a line feed can confirm the one under the pointer. The usage-limit menu is
+# a live capture; a server flag can list usage credits first, built here from it
+# the way tests/test_usage_limit_reader.py builds that layout.
+credits_first="$TMPD/usage-limit-menu-credits-first.txt"
+sed -e 's/❯ 1\. Stop and wait for limit to reset/❯ 1. Switch to usage credits/' \
+    -e 's/^\(  *\)3\. Switch to usage credits/\13. Stop and wait for limit to reset/' \
+    "$FIXTURES/usage-limit-menu.txt" > "$credits_first"
+r=$(grep -c -e '❯ 1\. Switch to usage credits' -e '3\. Stop and wait for limit to reset' "$credits_first" || true)
+assert_eq "the credits-first frame was built (both lines swapped)" "2" "$r"
+cap_reset
+for menu in "$FIXTURES/menu-option.txt" "$FIXTURES/usage-limit-menu.txt" "$credits_first"; do
+    r=$(run_send_rc $'Reply 3 when the review is done\nthanks' "$menu")
+    assert_eq "${menu##*/}: no keystrokes and definite refusal" "0 4" "$r"
+done
+r=$(grep -cF 'pane_send: recipient-menu-open; no payload or Enter was sent' "$SEND_ERR" || true)
+assert_eq "the menu refusal says that nothing was sent" "1" "$r"
+r=$(count_events '"reason": ?"recipient-menu-open"')
+assert_eq "each menu refusal is recorded as a send_miss" "3" "$r"
+r=$(boot_send_settled STARTUP 4 "$blog"; echo "rc=$?")
+assert_eq "rc 4 at boot: a menu does not abort the boot either" "rc=0" "$r"
+r=$(grep -c 'STARTUP — NOT SENT: the input box already held text, or a menu held the screen' "$blog" || true)
+assert_eq "the boot log names both reasons a send takes no input" "2" "$r"
 
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

@@ -140,10 +140,10 @@ def cmd_generate(args) -> int:
     _warn_unresolvable_skill_refs(paths)
 
     # Phase 2b: the generate-time registry scan (cause=generate). NON-
-    # BLOCKING and dormant: unarmed fleets (no PLANE_EMIT_ENABLED=1 in the
-    # fleet env) return None silently, and a scan failure must never break
-    # a generate — the composed estate is correct with or without its
-    # keyframes; the scan just records what generate produced.
+    # BLOCKING: a fleet whose .env tier says PLANE_EMIT_ENABLED=0 returns
+    # None (here only; activation refuses that value), and a scan failure
+    # must never break a generate — the composed estate is correct with or
+    # without its keyframes; the scan just records what generate produced.
     try:
         from ..plane.registry_emit import run_generate_scan
         summary = run_generate_scan(paths, fleet)

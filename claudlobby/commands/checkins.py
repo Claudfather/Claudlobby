@@ -123,6 +123,7 @@ def _row(r) -> dict:
     return {
         "checkin_id": g.get("checkin_id"), "prev_checkin_id": g.get("prev_checkin_id"),
         "actor": r["subject_alias"], "bot": _bot_of(r["subject_alias"]),
+        "actor_uid": r["subject_uid"], "ingest_seq": r["ingest_seq"],
         "occurred_at": r["occurred_at"],
         "action": g.get("action"), "project_key": g.get("project_key"),
         "raise": {"decided": bool(raise_.get("decided")), "reason": raise_.get("reason")},
@@ -135,7 +136,8 @@ def _row(r) -> dict:
 
 def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | None,
                      last: bool, raised: bool = False, limit: int | None = None,
-                     checkin_id: str | None = None) -> list[dict]:
+                     checkin_id: str | None = None, include_dispatches: bool = True,
+                     checkin_prefix: str | None = None) -> list[dict]:
     """Newest first by occurred_at. `since` None means no window (--last);
     `raised` keeps only rows whose raise.decided is true (the ask count).
 
@@ -154,10 +156,14 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
     try:
         push_limit = limit is not None and not raised
         sql = checkin_rows_sql(since=since is not None, bot=bool(bot), limit=push_limit,
-                               checkin_id=checkin_id is not None)
+                               checkin_id=checkin_id is not None,
+                               checkin_prefix=checkin_prefix is not None)
         params: list = [fleet, *fleet_range_params(fleet), *fleet_range_params(fleet)]
         if checkin_id is not None:
             params.append(f"checkin:{checkin_id}")
+        if checkin_prefix is not None:
+            # Hex digits sort below 'g', so this closes the prefix's range (#2380).
+            params.extend((f"checkin:{checkin_prefix}", f"checkin:{checkin_prefix}g"))
         if bot:
             # exact and case-sensitive -- fleet_alias_range's own rule.
             params.append(f"bot:{fleet}/{bot}")
@@ -175,7 +181,7 @@ def collect_checkins(conn, fleet: str, *, since: datetime | None, bot: str | Non
                 break
         if limit is not None:
             out = out[:limit]
-        joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out])
+        joined = _join_dispatches(conn, fleet, [x["checkin_ref"] for x in out]) if include_dispatches else {}
         for row in out:
             row["dispatches"] = joined.get((row["checkin_ref"] or "").split("checkin:", 1)[-1], [])
         return out

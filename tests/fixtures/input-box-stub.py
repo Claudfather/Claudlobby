@@ -19,16 +19,26 @@ never sees its payload there and nothing is submitted (#2120).
 
 --log PATH appends each submitted line to PATH, one line per submit (a LF inside
 it becomes a space): the record of what was submitted, which the pane is not.
+
+It enters raw mode before it draws its box, and entering raw mode discards the
+keys typed before it (TCSAFLUSH), as a send to a Claude Code session that has
+not drawn its box is lost (#860). So nothing may type into this pane before the
+box shows; lib-common's harness_box_up starts it and waits for that (#2139).
+INPUT_BOX_START_DELAY=S in the environment is the test seam: the stand-in waits
+S seconds before raw mode and the box, as a slow start does.
 """
 import os
 import signal
 import sys
+import time
 import tty
 
 CHROME = "--chrome" in sys.argv[1:]
 DEAF = "--deaf" in sys.argv[1:]
 LOG = sys.argv[sys.argv.index("--log") + 1] if "--log" in sys.argv[1:-1] else None
 fd = sys.stdin.fileno()
+if os.environ.get("INPUT_BOX_START_DELAY"):
+    time.sleep(float(os.environ["INPUT_BOX_START_DELAY"]))
 tty.setraw(fd)
 out = sys.stdout.buffer
 line = bytearray()

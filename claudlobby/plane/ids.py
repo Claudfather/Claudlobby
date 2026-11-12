@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
@@ -22,13 +23,8 @@ _UID_PREFIX = {
     "vault": "vault_",
     "project": "proj_",
     "library_item": "lib_",
-    # F12 refinement (§19.6, delivered PR-B T7): session_uid is the TRANSCRIPT
-    # identity (stable across resume — empirically confirmed 2026-08-25);
-    # process_uid distinguishes the concurrent RESUMES of one transcript —
-    # minted fresh per process at SessionStart, never derived. (#2145 P1 note:
-    # its only minter, plane-session-start.sh, retires in #2145 P3; the proc_
-    # prefix stays registered so historical rows classify — P3 rewrites this
-    # comment.)
+    # process_uid has no minter since the SessionStart hook retired (#2145 P3);
+    # the prefix stays registered so historical proc_ rows classify.
     "process": "proc_",
 }
 
@@ -103,12 +99,36 @@ def derive_session_uid(platform_session_id: str, agent_cli: str = "claude") -> s
 
     #2145 F2: composed from session_alias — never a second spelling of the
     rule. A `claude` uid is byte-identical to the one derived before #2145 (the
-    bash mirror in plane-session-start.sh is Claude-only and stays so)."""
+    bash mirror retired with the SessionStart hook)."""
     return derive_uid("sess", session_alias(platform_session_id, agent_cli))
 
 
 def mint_uid(kind: str) -> str:
     return mint(_UID_PREFIX[kind])
+
+
+def read_host_uid(state_dir: Path) -> str:
+    """Read an existing private installation identity without repairing it.
+
+    This identifies the installation, not its operator or a remote caller.
+    Readers must never mint a replacement identity or relax file checks.
+    """
+    state_dir = Path(state_dir)
+    try:
+        if state_dir.is_symlink():
+            raise ValueError("redirected state")
+        fd = os.open(state_dir / "host-uid", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError("host identity is not an owned private file")
+            value = stream.read().strip()
+        if not _HOST_UID_RE.fullmatch(value):
+            raise ValueError("malformed host identity")
+        return value
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("existing host identity is unavailable or invalid") from exc
 
 
 def ensure_host_uid(state_dir: Path) -> str:

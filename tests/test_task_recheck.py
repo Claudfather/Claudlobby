@@ -10,9 +10,11 @@ from claudlobby import message_operations, operation_context
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold, tmp_path  # noqa: F401 — active fixture dependencies
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — active fixture dependencies
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 from tests.test_task_write_cli import _call, active  # noqa: F401 — shared private activated fixture
+from tests.test_task_state import (_assignment, _deadline_fact, _read, _task,  # noqa: F401 — reducer rows
+                                   conn)
 
 
 def _admit(capsys, root, title):
@@ -117,6 +119,7 @@ def test_known_failure_retries_next_tick_and_empty_uuid_stays_empty(active, monk
     task_id = _admit(capsys, root, "Queue for manager")
     empty_replay = _recheck(capsys, root, empty_id)
     assert empty_replay["data"]["replayed"] is True and empty_replay["data"]["task_ids"] == []
+    assert empty_replay["data"]["selection_notes"] is None
     first = _recheck(capsys, root, expected=5)
     assert first["data"]["task_ids"] == [task_id]
     assert first["data"]["transport"] == "failed" and len(calls) == 1
@@ -125,6 +128,12 @@ def test_known_failure_retries_next_tick_and_empty_uuid_stays_empty(active, monk
     held = _recheck(capsys, root)
     assert held["data"]["task_ids"] == [] and held["data"]["held"] == 1
     assert len(calls) == 2
+    assert main(["--root", str(root), "task", "recheck", "--max-age-h", "0",
+                 "--dry-run", "--request-id", str(uuid4())]) == 0
+    plain = capsys.readouterr().out
+    assert "no task is due" not in plain
+    assert "1 task(s) held" in plain and "24h repeat window" in plain
+    assert "wait" in plain and len(calls) == 2
 
 
 def test_private_timer_off_switch_skips_before_request_or_identity(active, monkeypatch, capsys):  # noqa: F811
@@ -162,6 +171,19 @@ def test_uncertain_digest_holds_new_uuid_and_escalated_work_is_waiting(active, m
     assert held["data"]["task_ids"] == [] and held["data"]["uncertain"] == 1
     assert held["data"]["uncertain_request_ids"] == [first["request_id"]]
     assert held["data"]["waiting"] == 1 and len(calls) == 1
+    assert any(first["request_id"] in note for note in held["data"]["selection_notes"])
+    with sqlite3.connect(db_file(root)) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0]
+    assert main(["--root", str(root), "task", "recheck", "--max-age-h", "0",
+                 "--dry-run", "--request-id", str(uuid4())]) == 0
+    plain = capsys.readouterr().out
+    assert "no task is due" not in plain
+    assert "1 task(s) held for uncertain prior delivery" in plain
+    assert first["request_id"] in plain and "request show" in plain
+    assert "1 escalated task(s) waiting on a human" in plain
+    assert len(calls) == 1
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == before
 
 
 def test_a_persons_deadline_less_assignment_is_a_standing_goal(active, monkeypatch, capsys):  # noqa: F811
@@ -204,3 +226,76 @@ def test_a_persons_deadline_less_assignment_is_a_standing_goal(active, monkeypat
         targets = conn.execute("SELECT DISTINCT recipient_alias FROM communications "
                                "WHERE source_ref LIKE 'task-recheck:%'").fetchall()
     assert targets == [("bot:example/manager",)]
+
+
+def test_a_moved_deadline_restarts_the_age_clock_as_a_reassign_did(conn):  # noqa: F811
+    """#2469: once a manager moves a bot's assignment to an open-ended deadline,
+    its age counts from the move, as a same-worker reassign's new assignment
+    counted from its own dispatch, and not from the original dispatch."""
+    from claudlobby.task_recheck import _due
+
+    _task(conn, "wi_wait")
+    _assignment(conn, "asg_wait", "wi_wait")            # dispatched 2026-09-01T00:00Z
+    _deadline_fact(conn, "wi_wait", "asg_wait", None, "2026-09-02T23:00:00Z")
+    task = _read(conn, "wi_wait")
+    noon = datetime(2026, 9, 3, 12, tzinfo=timezone.utc)   # 60 h after dispatch, 13 h after the move
+    assert not _due(task, noon, 48 * 3600)
+    assert _due(task, noon + timedelta(hours=36), 48 * 3600)
+
+
+
+def test_git_recheck_preview_and_uncertain_original_request_are_not_retargeted(active, monkeypatch, capsys):
+    import json
+    from claudlobby import active_config
+    from tests.test_task_permissions import _git_cli
+    from claudlobby.request_queries import read_request
+    root, package, snapshot = _git_cli(active, monkeypatch)
+    task_id = _admit(capsys, root, 'Synthetic Git recheck')
+    preview = _recheck(capsys, root, dry_run=True)
+    assert preview['release_id'] is None and preview['data']['task_ids'] == [task_id]
+    assert preview['data']['config_fingerprint'] == snapshot['fingerprint']
+    calls = []
+    strict = message_operations.send_committed_native_attempt
+    def send_once(*args, **kwargs):
+        def native(*_args, **options):
+            calls.append(options['body'])
+            return TransportOutcome('submitted', 'sha256:' + 'a' * 64, 99, 0)
+        return strict(*args, transport=native, **kwargs)
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt', send_once)
+    monkeypatch.setattr(message_operations, 'read_recipient_box', lambda *a, **k: None)
+    request_id = str(uuid4())
+    first = _recheck(capsys, root, request_id, expected=5)
+    assert first['data']['source_revision'] == snapshot['revision'] and len(calls) == 1
+    from claudlobby.activation_identity import read_current_identity_bindings
+    fleet_uid = read_current_identity_bindings(root, 'example', package=package)['fleet_uid']
+    original = read_request(root, fleet_uid, request_id)
+    assert original.route.release_id is None and original.route.config_fingerprint == snapshot['fingerprint']
+    again = _recheck(capsys, root, request_id, expected=5)
+    assert again['data']['replayed'] and len(calls) == 1
+    changed = json.loads(json.dumps(snapshot))
+    changed['fleets']['example']['fleet'] += '\n# New effective input\n'
+    changed['fingerprint'] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    # Provenance changes do not replace the original same-party native request.
+    # Its unverified notification remains unknown and cannot license a resend.
+    recovered = _recheck(capsys, root, request_id, expected=5)
+    assert recovered['error']['code'] == 'notification_failed'
+    assert recovered['data']['replayed'] and recovered['data']['notification'] == 'unknown'
+    assert read_request(root, fleet_uid, request_id) == original and len(calls) == 1
+
+
+def test_git_recheck_refuses_route_from_another_config_before_recording(active, monkeypatch, capsys):
+    from dataclasses import replace
+    from claudlobby import message_context
+    from tests.test_task_permissions import _git_cli
+    root, package, snapshot = _git_cli(active, monkeypatch)
+    _admit(capsys, root, 'Synthetic route mismatch')
+    calls = []
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt', lambda *a, **k: calls.append(1))
+    resolve = message_context.resolve_message_route
+    monkeypatch.setattr(message_context, 'resolve_message_route',
+                        lambda *a, **k: replace(resolve(*a, **k), config_fingerprint='f' * 64))
+    request_id = str(uuid4())
+    _recheck(capsys, root, request_id, expected=4)
+    assert not calls and not list((root / 'state/requests').rglob(request_id + '.json'))

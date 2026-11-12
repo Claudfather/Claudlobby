@@ -19,9 +19,16 @@ touch nothing: no non-GET route exists (pinned by
 ## Run it
 
 ```bash
-claudlobby plane view  # use the sealed release CLI with the [plane-ui] extra
+claudlobby plane view  # use the installation CLI, whose environment needs the [plane-ui] extra
 claudlobby plane open  # print/launch the URL (§17's open verb)
 ```
+
+Routine `/api/summary` and `/healthz` reads return recorder state and provenance without
+counting retained history: `counts` is `null` and `counts_state` is `not_counted`, not zero.
+For exact table totals, explicitly request the native `/api/summary?counts=true` diagnostic;
+it returns `counts_state: counted` with the count object when successful. This expensive
+read retains the ordinary query deadline and can time out on large history. The connected
+workspace keeps its lightweight summary route; it does not expose this diagnostic query.
 
 `/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
 db is absent or unreadable — including on a brand-new host where the
@@ -29,25 +36,23 @@ recorder simply has not written yet — so wire monitors accordingly. The
 header's recorder pill is a live daemon PROBE (typed handshake), never
 socket-file presence.
 
-Supervised: **enrolled by default since chunk N** — activation composes and
+Supervised: **enrolled by default since chunk N** — the Git update composes and
 enrolls its units, because a read-only localhost
 UI reaches none of the four categories the defaults rule reserves for opt-in.
 Exposing it beyond the host (Tailscale Serve, below) stays deliberately your
-step. To turn it off, set `plane-view.enroll: false` under `host.jobs` in
-**this host's own** system.yaml (compose-time dormancy, exactly like
-`plane-daemon` — regenerating then prunes the units), then stop the installed
-unit. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev fallback
+step. The current Git updater refuses removal of an existing native unit, so an
+`enroll: false` edit is not a completed backout. Retain the installed configuration
+until an operator has reviewed stopping the unit and its future enrollment. Knobs: `PLANE_VIEW_PORT`; `PLANE_VIEW_HOST` is the raw-bind dev fallback
 only.
 
 **It needs the `[plane-ui]` extra, and the compositor checks.** Where fastapi
-and uvicorn do not import in the install's venv, `generate` composes **no**
+and uvicorn do not import in the installation's environment, composition emits **no**
 view unit at all and `claudlobby host doctor --switches` renders `plane-view` off
-with the `[plane-ui]` release extra as its arm line. That is the fold's F1:
+with the `[plane-ui]` extra as its arm line. That is the fold's F1:
 "the unit exits saying so" is an honest failure for a hand run and a **crash
 loop every 5s, forever** under `Restart=always` — and enrolling by default is
-what turns the first into the second. Build the wheel with the `[plane-ui]`
-extra in its offline dependency wheelhouse before `host setup`; the
-[cold-host walkthrough](../getting-started.md) shows that preparation.
+what turns the first into the second. The managed installation's checked-in `requirements-runtime.lock` includes fastapi and uvicorn;
+[installation preparation](../getting-started.md) installs that lock.
 
 ## Front it with Tailscale Serve (the ruled exposure)
 
@@ -110,7 +115,7 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   host-wide read. A fleet the plane holds **no identity for** (while it holds
   others) answers a typed `unknown` state naming the fleets it does hold — the
   plane's own rule, never a healthy empty room; a plane holding no fleet yet lets
-  the name through to the route's idle remedy (`generate`). The grid and presence
+  the name through to the route's idle state and its remedy. The grid and presence
   routes also accept a fleet the sampler knows from disk before its first row.
 - **The roster rail.** Inside a room, a flat list ordered by last-seen. Under
   `all` — the only read that spans fleets — the rail groups by fleet under a

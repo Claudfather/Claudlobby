@@ -42,94 +42,49 @@ def _shell_lines(doc: Path) -> list[str]:
 
 
 class TestDocumentedInstallPath:
-    """The install commands the docs hand a user must work on a stock host."""
+    """Docs distinguish preparation, credentials and explicit native startup."""
 
-    def test_cold_host_docs_use_setup_then_activation(self):
-        # `lib/setup-fleet` is retired with `lib/setup-system`: `fleet setup`
-        # validates before it activates, so no doc may chain the old wrapper
-        # after a validate (#1681's quickstart shape).
+    def test_onboarding_uses_one_git_preparation_and_original_update_route(self):
         for doc in (README, GETTING_STARTED, SETUP_SKILL):
             text = doc.read_text()
             assert "host setup" in text and "fleet setup" in text, doc
-            assert "lib/setup-system" not in text and "host-timers" not in text, doc
-            assert "lib/setup-fleet" not in text, doc
+            assert "--plan-only" in text and "host update continue" in text, doc
+            assert not any(flag in text for flag in
+                           ("--guided", "--wheelhouse", "--dependency-lock", "claudlobby-install.pyz")), doc
+        commands = "\n".join(command for _, command in _commands(GETTING_STARTED.read_text()))
+        assert "-m claudlobby.bootstrap" in commands
+        for flag in ("--installation", "--root", "--remote", "--ref", "--interpreter"):
+            assert flag in commands
+        assert "--install-directory" in commands and "host update status" in commands
 
-    @pytest.mark.parametrize(
-        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
-    )
-    def test_no_bare_pip_invocation(self, doc: Path):
-        """`pip ...` as a command is not portable — Homebrew ships pip3 only.
-
-        A stock macOS has no `pip` on PATH at all, so a doc line starting with
-        `pip install` dies with 'command not found' before PEP 668 even gets a
-        say. `python3 -m pip` works anywhere `python3` does.
-        """
-        offenders = [
-            line
-            for line in _shell_lines(doc)
-            if re.match(r"^(sudo\s+)?pip3?\s+install\b", line)
-        ]
-        assert not offenders, (
-            f"{doc.name} tells users to run bare pip:\n  "
-            + "\n  ".join(offenders)
-            + "\nUse 'python3 -m pip install' (or a venv interpreter) instead."
-        )
-
-    @pytest.mark.parametrize(
-        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
-    )
-    def test_install_is_accompanied_by_a_venv(self, doc: Path):
-        """Any doc that installs the package must first create a virtualenv.
-
-        Homebrew python (macOS) and Debian/Raspberry Pi system python are both
-        externally-managed under PEP 668 and refuse an install into the
-        interpreter. Those are the two hosts this project targets first, so an
-        install instruction without a venv is a blocker, not a style nit.
-        """
+    @pytest.mark.parametrize("doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name)
+    def test_no_bare_or_system_pip_install(self, doc):
         lines = _shell_lines(doc)
-        installs_package = any(re.search(r"(?:-m\s+)?pip\s+install\b", ln) for ln in lines)
-        if not installs_package:
-            # The README delegates assembly to the canonical walkthrough.
-            assert doc == README and "documentation/getting-started.md" in doc.read_text()
-            lines = _shell_lines(GETTING_STARTED)
-            assert any(re.search(r"-m\s+pip\s+install\b", ln) for ln in lines)
+        assert not [line for line in lines if re.match(r"^(sudo\s+)?pip3?\s+install\b", line)]
+        if doc in (README, GETTING_STARTED):
+            assert not [line for line in lines if "pip install" in line]
 
-        assert any("venv" in ln for ln in lines), (
-            f"{doc.name} installs the package but never creates a venv. "
-            "PEP 668 makes that install fail on both supported host families."
-        )
+    def test_python_probe_creates_and_runs_an_independent_environment(self):
+        commands = "\n".join(command for _, command in _commands(GETTING_STARTED.read_text()))
+        assert "-m venv" in commands and '"$PROBE/venv/bin/python"' in commands
+        assert "sys.prefix != sys.base_prefix" in commands
+        assert "ssl" in commands and "resolve(strict=True)" in commands
+        assert "sys.version_info >= (3, 10)" in commands
+        assert not [line for line in _shell_lines(GETTING_STARTED) if re.search(r"\bexit\b", line)]
 
-    def test_walkthrough_probes_a_real_venv_and_never_exits_the_pasting_shell(self):
-        """`import venv` passes on Debian without python3-venv; only creating
-        one proves ensurepip. Snippets are pasted into an interactive shell, so
-        `exit` would close the operator's terminal instead of stopping a block.
-        """
-        lines = _shell_lines(GETTING_STARTED)
-        assert not [ln for ln in lines if re.search(r"\bexit\b", ln)]
-        assert not [ln for ln in lines if re.search(r"\bimport [\w, ]*\bvenv\b", ln)]
-        assert any(re.search(r'-m venv "\$PROBE/', ln) for ln in lines)
-        text = GETTING_STARTED.read_text()
-        assert "python3-venv" in text and "`jq`" in text
-
-    def test_every_entry_point_agrees_on_the_first_run_template(self):
-        """The three onboarding entry points must name the same template.
-
-        They disagreed: README and getting-started both said fleet.yaml.example
-        (a ~600-line multi-bot manifest) while the /setup skill said
-        fleet.yaml.seed (one bot). A newcomer following the README therefore got
-        the hardest possible starting point, and the guided and manual paths
-        diverged at step one.
-
-        The skill is included deliberately — the docs agreed with *each other*
-        the whole time, so a docs-only comparison would have stayed green.
-        """
+    def test_credentials_and_startup_are_separate_gates(self):
+        text = GETTING_STARTED.read_text().lower()
+        assert text.index("credential gate") < text.index("## 2.")
+        assert text.index("agent-start gate") < text.index("## 3.")
         for source in (README, GETTING_STARTED, SETUP_SKILL):
-            assert "fleet.yaml.seed" in source.read_text(), source
-        # The executable copy uses the installed package path, including when
-        # the operator is still in the source checkout after building it.
-        walkthrough = GETTING_STARTED.read_text()
-        assert 'cp "$SEEDS/fleet.yaml.seed" "$WORK/fleet.yaml"' in walkthrough
-        assert 'SEEDS=$("$WORK/bootstrap/bin/python" -I -c' in walkthrough
+            text = source.read_text().lower()
+            assert "telegram" in text and "operator" in text
+            assert "first-team-setup.md" in text
+        first_team = (REPO_ROOT / "documentation/first-team-setup.md").read_text()
+        assert "--template revenue-web-app" in first_team and "--plan-only" in first_team
+        assert "host update continue" in first_team
+        assert "not completed cold-host acceptance" in first_team
+        assert "--guided" not in first_team
 
 
 
@@ -203,4 +158,117 @@ def test_example_ids_in_onboarding_docs_are_obviously_fake(doc: Path):
     assert not real_looking, (
         f"{doc.relative_to(REPO_ROOT)} carries ID-shaped numbers that are not obviously "
         f"fake placeholders: {real_looking}"
+    )
+
+
+# --- Staging and activation never take --fleet or --seed (#2567) ---------------
+
+# `config plan`, `config diff PLAN_ID` and `host activate` cover the whole host, and
+# each refuses --fleet and --seed ("host preparation rejects --fleet and --seed",
+# `_host_root` in claudlobby/commands/releases.py), so a doc that passes either stages
+# nothing. After `config plan`, argparse reads a bare `--fleet X` as `--fleet-path X`.
+# The form that works is the sealed CLI with an explicit --root on every command
+# (library/protocols/canary-rollout.md).
+_HOST_WIDE = re.compile(
+    r"\bconfig\s+plan\b|\bhost\s+activate\b|\bconfig\s+diff\s+(?:--json\s+)*(?!-)[^\s;&|]"
+)
+_FLEET_OR_SEED = re.compile(r"(?<![\w-])--(?:fleet|seed)(?![\w-])")
+_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_COMMAND_SEP = re.compile(r";|&&|\|\|?")
+_COMMENT_RE = re.compile(r"(?:^|\s)#.*")
+
+
+def _commands(text: str) -> list[tuple[int, str]]:
+    """(line, command) for each command a doc shows: a code-fence line, with its
+    backslash continuations joined and its comment cut, or an inline code span.
+    Each is split at `;`, `&&`, `||` and `|`, so a flag counts only in its own command."""
+    found: list[tuple[int, str]] = []
+    fenced, pending, start = False, "", 0
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            fenced, pending = not fenced, ""
+            continue
+        if not fenced:
+            found += [(number, part) for span in _SPAN_RE.findall(line)
+                      for part in _COMMAND_SEP.split(span)]
+            continue
+        start = start if pending else number
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        code, pending = _COMMENT_RE.sub("", pending + line), ""
+        found += [(start, part) for part in _COMMAND_SEP.split(code)]
+    return found
+
+
+def _command_docs() -> list[Path]:
+    docs = [REPO_ROOT / name for name in ("README.md", "CLAUDE.md", "AGENTS.md")]
+    for top in ("documentation", "library", "templates", ".claude"):
+        docs += sorted(p for p in (REPO_ROOT / top).rglob("*")
+                       if p.suffix in (".md", ".j2") and p.is_file())
+    return docs
+
+
+def test_no_doc_passes_fleet_or_seed_to_staging_or_activation():
+    """A stranger following our own procedure must stage something (#2567).
+    CHANGELOG.md is not read: it records what was, not what to type."""
+    offenders = [
+        f"{doc.relative_to(REPO_ROOT)}:{line}: {command.strip()}"
+        for doc in _command_docs()
+        for line, command in _commands(doc.read_text())
+        if _HOST_WIDE.search(command) and _FLEET_OR_SEED.search(command)
+    ]
+    assert not offenders, (
+        "these pass --fleet or --seed to a host-wide command, which refuses it:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse the sealed CLI with --root on every command and no --fleet "
+        "(library/protocols/canary-rollout.md)."
+    )
+
+
+# --- The switch tables, and `bot remove` (#2575) -------------------------------------
+
+# fleet-yaml-schema.md and system-yaml-schema.md carry the switch tables as prose that
+# claudlobby/switches.py generates, outside the code spans the rule above reads, so this
+# one reads the registry. A command is the text from one `claudlobby` to the next: the
+# --fleet of `host cache warm` must not stand in front of the verbs that follow it. The
+# package is imported inside the test, so a broken import fails this test alone.
+_PROGRAM = re.compile(r"(?=\bclaudlobby\s)")
+
+
+def test_no_switch_line_passes_fleet_or_seed_to_staging_or_activation():
+    from claudlobby import switches
+
+    offenders = [
+        f"{row.key} ({name}): {command.strip()}"
+        for row in switches.SWITCHES
+        for name, line in (("arm", row.arm), ("disarm", row.disarm))
+        for command in _PROGRAM.split(line)
+        if _HOST_WIDE.search(command) and _FLEET_OR_SEED.search(command)
+    ]
+    assert not offenders, (
+        "these switch lines pass --fleet or --seed to a host-wide command, which refuses it:\n  "
+        + "\n  ".join(offenders)
+        + "\nGive each command its own `claudlobby --root <data-root>` and its own flags."
+    )
+
+
+# `bot remove` refuses without an explicit --root and --fleet ("bot remove requires
+# explicit --root and --fleet", claudlobby/commands/bot_remove.py). A span that starts
+# with the verb names it; one with anything before the verb shows a command to run.
+_BOT_REMOVE = re.compile(r"\S.*\bbot\s+remove\b")
+_ROOT = re.compile(r"(?<![\w-])--root(?![\w-])")
+_FLEET = re.compile(r"(?<![\w-])--fleet(?![\w-])")
+
+
+def test_no_doc_shows_bot_remove_without_root_and_fleet():
+    offenders = [
+        f"{doc.relative_to(REPO_ROOT)}:{line}: {command.strip()}"
+        for doc in _command_docs()
+        for line, command in _commands(doc.read_text())
+        if _BOT_REMOVE.search(command) and not (_ROOT.search(command) and _FLEET.search(command))
+    ]
+    assert not offenders, (
+        "these show `bot remove` without both --root and --fleet, which it requires:\n  "
+        + "\n  ".join(offenders)
     )

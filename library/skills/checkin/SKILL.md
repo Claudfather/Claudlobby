@@ -1,10 +1,11 @@
 ---
 name: checkin
-description: "The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
+description: "Use when the check-in beat sends /checkin to an idle manager, or an idle manager must choose its next move. The idle-manager check-in: read the selected fleet's check-in history, brief and status, Claudron, mission and backlog; decide one project and one action, commit the decision before acting, and surface only justified asks."
 argument-hint: "[--dry-run]"
 tool_grants:
   - "Bash(claudlobby --json --fleet * checkin list *)"
   - "Bash(claudlobby --json --fleet * checkin record *)"
+  - "Bash(claudlobby --json --fleet * checkin show *)"
   - "Bash(claudlobby --fleet * brief *)"
   - "Bash(claudlobby --fleet * fleet status *)"
   - "Bash(claudlobby --json fleet inbox)"
@@ -237,6 +238,10 @@ proceeding; never mint another UUID or resend automatically. If an act is
 confirmed failed, record a follow-up `nothing` check-in with
 `prev_checkin_id=CHECKIN_ID` and name the failed step. Do not report a failed
 notification as an unrecorded task.
+
+To re-read one recorded decision with the assignments joined to it
+(`data.decision.dispatches`), run
+`claudlobby --json --fleet "$FLEET_NAME" checkin show CHECKIN_ID`.
 
 Under `--dry-run`, pass the same file and request UUID to `checkin record --dry-run`.
 Its `validated: true` output has no committed check-in ID. Print the

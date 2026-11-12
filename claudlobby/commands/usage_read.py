@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from datetime import datetime, timedelta, timezone
 import re
 import sqlite3
@@ -28,7 +26,6 @@ def _window(raw: str) -> tuple[datetime, datetime]:
 
 def dispatch(args) -> CommandOutput:
     from ..active_config import ActivationError
-    from ..activation_state import read_selection
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import OperationContextError, OperationContextUnavailableError
@@ -80,16 +77,17 @@ def dispatch(args) -> CommandOutput:
                        f"scan limits={row['scan_limits']}; "
                        f"shared account peers={','.join(row['shared_account_with_selected_fleet_bots']) or '-'}"
                        for row in data['bots']))
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active usage selection changed during read')
+        selected.check(destination.paths.root, package=destination.paths.package,
+                       message='active usage selection changed during read')
+        data.update(selected.provenance)
         if data["coverage"]["status"] == "unavailable":
             # Unreadable is not empty: no zero totals when nothing was observed.
             raise CommandFailure(
                 "unavailable", "no transcript usage could be observed for the selected scope",
                 data={**{key: value for key, value in data.items()
                          if key not in ("main", "sidechain")}, "usage": None},
-                release_id=selected["release_id"])
-        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+                release_id=selected.release_id)
+        return CommandOutput(data, release_id=selected.release_id, lines=lines)
     except CommandFailure:
         raise
     except InvalidPathSelector as exc:

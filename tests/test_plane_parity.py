@@ -205,7 +205,7 @@ def test_field_mismatch_is_flagged_and_match_is_clean(tmp_path):
         "event_type": "work_item", "emitter": "parity-test",
         "fleet": "example-fleet", "source_ref": "dispatch-log:tsk_f1",
         "payload": {"work_item_id": "wi_" + "1" * 32, "title": "build the thing",
-                    "created_by": "bot:example-fleet/mgr"},
+                    "created_by": "bot:example-fleet/mgr", "workstream_id": "ws-test"},
     })
     ledger = _ledger(tmp_path, [
         {"task_id": "tsk_f1", "ts": "t", "task": "build the thing"},

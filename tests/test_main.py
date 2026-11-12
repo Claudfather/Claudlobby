@@ -15,7 +15,7 @@ from claudlobby.commands.data_migrate import (
     _dir_size_mb,
     _human_size,
 )
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 
 
@@ -204,6 +204,11 @@ class TestConfigValidate:
 
 
 class TestCmdGenerate:
+    @pytest.fixture(autouse=True)
+    def managed_render_paths(self, fleet_dir, monkeypatch):
+        paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+        monkeypatch.setattr("claudlobby.commands.core._resolve_paths", lambda _args: paths)
+
     def test_generates_bots(self, fleet_dir):
         args = SimpleNamespace(
             root=str(fleet_dir),

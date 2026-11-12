@@ -1,7 +1,8 @@
-"""The generate-time registry emitter (Phase 2b — spec §9b/§18).
+"""The registry emitter (Phase 2b — spec §9b/§18), run by activation.
 
-One SCAN per generate: assemble the §9b entity payloads from the composed
-fleet state, emit them as `registry_snapshot` events (cause=generate, one
+One SCAN per fleet per activated configuration: assemble the §9b entity
+payloads from the composed fleet state, emit them as `registry_snapshot`
+events (cause=generate, one
 scan_id), diff the db's prior entity set against what this scan enumerated
 to emit TOMBSTONES (deletion is the one underivable operation), then close
 with the `scan_completed` declaration that makes those tombstones valid
@@ -21,15 +22,13 @@ declaration names its scope string.
 
 Default ON since the defaults flip (chunk N): a keyframe of what the fleet IS
 is what every metric sample joins to, and a plane whose registry lane never
-ran renders an estate of unnamed uids. The knob is an opt-OUT —
-``PLANE_EMIT_ENABLED=0`` in the ``.env`` tier suppresses the scan, resolved
-through the runtime's own tier cascade (the SAME resolution the composer uses
-for timer arming). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
-``bot.conf`` (runtime doors and hooks read it) but does NOT reach generate-time
-scans — the .env tier reaches BOTH, so it is the single carrier worth using.
-``PLANE_EMIT_DISABLED=1`` is the ruled harness exemption and still silences
-this like every other door. The generate hook is NON-BLOCKING (a scan failure
-logs and never breaks generate).
+ran renders an estate of unnamed uids. First-fleet setup REQUIRES the scan
+and refuses the values that would turn it off (activation_scan_refusal says
+which and why). Only the retired generate hook, which the harness still drives,
+reads them as an opt-out; it is NON-BLOCKING (a scan failure logs and never
+breaks generate). NOTE the carrier split: ``fleet.yaml env:`` reaches composed
+``bot.conf`` (runtime doors and hooks read it) but does NOT reach the scan —
+only the .env tier does, through the runtime's own tier cascade.
 
 F11 boundary: this emitter enforces the PREVENTION half — incomplete
 enumerations never tombstone, empty-but-complete tombstones its scope.
@@ -54,7 +53,7 @@ from pathlib import Path
 
 from ..claude_version import measure as measure_claude_version
 from ..claudron_compat import COMPAT_FLOOR
-from ..paths import _iter_fleet_dirs
+from ..paths import INSTRUCTION_FILE_NAMES, _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
@@ -372,8 +371,9 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         # EFFECTIVE sets, through the composer's own resolvers (one
         # definition): the composer auto-pairs an integration for every MCP
         # with a matching integrations/<name>.md and adds the available
-        # default protocols at compose time, and a protocol's requires.skills
-        # brings a skill along with it (spec §10) — none of which the
+        # default protocols at compose time, and a protocol's or an
+        # integration's requires: brings skills (and, for an integration,
+        # protocols) along with it (spec §10) — none of which the
         # DECLARED lists carry, so a keyframe of bot.integrations/bot.protocols/
         # bot.skills read every auto-paired integration, default protocol and
         # required skill as "unused" in the inventory while composed into the
@@ -462,7 +462,10 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
             tier = "shared" if is_shared else "fleet-overlay"
             prefix = "shared" if is_shared else fleet_name
             for entry in sorted(base.iterdir()):
-                if entry.name.startswith(".") or entry.name == "README.md":
+                # A folder's CLAUDE.md/AGENTS.md describes the folder and is
+                # never an item in it (library/voices/ carries one, #2150).
+                if (entry.name.startswith(".") or entry.name == "README.md"
+                        or entry.name in INSTRUCTION_FILE_NAMES):
                     continue
                 try:
                     if entry.is_dir():
@@ -605,26 +608,45 @@ class RegistryScanError(RuntimeError):
         super().__init__(reason)
 
 
-def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | None:
-    """Emit one generate-cause registry scan for *fleet*. Returns the summary
-    dict, or None when a tier has turned the scan OFF. Raises only upward
-    through the non-blocking hook in cmd_generate.
+def activation_scan_refusal(paths, fleet) -> str | None:
+    """Why first-fleet setup's scan of *fleet* would refuse before its first emission, or None.
 
-    Activation passes require_commit=True after exact ingest/config readiness,
-    before starting any bot or producer. That mode refuses disabled/unavailable
-    recording and incomplete enumeration before the first emission; success is
-    complete=True, recording='committed', with every <=50-event chunk confirmed.
-    RegistryScanError.summary discloses acknowledged partial chunks; an exception
-    during a chunk leaves its commit unknown, never definitely absent. Keep the
-    coordinator pending on any failure. A later scan reuses canonical hash
-    suppression for existing keyframes; this is not an all-fleet transaction or
-    a second activation journal. The caller owns selected release/source paths.
+    The setup's identity bindings join to the keyframes the scan commits, so
+    there a silenced or opted-out scan is a refusal, never a skip. Each check
+    reads only this process's environment or the fleet's .env tier cascade, so
+    the update's prepare stage asks before it stops or starts anything, with
+    the update record already written, and
+    run_generate_scan(require_commit=True) asks again at the scan. The text is
+    written for the operator and says only what clears the refusal. Unsetting
+    an exported value does, and host update continue then resumes the retained
+    update. Nothing does for a tier value: the update froze its .env tiers as
+    inputs, so an edit stops at the changed-input check, and nothing discards
+    the update. The operator starts over with a new installation and data root.
     """
-    summary = {"scan_id": None, "entities": None, "tombstoned": 0, "complete": False,
-               "foreign_host_rows": 0, "outcomes": {}, "recording": "not_attempted",
-               "attempted_chunks": 0, "committed_chunks": 0, "event_count": None}
-    def refuse(reason, recording="not_attempted"):
-        raise RegistryScanError(reason, {**summary, "recording": recording})
+    from .. import env_tiers as _env_tiers
+    needs = "the registry scan that first-fleet setup needs before it starts any bot"
+    resume = "run host update continue"
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        return (f"PLANE_EMIT_DISABLED=1 in this command's environment silences {needs};"
+                f" unset it, then {resume}")
+    if os.environ.get("PLANE_EMIT_ENABLED") == "0":
+        return (f"PLANE_EMIT_ENABLED=0 in this command's environment opts out of {needs};"
+                f" unset it, then {resume}")
+    try:
+        cascade = _env_tiers.resolve(paths, fleet_name=fleet.name)
+    except _env_tiers.ResolverUnavailable:
+        return (f"the check for {needs} cannot resolve fleet {fleet.name}'s .env tiers to read"
+                f" PLANE_EMIT_ENABLED; {resume} once they resolve")
+    if _env_tiers.resolves_to(cascade, "PLANE_EMIT_ENABLED", "0"):
+        return (f"PLANE_EMIT_ENABLED=0 in {cascade['PLANE_EMIT_ENABLED'].path} opts fleet"
+                f" {fleet.name} out of {needs}; this update froze that file, so no step clears"
+                " the refusal, neither an edit nor host update continue; remove that line,"
+                " then start over with a new installation and data root")
+    return None
+
+
+def _generate_scan_on(paths, fleet) -> bool:
+    """Whether the generate hook's scan (require_commit=False) runs for *fleet*."""
     # The flag resolves through the runtime's OWN .env tier cascade —
     # env_tiers, exactly as the composer resolves the SAME variable for timer
     # stamps. (The shipped check once read fleet.defaults["env"], a tier the
@@ -642,18 +664,12 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
     # PLANE_EMIT_DISABLED=1 is the ruled harness exemption, honored here like
     # every other door.
     if os.environ.get("PLANE_EMIT_DISABLED") == "1":
-        if require_commit:
-            refuse("activation registry scan is disabled by PLANE_EMIT_DISABLED")
-        return None
-    if require_commit and os.environ.get("PLANE_EMIT_ENABLED") == "0":
-        refuse("activation registry scan is opted out by PLANE_EMIT_ENABLED")
+        return False
     from .. import env_tiers as _env_tiers
     try:
         _res = _env_tiers.resolve(
             paths, fleet_name=fleet.name).get("PLANE_EMIT_ENABLED")
     except _env_tiers.ResolverUnavailable as exc:
-        if require_commit:
-            refuse("activation registry scan cannot resolve its recording opt-out tiers")
         # ...but an EXPLICIT opt-out beats a fail-open scan (F3). The CLI
         # already loaded the fleet's .env into os.environ (_load_env), so an
         # operator who wrote PLANE_EMIT_ENABLED=0 is visible here even when
@@ -668,7 +684,7 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
                      " PLANE_EMIT_ENABLED=0 is set in this process's"
                      " environment — NOT scanning (an explicit opt-out is"
                      " honored without the resolver)", exc)
-            return None
+            return False
         log.warning("registry scan: env resolver unreachable (%s) — scanning"
                     " anyway (on by default; PLANE_EMIT_ENABLED=0 opts out)",
                     exc)
@@ -677,8 +693,37 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
         log.info("registry scan: OFF for this fleet (PLANE_EMIT_ENABLED=0 at"
                  " the %s tier) — no keyframes recorded for this generate",
                  _res.tier)
-        if require_commit:
-            refuse("activation registry scan is opted out by an environment tier")
+        return False
+    return True
+
+
+def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | None:
+    """Emit one generate-cause registry scan for *fleet*. Returns the summary
+    dict, or None when a tier has turned the scan OFF. Raises only upward
+    through the non-blocking hook in cmd_generate.
+
+    First-fleet setup passes require_commit=True after exact ingest/config
+    readiness, before starting any bot or producer. That mode refuses
+    disabled/unavailable recording (activation_scan_refusal, which the setup
+    also asks before it stops or starts anything) and incomplete enumeration before the first
+    emission; success is complete=True, recording='committed', with every
+    <=50-event chunk confirmed.
+    RegistryScanError.summary discloses acknowledged partial chunks; an exception
+    during a chunk leaves its commit unknown, never definitely absent. Keep the
+    coordinator pending on any failure. A later scan reuses canonical hash
+    suppression for existing keyframes; this is not an all-fleet transaction or
+    a second activation journal. The caller owns selected release/source paths.
+    """
+    summary = {"scan_id": None, "entities": None, "tombstoned": 0, "complete": False,
+               "foreign_host_rows": 0, "outcomes": {}, "recording": "not_attempted",
+               "attempted_chunks": 0, "committed_chunks": 0, "event_count": None}
+    def refuse(reason, recording="not_attempted"):
+        raise RegistryScanError(reason, {**summary, "recording": recording})
+    if require_commit:
+        reason = activation_scan_refusal(paths, fleet)
+        if reason is not None:
+            refuse(reason)
+    elif not _generate_scan_on(paths, fleet):
         return None
 
     from .emit_api import emit_batch
@@ -721,8 +766,8 @@ def run_generate_scan(paths, fleet, *, require_commit: bool = False) -> dict | N
         if db.is_file():
             conn = None
             try:
-                conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-                conn.row_factory = sqlite3.Row
+                from .db import connect_ro
+                conn = connect_ro(db)
                 # THIS host's envelope uid — the SAME value ingest stamps
                 # rows with, READ from the uid file, never ensure_host_uid:
                 # ensure_ MINTS on absence (mkdir+write — a write this read

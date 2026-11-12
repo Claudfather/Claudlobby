@@ -9,12 +9,13 @@ process, the no-silent-switches violation)."""
 from __future__ import annotations
 
 import subprocess
+import plistlib
 from pathlib import Path
 
 import pytest
 
 import claudlobby.composer as composer_mod
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 
@@ -22,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _paths(tmp_path: Path) -> Paths:
-    return Paths(root=tmp_path, package=source_package())
+    return Paths(root=tmp_path, package=git_package(tmp_path))
 
 
 def _compose(tmp_path: Path, monkeypatch, jobs: dict) -> Path:
@@ -36,6 +37,45 @@ SERVICE_JOB = {
 }
 
 
+def test_owner_service_keeps_literal_arguments_and_operator_environment(tmp_path, monkeypatch):
+    binary = tmp_path / "native $CLAUDLOBBY_ROOT % tailscale"
+    binary.write_text("#!/bin/sh\nexit 99\n")
+    binary.chmod(0o700)
+    cfg = {"unit": "service", "script": "$CLAUDLOBBY_CLI", "enroll": True,
+           "origin": "https://host.example.test", "tailscale": str(binary),
+           "tailscale_socket": str(tmp_path / "headless control.sock"),
+           "socket": str(tmp_path / "private socket"),
+           "workspace_issuer": "https://app.example.test",
+           "workspace_origin": "https://plane.example.test"}
+    out = _compose(tmp_path, monkeypatch, {"plane-owner": cfg})
+    doc = plistlib.loads((out / "claudlobby-plane-owner.plist").read_bytes())
+    from claudlobby.installation import parse_git_unit_argv
+    argv = parse_git_unit_argv(doc["ProgramArguments"]).command
+    assert list(argv[1:6]) == ["--root", str(tmp_path), "host", "owner", "serve"]
+    assert argv[argv.index("--tailscale") + 1] == str(binary)
+    assert argv[argv.index("--tailscale-socket") + 1] == cfg["tailscale_socket"]
+    assert argv[argv.index("--socket") + 1] == cfg["socket"]
+    assert argv[argv.index("--workspace-origin") + 1] == "https://plane.example.test"
+    assert "FLEET_ROOT" not in doc["EnvironmentVariables"]
+    assert doc["KeepAlive"] is True
+    assert "$$CLAUDLOBBY_ROOT %% tailscale" in (out / "claudlobby-plane-owner.service").read_text()
+    assert not (out / "claudlobby-plane-owner.timer").exists()
+    with pytest.raises(ValueError, match="socket requires"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "socket": "relative.sock"}})
+    _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "socket": None}})
+    with pytest.raises(ValueError, match="absolute native Tailscale control socket"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "tailscale_socket": "relative.sock"}})
+
+
+def test_owner_service_is_dormant_until_configured(tmp_path, monkeypatch):
+    cfg = {"unit": "service", "script": "$CLAUDLOBBY_CLI", "enroll": False}
+    out = _compose(tmp_path, monkeypatch, {"plane-owner": cfg})
+    assert not list(out.glob("*plane-owner*"))
+    with pytest.raises(ValueError, match="HTTPS origin"):
+        _compose(tmp_path, monkeypatch, {"plane-owner": {**cfg, "enroll": True}})
+    assert not list(out.glob("*plane-owner*"))
+
+
 def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch):
     out = _compose(
         tmp_path, monkeypatch, {"plane-daemon": {**SERVICE_JOB, "enroll": True}}
@@ -46,8 +86,16 @@ def test_armed_service_composes_service_and_plist_no_timer(tmp_path, monkeypatch
     assert not (out / "claudlobby-plane-daemon.timer").exists()
     body = service.read_text()
     assert "Restart=always" in body
-    assert f"Environment=CLAUDLOBBY_ROOT={tmp_path}" in body
-    assert str(source_package().native / "plane-daemon.sh") in body
+    from claudlobby.supervision_inventory import _environment
+    assignments = " ".join(line.partition("=")[2] for line in body.splitlines()
+                           if line.startswith("Environment="))
+    assert _environment(assignments)["CLAUDLOBBY_ROOT"] == str(tmp_path)
+    from claudlobby.installation import parse_git_unit_argv
+    definition = plistlib.loads(plist.read_bytes())
+    command = parse_git_unit_argv(definition["ProgramArguments"]).command
+    assert list(command[1:]) == ["--root", str(tmp_path), "plane", "serve"]
+    assert command[0] == str(_paths(tmp_path).package.installation.cli)
+    assert "plane-daemon.sh" not in body
     pbody = plist.read_text()
     assert "<key>KeepAlive</key>" in pbody and "<true/>" in pbody
     assert "<key>RunAtLoad</key>" in pbody
@@ -312,3 +360,36 @@ def test_launcher_requires_explicit_absolute_data_root(tmp_path, root, script):
     assert result.returncode == 127
     assert "CLAUDLOBBY_ROOT" in result.stderr
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("name,verb,options", [
+    ("plane-daemon", "serve", {"PLANE_SOCKET": "owned socket $literal %", "PLANE_DRAIN_INTERVAL": "0.25"}),
+    ("plane-view", "view", {"PLANE_VIEW_HOST": "127.0.0.1", "PLANE_VIEW_PORT": "4567"}),
+])
+@pytest.mark.parametrize("declared_options", [False, True])
+def test_resident_native_cli_uses_only_declared_environment_options(tmp_path, monkeypatch, name, verb, options, declared_options):
+    from claudlobby.installation import parse_git_unit_argv
+    original = composer_mod.native_environment
+    if declared_options:
+        monkeypatch.setattr(composer_mod, "native_environment", lambda paths: {**original(paths), **options})
+    else:
+        # Caller environment is not declared native input and must not change
+        # deterministic service composition.
+        for key, value in options.items():
+            monkeypatch.setenv(key, value)
+    out = _compose(tmp_path, monkeypatch, {name: {"unit": "service", "enroll": True,
+                   "script": "$CLAUDLOBBY_NATIVE_DIR/" + name + ".sh"}})
+    doc = plistlib.loads((out / ("claudlobby-" + name + ".plist")).read_bytes())
+    admitted = parse_git_unit_argv(doc["ProgramArguments"])
+    flags = {"PLANE_SOCKET": "--socket", "PLANE_DRAIN_INTERVAL": "--drain-interval",
+             "PLANE_VIEW_HOST": "--host", "PLANE_VIEW_PORT": "--port"}
+    expected = [doc["EnvironmentVariables"]["CLAUDLOBBY_CLI"], "--root", str(tmp_path), "plane", verb]
+    if declared_options:
+        for key, value in options.items():
+            expected.extend([flags[key], value])
+    assert list(admitted.command) == expected
+    assert admitted.mode == "exec"
+    assert doc["KeepAlive"] is True and doc["RunAtLoad"] is True
+    service = (out / ("claudlobby-" + name + ".service")).read_text()
+    assert "ExecStart=" + composer_mod.unit_systemd_command(doc["ProgramArguments"]) in service
+    assert "Restart=always" in service

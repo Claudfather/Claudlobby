@@ -45,8 +45,8 @@ import pytest
 
 from claudlobby.plane import queries
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import (F, NOW_EPOCH, REPO, _dispatch, _matcher, _report, _scene,
-                                  _stdlib_readers, plane_root)
+from tests.plane_fixtures import (F, NOW_EPOCH, REPO, WALK, _at, _deadline_changed, _dispatch, _matcher,
+                                  _report, _scene, _stdlib_readers, plan_steps, plane_root, ro)
 from tests.plane_fixtures import _live_dispatch
 
 
@@ -70,6 +70,13 @@ def test_the_stdlib_report_and_ack_sql_are_byte_identical_to_the_package():
     assert pr.NEWEST_ACK_SQL == queries.NEWEST_ACK_SQL
 
 
+def _past_due(result) -> list[tuple[str, str, str, str]]:
+    """`--all` lines (<bot> <dispatched_at> <expected_by> <elapsed> <assignment_id>
+    <verdict> <task_id>) as (bot, task_id, assignment_id, verdict), in order."""
+    return [(bot, tid, asg, verdict)
+            for bot, _da, _exp, _elapsed, asg, verdict, tid in map(str.split, result.stdout.splitlines())]
+
+
 # --- the plane answers -------------------------------------------------------------
 
 def test_open_and_all_answer_from_the_plane(tmp_path):
@@ -82,8 +89,8 @@ def test_open_and_all_answer_from_the_plane(tmp_path):
         assert f"--open: bot={bot!r} -> 1 open id'd dispatch(es) [source=plane]" in r.stderr
     over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
     assert over.returncode == 0, over.stderr
-    assert [(l.split()[0], l.split()[-1]) for l in over.stdout.splitlines()] == \
-        [("w1", "t-2-bbbb"), ("w2", "t-3-cccc")]                     # both past due
+    assert _past_due(over) == [("w1", "t-2-bbbb", f"asg_{'2':0>32}", "overdue"),
+                               ("w2", "t-3-cccc", f"asg_{'3':0>32}", "overdue")]   # both past due
     # the carriers: a session's FLEET_NAME, a timer unit's CLAUDLOBBY_FLEET (which
     # wins over a session's), an explicit --root over CLAUDLOBBY_ROOT
     named = _matcher(root, "--open", "w1", "--fleet", F)
@@ -99,16 +106,64 @@ def test_the_expiry_cap_and_the_progress_grace_hold_on_the_plane(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     later = NOW_EPOCH + 30 * 86400                       # the cap drops the ancient rows
     capped = _matcher(root, "--all", str(later), "--fleet", F)
-    assert capped.returncode == 0 and capped.stdout == "", capped.stderr
+    assert capped.returncode == 0, capped.stderr                 # past due, never paged again
+    assert [(t, v) for _, t, _, v in _past_due(capped)] == \
+        [("t-2-bbbb", "max_age_cap"), ("t-3-cccc", "max_age_cap")]
     prog_at = datetime.fromtimestamp(NOW_EPOCH - 300, timezone.utc).isoformat(timespec="seconds")
     emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,     # w1 reported progress 5 min ago
                        "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": prog_at,
                        "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
                                    "event": "progress", "actor": f"bot:{F}/w1", "progress": 10}}])
     graced = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
-    assert graced.returncode == 0 and "t-2-bbbb" not in graced.stdout and "t-3-cccc" in graced.stdout
+    assert graced.returncode == 0, graced.stderr                 # deferred, and still listed (#2457)
+    assert [(t, v) for _, t, _, v in _past_due(graced)] == \
+        [("t-2-bbbb", "progress_grace"), ("t-3-cccc", "overdue")]
     opened = _matcher(root, "--open", "w1", "--fleet", F)             # open is deadline-blind and grace-blind
     assert [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
+
+
+# --- a deadline fact moves the deadline the watchdog reads (#2469) -------------------
+
+def _verdicts(root, now):
+    r = _matcher(root, "--all", str(now), "--fleet", F)
+    assert r.returncode == 0, r.stderr
+    return [(t, v) for _, t, _, v in _past_due(r)]
+
+
+def test_a_deadline_fact_moves_the_deadline_the_watchdog_reads(tmp_path):
+    """Dispatched 2 h ago and due 1 h ago, then moved 3 days out: past due before
+    the move, not listed after it, overdue (not capped) once the moved deadline
+    passes, though that is days past dispatch + 24 h, and capped 24 h later."""
+    root = plane_root(tmp_path)
+    wi, asg, _msg = _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    assert _verdicts(root, NOW_EPOCH) == [("t-1-aaaa", "overdue")]
+    due = 3 * 86400
+    _deadline_changed(root, wi, asg, _at(due), ts=_at(-60))
+    assert _verdicts(root, NOW_EPOCH) == []
+    assert _verdicts(root, NOW_EPOCH + due + 1) == [("t-1-aaaa", "overdue")]
+    assert _verdicts(root, NOW_EPOCH + due + 86400 + 1) == [("t-1-aaaa", "max_age_cap")]
+
+
+def test_an_open_ended_deadline_fact_wins_as_the_newest(tmp_path):
+    """A fact with no deadline makes the assignment open-ended, and it wins as
+    the newest fact: read after both the dispatch's deadline and an older
+    fact's have passed, nothing is past due."""
+    root = plane_root(tmp_path)
+    wi, asg, _msg = _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    _deadline_changed(root, wi, asg, _at(86400), ts=_at(-120))
+    _deadline_changed(root, wi, asg, None, ts=_at(-60))
+    assert _verdicts(root, NOW_EPOCH + 86400 + 1) == []
+
+
+def test_the_deadline_fragment_seeks_the_assignments_own_events(tmp_path):
+    """Every open row runs the fragment's two subqueries, so each must seek
+    the assignment's own events, never scan them or walk the task history by
+    kind looking for a deadline fact the row may not have."""
+    root = plane_root(tmp_path)
+    _live_dispatch(root, "1", "t-1-aaaa", ts=_at(-7200), expected_by=_at(-3600))
+    with ro(root) as conn:
+        steps = plan_steps(conn, queries.OPEN_ASSIGNMENTS_AT_SQL, ("actor_x",) + (None,) * 10, "d")
+    assert len(steps) == 2 and not [d for d in steps if WALK.search(d)], steps
 
 
 @pytest.mark.parametrize("report_at,closed", [
@@ -138,7 +193,7 @@ def test_the_orphan_split_holds_on_the_plane(tmp_path):
     os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))      # w1 respawned after t-2 was dispatched
     split = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
     assert split.returncode == 0, split.stderr
-    assert "t-2-bbbb" not in split.stdout and "t-3-cccc" in split.stdout
+    assert [(t, v) for _, t, _, v in _past_due(split)] == [("t-2-bbbb", "orphaned"), ("t-3-cccc", "overdue")]
     orphans = _matcher(root, "--orphans", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
     assert orphans.returncode == 0, orphans.stderr
     assert "t-2-bbbb" in orphans.stdout and "t-3-cccc" not in orphans.stdout
@@ -166,7 +221,7 @@ def test_canonical_assignment_attention_keeps_same_second_rows_and_watchdog_rule
             {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": F,
              "source_ref": "request:shared-second", "occurred_at": at,
              "payload": {"work_item_id": wi, "title": "One canonical task",
-                         "created_by": f"bot:{F}/w2"}},
+                         "created_by": f"bot:{F}/w2", "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": F,
              "source_ref": "request:shared-second", "occurred_at": at,
              "payload": {"assignment_id": aid, "work_item_id": wi,
@@ -221,7 +276,7 @@ def test_stdlib_escalation_projection_keeps_queued_canonical_task(tmp_path):
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": F,
          "occurred_at": at,
          "payload": {"work_item_id": task_id, "title": "Needs operator guidance",
-                     "created_by": actor}},
+                     "created_by": actor, "workstream_id": "ws-test"}},
         {"event_type": "task", "emitter": TASK_EMITTER, "fleet": F,
          "occurred_at": at,
          "payload": {"work_item_id": task_id, "assignment_id": None,
@@ -262,8 +317,7 @@ def test_an_id_less_row_is_the_overdue_readers_but_never_the_open_lists(tmp_path
     assert opened.returncode == 0 and [l.split()[-1] for l in opened.stdout.splitlines()] == ["t-2-bbbb"]
     over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F)
     assert over.returncode == 0, over.stderr
-    rows = [l.split() for l in over.stdout.splitlines()]
-    assert {r[-1] for r in rows if r[0] == "w1"} == {"t-2-bbbb", "-"}
+    assert {t for bot, t, _, _ in _past_due(over) if bot == "w1"} == {"t-2-bbbb", "-"}
 
 
 # --- unreachable is not empty --------------------------------------------------------
@@ -320,7 +374,7 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
     from claudlobby.composer import compose_bot_conf, compose_fleet_timers
     from claudlobby.config import load_fleet
     from claudlobby.env_tiers import Resolution
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from tests.test_composer_briefing_arming import _FLEET
     fl = dedent(_FLEET).replace("system_defaults: false", "system_defaults: true")
@@ -328,7 +382,7 @@ def _composed(tmp_path, monkeypatch, armed: dict[str, str]):
     root.mkdir(parents=True)
     (root / "fleet.yaml").write_text(fl)
     fleet, md = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
     res = {k: Resolution(name=k, value=v, tier="fleet", path=None) for k, v in armed.items()}
     monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
     monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: res)
@@ -481,4 +535,5 @@ def test_the_orphan_list_is_the_planes_own_split(tmp_path):
     assert "t-8-only-plane" in orphans.stdout and "t-2-bbbb" in orphans.stdout
     assert "w2" not in orphans.stdout and "t-3-cccc" not in orphans.stdout
     over = _matcher(root, "--all", str(NOW_EPOCH), "--fleet", F, "--bots-dir", str(bots))
-    assert "t-8-only-plane" not in over.stdout and "t-3-cccc" in over.stdout      # split, never paged twice
+    assert {t: v for _, t, _, v in _past_due(over)} == \
+        {"t-8-only-plane": "orphaned", "t-2-bbbb": "orphaned", "t-3-cccc": "overdue"}   # split, never paged twice

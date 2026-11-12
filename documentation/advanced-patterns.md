@@ -8,7 +8,7 @@ Two mechanics run through most of these patterns. Read them once here:
 
 - **Every bot runs on its own tmux server.** A bot's session lives on a *private* tmux server addressed by `-L <socket>`, where the socket name is the bot's `BOT_SERVICE` (also written to `bot.conf` as `TMUX_SOCKET`). One server's death drops only that bot, never the fleet. Use the canonical task, assignment, message, and report commands for work; Section 5 covers that model. Legacy lifecycle scripts that inspect or restart a pane must address its private socket.
 
-- **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, add its name to a bot's `skills:` list in `fleet.yaml`, stage the source with `config plan`, and activate the reviewed plan. The compositor links `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Never hand-author a skill in a generated bot directory. For those patterns, this doc gives the *why*, the wiring and scheduling; the skill file itself owns the steps.
+- **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, add its name to a bot's `skills:` list in `fleet.yaml` and apply the reviewed change through the managed Git updater (see the [update guide](fleet-update-lifecycle.md#managed-git-delivery)). The compositor links `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Never hand-author a skill in a generated bot directory. For those patterns, this doc gives the *why*, the wiring and scheduling; the skill file itself owns the steps.
 
 ---
 
@@ -24,7 +24,7 @@ Without this, you manually dispatch the engineer, wait, dispatch the reviewer, w
 
 ### Enable it
 
-Add `lifecycle` to the manager bot's `skills:`, then stage and activate the reviewed configuration:
+Add `lifecycle` to the manager bot's `skills:`, then apply the reviewed configuration through the [update guide](fleet-update-lifecycle.md#managed-git-delivery):
 
 ```yaml
 bots:
@@ -57,11 +57,11 @@ Monitoring channels (Slack, Datadog, etc.) accumulate alerts faster than anyone 
 
 ### Enable it
 
-Add `data-alert-sweep` to the bot that owns the monitoring integrations (typically the manager, or a business bot with Slack + GitHub MCP), then stage the source with `config plan` and activate the reviewed plan with `host activate`. The skill's core principle — *always investigate independently; existing PRs and team comments are inputs, not conclusions; never open a competing PR* — is defined in the skill file.
+Add `data-alert-sweep` to the bot that owns the monitoring integrations (typically the manager, or a business bot with Slack + GitHub MCP), then apply the reviewed configuration through the [update guide](fleet-update-lifecycle.md#managed-git-delivery). The skill's core principle — *always investigate independently; existing PRs and team comments are inputs, not conclusions; never open a competing PR* — is defined in the skill file.
 
 ### Scheduling
 
-To run it on a cadence, declare the fleet job in `fleet.yaml`, stage it with `config plan`, and activate it with `host activate` (see [fleet-yaml-schema](fleet-yaml-schema.md)). The private scheduled dispatcher handles the bot's socket and busy-pane check; do not call it as a public operation or add a personal crontab.
+To run it on a cadence, declare the fleet job in `fleet.yaml` and apply it through the [update guide](fleet-update-lifecycle.md#managed-git-delivery) (field reference: [fleet-yaml-schema](fleet-yaml-schema.md)). The private scheduled dispatcher handles the bot's socket and busy-pane check; do not call it as a public operation or add a personal crontab.
 
 ### Gotchas
 
@@ -82,11 +82,11 @@ Action items hide in inboxes and meeting notes and never become tracked tasks. T
 
 ### Enable it
 
-Add `triage` to a bot with the right integrations — the manager, or a business bot with Gmail + Notion + Shopify MCP — then stage and activate the reviewed source configuration. The source-to-enrichment mapping and the dedup-before-create rule are in the skill file.
+Add `triage` to a bot with the right integrations — the manager, or a business bot with Gmail + Notion + Shopify MCP — then apply the reviewed configuration through the [update guide](fleet-update-lifecycle.md#managed-git-delivery). The source-to-enrichment mapping and the dedup-before-create rule are in the skill file.
 
 ### Scheduling
 
-Same as the alert sweep: declare and activate the fleet job so its composed timer owns the schedule and private delivery path.
+Same as the alert sweep: declare the fleet job and apply it through the managed updater so its composed timer owns the schedule and private delivery path.
 
 ### Gotchas
 
@@ -97,37 +97,40 @@ Same as the alert sweep: declare and activate the fleet job so its composed time
 
 ## 4. Graceful Restart & Pre-Stop Handoff
 
-Capture a bot's working context before a restart kills its process, so the next session can resume where it left off. The mechanism is real and current (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop` — it's invoked by whatever is doing the restart.
+A planned restart continues the bot's exact session and needs no handoff: `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation. `claudlobby bot restart BOT --fresh` starts a new session with an empty context that resumes from the bot's saved handoff (`.claude/session.md`), so capture the handoff first. The capture mechanism (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`) is real and current, but it is *not* wired to systemd `ExecStop`.
 
 ### Why
 
-A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought. Any in-flight reasoning about ongoing tasks is lost. A handoff gives the bot a few seconds to write down what it's doing first; the fresh session reads it back and picks up.
+A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought: its next start continues the same conversation from the transcript, but the turn it was in is cut off. A planned `bot restart` avoids that by waiting for an idle prompt. A fresh session drops the conversation, so anything the bot had not written down is gone unless a handoff carries it.
 
 ### Two entry points
 
-Which path runs the handoff depends on *who* is restarting the bot:
+Which path writes the handoff depends on *who* gives the bot a fresh session:
 
-- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the skill captures the handoff in that session before requesting the supervised restart. The public lifecycle route is `claudlobby bot restart BOT`; the skill owns the in-session sequence. See `library/skills/restart/SKILL.md`.
+- **In-session (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from a headless caller — the skill captures the handoff in that session, then requests `claudlobby bot restart BOT --fresh`, which refuses a handoff more than 300 s old. See `library/skills/restart/SKILL.md`.
 
-- **External restarter.** Use `claudlobby bot handoff BOT` to obtain an explicit saved-handoff result before requesting `claudlobby bot restart BOT`. Private scheduled restarters own their native handoff sequence; callers do not invoke those scripts directly.
+- **From outside (a manager).** Request `claudlobby bot handoff BOT` and wait for `saved`; after a `timeout`, inspect with `claudlobby bot handoff BOT --check` instead of sending another handoff. Then run `claudlobby bot restart BOT --fresh`. A plain `claudlobby bot restart BOT` needs no handoff: the Git updater, the weekly worker restart and crash recovery all continue the exact session and read none.
 
 ### What `pre-stop-handoff.sh` actually does
 
-Given a bot directory, the script:
+This is an internal delivery helper, run by `bot handoff`. It loads the bot configuration, resolves its
+private tmux session, checks the existing capture through the shared parser, and
+sends the configured handoff command when needed. Explicit mode reports whether
+a capture was saved, still pending, or unavailable; its short wait is not the end
+of the handoff, which often takes minutes.
 
-1. Loads the bot's config and resolves its tmux session name and **private socket** (`tmux_socket_for_bot`) — the handoff is sent on the bot's own server, not the default one.
-2. Checks `<bot-dir>/.claude/session.md` (the handoff artifact — written by whatever session-handoff capability is installed, or by the `restart` skill itself when none is). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit.
-3. Otherwise, if the session is live **and a session-handoff capability resolves**, sends the configured handoff command and waits up to ~30 seconds for a new `session.md` to land. If no such capability is installed it skips the send, says so on stderr (the `ExecStop` journal) and emits `handoff_skipped` — a silent skip here would lose the handoff at the one moment it matters.
-4. Always exits 0. The handoff is best-effort and never blocks the restart: a timed-out or unreachable bot just proceeds to the bounce. (It also cleans up the transient `.tmux-env` secrets file on every exit path.)
+A pending or unknown handoff is never resent automatically. Continue by inspecting
+the same request, never by sending a replacement. Low-level best-effort behavior is
+not a supported restart shortcut.
 
-### Resume on the next start
+### Resume on a fresh start
 
-Resume needs no separate wiring in the common case. `claudlobby/_runtime_scripts/start-bot.sh` injects the configured session-resume command as the new session's first keystroke, behind two gates: the checkpoint must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every boot. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason and emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
+Resume needs no separate wiring in the common case. When a session starts fresh, `claudlobby/_runtime_scripts/start-bot.sh` submits the configured session-resume command as its own submission, ahead of the authored startup prompt, behind two gates: the handoff must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every fresh start. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason; an unresolved command also emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
 
 ### Gotchas
 
-- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by reviewed configuration activation (the file header says *do not hand-edit*). The handoff belongs at the restarter, per the two entry points above.
-- Best-effort by design: if a bot is deeply stuck (unresponsive MCP, tight loop), the handoff times out and the restart proceeds anyway. That's the intended behavior.
+- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by the managed Git updater (the file header says *do not hand-edit*). The handoff belongs before a fresh session, per the two entry points above.
+- A planned restart waits up to 900 s for an idle prompt. A bot that never goes idle is refused, not bounced, and no model request is sent.
 - The `--auto` flag matters — it runs the handoff non-interactively so the bot doesn't stop to ask for confirmation.
 
 ---
@@ -158,6 +161,17 @@ assignment, use an explicitly unlinked `fleet reports submit --status STATUS
 --summary "..." --request-id UUID`; that report does not transition a task.
 No report may borrow a historical display task ID as an assignment ID.
 
+The read doors (`task show`, `assignment show`, `message show`, `message
+receipt`, `message wait`, `request show` and `checkin show`) also take a
+prefix of an ID: its tag and at least 8 of its hex digits (`asg_da1585e0`), or
+a request UUID's first 8 or more characters. A prefix that names exactly one
+record the caller may read returns that record, and the result names the full
+ID in `data.resolved_from_prefix`. One that names several returns
+`ambiguous_reference` with the candidates and the command that reads each, and
+resolves none. One that names nothing is `not_found` only after that search; a
+shorter prefix is `invalid_argument`. Every mutation, and a reply's parent,
+still takes the full ID: copy it from the read's result before acting on it.
+
 Read reports with `claudlobby --json fleet reports list`, optionally filtering
 with `--bot`, `--status`, or `--since RFC3339_CUTOFF`. The cutoff must be a
 real RFC3339 instant with an offset, derived for the intended window. Inspect
@@ -170,11 +184,10 @@ resends an uncertain message.
 
 ### Trusted local task filers
 
-A local integration such as an operator script uses the selected release's CLI
-with an explicit data root and fleet. Use the absolute `cli` path reported for
-that release by `host releases`; the examples below assume that executable is
-on PATH. Activation manages bot CLI bindings, but does not replace an unrelated
-global pip installation. Admit work into the fleet's queue and read back
+A local integration such as an operator script uses the managed installation's stable CLI
+(`INSTALL/bin/claudlobby`) with an explicit data root and fleet; the examples below
+assume that executable is on PATH. The updater manages bot CLI bindings, but does
+not replace an unrelated global pip installation. Admit work into the fleet's queue and read back
 the canonical task ID returned by the command:
 
 ```bash
@@ -214,7 +227,7 @@ The CLI targets a selected bot's projects directory and refuses an undeclared bo
 
 The old arbitrary-directory cron recipe has no public CLI equivalent. For a
 one-shot selected bot, use `host repos pull --bot BOT`; configure scheduled
-work through the supported authored job and activation path.
+work through the supported authored job and the managed updater.
 
 ### Gotchas
 
@@ -248,7 +261,7 @@ On a timer, the no-LLM selector `claudlobby/_runtime_scripts/code-audit-sweep.sh
 
 The design's key property: **GitHub is the only ledger.** The labelled issues *are* the staleness record — an audit's own filed issues make its repo look "fresh" for the next run — so there's no local tracker file to maintain and nothing to drift out of sync. (Earlier guidance here described a hand-built `next-audit-target.py` + `audit-tracker.json`; that approach was replaced precisely because a local tracker drifts.)
 
-Stage the `fleet.sweep` source with `config plan` and activate the reviewed plan with `host activate`; activation owns timer enrollment on Linux and macOS. Full field reference and the emitted observability events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) are in [fleet-yaml-schema](fleet-yaml-schema.md).
+Apply the `fleet.sweep` configuration through the [update guide](fleet-update-lifecycle.md#managed-git-delivery); the updater owns timer enrollment on Linux and macOS. Full field reference and the emitted observability events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) are in [fleet-yaml-schema](fleet-yaml-schema.md).
 
 ### Gotchas
 
@@ -264,7 +277,7 @@ Consistent, reliable message output across all bots. The fleet-wide policy is **
 
 ### The policy: plain text, no `parseMode`
 
-Do **not** pass `parseMode`, and do **not** wrap output in `**bold**`, `_italic_`, or `` `backticks` ``. Send plain text. Technical identifiers (`chart_uuid`, `~/path`) then render correctly with no escaping, and there are no silent failures from a missed escape character. The bash helper `$CLAUDLOBBY_ROOT/lib/tg-post.sh` sends plain text by default; the Telegram MCP `reply` tool should be called *without* `parseMode`.
+Do **not** pass `parseMode`, and do **not** wrap output in `**bold**`, `_italic_`, or `` `backticks` ``. Send plain text. Technical identifiers (`chart_uuid`, `~/path`) then render correctly with no escaping, and there are no silent failures from a missed escape character. The bash helper `$CLAUDLOBBY_NATIVE_DIR/tg-post.sh` sends plain text by default; the Telegram MCP `reply` tool should be called *without* `parseMode`.
 
 This is codified as a shipped protocol — `library/protocols/telegram-formatting.md` — which the example fleet composes into every bot via `defaults.protocols: [..., telegram-formatting]`. There's also a shared partial (`library/skills/_telegram-formatting.md`) that skills can reference.
 
@@ -295,7 +308,7 @@ Frontend QA is tedious and gets skipped. A designer bot checks every page at eve
 
 ### Enable it
 
-Add `visual-crawl` to a designer/QA bot, then stage and activate the reviewed configuration. The skill takes `[--url <base-url>] [--auto] [--output github|session]`. The [Designer / Visual QA Bot archetype](bot-archetypes.md) describes a good persona for the bot that runs it (typically an Opus bot doing visual QA across the fleet's frontends).
+Add `visual-crawl` to a designer/QA bot, then apply the reviewed configuration through the [update guide](fleet-update-lifecycle.md#managed-git-delivery). The skill takes `[--url <base-url>] [--auto] [--output github|session]`. The [Designer / Visual QA Bot archetype](bot-archetypes.md) describes a good persona for the bot that runs it (typically an Opus bot doing visual QA across the fleet's frontends).
 
 ### Browser automation
 
@@ -303,7 +316,7 @@ The skill needs a way to drive a browser. There is no `library/mcp/` fragment fo
 
 ### Scheduling
 
-For a nightly or post-deploy run, declare the selected bot's fleet job and activate the reviewed plan. The private dispatcher handles its socket; it is not a public scheduling command.
+For a nightly or post-deploy run, declare the selected bot's fleet job and apply the reviewed change through the managed updater. The private dispatcher handles its socket; it is not a public scheduling command.
 
 ### Gotchas
 
@@ -331,7 +344,7 @@ fleet:
       account: work        # → compositor writes CLAUDE_CONFIG_DIR into this bot's bot.conf
 ```
 
-When a bot's `account` is not `default`, configuration staging and activation writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `claudlobby/_runtime_scripts/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
+When a bot's `account` is not `default`, the managed updater's configuration publication writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `claudlobby/_runtime_scripts/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
 
 ### The host side (one-time, per account)
 
@@ -355,7 +368,7 @@ ln -s ~/.claude/skills ~/.claude-work/skills
 
 - Auth, plugins, and (if not symlinked) skills are all per-config-dir. If auth expires or you add a plugin on the default account, repeat the step with `CLAUDE_CONFIG_DIR` set for the other account.
 - Symlinked skills are shared both ways — edits to one are seen by both. If you need account-specific skills, use a real directory instead of a symlink.
-- Everything else (which bot uses which account, service naming, Telegram state) is driven by `fleet.yaml` + configuration staging and activation. Keep account membership there, not in hand-edited runtime files.
+- Everything else (which bot uses which account, service naming, Telegram state) is driven by `fleet.yaml` + the managed Git updater. Keep account membership there, not in hand-edited runtime files.
 
 ---
 

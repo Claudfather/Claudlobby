@@ -1,6 +1,6 @@
 ---
 title: Printify
-type: mcp
+type: cli
 env_contract:
   PRINTIFY_API_KEY:
     description: Printify API key
@@ -10,46 +10,47 @@ env_contract:
     description: Printify shop ID
     default_tier: fleet
     secret: false
-tool_grants:
-  - "mcp__printify__get_blueprint"
-  - "mcp__printify__get_blueprints"
-  - "mcp__printify__get_defaults"
-  - "mcp__printify__get_print_providers"
-  - "mcp__printify__get_printify_status"
-  - "mcp__printify__get_product"
-  - "mcp__printify__get_variants"
-  - "mcp__printify__how_to_use"
-  - "mcp__printify__list_products"
-  - "mcp__printify__list_shops"
 ---
 
 # Printify
 
-### Printify MCP
+### The Printify API
 
-Wire config: shipped as the shared fragment `library/mcp/printify.json` — add `printify` to a bot's `mcp:` list and the compositor merges it into `.mcp.json`. It runs the published package (`npx -y printify-mcp`) and reads `PRINTIFY_API_KEY` + `PRINTIFY_SHOP_ID` (both fleet-tier `.env`). To get order-management tools, override it locally with a fork (below).
+Printify is reached through its v1 REST API. The tool is the `printify` skill, `library/skills/printify/printify_api.sh`. Equip both:
 
-#### Forked MCP with Order Tools
+```yaml
+skills: [printify]          # the tool: reads, and draft-first writes
+integrations: [printify]    # this guide, and the PRINTIFY_* env contract that doctor checks
+```
 
-The published `@tsavo/printify-mcp` package (the fragment pins 0.1.1; there is no unscoped `printify-mcp` on npm) only exposes product/shop/blueprint tools. To get order-management tools (`list_orders`, `submit_order`, `get_order`, `send_order_to_production`, `calculate_shipping`, `cancel_order`), fork upstream `TSavo/printify-mcp` and add them yourself.
+Run the tool from the bot directory, where every session starts:
 
-The `.mcp.json` points to the local build at `~/your-fork/printify-mcp/dist/index.js`. If making changes, edit `src/` files, run `npm run build`, then restart the bot.
+```bash
+.claude/skills/printify/printify_api.sh <command>
+```
 
-**Periodically check:** whether upstream merged the order tools PR. If merged, switch back to the published package (`npx -y @tsavo/printify-mcp@<version>`, pinned like every shipped fragment) and drop the local fork.
+- **Reads:** `status` (the real shop list, and which shop is current), `products [limit]`, `product <id>` (with its full description), `orders [limit]` (no customer data), `order <id>`, and `raw <api/path.json>` for any other v1 GET.
+- **Writes, draft-first:** `create` (a PNG to a new draft product), `migrate` (a product recreated on a new print provider, as a draft) and `publish` (pushes a draft to the store, and refuses without `--yes`). `create` and `migrate` never publish. Run each with `--dry-run` first: it prints the request and sends nothing.
+
+`library/skills/printify/SKILL.md` has the full usage. Auth is `Authorization: Bearer $PRINTIFY_API_KEY`; the shop is `$PRINTIFY_SHOP_ID`. Both live in the fleet-tier `.env`.
 
 #### Permissions
 
-Read-only tools (`get_*`, `list_*`, `how_to_use`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`create_product`, `update_product`, `delete_product`, `publish_product`, `upload_image`, `generate_*`, `set_default`, `switch_shop`) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tool_permissions.allow`. Split declared in `library/mcp/printify.json` `_permissions_contract` (see `library/mcp/README.md`). A fork override adding order tools should ship a local overlay fragment extending `tools`/`read_only_tools` (and mirror `tool_grants`) for its read-tier additions (`list_orders`, `get_order`, `calculate_shipping`).
+The skill's `tool_grants` allow its reads in the form above, so they run without a prompt. Its writes are not granted and ask first; a bot that must write unattended grants the exact command in fleet.yaml `tool_permissions.allow`. The grants name a path relative to the bot directory, so run the tool from there. `"$BOT_DIR/.claude/skills/printify/printify_api.sh" <command>` runs it from anywhere, but every call asks: Claude Code allows a command that contains a `$VARIABLE` only through an exact-text rule.
 
 #### Gotchas
 
 - Printify fulfillment status doesn't always sync back to Shopify — monitor for orphaned unfulfilled orders in Shopify
-- Order creation requires a `send_order_to_production` call after `submit_order` — two-step process
+- An order is created in two steps: submit it, then send it to production
 - Blueprint browsing returns large payloads — use specific blueprint IDs when possible rather than listing all
+
+### The MCP server (deprecated)
+
+`library/mcp/printify.json`, the `@tsavo/printify-mcp` server, is deprecated. A bot that still lists `mcp: [printify]` composes as before: the server starts, its read tools are allowed by the fragment's own `_permissions_contract`, its writes ask, and `config validate` warns `mcp-deprecated`. This integration grants no `mcp__printify__` tool. To move a bot to the API, replace `mcp: [printify]` with the two lines above.
 
 ### API / developer reference
 
-Full REST reference: **https://developers.printify.com/**. When the MCP tools are lossy (the fork's `list_products` can drop the product array from its formatted output), hit the API directly — auth is `Authorization: Bearer $PRINTIFY_API_KEY`, shop from `$PRINTIFY_SHOP_ID` (both fleet-tier `.env`).
+Full REST reference: **https://developers.printify.com/**. `raw` reaches the GETs below. The skill has no update door, so the `PUT` below is a direct API call with the same Bearer auth.
 
 Endpoints worth knowing:
 

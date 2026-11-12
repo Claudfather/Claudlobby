@@ -328,3 +328,84 @@ def test_a_reply_recorded_for_a_human_is_keyed_on_positive_facts(receipt_case):
         with rr.locked_request(root, intent.fleet_uid, str(uuid4())) as store:
             with pytest.raises(rr.ReceiptError):
                 store.prepare(mutant)
+
+
+@pytest.mark.parametrize('damage', [None, 'bot', 'no_task', 'other_recipient', 'task_event', 'delivery', 'extra_fact'])
+def test_feedback_codec_requires_one_human_task_comment(receipt_case, damage):
+    root, ident, intent = receipt_case
+    route = _message_route(root)
+    route = replace(route, caller_alias='human:reviewer', caller_fleet_uid=None,
+                    recipient_alias=route.manager_alias, peer_destination=route.manager_destination)
+    intent = replace(intent, operation='task.feedback', task_id='wi_' + 'a' * 32,
+        recipient_uid=route.manager_uid, route=route,
+        stages=(intent.stages[0], rr.StagePlan('notification')))
+    if damage == 'bot':
+        intent = replace(intent, route=replace(route, caller_alias='bot:fleet-a/caller', caller_fleet_uid=intent.fleet_uid))
+    elif damage == 'no_task':
+        intent = replace(intent, task_id=None)
+    elif damage == 'other_recipient':
+        intent = replace(intent, recipient_uid='actor_' + 'b' * 32)
+    elif damage == 'task_event':
+        intent = replace(intent, stages=(rr.StagePlan('recording', (replace(intent.stages[0].facts[0], family='task'),)), intent.stages[1]))
+    elif damage == 'delivery':
+        intent = replace(intent, stages=(intent.stages[0], rr.StagePlan('delivery')))
+    elif damage == 'extra_fact':
+        intent = replace(intent, stages=(rr.StagePlan('recording', (intent.stages[0].facts[0],
+            replace(intent.stages[0].facts[0], event_id='ev_' + 'c' * 32))), intent.stages[1]))
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        if damage:
+            with pytest.raises(rr.ReceiptError):
+                store.prepare(intent)
+        else:
+            store.prepare(intent)
+            assert store.load().intent == intent
+            with pytest.raises(rr.ReceiptConflict):
+                store.begin_native_attempt('ev_' + 'd' * 32)
+
+
+def test_git_message_receipt_retains_unknown_and_exact_original_provenance(receipt_case):
+    root, ident, base = receipt_case
+    route = replace(_message_route(root), activation_id=None, plan_id=None, release_id=None,
+                    revision='a' * 40, config_fingerprint='b' * 64)
+    intent = replace(_message_intent(root, base), route=route)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        store.prepare(intent)
+        store.begin_native_attempt('ev_' + 'a' * 32)
+        store.stage(0)
+        store.outcome(0, 'committed')
+        before = store.path.read_bytes()
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        saved = store.prepare(intent)
+        assert saved.intent.route == route and saved.stages[1].status == 'unknown'
+        changed = replace(route, revision='c' * 40, config_fingerprint='d' * 64)
+        assert rr.same_native_route(route, changed)
+        assert not rr.same_native_route(route, replace(changed, recipient_alias='bot:fleet-a/other'))
+        with pytest.raises(rr.ReceiptConflict):
+            store.prepare(replace(intent, route=changed))
+        assert store.path.read_bytes() == before
+    raw = json.loads(before)['intent']['route']
+    assert all(raw[key] is None for key in ('activation_id', 'plan_id', 'release_id'))
+    assert raw['revision'] == route.revision and raw['config_fingerprint'] == route.config_fingerprint
+
+
+def test_historical_sealed_message_receipt_keeps_its_original_route_shape(receipt_case):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        original = store.prepare(intent)
+        raw = json.loads(store.path.read_bytes())
+        assert 'revision' not in raw['intent']['route']
+        assert 'config_fingerprint' not in raw['intent']['route']
+        assert rr.decode_receipt(raw, request_id=ident, fleet_uid=intent.fleet_uid) == original
+
+
+@pytest.mark.parametrize('change', [dict(release_id='release-1'), dict(revision=None),
+                                   dict(config_fingerprint=None), dict(revision='not-a-commit')])
+def test_git_route_rejects_mixed_or_incomplete_selection_before_recording(receipt_case, change):
+    root, ident, base = receipt_case
+    route = replace(_message_route(root), activation_id=None, plan_id=None, release_id=None,
+                    revision='a' * 40, config_fingerprint='b' * 64)
+    with rr.locked_request(root, base.fleet_uid, ident) as store:
+        with pytest.raises(rr.ReceiptError):
+            store.prepare(replace(_message_intent(root, base), route=replace(route, **change)))
+        assert not store.path.exists()

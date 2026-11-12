@@ -1,6 +1,6 @@
 ---
 name: selfcheck
-description: "Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, and own-fleet state from claudlobby fleet status. Generic — no host-specific or personal paths."
+description: "Use when a manager is asked how it is doing, or wants to surface degradation in its own session, MCP servers or Telegram link. Manager self-diagnostic (formerly /status). Reports session health, MCP connectivity, and own-fleet state from claudlobby fleet status. Generic — no host-specific or personal paths."
 argument-hint: "[full|mcp|telegram]"
 ---
 
@@ -108,7 +108,7 @@ Send via `mcp__plugin_telegram_telegram__reply` to chat_id `$TELEGRAM_GROUP_CHAT
 2. For MCP tests, use read-only calls — don't modify anything.
 3. Flag issues prominently at the top of the output.
 4. If you notice a degradation symptom (`context-management`), call it out with
-   the token `context-degraded` and say whether a restart is safe right now.
+   the token `context-degraded` and say whether a fresh session is safe right now.
    Never substitute a guessed percentage for that.
 5. Keep the output under ~20 lines. Don't dump full logs — only the single relevant line if you found an error.
 6. Default to "full" if no argument is provided.

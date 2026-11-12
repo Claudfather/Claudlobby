@@ -1,33 +1,7 @@
-"""No ``library/`` file may reference the retired transcript-digest JSONL sink.
-
-#1503 moved the session digest OFF ``state/transcript-digests/transcript-digest-
-<date>.jsonl`` and ONTO the plane as a ``session_digest`` system event:
-``claudlobby/_runtime_scripts/transcript-digest.sh`` emits it, ``claudlobby events --type
-session_digest`` reads it. The sink cutover shipped, but its on-estate READER —
-the ``fleet-digest`` skill and the ``fleet-monitoring`` protocol under
-``library/`` — kept pointing at the deleted file, because the "no on-estate
-consumer" census swept only ``claudlobby/_runtime_scripts/`` and ``claudlobby/`` and missed ``library/``.
-That left the reader reading an empty window the moment a fleet armed the
-digester, and the docs contradicting the code.
-
-This pins the reader side: any ``library/**`` file that names the retired path
-fails here, naming the file and line so the next drift is caught at the source
-rather than in production.
-
-**Scoped to ``library/**`` deliberately.** ``documentation/architecture/*``
-legitimately mentions the old path as history ("was ``state/transcript-digests/
-…``, retired by #1503") — those are not stale references and are out of scope.
-
-The retired tokens, each chosen NOT to collide with a live surface:
-
-- ``transcript-digest-*.jsonl`` — the dated file. Not ``transcript-digest.sh``
-  (the live sink script, a DOT before ``sh``), not ``session_digest`` (the live
-  event name).
-- ``state/transcript-digests`` — the retired host directory.
-- ``SESSION_DIGEST_LOG_DIR`` — the retired dir-override env knob. Not
-  ``SESSION_DIGEST_ENABLED`` / ``SESSION_DIGEST_MIN_TURNS``, which are live.
+"""The writer retired in #2145 P3; live monitoring reads session_summary through
+claudlobby event list --type session_summary. No library reader may name the
+retired session_digest, transcript-digest or SESSION_DIGEST_ surface.
 """
-
 from __future__ import annotations
 
 import re
@@ -39,9 +13,9 @@ LIBRARY = REPO / "library"
 # Each pattern names one retired surface; a match anywhere under library/ is a
 # reader that #1503 left pointing at the deleted file.
 RETIRED = (
-    re.compile(r"transcript-digest-.*\.jsonl"),
-    re.compile(r"state/transcript-digests"),
-    re.compile(r"SESSION_DIGEST_LOG_DIR"),
+    re.compile(r"\bsession_digest\b"),
+    re.compile(r"transcript-digest"),
+    re.compile(r"SESSION_DIGEST_"),
 )
 
 
@@ -62,5 +36,5 @@ def test_no_library_file_references_the_retired_digest_jsonl() -> None:
     assert not offenders, (
         "library/ still references the retired transcript-digest JSONL sink "
         "(#1503 moved it to the plane; read it via `claudlobby events --type "
-        "session_digest --json`):\n" + "\n".join(offenders)
+        "session_summary --json`):\n" + "\n".join(offenders)
     )

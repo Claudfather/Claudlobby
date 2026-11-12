@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation, context, message_operations, operation_context, runtime_admission
+from claudlobby import context, message_operations, operation_context, runtime_admission
 from claudlobby.__main__ import main
 from claudlobby.message_transport import TransportOutcome
 from claudlobby.plane.db import db_file
@@ -17,7 +17,7 @@ from claudlobby.plane.emit_api import emit_batch
 from claudlobby.request_receipts import RequestStore, locked_request
 from tests.package_fixtures import source_package
 from tests.conftest import load_lib_module
-from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 
 
@@ -27,9 +27,7 @@ def active(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR",
                 "FLEET_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=release.inputs.artifact_id)
+    package = host.package
     monkeypatch.setattr(context, "get_resources", lambda: package)
     return root, release
 
@@ -57,7 +55,7 @@ def test_admit_assign_accept_are_distinct_committed_operations(active, monkeypat
                      "--body-file", str(body), "--repo", "owner/repo",
                      "--request-id", admit_id)
     task_id = admitted["data"]["task_id"]
-    assert admitted["request_id"] == admit_id and admitted["release_id"] == release.release_id
+    assert admitted["request_id"] == admit_id and admitted["release_id"] == None
     assert admitted["data"]["state"] == "queued"
     assert admitted["data"]["fleet"] == "example" and admitted["data"]["replayed"] is False
     assert admitted["data"]["recording"] == "committed"
@@ -104,10 +102,11 @@ def test_admit_assign_accept_are_distinct_committed_operations(active, monkeypat
     stale = _call(capsys, root, "assignment", "accept", assignment_id,
                   "--request-id", accept_id, expected=7)
     assert stale["error"]["code"] == "release_mismatch" and _counts(root) == before_stale
-    monkeypatch.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+    monkeypatch.delenv("CLAUDLOBBY_RELEASE_ID")
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(release.directory))
     accepted = _call(capsys, root, "assignment", "accept", assignment_id,
                      "--request-id", accept_id)
-    assert accepted["request_id"] == accept_id and accepted["release_id"] == release.release_id
+    assert accepted["request_id"] == accept_id and accepted["release_id"] == None
     assert accepted["data"]["task_id"] == task_id
     assert accepted["data"]["assignment_id"] == assignment_id
     assert accepted["data"]["state"] == "active"
@@ -128,11 +127,11 @@ def test_bad_inputs_and_wrong_executable_refuse_before_identity_or_task_writes(a
     assert _counts(root) == before
 
     monkeypatch.setattr(runtime_admission.RuntimeIdentity, "current", classmethod(lambda cls:
-        runtime_admission.RuntimeIdentity(release.cli_path.with_name("other-cli"),
-                                          release.native_path, release.inputs.artifact_id)))
+        runtime_admission.RuntimeIdentity(release.cli.with_name("other-cli"),
+                                          release.native, "")))
     wrong = _call(capsys, root, "task", "admit", "--title", "Valid",
-                  "--request-id", str(uuid4()), expected=7)
-    assert wrong["error"]["code"] == "release_mismatch"
+                  "--request-id", str(uuid4()), expected=4)
+    assert wrong["error"]["code"] == "conflict"
     assert _counts(root) == before
 
 
@@ -151,22 +150,25 @@ def test_reassign_closes_predecessor_and_replay_keeps_exact_provenance(active, c
             "--request-id", request_id)
     routed = _call(capsys, root, *argv)
     successor = routed["data"]["assignment_id"]
-    assert routed["release_id"] == release.release_id
+    assert routed["release_id"] == None
     assert routed["data"]["state"] == "assigned" and successor != original
     assert routed["data"]["recording"] == "committed"
     assert routed["data"]["delivery"] == routed["data"]["notification"] == "not_requested"
     assert _counts(root)[2:] == (before[2] + 1, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    shown = data["task"]
     with sqlite3.connect(db_file(root)) as conn:
         manager_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='actor' AND alias=?",
                                    ("bot:example/manager",)).fetchone()[0]
-    assert shown["current_assignment"]["assignment_id"] == successor
-    assert shown["current_assignment"]["assigned_by_uid"] == manager_uid
+    assert shown["current_assignment_id"] == successor
+    current = next(item for item in shown["assignments"] if item["assignment_id"] == shown["current_assignment_id"])
+    assert current["assigned_by_uid"] == manager_uid
     prior = next(item for item in shown["assignments"] if item["assignment_id"] == original)
     assert prior["state"] == "closed"
-    assert prior["terminal_event"]["event"] == "reassigned"
-    assert prior["terminal_event"]["successor_id"] == successor
-    assert prior["terminal_event"]["actor_uid"] == manager_uid
+    closing = next(event for event in data["events"] if event["event_id"] == prior["terminal_event_id"])
+    assert closing["event"] == "reassigned"
+    assert closing["successor_id"] == successor
+    assert closing["actor_uid"] == manager_uid
 
     after = _counts(root)
     replay = _call(capsys, root, *argv)
@@ -196,11 +198,13 @@ def test_withdraw_closes_queued_task_and_retains_caller_separate_from_by(active,
     assert withdrawn["data"]["assignment_id"] is None
     assert withdrawn["data"]["delivery"] == "not_requested"
     assert _counts(root)[2:] == (0, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    shown = data["task"]
     with sqlite3.connect(db_file(root)) as conn:
         manager_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='actor' AND alias=?",
                                    ("bot:example/manager",)).fetchone()[0]
-    assert shown["terminal_event"]["actor_uid"] == manager_uid
+    closing = next(event for event in data["events"] if event["event_id"] == shown["terminal_event_id"])
+    assert closing["actor_uid"] == manager_uid
     receipt = next((root / "state/requests").glob(f"*/{request_id}.json"))
     assert json.loads(receipt.read_text())["intent"]["caller_uid"] == shown["created_by_uid"]
     assert shown["created_by_uid"] != manager_uid
@@ -248,12 +252,13 @@ def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, cap
             "--by", "bot:example/manager", "--request-id", request_id)
     before = _counts(root)
     raised = _call(capsys, root, *argv)
-    assert raised["release_id"] == release.release_id
+    assert raised["release_id"] == None
     assert raised["data"]["state"] == "queued" and raised["data"]["assignment_id"] is None
     assert raised["data"]["delivery"] == raised["data"]["notification"] == "not_requested"
     assert _counts(root)[2:] == (0, 0, before[4] + 1)
-    shown = _call(capsys, root, "task", "show", task_id)["data"]["task"]
-    assert shown["history"][-1]["event"] == "escalated"
+    data = _call(capsys, root, "task", "show", task_id)["data"]
+    history = [event for event in data["events"] if event["task_id"] == task_id]
+    assert history[-1]["event"] == "escalated"
     with sqlite3.connect(db_file(root)) as conn:
         detail = conn.execute("SELECT assignment_id, detail FROM events "
                               "WHERE kind='task' AND event='escalated' AND work_item_id=?",
@@ -273,11 +278,39 @@ def test_escalate_queued_task_is_visible_and_replay_does_not_move_it(active, cap
     assert _counts(root) == after
 
 
+def test_reschedule_moves_the_deadline_the_pulse_reads_on_the_same_assignment(active, capsys):
+    """#2469: the public verb records one deadline_changed on the assignment the
+    page names, and the overdue read the pulse runs stops listing it, with no
+    new assignment and nothing delivered."""
+    root, release = active
+    due = datetime.now(timezone.utc) - timedelta(hours=1)
+    task_id = _call(capsys, root, "task", "admit", "--title", "Waits on the operator",
+                    "--request-id", str(uuid4()))["data"]["task_id"]
+    asg = _call(capsys, root, "task", "assign", task_id, "--bot", "worker", "--expected-by", due.isoformat(),
+                "--request-id", str(uuid4()))["data"]["assignment_id"]
+    doors = load_lib_module("dispatch-overdue")
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
+    later = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    argv = ("assignment", "reschedule", asg, "--expected-by", later,
+            "--reason", "Waits on the operator", "--request-id", str(uuid4()))
+    before = _counts(root)
+    moved = _call(capsys, root, *argv)
+    assert moved["command"] == "assignment.reschedule" and moved["release_id"] == None
+    assert moved["data"]["assignment_id"] == asg and moved["data"]["outcome"] == "committed"
+    assert moved["data"]["delivery"] == moved["data"]["notification"] == "not_requested"
+    assert _counts(root) == (*before[:4], before[4] + 1)
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert not doors.overdue_all(now, max_age=0, fleet="example", root=str(root)).get("worker")
+    replay = _call(capsys, root, *argv)
+    assert replay["data"]["replayed"] and _counts(root) == (*before[:4], before[4] + 1)
+
+
 def test_linked_reports_commit_before_notification_and_replay_never_resends(active, monkeypatch, capsys):
     root, release = active
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
                        "FLEET_NAME": "example",
-                       "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+                       "CLAUDLOBBY_INSTALLATION": str(release.directory)}.items():
         monkeypatch.setenv(key, value)
     def generated(bot):
         monkeypatch.setenv("BOT_ID", bot)
@@ -422,7 +455,7 @@ def test_nudge_queued_and_assigned_work_records_before_send_without_replay(activ
             "--by", "bot:example/worker", "--request-id", request_id)
     first = _call(capsys, root, *argv, expected=5)
     assert first["error"]["code"] == "notification_failed"
-    assert first["release_id"] == release.release_id
+    assert first["release_id"] == None
     assert first["data"]["task_id"] == task_id and first["data"]["assignment_id"] is None
     assert first["data"]["recording"] == "committed" and first["data"]["transport"] == "submitted"
     assert first["data"]["request_persisted"] is True and len(sent) == 1
@@ -473,3 +506,184 @@ def test_task_write_help_and_syntax_do_not_import_mutation_owner(monkeypatch, ca
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "assignment.accept"
+
+
+def test_feedback_cli_binds_existing_explicit_human_and_original_receipt(active, monkeypatch, capsys):
+    from tests.test_plane_owner_feedback import receiver
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Review result',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setattr(operation_context, '_local_operator_alias',
+                        lambda: pytest.fail('feedback must not resolve an ambient actor'))
+    calls, repairs = receiver(monkeypatch)
+    before = _counts(root)
+    bad = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:unregistered',
+                '--expected-assignment', 'none', '--text', 'Comment', '--request-id', str(uuid4()), expected=4)
+    assert bad['error']['code'] == 'conflict' and _counts(root) == before
+    request = str(uuid4())
+    argv = ('task', 'feedback', task_id, '--actor', 'human:reviewer', '--expected-assignment', 'none',
+            '--text', '  Please consider café\nNext iteration  ', '--request-id', request)
+    first = _call(capsys, root, *argv)
+    assert first['command'] == 'task.feedback' and first['request_id'] == request
+    assert first['data']['recording'] == 'committed' and first['data']['current_task_state'] == 'queued'
+    assert first['data']['notification'] == 'received'
+    replay = _call(capsys, root, *argv)
+    assert replay['data']['replayed'] and replay['data']['message_id'] == first['data']['message_id']
+    assert replay['data']['recording'] == 'committed'
+    retained = _call(capsys, root, 'request', 'show', request)['data']['request']
+    assert retained['operation'] == 'task.feedback' and retained['assignment_id'] is None
+    assert len(calls) == 1 and repairs == []
+    after = _counts(root)
+    assert after[:3] == before[:3] and after[3] == before[3] + 1 and after[4] == before[4]
+    monkeypatch.setenv('BOT_ID', 'worker')
+    denied = _call(capsys, root, *argv, expected=4)
+    assert denied['error']['code'] == 'conflict' and _counts(root) == after
+
+
+@pytest.mark.parametrize('change', ['body', 'selection', 'actor'])
+def test_feedback_cli_invalid_input_has_no_recording(active, monkeypatch, capsys, change):
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id,
+        '--actor', 'bot:example/manager' if change == 'actor' else 'human:reviewer',
+        '--expected-assignment', '' if change == 'selection' else 'none',
+        '--text', 'x' * 16385 if change == 'body' else 'Comment', '--request-id', str(uuid4()), expected=2)
+    assert result['error']['code'] == 'invalid_argument' and _counts(root) == before
+
+
+@pytest.mark.parametrize('carrier', ['fleet-name', 'fleet-selector', 'timer', 'empty-timer',
+                                     'service', 'empty-service', 'release', 'empty-release', 'native', 'empty-native', 'host-update'])
+def test_feedback_cli_refuses_generated_carrier_with_existing_human(active, monkeypatch, capsys, carrier):
+    from tests.test_plane_owner_feedback import receiver
+    from claudlobby.active_config import resolve_active_context
+
+    root, release = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Existing human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    selected = resolve_active_context(root=root, fleet='example', package=context.get_resources())
+    calls, repairs = receiver(monkeypatch)
+    if carrier in {'fleet-name', 'fleet-selector'}:
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('FLEET_ROOT', str(selected.paths.fleet_config_dir))
+        monkeypatch.setenv('FLEET_NAME' if carrier == 'fleet-name' else 'CLAUDLOBBY_FLEET', 'example')
+    elif carrier in {'timer', 'empty-timer'}:
+        monkeypatch.setenv('CLAUDLOBBY_TIMER_CONTEXT', 'fleet' if carrier == 'timer' else '')
+    elif carrier in {'service', 'empty-service'}:
+        monkeypatch.setenv('BOT_SERVICE', 'fixture-worker' if carrier == 'service' else '')
+    elif carrier in {'release', 'empty-release'}:
+        monkeypatch.setenv('CLAUDLOBBY_RELEASE_ID', 'r-' + 'a' * 64 if carrier == 'release' else '')
+    elif carrier in {'native', 'empty-native'}:
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_ADMITTED', '1' if carrier == 'native' else '')
+    else:
+        # Actual host_update_operations child shape: no BOT_* or FLEET_ROOT,
+        # but explicit installation/native/CLI and the private re-entry marker.
+        monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+        monkeypatch.setenv('CLAUDLOBBY_INSTALLATION', str(release.directory))
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_DIR', str(release.native))
+        monkeypatch.setenv('CLAUDLOBBY_CLI', str(release.cli))
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_ADMITTED', '1')
+        monkeypatch.setenv('CLAUDLOBBY_NATIVE_PYTHON', __import__('sys').executable)
+    before = _counts(root)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'A timer must not impersonate this human',
+                   '--request-id', str(uuid4()), expected=4)
+    assert result['error']['code'] == 'conflict'
+    assert result['error']['message'] == 'task feedback requires an explicit local human caller'
+    assert _counts(root) == before and calls == repairs == []
+
+
+@pytest.mark.parametrize('selector', ['FLEET_NAME', 'CLAUDLOBBY_FLEET'])
+def test_feedback_cli_allows_manual_root_and_fleet_selectors(active, monkeypatch, capsys, selector):
+    from tests.test_plane_owner_feedback import receiver
+
+    root, installation = active
+    # Explicit installed paths alone describe a manual operator, not native re-entry.
+    monkeypatch.setenv('CLAUDLOBBY_CLI', str(installation.cli))
+    monkeypatch.setenv('CLAUDLOBBY_NATIVE_DIR', str(installation.native))
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Manual human selected task',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv(selector, 'example')
+    calls, repairs = receiver(monkeypatch)
+    result = _call(capsys, root, 'task', 'feedback', task_id, '--actor', 'human:reviewer',
+                   '--expected-assignment', 'none', '--text', 'Explicit local operator comment',
+                   '--request-id', str(uuid4()))
+    assert result['data']['recording'] == 'committed' and result['data']['notification'] == 'received'
+    assert len(calls) == 1 and repairs == []
+
+
+def test_feedback_cli_expanded_body_has_bounded_native_budget_and_never_retries(active, monkeypatch, capsys):
+    from dataclasses import replace
+    import subprocess
+    from claudlobby import message_operations, message_transport
+    from tests.package_fixtures import source_package
+
+    root, _ = active
+    monkeypatch.setattr(operation_context, '_local_operator_alias', lambda: 'human:reviewer')
+    task_id = _call(capsys, root, 'task', 'admit', '--title', 'Maximum escaped comment',
+                    '--request-id', str(uuid4()))['data']['task_id']
+    original = message_operations.send_committed_native_attempt
+    calls = []
+
+    def native_runner(command, **kwargs):
+        calls.append(kwargs)
+        assert len(kwargs['input']) > 98301  # Escaped comment plus canonical envelope.
+        assert kwargs['timeout'] == 120
+        # Exercise the actual transport's timeout classification, without a PTY.
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'transport-v1\tinvoked\n')
+
+    def selected_transport(package, destination, **kwargs):
+        # The activation fixture seals only a stub native directory. Select the
+        # prepared helper for validation; native_runner prevents its execution.
+        return message_transport.send(replace(package, native=source_package().native),
+                                      destination, **kwargs, runner=native_runner)
+
+    monkeypatch.setattr(message_operations, 'send_committed_native_attempt',
+                        lambda *a, **k: original(*a, **k, transport=selected_transport))
+    monkeypatch.setattr(message_operations, 'repair_held_delivery',
+                        lambda *a, **k: pytest.fail('feedback must not repair input'))
+    request_id = str(uuid4())
+    args = ('task', 'feedback', task_id, '--actor', 'human:reviewer',
+            '--expected-assignment', 'none', '--text', 'x' + '\x01' * 16383,
+            '--request-id', request_id)
+    first = _call(capsys, root, *args, expected=5)
+    assert first['data']['recording'] == 'committed'
+    assert first['data']['transport'] == 'unknown' and first['data']['request_persisted']
+    recorded = _counts(root)
+    replay = _call(capsys, root, *args, expected=5)
+    assert replay['data']['replayed'] and replay['data']['transport'] == 'unknown'
+    assert _counts(root) == recorded and len(calls) == 1
+    assert calls[0]['timeout'] == 120 and len(calls[0]['input']) > 98301
+
+
+def test_git_generated_task_writes_use_current_provenance_and_same_request(active, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from tests.test_message_write_cli import _git_generated
+    root, release = active
+    from claudlobby.resources import get_resources
+    from claudlobby.active_config import read_current_config
+    host = SimpleNamespace(installation=release, package=get_resources(installation=release),
+        snapshot=read_current_config(root, installation=release, revision=release.preflight()))
+    root, package, snapshot = _git_generated((root, host), monkeypatch)
+    request = str(uuid4())
+    argv = ("task", "admit", "--title", "Private Git task", "--request-id", request)
+    first = _call(capsys, root, *argv)
+    replay = _call(capsys, root, *argv)
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert replay["data"]["task_id"] == first["data"]["task_id"] and replay["data"]["replayed"]
+    assigned = _call(capsys, root, "task", "assign", first["data"]["task_id"], "--bot", "worker",
+                     "--request-id", str(uuid4()))
+    monkeypatch.setenv("BOT_ID", "worker")
+    monkeypatch.setenv("BOT_DIR", str(root / "runtime/bots/worker"))
+    accepted = _call(capsys, root, "assignment", "accept", assigned["data"]["assignment_id"],
+                     "--request-id", str(uuid4()))
+    assert accepted["data"]["state"] == "active" and accepted["release_id"] is None
+    assert accepted["data"]["config_fingerprint"] == snapshot["fingerprint"]

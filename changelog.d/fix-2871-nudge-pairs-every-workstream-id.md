@@ -1,0 +1,3 @@
+### Fixed — the plane UI shows a nudge's reason for a task in any workstream (#2871)
+
+Since #2870, the row a nudge records also names the task's workstream. The activity view showed the nudge's reason only when that ID had the form of a task's own workstream (`ws_` and 32 hex digits). A nudge on a task in any other workstream showed its literal message instead. That covers a workstream from `workstream open` (`ws-` and a slug, or its `--id`) and one an imported or older registry holds. The view now pairs any non-empty ID. It never shows the ID. The row must still hold exactly `by` and `reason`, or those two and `workstream_id`, and both must equal the message's.

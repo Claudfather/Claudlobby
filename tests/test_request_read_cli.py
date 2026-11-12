@@ -7,10 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation, context
+from claudlobby import context
 from claudlobby.__main__ import main
 from claudlobby.plane.db import db_file
-from tests.test_activation import cold, tmp_path  # noqa: F401 — activation and short socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — activation and short socket root
 from tests.test_releases import installed  # noqa: F401 — dependency of cold
 
 
@@ -19,7 +19,6 @@ def active(cold, monkeypatch):  # noqa: F811 — pytest fixture parameter
     root, _, plan, host = cold
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR", "FLEET_ROOT"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
     monkeypatch.setattr(context, "get_resources", lambda: host.package)
     return root, host
 
@@ -49,7 +48,7 @@ def test_task_request_shows_recorded_and_independent_proof_even_when_plane_disap
     directory = root / "state/requests"
     before_paths = tuple(sorted(str(path) for path in directory.rglob("*")))
     shown = _call(capsys, root, "request", "show", request_id)
-    assert shown["release_id"] == host.release.release_id
+    assert shown["release_id"] == None
     assert shown["data"]["fleet"] == "example"
     view = shown["data"]["request"]
     assert view["request_id"] == request_id and view["operation"] == "task.admit"
@@ -72,7 +71,7 @@ def test_missing_receipt_and_bad_uuid_do_not_create_request_paths_or_identity(ac
     assert not requests.exists()
     before = _counts(root)
     missing = _call(capsys, root, "request", "show", str(uuid4()), expected=3)
-    assert missing["release_id"] == host.release.release_id
+    assert missing["release_id"] == None
     assert missing["error"]["code"] == "not_found" and missing["data"] == {}
     assert "cannot prove" in missing["error"]["hint"]
     invalid = _call(capsys, root, "request", "show", "not-a-uuid", expected=2)
@@ -118,3 +117,18 @@ def test_request_help_and_syntax_remain_dependency_light(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert exited.value.code == 2 and "private-value" not in output
     assert json.loads(output)["command"] == "request.show"
+
+
+def test_git_request_read_uses_committed_provenance_without_historical_selection(active, monkeypatch, capsys):
+    from tests.test_task_read_cli import _use_git_current
+    root = active[0]
+    request_id = str(uuid4())
+    _call(capsys, root, "task", "admit", "--title", "Retained Git read", "--request-id", request_id)
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    before = _counts(root)
+    shown = _call(capsys, root, "request", "show", request_id)
+    assert shown["release_id"] is None
+    assert shown["data"]["request"]["request_id"] == request_id
+    assert shown["data"]["source_revision"] == package.source_revision
+    assert shown["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    assert _counts(root) == before

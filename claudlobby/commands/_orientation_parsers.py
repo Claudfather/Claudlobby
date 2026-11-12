@@ -23,6 +23,12 @@ def _usage_dispatch(args):
                    json_output=args.json)
 
 
+def _compactions_dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".compactions_record", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _status_dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".status_read", __package__).dispatch(args),
@@ -114,6 +120,14 @@ def register_orientation_subparsers(sub):
                                 help="Window (default: all in JSON, 24h in text)")
             uptime.add_argument("--json", action="store_true", help="One schema-1 result object")
             uptime.set_defaults(func=_status_dispatch, public_command="fleet.uptime")
+            compactions = children.add_parser(
+                "compactions", help="Record each bot's Claude Code compactions on the Plane")
+            compaction_verbs = compactions.add_subparsers(dest="compactions_command", required=True)
+            record = compaction_verbs.add_parser(
+                "record", help="Record each compact_boundary row appended since the last pass, once")
+            record.add_argument("--json", action="store_true", help="One schema-1 result object")
+            record.set_defaults(func=_compactions_dispatch,
+                                public_command="fleet.compactions.record")
             from ._setup_parsers import register_fleet_setup
             register_fleet_setup(children)
             move = children.add_parser("move", help="Move an unselected cold fleet into a system container")
@@ -148,9 +162,9 @@ def register_orientation_subparsers(sub):
         if domain == "bot":
             from ._bot_create_parsers import register_bot_create
             register_bot_create(children, _bot_create_dispatch)
-            remove = children.add_parser("remove", help="Clean up a bot omitted by an activated configuration")
+            remove = children.add_parser("remove", help="Unavailable until common Git roster removal is supported")
             remove.add_argument("bot_id", metavar="BOT", help="Exact retired bot ID")
-            remove.add_argument("--purge", action="store_true", help="Delete the retained bot directory after WIP checks")
+            remove.add_argument("--purge", action="store_true", help="Reserved; no retained directory is currently deleted")
             remove.add_argument("--json", action="store_true", help="One schema-1 result object")
             remove.set_defaults(func=_remove_dispatch, public_command="bot.remove")
             session = children.add_parser("session", help="Observe one selected private bot session")
@@ -167,14 +181,14 @@ def register_orientation_subparsers(sub):
             status.add_argument("bot_id", metavar="BOT", help="Exact declared bot ID")
             status.add_argument("--json", action="store_true", help="One schema-1 result object")
             status.set_defaults(func=_status_dispatch, public_command="bot.status")
-            move = children.add_parser("move", help="Preview or apply a bot move between fleets")
+            move = children.add_parser("move", help="Unavailable until common Git roster movement is supported")
             move.add_argument("bot", metavar="BOT")
             move.add_argument("--to", required=True, metavar="FLEET")
             move.add_argument("--from", dest="from_fleet", metavar="FLEET")
-            move.add_argument("--apply", action="store_true", help="Copy state and activate the new placement")
+            move.add_argument("--apply", action="store_true", help="Reserved; Git roster movement is not yet supported")
             move.add_argument("--cleanup-source", action="store_true",
-                              help="Remove the source bot directory after successful activation")
-            move.add_argument("--force", action="store_true", help="Allow a move with an active source session")
+                              help="Reserved; no source cleanup is currently performed")
+            move.add_argument("--force", action="store_true", help="Reserved; active sessions cannot be moved")
             move.add_argument("--json", action="store_true")
             move.set_defaults(func=_move_dispatch, public_command="bot.move")
             automation = children.add_parser("automation", help="Read or control one bot's runner state")
@@ -204,6 +218,22 @@ def register_orientation_subparsers(sub):
                 if verb == "restart":
                     route.add_argument("--ceiling", type=int, metavar="SECONDS",
                                        help="Override the per-bot bridge readiness ceiling")
+                    route.add_argument("--fresh", action="store_true",
+                                       help="Start a new session that resumes from the saved "
+                                            "handoff, instead of continuing the current one")
+                elif verb == "stop":
+                    route.add_argument("--reason", metavar="TEXT",
+                                       help="Why it is stopped, recorded with the stop (#2243)")
+                elif verb == "handoff":
+                    route.add_argument("--check", action="store_true",
+                                       help="Send nothing; read whether the last requested handoff "
+                                            "was saved, is pending or is unknown (#990)")
+                elif verb == "compact":
+                    route.add_argument("--request-id", metavar="UUID",
+                                       help="On your own ID: this request's UUID. A bot's compact "
+                                            "on itself records a request and types nothing (#1053)")
+                    route.add_argument("--cancel", action="store_true",
+                                       help="On your own ID: withdraw your pending compaction request")
             elif domain == "project" and verb == "show":
                 route.add_argument("project_id", metavar="PROJECT", help="Exact project key")
             elif domain == "context":

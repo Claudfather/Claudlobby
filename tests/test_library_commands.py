@@ -29,6 +29,8 @@ def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monk
     voice = paths.overlay_voices / "nested"
     voice.mkdir(parents=True)
     (voice / "voice.md").write_text("voice")
+    paths.legacy_overlay_voices.mkdir(parents=True)
+    (paths.legacy_overlay_voices / "old.md").write_text("old")
     tool = paths.overlay_library / "tools" / "custom"
     tool.mkdir(parents=True)
     (tool / "tool.yaml").write_text("name: custom\n")
@@ -43,8 +45,52 @@ def test_list_json_preserves_nested_overlay_precedence_and_other_categories(monk
     assert items["skills", "checkin"] == "overlay"
     assert items["skills", "group/nested"] == "overlay"
     assert items["voices", "nested/voice.md"] == "overlay"
+    assert items["voices", "old.md"] == "overlay"
+    assert ("voices", "CLAUDE.md") not in items and ("voices", "AGENTS.md") not in items
     assert any(kind == "mcp" and source == "base" for (kind, _name), source in items.items())
     assert items["tools", "custom"] == "overlay"
+
+
+def test_list_includes_principles_with_overlay_precedence(monkeypatch, tmp_path, capsys):
+    paths = Paths(root=tmp_path / "data-root", fleet_dir=tmp_path / "external-fleet",
+                  package=source_package())
+    principles = paths.overlay_library / "principles"
+    principles.mkdir(parents=True)
+    (principles / "simple-outside-rigorous-inside.md").write_text("overlay")
+    (principles / "overlay-only.md").write_text("overlay")
+    (principles / "README.md").write_text("not an item")
+    monkeypatch.setattr(library, "_paths", lambda args: paths)
+    args = _args("library.list", json=True)
+    assert execute("library.list", lambda: library.dispatch(args), json_output=True) == 0
+    items = {(row["kind"], row["name"]): row["source"]
+             for row in json.loads(capsys.readouterr().out)["data"]["items"]}
+    assert items["principles", "consolidate-dont-fork"] == "base"
+    assert items["principles", "simple-outside-rigorous-inside"] == "overlay"
+    assert items["principles", "overlay-only"] == "overlay"
+    assert not any(kind == "principles" and name.lower().startswith("readme")
+                   for kind, name in items)
+    args = _args("library.list")
+    assert execute("library.list", lambda: library.dispatch(args), json_output=False) == 0
+    text = capsys.readouterr().out.splitlines()
+    assert "Principles:" in text
+    assert "  simple-outside-rigorous-inside (override)" in text
+    assert "  consolidate-dont-fork" in text
+
+
+def test_list_covers_every_library_directory_that_holds_items(monkeypatch, tmp_path):
+    # A kind the list leaves out is invisible to a bot asking what exists
+    # (principles were, until #2331); this fails for the next one too.
+    paths = Paths(root=tmp_path / "data-root", package=source_package())
+    monkeypatch.setattr(library, "_paths", lambda args: paths)
+    listed = {row["kind"] for row in library.dispatch(_args("library.list")).data["items"]}
+    holding_items = {
+        directory.name for directory in paths.base_library.iterdir()
+        if directory.is_dir() and any(
+            path.is_file() and path.suffix in {".md", ".json", ".yaml"}
+            and not path.stem.lower().startswith("readme")
+            for path in directory.rglob("*"))}
+    assert "principles" in holding_items
+    assert holding_items - listed == set()
 
 
 def test_create_json_never_prompts_and_preview_stays_in_overlay(monkeypatch, tmp_path, capsys):

@@ -1,4 +1,5 @@
 {
+  "_deprecated": "Use skills: [printify] with integrations: [printify], which call the Printify REST API directly (library/integrations/printify.md).",
   "_env_contract": {
     "PRINTIFY_API_KEY": {
       "description": "Printify Personal Access Token",

@@ -392,9 +392,9 @@ class TestKnobDisclosure:
         assert "forwarded" in out
 
     def test_set_ready_discloses_inert(self):
-        # start-bot.sh arms PANE_READY_TICKS itself at both injection call
-        # sites, so a forwarded override cannot reach the measured path; the
-        # disclosure must say so rather than let a ladder read as if it varied
+        # start-bot.sh passes its own PANE_READY_TICKS budget through the
+        # canonical injection owner, so a forwarded override cannot reach the
+        # measured path. Disclosure must say so rather than imply it varied
         # something.
         out = self._disclosure({"PANE_READY_TICKS": "200"})
         assert "PANE_READY_TICKS=200" in out
@@ -447,21 +447,42 @@ class TestKnobDisclosure:
         )
         assert declared == actual
 
-    def test_inert_label_matches_start_bot_arming(self):
-        # The disclosure calls a forwarded PANE_READY_TICKS INERT because
-        # start-bot.sh prefix-arms its own value at both pane_send_verified
-        # call sites. If this pin fails, start-bot now honors an inherited
-        # value — update knob_disclosure's INERT branch (and this pin), or the
-        # disclosure starts lying in the safe-but-wrong direction.
-        start_bot = (REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh").read_text(encoding="utf-8")
-        arming = re.findall(
-            r'PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"\s*\\\s*\n\s*pane_send_verified',
-            start_bot,
+    @pytest.mark.parametrize("mode", ["fresh", "resume"])
+    def test_inert_label_matches_start_bot_arming(self, tmp_path, mode):
+        # Fresh native sessions arm the authored startup send; continuation
+        # restores the exact transcript without another model turn. Neither
+        # branch may change the inherited boot-budget knob.
+        start_bot = (REPO_ROOT / "claudlobby/_runtime_scripts/start-bot.sh").read_text()
+        marker = "# Native continuation already restores"
+        injection = marker + start_bot.split(marker, 1)[1].split("# Mark bot as idle", 1)[0]
+        capture, inherited = tmp_path / "sends", tmp_path / "inherited"
+        bot = tmp_path / "bot"
+        bot.mkdir()
+        capture.write_text("")
+        script = '''
+. "$1"
+_PANE_READY_TICKS_BOOT=37
+_native_mode="$MODE"
+pane_send_verified() { printf '%s\\t%s\\n' "$PANE_READY_TICKS" "$3" >> "$SEND_CAPTURE"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { :; }
+''' + injection + '\nprintf "%s" "$PANE_READY_TICKS" > "$INHERITED_CAPTURE"\n'
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "_", str(REPO_ROOT / "claudlobby/_runtime_scripts/lib-common.sh")],
+            capture_output=True, text=True, timeout=15,
+            env=constructed_env(MODE=mode, BOT_DIR=bot, LOG=tmp_path / "startup.log",
+                                TMUX_SOCKET="private", TMUX_SESSION="worker",
+                                SESSION_RESUME_COMMAND="/provider:restore --auto",
+                                STARTUP_PROMPT="Authored startup",
+                                PANE_READY_TICKS="200", SEND_CAPTURE=capture, INHERITED_CAPTURE=inherited),
         )
-        assert len(arming) == 2, (
-            "start-bot.sh no longer arms PANE_READY_TICKS unconditionally at "
-            "exactly its two injection sites; re-derive the INERT disclosure."
-        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        payloads = ["set +H; Authored startup"] if mode == "fresh" else []
+        if mode == "resume":
+            assert "NATIVE RESUME" in (tmp_path / "startup.log").read_text()
+        assert capture.read_text().splitlines() == ["37\t" + payload for payload in payloads]
+        assert inherited.read_text() == "200"
 
 
 # ── #843 arm identity: the row must evidence its own IV ───────────────────────
@@ -1560,15 +1581,8 @@ class TestResumeBootEvidence:
         )
         assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
 
-    def test_seeded_handoff_passes_the_resume_age_gate(self, tmp_path):
-        bot = tmp_path / "bot"
-        bot.mkdir()
-        assert _sampler_rc("seed_resume_handoff", str(bot)) == 0
-        handoff = bot / ".claude" / "session.md"
-        # The gate start-bot itself consults (lib-common), at its default age.
-        assert _sampler_rc("should_resume_session", str(handoff), "86400") == 0
-        # Never the marker: the resume turn reads this file.
-        assert self.MARKER not in handoff.read_text(encoding="utf-8")
+    # The handoff-age gate test was retired with skill-based automatic resume.
+    # Native continuation does not consult a seeded Markdown handoff.
 
     def test_resume_injected_reads_only_this_boots_part_of_the_log(self, tmp_path):
         line = ("RESUME — injecting resume command [available]: "

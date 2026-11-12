@@ -25,6 +25,7 @@ import pytest
 
 from claudlobby.config import load_fleet
 from tests.package_fixtures import source_package
+from tests.test_config_staging import staging_case  # noqa: F401
 from claudlobby.paths import Paths
 from claudlobby.plane.contracts import (
     ContractViolation,
@@ -741,6 +742,23 @@ def test_library_walk_discovers_integrations(tmp_path, *, scratch_plane_env):
     assert "shared/integrations/github-app" in aliases
 
 
+def test_library_walk_records_voices_and_skips_folder_instructions(tmp_path):
+    """#2150: voices are a library folder now, so the discovered walk records
+    each packaged voice. The folder's CLAUDE.md/AGENTS.md describe it and are
+    never items (the package ships both, so this is a live case)."""
+    from claudlobby.plane.registry_emit import library_items
+
+    paths = Paths(root=tmp_path, package=source_package())
+    assert (paths.base_voices / "CLAUDE.md").is_file()
+    items, skipped = library_items(paths, "test-fleet", None)
+    aliases = {alias for alias, _payload in items}
+    assert skipped == 0
+    assert "shared/voices/vito-corleone" in aliases
+    assert not {"shared/voices/CLAUDE", "shared/voices/AGENTS"} & aliases
+    assert {payload["category"] for alias, payload in items
+            if alias.startswith("shared/voices/")} == {"voices"}
+
+
 # ---------------------------------------------------------------------------
 # Gauntlet round-2 pins
 # ---------------------------------------------------------------------------
@@ -975,6 +993,10 @@ def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, s
     else:
         monkeypatch.setattr(registry, "assemble_entities", lambda *a: (
             (entities, False) if stop == "incomplete" else ([], True)))
+    # Activation asks the same question before its record (#2611): it can answer
+    # then exactly the stops that read no recorded state.
+    static = stop in ("disabled", "process-opt-out", "tier-opt-out", "unreachable")
+    assert (registry.activation_scan_refusal(paths, fleet) is not None) is static
     with pytest.raises(registry.RegistryScanError) as caught:
         registry.run_generate_scan(paths, fleet, require_commit=True)
     assert not calls
@@ -984,6 +1006,74 @@ def test_activation_scan_refuses_before_any_emit(activation_scan, monkeypatch, s
         assert not (paths.root / "state/plane/plane.db").exists()
     assert caught.value.summary["recording"] == "not_attempted"
     assert caught.value.summary["attempted_chunks"] == 0
+
+
+def test_activation_scan_refusal_reads_the_winning_tier_through_the_shipped_resolver(tmp_path, monkeypatch):
+    """#2611: the question activation asks before its record resolves the tier
+    cascade the scan resolves, through the runtime's own resolver. Only the
+    winning tier's exact 0 refuses, and the refusal names that file."""
+    from claudlobby.plane import registry_emit as registry
+    root = _fleet_root(tmp_path, armed=False)  # the root tier says 0
+    fleet_dir = root / "local" / "test-fleet"
+    fleet_dir.mkdir(parents=True)
+    (fleet_dir / "fleet.yaml").write_text((root / "fleet.yaml").read_text())
+    fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+    paths = Paths(root=root, package=source_package(), fleet_dir=fleet_dir)
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
+    opted_out = "PLANE_EMIT_ENABLED=0 in {} opts fleet test-fleet out of the registry scan"
+    refusal = registry.activation_scan_refusal(paths, fleet)
+    assert refusal.startswith(opted_out.format(root / ".env"))
+    # The retained update froze this file, so the way out is to start over.
+    assert refusal.endswith("that first-fleet setup needs before it starts any bot;"
+                            " this update froze that file, so no step clears the refusal,"
+                            " neither an edit nor host update continue; remove that line,"
+                            " then start over with a new installation and data root")
+    # An exported value is no input of the update, which continue then resumes.
+    monkeypatch.setenv("PLANE_EMIT_ENABLED", "0")
+    assert registry.activation_scan_refusal(paths, fleet).endswith(
+        "; unset it, then run host update continue")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED")
+    (fleet_dir / ".env").write_text("PLANE_EMIT_ENABLED=1\n")  # the fleet tier wins
+    assert registry.activation_scan_refusal(paths, fleet) is None
+    (root / ".env").unlink()
+    (fleet_dir / ".env").write_text("PLANE_EMIT_ENABLED=0\n")
+    assert registry.activation_scan_refusal(paths, fleet).startswith(opted_out.format(fleet_dir / ".env"))
+    (fleet_dir / ".env").unlink()
+    assert registry.activation_scan_refusal(paths, fleet) is None
+
+
+def test_no_tier_edit_clears_the_refusal_of_a_retained_first_fleet_update(staging_case, monkeypatch):  # noqa: F811
+    """What the tier refusal claims: the retained render froze the .env tiers, so the prepare
+    stage stops at any edit, before the registry check, and only the refused bytes pass it."""
+    from types import SimpleNamespace
+    from claudlobby import config_staging, update_operation
+    from claudlobby.activation_identity import ActivationRefusal
+    from claudlobby.config_plan import PlanError, read_rendered
+    case = staging_case
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "0")
+    monkeypatch.delenv("PLANE_EMIT_ENABLED", raising=False)
+    env = case.root / ".env"
+    env.write_text("export PLANE_EMIT_ENABLED=0\n")
+    plan = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
+    record = {"request_id": "rid", "target": plan.revision, "config_fingerprint": None, "finalized": False,
+              "phase": "prepare", "initialization_scope": {"directory": str(case.root / "units"), "manifests": []}}
+    store = SimpleNamespace(root=case.root, installation=case.package.installation,
+                            _assert_locked=lambda: None, load=lambda: record)
+
+    def prepare():  # the update's prepare stage, on the render it retained
+        update_operation.prepare_operation(store, read_rendered(case.root, plan.fingerprint),
+                                           SimpleNamespace(package=case.package), case.root / "units",
+                                           Path("/python"), "rid", initialize=True)
+
+    with pytest.raises(ActivationRefusal, match="no step clears the refusal"):
+        prepare()
+    env.write_text("")  # the operator removes the line
+    with pytest.raises(PlanError, match="configuration input changed"):
+        prepare()
+    env.write_text("export PLANE_EMIT_ENABLED=0\n")  # the refused bytes pass, and refuse again
+    with pytest.raises(ActivationRefusal, match="no step clears the refusal"):
+        prepare()
 
 
 @pytest.mark.parametrize("failure", ["spooled", "staged", "exception", "short-list"])

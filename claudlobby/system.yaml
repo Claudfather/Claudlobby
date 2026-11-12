@@ -263,6 +263,18 @@ host:
       enroll: true
       unit: service
       script: "$CLAUDLOBBY_NATIVE_DIR/plane-view.sh"
+    # Explicitly paired private serving, after first-team setup. Configuration
+    # and enrollment belong to this host's override; grants and Serve are separate.
+    plane-owner:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_CLI"
+      origin: null
+      tailscale: null
+      tailscale_socket: null
+      socket: null
+      workspace_issuer: null
+      workspace_origin: null
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:
@@ -427,30 +439,6 @@ defaults:
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-telegram-out.sh"
         matcher: "mcp__plugin_telegram_telegram__reply"
         timeout: 15
-    # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
-    # each finished session into one structured JSONL row via a cheap Haiku
-    # pass, so the monitor reasons over per-session digests and never over raw
-    # transcripts (a real transcript is ~19 MB / ~5M tokens and cannot enter a
-    # 200K context at all). Bounded by a qualifying gate + tail-cap; a session
-    # below the gate still gets a row, written without a model call.
-    #
-    # COMPOSED DORMANT. This entry lands in every bot on every fleet, but the
-    # script exits immediately unless the fleet sets SESSION_DIGEST_ENABLED=1 in
-    # its fleet.yaml `env:`. That keeps the rollout per-fleet: generate composes
-    # it everywhere harmlessly, and fleets are armed one at a time with their
-    # Haiku spend watched between. Default-on would have fired across the whole
-    # estate at the next generate or daily reload.
-    SessionEnd:
-      - command: "$CLAUDLOBBY_NATIVE_DIR/transcript-digest.sh"
-        timeout: 150
-    # Observable-plane session identity (PR-B T7, spec §19.6/F12): derives the
-    # transcript-stable session_uid + a fresh per-process process_uid and
-    # publishes them to $BOT_DIR/data/.plane-session for the doors. Composed
-    # everywhere, always on (PLANE_EMIT_DISABLED=1 is the one silencer), exit
-    # 0 on every path (a hook must never break a boot).
-    SessionStart:
-      - command: "$CLAUDLOBBY_NATIVE_DIR/plane-session-start.sh"
-        timeout: 15
     # The INBOUND Telegram carrier (#1402): recognizes the plugin's channel
     # injection shape and records the OPERATOR's own message as a first-
     # class communication (sender human:<user>). Matches that shape ONLY --
@@ -471,6 +459,10 @@ defaults:
       # on every path (UserPromptSubmit stdout feeds the model). Same dormancy.
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-dispatch-in.sh"
         timeout: 15
+      # #1053: when input last reached the session (data/.turn-input). stdout
+      # empty, exit 0 on every path; nothing reads it yet.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
+        timeout: 10
     # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
     # when a bot answers a Telegram-initiated turn with plain final text
     # (no reply tool call) the bridge's RC auto-relay delivers it and no
@@ -479,6 +471,22 @@ defaults:
     Stop:
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-rc-relay-out.sh"
         timeout: 15
+      # #996: a turn that ended normally clears the usage-limit record below.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
+        timeout: 10
+      # #1053: when the turn ended (data/.turn-ended), normally or not, below.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
+        timeout: 10
+    # #996: Claude Code ends a turn a claude.ai usage limit stopped with
+    # StopFailure (error rate_limit, the limit line in last_assistant_message).
+    # The hook keeps that fact in data/.usage-limit for keepalive's LIMIT
+    # verdict, so a limit line a bot merely quotes is never read as a stop, and
+    # records usage_limit_hit. stdout empty, exit 0 on every path.
+    StopFailure:
+      - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
+        timeout: 10
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
+        timeout: 10
 
   observability:
     pulse_interval: 300
@@ -572,6 +580,13 @@ defaults:
     # no-ops LOUDLY on every tick, so an off switch is visible in the log of
     # the host it is off on rather than reading as a broken timer. The
     # self-gate SHAPE is kept for exactly that -- it is an opt-OUT now.
+    # Contract polling spends nothing and reads no transcript. Model spend is
+    # clauDNA's and gated by the two claudna compose switches.
+    session-export:
+      script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _session-export-tick"
+      interval: 900
+      startup_delay: 735
+      type: oneshot
     task-recheck:
       script: "$CLAUDLOBBY_CLI --root $CLAUDLOBBY_ROOT _task-recheck-tick"
       interval: 21600

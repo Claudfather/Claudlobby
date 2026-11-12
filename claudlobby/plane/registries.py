@@ -65,6 +65,14 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # was ever declared" -- the precise false clear the field exists to prevent,
     # re-entering through its own remedy. Closed Literal, so no cap.
     ("task", "pr_attribution_withheld"): {"class": "METADATA"},
+    # `workstream_id` is METADATA for the same reason as `pr_role`, and
+    # registered EXPLICITLY rather than left out (#1053): unregistered, it
+    # would survive a metadata capture by ACCIDENT. It must survive by RULE,
+    # because the failure is silent and passes -- a stripped workstream reads
+    # as "in no workstream", which a reader grouping work by workstream takes
+    # for a task never filed into one. No cap, like `pr_role`: the door reads
+    # it from the task's own record, never from anything a caller types.
+    ("task", "workstream_id"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "waiting_on"): {"class": "METADATA"},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
@@ -135,15 +143,54 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "reload_failed": "critical",
     "restart_failed": "critical",
     "rc_timeout": "critical",
+    # #2423: Claude Code skipped the bot's Telegram channel at connect (the
+    # channel decision in the plugin's MCP log): the poller runs and replies go
+    # out, and no inbound message reaches the session. Raised through
+    # emit_failure_alert by bring-up and keepalive.
+    "channel_refused": "critical",
     # #1769: a unit failing its start over and over, which the per-phase boot
     # gate had been reading as "boot in flight" forever. Critical so the
     # escalation read (severity = 'critical') can page it.
     "crash_loop": "critical",
+    # #2243: a declared bot with no unit file and no stop record, a unit lost with
+    # nobody having stopped it (a botched disenroll, a broken activation, a deleted
+    # unit directory). Critical so the escalation counts it: one cause, in place of
+    # the service_down and session_missing such a bot raised before.
+    "unit_missing": "critical",
     # #2070: a bot whose input box holds text that was never submitted, with no
     # turn running (keepalive's HELD verdict), paged in place of activity_stuck.
     # Critical like the page it replaces; the remedy is an operator Enter, not
     # a restart, so it is not one of fleet-pulse's Telegram escalation types.
     "input_held": "critical",
+    # #996: a bot a claude.ai usage limit still holds after the limit's printed
+    # reset (keepalive's LIMIT verdict, past its resume window), paged in place
+    # of activity_stuck. Critical like input_held, and like it not one of
+    # fleet-pulse's Telegram escalation types: the remedy is a prompt to the bot.
+    "usage_limit_held": "critical",
+    # #997: a bot whose pane keepalive cannot read (its UNKNOWN verdict: no
+    # running turn, no prompt, no held box and no usage limit) past the
+    # threshold, with no tool call since. After an IDLE tick such a pane keeps
+    # data/.idle, so activity_stuck never fires for it. Critical like
+    # activity_stuck, and not one of fleet-pulse's Telegram escalation types:
+    # the remedy is a person looking at the pane.
+    "pane_unknown": "critical",
+    # #2532: an owned host or fleet unit in the failed state (systemd
+    # ActiveState=failed, or a launchd job not running after a non-zero exit),
+    # recorded by fleet-pulse once an episode: data.unit, scope, surface,
+    # detail, and template for a failure template's instance. Critical like the
+    # fleet_alert a failure template records. Not one of fleet-pulse's
+    # escalation types: the pulse pages a fleet's own unit itself, once an
+    # episode, and a host unit pages nobody until #1611 names a recipient.
+    "unit_failed": "critical",
+    # #996: the bot's own StopFailure hook recording a usage-limit stop (the
+    # limit line in data.limit_line), and keepalive's one resume for a reset
+    # (data.menu, data.outcome).
+    "usage_limit_hit": "notice",
+    "keepalive_limit_resume": "notice",
+    # #2243: the stop door's audit rows, who stopped or started a bot and why
+    # (data.by, data.reason). fleet-pulse reads the stop door's local record, never these.
+    "bot_stopped": "notice",
+    "bot_started": "notice",
     # #1924: historical launchd reenrollment deferral, retained for old facts.
     "job_reenroll_deferred": "notice",
     "alert_delivery_failed": "notice",
@@ -152,6 +199,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "worker_unassigned": "notice",
     "pane_stuck": "notice",
     "wip_uncommitted": "notice",
+    # #2332: a browser outside a render scope, pushed to the manager once; a report,
+    # never a fault the pulse can fix, and the pulse never stops it.
+    "browser_outside_render": "notice",
     "send_miss": "notice",
     "send_retry": "notice",
     "send_blind": "notice",
@@ -212,6 +262,31 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hook), moved off the retired transcript-digest-<date>.jsonl onto the
     # plane. Informational — the monitor's substrate, never an alert.
     "session_digest": "notice",
+    # #2145 F6: session-export records each sealed clauDNA segment. The old
+    # session_digest entry above stays so historical rows classify.
+    "session_summary": "notice",
+    # Record only; the independent alert door pages and records fleet_alert.
+    "export_stalled": "notice",
+    # One Claude Code compaction, from its compact_boundary transcript row,
+    # recorded once by the pulse (claudlobby.compactions, #2206).
+    "compaction": "notice",
+    # #1053: a bot's request for its own compaction (`bot compact` on itself:
+    # data.request_id, data.context) and its withdrawal (`--cancel`). A reader
+    # acts on the request file, data/.compact-request, never on these rows.
+    "compact_requested": "notice",
+    "compact_cancelled": "notice",
+    # #1053 build PR 4: keepalive's executor acting on that request. It typed
+    # /compact (data: the request, the slot's lease, every guard's reading); a
+    # compact_boundary row newer than the send proved it (with its sizes); or
+    # none came within the lease's 10 minutes, critical, since a compaction
+    # asked for and not done is a fault nothing resends: `event list --critical`
+    # and the bot's own brief show it. A guard that said not now, or ended the
+    # request unsent, writes
+    # compaction_skipped with its reason, once per reason per request.
+    "compaction_sent": "notice",
+    "compaction_proven": "notice",
+    "compaction_not_proven": "critical",
+    "compaction_skipped": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.
@@ -222,13 +297,18 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # hold whose holder died without a release (across_reset: it was running
     # when the host reset, #1644's evidence), a heavy-looking command the
     # matcher would not parse, and (#2124) a queue ticket dropped because its
-    # holder stayed silent once a slot was free. The record, never a page.
+    # holder stayed silent once a slot was free, and (#2221) a render the
+    # render profile killed (at a stop line, its time limit, a signal, or by
+    # its keeper when the runner died) and a render hold lifted, with who
+    # lifted it. The record, never a page.
     "heavy_slot_acquired": "notice",
     "heavy_slot_released": "notice",
     "heavy_slot_refused": "notice",
     "heavy_slot_unreleased": "notice",
     "heavy_slot_unparsed": "notice",
     "heavy_slot_ticket_dropped": "notice",
+    "heavy_slot_stopped": "notice",
+    "heavy_slot_hold_lifted": "notice",
     # The public-write guard: a refused GitHub-bound write (the record), and an
     # armed guard that found no host list. That one is critical because the
     # protection someone armed is off until the list is written: it shows in
@@ -249,10 +329,13 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
     # pages the manager and Telegram. Where each row lands is in the
     # fleet-observability protocol's table. From the host jobs: disk-monitor,
-    # fleet-memory-check, host-health-check (one of three types, by finding),
-    # update-claude-code and vault-sync.
+    # fleet-memory-check, plane-host-probe (swap thrash, once an episode, and a
+    # thrash line file it refuses, once a bad edit), host-health-check (one of
+    # three types, by finding), update-claude-code and vault-sync.
     "disk_high": "critical",
     "memory_high": "critical",
+    "memory_thrash": "critical",
+    "memory_thrash_unarmed": "critical",
     "undervoltage": "critical",
     "storage_stall": "critical",
     "host_health": "critical",
@@ -276,6 +359,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # and update-siblings.
     "source_behind": "notice",
     "source_release_gap": "notice",
+    "source_unknown": "notice",
     "sibling_update_blocked": "notice",
     "sibling_update_failed": "notice",
     "sibling_updated": "notice",
@@ -295,12 +379,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "vault_sync": "notice",
     "audit_completed": "notice",
     # The Python writers' records: a local operator's first contact
-    # (operation_context), a task re-check and an empty one (task_recheck), and
-    # an empty workstream prune (workstream_operations).
+    # (operation_context), a task re-check and an empty one (task_recheck), an
+    # empty workstream prune (workstream_operations), and a manager's move of a
+    # task into another workstream (task_operations; every task read takes a
+    # task's workstream from its newest move, so it must never join
+    # retention's PRUNABLE_SYSTEM_EVENTS).
     "operator_first_seen": "notice",
     "task_recheck": "notice",
     "task_recheck_noop": "notice",
     "workstream_prune_noop": "notice",
+    "task_moved": "notice",
 }
 
 # ---------------------------------------------------------------------------

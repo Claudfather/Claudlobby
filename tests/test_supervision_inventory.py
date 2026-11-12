@@ -14,7 +14,6 @@ import pytest
 from claudlobby import supervision_inventory as inventory
 from claudlobby.supervision_inventory import (
     Adapter, InventoryError, UnitDeclaration, _darwin_disabled, _darwin_source, collect_enrollment,
-    legacy_linux_declarations,
 )
 from tests.package_fixtures import source_package
 
@@ -29,6 +28,17 @@ def _apple_xml(*, duplicate=False):
             b"http://www.apple.com/DTDs/PropertyList-1.0.dtd>\n"
             b"<plist version=1.0><dict><key>Label</key><string>com.apple.foreign</string>"
             + extra + b"<key>Program</key><string>/System/Library/foreign</string></dict></plist>")
+
+
+def test_spawn_scheduled_projection_is_binding_only_for_explicit_restore(tmp_path):
+    source = {"Label": "fixture", "ProgramArguments": ["/bin/sleep", "60"],
+              "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
+    # Grounded in the native failed resident restore: no PID, spawn scheduled.
+    observed = observed_print("gui/501/fixture", source, tmp_path / "fixture.plist", active=False)
+    observed = observed.replace("\tstate = not running", "\tstate = spawn scheduled", 1)
+    with pytest.raises(InventoryError, match="unknown or transitional"):
+        inventory._darwin_print(observed, "gui/501/fixture")
+    assert inventory._darwin_print(observed, "gui/501/fixture", restore_pending=True)["ActiveState"] == "activating"
 
 
 def test_nonstandard_apple_xml_remains_raw_and_classifies_foreign(tmp_path, monkeypatch):
@@ -251,6 +261,8 @@ class Observations:
         self.declarations, self.properties, self.calls = [], {}, []
         # Catalog rows/properties outside add(): ghosts, templates, instances.
         self.rows, self.extra, self.failures = [], {}, {}
+        # svc_activation_quiet's (rc, stdout) per unit; a unit with none set fails the test.
+        self.quiet = {}
         self.manager, self.domain = "Linux", ""
         self.disabled = '\n\tdisabled services = {\n\t}\n'
         self.launchd = {}
@@ -316,8 +328,11 @@ class Observations:
         assert command[4] == str(self.package.native)
         function, args = command[5], command[6:]
         self.calls.append((function, args))
-        assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled", "svc_bot_unit_owned_by"}
-        if function == "svc_inventory_catalog":
+        assert function in {"svc_inventory_catalog", "svc_inventory_properties", "svc_inventory_disabled",
+                            "svc_bot_unit_owned_by", "svc_activation_quiet"}
+        if function == "svc_activation_quiet":
+            rc, output = self.quiet[args[1]]
+        elif function == "svc_inventory_catalog":
             output, rc = self.catalog(), 0
         elif function == "svc_inventory_properties" and args[0] in self.failures:
             rc, stderr = self.failures[args[0]]
@@ -336,6 +351,59 @@ class Observations:
 
     def collect(self):
         return collect_enrollment(self.root, tuple(self.declarations), package=self.package, runner=self.runner)
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_git_inventory_keeps_exact_native_ownership_without_sealed_identity(tmp_path, manager):
+    from claudlobby.installation import Installation
+    obs = Observations(tmp_path)
+    installation = Installation(tmp_path / "installation", obs.root)
+    obs.package = replace(obs.package, installation=installation)
+    obs.manager = manager
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "FLEET_ROOT": str(obs.root / "local/alpha"),
+               "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+               "CLAUDLOBBY_CLI": str(installation.cli),
+               "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+               "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    name = "example.worker.service" if manager == "Linux" else "example.worker.plist"
+    installed = obs.add(name, scope="bot")
+    declaration = replace(obs.declarations[0], release_id="")
+    obs.declarations = [declaration]
+    result = obs.collect().require_complete()
+    assert not result.legacy_source and result.units[0].installed[0].path == str(installed)
+    for key in ("CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"):
+        changed = {**obs.env, key: str(tmp_path / "wrong")}
+        obs.declarations = [replace(declaration, environment=tuple(changed.items()))]
+        with pytest.raises(InventoryError, match="incomplete declaration"):
+            obs.collect()
+    obs.declarations = [declaration]
+    installed.write_bytes(installed.read_bytes() + b"\n")
+    with pytest.raises(InventoryError, match="installed bytes differ"):
+        obs.collect().require_complete()
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("scope", ["host", "fleet", "bot"])
+def test_only_host_services_may_omit_fleet_context(tmp_path, manager, scope):
+    obs = Observations(tmp_path)
+    obs.manager = manager
+    del obs.env["FLEET_ROOT"]
+    target = obs.add("owner.plist" if manager == "Darwin" else "owner.service", scope)
+    if scope != "host":
+        with pytest.raises(InventoryError, match="incomplete declaration"):
+            obs.collect()
+        return
+
+    assert len(obs.collect().require_complete().units) == 1
+    # A loaded service cannot acquire fleet context absent from its reviewed unit.
+    if manager == "Darwin":
+        source = plistlib.loads(target.read_bytes())
+        source["EnvironmentVariables"]["FLEET_ROOT"] = str(obs.root)
+        obs.launchd[target.name] = observed_print("gui/501/owner", source, target)
+    else:
+        obs.properties[target.name]["Environment"] += f" FLEET_ROOT={obs.root}"
+    with pytest.raises(InventoryError):
+        obs.collect().require_complete()
 
 
 @pytest.mark.parametrize("manager", ["Linux", "Darwin"])
@@ -539,11 +607,75 @@ def test_declared_bot_deenrolled_by_stop_reads_absent_without_execstart(tmp_path
         obs.extra[name] = {**absent, **changed}
         with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
             obs.collect().require_complete()
-    # The absent form still refuses while the catalogue reports it loaded.
+    # Listed by the catalogue, the absent form still refuses while processes are
+    # left in its cgroup (the quiet proof refuses); one that is quiet is #2700's case.
     obs.extra[name] = dict(absent)
     obs.rows.append(f"loaded\t{name}")
+    obs.quiet[name] = (3, "")
     with pytest.raises(InventoryError, match="loaded consumer lacks installed source bytes"):
         obs.collect().require_complete()
+
+
+def test_a_unit_listed_only_through_a_dangling_wants_link_reads_absent_when_quiet(tmp_path):
+    """#2700: a unit file removed while its default.target.wants link stayed behind.
+
+    systemd keeps listing a unit that has no file while anything still names it, in
+    the same absent shape a bot stop leaves, so the catalogue reported it loaded and
+    the inventory refused it as a consumer: bot start refused the bot with exit 6.
+    """
+    obs = Observations(tmp_path)
+    name = "com.example.worker.service"
+    installed = obs.add(name, "bot")
+    wants = obs.installed / "default.target.wants"
+    wants.mkdir()
+    (wants / name).symlink_to(installed)
+    installed.unlink()  # The file is gone and its link dangles, as on the host in #2700.
+    del obs.properties[name]
+    absent = {"Environment": "", "WorkingDirectory": "", "Id": name, "Triggers": "",
+              "TriggeredBy": "", "LoadState": "not-found", "ActiveState": "inactive",
+              "FragmentPath": "", "DropInPaths": "", "UnitFileState": "", "NeedDaemonReload": "no"}
+    obs.extra[name] = dict(absent)
+    obs.rows.append(f"loaded\t{name}")  # systemd lists it: list-units --all names it
+    for witness in ("inactive\tno-cgroup-witness\n", "inactive\tcgroup-empty\n"):
+        obs.quiet[name] = (0, witness)
+        # Every read and bot start's own (only_names) read it as a bot that is down.
+        for only_names in (None, frozenset({name})):
+            obs.calls.clear()
+            inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                           runner=obs.runner, only_names=only_names).require_complete()
+            (unit,) = inventory.units
+            assert unit.installed == () and dict(unit.properties)["LoadState"] == "not-found"
+            (asked,) = [args for function, args in obs.calls if function == "svc_activation_quiet"]
+            assert asked[1] == name and Path(asked[0]).name == name and not Path(asked[0]).exists()
+
+    # A process left in its cgroup is a consumer: the refusal stands.
+    obs.quiet[name] = (3, "")
+    with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+
+    # Outside the absent shape nothing runs the quiet proof: it refuses as before. Nor does
+    # a LoadState other than not-found, which refuses by itself, whatever the shape. The
+    # error and bad-setting units print an empty ExecStart= (systemctl omits an empty one) so
+    # that the property parser passes them on to that guard instead of refusing them first.
+    obs.quiet[name] = (0, "inactive\tno-cgroup-witness\n")
+    for changed in ({"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"},
+                    {"ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }", "WorkingDirectory": str(obs.root)},
+                    {"LoadState": "error", "ExecStart": ""}, {"LoadState": "bad-setting", "ExecStart": ""}):
+        obs.extra[name] = {**absent, **changed}
+        obs.calls.clear()
+        with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+            obs.collect().require_complete()
+        assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
+
+    # A unit systemd shows loaded, with its definition, that the catalogue does not list (the
+    # two reads disagree) never reaches the shape check: only the LoadState guard refuses it here.
+    obs.rows.remove(f"loaded\t{name}")
+    obs.extra[name] = {**absent, "LoadState": "loaded", "FragmentPath": str(installed),
+                       "ExecStart": "{ path=/bin/true ; argv[]=/bin/true ; }"}
+    obs.calls.clear()
+    with pytest.raises(InventoryError, match=f"{name}: loaded consumer lacks installed source bytes"):
+        obs.collect().require_complete()
+    assert "svc_activation_quiet" not in [function for function, _ in obs.calls]
 
 
 def test_empty_bootstrap_refuses_unknown_catalog_and_prior_selection(tmp_path):
@@ -597,101 +729,8 @@ def test_unsealed_darwin_source_keeps_exact_unit_ownership_without_release_claim
         inventory.check_files()
 
 
-def test_unsealed_linux_sources_preserve_owned_host_fleet_bot_and_foreign_units(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from claudlobby import config_units
-
-    obs = Observations(tmp_path)
-    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root)}
-    obs.add("claudlobby-plane.service", scope="host", working=obs.root)
-    obs.env.update(FLEET_ROOT=str(obs.root / "local/alpha"), CLAUDLOBBY_FLEET="alpha")
-    obs.add("alpha-sweep.service", scope="fleet", working=obs.root)
-    timer = obs.add("alpha-sweep.timer", scope="fleet", working=obs.root,
-                    service="alpha-sweep.service")
-    # The shipped compositor omits Unit= when the service has the same stem.
-    (obs.root / "generated/alpha-sweep.timer").write_text("[Timer]\nOnCalendar=hourly\n")
-    timer.write_bytes((obs.root / "generated/alpha-sweep.timer").read_bytes())
-    obs.env.pop("CLAUDLOBBY_FLEET")
-    obs.env["TMUX_TMPDIR"] = "/tmp"
-    bot = obs.add("alpha.worker.service", scope="bot")
-    foreign = obs.add("pipewire.service", working=tmp_path / "unrelated", declared=False)
-    foreign.write_text("[Service]\nWorkingDirectory=/unrelated\nExecStart=/usr/bin/true\n")
-    obs.properties[foreign.name].update(WorkingDirectory="/unrelated", Environment="",
-                                        ExecStart="/usr/bin/true")
-
-    plan = SimpleNamespace(data_root=obs.root, check_fresh=lambda: None)
-    monkeypatch.setattr(config_units, "planned_units", lambda _plan, manager:
-                        tuple((item, {}) for item in obs.declarations) if manager == "Linux" else ())
-    declarations = legacy_linux_declarations(plan)
-    inventory = collect_enrollment(obs.root, declarations, package=obs.package,
-                                   runner=obs.runner, legacy_source=True).require_complete()
-    assert {unit.target for unit in inventory.units} == {
-        "claudlobby-plane.service", "alpha-sweep.service", "alpha-sweep.timer", "alpha.worker.service"}
-    assert str(foreign) in inventory.foreign
-    assert dict(next(item.declaration.environment for item in inventory.units
-                     if item.target == "alpha.worker.service"))["TMUX_TMPDIR"] == "/tmp"
-
-    # An old installed service cannot carry unreviewed bytes into the pause journal.
-    bot.write_bytes(bot.read_bytes() + b"\n# changed after source composition\n")
-    with pytest.raises(InventoryError, match="installed bytes differ"):
-        collect_enrollment(obs.root, declarations, package=obs.package,
-                           runner=obs.runner, legacy_source=True).require_complete()
-    bot.write_bytes((obs.root / "generated/alpha.worker.service").read_bytes())
-    obs.properties["alpha.worker.service"]["Environment"] = "CLAUDLOBBY_ROOT=/other-root"
-    with pytest.raises(InventoryError, match="loaded data/fleet/release identity differs"):
-        collect_enrollment(obs.root, declarations, package=obs.package,
-                           runner=obs.runner, legacy_source=True).require_complete()
-    fleet_source = obs.root / "generated/alpha-sweep.service"
-    fleet_source.write_bytes(fleet_source.read_bytes().replace(
-        b"Environment=CLAUDLOBBY_FLEET=alpha", b"Environment=CLAUDLOBBY_FLEET=other"))
-    with pytest.raises(InventoryError, match="different root or fleet owner"):
-        legacy_linux_declarations(plan)
 
 
-def test_legacy_linux_units_without_fleet_root_adopt_only_proven_environment(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from claudlobby import config_units
-
-    # 8bc588a-generated fleet and bot units carry no FLEET_ROOT; the candidate
-    # roster still declares one.
-    obs = Observations(tmp_path)
-    fleet_root = str(obs.root / "local/alpha")
-    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "CLAUDLOBBY_FLEET": "alpha"}
-    obs.add("alpha-sweep.service", scope="fleet", working=obs.root)
-    obs.add("alpha-sweep.timer", scope="fleet", working=obs.root, service="alpha-sweep.service")
-    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "TMUX_TMPDIR": "/tmp"}
-    bot = obs.add("alpha.worker.service", scope="bot")
-    candidate = [replace(item, environment=(*item.environment, ("FLEET_ROOT", fleet_root)))
-                 for item in obs.declarations]
-    plan = SimpleNamespace(data_root=obs.root, check_fresh=lambda: None)
-    monkeypatch.setattr(config_units, "planned_units", lambda _plan, manager:
-                        tuple((item, {}) for item in candidate) if manager == "Linux" else ())
-    declarations = legacy_linux_declarations(plan)
-    assert all("FLEET_ROOT" not in dict(item.environment) for item in declarations)
-    inventory = collect_enrollment(obs.root, declarations, package=obs.package,
-                                   runner=obs.runner, legacy_source=True).require_complete()
-    assert {unit.target for unit in inventory.units} == {
-        "alpha-sweep.service", "alpha-sweep.timer", "alpha.worker.service"}
-
-    # An effective FLEET_ROOT the reviewed source does not carry is not adopted.
-    effective = obs.properties["alpha.worker.service"]["Environment"]
-    obs.properties["alpha.worker.service"]["Environment"] = effective + " FLEET_ROOT=/other"
-    with pytest.raises(InventoryError, match="loaded data/fleet/release identity differs"):
-        collect_enrollment(obs.root, declarations, package=obs.package,
-                           runner=obs.runner, legacy_source=True).require_complete()
-    obs.properties["alpha.worker.service"]["Environment"] = effective
-
-    # A present but different fleet root still refuses.
-    source = obs.root / "generated/alpha.worker.service"
-    source.write_bytes(source.read_bytes() + b"Environment=FLEET_ROOT=/other\n")
-    with pytest.raises(InventoryError, match="different root or fleet owner"):
-        legacy_linux_declarations(plan)
-    source.write_bytes(bot.read_bytes())
-
-    # Without FLEET_ROOT, a bot working directory shared with another unit is ambiguous.
-    candidate.append(replace(candidate[-1], source=obs.root / "generated/alpha.other.service", bot="other"))
-    with pytest.raises(InventoryError, match="no unique working directory"):
-        legacy_linux_declarations(plan)
 
 
 def test_all_scopes_bytes_links_and_exact_candidate_cleanup(tmp_path):
@@ -938,9 +977,166 @@ launchctl() {{
     assert adapter.read("svc_inventory_disabled", "gui/501") == disabled
     assert adapter.read("svc_inventory_properties", "user/501/com.fixture.observed") == captured
     assert adapter.call("svc_inventory_properties", "user/502/com.fixture.observed").returncode == 3
-    assert adapter.call("svc_inventory_disabled", "user/501").returncode == 3
+    assert adapter.read("svc_inventory_disabled", "user/501") == disabled
+    assert adapter.call("svc_inventory_disabled", "user/502").returncode == 3
+    # Read-only cross-domain support must not loosen the mutation proof.
+    job = tmp_path / "com.claudlobby.update.0123456789abcdef.plist"
+    job.write_text("fixture")
+    assert adapter.call("svc_update_job_run_exact", job,
+                        "user/501/com.claudlobby.update.0123456789abcdef").returncode == 3
     assert trace.read_text().splitlines() == [
         "manageruid", "managername", "print gui/501/com.fixture.observed",
         "manageruid", "managername", "print-disabled gui/501", "manageruid", "managername",
         "manageruid", "managername", "print user/501/com.fixture.observed",
+        "manageruid", "managername", "manageruid", "managername",
+        "manageruid", "managername", "manageruid", "managername", "print-disabled user/501",
         "manageruid", "managername", "manageruid", "managername", "manageruid", "managername"]
+
+
+def _git_inventory_with_independent_updater(tmp_path, manager, *, job_domain=None):
+    """Existing native capture grammar plus the fixed job owner's definition."""
+    import os
+    from claudlobby.installation import Installation, write_installation
+    from claudlobby.update_job import update_job_definition
+    obs = Observations(tmp_path)
+    installation = Installation(tmp_path / "installation", obs.root)
+    write_installation(installation)
+    installation.bin.mkdir()
+    updater = installation.bin / "claudlobby-update"
+    updater.write_text("#!/bin/sh\nexit 0\n")
+    updater.chmod(0o755)
+    obs.package = replace(obs.package, installation=installation)
+    obs.manager = manager
+    obs.env = {"CLAUDLOBBY_ROOT": str(obs.root), "FLEET_ROOT": str(obs.root / "local/alpha"),
+               "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+               "CLAUDLOBBY_CLI": str(installation.cli), "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
+               "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
+    obs.add("example.worker.service" if manager == "Linux" else "example.worker.plist", scope="bot")
+    obs.declarations = [replace(value, release_id="") for value in obs.declarations]
+    domain = f"gui/{os.getuid()}" if manager == "Darwin" else ""
+    job = update_job_definition(installation, manager=manager, domain=job_domain or domain, install_directory=obs.installed)
+    for path in (job.source, job.installed):
+        path.write_bytes(job.content)
+        path.chmod(0o644)
+    executable = str(updater)
+    if manager == "Linux":
+        obs.properties[job.installed.name] = {"Id": job.target, "LoadState": "loaded", "ActiveState": "inactive",
+            "UnitFileState": "static", "FragmentPath": str(job.installed), "WorkingDirectory": str(installation.directory),
+            "Environment": "", "ExecStart": f"{{ path={executable} ; argv[]={executable} _run ; }}",
+            "DropInPaths": "", "NeedDaemonReload": "no", "Triggers": "", "TriggeredBy": ""}
+    else:
+        obs.launchd[job.installed.name] = observed_print(job.target,
+            {**plistlib.loads(job.content), "EnvironmentVariables": {}}, job.installed, active=False)
+        obs.launchd_active[job.installed.name] = False
+    native_argv = [executable, [executable, "_run"], False, 0, 0, 0, 0, 0, 0, 0]
+    def runner(command, **kwargs):
+        function, args = command[5], command[6:]
+        if function == "svc_inventory_catalog":
+            return subprocess.CompletedProcess(command, 0, obs.catalog().replace("gui/501", domain), "")
+        if function == "svc_inventory_disabled":
+            return subprocess.CompletedProcess(command, 0, obs.disabled, "")
+        if function == "svc_inventory_state":
+            assert args == [str(job.installed), job.target]
+            if manager == "Darwin" and job.target.rsplit("/", 1)[0] != domain:
+                return subprocess.CompletedProcess(command, 3, "", "")
+            return subprocess.CompletedProcess(command, 0,
+                "static loaded inactive\n" if manager == "Linux" else "unchanged loaded inactive\n", "")
+        if function == "svc_update_job_exec":
+            assert manager == "Linux" and args == [str(job.installed), job.target]
+            return subprocess.CompletedProcess(command, 0,
+                json.dumps({"type": "a(sasbttttuii)", "data": [native_argv]}), "")
+        if function == "svc_inventory_properties" and manager == "Darwin":
+            name = args[0].split("/")[-1] + ".plist"
+            observed_domain = domain
+            if name == job.installed.name:
+                if args[0] != job.target:
+                    return subprocess.CompletedProcess(command, 113, "", "Could not find service")
+                observed_domain = job.target.rsplit("/", 1)[0]
+            return subprocess.CompletedProcess(command, 0, obs.launchd[name].replace("gui/501", observed_domain), "")
+        return obs.runner(command, **kwargs)
+    return obs, job, native_argv, runner
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_exact_independent_updater_is_foreign_never_a_fleet_consumer(tmp_path, manager):
+    obs, job, _, runner = _git_inventory_with_independent_updater(tmp_path, manager)
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                runner=runner).require_complete()
+    assert str(job.installed) in result.foreign
+    assert job.target not in {unit.target for unit in result.units}
+    assert len(result.units) == 1
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("defect", ["installed", "source", "native_argv"])
+def test_independent_updater_mismatch_remains_an_issue(tmp_path, manager, defect):
+    obs, job, native_argv, runner = _git_inventory_with_independent_updater(tmp_path, manager)
+    if defect == "installed":
+        job.installed.write_bytes(job.content + b"\nchanged")
+    elif defect == "source":
+        job.source.unlink()
+    elif manager == "Linux":
+        native_argv[1].append("--foreign")
+    else:
+        obs.launchd[job.installed.name] = obs.launchd[job.installed.name].replace("_run", "_foreign")
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package, runner=runner)
+    assert result.issues
+    with pytest.raises(InventoryError):
+        result.require_complete()
+    assert job.target not in {unit.target for unit in result.units}
+
+
+def test_gui_inventory_verifies_exact_user_domain_updater_without_quieting_it(tmp_path):
+    import os
+    obs, job, _, runner = _git_inventory_with_independent_updater(
+        tmp_path, "Darwin", job_domain=f"user/{os.getuid()}")
+    result = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                runner=runner).require_complete()
+    assert str(job.installed) in result.foreign
+    assert job.target not in {unit.target for unit in result.units}
+    assert len(result.units) == 1
+    from claudlobby.update_job import observe_update_job
+    with pytest.raises(InventoryError, match="svc_inventory_state failed"):
+        observe_update_job(obs.package.installation, Adapter(obs.package, runner=runner),
+                           obs.installed, native_target=job.target)
+
+
+@pytest.mark.parametrize("load,active,file_state,fragment", [
+    ("not-found", "active", "", ""),
+    ("masked", "inactive", "masked", "/dev/null"),
+])
+def test_foreign_pi_missing_execstart_is_only_parser_shape(load, active, file_state, fragment):
+    """Read-only Pi capture: parked foreign active units omit an empty ExecStart."""
+    observed = {"Id": "com.example.foreign.service", "LoadState": load, "ActiveState": active,
+                "UnitFileState": file_state, "FragmentPath": fragment, "DropInPaths": "",
+                "NeedDaemonReload": "no", "WorkingDirectory": "", "Environment": "",
+                "Triggers": "", "TriggeredBy": ""}
+    text = "\n".join(key + "=" + value for key, value in observed.items())
+    assert inventory._properties(text, foreign=True) == {**observed, "ExecStart": ""}
+    with pytest.raises(InventoryError, match="missing/unknown native unit properties"):
+        inventory._properties(text)
+
+
+@pytest.mark.parametrize("directory", ["foreign", "owned", "relative"])
+def test_native_ignore_missing_working_directory_never_uses_callers_cwd(tmp_path, monkeypatch, directory):
+    """Pi gpg capture: native WorkingDirectory='!/home/example', unit owner rc2."""
+    obs = Observations(tmp_path)
+    obs.add("owned.service")  # Keep declared root/native anchors nonempty.
+    foreign = obs.add("gpg-agent.service", declared=False)
+    foreign.write_text("[Service]\nExecStart=/usr/bin/gpg-agent\n")
+    assert obs.owner.main(str(foreign), str(obs.root)) == 2
+    native = "!/home/example" if directory == "foreign" else "!" + str(obs.root) if directory == "owned" else "relative/path"
+    obs.properties[foreign.name].update(WorkingDirectory=native, Environment="",
+                                        ExecStart="{ path=/usr/bin/gpg-agent ; argv[]=/usr/bin/gpg-agent ; }")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(obs.root))
+    for cwd in (outside, obs.root):
+        monkeypatch.chdir(cwd)
+        if directory == "foreign":
+            inventory_result = obs.collect().require_complete()
+            assert inventory_result.foreign == (str(foreign),)
+            assert len(inventory_result.units) == 1
+        else:
+            with pytest.raises(InventoryError, match="owned consumer|working directory"):
+                obs.collect().require_complete()

@@ -13,6 +13,7 @@ import json
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -131,8 +132,10 @@ class Scene:
         return r, log
 
     def pulse(self):
+        (self.root / ".claudlobby-harness-root").write_text(str(self.root.resolve()))
         r = subprocess.run(
-            ["bash", str(LIB / "fleet-pulse.sh"), "F"],
+            [sys.executable, str(REPO / "harness/compose.py"), "--root", str(self.root),
+             "--fleet", "F", "--pulse", *(["--record-plane"] if self.emit_dir else [])],
             env=self.env(),
             capture_output=True,
             text=True,

@@ -49,13 +49,15 @@ CREDENTIAL_VARS = (
 )
 
 
-def _controlled(tmp_path, *, railway_fails: bool):
+def _controlled(tmp_path, *, railway_fails: bool, **fleet_kwargs):
     """A fleet whose credential inputs are set by the TEST, not by the host.
 
     railway_fails=True  -> railway_personal_token resolves `fail` (token present, stub 404)
     railway_fails=False -> railway_personal_token resolves `skip` (no token at all)
+
+    ``fleet_kwargs`` go to ``_fleet``, a ``roster`` for one.
     """
-    f = _fleet(tmp_path)
+    f = _fleet(tmp_path, **fleet_kwargs)
     for var in CREDENTIAL_VARS:
         f["env"].pop(var, None)
     if railway_fails:

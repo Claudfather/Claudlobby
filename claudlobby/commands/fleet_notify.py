@@ -5,12 +5,12 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
+    from ..config_plan import PlanError
     from ..fleet_notification import (FleetNotificationError, FleetNotificationInputError,
                                       notify_fleet)
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
 
     if args.seed:
         raise CommandFailure("conflict", "fleet notification requires an active host")
@@ -23,9 +23,9 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", str(exc)) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid root or fleet selector") from exc
-    except (ReleaseMismatch, ReleaseError) as exc:
+    except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "fleet notification requires the selected release") from exc
-    except (ActivationError, OperationContextError) as exc:
+    except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected fleet notification scope is unavailable") from exc
     data = result.data()
     reached = [name for name in ("manager", "telegram")

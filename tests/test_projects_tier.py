@@ -404,9 +404,7 @@ def test_bot_env_cannot_clobber_project_namespace(fleet_dir):
     ), report.errors
 
 
-def test_move_bot_surfaces_validation_warnings(fleet_dir, caplog):
-    # The round-1 fold CLAIMED move-bot shared the gate; round 2 caught that
-    # it never migrated. Warnings (did-you-mean hints) must surface there too.
+def test_validation_gate_surfaces_project_warnings(fleet_dir, caplog):
     import logging
 
     from claudlobby.commands._helpers import _validation_gate
@@ -417,9 +415,15 @@ def test_move_bot_surfaces_validation_warnings(fleet_dir, caplog):
         ok = _validation_gate(fleet, _paths(fleet_dir), context="retry")
     assert ok, "warnings alone must not block"
     assert any("surprise" in r.message for r in caplog.records)
-    # and the source-level assertion that move_bot actually uses the gate:
-    src = (REPO_DIR / "claudlobby" / "commands" / "move_bot.py").read_text()
-    assert "_validation_gate" in src, "move_bot must consume the shared gate"
+    # Bot move's old source-level gate assertion was retired with sealed roster
+    # changes. Its public door must refuse before changing authored inputs.
+    from claudlobby.commands import move_bot
+    from claudlobby.command_result import CommandFailure
+    before = (fleet_dir / "fleet.yaml").read_bytes()
+    with pytest.raises(CommandFailure, match="Git roster changes are not yet supported") as caught:
+        move_bot.dispatch(None)
+    assert caught.value.data == {"native_outcome": "unattempted", "changed": False}
+    assert (fleet_dir / "fleet.yaml").read_bytes() == before
 
 
 # --- root example files --------------------------------------------------------

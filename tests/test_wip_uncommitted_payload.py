@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -38,7 +39,6 @@ from tests.conftest import constructed_env, read_fleet_events
 from tests.test_plane_events_door import _serving
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEET_PULSE = REPO_ROOT / "claudlobby/_runtime_scripts" / "fleet-pulse.sh"
 FLEET = "wipfleet"
 BOT = "wipbot"
 
@@ -57,7 +57,7 @@ def wip_root(tmp_path):
     (bot / "data").mkdir(parents=True)
     (bot / "bot.conf").write_text("TMUX_SOCKET=wip-none\n")
     (root / "local" / FLEET / "fleet.yaml").write_text(
-        f"fleet:\n  bots:\n    {BOT}:\n")
+        f"fleet:\n  name: {FLEET}\n  manager: {BOT}\n  bots:\n    {BOT}: {{expertise: [testing]}}\n")
     repo = bot / "projects" / "demo"
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
@@ -73,9 +73,11 @@ def _run(root: Path, *, scratch_plane_env, **extra) -> subprocess.CompletedProce
     """A constructed child env and private daemon for committed event reads."""
     env = constructed_env(HOME=str(root / "home"),
                           **scratch_plane_env(root, initialize=True), **extra)
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
     with _serving(root, scratch_plane_env) as sock:
         env["PLANE_SOCKET"] = str(sock)
-        return subprocess.run(["bash", str(FLEET_PULSE), FLEET],
+        return subprocess.run([sys.executable, str(REPO_ROOT / "harness/compose.py"), "--root", str(root),
+                               "--fleet", FLEET, "--pulse", "--record-plane"],
                               capture_output=True, text=True, env=env, timeout=180)
 
 

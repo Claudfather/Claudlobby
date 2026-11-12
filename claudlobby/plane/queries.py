@@ -55,7 +55,10 @@ NON_TERMINAL_CLAUSE = (
 # terminal report closes every row that carried it — so this closes an
 # assignment when a terminal task event by the instant names it OR a sibling
 # assignment of the same assignee with the same dispatch-log source_ref.
-# Params: (assignee_uid, at, at, at, at, at, at) — the assignee resolved to a
+# One NOT EXISTS per way a row closes, each seeking its own column; under one
+# OR none could, and each row walked every task event (#2549). The fragment is
+# byte-identical to plane-readers.py's `_SIBLING_CLOSURE`, which says why.
+# Params: the assignee_uid, then `at` ten times — the assignee resolved to a
 # uid by the caller on the small registry (case-insensitively), so the read
 # hits idx_assignments_assignee; `at` None = unbounded (everything landed).
 # --- the fleet axis of an alias, in SQL (U) -----------------------------------
@@ -100,6 +103,26 @@ FLEET_REPORTS_SQL = (
     " ORDER BY c.occurred_at, c.ingest_seq"
 )
 
+# The workstream each of a fleet's reports names (#1053): the report's
+# communication records it in its own column, as the report's task stood when
+# the report was made. FLEET_REPORTS_SQL selects no workstream, and the stdlib
+# reader carries it byte for byte, so `fleet reports list --workstream` reads it
+# here instead: the same population, by the same WHERE text (pinned by test).
+# Binds as FLEET_REPORTS_SQL.
+FLEET_REPORT_WORKSTREAMS_SQL = (
+    "SELECT c.msg_id, c.workstream_id"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND (c.fleet_uid = ? OR c.recipient_fleet = ?)"
+    " AND (? IS NULL OR c.occurred_at >= ?) AND (? IS NULL OR c.ingest_seq > ?)"
+)
+
+# Whether the fleet ever recorded a workstream by this ID, whatever became of it:
+# open, closed or archived (an archive is an event; the construct row stays).
+# Binds (workstream_id, fleet_uid).
+FLEET_WORKSTREAM_RECORDED_SQL = (
+    "SELECT 1 FROM workstreams WHERE workstream_id = ? AND fleet_uid = ?"
+)
+
 # The newest READABLE `reports_acked` event among a set of uids (subject OR
 # actor — an ack lands on the viewer's own actor; the uids span every alias
 # variant the bot minted, the R2a rule). Decoded by SQLite: a row whose detail
@@ -118,20 +141,40 @@ NEWEST_ACK_SQL = (
     " ORDER BY e.ingest_seq DESC LIMIT 1"
 )
 
+# THE deadline of assignment `a` (#2469), one fragment for every reader: the
+# newest `deadline_changed` task event on it, by ingest order, whose NULL
+# deadline means open-ended; with no such event, the `expected_by` its dispatch
+# promised. A manager's move is a fact, so `assignments.expected_by` is never
+# rewritten. In the fragment, '' stands for "the newest fact names no
+# deadline", so the fallback applies only when there is no fact at all (a
+# stored deadline is never ''). Compare it through `_epoch` like any instant.
+_NEWEST_DEADLINE_FACT = ("(SELECT {col} FROM events d WHERE d.kind='task'"
+                         " AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
+                         " ORDER BY d.ingest_seq DESC LIMIT 1)")
+EFFECTIVE_DEADLINE_SQL = ("NULLIF(COALESCE(" + _NEWEST_DEADLINE_FACT.format(col="IFNULL(d.deadline, '')")
+                          + ", a.expected_by), '')")
+# When the newest deadline fact was recorded, NULL while the dispatch's own
+# deadline stands: the watchdog's expiry cap counts from it (plane-readers.py,
+# `deadline_status`).
+DEADLINE_SET_AT_SQL = _NEWEST_DEADLINE_FACT.format(col="d.occurred_at")
+
+_TERMINAL_AS_OF = f" AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
 OPEN_ASSIGNMENTS_AT_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, " + EFFECTIVE_DEADLINE_SQL + ", "
+    + DEADLINE_SET_AT_SQL +
     " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"    AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
-    "    AND (t.assignment_id = a.assignment_id"
-    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
-    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
-    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
-    "              AND (? IS NULL OR s.occurred_at <= ?)))"
-    "      OR (t.emitter='claudlobby.tasks.v1' AND t.event='cancelled'"
-    "          AND t.assignment_id IS NULL AND t.work_item_id=a.work_item_id"
-    "          AND t.ingest_seq>a.ingest_seq)))"
+    " AND t.assignment_id = a.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM assignments s CROSS JOIN events t"
+    " WHERE a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    " AND s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    " AND (? IS NULL OR s.occurred_at <= ?)"
+    " AND t.kind='task' AND t.assignment_id = s.assignment_id" + _TERMINAL_AS_OF + ")"
+    "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    " AND t.work_item_id = a.work_item_id AND t.ingest_seq > a.ingest_seq"
+    " AND t.emitter='claudlobby.tasks.v1' AND t.event='cancelled' AND t.assignment_id IS NULL"
+    + _TERMINAL_AS_OF + ")"
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 
@@ -178,13 +221,15 @@ _TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 # (command_type='task') linked to this task AND this assignment, addressed to
 # this assignee in this fleet on this host. Canonical delivery never writes
 # dispatch_msg_id, so a join on that column alone hid every failed canonical
-# send from the board.
+# send from the board. _DELIVERY_MATCH is that link, which
+# ASSIGNMENT_DELIVERIES_SQL lists for `assignment show` (#2379).
+_DELIVERY_MATCH = (
+    " c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
+    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
+    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid")
 _DELIVERY_MSG = (
     "COALESCE(a.dispatch_msg_id, (SELECT c.msg_id FROM communications c"
-    " WHERE c.work_item_id = a.work_item_id AND c.assignment_id = a.assignment_id"
-    " AND c.command_type = 'task' AND c.recipient_uid = a.assignee_uid"
-    " AND c.fleet_uid = a.fleet_uid AND c.host_uid = a.host_uid"
-    " ORDER BY c.ingest_seq DESC LIMIT 1))")
+    " WHERE" + _DELIVERY_MATCH + " ORDER BY c.ingest_seq DESC LIMIT 1))")
 _TX_EXISTS = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
               f" AND e.msg_id = {_DELIVERY_MSG} AND e.event <> 'received')")
 _TX_ACTIVATED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
@@ -198,6 +243,29 @@ _TX_FAILED = ("EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
 ASSIGNMENT_DELIVERY_MSG_SQL = (
     f"SELECT a.assignment_id, {_DELIVERY_MSG} AS msg_id FROM assignments a"
     " WHERE a.assignment_id IN ({ph})")
+
+# One assignment's delivery messages for `assignment show` (#2379), oldest
+# first: each communication _DELIVERY_MATCH accepts. With the row's legacy
+# dispatch_msg_id they name _DELIVERY_MSG's message: the legacy one where the
+# row carries it, else the newest. INDEXED BY keeps the seek on the task's few
+# communications; without planner statistics SQLite answers the ORDER BY from
+# the fleet's index instead, a walk that grows with the fleet's history.
+ASSIGNMENT_DELIVERIES_SQL = (
+    "SELECT c.msg_id, c.occurred_at, c.source_ref FROM assignments a"
+    " JOIN communications c INDEXED BY idx_intents_work_item ON" + _DELIVERY_MATCH
+    + " WHERE a.assignment_id = ? ORDER BY c.ingest_seq")
+# A delivery message's own row, for a legacy message no communication links.
+DELIVERY_MESSAGE_SQL = (
+    "SELECT occurred_at, source_ref FROM communications WHERE msg_id = ? AND host_uid = ?")
+# The sender's recorded attempts at one delivery message, oldest first: its
+# transmissions on the assignment's host and fleet. The receiver's `received`
+# rows are the receipt, which DELIVERY_STATUS_SQL judges.
+DELIVERY_ATTEMPTS_SQL = (
+    "SELECT e.attempt_no, e.event, e.occurred_at FROM events e"
+    " WHERE e.kind = 'transmission' AND e.msg_id = ? AND e.event <> 'received'"
+    " AND e.host_uid = ? AND e.fleet_uid IS ? ORDER BY e.ingest_seq")
+# When one ingested event happened, by its sequence (a receipt's instant).
+EVENT_OCCURRED_AT_SQL = "SELECT occurred_at FROM events WHERE ingest_seq = ?"
 
 # --- the delivery JOIN (chunk P, #1501; fold F1/F3) ---------------------------
 # Delivery, derived ONCE here — the honest replacement for reading
@@ -330,8 +398,15 @@ DELIVERY_STATUS_SQL = (
 #
 # The nudge's OWN arm needs the opposite window (a nudge is exactly what it
 # looks for), so there are two, and they differ by that one token.
+#
+# A manager moving a deadline (`deadline_changed`, #2469) is an act on the row,
+# so it ends a nudge like any other. It is neither an answer to the human the
+# manager asked nor the worker's word, so the escalation's window and the
+# worker's (the block arm, and stale_task's exclusion of a declared wait) skip
+# it: a move ends neither an escalation nor a block.
 NEWEST_TASK_IGNORED = ("supplied_id_not_open",)
-ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged",)
+ESCALATION_IGNORED = NEWEST_TASK_IGNORED + ("nudged", "deadline_changed")
+WORKER_WORD_IGNORED = NEWEST_TASK_IGNORED + ("deadline_changed",)
 
 
 def _newest_task(col: str, ignore: tuple = NEWEST_TASK_IGNORED) -> str:
@@ -347,6 +422,8 @@ _NEWEST_AT = _newest_task("n.occurred_at")
 _NEWEST_BY = _newest_task("json_extract(n.detail, '$.by')")
 _NEWEST_ANSWER = _newest_task("n.event", ESCALATION_IGNORED)
 _NEWEST_ANSWER_AT = _newest_task("n.occurred_at", ESCALATION_IGNORED)
+_NEWEST_WORD = _newest_task("n.event", WORKER_WORD_IGNORED)
+_NEWEST_WORD_AT = _newest_task("n.occurred_at", WORKER_WORD_IGNORED)
 
 # A nudge is an ASK, and a manager is owed a moment to act on it, so a nudge
 # is not attention until it has gone unanswered past this. Named because the
@@ -372,6 +449,13 @@ def _epoch(expr: str) -> str:
     than firing on garbage — which ingest's AwareDatetime makes unreachable
     anyway."""
     return f"CAST(strftime('%s', {expr}) AS INTEGER)"
+
+
+# The deadline in force (EFFECTIVE_DEADLINE_SQL) passed before the bound
+# instant: the overdue arm, stale_task's not-overdue clause and the expiry
+# sweep's horizon all ask exactly this. A NULL deadline (open-ended) is never
+# past; it yields NULL, which a WHERE reads as false.
+DEADLINE_PASSED_SQL = f"({_epoch(EFFECTIVE_DEADLINE_SQL)} < {_epoch('?')})"
 
 
 # --- the stale in-flight task arm (chunk T) -----------------------------------
@@ -460,8 +544,9 @@ _ASSIGNEE_WORKING = (
 #   1) now             — not-overdue: no deadline, or the deadline has not passed
 #   2) amber cutoff     — aged: the LATER of dispatch/progress predates it
 #   3) hb-fresh cutoff  — working: the freshness gate inside _ASSIGNEE_WORKING
-# NULL expected_by is NOT overdue (the deadline-less case is the whole point);
-# without the guard `NOT (NULL < now)` is NULL and would drop every such row.
+# A NULL deadline is NOT overdue (the deadline-less case is the whole point):
+# DEADLINE_PASSED_SQL yields NULL for it, and without the IFNULL guard
+# `NOT NULL` is NULL and would drop every such row.
 #
 # HOLDING requires DELIVERY (_TX_ACTIVATED): a bot cannot be "sitting on" a task
 # a send never got to it. That gate also keeps stale_task mutually exclusive
@@ -473,7 +558,7 @@ _ASSIGNEE_WORKING = (
 # already hold).
 _STALE_TASK = (
     "(" + _TX_ACTIVATED
-    + " AND (a.expected_by IS NULL OR " + _epoch("a.expected_by") + " >= " + _epoch("?") + ")"
+    + " AND NOT IFNULL(" + DEADLINE_PASSED_SQL + ", 0)"
     " AND MAX(" + _epoch("a.occurred_at") + ", COALESCE("
     + _epoch(_STALE_PROGRESS_AT) + ", " + _epoch("a.occurred_at") + ")) < "
     + _epoch("?")
@@ -481,7 +566,7 @@ _STALE_TASK = (
     # re-derived as a silent stall here (the same lead-and-exclude the
     # not-overdue clause above does for `overdue`). No `?` -- attention_params
     # is unchanged.
-    + " AND (" + _NEWEST_EVENT + " IS NULL OR " + _NEWEST_EVENT
+    + " AND (" + _NEWEST_WORD + " IS NULL OR " + _NEWEST_WORD
     + " != 'blocked_waiting')"
     + " AND NOT " + _ASSIGNEE_WORKING + ")"
 )
@@ -519,16 +604,15 @@ ATTENTION_ARMS = (
     ("nudged",
      f"({_NEWEST_EVENT} = 'nudged' AND {_epoch(_NEWEST_AT)} < {_epoch('?')})",
      _NEWEST_AT, NEWEST_TASK_IGNORED),
-    ("overdue", f"({_epoch('a.expected_by')} < {_epoch('?')})",
-     "a.expected_by", None),
+    ("overdue", DEADLINE_PASSED_SQL, EFFECTIVE_DEADLINE_SQL, None),
     # a bot that SAID it is blocked and waiting: its newest task event is
     # `blocked_waiting` — non-terminal (the task stays open while it waits, the
     # escalated/nudged family), so `_NON_TERMINAL_A` keeps it in the queue. An
     # EXPLICIT block dated by the bot outranks an INFERRED stall, so it leads
     # stale_task and stale_task excludes it above — an aged block reads
     # `blocked_waiting`, never both. No `?`, so attention_params is unchanged.
-    ("blocked_waiting", f"({_NEWEST_EVENT} = 'blocked_waiting')",
-     _NEWEST_AT, None),
+    ("blocked_waiting", f"({_NEWEST_WORD} = 'blocked_waiting')",
+     _NEWEST_WORD_AT, None),
     # LAST in the order so `overdue`/`blocked_waiting` (and every louder arm)
     # LEAD a row that is both — and its predicate already excludes an overdue
     # or blocked row, so belt and suspenders: stale_task never rides in front,
@@ -789,9 +873,11 @@ _F11_COMPLETION_JOIN = (
     " AND json_extract(d.detail,'$.complete') = 1)"
 )
 
+# Malformed/naive historical instants are excluded from chronology; stored
+# timestamps and payload/hash bytes are unchanged (see plane.time).
 _REG_EFFECTIVE = (
     "effective AS ("
-    " SELECT rs.*,"
+    " SELECT rs.*, claudlobby_instant_key(rs.occurred_at) AS instant_key,"
     "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
     " FROM registry_snapshots rs)"
 )
@@ -799,15 +885,15 @@ _REG_EFFECTIVE = (
 # Current state per SCD partition: the latest F11-valid row wins; when that
 # row is a (valid) tombstone the entity is absent from current. An INVALID
 # tombstone is not merely demoted — it is excluded, so the prior snapshot
-# remains current. Ordering is (occurred_at, ingest_seq), the spec's ONE
+# remains current. Ordering is (instant_key(occurred_at), ingest_seq), the ONE
 # SCD ordering (line 145: first-hand snapshots carry null observed_at, and
 # ingest_seq breaks producer-timestamp ties) — current is simply its tail.
 REG_CURRENT_SQL = (
     "WITH " + _REG_EFFECTIVE + ", latest AS ("
     " SELECT e.*, ROW_NUMBER() OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at DESC, e.ingest_seq DESC) AS rn"
-    " FROM effective e WHERE e.f11_valid = 1)"
+    "   ORDER BY e.instant_key DESC, e.ingest_seq DESC) AS rn"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
     " SELECT host_uid, entity_type, entity_uid, entity_alias, payload,"
     " payload_hash, cause, scan_id, vault_rev, occurred_at, ingest_seq"
     " FROM latest WHERE rn = 1 AND tombstone = 0"
@@ -839,17 +925,25 @@ REG_CURRENT_KEYS_SQL = (
 # the partition's next row (NULL = still open). Tombstone rows appear as
 # window-openers of the deleted period — the reader renders them, never
 # filters them, or deletion vanishes from history.
+# Select complete partitions first: a later alias must still close an old
+# alias's window. Only after LEAD may :ident select the returned rows.
 REG_HISTORY_SQL = (
-    "WITH " + _REG_EFFECTIVE +
+    "WITH " + _REG_EFFECTIVE + ", selected AS ("
+    " SELECT DISTINCT host_uid, entity_type, entity_uid"
+    " FROM registry_snapshots WHERE entity_alias = :ident OR entity_uid = :ident),"
+    " history AS ("
     " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
     " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
     " e.occurred_at AS valid_from,"
     " LEAD(e.occurred_at) OVER ("
     "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at, e.ingest_seq) AS valid_to,"
+    "   ORDER BY e.instant_key, e.ingest_seq) AS valid_to,"
     " e.ingest_seq"
-    " FROM effective e WHERE e.f11_valid = 1"
-    " ORDER BY e.entity_type, e.entity_alias, e.occurred_at, e.ingest_seq"
+    " FROM effective e JOIN selected s"
+    " ON s.host_uid = e.host_uid AND s.entity_type = e.entity_type"
+    " AND s.entity_uid = e.entity_uid WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL)"
+    " SELECT * FROM history WHERE entity_alias = :ident OR entity_uid = :ident"
+    " ORDER BY entity_type, entity_alias, claudlobby_instant_key(valid_from), ingest_seq"
 )
 
 # Consecutive rows in a partition ARE the diff view (spec line 143). This
@@ -860,20 +954,21 @@ REG_HISTORY_SQL = (
 # as first_observed — spec's own derivation name, and a new entity is
 # prime drift signal (chunk-B gauntlet: the old WHERE silently dropped
 # exactly those rows from --changes).
+# LIMIT bounds returned payloads, not the SQL window's partition input.
 REG_CHANGES_SQL = (
     "WITH " + _REG_EFFECTIVE + ", ordered AS ("
     " SELECT e.*,"
     "  LAG(e.payload) OVER w AS prev_payload,"
     "  LAG(e.payload_hash) OVER w AS prev_hash,"
     "  LAG(e.tombstone) OVER w AS prev_tombstone"
-    " FROM effective e WHERE e.f11_valid = 1"
+    " FROM effective e WHERE e.f11_valid = 1 AND e.instant_key IS NOT NULL"
     " WINDOW w AS (PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
-    "   ORDER BY e.occurred_at, e.ingest_seq))"
+    "   ORDER BY e.instant_key, e.ingest_seq))"
     " SELECT entity_type, entity_alias, entity_uid, tombstone, payload,"
     " prev_payload, prev_tombstone, cause, scan_id,"
     " occurred_at, ingest_seq"
     " FROM ordered"
-    " ORDER BY ingest_seq DESC"
+    " ORDER BY ingest_seq DESC LIMIT ?"
 )
 
 # Trust: tombstones the F11 join does NOT validate. Nonzero means a scan
@@ -984,7 +1079,7 @@ def checkin_event_scope_sql(col: str = "e") -> str:
 # links. Current local-human decisions have a fleet UID but no bot alias;
 # historical null-fleet rows retain the exact bot-alias fallback.
 _CHECKIN_ROWS_HEAD = (
-    "SELECT e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
+    "SELECT e.subject_uid AS subject_uid, e.subject_alias AS subject_alias, e.occurred_at AS occurred_at,"
     " e.detail AS detail, e.detail_truncated AS detail_truncated, e.ingest_seq AS ingest_seq,"
     " e.source_ref AS source_ref"
     " FROM events e"
@@ -998,7 +1093,7 @@ _CHECKIN_ROWS_ORDER = f" ORDER BY {_epoch('e.occurred_at')} DESC, e.ingest_seq D
 
 
 def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = False,
-                     checkin_id: bool = False) -> str:
+                     checkin_id: bool = False, checkin_prefix: bool = False) -> str:
     """The check-in decision rows query (PR 3 chunk 4): the window, the bot
     filter and --limit bound here rather than pulled whole into Python and
     filtered there (PR 1's shape) -- a wide --since still shrinks what
@@ -1012,9 +1107,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     base query admits human actors only under the recorded fleet UID;
     historical bot rows retain the alias fallback.
 
-    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, alias]
-    [, since] [, limit] -- current UID scope, legacy alias fallback and
-    a separate exact bot-alias guard, so
+    Binds: fleet, fleet, fleet, fleet, fleet [, checkin ref] [, ref low,
+    ref high] [, alias] [, since] [, limit] -- current UID scope, legacy
+    alias fallback and a separate exact bot-alias guard, so
     every optional term is appended AFTER it. `collect_checkins`
     (commands/checkins.py) gates its params list on the SAME three booleans
     this function is called with, in the SAME order, so the SQL shape and
@@ -1028,6 +1123,9 @@ def checkin_rows_sql(*, since: bool = False, bot: bool = False, limit: bool = Fa
     sql = _CHECKIN_ROWS_HEAD
     if checkin_id:
         sql += " AND e.source_ref = ?"
+    if checkin_prefix:
+        # `checkin show` with an ID prefix (#2380): the refs in [prefix, prefix + 'g').
+        sql += " AND e.source_ref >= ? AND e.source_ref < ?"
     if bot:
         sql += " AND e.subject_alias = ?"
     if since:

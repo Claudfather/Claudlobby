@@ -27,7 +27,7 @@
 #   eng-1:
 #     <<: *engineer-base                         # merges all keys from anchor
 #     expertise: [software-engineering]           # bot-specific keys override
-#     voice: voices/dinesh.md
+#     voice: voices/dinesh-chugtai.md
 
 fleet:
   name: example-fleet
@@ -65,6 +65,7 @@ fleet:
     spinner_tips_enabled: false              # settings.local spinnerTipsEnabled — silence the "Tip:" lines
     preferred_notif_channel: notifications_disabled  # settings.local preferredNotifChannel — no desktop on a headless bot
     prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based
+    # auto_compact_window: auto              # settings.local autocompact window — auto keeps Claude Code's own and stops its end-of-turn offer; or 100000 to 1000000 tokens
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
     # worker-lifecycle is the ack/report doctrine's canonical owner — several
@@ -210,7 +211,7 @@ fleet:
 #         purpose: vendored CLI tree the bot shells out to
 #
 #     # integrations — usage docs from library/integrations/ (auto-paired with mcp by default)
-#     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
+#     # An explicit list adds to auto-pairing; it never replaces it. Omit it to let mcp drive it.
 #     integrations: [neon, railway, vercel]
 #
 #     # brief — the SessionStart boot brief (#904 M1, epic #1102 R3). DEFAULT
@@ -319,8 +320,8 @@ fleet:
 #     # unset (omit Option A above to use this).
 #     dangerously_skip_permissions: true
 #
-#     # remote_control — enable --remote-control flag (default: true)
-#     # Allows dispatch via tmux send-keys. Disable for standalone bots.
+#     # remote_control — run with --remote-control (default: true for the
+#     # fleet manager, false for every other bot). Set true to opt a worker in.
 #     remote_control: true
 #
 #     # channels — Claude Code channel plugins for messaging (default: [plugin:telegram@claude-plugins-official])
@@ -334,7 +335,10 @@ fleet:
 #
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
-#     claudna_version: "0.2.0"                    # pin clauDNA plugin version
+#     claudna: {session_summary: true, harvest: false}  # OPTIONAL strict booleans
+#     # precompact_reflect: true arms clauDNA's capture prompt, off for bots.
+#     # harvest needs Claudron >= 0.8.0 on the host first (PR 6a).
+#     claudna_version: "0.2.0"                    # exports a version hint; pins nothing
 #     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
 #
@@ -361,11 +365,11 @@ fleet:
 #
 #     # autonomous_runner — turns a bot into an Autonomous Worker that picks
 #     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto
-#     # skill (typically /claudna:implement-plan) to resolve them. The bot's
+#     # skill (typically /claudna:build) to resolve them. The bot's
 #     # CLAUDE.md gets a rendered "Autonomous Runner" section describing the job.
 #     # See library/skills/autonomous-runner/{SKILL.md,archetype.md} for details.
 #     autonomous_runner:
-#       skill: /claudna:implement-plan            # required: which clauDNA --auto skill to run
+#       skill: /claudna:build                     # required: which clauDNA --auto skill to run
 #       cadence: 1h                                # required: how often (15m | 1h | 6h | 24h, etc.)
 #       target_repo: my-org/my-repo                # required: <owner>/<repo>
 #       args: ""                                   # optional: appended after --auto
@@ -401,7 +405,7 @@ fleet:
 #       telegram:
 #         handle: my_dbt_auto_bot
 #       autonomous_runner:
-#         skill: /claudna:implement-plan
+#         skill: /claudna:build
 #         cadence: 1h
 #         target_repo: my-org/my-dbt-repo
 #         picker:

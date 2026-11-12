@@ -1,39 +1,27 @@
-# Printify: MCP vs direct API — when to use which
+# Printify: use the API; the MCP is deprecated
 
-Printify is exposed to the fleet as **two first-class tools that share one env contract** (`PRINTIFY_API_KEY` + `PRINTIFY_SHOP_ID`, fleet-tier in `local/<fleet>/.env`):
+Use the Printify v1 REST API through this skill, `printify_api.sh`. It is the tool of the `printify` integration, and it covers the reads and the writes:
 
-| Tool | What it is | Declare in fleet.yaml |
-|------|-----------|-----------------------|
-| **`printify` skill** | This skill → `printify_api.sh`, direct v1 REST **reads and draft-first writes** (create / migrate / publish). | `skills: [printify]` |
-| **`printify` MCP** | `library/mcp/printify.json` → the `printify-mcp` server (Node). Exposes ~19 `mcp__printify__*` tools; its one non-redundant capability here is Replicate **image generation**. | `mcp: [printify]` |
+```yaml
+skills: [printify]          # this skill: reads + draft-first writes
+integrations: [printify]    # the guide, and the PRINTIFY_* env contract that doctor checks
+```
 
-A bot can declare **either or both**. Both read the same two env vars, so there is exactly one secret contract to manage.
+**The Printify MCP server is deprecated.** `library/mcp/printify.json` stays in the library so that a bot that still lists `mcp: [printify]` keeps composing and running. Its read tools are allowed by the fragment's own `_permissions_contract`, its writes ask, and `config validate` warns `mcp-deprecated`, naming the bots that list it. The `printify` integration grants no `mcp__printify__` tool. List the skill and the integration instead, and nothing new should list the MCP.
 
-## Decision guide
+## What the skill covers
 
-**Use the `printify` skill (direct REST) for:**
-- **Real shop / connection status.** Some `printify-mcp` builds fabricate a `Mock Shop 1` placeholder on a transient init failure and still report `Connected: Yes`. `printify_api.sh status` is the real shop, always — ground truth regardless of which build is installed.
-- **Lossless product descriptions.** The MCP's `get_product` / `list_products` responses are **lossy** — they drop the product `description`. Copy/PDP work needs the full description → use `printify_api.sh product <id>`.
-- **Orders** — quick, PII-controlled reads of the order pipeline.
-- **Product writes — create, migrate, publish.** Direct REST returns clean JSON ids, sets `tags` and image geometry the MCP can't, and never touches the MCP's mock-shop bug. Writes are **draft-first**: `create`/`migrate` leave a DRAFT and print the edit URL; `publish` is explicit and `--yes`-gated. (The MCP `create_product` hardcodes image geometry, sets no tags, and returns Markdown you'd have to regex ids out of — all write-path blockers.)
-- **Any endpoint the MCP doesn't expose** — `printify_api.sh raw <path>`.
-- **Non-MCP bots.** Because `PRINTIFY_*` is fleet-tier, the REST skill works on a bot that has NOT declared the `printify` MCP. No MCP server process needed.
+- **Reads:** `status` (the real shop list, and which shop is current), `products [limit]`, `product <id>` (the full description, lossless), `orders [limit]` (no customer details), `order <id>`, and `raw <api/path.json>` for any other v1 GET, the catalog included (for example `raw catalog/blueprints/<id>/print_providers/<provider_id>/variants.json`).
+- **Writes, draft-first:** `create` (a PNG to a new DRAFT product, with its tags and print placement), `migrate` (a product recreated on a new print provider as a DRAFT, with a coverage report) and `publish` (refuses without `--yes`). Run each with `--dry-run` first.
+- **Not covered:** image generation, and updating or deleting a product. Make the PNG elsewhere and hand it to `create --png`.
 
-**Use the `printify` MCP for:**
-- **Replicate image generation** (`generate_and_upload_image`) — the genuinely unique MCP capability. A decoupled design-gen flow calls it and hands the resulting PNG to `printify create --png`.
-- **Rich tool ergonomics** inside an agent flow where structured MCP tool calls beat shelling out, and the mock-shop bug is not on the path.
+When a read must be complete or trustworthy, this skill is authoritative: it returns the API's own JSON and surfaces the real HTTP error.
 
-## Rule of thumb
+## Env contract
 
-> **Reads that must be complete or trustworthy → REST skill. Product writes → REST skill (draft-first). Image generation → MCP.**
-
-The REST skill is the actuator (trustworthy reads + honest, draft-first writes); the MCP is retained for image-gen and rich agent ergonomics. When they disagree on a read, the REST API is authoritative. When writing, prefer REST — it returns clean ids and controls the full product model.
-
-## Env contract (shared)
-
-Both resolve `${PRINTIFY_API_KEY}` / `${PRINTIFY_SHOP_ID}` at runtime from the process env, sourced from `local/<fleet>/.env` by `start-bot.sh`. Nothing about the contract is duplicated — declaring the MCP, the skill, or both draws on the same two vars.
+`PRINTIFY_API_KEY` (secret) and `PRINTIFY_SHOP_ID`, declared by `library/integrations/printify.md` and read from the fleet-tier `.env`. The deprecated MCP fragment declares the same two vars, so a bot moving off it keeps its `.env` as it is.
 
 ## Related
-- `library/skills/printify/SKILL.md` — this REST actuator (reads + draft-first writes).
-- `library/mcp/printify.json` — the MCP fragment. The shipped default is upstream `npx @tsavo/printify-mcp@0.1.1`; a fleet running a patched build points its overlay fragment at that build instead.
-- `library/skills/README.md` — the skill-authoring conventions this skill follows.
+- `library/skills/printify/SKILL.md` — this skill: usage, permissions, and the draft-first rules.
+- `library/integrations/printify.md` — the integration: env contract, permissions and the API reference.
+- `library/mcp/printify.json` — the deprecated MCP fragment.

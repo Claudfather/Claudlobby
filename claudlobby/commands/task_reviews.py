@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..activation_state import ActivationError
 from ..command_result import selection_read_conflict
 
 from contextlib import closing
@@ -13,9 +14,8 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def _read(args) -> CommandOutput:
-    from ..active_config import ActivationError
-    from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import read_selection
+    from ..active_config import runtime_read_stamp
+    from ..activation_identity import read_current_identity_bindings
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (
@@ -26,7 +26,6 @@ def _read(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.registry_read import current_entities
     from ..plane.schema_state import PendingMigrationError, require_current_schema
-    from ..releases import ReleaseError
     from .. import review_queries, review_rules
 
     release_id = None
@@ -43,11 +42,11 @@ def _read(args) -> CommandOutput:
         destination, _origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no review evidence")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root,package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active review selection is unavailable")
-        release_id = selected["release_id"]
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        release_id = selected.release_id
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
@@ -72,11 +71,11 @@ def _read(args) -> CommandOutput:
                 raise CommandFailure("conflict", "Plane host differs from active review scope",
                                      release_id=release_id)
             data = review_queries.assess_payloads(conn, payloads, args.repo)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active review selection changed during read', release_id=release_id)
+        selected.check(destination.paths.root,package=destination.paths.package,
+                       message="current review configuration changed during read")
         data.update({"caller_fleet": destination.fleet.name,
                      "host_uid": bindings["host_uid"],
-                     "merge_authorization": False})
+                     "merge_authorization": False, **selected.provenance})
         lines = [f"Review attribution scans every fleet in this host's Plane; caller fleet: "
                  f"{destination.fleet.name}.",
                  "This read does not authorize a merge or prove PR authorship.",
@@ -116,8 +115,6 @@ def _read(args) -> CommandOutput:
                                  retryable=True, release_id=release_id) from exc
         raise CommandFailure("conflict", "active review scope is incomplete",
                              release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
     except PlanError as exc:
         raise CommandFailure("conflict", "active review configuration is incomplete") from exc
     except (PendingMigrationError, DowngradeError) as exc:

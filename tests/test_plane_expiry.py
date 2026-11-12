@@ -4,7 +4,7 @@ assignments (a fresh one and a completed one are untouched); the event
 removes the card from ATTENTION_SQL and TASK_STATUS_SQL says `expired`;
 a second run is a no-op (idempotent by construction); dry-run emits
 nothing; the launcher self-gates; the composer stamps the arming flag.
-Public expiry requires an active selected release and filters to its fleets.
+Public expiry requires committed Git configuration and filters to its fleets.
 """
 
 from __future__ import annotations
@@ -51,11 +51,11 @@ def _dispatch(root, n, *, expected_by, fleet=F, emitter="t"):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": emitter, "fleet": fleet,
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": f"bot:{fleet}/mgr"}},
+                     "created_by": f"bot:{fleet}/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": emitter, "fleet": fleet,
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": f"bot:{fleet}/w1", "assigned_by": f"bot:{fleet}/mgr",
-                     "expected_by": expected_by.isoformat(),
+                     **({"expected_by": expected_by.isoformat()} if expected_by else {}),
                      "dispatch_msg_id": f"msg_{n:0>32}"}}])
     return wi, aid
 
@@ -113,7 +113,6 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
 
 
 def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
-    from claudlobby.task_audit import audit_tasks
     from claudlobby.task_state import TASK_EMITTER, read_tasks
 
     root = _root(tmp_path)
@@ -127,13 +126,12 @@ def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
         fleet_uid = conn.execute(
             "SELECT uid FROM identity_registry WHERE kind='fleet' AND alias=?", (F,)
         ).fetchone()[0]
-        task = read_tasks(conn, fleet_uid=fleet_uid).get(task_id)
-        audit = audit_tasks(conn)
+        state = read_tasks(conn, fleet_uid=fleet_uid)
+        task = state.get(task_id)
     assert task.state == "queued" and task.current_assignment is None
     assert task.terminal_event is None and not task.blockers
     assert task.assignments[0].terminal_event.emitter == "attention-expiry"
-    assert audit.counts["unassigned_tasks"] == 1 and not audit.blockers
-    assert audit.preview(task_id, fleet_uid=fleet_uid, active_only=True).mapping.assignment_id is None
+    assert [t.task_id for t in state.tasks] == [task_id] and not state.blockers
 
 
 def test_negative_horizon_refused():
@@ -161,20 +159,51 @@ def _selected_sweep(monkeypatch, root, *, dry_run=False):
 
     @contextmanager
     def admitted(*_args, **_kwargs):
-        yield SimpleNamespace(release_id="selected-release", seal_sha256="selected-seal")
+        from claudlobby.runtime_admission import GitCurrentRuntime
+        from tests.package_fixtures import git_package
+
+        yield GitCurrentRuntime(git_package(root).installation,
+                                "a" * 40, "b" * 64, {"fleets": {F: {}}})
 
     monkeypatch.setattr(plane_expire, "mutation_admission", admitted)
     monkeypatch.setattr(plane_expire, "resolve_paths", lambda **_kwargs:
                         SimpleNamespace(root=root))
     monkeypatch.setattr(plane_expire.RuntimeIdentity, "current", classmethod(
         lambda cls: SimpleNamespace()))
-    monkeypatch.setattr("claudlobby.activation_state.read_selection",
-                        lambda _root: {"plan_id": "selected-plan"})
-    monkeypatch.setattr("claudlobby.config_plan.read_plan", lambda *_args:
-                        SimpleNamespace(release_id="selected-release", release_seal="selected-seal",
-                                        fleets=(F,)))
     return plane_expire.dispatch(SimpleNamespace(root=root, fleet=None, seed=False,
                                                   after_days=None, dry_run=dry_run))
+
+
+def test_git_expiry_uses_admitted_fleet_roster_and_preserves_unknown_outcome(tmp_path, monkeypatch):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
+    root = _root(tmp_path)
+    _seed(root)
+    _dispatch(root, "d", expected_by=NOW - timedelta(days=10), fleet="parked-fleet")
+    dry = _selected_sweep(monkeypatch, root, dry_run=True)
+    assert dry.release_id is None
+    assert dry.data["source_revision"] == "a" * 40
+    assert dry.data["config_fingerprint"] == "b" * 64
+    assert dry.data["fleets"] == [F]
+    assert dry.data["candidates"] == 1 and dry.data["skipped_unselected"] == 1
+    emit = plane_expire.emit_batch
+    def unknown(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic I/O failure")
+    monkeypatch.setattr(plane_expire, "emit_batch", unknown)
+    with pytest.raises(CommandFailure) as failed:
+        _selected_sweep(monkeypatch, root)
+    assert failed.value.error.code == "commit_unknown"
+    assert failed.value.data["recording"] == "unknown"
+    assert failed.value.data["config_fingerprint"] == "b" * 64
+    assert failed.value.data["event_ids"] and "expired" not in failed.value.data
+    # The fake emitter failed before commit. Resolve that fact before a fresh sweep.
+    with closing(connect(db_path(root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='expired'").fetchone()[0] == 0
+    monkeypatch.setattr(plane_expire, "emit_batch", emit)
+    live = _selected_sweep(monkeypatch, root)
+    assert live.data["expired"] == 1 and live.data["recording"] == "committed"
+    assert _selected_sweep(monkeypatch, root).data["expired"] == 0
 
 
 def test_selected_dry_run_then_live(tmp_path, monkeypatch):
@@ -296,7 +325,7 @@ def test_launcher_runs_with_no_flag_at_all(tmp_path):
 def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     import yaml
     from claudlobby.composer import compose_host_timers
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -319,7 +348,7 @@ def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
@@ -332,7 +361,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     would keep firing with no way to tell why (#1383's class, inverted)."""
     import yaml  # noqa: F401 — mirrors the fixture above
     from claudlobby.composer import compose_host_timers
-    from tests.package_fixtures import source_package
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -347,7 +376,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="0", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=0" in (
         out / "claudlobby-plane-expire.service").read_text()
 
@@ -376,29 +405,64 @@ def test_an_alive_assignment_is_never_expired(tmp_path):
     assert [r["assignment_id"] for r in plan.rows] == [stale[1]]   # alive kept
 
 
-def test_a_changed_deadline_is_honored(tmp_path):
-    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
-    the future must keep the assignment — the sweep reads the EFFECTIVE
-    deadline, not the original row."""
-    root = _root(tmp_path)
-    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+def _deadline_fact(root, wi, aid, deadline):
+    """A deadline_changed on the assignment (None = open-ended), its ingest
+    backdated so the quiet-horizon clause is not what decides."""
     emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
                        "payload": {"work_item_id": wi, "assignment_id": aid,
                                    "event": "deadline_changed",
-                                   "deadline": (NOW + timedelta(days=5)).isoformat()}}])
-    # backdate that event's ingest so the quiet-horizon clause is not what saves it
+                                   "deadline": deadline.isoformat() if deadline else None}}])
     db = connect(db_path(root))
     try:
         db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
                    ((NOW - timedelta(days=9)).isoformat(),))
     finally:
         db.close()
+
+
+def test_a_changed_deadline_is_honored(tmp_path):
+    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
+    the future must keep the assignment — the sweep reads the EFFECTIVE
+    deadline, not the original row."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, NOW + timedelta(days=5))
     conn = connect(db_path(root))
     try:
         plan = expirable(conn, now=NOW, after_days=7)
     finally:
         conn.close()
     assert plan.rows == []
+
+
+def test_an_open_ended_deadline_fact_is_never_expired(tmp_path):
+    """#2469: a deadline_changed with no deadline makes the assignment
+    open-ended. The sweep keeps it, rather than skipping the fact for the
+    original deadline ten days back."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, None)
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert plan.rows == []
+
+
+def test_a_deadline_fact_gives_an_open_ended_assignment_a_deadline(tmp_path):
+    """#2469: an assignment dispatched with no deadline and given one by a
+    deadline_changed is swept like any other once that deadline is past the
+    horizon."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=None)
+    _deadline_fact(root, wi, aid, NOW - timedelta(days=10))
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert [r["assignment_id"] for r in plan.rows] == [aid]
 
 
 def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):

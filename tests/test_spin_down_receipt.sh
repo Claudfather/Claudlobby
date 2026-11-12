@@ -83,6 +83,8 @@ spin_down() {
     printf 'export BOT_NAME=%s\nexport BOT_SERVICE=t.p.%s\nexport TMUX_SOCKET=t.p.%s\nexport FLEET_STATE_PATH=%s\n' \
         "$bot" "$bot" "$bot" "$ROOT/state/fleet-state.json" > "$bdir/bot.conf"
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
+        CLAUDLOBBY_INSTALLATION="$T/installation" CLAUDLOBBY_CLI="$T/bin/claudlobby" \
+        CLAUDLOBBY_NATIVE_DIR="$LIB_DIR" CLAUDLOBBY_LIBRARY_DIR="$T/library" \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
         SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
         NATIVE_OCCUPIED="${NATIVE_OCCUPIED:-0}" NATIVE_UNIT="t.p.$bot.service" TMUX_STALE="${TMUX_STALE:-0}" \

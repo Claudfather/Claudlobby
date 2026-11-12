@@ -1,0 +1,24 @@
+
+✻ Worked for 12s · done 12:01 AM
+
+❯ And then this pr4-live-Q-336ab32e.
+
+● Stand-in reply.
+
+✻ Brewed for 0s · done 12:01 AM
+
+❯ Ask me pr4-live-ASK-90d0d208.
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Stand-in
+
+Which stand-in option?
+
+❯ 1. Option 1
+     A stand-in description 1
+  2. Option 2
+     A stand-in description 2
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

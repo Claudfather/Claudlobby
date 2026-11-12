@@ -1,6 +1,6 @@
 ---
 name: cross-fleet-initiative
-description: "Coordinate a multi-team initiative across multiple manager fleets via a 7-stage operating loop (FRAME, DECOMPOSE, GATE, DISPATCH, MONITOR, SYNTHESIZE, CLOSE). Use when a strategic goal spans more than one fleet and needs the senior-management layer to keep both aligned, surface forks to the owner, and drive to a defined done state."
+description: "Use when a strategic goal spans more than one fleet and needs the senior-management layer to keep both aligned, surface forks to the owner, and drive to a defined done state. Coordinates a multi-team initiative across multiple manager fleets via a 7-stage operating loop (FRAME, DECOMPOSE, GATE, DISPATCH, MONITOR, SYNTHESIZE, CLOSE)."
 argument-hint: "<stage> <initiative-name> | bootstrap <initiative-name> <one-line-goal> | next <initiative-name>"
 tool_grants:
   - "Bash(python3 *issue-intake.py* list *)"
@@ -226,5 +226,5 @@ The MONITOR stage is steady-state; stages 6 and 7 fire on triggers within it.
 
 - **Don't compress the stages.** Each is load-bearing. Skipping FRAME means later forks lack a north-star check; skipping GATE means decisions become discretionary; skipping CLOSE means lessons don't compound.
 - **Don't escalate every fork.** SYNTHESIZE applies the four lenses first; only escalate when the lenses don't tip.
-- **Don't lose state to a crash.** Every stage writes durable artifacts to disk before posting to chat. A restart at any stage rebuilds context from disk.
+- **Don't lose state to a crash.** Every stage writes durable artifacts to disk before posting to chat. A fresh session at any stage rebuilds context from disk; a plain restart continues the same conversation.
 - **The owner owns the ratify; the orchestrator owns the loop.** The skill makes the operating loop mechanical — the strategic compass stays the owner's.

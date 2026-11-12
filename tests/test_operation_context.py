@@ -65,8 +65,7 @@ def estate(tmp_path, monkeypatch):
                 "declared_hash": "fixture", "schema_version": "1"})
     identity("actor", "human:operator", ids["fleet", "origin"])
     conn.execute("UPDATE identity_registry SET provisional=1 WHERE alias='human:operator'")
-    builder = ConfigPlanBuilder(tmp_path, "r-" + "a" * 64, "b" * 64,
-                                ("origin", "target"), effects={"fleet_manifests": {}, "fleet_sources": {}})
+    builder = ConfigPlanBuilder(tmp_path, ("origin", "target"), effects={"fleet_manifests": {}, "fleet_sources": {}})
     for name in ("origin", "target"):
         directory = tmp_path / "local" / name
         manifest, projects = directory / "fleet.yaml", directory / "projects.yaml"
@@ -75,7 +74,7 @@ def estate(tmp_path, monkeypatch):
             "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
             "projects": {"path": str(projects), "sha256": builder.input_content(projects)},
         }
-    plan = builder.seal()
+    plan = builder.freeze("a" * 40)
     # Selection/admission has separate real-journal coverage. Keep the actual
     # frozen parser and registry here, with an explicit recorded-plan boundary.
     def active_context(*, root=None, fleet=None, bot=None, package=None):

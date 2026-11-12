@@ -29,6 +29,7 @@ from pathlib import Path
 from .config import FleetConfig
 from .plane.presence import derive_presence
 from .paths import Paths, tmux_socket_for_bot
+from .stop_record import read_stop, unit_installed
 from .task_work_queries import CurrentWork, read_fleet_work
 from .uptime import _fmt_duration
 
@@ -85,7 +86,7 @@ _SVC_UNDETERMINED = "undetermined"
 @dataclass
 class BotStatus:
     name: str
-    state: str = "unknown"  # idle/working/blocked/offline/unknown
+    state: str = "unknown"  # idle/working/blocked/offline/unknown/stopped
     current_task: str | None = None
     # How many assignments are open: more than one means current_task is the
     # first by state, then latest transition, of several (#2179).
@@ -116,11 +117,64 @@ class BotStatus:
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
     busy_age_secs: int | None = None
+    # #2243: a bot the stop door stopped (state "stopped"): when, by whom and why,
+    # from the stop door's record
+    stopped_since: str | None = None
+    stopped_by: str | None = None
+    stop_reason: str | None = None
+    # the live context (#2206): transcript_usage.current_context's answer,
+    # tokens None with its reason when the transcript cannot answer
+    context: dict | None = None
 
     @property
     def service_undetermined(self) -> bool:
         """True when nothing ever answered, so up-or-down is not known."""
         return self.service_sub == _SVC_UNDETERMINED
+
+
+def _current_service_observations(fleet, paths, bots):
+    """Exact current Git native bindings; missing evidence stays undetermined."""
+    from .active_config import read_current_config
+    from .config_units import current_git_declarations
+    from .supervision_inventory import collect_enrollment
+
+    unknown = {bot: (False, _SVC_UNDETERMINED, None) for bot in bots}
+    try:
+        snapshot = read_current_config(paths.root, installation=paths.package.installation,
+                                       revision=paths.package.source_revision)
+        placement = snapshot.get("supervision")
+        manager = placement["manager"] if placement else platform.system()
+        declarations = current_git_declarations(snapshot, manager)
+        selected = {bot: [row for row in declarations if row.fleet == fleet.name and row.bot == bot
+                         and row.scope == "bot" and row.source.suffix in {".service", ".plist"}]
+                    for bot in bots}
+        if any(len(rows) != 1 for rows in selected.values()):
+            return unknown
+        names = frozenset(rows[0].source.name for rows in selected.values())
+        inventory = collect_enrollment(paths.root, declarations, package=paths.package,
+                                       only_names=names).require_complete()
+        if inventory.manager != manager:
+            return unknown
+        result = dict(unknown)
+        for bot, rows in selected.items():
+            units = [unit for unit in inventory.units if unit.declaration == rows[0]]
+            if len(units) != 1:
+                continue
+            unit = units[0]
+            if placement:
+                expected = str(Path(placement["directory"]) / rows[0].source.name)
+                if any(saved.path != expected for saved in unit.installed):
+                    continue
+                if manager == "Darwin" and unit.target.rsplit("/", 1)[0] != placement["domain"]:
+                    continue
+            props = dict(unit.properties)
+            state = props.get("ActiveState")
+            if state not in {"active", "inactive", "failed", "activating", "deactivating"}:
+                continue
+            result[bot] = (state == "active", state, bool(unit.installed))
+        return result
+    except (OSError, ValueError, RuntimeError):
+        return unknown
 
 
 def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
@@ -134,11 +188,22 @@ def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
     """
     alive: set[str] = set()
     for bot_id in (fleet.bots if bots is None else bots):
+        environment = None
         try:
-            socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
-                f"{fleet.service_prefix}.{bot_id}"
-            )
-        except ValueError:
+            if paths.package.installation is not None:
+                from .supervision import build_supervision_spec
+                spec = build_supervision_spec(fleet.bots[bot_id], fleet, paths)
+                socket = spec.label
+                environment = {**os.environ, "TMUX_TMPDIR": spec.environment["TMUX_TMPDIR"]}
+            else:
+                socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
+                    f"{fleet.service_prefix}.{bot_id}"
+                )
+        except (ValueError, OSError, RuntimeError) as exc:
+            if paths.package.installation is not None:
+                continue  # A missing committed target is not a guessed socket.
+            if not isinstance(exc, ValueError):
+                raise
             # SSOT resolver fail-fasts on a misconfigured bot when FLEET_NAME is
             # set; fall back to the canonical service-name socket so one bad bot
             # doesn't blank the whole dashboard.
@@ -147,7 +212,7 @@ def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
             out = subprocess.run(
                 ["tmux", "-L", socket, "has-session", "-t", bot_id],
                 capture_output=True,
-                timeout=5,
+                timeout=5, **({"env": environment} if environment is not None else {}),
             )
             if out.returncode == 0:
                 alive.add(bot_id)
@@ -327,6 +392,18 @@ def _read_service_label(bot_dir: Path) -> str:
     return ""
 
 
+def _live_context(paths: Paths, fleet: FleetConfig, bot_id: str) -> dict:
+    """The newest main-chain usage row's context, from the reader `fleet
+    usage` uses; a reader fault costs this field, never the status read."""
+    from .transcript_usage import current_context
+
+    try:
+        return current_context(paths, fleet, bot_id)
+    except Exception as exc:  # noqa: BLE001 - named in the field, not raised
+        return {"tokens": None, "at": None, "reason": f"context_read_failed: {type(exc).__name__}",
+                "session": None, "compacted_after": None, "bytes_read": 0, "cap": None}
+
+
 def collect_fleet_status(
     fleet: FleetConfig,
     paths: Paths,
@@ -338,6 +415,8 @@ def collect_fleet_status(
     from .utilization import compute_bot_utilization, fleet_heartbeat_series
     bots = list(fleet.bots) if only is None else [only]
     tmux_sessions = _check_tmux_sessions(fleet, paths, bots)
+    current_services = (_current_service_observations(fleet, paths, bots)
+                        if paths.package.installation is not None else None)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
 
@@ -404,8 +483,10 @@ def collect_fleet_status(
 
         # service supervision — key off the BOT_SERVICE label the installer
         # names the unit after (com.<fleet>.<bot>), not the bare bot id.
-        label = _read_service_label(bot_dir)
-        if is_linux:
+        label = _read_service_label(bot_dir) if current_services is None else ""
+        if current_services is not None:
+            bs.service_active, bs.service_sub, _ = current_services[bot_id]
+        elif is_linux:
             bs.service_active, bs.service_sub = _check_systemd_service(bot_id, label)
         elif label:
             bs.service_active, bs.service_sub = _check_launchd_service(bot_id, label)
@@ -421,6 +502,8 @@ def collect_fleet_status(
             bs.busy_pct_24h = util.busy_pct_24h
             bs.busy_age_secs = util.busy_age_secs
             bs.idle_since = util.idle_since
+        bs.context = _live_context(paths, fleet, bot_id)
+
         # STATE and TMUX now answer the SAME question from the SAME verdict.
         # A current blocked assignment decorates an observed idle presence;
         # it cannot turn a BUSY pane into an idle one.
@@ -433,6 +516,21 @@ def collect_fleet_status(
             bs.state = "unknown"
         else:
             bs.state = "unknown"
+        # #2243 F8: stopped on purpose, not down. fleet-pulse's two facts: no
+        # installed unit file (svc_is_registered) and the stop door's record. A
+        # missing unit with no record is never `stopped` (the sweep calls it
+        # unit_missing), nor is a bot whose session is still up.
+        unenrolled = not bs.tmux_alive and (
+            current_services[bot_id][2] is False if current_services is not None
+            else bool(label) and not unit_installed(label, system=platform.system()))
+        if unenrolled:
+            record = read_stop(bot_dir)
+            if record is not None:
+                bs.state = "stopped"
+                bs.stopped_since, bs.stopped_by, bs.stop_reason = (
+                    value if isinstance(value, str) else None
+                    for value in (record.get("stopped_at"), record.get("by"),
+                                  record.get("reason")))
 
         results.append(bs)
 
@@ -443,7 +541,10 @@ def collect_fleet_status(
 
 
 def _health_indicator(bs: BotStatus) -> str:
-    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known."""
+    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known,
+    - stopped on purpose (#2243)."""
+    if bs.state == "stopped":
+        return _dim("-")
     if not bs.tmux_alive:
         return _red("x")
     if not bs.service_active:
@@ -470,7 +571,7 @@ def _health_indicator(bs: BotStatus) -> str:
 def _state_display(bs: BotStatus) -> str:
     """Colorized state string."""
     s = bs.state
-    if s == "idle":
+    if s in {"idle", "stopped"}:
         return _dim(s)
     if s == "working":
         return _green(s)
@@ -527,6 +628,9 @@ def _tmux_display(bs: BotStatus) -> str:
             # #2070: text sits unsubmitted in the input box; an operator Enter
             # clears it, a restart would discard it.
             return _yellow("held")
+        if bs.pane_state == "LIMIT":
+            # #996: a claude.ai usage limit stopped it; it waits for the reset.
+            return _yellow("limit")
         return "up"
     return _red("down")
 
@@ -609,11 +713,41 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
     from . import switches as _sw
 
     off = _sw.target_workflow_off(switch_states or [])
-    if not off:
-        return ""
-    return ", ".join(
-        f"{s.switch.key} off on {fleet_name}" for s in off
-    ) + " — this reaction will not happen (claudlobby host doctor --switches)"
+    notes = []
+    if off:
+        notes.append(", ".join(f"{s.switch.key} off on {fleet_name}" for s in off)
+                     + " — this reaction will not happen (claudlobby host doctor --switches)")
+    unknown = [s for s in switch_states or [] if s.unknown]
+    if unknown:
+        notes.append("Switch states unknown: " + ", ".join(
+            f"{s.switch.key} ({s.unknown_reason})" for s in unknown)
+            + " — inspect claudlobby host doctor --switches")
+    return "\n".join(notes)
+
+
+def _context_display(bs: BotStatus) -> str:
+    tokens = (bs.context or {}).get("tokens")
+    if tokens is None:
+        return "?"
+    if tokens < 1000:
+        return str(tokens)
+    return f"{tokens / 1000:.0f}k" if tokens < 999_500 else f"{tokens / 1_000_000:.1f}M"
+
+
+def _count(tokens: int | None) -> str:
+    return "unknown" if tokens is None else f"{tokens:,}"
+
+
+def _context_detail(context: dict | None) -> str:
+    context = context or {}
+    if context.get("tokens") is None:
+        return f"unknown ({context.get('reason') or 'not read'})"
+    line = f"{context['tokens']:,} tokens at {context['at']} (the newest main-chain call)"
+    after = context.get("compacted_after")
+    if after:
+        line += (f"; compacted after it at {after['at']}, "
+                 f"{_count(after['pre_tokens'])} -> {_count(after['post_tokens'])}")
+    return line
 
 
 def format_table(statuses: list[BotStatus], fleet_name: str,
@@ -648,6 +782,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         f"{'BUSY%':<6}  "
         f"{'IDLE':<8}  "
         f"{'BUSY AGE':<8}  "
+        f"{'CONTEXT':<7}  "
         f"ACTIVITY"
     )
     lines.append(_dim(hdr))
@@ -656,7 +791,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
     for bs in statuses:
         indicator = _health_indicator(bs)
         activity = ("work unresolved" if bs.work_unresolved else
-                    bs.current_task or bs.last_completed or
+                    bs.current_task or _stopped_note(bs) or bs.last_completed or
                     ("work unknown" if bs.work_unavailable else ""))
         # Never pick silently (#2179): the count of the other open assignments
         # is kept clear of the column's truncation.
@@ -683,6 +818,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
             f"{_pad(_busy_pct_display(bs), 6)}  "
             f"{_pad(_idle_since_display(bs, now), 8)}  "
             f"{_pad(_busy_age_display(bs), 8)}  "
+            f"{_pad(_context_display(bs), 7)}  "
             f"{activity_display}"
         )
         lines.append(row)
@@ -721,12 +857,22 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
     return "\n".join(lines) + "\n"
 
 
+def _stopped_note(bs: BotStatus) -> str:
+    """`stopped since <UTC> by <caller>` for a recorded stop, else ""."""
+    if bs.state != "stopped":
+        return ""
+    return f"stopped since {bs.stopped_since or 'unknown'} by {bs.stopped_by or 'unknown'}"
+
+
 def format_bot_detail(bs: BotStatus) -> str:
     """Detailed view for a single bot (claudlobby status --bot <name>)."""
     lines: list[str] = []
     lines.append(_bold(bs.name))
     lines.append("")
     lines.append(f"  State:      {_state_display(bs)}")
+    if bs.state == "stopped":
+        lines.append(f"  Stopped:    {_stopped_note(bs)}"
+                     + (f" ({bs.stop_reason})" if bs.stop_reason else ""))
     lines.append(f"  Service:    {_service_display(bs)} ({bs.service_sub})")
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
     lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}"
@@ -736,6 +882,7 @@ def format_bot_detail(bs: BotStatus) -> str:
     now = datetime.now(timezone.utc)
     lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
     lines.append(f"  Busy age:   {_busy_age_display(bs)}")
+    lines.append(f"  Context:    {_context_detail(bs.context)}")
 
     if bs.current_task:
         of = (f" (1 of {bs.open_assignments} open)"
@@ -780,6 +927,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
                 # The observed BUSY run, separate from assignment state.
                 "busy_age_secs": bs.busy_age_secs,
+                # The newest main-chain usage row (#2206); tokens null with a
+                # reason when the transcript cannot answer, never 0.
+                "context": bs.context,
                 "current_task": bs.current_task,
                 "open_assignments": bs.open_assignments,
                 "last_completed": bs.last_completed,
@@ -787,6 +937,10 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "work_issues": list(bs.work_issues),
                 "work_unresolved": bs.work_unresolved,
                 "work_unavailable": bs.work_unavailable or None,
+                # #2243: null unless state is "stopped"
+                "stopped_since": bs.stopped_since,
+                "stopped_by": bs.stopped_by,
+                "stop_reason": bs.stop_reason,
             }
         )
     payload: dict = {"fleet": fleet_name, "bots": bots}
@@ -798,4 +952,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
             s.switch.key for s in switch_states
             if s.switch.target_workflow and not s.on and not s.unknown
         ]
+        payload["switches_unknown"] = [
+            {"key": s.switch.key, "reason": s.unknown_reason}
+            for s in switch_states if s.unknown
+        ]
+        payload["switches_state"] = "unknown" if payload["switches_unknown"] else "read"
     return json.dumps(payload, indent=2) + "\n"

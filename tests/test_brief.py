@@ -50,9 +50,9 @@ from claudlobby.brief import (
 )
 from claudlobby.config import BotConfig, FleetConfig, ProjectConfig, ScopeConfig
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — selected activation and short paths
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — selected activation and short paths
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
-from tests.test_task_write_cli import active  # noqa: F401 — real selected activation fixture
+from tests.test_task_write_cli import _call, active  # noqa: F401 — real selected activation fixture
 from claudlobby.paths import Paths
 
 from tests.conftest import (
@@ -1089,13 +1089,10 @@ def _write_fleet_yaml(fleet_dir: Path, name: str, bots: list[str], *, manager: s
     )
 
 
-def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, monkeypatch, capsys):  # noqa: F811
-    """One selected-activation flow: a later report stays unread, and replay
-    cannot advance the position or write a second ACK event."""
-    from uuid import uuid4
-
+def _report_viewer(active, monkeypatch, capsys):
+    """The selected activation's manager as the generated report viewer, reading
+    through the brief's real shared reader. Returns a CLI caller."""
     from claudlobby import brief
-    from claudlobby.__main__ import main
     from claudlobby.paths import load_lib_module
 
     root, release = active
@@ -1106,15 +1103,18 @@ def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, mon
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_ROOT": str(root),
                        "FLEET_NAME": "example", "BOT_ID": "manager",
                        "BOT_DIR": str(root / "runtime/bots/manager"),
-                       "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+                       "CLAUDLOBBY_INSTALLATION": str(release.directory)}.items():
         monkeypatch.setenv(key, value)
+    return lambda *argv, expected=0: _call(capsys, root, *argv, expected=expected)
 
-    def call(*argv, expected=0):
-        assert main(["--root", str(root), "--json", *argv]) == expected
-        result = json.loads(capsys.readouterr().out)
-        assert result["ok"] is (expected == 0)
-        return result
 
+def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, monkeypatch, capsys):  # noqa: F811
+    """One selected-activation flow: a later report stays unread, and replay
+    cannot advance the position or write a second ACK event."""
+    from uuid import uuid4
+
+    root, _ = active
+    call = _report_viewer(active, monkeypatch, capsys)
     _land_report(Paths(root=root, fleet_dir=None, package=source_package()),
                  _report("worker", "2026-08-08T10:00:00Z"), fleet="example")
     shown = call("fleet", "reports", "list", "--unacknowledged", "--limit", "1")
@@ -1158,6 +1158,59 @@ def test_selected_report_ack_consumes_only_served_prefix_and_replays(active, mon
                       "--request-id", str(uuid4()), expected=6)
     assert failed["error"]["code"] == "unavailable"
     assert len(_acked_events(Paths(root=root, fleet_dir=None, package=source_package()))) == 1
+
+
+def test_an_unacknowledged_read_builds_only_reports_past_the_read_position(active, monkeypatch, capsys):  # noqa: F811
+    """The read starts at the viewer's read position, as the ACK does: a report
+    at or below it is never built, so a read costs the reports the viewer has
+    not read, not every report the fleet has recorded. Its pages, its cursors
+    and the cursor's prefix check all read the reports past that position."""
+    from uuid import uuid4
+
+    from claudlobby.paths import load_lib_module
+
+    root, _ = active
+    call = _report_viewer(active, monkeypatch, capsys)
+    # Count every report the shared reader builds, through the readers module
+    # every session shares: each report built costs its decode and lookups.
+    readers = load_lib_module(source_package().native, "dispatch-overdue.py")._plane_readers()
+    report_rows, built = readers.report_rows, []
+
+    def counted(*args, **kwargs):
+        rows = report_rows(*args, **kwargs)
+        built.extend(row["_seq"] for row in rows)
+        return rows
+
+    monkeypatch.setattr(readers, "report_rows", counted)
+
+    def unread(*flags):
+        built.clear()
+        return call("fleet", "reports", "list", "--unacknowledged", *flags)["data"]
+
+    paths = Paths(root=root, fleet_dir=None, package=source_package())
+    for hour in (10, 11):
+        _land_report(paths, _report("worker", f"2026-08-08T{hour}:00:00Z"), fleet="example")
+    never_acked = unread()
+    assert len(never_acked["items"]) == len(built) == 2    # no read position: every report is unread
+    position = never_acked["items"][-1]["ingest_seq"]
+    assert call("fleet", "reports", "ack", "--through", never_acked["ack_cursor"],
+                "--request-id", str(uuid4()))["data"]["count"] == 2
+    for hour in (12, 13):
+        _land_report(paths, _report("worker", f"2026-08-08T{hour}:00:00Z"), fleet="example")
+
+    first = unread("--limit", "1")
+    below = [seq for seq in built if seq <= position]
+    assert not below, (f"the unacknowledged read built {len(built)} reports, {len(below)} of them"
+                       f" at or below the read position {position}")
+    second = unread("--limit", "1", "--cursor", first["next_cursor"])
+    assert built and min(built) > position                  # the prefix check reads the same bound
+    assert [item["occurred_at"] for item in first["items"] + second["items"]] == [
+        "2026-08-08T12:00:00Z", "2026-08-08T13:00:00Z"]
+    assert second["next_cursor"] is None
+    assert call("fleet", "reports", "ack", "--through", second["ack_cursor"],
+                "--request-id", str(uuid4()))["data"]["count"] == 2
+    caught_up = unread()
+    assert caught_up["items"] == [] and caught_up["ack_cursor"] is None and built == []
 
 
 # --- the omit suppresses true positives too, and must say how many ------------
@@ -1335,12 +1388,13 @@ class TestBootCLI:
         assert main(["--root", str(root), "--json", "brief"]) == 0
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["schema_version"] == 1 and envelope["command"] == "brief"
-        assert envelope["request_id"] is None and envelope["release_id"] == release.release_id
+        assert envelope["request_id"] is None and envelope["release_id"] == None
         assert envelope["data"]["viewer_selection"] == "manager_default"
         assert envelope["data"]["brief"]["schema"] == 2
         assert envelope["data"]["brief"]["bot"] == "manager"
         assert envelope["data"]["brief"]["work"]["items"] == []
         assert "usage" not in envelope["data"]["brief"]
+        assert "context" not in envelope["data"]["brief"]  # an ordinary brief reads no transcript
 
         transcript_dir = (Path.home() / ".claude/projects" /
                           transcript_slug(root / "runtime/bots/manager"))
@@ -1353,14 +1407,19 @@ class TestBootCLI:
                 "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}},
         }) + "\n")
         assert main(["--root", str(root), "--json", "brief", "--usage-since", "24h"]) == 0
-        with_usage = json.loads(capsys.readouterr().out)["data"]["brief"]["usage"]
+        read = json.loads(capsys.readouterr().out)["data"]["brief"]
+        with_usage = read["usage"]
         assert [with_usage["usage"][key] for key in (
             "input_tokens", "output_tokens", "cache_creation_input_tokens",
             "cache_read_input_tokens")] == [11, 7, 3, 5]
         assert with_usage["coverage"]["status"] == "observed"
         assert with_usage["quota"]["status"] == "unavailable"
+        # #2206: the same reader gives the viewer's live context beside it.
+        assert (read["context"]["tokens"], read["context"]["reason"]) == (19, None)  # 11 + 3 + 5
         assert main(["--root", str(root), "brief", "--usage-since", "24h"]) == 0
-        assert "USAGE — Claude transcript token counts" in capsys.readouterr().out
+        text = capsys.readouterr().out
+        assert "USAGE — Claude transcript token counts" in text
+        assert "context now: 19 tokens" in text
         assert main(["--root", str(root), "--json", "brief", "--usage-since", "8d"]) == 2
         assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
         assert main(["--root", str(root), "brief", "--boot", "--usage-since", "24h"]) == 2
@@ -1395,17 +1454,17 @@ class TestBootCLI:
         assert after == before
 
         # #1973: refusals name a remedy, and only the selection race is retryable.
-        from claudlobby import activation_state
-        real_read = activation_state.read_selection
+        from claudlobby import active_config
+        real_stamp = active_config.runtime_read_stamp
         reads = []
 
-        def racing(path):
+        def racing(path, **kwargs):
             reads.append(path)
-            value = real_read(path)
-            return value if len(reads) == 1 else {**value, "release_id": "r-" + "e" * 64}
+            value = real_stamp(path, **kwargs)
+            return value if len(reads) == 1 else replace(value, config_fingerprint="e" * 64)
 
         with monkeypatch.context() as patch:
-            patch.setattr(activation_state, "read_selection", racing)
+            patch.setattr(active_config, "runtime_read_stamp", racing)
             assert main(["--root", str(root), "--json", "brief"]) == 4
         raced = json.loads(capsys.readouterr().out)["error"]
         assert raced["retryable"] is True and raced["hint"] == "retry the same read"
@@ -1424,7 +1483,7 @@ class TestBootCLI:
         assert main(["--root", str(root), "--json", "brief"]) == 4
         mismatched = json.loads(capsys.readouterr().out)
         assert mismatched["error"]["code"] == "conflict"
-        assert mismatched["data"] == {} and mismatched["release_id"] == release.release_id
+        assert mismatched["data"] == {} and mismatched["release_id"] == None
 
 
 class TestUnlistableBotsDir:
@@ -1585,3 +1644,74 @@ def test_unresolved_history_alone_prevents_no_work_claim(paths: Paths):
     assert brief["work"]["issues"]
     boot = format_boot_brief(brief, boot_provenance(paths, NOW))
     assert "unresolved history" in boot and "no open tasks for this bot" not in boot
+
+
+def test_startup_wait_bounds_and_boot_rejection_precede_observation(monkeypatch, capsys):
+    from claudlobby.__main__ import main
+    from claudlobby import operation_context
+
+    monkeypatch.setattr(operation_context, "resolve_operation_scope",
+                        lambda **kw: pytest.fail("invalid wait observed runtime"))
+    for args in (["--startup-wait", "0"], ["--startup-wait", "301"],
+                 ["--startup-wait", "-1"], ["--boot", "--startup-wait", "120"]):
+        assert main(["--json", "brief", *args]) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result["error"]["code"] == "invalid_argument"
+    for value in ("nan", "1.5"):
+        with pytest.raises(SystemExit) as rejected:
+            main(["--json", "brief", "--startup-wait", value])
+        assert rejected.value.code == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "invalid_argument"
+
+@pytest.mark.parametrize("change_during_read", [False, True])
+def test_git_brief_uses_shared_current_stamp(active, monkeypatch, capsys, change_during_read):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from claudlobby import active_config, brief, context, env_tiers
+    from claudlobby.paths import load_lib_module
+    from tests.test_task_read_cli import _use_git_current
+
+    root, _ = active
+    root, package, snapshot = _use_git_current(
+        (root, SimpleNamespace(package=context.get_resources())), monkeypatch)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(
+                            source_package().native, "dispatch-overdue.py"))
+    monkeypatch.setattr(env_tiers, "resolve", lambda *args, **kwargs: {})
+    original = brief.build_brief
+
+    def build(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if change_during_read:
+            changed = deepcopy(snapshot)
+            changed["fleets"]["example"]["fleet"] += "\n# approved change\n"
+            changed["fingerprint"] = active_config._fingerprint(changed)
+            active_config.publish_current_config(changed, installation=package.installation,
+                                                 expected_previous=snapshot["fingerprint"])
+        return result
+
+    monkeypatch.setattr(brief, "build_brief", build)
+    result = _call(capsys, root, "brief", "--startup-wait", "120",
+                   expected=4 if change_during_read else 0)
+    assert result["release_id"] is None
+    if change_during_read:
+        assert result["error"]["retryable"] is True
+    else:
+        assert result["data"]["source_revision"] == snapshot["revision"]
+        assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]
+        assert result["data"]["brief"]["reports"]["cursor"] is None
+
+
+@pytest.mark.parametrize("damage", ["missing_config", "origin"])
+def test_git_startup_brief_refuses_uncommitted_or_wrong_origin_before_queries(active, monkeypatch, capsys, damage):
+    from claudlobby import active_config, brief
+    root, installation = active
+    if damage == "missing_config":
+        active_config._snapshot_path(root).unlink()
+    else:
+        for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example", "BOT_ID": "worker",
+                           "BOT_DIR": str(root / "wrong-bot")}.items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(brief, "build_brief", lambda *a, **kw: pytest.fail("unadmitted startup queried work"))
+    result = _call(capsys, root, "brief", "--startup-wait", "120", expected=4)
+    assert result["data"] == {} and result["error"]["retryable"] is False

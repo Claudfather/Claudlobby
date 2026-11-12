@@ -9,7 +9,7 @@ live fleet installation merely because the emission sentinels pass.
 For editable tests, prepare wheel resources in that disposable checkout using
 `tests/prepare_resources.py --disposable-checkout "$PWD"`. Pytest refuses
 missing or stale prepared resource copies; rerun preparation after changing
-`claudlobby/_runtime_scripts/`, `library/`, `templates/`, `voices/`, or seed inputs.
+`claudlobby/_runtime_scripts/`, `library/`, `templates/`, or seed inputs.
 
 The shared session and per-test fixtures provide private HOME, XDG config/cache/
 state/data, and temporary directories. Child builders carry those directories unless
@@ -79,7 +79,7 @@ dispatch-receipt and daemon cooldown tests):
   probes use private roots and recorder transports. Negative CLI outcomes use
   test-owned wrappers or explicit failing executables after scratch validation.
 - Standalone shell suites own their boundary: `test_plane_emit.sh`, receipt,
-  error-trap, recipient, pane-send and transcript-digest suites create private
+  error-trap, recipient, pane-send and session-export suites create private
   roots and socket paths and explicitly arm their recorder only there. The shim
   suite preserves its disabled control and every ladder assertion. Host-health
   and orphan-browser incidental emissions remain silent.

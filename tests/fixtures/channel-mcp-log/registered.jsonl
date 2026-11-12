@@ -1,0 +1,5 @@
+{"debug":"Starting connection with timeout of 180000ms","timestamp":"2026-10-21T16:05:25.935Z","sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/home/example/bots/b1"}
+{"error":"Server stderr: telegram channel: polling as @example_bot\n","timestamp":"2026-10-21T16:05:29.056Z","sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/home/example/bots/b1"}
+{"debug":"Successfully connected (transport: stdio) in 3981ms","timestamp":"2026-10-21T16:05:29.057Z","sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/home/example/bots/b1"}
+{"debug":"Connection established with capabilities: {\"hasTools\":true,\"hasPrompts\":false,\"hasResources\":false,\"hasResourceSubscribe\":false,\"serverVersion\":{\"name\":\"telegram\",\"version\":\"1.0.0\"},\"protocolEra\":\"legacy\",\"negotiatedProtocolVersion\":\"2025-11-25\"}","timestamp":"2026-10-21T16:05:29.066Z","sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/home/example/bots/b1"}
+{"debug":"Channel notifications registered","timestamp":"2026-10-21T16:05:29.352Z","sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/home/example/bots/b1"}

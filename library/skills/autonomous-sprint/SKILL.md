@@ -1,6 +1,6 @@
 ---
 name: autonomous-sprint
-description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs a product-vision pass if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
+description: "Use when asked to run an autonomous, mission-driven development cycle on a repo. Reads PROJECT_MISSION.md, evaluates backlog, runs a product-vision pass if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
 argument-hint: "<repo> [--max-issues N] [--dry-run] [--focus <area>]"
 tool_grants:
   - "Bash(python3 *issue-intake.py* list *)"
@@ -146,7 +146,9 @@ For each issue, sequentially:
 4. **Between issues**: check the engineer's reported state — NOT a context
    percentage, which no bot can measure (`context-management`)
    - If it reported `context-degraded`, or shows ~3+ completed reports in a
-     verified 24-hour window, restart the bot before the next issue. Read
+     verified 24-hour window, give the bot a fresh session before the next
+     issue: `claudlobby --json bot restart BOT --fresh` once its handoff reads
+     `saved` (a plain restart continues the same conversation). Read
      `claudlobby --fleet "$FLEET_NAME" --json fleet reports list --bot BOT
      --since "$CUTOFF"`, deriving `CUTOFF` as an offset-bearing RFC3339
      instant 24 hours before now. Inspect `ok`, follow every `next_cursor`,
@@ -200,7 +202,7 @@ Reviewer is whichever reviewer bot is idle and least-context-saturated.
 - **Never merge to shared repos** (configure your fleet's exclusion list) — create PRs only
 - **Always verify CI green** before any merge
 - **Max 3 review cycles** per issue — flag the user after that
-- **Respect context limits** — restart bots proactively
+- **Respect context limits** — compact bots, or give them fresh sessions (`bot restart BOT --fresh`), proactively; a plain restart keeps the same context
 - **One plan post, one summary** — the Step 6 plan and the Step 8 summary reach Telegram; per-merge and per-dispatch updates go to the plane
 
 ## Scheduling

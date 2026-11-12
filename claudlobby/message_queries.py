@@ -24,8 +24,11 @@ from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.migrations import DowngradeError
 from .plane.queries import DELIVERY_STATUS_SQL, RECEIPT_HISTORY_SQL
+from .plane.queue_names import may_hold_transmission
 from .plane.queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
 from .plane.schema_state import PendingMigrationError, require_current_schema
+from .reference_hints import (PREFIX_HINT_LIMIT, PREFIX_MIN_HEX, PREFIX_SCAN_LIMIT, PrefixCandidate,
+                              PrefixHint, id_shape)
 from .source_state import SOURCE_ABSENT, SOURCE_OK, SOURCE_UNREADABLE
 
 if TYPE_CHECKING:
@@ -37,12 +40,21 @@ DIRECT_REPLY_SQL = (
     " AND sender_uid=? AND recipient_uid=? AND host_uid=?"
     " ORDER BY ingest_seq, msg_id LIMIT 1"
 )
+# The messages a prefix names (#2380): a seek on the msg_id key that reads only
+# the rows starting with the prefix. Hex digits sort below 'g', so the prefix
+# followed by 'g' closes the range.
+MESSAGE_PREFIX_SQL = ("SELECT msg_id FROM communications WHERE msg_id >= ? AND msg_id < ?"
+                      " ORDER BY msg_id LIMIT ?")
 
 
 class MessageQueryError(ValueError):
     code = "invalid_argument"
     exit_code = 2
     retryable = False
+
+    def __init__(self, message: str = "", *, hint: PrefixHint | None = None):
+        super().__init__(message)
+        self.hint = hint
 
 
 class MessageNotFoundError(MessageQueryError):
@@ -54,6 +66,12 @@ class MessageUnavailableError(MessageQueryError):
     code = "unavailable"
     exit_code = 6
     retryable = True
+
+
+class MessageAmbiguousError(MessageQueryError):
+    """A prefix names several messages; none is chosen (#2380)."""
+    code = "ambiguous_reference"
+    exit_code = 4
 
 
 @dataclass(frozen=True)
@@ -185,8 +203,9 @@ def _written_before(path: Path, instant: float) -> bool:
 
 def pending_transmission_proof(root: Path, message_id: str, *,
                                probe_timeout: float = 0.5) -> Literal["pending", "absent", "unavailable"]:
-    """`queued_transmission_proof` over every queued entry, for a caller that
-    has no recorded instant for the message, such as the retry gate."""
+    """`queued_transmission_proof` over every queued entry whose name leaves
+    room for the proof, for a caller that has no recorded instant for the
+    message, such as the retry gate."""
     return queued_transmission_proof(root, message_id, probe_timeout=probe_timeout).state
 
 
@@ -198,8 +217,16 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     claims, replays or deletes a file. Scan these before the committed read,
     because ingest moves proof from queue to database, never the reverse. An
     unreadable, non-regular, torn or over-bound queue entry is unavailable,
-    never absent. A root using the staged handshake also needs a live ingest
+    never absent, and so is one nested past what the match's walk reaches
+    (#2446). A root using the staged handshake also needs a live ingest
     daemon: a dead one may hold unstaged proof, so absence is then unproven.
+
+    An entry whose name says it holds no transmission of this message (its
+    writer tagged it for none, or for another message: queue_names) cannot
+    hold the proof either, and is neither read nor counted. Under load nearly
+    every hook emit stages, and a queue past the bound with other bots' tool
+    calls held every uncommitted receipt "unavailable" (#2430). An untagged
+    name says nothing, and its entry is read.
 
     `written_after` is the message's recorded instant (epoch seconds). Its
     proof is emitted only after the message exists, so an entry last written
@@ -214,13 +241,13 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
         return QueuedProof("unavailable", "a Plane queue cannot be listed")
     files = ([entry for entry in entries if staged_payload(entry)] if probe.state == SOURCE_OK else [])
     files += spool.pending + spool.inflight
-    scope = "queued Plane entries"
+    files = [path for path in files if may_hold_transmission(path.name, message_id)]
+    scope = "queued Plane entries that may hold this message's proof"
     if written_after is not None:
         if len(files) > _LISTED_FILES:
             return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                               f" {_LISTED_FILES} whose write times a receipt check reads")
         files = [path for path in files if not _written_before(path, written_after)]
-        scope = "queued Plane entries that may hold this message's proof"
     if len(files) > _PENDING_FILES:
         return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                           f" {_PENDING_FILES} a receipt check reads")
@@ -235,11 +262,16 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
                                               f" {_PENDING_BYTES} bytes a receipt check reads")
         try:
             value = json.loads(data)
+            found = needle in data and _queued_proof(value, message_id)
         except ValueError:
             # A torn entry cannot establish irrelevance.
             return QueuedProof("unavailable", f"queued Plane entry {path.name} is not a whole batch"
                                               " (a write in progress, or one cut short)")
-        if needle in data and _queued_proof(value, message_id):
+        except RecursionError:
+            # Nor can one nested past the walk's reach.
+            return QueuedProof("unavailable", f"queued Plane entry {path.name} is nested deeper"
+                                              " than a receipt check reads")
+        if found:
             return QueuedProof("pending")
     if probe.state != SOURCE_ABSENT:
         from .plane.daemon import probe_daemon_state, socket_path
@@ -323,6 +355,54 @@ def _show(conn, ctx, message_id):
                    row["message_class"], row["reply_to_msg_id"], row["work_item_id"],
                    row["assignment_id"], body, row["body_bytes"], row["body_sha256"],
                    row["privacy"], bool(row["truncated"]), content)
+
+
+def _resolve(conn, ctx, reference):
+    """The one message this caller may read that starts with `reference` (#2380).
+
+    `_show`'s participation and operator scope decide what the caller may read,
+    so a prefix never reveals a message its full ID would not. The read is
+    bounded by the range seek and PREFIX_SCAN_LIMIT.
+    """
+    rows = conn.execute(MESSAGE_PREFIX_SQL, (reference, reference + "g", PREFIX_SCAN_LIMIT + 1)).fetchall()
+    if len(rows) > PREFIX_SCAN_LIMIT:
+        raise MessageAmbiguousError(f"more than {PREFIX_SCAN_LIMIT} recorded messages start with "
+                                    f"{reference}; give more of the ID")
+    readable = []
+    for row in rows:
+        try:
+            _show(conn, ctx, row[0])
+        except MessageNotFoundError:
+            continue
+        readable.append(row[0])
+    if len(readable) == 1:
+        return readable[0]
+    hint = PrefixHint(reference, tuple(PrefixCandidate(message_id, ("message", "show", message_id))
+                                       for message_id in readable[:PREFIX_HINT_LIMIT]), len(readable), None)
+    if readable:
+        raise MessageAmbiguousError(f"{len(readable)} messages start with {reference}; "
+                                    "select a canonical message ID", hint=hint)
+    raise MessageNotFoundError(f"no message this caller may read starts with {reference}", hint=hint)
+
+
+def resolve_message_reference(ctx: TaskOperationContext, reference: str) -> str:
+    """The full message ID a read door's reference names (#2380).
+
+    A canonical ID comes back unchanged and unread. A prefix (msg_ and 8 to 31
+    hex digits) comes back as the one message this caller may read that starts
+    with it. The read doors call this first; `show_message`, `receipt` and
+    `wait_for_reply` take canonical IDs only, as a reply's parent must.
+    """
+    shape = id_shape(reference, "msg_")
+    if shape == "canonical":
+        return reference
+    if shape == "short":
+        raise MessageQueryError(f"a message ID prefix needs at least {PREFIX_MIN_HEX} hex digits after msg_")
+    if shape is None:
+        raise MessageQueryError("message ID must be canonical (msg_<32 lowercase hex digits>) or a "
+                                f"prefix of one (msg_ and at least {PREFIX_MIN_HEX} of its hex digits)")
+    with _snapshot(ctx) as conn:
+        return _resolve(conn, ctx, reference)
 
 
 def show_message(ctx: TaskOperationContext, message_id: str) -> Message:

@@ -15,6 +15,18 @@ load_bot_conf "$BOT_DIR"
 native_admission start-bot
 install_error_trap "$BOT_DIR"
 
+# Verify before consent writes, boot locks or tmux work. Keep the required
+# plugin list intact; this policy never installs or refreshes account plugins.
+_sb_plugin_startup_policy="${FLEET_PLUGIN_STARTUP_POLICY:-manage}"
+case "$_sb_plugin_startup_policy" in
+    manage) ;;
+    verify-existing)
+        unset CLAUDE_CODE_SYNC_PLUGIN_INSTALL
+        plugin_verify_required "$_NATIVE_ADMISSION_PYTHON" "${FLEET_PLUGINS_REQUIRED:-}" "$BOT_DIR" || exit 3
+        ;;
+    *) printf 'start-bot: unknown plugin startup policy; refusing launch\n' >&2; exit 3 ;;
+esac
+
 # --- Boot-mass mitigation -----------------------------------------------------
 # When the whole fleet is mass-restarted (e.g. reconcile-fleet --enroll, or
 # systemd restarts triggered by keepalive), all bots race to spawn their channel
@@ -126,7 +138,6 @@ if command -v jq >/dev/null 2>&1; then
     if [ "$_consent_ok" -eq 0 ]; then
         # Serialize with other bots — mass restart can race on this file.
         _do_consent_update() {
-            mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
             _tmp=$(safe_mktemp)
             if [ -f "$CLAUDE_SETTINGS" ] && jq -e '.' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
                 jq '.skipAutoPermissionPrompt = true | .skipDangerousModePermissionPrompt = true' \
@@ -136,6 +147,8 @@ if command -v jq >/dev/null 2>&1; then
             fi
             echo "$(ts_iso) CONSENT pre-accepted permission prompts in $CLAUDE_SETTINGS" >> "$BOT_DIR/logs/startup.log" 2>/dev/null || true
         }
+        # with_lock opens the lock file before calling the updater.
+        mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
         with_lock "${CLAUDE_SETTINGS}.lock" _do_consent_update
     fi
 fi
@@ -175,6 +188,13 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
     echo "start-bot.sh: cannot resolve tmux socket for $BOT_DIR (check BOT_SERVICE in bot.conf)" >&2
     exit 1
 }
+
+# Resolve only the retained native identity, never the account's latest session.
+_native_launch=$("$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" _native-session launch "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_TMPDIR") || exit 3
+IFS=$'\t' read -r _native_mode _native_session_id <<<"$_native_launch"
+case "$_native_mode" in fresh) _native_flag=--session-id ;; resume) _native_flag=--resume ;; *) exit 3 ;; esac
+case "$_native_session_id" in ''|*[!a-f0-9-]*) exit 3 ;; esac
+CLAUDE_FLAGS="${CLAUDE_FLAGS:-} $_native_flag $_native_session_id --system-prompt-snapshot off"
 
 # Kill any prior session — expected to fail on first boot or after clean shutdown
 bot_tmux "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
@@ -274,7 +294,19 @@ CLAUDE="$(fleet_claude_bin)"
 # claude sets all three for its children, so unsetting the leaked ones costs
 # nothing. Removing the cause beats forcing persistence back on, which would
 # mask it.
-CLAUDE_CMD=". '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
+# The host's desktop is cut first, before the env file (#2332). On a host with
+# a desktop, the user manager hands every unit the desktop's DISPLAY and
+# WAYLAND_DISPLAY, and a tmux server keeps whatever started it, so a login
+# CLI's browser, an Artifact preview or `claudlobby plane open` put a window on
+# the host's screen that outlived the command. DISPLAY is unset: X clients need
+# it. WAYLAND_DISPLAY is set EMPTY, never unset: unset, libwayland falls back to
+# $XDG_RUNTIME_DIR/wayland-0 and a Wayland client still reaches the desktop
+# (measured), while an empty value names no socket and reads as no display to
+# xdg-open and to Claude Code. BROWSER=true makes xdg-open and every CLI that
+# honours it run true instead of a browser; without it, xdg-open with no display
+# falls back to a console browser. Before the env file, so a bot that declares
+# DISPLAY, WAYLAND_DISPLAY or BROWSER in its own fleet.yaml env still gets them.
+CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FILE'; if [ \"\${FLEET_PLUGIN_STARTUP_POLICY:-manage}\" = verify-existing ]; then unset CLAUDE_CODE_SYNC_PLUGIN_INSTALL; fi; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
@@ -285,7 +317,7 @@ CLAUDE_CMD=". '$BOT_ENV_FILE'; unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE
 # Failures never block bot startup (a network blip must not down the
 # fleet) — but marketplace registration is verified against the registry
 # and surfaced as a fleet event when it did not land, never swallowed.
-if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
+if [ "$_sb_plugin_startup_policy" = manage ] && command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
     LOG="$BOT_DIR/logs/startup.log"
     setup_log_dir "$LOG"
 
@@ -338,6 +370,13 @@ bot_session_spawn "$TMUX_SOCKET" "$TMUX_SESSION" "$CLAUDE_CMD"
 # — including a fleet-wide restart — doesn't trip a spurious bridge_down alert.
 mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
+# A new session's pane is not the last one's. keepalive's markers about the
+# pane, data/.held (its box holds text) and data/.unknown (keepalive cannot read
+# it), carry the epoch of the run they first saw, and a restart ends that run,
+# so they go here; fleet-pulse would otherwise read a fresh one from before the
+# restart as hours old (#997). data/.limit stays: a usage limit belongs to the
+# account, and it outlives a restart.
+rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.unknown" 2>/dev/null || true
 
 # Wait for initialization with observability. The readiness ceiling is
 # RC_READY_TIMEOUT_S: composed from host.boot into bot.conf since #1573
@@ -486,6 +525,10 @@ case "$_wait_rc" in
         ;;
 esac
 
+# A fresh native session first resumes from the saved handoff, ahead of the
+# authored startup below; exact continuation sends nothing here (#2696).
+fresh_session_resume "$_native_mode" "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
 # an input box, and treating it as a proxy for that is what #860 was. Measured:
@@ -505,74 +548,12 @@ esac
 # this bot being unreachable. A one-shot assignment prefix is scoped to the single
 # command and does not persist afterwards.
 
-# Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
-# intentional, crash, or weekly bounce — injects a session-resume command as a
-# first keystroke so the bot picks up its last handoff. Sent BARE — no 'set +H;'
-# prefix, unlike the STARTUP_PROMPT prose send below (see pane_send_verified for
-# why a slash command must reach the pane untouched). Sent first so it settles
-# before STARTUP_PROMPT and the two never collide.
-#
-# TWO independent gates, and they fail in opposite directions on purpose:
-#
-#   AGE       resume only from a checkpoint fresher than RESUME_MAX_AGE_S; a
-#             stale one (a bot that crashed days ago) clean-starts rather than
-#             replaying dead state.
-#   CAPABILITY (#1163) inject only when the configured command can actually
-#             resolve. This used to be a hardcoded plugin-qualified command sent
-#             unconditionally, so a fleet running `plugins.include_defaults:
-#             false` fired an unresolvable keystroke into EVERY pane on EVERY
-#             boot — including bots that never equipped `restart`. There is no
-#             agent at that instant to exercise judgement; the keystroke either
-#             resolves or it does not.
-#
-# A skipped resume is LOUD — a distinct log line naming the reason, plus a fleet
-# event, because the whole defect class here is a degradation nobody sees.
-_SESSION_MD="$BOT_DIR/.claude/session.md"
-_RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
-# `-` not `:-` deliberately: an explicitly EMPTY SESSION_RESUME_COMMAND is a
-# fleet saying "no resume injection", and must not fall back to the default.
-_RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
-if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    # Bash 3.2 can fire ERR inside a command substitution even when the
-    # assignment is an if condition. Capture the status verdict with its
-    # expected negative guarded inside, then decide by the explicit values.
-    _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR" || true)"
-    case "$_resume_status" in
-    available|unverifiable)
-        echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
-        # #1265: stamp the send instant. Written before the call and again
-        # after, so a send that never returns leaves state=sending on disk.
-        _inject_t0="$(inject_stamp "$BOT_DIR" resume sending)"
-        _send_rc=0
-        PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD" || _send_rc=$?
-        inject_stamp "$BOT_DIR" resume "done" "$_send_rc" "$_inject_t0" >/dev/null
-        boot_send_settled RESUME "$_send_rc" "$LOG"
-        ;;
-    *)
-        echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
-        emit_fleet_event "resume_skipped" "startup" \
-            "{\"reason\":\"$_resume_status\",\"handoff\":\"$_SESSION_MD\"}" || true
-        ;;
-    esac
-elif [ -f "$_SESSION_MD" ]; then
-    echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
-fi
-
-if [ -n "${STARTUP_PROMPT:-}" ]; then
-    # Prose, so it keeps the 'set +H; ' history-expansion guard the resume send
-    # above must omit. The TUI's input buffer can race on cold start, leaving the
-    # prompt typed but unsubmitted; pane_send_verified owns the catch.
-    # #1265: the injection instant, stamped at the actual send. The service
-    # rung is not a proxy for it — measured on the 2026-09-07 boot every rung
-    # fired to the second while the session appeared 36-168s later, so all of
-    # the variance lives here and nothing recorded it.
-    _inject_t0="$(inject_stamp "$BOT_DIR" startup sending)"
-    _send_rc=0
-    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" || _send_rc=$?
-    inject_stamp "$BOT_DIR" startup "done" "$_send_rc" "$_inject_t0" >/dev/null
-    boot_send_settled STARTUP "$_send_rc" "$LOG"
+# Native continuation already restores the exact provider conversation. Only
+# a fresh UUID receives authored startup; a resume never adds a model turn.
+if [ "$_native_mode" = fresh ]; then
+    startup_inject "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+else
+    printf '%s NATIVE RESUME — exact session, current composition; no startup/model restore injection\n' "$(ts_iso)" >> "$LOG"
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
@@ -588,12 +569,20 @@ fi
 # keepalive's heal ladder. Both are intentional. Done AFTER the bot is dispatch-
 # ready (resumed + prompted + marked idle) so it never delays the bridge-
 # INDEPENDENT tmux-dispatch path. start-bot does NOT bounce — keepalive owns the
-# heal ladder (Fork F1=b). No second wait-knob here: a slow host raises poll 1's
-# RC_READY_TIMEOUT_S (which owns the wait); this verify is a single check (0) by
-# construction, never a redundant re-wait past an already-declared timeout.
-_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$_session_pid")"
+# heal ladder (Fork F1=b). No second wait for the poller here: a slow host raises
+# poll 1's RC_READY_TIMEOUT_S (which owns that wait), and this verify checks it
+# once (0). The one wait it can add is for Claude Code's channel decision
+# (CHANNEL_DECISION_WAIT_S, #2423), which follows the server's connect by a
+# fraction of a second and is normally on disk long before this runs.
+_bridge_out="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0 "$_session_pid")"
+# The channel verdicts carry their detail after a tab (#2423).
+IFS=$'\t' read -r _bridge_verdict _bridge_detail <<<"$_bridge_out"
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
+    refused)   # bridge_bringup_verify has alerted
+        echo "$(ts_iso) BRIDGE_REFUSED — Telegram poller up, but Claude Code refused the channel at connect (\"$_bridge_detail\"); inbound is dark, and a restart on the same login comes up refused again" >> "$LOG" ;;
+    unknown:channel)
+        echo "$(ts_iso) BRIDGE_UNVERIFIED — Telegram poller up, but the channel decision could not be read ($_bridge_detail); not ready: Claude Code records it only in the plugin MCP log, and an unread decision is never taken as registered" >> "$LOG" ;;
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
     missing:*)
         # "keepalive owns heal" is right for every cause of a missing bridge but

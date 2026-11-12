@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Admit fleet work, assign a declared worker, and deliver the recorded assignment through the public CLI."
+description: "Use when you manage a fleet and work should go to one of your workers, whether a human asked for it or you chose it. Admits the fleet work, assigns a declared worker, and delivers the recorded assignment through the public CLI."
 argument-hint: "<bot> <task description> [--repo <repo>]"
 ---
 
@@ -13,7 +13,9 @@ unavailable evidence does not mean idle.
 
 1. Admit the work with `claudlobby --json task admit --title "TASK" --request-id UUID`.
    Retain the returned `data.task_id`. Put longer context in a UTF-8 file and
-   supply `--body-file FILE`; add `--repo OWNER/REPO` when appropriate.
+   supply `--body-file FILE`; add `--repo OWNER/REPO` when appropriate. A
+   related follow-up joins its task's workstream: add `--workstream ID`, with
+   that task's `data.workstream_id`, before that task closes.
 2. Assign it with `claudlobby --json task assign TASK_ID --bot BOT --request-id UUID`.
    Retain `data.assignment_id`. This records ownership without sending a prompt.
 3. Write the bounded worker instructions to a UTF-8 file, then run

@@ -20,8 +20,8 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-from . import dotenv, tool_resolve
-from .claudron_compat import CLAUDRON_INTEGRATION_URL
+from . import claudron_compat, dotenv, tool_resolve
+from .claudron_compat import CLAUDRON_INTEGRATION_URL, MigrationReader
 from .config import (
     _RETIRED_BOT_KEYS,
     _RETIRED_OBSERVABILITY_KEYS,
@@ -31,10 +31,13 @@ from .config import (
     FleetConfig,
     is_pos_int,
     load_projects,
+    manager_alert_target,
+    telegram_handle,
 )
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_SKILL_RENAMES,
     DEPRECATED_ENV_TIERS,
     ENV_TIERS,
     EXPERTISE_CORE_TOOLS,
@@ -154,11 +157,14 @@ RETIRED_HOOK_PREFIX = "$CLAUDLOBBY_ROOT/lib/"
 #: is a KIND of finding, grouped by remedy; the value is the one line a reader
 #: gets when a category appears that a baseline did not have.
 WARNING_CATEGORIES: dict[str, str] = {
+    "claudna-env": "a clauDNA composed knob is assigned in .env or bot.env; move it to claudna:",
     # a declared reference that resolves to nothing
-    "voice-missing": "a declared voice is not in voices/",
+    "voice-missing": "a declared voice is not in any library/voices/",
+    "voice-legacy-path": "a voice resolves from the overlay's old voices/; move it to library/voices/ before #2202 stops reading there",
     "skill-missing": "a declared skill or skill folder is not in any library/skills/",
     "integration-missing": "a declared integration is not in any library/integrations/",
     "mcp-missing": "a declared MCP fragment is not in any library/mcp/",
+    "mcp-deprecated": "a declared MCP fragment is marked deprecated; the warning names what replaces it",
     "guardrail-missing": "a declared guardrail is not in any library/guardrails/",
     "protocol-missing": "a declared protocol is not in any library/protocols/",
     "resource-missing": "a declared resource is not in any library/resources/",
@@ -181,6 +187,8 @@ WARNING_CATEGORIES: dict[str, str] = {
     "isolation-env-read": "a bot with shared-config isolation on is told to read ~/.env itself, a read its own rules deny",
     "isolation-gap": "a bot's shared-config isolation rules fall short of the host roster",
     # host facts every bot inherits
+    "claudron-migration": "a session-loop vault has pending migrations or unequal vault and engine formats",
+    "claudron-doctor": "a session-loop vault's migration state could not be checked",
     "claudron-path": "a vault is wired but the claudron CLI is not on PATH",
     "vault-path": "claudron_vault_path is not a directory, or does not resolve to a vault",
     "git-identity": "the operator gitconfig the composed .gitconfig includes sets no identity",
@@ -207,6 +215,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "job-unarmed": "manager-checkin is not armed on a fleet with a check-in-equipped leaf manager",
     "job-inert": "manager-checkin is armed on a fleet with no leaf manager, so nothing composes",
     "alert-unpaired": "an alert chat has no sender that can post to it",
+    "alert-pane-only": "fleet alerts have no Telegram target, so they reach the manager's pane only",
     "ignition-unarmed": "no ignition door is armed, so nothing gives an idle bot a turn",
     # goal binding
     "projects-missing": "a check-in-equipped leaf manager has no Projects table to dispatch against",
@@ -636,8 +645,11 @@ def _validate_bots(
     paths: Paths,
     fleet_env: dict[str, str],
     report: ValidationReport,
+    *, migration_reader: MigrationReader | None = None,
 ) -> None:
     """Per-bot validation: expertise, voice, skills, MCP, env vars, integrations, etc."""
+    if migration_reader is None:
+        migration_reader = claudron_compat.vault_migration_reader()
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
@@ -687,7 +699,7 @@ def _validate_bots(
     # dataclass / MCP-fragment leaves via audit_bot_sources, and the grant paths
     # (which live in the composed settings.local.json allow-list, not on BotConfig)
     # via compose_settings_local — the same pure builder generate raises from (#704).
-    from .composer import _load_bot_fragments, compose_settings_local
+    from .composer import _load_bot_fragments, _mcp_deprecation, compose_settings_local
     from .path_audit import audit_bot_sources
 
     # Findings raised per bot whose cause is shared, emitted once after the
@@ -735,10 +747,19 @@ def _validate_bots(
 
         # Voice (warn)
         if bot.voice:
-            if paths.find_voice_file(bot.voice) is None:
+            voice_file = paths.find_voice_file(bot.voice)
+            if voice_file is None:
                 report.warn(
                     "voice-missing",
                     f"bot '{bot_name}': voice file '{bot.voice}' not found — bare expertise will be used"
+                )
+            elif voice_file.is_relative_to(paths.legacy_overlay_voices):
+                # One file, one line: every bot that declares it folds in.
+                shared.add(
+                    "voice-legacy-path",
+                    f"voice file {voice_file} is at the old voices/ path; "
+                    f"move it to {paths.overlay_voices}/",
+                    bot_name,
                 )
 
         # Skills (warn). Accepts:
@@ -747,9 +768,10 @@ def _validate_bots(
         #   dir/        — folder expansion (skills/dir/**)
         #
         # Checked against the EFFECTIVE set (declared plus every requires.skills
-        # entry of the bot's effective protocols, spec §10) — never bot.skills
-        # alone — so a protocol requiring a skill that has since gone missing is
-        # reported here too, not only in the grant loop further down.
+        # entry of the bot's effective protocols and integrations, spec §10) —
+        # never bot.skills alone — so a protocol or integration requiring a skill
+        # that has since gone missing is reported here too, not only in the
+        # grant loop further down.
         from .composer import resolve_effective_skills
 
         effective_skills = resolve_effective_skills(
@@ -822,6 +844,16 @@ def _validate_bots(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
                 )
             else:
+                note = _mcp_deprecation(paths, mcp.name)
+                if note is not None:
+                    # One fragment, one line: every bot that lists it folds in. Its
+                    # grants are not meant to migrate, so the gap check is skipped.
+                    shared.add(
+                        "mcp-deprecated",
+                        f"mcp fragment '{mcp.name}.json' is deprecated: {note}",
+                        bot_name,
+                    )
+                    continue
                 # Migration-gap warning (remove with the P8 _permissions_contract cut):
                 # a fragment that still grants tools whose paired integration hasn't
                 # been given covering tool_grants would be dropped by the eventual
@@ -842,6 +874,27 @@ def _validate_bots(
                         f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
                         f"won't migrate ({hint})"
                     )
+
+        # Authored tiers only: an operator's os.environ is not fleet config.
+        from .env_tiers import ResolverUnavailable, resolve as resolve_claudna_tiers
+        try:
+            claudna_tiers = resolve_claudna_tiers(paths, bot_name=bot_name, fleet_name=fleet.name)
+        except ResolverUnavailable:
+            claudna_tiers = {}
+            shared.add("claudna-env", "authored .env tiers could not be resolved; claudna: override coverage is unknown", bot_name)
+        for key in ("CLAUDNA_STATE_DIR", "CLAUDNA_SESSION_SUMMARY", "CLAUDNA_HARVEST",
+                    "CLAUDNA_PRECOMPACT_REFLECT"):
+            resolution = claudna_tiers.get(key)
+            if resolution is not None:
+                finding = (f"{key} assigned in {resolution.tier} tier ({resolution.path}) is overridden "
+                           "by bot.conf; use claudna: as the one knob")
+                if resolution.tier == "bot":
+                    report.warn("claudna-env", f"bot '{bot_name}': {finding}")
+                else:
+                    shared.add("claudna-env", finding, bot_name)
+            if key in bot.env:
+                report.warn("claudna-env", f"bot '{bot_name}': env: assigns {key} after the composed lines "
+                            "and overrides the claudna: mapping; move it to claudna:")
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
         # var names (the same names composer puts into the rendered
@@ -1006,6 +1059,25 @@ def _validate_bots(
                 report, bot_name, "skill", name, grants, allow_side=True
             )
             report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
+        # ask_grants and deny_grants (#2476). The reader refuses a list that would
+        # not compose as written, naming its source, and compose_settings_local
+        # above meets the same refusal, so each is reported once. A list that reads
+        # is held to the path rule tool_grants are; a bare 'Bash' is legitimate in
+        # either (ask about, or refuse, every shell command) and is not flagged.
+        for key in ("ask_grants", "deny_grants"):
+            for kind, iterate, equipped in (
+                ("integration", iter_integration_grants, resolve_effective_integrations(bot, paths)),
+                ("skill", iter_skill_grants, effective_skills),
+            ):
+                try:
+                    declared = iterate(paths, equipped, key=key)
+                except ValueError as exc:
+                    refusal = f"bot '{bot_name}': {exc}"
+                    if refusal not in report.errors:
+                        report.errors.append(refusal)
+                    continue
+                for name, rules in declared:
+                    report.errors.extend(_inert_path_errors(bot_name, kind, name, rules))
         for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
             if gperms is None:
                 continue
@@ -1406,6 +1478,26 @@ def _validate_bots(
                         f"(see {CLAUDRON_INTEGRATION_URL})",
                         bot_name,
                     )
+                elif claudron_on_path:
+                    from .composer import _session_loop_enabled
+
+                    if _session_loop_enabled(bot):
+                        state = migration_reader(key)
+                        if state.status in ("pending", "old_format"):
+                            ids = ", ".join(ident for ident, _ in state.pending) or "see D001"
+                            count = len(state.pending) or sum(code == "D001" for code, _ in state.findings)
+                            cause = (f"has {count} pending migration(s) ({ids})"
+                                     if state.status == "pending" else
+                                     f"records vault format {state.vault_format} but the engine is at {state.engine_format}")
+                            shared.add(
+                                "claudron-migration",
+                                f"claudron_vault_path '{key}' {cause} — the session loop would run hooks on an unmigrated vault. "
+                                f"Once per vault, from one clone, a human runs `claudron doctor --fix --json --vault {key}` "
+                                "(it commits), then pulls on every clone (vault-sync), then plans again.",
+                                bot_name,
+                            )
+                        elif state.status == "unknown":
+                            shared.add("claudron-doctor", state.detail, bot_name)
 
         # Ecosystem: the session loop (L2) needs a vault to run against. An
         # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
@@ -1468,8 +1560,16 @@ def _validate_bots(
         ar = bot.autonomous_runner
         if ar is not None:
             if ar.skill not in AUTO_ELIGIBLE_SKILLS:
+                # A renamed-away skill names its successor; a similarity match
+                # misses /claudna:implement-plan -> /claudna:build (#2543).
+                renamed = CLAUDNA_SKILL_RENAMES.get(ar.skill)
                 suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                if renamed:
+                    hint = f" — clauDNA renamed it to '{renamed}'"
+                elif suggestion:
+                    hint = f" — did you mean '{suggestion}'?"
+                else:
+                    hint = ""
                 report.warn(
                     "autonomous-runner",
                     f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
@@ -2235,6 +2335,40 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_alert_target(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Warn where a fleet that uses Telegram leaves its alerts no Telegram target (#2654).
+
+    `fleet notify`, a failed job's alert and a failed message write's alert go to
+    the declared ``fleet_pulse`` pair, else to the manager's own chat as the
+    manager's own bot (``manager_alert_target``). With neither they reach the
+    manager's pane only, which nobody reads when the manager's session is what is
+    down (#997). A chat declared without its sender is ``alert-unpaired``'s. A
+    fleet that configures no Telegram (no fleet chat, and no bot declares a
+    handle, a chat or a token) is not warned: its bots take the Telegram channel
+    by default, so the channel alone says nothing about whether Telegram is set
+    up, and a warning on every minimal manifest would be noise."""
+    fp = fleet.fleet_pulse
+    if (fp is not None and fp.escalation_chat_id) or manager_alert_target(fleet) is not None:
+        return
+    if not fleet.telegram_group_chat_id and not any(
+            bot.telegram.handle or bot.telegram.chat_id or bot.telegram.token_env
+            for bot in fleet.bots.values()):
+        return
+    if telegram_handle(fleet.bots[fleet.manager]) is None:
+        why, fix = "is not a Telegram channel bot", ""
+    else:
+        why = "has no Telegram chat (its telegram.chat_id or the fleet's telegram_group_chat_id)"
+        fix = "set one of those, or "
+    report.warn(
+        "alert-pane-only",
+        f"fleet manager '{fleet.manager}' {why} and the fleet declares no fleet_pulse "
+        "escalation pair, so `fleet notify`, a failed job and a failed message write "
+        "alert its pane only, unless its .env tiers set TELEGRAM_GROUP_CHAT_ID and "
+        f"TELEGRAM_STATE_DIR. To reach Telegram, {fix}declare "
+        "fleet_pulse.escalation_chat_id and escalation_state_dir (#2654)"
+    )
+
+
 def _validate_fleet_pulse_cap(fleet: FleetConfig, report: ValidationReport) -> None:
     """fleet_pulse.timeout_s caps the pulse sweep; the sweep clamps it to the same range."""
     from .config import FLEET_PULSE_TIMEOUT_RANGE
@@ -2338,15 +2472,36 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
                 )
 
 
+# The ``requires.<kind>`` keys the composer reads, per library kind:
+# resolve_effective_skills reads ``skills`` from protocols and integrations,
+# and resolve_effective_protocols reads ``protocols`` from integrations.
+_REQUIRES_READ = {
+    "protocols": ("skills",),
+    "integrations": ("skills", "protocols"),
+}
+
+
+def _requirement_resolvable(paths: Paths, kind: str, name: str) -> bool:
+    """Whether a ``requires.<kind>`` entry names an item some library holds."""
+    if kind == "skills":
+        if name.endswith("/"):
+            return bool(paths.expand_skill_folder(name.rstrip("/")))
+        return paths.find_library_dir("skills", name) is not None
+    if name.endswith("/"):
+        return bool(paths.expand_library_folder(kind, name.rstrip("/")))
+    return paths.find_library_file(kind, name, ".md") is not None
+
+
 def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
     """Fail loud on a malformed or unresolvable ``requires:`` entry (spec §10).
 
-    v1 scope is protocols -> skills: a protocol's ``requires.skills`` naming a
-    skill absent from the library is an error. Library-wide and scanned ONCE
+    The scope is what the composer reads (``_REQUIRES_READ``): protocols ->
+    skills, and integrations -> skills and protocols. An entry naming an item
+    absent from the library is an error. Library-wide and scanned ONCE
     PER FILE — never once per equipping bot — the same "one defect, one error"
     rule :func:`_validate_env_contracts` states in its docstring
-    (`validator.py:383-396`): the defect is a property of the protocol FILE,
-    so an unequipped protocol with a broken requirement is still caught, and a
+    (`validator.py:383-396`): the defect is a property of the library FILE,
+    so an unequipped item with a broken requirement is still caught, and a
     fleet where several bots equip it gets one message, not several.
 
     Also reports a non-string entry (``requires: {skills: [3]}``) — one error
@@ -2360,51 +2515,52 @@ def _validate_library_requires(paths: Paths, report: ValidationReport) -> None:
 
     roots = [paths.base_library, paths.overlay_library]
     seen: set[Path] = set()
-    for root in roots:
-        if root is None or not root.is_dir():
-            continue
-        protocols_dir = root / "protocols"
-        if not protocols_dir.is_dir():
-            continue
-        for md in sorted(protocols_dir.rglob("*.md")):
-            if md.name.startswith("README"):
+    for kind, read_keys in _REQUIRES_READ.items():
+        for root in roots:
+            if root is None or not root.is_dir():
                 continue
-            resolved = md.resolve()
-            if resolved in seen:
+            kind_dir = root / kind
+            if not kind_dir.is_dir():
                 continue
-            seen.add(resolved)
-            try:
-                rel = md.relative_to(root)
-            except ValueError:
-                rel = md
+            for md in sorted(kind_dir.rglob("*.md")):
+                if md.name.startswith("README"):
+                    continue
+                resolved = md.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                try:
+                    rel = md.relative_to(root)
+                except ValueError:
+                    rel = md
 
-            try:
-                raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
-            except OSError:
-                raw_fm = {}
-            raw_requires = raw_fm.get("requires") if isinstance(raw_fm, dict) else None
-            if isinstance(raw_requires, dict) and any(
-                isinstance(v, list) and any(not isinstance(x, str) for x in v)
-                for v in raw_requires.values()
-            ):
-                report.errors.append(
-                    f"protocol '{rel}' requires: block holds a non-string "
-                    "entry — every name in a requires.<kind> list must be a "
-                    "string; the non-string entry was dropped"
+                try:
+                    raw_fm, _ = parse_frontmatter(md.read_text(encoding="utf-8"))
+                except OSError:
+                    raw_fm = {}
+                raw_requires = (
+                    raw_fm.get("requires") if isinstance(raw_fm, dict) else None
                 )
-
-            requires = library_requires(md)
-            for skill in requires.get("skills", []):
-                if skill.endswith("/"):
-                    resolvable = bool(paths.expand_skill_folder(skill.rstrip("/")))
-                else:
-                    resolvable = paths.find_library_dir("skills", skill) is not None
-                if not resolvable:
+                if isinstance(raw_requires, dict) and any(
+                    isinstance(v, list) and any(not isinstance(x, str) for x in v)
+                    for v in raw_requires.values()
+                ):
                     report.errors.append(
-                        f"protocol '{rel}' requires skill '{skill}', which is "
-                        "not in any library/skills/ — the requirement cannot "
-                        "be satisfied"
+                        f"{kind[:-1]} '{rel}' requires: block holds a non-string "
+                        "entry — every name in a requires.<kind> list must be a "
+                        "string; the non-string entry was dropped"
                     )
+
+                requires = library_requires(md)
+                for read_key in read_keys:
+                    for name in requires.get(read_key, []):
+                        if not _requirement_resolvable(paths, read_key, name):
+                            report.errors.append(
+                                f"{kind[:-1]} '{rel}' requires {read_key[:-1]} "
+                                f"'{name}', which is not in any "
+                                f"library/{read_key}/ — the requirement cannot "
+                                "be satisfied"
+                            )
 
 
 # Literal placeholder tokens shipped in fleet.yaml.seed (three of them). Reaching
@@ -2590,7 +2746,9 @@ def _validate_mcp_packages(
         report.warn(mcp_kind.get(finding.kind, UNCATEGORIZED), finding.message())
 
 
-def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
+def validate(
+    fleet: FleetConfig, paths: Paths, *, migration_reader: MigrationReader | None = None,
+) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
 
@@ -2601,11 +2759,14 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
 
     fleet_env = dotenv.read(paths.env_file)
     _warn_dead_flags(fleet_env, paths, report)
-    _validate_bots(fleet, paths, fleet_env, report)
+    if migration_reader is None:
+        migration_reader = claudron_compat.vault_migration_reader()
+    _validate_bots(fleet, paths, fleet_env, report, migration_reader=migration_reader)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
     _validate_alert_pair(fleet, report)
+    _validate_alert_target(fleet, report)
     _validate_fleet_pulse_cap(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming

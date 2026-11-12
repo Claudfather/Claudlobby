@@ -128,7 +128,7 @@ def _extract_assets(wheel: Path, destination: Path) -> None:
     package = destination / "claudlobby"
     metadata = json.loads((package / "_artifact.json").read_text())
     directories = [
-        package / "_resources" / name for name in ("library", "voices", "templates", "seeds")
+        package / "_resources" / name for name in ("library", "library/voices", "templates", "seeds")
     ]
     if metadata.get("schema") != 1 or not metadata.get("artifact_id"):
         raise ValueError("Wheel has unsupported or missing artifact metadata")

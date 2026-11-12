@@ -14,6 +14,7 @@ from tests.plane_setup import initialize_plane
 
 import json
 import pytest
+import shutil
 import subprocess
 import sys
 import time
@@ -24,10 +25,18 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.uptime import compute_metrics, entries_from_plane
 from tests.plane_fixtures import _stdlib_readers
+from tests.conftest import constructed_env
 from tests.test_plane_keepalive_door import CLI, LIB, _replay_pending, _rig, _tick
 
 FLEET = "kfleet"
 TODAY = datetime.now().strftime("%Y-%m-%d")
+CODEX_FIXTURES = Path(__file__).parent / "fixtures/codex"
+TOOL_PAYLOADS = [
+    {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"},
+    json.loads((CODEX_FIXTURES / "pre-tool-use.json").read_text()),
+    json.loads((CODEX_FIXTURES / "post-tool-use.json").read_text()),
+]
+TOOL_IDS = ["claude-minimal", "codex-pre", "codex-post"]
 
 
 def _manifest(root: Path):
@@ -39,9 +48,29 @@ def _manifest(root: Path):
 
 
 def _cli(root: Path, *args, env=None):
-    base = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"}
-    return subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", FLEET, *args],
+    base = constructed_env(CLAUDLOBBY_ROOT=str(root), HOME=str(root), PATH="/usr/bin:/bin")
+    cli = root.parent / (".harness-installation-" + root.name) / "bin/claudlobby"
+    return subprocess.run([str(cli), "--root", str(root), "--fleet", FLEET, *args],
                           capture_output=True, text=True, timeout=180, env={**base, **(env or {})})
+
+
+@pytest.fixture
+def uptime_runtime(tmp_path):
+    """Commit the real private roster, with no enrollment or native start."""
+    root = tmp_path
+    _manifest(root)
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
+    installation = root.parent / (".harness-installation-" + root.name)
+    try:
+        prepared = subprocess.run([sys.executable, str(LIB.parents[1] / "harness/compose.py"),
+                                   "--root", str(root), "--fleet", FLEET, "--prepare-runtime"],
+                                  capture_output=True, text=True, timeout=180,
+                                  env=constructed_env(HOME=str(root)))
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+        assert (installation / "bin/claudlobby").is_file()
+        yield root
+    finally:
+        shutil.rmtree(installation, ignore_errors=True)
 
 
 def _await(root: Path, sql: str, want, *, timeout=30):
@@ -92,11 +121,12 @@ def test_an_idle_tick_lands_no_fleet_event_the_heartbeat_carries_the_verdict(tmp
 
 # --- the vitals hook ---------------------------------------------------------------
 
-def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_plane_env):
+@pytest.mark.parametrize("hook_payload", TOOL_PAYLOADS, ids=TOOL_IDS)
+def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, hook_payload, *, scratch_plane_env):
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (libdir / "bot-vitals.sh").symlink_to(LIB / "bot-vitals.sh")
     env = {**env, "BOT_DIR": str(bot), "BOT_ID": "b1", "FLEET_NAME": FLEET}
-    payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})
+    payload = json.dumps(hook_payload)
     r = subprocess.run(["bash", str(libdir / "bot-vitals.sh")], input=payload, capture_output=True, text=True,
                        timeout=180, env=env)
     assert r.returncode == 0, r.stderr
@@ -108,11 +138,12 @@ def test_the_vitals_hook_lands_its_events_through_the_door(tmp_path, *, scratch_
         rows = pr.fleet_events(conn, FLEET)
     row = pr.public(rows[0])                                                            # the row as the ledger wrote it
     assert (row["bot"], row["type"], row["source"], row["data"]) == \
-        ("b1", "tool_call", "vitals", {"tool": "Read", "event": "PostToolUse", "session": "s-1"})
+        ("b1", "tool_call", "vitals", {"tool": hook_payload["tool_name"], "event": hook_payload["hook_event_name"], "session": hook_payload["session_id"]})
 
 
 @pytest.mark.parametrize("bot_dir", [None, "", "runtime/bots/b1"], ids=["unset", "empty", "relative"])
-def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, *, scratch_plane_env):
+@pytest.mark.parametrize("hook_payload", TOOL_PAYLOADS, ids=TOOL_IDS)
+def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, hook_payload, *, scratch_plane_env):
     """#874: with no usable BOT_DIR (unset, empty or relative) the hook writes no marker into the dir it runs
     in (a bot's cwd is its project checkout) and records no row against a bot it cannot name. It exits 0."""
     libdir, bot, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
@@ -123,7 +154,7 @@ def test_the_vitals_hook_never_falls_back_to_the_cwd(tmp_path, bot_dir, *, scrat
     cwd = tmp_path / "project-checkout"
     (cwd / "data").mkdir(parents=True)
     (cwd / "runtime" / "bots" / "b1" / "data").mkdir(parents=True)   # a relative BOT_DIR would resolve here
-    payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": "s-1"})
+    payload = json.dumps(hook_payload)
     r = subprocess.run(["bash", str(libdir / "bot-vitals.sh")], input=payload, capture_output=True, text=True,
                        timeout=180, env=env, cwd=cwd)
     assert r.returncode == 0, r.stderr
@@ -182,9 +213,8 @@ def test_uptime_metrics_from_the_plane(tmp_path):
     assert with_down["uptime_pct"] <= expected["uptime_pct"] and with_down["restart_count"] == 1   # DOWN adds no uptime
 
 
-def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
-    root = tmp_path
-    _manifest(root)
+def test_fleet_uptime_reads_the_plane_and_refuses_without_it(uptime_runtime):
+    root = uptime_runtime
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     bot = root / "local" / FLEET / "runtime" / "bots" / "b1"
     bot.mkdir(parents=True); (bot / "bot.conf").write_text('BOT_NAME="b1"\n')
@@ -209,13 +239,12 @@ def test_fleet_uptime_reads_the_plane_and_refuses_without_it(tmp_path):
     assert refused_result["data"] == {} and "plane.db" in refused_result["error"]["message"]  # never an empty table
 
 
-def test_fleet_uptime_says_what_it_measured_even_with_no_rows(tmp_path):
+def test_fleet_uptime_says_what_it_measured_even_with_no_rows(uptime_runtime):
     """#891: with no bot rows the text path still prints its coverage line (the
     `No bots found` path #1742's review noted is gone; this pins it), and the JSON
     says what `uptime_pct` divides by. The plane holds the fleet (a plane that
     never saw it is refused as the wrong root); the runtime has no bot dirs."""
-    root = tmp_path
-    _manifest(root)
+    root = uptime_runtime
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     (root / "local" / FLEET / "runtime" / "bots").mkdir(parents=True)
     initialize_plane(root)

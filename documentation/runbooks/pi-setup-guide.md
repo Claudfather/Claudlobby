@@ -113,7 +113,7 @@ sudo apt install -y tmux
 
 ### jq
 
-Required by several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
+Required by several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, creds-check, keepalive helpers, etc.) for JSON parsing.
 
 ```bash
 sudo apt install -y jq
@@ -328,6 +328,26 @@ sudo systemctl enable --now fail2ban
 sudo systemctl disable --now cups cups-browsed ModemManager
 ```
 
+### The `sudo` defaults every bot inherits
+
+Every bot runs as your user and inherits its `sudo` rules (the README's [Safety model](../../README.md#safety-model)). Raspberry Pi OS ships two rules that matter here, both from its `raspberrypi-sys-mods` package:
+
+- `/etc/sudoers.d/010_pi-nopasswd` gives the first user `sudo` with no password, and first-boot setup writes the name of the user you create into it. On a stock install `sudo -n true` succeeds, so every bot has root.
+- `/etc/sudoers.d/010_global-tty` sets `Defaults timestamp_type=global`: once you type your password for `sudo` in any terminal, every process of your user, every bot included, can use `sudo` without one until that ticket times out.
+
+What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464): a worker's composed permissions deny `sudo`, and the fleet manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
+
+### Ask polkit what a bot may do
+
+polkit is a second gate beside `sudo`. It decides who may reboot the host, change its network or manage its services, and on a host where you are logged in at the desktop it can answer for a bot as it does for that session. Ask it from a user service, which is where bots run:
+
+```bash
+systemd-run --user --wait --pipe --quiet sh -c \
+  'pkcheck --action-id org.freedesktop.login1.reboot --process $$$$ && echo allowed'
+```
+
+`allowed` means every bot can reboot the host with no password. `systemd-run` reads `$$` as one `$`, so the shell gets `$$`, its own process ID. Ask the same of `org.freedesktop.login1.power-off`, and of `org.freedesktop.NetworkManager.settings.modify.system` for the host's network connections; `pkaction` lists every action. On a Raspberry Pi OS desktop all three print `allowed`, while managing services and installing packages still ask for a password. Only a separate account keeps these rights from the bots and leaves them with you at the desktop.
+
 ## Swap (Recommended for 4+ Bots)
 
 **Set `CONF_MAXSWAP` as well as `CONF_SWAPSIZE`, or you silently get 2 GB.**
@@ -410,12 +430,7 @@ wedges still completes. 10min is the sensible default.
 
 ## Host jobs
 
-`system.yaml` declares the host-level jobs. The sealed release's `config plan`
-stages their units with the fleet; `config diff` exposes the proposed changes,
-and `host activate` installs them through the native user manager. First-time
-`fleet setup` performs those steps together. Follow the
-[cold-host walkthrough](../getting-started.md) before enabling jobs; inspect
-their resulting state with `host doctor` and the systemd user journal.
+`system.yaml` declares the host-level jobs. They are prepared and published with the fleet through the managed Git updater: first-time `fleet setup --plan-only` prepares them, `host update continue` applies the original operation, and later changes use `host update apply`. Follow the [cold-host walkthrough](../getting-started.md) and the [update guide](../fleet-update-lifecycle.md#managed-git-delivery) before enabling jobs; inspect their resulting state with `host doctor` and the systemd user journal.
 
 ## Installing the fleet
 
@@ -424,9 +439,7 @@ One supported pattern on Linux — systemd user services; the cron + tmux patter
 ### systemd user services (self-restarting)
 
 Enable user lingering through your host administrator for persistence past
-logout. Then follow the [cold-host walkthrough](../getting-started.md) to
-assemble a release and run `fleet setup` with
-`--install-directory "$HOME/.config/systemd/user"`.
+logout. Then follow the [cold-host walkthrough](../getting-started.md) to prepare the managed installation and first fleet, passing `$HOME/.config/systemd/user` as the native install directory when it asks. A Pi already installed through the earlier sealed-release model needs a reviewed conversion that is not yet implemented; do not run the walkthrough over its data root.
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
@@ -435,4 +448,4 @@ Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `s
 - `claudlobby --fleet FLEET bot restart BOT` — supervised bot restart
 - `claudlobby --fleet FLEET fleet logs` — bounded bot log tails
 - `claudlobby host job run disk-monitor` — request the selected, enabled disk check
-- Declare periodic bot prompts in fleet configuration and activate the reviewed plan; the private scheduled dispatcher is not a public command.
+- Declare periodic bot prompts in fleet configuration and apply the reviewed change through `host update apply`; the private scheduled dispatcher is not a public command.

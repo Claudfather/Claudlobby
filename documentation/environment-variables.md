@@ -56,6 +56,18 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 | `WORKSTREAM_MAX_ACTIVE` | `fleet.workstreams.max_active` | Cap on concurrently active workstreams in the fleet registry (default: 12) |
 | `WORKSTREAM_LEASE_DAYS` | `fleet.workstreams.lease_days` | Workstream lease length in days before renewal is needed (default: 14) |
 
+## The Host's Desktop
+
+A bot session never reaches the host's desktop (#2332). On a host with a desktop, the user manager hands every unit the desktop session's display variables, so a browser opened from a bot session (a login CLI, an Artifact preview, `claudlobby plane open`) put a window on the host's screen that outlived the command. `start-bot.sh` sets these three in the session's shell before the env tiers and `bot.conf` are read:
+
+| Variable | Value | Why |
+|----------|-------|-----|
+| `DISPLAY` | unset | X clients need it to reach a display |
+| `WAYLAND_DISPLAY` | empty | Unset, libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0` and a Wayland client still reaches the desktop. Empty names no socket, and reads as no display to xdg-open and to Claude Code |
+| `BROWSER` | `true` | xdg-open and the CLIs that honour it run `true` instead of a browser. Without it, xdg-open with no display falls back to a console browser |
+
+Nothing composed into a bot needs a display: a headless render does not. A bot that does need one gets it explicitly, either for one command (`env DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 <command>`, with the desktop's values from `systemctl --user show-environment`) or for its whole session, by declaring `DISPLAY`, `WAYLAND_DISPLAY` or `BROWSER` in its `fleet.yaml` `env:`, which `bot.conf` carries and which is read after the cut. A browser that does reach the desktop and runs for more than 15 minutes outside a render scope is reported by the fleet pulse (`browser_outside_render`).
+
 ## Telegram
 
 | Variable | Source | Description |
@@ -94,8 +106,9 @@ one fleet sets it — it is the interface. Reasoning from "anything credential-a
 |----------|--------|-------------|
 | `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
-| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue. Composed for every bot since #1481; 86400 (24h) when the fleet declares none, `0` = open-ended. SECONDS — 24h is 1440 minutes, and only `--deadline-min` speaks minutes |
+| `OBSERVABILITY_DISPATCH_DEADLINE` | composed into `bot.conf` from `bots.<name>.observability.dispatch_deadline`, the bot's resolved value (`system.yaml` floor, then fleet `defaults.observability`, then the bot's own) | Compatibility only: composed for every bot since #1481, and no current code reads it, so setting it in a `.env` tier changes nothing. Its value is the bot's resolved `dispatch_deadline` in seconds, or 86400 (24h) when no tier sets one; `0` composes as `0`. The live input is the field itself: `task assign` and `task reassign` without `--expected-by` freeze now plus the fleet manager's resolved `dispatch_deadline` once per request, and a retry keeps that deadline. `0`, or an explicit `--expected-by none`, means open-ended; `--expected-by <RFC3339>` sets the deadline directly |
 | `RC_READY_TIMEOUT_S` | composed (`BootPolicy` -> `bot.conf`, derived from `host.boot.mcp_timeout_ms`); env override fallback (`start-bot.sh`) | Seconds `start-bot.sh` waits for the Telegram poller's `bridge_state=up` (session-scoped, #1530) before logging TIMEOUT and emitting the `rc_timeout` event. Derived, not a flat default: `max(90, mcp_timeout_ms // 1000 + 20)` — 200 at the package's default `mcp_timeout_ms` (180000), so the ceiling can never be shorter than the MCP-startup timeout it waits on (F3). `bot.conf` is sourced before `start-bot.sh` reads this variable, so the composed value wins whenever the key is present; the bare `90` fallback fills in only for an un-regenerated `bot.conf` that predates the key (F4) |
+| `CHANNEL_DECISION_WAIT_S` | env override (`lib-common.sh` `bridge_bringup_verify`) | Seconds bring-up re-reads the Telegram plugin's MCP log for Claude Code's channel decision when the poller is up and the log holds none yet (default: 10). Where measured, the decision followed the server's connect by 0.1 to 0.3 s; none within the wait logs `BRIDGE_UNVERIFIED`, which is not ready (#2423). Not composed from fleet.yaml |
 | `KEEPALIVE_BOOT_GRACE_S` | env override (`lib-common.sh` `service_is_starting`) | Seconds a unit may stay mid-start before keepalive stops treating it as booting and restarts it, and fleet-pulse resumes alarming (default: 300). Budgets ONE phase — `ExecStart`, bounded by `RC_READY_TIMEOUT_S` — so the composed boot stagger never eats it. Raise it only on a host where cold starts genuinely exceed it; the cap is what stops a wedged `start-bot.sh` suppressing the watchdog forever (#1002). Not composed from fleet.yaml |
 
 ## Boot Admission
@@ -181,26 +194,27 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `CLAUDNA_STATE_DIR` | always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
-| `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
-| `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `docs/CLI_CONTRACT.md` §Environment) |
+| `CLAUDNA_STATE_DIR` | composed, always `$BOT_DIR/data/claudna` (reserved: not settable in `env:`/`secret_files:`) | The bot's own clauDNA root — session store, harvest status, ops log, hook logs (#2145 F14); overrides any `.env` tier |
+| `CLAUDNA_SESSION_SUMMARY` | composed, always: `0` unless `bots.<name>.claudna.session_summary` / `harvest` or `defaults.claudna.*` arms it | One summary per sealed segment; unarmed bots export `skipped: disabled` |
+| `CLAUDNA_HARVEST` | `bots.<name>.claudna.harvest` / `defaults.claudna.harvest` | Summaries plus draft vault capture; needs Claudron >= 0.8.0 on the host first (PR 6a) |
+| `CLAUDNA_PRECOMPACT_REFLECT` | composed, always: `0` unless `bots.<name>.claudna.precompact_reflect` / `defaults.claudna.precompact_reflect` arms it | clauDNA's PreCompact capture prompt, which refuses every other compaction until `/claudna:capture` runs (#941) |
+| `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | Exports the version hint; does not pin plugin installation |
+| `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault root; the bot's `claudron` CLI resolves the vault from it (Claudron `documentation/specs/CLI_CONTRACT.md` §Environment) |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
 
 ## Opt-in Feature Flags
 
-A handful of shared `claudlobby/_runtime_scripts/` hooks and scripts compose into **every** bot on **every** fleet
-(via `system.yaml` `defaults.hooks` or a shared `claudlobby/_runtime_scripts/` script), but ship **dormant by default** (the plane hooks are the exception since F18 R1: always on, `PLANE_EMIT_DISABLED=1` the one silencer) —
-each is a no-op until the specific var below is set to `"1"` under the relevant bot's
-`bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
-in its session). This is the equippable-dormant pattern: a shared install cannot be staged
-per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate-wide on the next
-`generate` or daily reload.
+The switch registry (`claudlobby host doctor --switches`) names each carrier and
+its arming line. Model-spending summaries and harvest now use the strict
+`bots.<name>.claudna` / `defaults.claudna` mapping, not `env:`. Composition carries
+those gates to the next session open. Runtime Plane hooks remain always on;
+`PLANE_EMIT_DISABLED=1` is their silencer. Timer opt-outs are stamped into closed
+unit environments, and a disabled job says so loudly.
 
 | Variable | Consumer | Description |
 |----------|----------|--------------|
-| `SESSION_DIGEST_ENABLED` | `claudlobby/_runtime_scripts/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
-| `PLANE_EMIT_ENABLED` | `claudlobby generate` (`registry_emit.py`) | An opt-**OUT** since chunk N: the generate-time registry keyframe scan runs unless the fleet-tier `.env` resolves this to exactly `"0"`. Not a runtime door gate — every door is always on since F18 R1 |
-| `PLANE_EMIT_DISABLED` | `claudlobby/_runtime_scripts/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three |
+| `PLANE_EMIT_ENABLED` | first-fleet setup (`registry_emit.py`) | Not an off switch: first-fleet setup needs every fleet's registry keyframe scan committed before it starts a bot, because the plane's fleet and bot identities join to it. A `"0"` in a fleet's `.env` tiers, or exported in the update command's environment, stops the update at its prepare stage, before it stops or starts anything, naming the value. Unset an exported value, then run `host update continue`. No step clears a tier value: the update froze its `.env` tiers, so after an edit `host update continue` stops at `configuration input changed`, and `fleet setup` refuses while the update exists. Remove the line, then start over with a new installation and data root ([getting started](getting-started.md), step 1). Not a runtime door gate — every door is always on since F18 R1 |
+| `PLANE_EMIT_DISABLED` | `claudlobby/_runtime_scripts/plane-emit.sh`, every hook, every fleet timer | `"1"` silences every plane door — the harness/test exemption, the one silencer. Opposite polarity from the other flags on this list. Set it in the fleet-tier `.env`: the composer carries the resolved value onto every fleet job unit (a timer sources no `.env`) and into `bot.conf` (a session sees no unexported tier assignment), so one line reaches all three. Exported in the update command's environment, it also stops first-fleet setup at its prepare stage, before it stops or starts anything, because the registry scan that setup needs would not run; unset it, then run `host update continue` |
 | `SPINDOWN_RECEIPT_ENABLED` | `claudlobby/_runtime_scripts/spin-down-bot.sh` | An opt-**OUT** since chunk N: the `bot_teardown_started` receipt is written unless this is exactly `"0"` (it is the one record that survives a `--purge`) |
 | `CLAUDLOBBY_MCP_PROBE_ENABLED` | `claudlobby config validate` / `generate` (`mcp_packages.py`) | `"1"` in the fleet-tier `.env` arms the NETWORK half of the MCP package check: each declared fragment's package is resolved by running the exact argv the fragment would run. Off by default — a compose must not depend on an external registry being up. The offline half (is the package version-pinned?) is unconditional and needs no flag. Findings are always WARNINGS; a probe that cannot answer says `could NOT check` and is never read as a pass (#1058) |
 | `CLAUDLOBBY_MCP_PROBE_TIMEOUT_S` | `claudlobby config validate` (`mcp_packages.py`) | Per-package bound on that probe, default `60`. A probe that exceeds it yields `could NOT check`, never `missing` — measured: a real package took >120s to fetch on a loaded host |

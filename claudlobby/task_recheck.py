@@ -107,6 +107,11 @@ def _due(task: Task, now: datetime, max_age_s: float, *, by_person: bool = False
     if by_person:
         return False
     started = _instant(assignment.occurred_at if assignment else task.occurred_at)
+    # A deadline the manager moved restarts the age clock, as a same-worker
+    # reassign's new assignment did (#2469).
+    moved = _instant(assignment.deadline_set_at) if assignment else None
+    if started is not None and moved is not None:
+        started = max(started, moved)
     return started is not None and (now - started).total_seconds() > max_age_s
 
 

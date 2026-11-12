@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,7 @@ def _pulse(root, libdir, *, fleet=F, scratch_plane_env, serve=True, **extra):
 
 
 def _pulse_with_socket(root, libdir, *, fleet, scratch_plane_env, socket, **extra):
+    (root / ".claudlobby-harness-root").write_text(str(root.resolve()))
     env = {**scratch_plane_env(root, socket=socket), "HOME": str(root / "home"), "FLEET_NAME": fleet,
            "PLANE_EMIT_ENABLED": "1",
 
@@ -76,7 +78,8 @@ def _pulse_with_socket(root, libdir, *, fleet, scratch_plane_env, socket, **extr
            # above the number of dead sandbox bots, so the burst detector's own
            # pages cannot be mistaken for this leg's
            "FLEET_PULSE_ESCALATION_THRESHOLD": "9", **extra}
-    return subprocess.run(["bash", str(libdir / "fleet-pulse.sh"), fleet],
+    return subprocess.run([sys.executable, str(REPO / "harness/compose.py"), "--root", str(root),
+                           "--fleet", fleet, "--pulse", "--record-plane", "--native-dir", str(libdir)],
                           capture_output=True, text=True, timeout=300, env=env)
 
 
@@ -285,6 +288,19 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
 
+    # This data-only scene has no native placement. Its native inventory is
+    # empty; task, event and error reads still use their real public doors.
+    common = libdir / "lib-common.sh"
+    common.unlink()
+    common.write_text((LIB / "lib-common.sh").read_text() + r'''
+claudlobby_cli() {
+    case "$*" in
+        *"host supervision failed") printf '%s\n' '{"ok":true,"data":{"units":[]}}' ;;
+        *) "$CLAUDLOBBY_CLI" "$@" ;;
+    esac
+}
+''')
+
     def sweep(fleet, threshold="1", *, serve=True):
         n = len(_pages(capture))
         r = _pulse(root, libdir, fleet=fleet, serve=serve,
@@ -298,7 +314,10 @@ def test_two_fleets_hit_at_once_each_page_their_own(tmp_path, *, scratch_plane_e
 
     got = [sweep(F), sweep(g, threshold="9"), sweep(F), sweep(g)]
     assert got == [
-        sorted([alert("bridge_down", F), alert("session_missing", F)]),  # f's two bursts
+        # f's two bursts, as one message: a sweep sends every cause over its threshold
+        # together, each still debounced by its own marker (#2243)
+        ["FLEET ALERT: session_missing on 1 bots (w1); bridge_down on 1 bots (w1). "
+         f"Check {F} fleet health immediately."],
         [],                  # g below threshold for every type: clears ONLY its own markers...
         [],                  # ...so f's are still inside their window
         [alert("session_missing", g)],   # and g's own burst is not silenced by f's marker

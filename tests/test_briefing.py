@@ -23,13 +23,13 @@ from claudlobby.composer import (
     compose_fleet_timers,
 )
 from claudlobby.config import BriefingConfig, _coerce_bot, load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root, package=source_package())
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _write(root: Path, body: str) -> Path:
@@ -240,7 +240,9 @@ class TestBriefingTimerComposition:
         timers = self._compose(tmp_path)
         svc = (timers / "com.test.briefing-kev-morning.service").read_text()
         assert "claudlobby/_runtime_scripts/briefing-trigger.sh" in svc
-        assert "test-fleet kev morning" in svc
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc.splitlines()
+                                   if line.startswith("ExecStart=")))
+        assert command[-3:] == ["test-fleet", "kev", "morning"]
 
     def test_plist_passes_fleet_bot_slot(self, tmp_path):
         timers = self._compose(tmp_path)

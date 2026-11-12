@@ -21,4 +21,4 @@ status/observability, path resolution, migrations, scaffolding.
 
 **Placement test** (one line): does it transform `fleet.yaml` into a running bot, or police what
 a bot may do? → here. Behavior → clauDNA / `library/`; knowledge → Claudron. Full algorithm:
-Claudron repo, `documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+Claudron repo, `documentation/decisions/005-claudfather-boundary-separation.md` §10.3.

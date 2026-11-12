@@ -39,7 +39,7 @@ def _seed(root: Path, fleets=(("engineering", "a"), ("data", "b")),
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "t", "fleet": fleet,
              "payload": asg},
             {"event_type": "communication", "emitter": "t", "fleet": fleet,
@@ -95,6 +95,25 @@ def test_fleet_axis_is_one_case_sensitive_range_on_every_arm(tmp_path):
     # the predicate itself: a range, no LIKE metacharacter to escape
     assert "LIKE" not in fleet_alias_range() and fleet_range_params("x") == ("x", "x")
     assert "NOT LIKE" in not_sentinel_sql()
+
+
+def test_overview_preserves_the_canonical_fleet_identity_used_by_the_selector(tmp_path):
+    # Actual owner-browser capture: /api/fleets included uid, while overview
+    # dropped it. The UI adopts both responses before joining roster actors.
+    _seed(tmp_path)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    dimension = client.get("/api/fleets").json()
+    overview = client.get("/api/overview").json()
+    assert dimension["state"] == overview["state"] == "ok"
+    with sqlite3.connect(
+        f"file:{tmp_path / 'state/plane/plane.db'}?mode=ro", uri=True
+    ) as conn:
+        canonical = dict(conn.execute(
+            "SELECT alias, uid FROM identity_registry WHERE kind='fleet'"
+        ))
+    assert canonical
+    assert {row["alias"]: row["uid"] for row in dimension["data"]["fleets"]} == canonical
+    assert {row["alias"]: row["uid"] for row in overview["data"]["fleets"]} == canonical
 
 
 def test_unknown_fleet_is_a_typed_state_on_every_route(tmp_path):

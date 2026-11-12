@@ -14,7 +14,7 @@ import pytest
 from claudlobby import defaults
 from claudlobby.composer import compose_bot, resolve_effective_protocols
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig, load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 from claudlobby.plane.registry_emit import bot_payload
 from claudlobby.validator import validate
@@ -256,7 +256,7 @@ class TestComposerPassesBothRoles:
 
 
 def _make_paths(root):
-    return Paths(root=root, fleet_dir=None, package=source_package())
+    return Paths(root=root, fleet_dir=None, package=git_package(root))
 
 
 def _write_checkin_library(fleet_dir):

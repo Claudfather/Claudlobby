@@ -50,18 +50,20 @@ def door_path(paths: Paths) -> Path:
     return paths.lib / "claude-version.sh"
 
 
-def measure(paths: Paths, binary: str | None = None) -> Measurement:
+def measure(paths: Paths, binary: str | None = None, *, launch_path: str | None = None) -> Measurement:
     """Measure ``binary``, or with ``None`` the binary the fleet launches.
 
     The child's environment is built, not inherited, so a caller's own session
     cannot redirect the answer. ``CLAUDE_BIN`` passes through when set, because
     start-bot.sh launches it when set and the answer must be the runtime's.
+    A lifecycle caller can supply its composed launch PATH so version helpers
+    and executable dependencies resolve as they do in that bot, not its updater.
     """
     script = door_path(paths)
     if not script.is_file():
         return Measurement(None, f"the version door {script} is not there")
     env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": launch_path if launch_path is not None else os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", str(Path.home())),
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),

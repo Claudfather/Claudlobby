@@ -1,6 +1,6 @@
 ---
 name: data-alert-sweep
-description: "Batch-process alerts from a monitoring channel. Pull alerts, check for existing PRs, independently investigate, compare findings, and reply to threads."
+description: "Use when alerts in a monitoring channel need working through as a batch. Pulls the alerts, checks for existing PRs, investigates each independently, compares findings, and replies to threads."
 argument-hint: "[recent|today|all-open]"
 ---
 

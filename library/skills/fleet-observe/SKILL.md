@@ -1,6 +1,6 @@
 ---
 name: fleet-observe
-description: "The monitor's reasoning pass. Reads the assembled digest summary and emits cited findings — each tied to a session_id and to a decision it should change. Reports; never acts outside its own fleet."
+description: "Use when the monitor's cadence tick fires, or you are asked what the fleet's recent sessions show. The monitor's reasoning pass. Reads the assembled digest summary and emits cited findings — each tied to a session_id and to a decision it should change. Reports; never acts outside its own fleet."
 argument-hint: "[days] [fleet]"
 tool_grants:
   - "Bash(jq *)"
@@ -23,33 +23,35 @@ size.
 
 Run `/fleet-digest $1 $2`. Reason over its output and nothing else.
 
-If it reports the log absent or the digester dormant, **that is your result**:
-report the coverage gap as the finding and stop. Do not go looking for substitute
-evidence, and never open a raw transcript.
+If it reports an empty window or all rows skipped, **that is your result**:
+carry its coverage explanation and stop. In particular, print its
+`COVERAGE: summaries available on 0 of N represented bots (all rows skipped: <reason tally>)`
+line unchanged. Do not look for substitute evidence or open raw transcripts.
 
 ## Step 2 — Reason across five lenses
 
 Take each deliberately; they surface different things.
 
-**Workflow dynamics.** What repeatedly gets in the way? Recurring `failed` /
-`would_change` themes are the fleet telling you where its process is wrong. One
+**Workflow dynamics.** What repeatedly gets in the way? Recurring `journey.outcome != "shipped"` /
+`journey.next` themes are the fleet telling you where its process is wrong. One
 session hitting a wall is noise; the same wall in six sessions across three bots
 is a finding.
 
-**Library usefulness.** Which composed assets show up in `worked` and `reusable`?
+**Library usefulness.** Which composed assets show up in `journey.done` and `blocks.count/kinds`?
 Which never appear at all? An asset that has never been cited by any session is a
 candidate for retirement — say so. Unused content is a cost, not a neutral.
 
-**Logging gaps.** Where did a digest row have to say "unclear" or leave the rubric
-empty on a substantial session? That is an instrument failing to capture
-something real.
+**Logging gaps.** Where did an ok summary leave a substantial session unclear?
+A `skipped_reason: disabled` row means the instrument is off by composition,
+not failing. Name this once as coverage (summaries available on k of N represented bots), never
+as a finding per skipped session.
 
 **Observability gaps.** What did you *want* to know and could not? Name the
 missing instrument concretely. **A gap you can name is a finding, not a
 non-result** — often the most valuable thing a pass produces.
 
 **Token bloat.** Where is spend concentrated, and is it buying anything? Compare
-`transcript_bytes` and `tool_calls` against what the sessions achieved. Look for
+`transcript_bytes` and `prompts` over ok rows against what the sessions achieved. Look for
 repetition: the same large file re-read across sessions, the same context
 rebuilt, work redone because it was not handed off.
 
@@ -116,7 +118,7 @@ rather than grading it yourself.
 ```json
 {"outcome": "completed",
  "findings": 3, "high": 0, "coverage_days": 7, "fleets": 5,
- "summary": "3 findings (0 high); 2 fleets had the digester off"}
+ "summary": "3 findings (0 high); 2 fleets had summaries off"}
 ```
 
 | `outcome` | When |

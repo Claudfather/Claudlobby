@@ -2,28 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 import os
 import re
 import sqlite3
 import stat
-import sys
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
-
-
-_RECEIPT_WAIT_S = 10
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
+from ..request_ids import canonical_request_id
+from ..runtime_admission import bound_runtime_release as _bound_release
 
 
 def _body(args):
@@ -53,59 +40,19 @@ def _body(args):
         raise CommandFailure("invalid_argument", "message body is empty, invalid or over the byte cap") from exc
 
 
-def _data(route, outcome, *, parent_message_id=None) -> dict:
-    alert = asdict(outcome.alert) if is_dataclass(outcome.alert) else None
-    data = {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
-            "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
-            "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
-            "recording": outcome.recording, "request_persisted": outcome.request_persisted,
-            "transport": outcome.delivery, "delivery": outcome.delivery,
-            "receipt_observation": None, "integrity_verdict": None,
-            "replayed": outcome.replayed, "alert": alert}
-    if parent_message_id is not None:
-        data["reply_to_message_id"] = parent_message_id
-    return data
-
-
-def _effect_failure(code, message, *, data, request_id, release_id):
-    """Keep native-effect evidence visible in human output as well as JSON."""
-    detail = (f"message {data.get('message_id') or 'unknown'}: "
-              f"recording {data.get('recording', 'unknown')}; "
-              f"request persisted {str(data.get('request_persisted', False)).lower()}; "
-              f"delivery {data.get('delivery', 'unknown')}")
-    if data.get("alert") is not None:
-        channels = data["alert"]
-        detail += "; fleet alert " + ", ".join(
-            f"{name}={channels[name]['status']}" for name in ("manager", "telegram"))
-    return CommandFailure(code, f"{detail}. {message}", data=data, release_id=release_id,
-                          hint=f"Inspect claudlobby --json request show {request_id}; "
-                               "do not automatically resend.")
-
-
-def _alert_tiers(route):
-    # Ask the runtime's existing tier-order owner for the selected fleet.
-    # A caller's ambient bot env can belong to another fleet under --fleet.
-    from ..env_tiers import resolve
-    from ..recording_alerts import _TIER_KEYS
-    try:
-        selected = resolve(route.selected.paths, bot_name=route.selected.fleet.manager,
-                           fleet_name=route.selected.fleet.name)
-    except (OSError, ValueError, RuntimeError):
-        return {}, False
-    return {key: selected[key].value for key in _TIER_KEYS if key in selected}, True
-
-
-def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> CommandOutput:
+def _answer_human(selected, origin, parent, body, *, request_id, current) -> CommandOutput:
     """A generated bot's answer to its human sender (#2068): recorded on the
     Plane, carried by nothing, read with `message wait --for reply`."""
     from ..message_context import resolve_human_reply_route
     from ..message_operations import record_reply_to_human
     from ..task_operations import TaskActor
+    from ..runtime_admission import runtime_release_id, runtime_provenance, runtime_route_matches
 
+    release_id = runtime_release_id(current)
     route = resolve_human_reply_route(TaskActor(parent.sender.uid, parent.sender.alias),
                                       root=selected.paths.root, fleet=selected.fleet.name,
                                       package=selected.paths.package)
-    if route.release_id != release_id:
+    if not runtime_route_matches(current, route):
         raise CommandFailure("release_mismatch", "message route differs from selected release",
                              release_id=release_id)
     if (route.caller.alias != f"bot:{origin.fleet.name}/{origin.bot_id}"
@@ -120,7 +67,8 @@ def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> 
             "recording": outcome.recording, "request_persisted": outcome.request_persisted,
             "transport": "not_requested", "delivery": "not_requested",
             "receipt_observation": None, "integrity_verdict": None,
-            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id}
+            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id,
+            **runtime_provenance(current)}
     if outcome.recording != "committed":
         raise CommandFailure(
             "unavailable", f"message {outcome.message_id}: recording {outcome.recording}. A reply to a "
@@ -131,15 +79,30 @@ def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> 
                          lines=(f"{outcome.message_id}\trecording=committed\tdelivery=not_requested",))
 
 
+def deliver_bound_message(route, *, body=None, report=None, request_id,
+                          kind="chat", parent_message_id=None,
+                          retry_uncertain=False, caller_context=None,
+                          require_durable_request=False) -> CommandOutput:
+    """CLI presentation over the shared admitted message workflow."""
+    from ..application_messages import deliver_bound_message as deliver
+
+    result = deliver(route, body=body, report=report, request_id=request_id,
+                     kind=kind, parent_message_id=parent_message_id,
+                     retry_uncertain=retry_uncertain, caller_context=caller_context,
+                     require_durable_request=require_durable_request)
+    data = result.data
+    return CommandOutput(data, release_id=result.release_id,
+                         lines=(f"{data['message_id']}\trecording={data['recording']}\t"
+                                "delivery=received",))
+
+
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
-    from ..message_operations import (MessageConflict, MessageIdentityUnavailable,
-                                      read_recipient_box, repair_held_delivery, send_message,
-                                      send_unlinked_report)
-    from ..message_queries import MessageQueryError, receipt, show_message
+    from ..message_operations import MessageConflict, MessageIdentityUnavailable
+    from ..message_queries import MessageQueryError, show_message
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
                                      bind_task_context, resolve_operation_scope,
                                      resolve_task_mutation_context)
@@ -150,14 +113,16 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
     from ..report_payload import ReportPayload, ReportPayloadError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_route_matches)
 
     release_id = None
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
+        body = report = None
         if is_report:
             report = ReportPayload(args.status, summary=args.summary, percent=args.percent,
                                    pr_url=args.pr, pr_role=args.pr_role,
@@ -171,13 +136,12 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "unlinked reports require a generated bot caller")
         if is_report and origin.fleet.name != selected.fleet.name:
             raise CommandFailure("conflict", "unlinked reports go to the caller's own fleet manager")
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
-        if origin is not None and (origin.bot_id is None or not bound_release
-                                   or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
-            raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        if origin is not None and origin.bot_id is None:
+            raise CommandFailure("release_mismatch", "generated caller lacks a bot identity")
+        bound_release = _bound_release(selected.paths.package, generated=origin is not None)
         with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
+            release_id = runtime_release_id(release)
             human_ctx = (resolve_task_mutation_context(root=selected.paths.root,
                          fleet=selected.fleet.name, package=selected.paths.package)
                          if origin is None else None)
@@ -196,7 +160,7 @@ def dispatch(args) -> CommandOutput:
                 if (addressed and origin is not None and parent.sender.fleet_uid is None
                         and parent.sender.alias.startswith("human:")):
                     return _answer_human(selected, origin, parent, body,
-                                         request_id=request_id, release_id=release_id)
+                                         request_id=request_id, current=release)
                 if not addressed or not parent.sender.alias.startswith("bot:") or parent.sender.fleet_uid is None:
                     raise CommandFailure("conflict", "reply requires a recorded bot or human sender and this caller as recipient",
                                          release_id=release_id)
@@ -205,7 +169,7 @@ def dispatch(args) -> CommandOutput:
                                           fleet=selected.fleet.name,
                                           package=selected.paths.package,
                                           caller_context=human_ctx)
-            if (route.release_id != release_id
+            if (not runtime_route_matches(release, route)
                     or human_ctx is not None and route.caller != human_ctx.caller
                     or origin is not None and route.caller.alias !=
                     f"bot:{origin.fleet.name}/{origin.bot_id}"):
@@ -218,105 +182,16 @@ def dispatch(args) -> CommandOutput:
                     or route.peer_fleet_uid != parent.sender.fleet_uid):
                 raise CommandFailure("conflict", "reply route differs from recorded parent participants",
                                      release_id=release_id)
-            trusted_tiers, tiers_available = _alert_tiers(route)
-            # The box just before the send, for the chip repair (#2105).
-            box_before = read_recipient_box(route, selected.paths.package)
-            if is_report:
-                outcome = send_unlinked_report(route, selected.paths.package, report,
-                                               request_id=request_id,
-                                               retry_uncertain=args.retry_uncertain,
-                                               trusted_tiers=trusted_tiers)
-            else:
-                outcome = send_message(route, selected.paths.package, body,
-                                       request_id=request_id,
-                                       kind="answer" if parent_message_id is not None else args.kind,
-                                       parent_message_id=parent_message_id,
-                                       retry_uncertain=args.retry_uncertain,
-                                       trusted_tiers=trusted_tiers)
-            data = _data(route, outcome, parent_message_id=parent_message_id)
-            if is_report:
-                data["report_status"] = report.status
-                data["task_id"] = data["assignment_id"] = None
-            if outcome.code == "recording_degraded":
-                if not tiers_available:
-                    if data["alert"] is not None:
-                        from ..recording_alerts import ChannelOutcome
-                        availability = data["alert"]["telegram"]["debounce_available"]
-                        data["alert"]["telegram"] = asdict(
-                            ChannelOutcome("failed", availability, "selected_tiers_unavailable"))
-                    print(f"recording-alert: fleet={route.selected.fleet.name} request={request_id} "
-                          "channel=telegram status=failed reason=selected_tiers_unavailable",
-                          file=sys.stderr)
-                raise _effect_failure("recording_degraded",
-                                     "message recording is degraded; inspect the request before retrying",
-                                     data=data, request_id=request_id, release_id=release_id)
-            # rc 3 (#1236): the box never showed the payload, so the transport
-            # withheld its Enter. The text can still land; the receipt wait and
-            # the held-box repair below decide (#2105).
-            withheld = outcome.delivery == "unknown" and getattr(outcome, "native_returncode", None) == 3
-            if outcome.delivery != "submitted" and not withheld:
-                code = "delivery_failed" if outcome.delivery == "failed" else "delivery_unknown"
-                raise _effect_failure(code, "message transport was not confirmed; inspect the request",
-                                     data=data, request_id=request_id, release_id=release_id)
-            # A tmux success is only submission. This read owns the final byte
-            # integrity verdict. It never resends the native payload; when no
-            # receipt came, the owner may press the Enter a held box waits for.
-            try:
-                ctx = (human_ctx if human_ctx is not None else
-                       bind_task_context(route.selected, origin=route.origin))
-                observed = receipt(ctx, outcome.message_id, destination=route.peer.alias,
-                                   wait=_RECEIPT_WAIT_S)
-                repair, observed = repair_held_delivery(
-                    route, selected.paths.package, outcome.message_id, first=observed,
-                    box_before=box_before,
-                    observe=lambda wait: receipt(ctx, outcome.message_id,
-                                                 destination=route.peer.alias, wait=wait))
-                if repair is not None:
-                    data["enter_repair"] = repair.as_dict()
-            except (OperationContextUnavailableError, OperationContextError,
-                    MessageQueryError, PendingMigrationError, DowngradeError,
-                    OSError, sqlite3.Error) as exc:
-                data["receipt_observation"] = "unavailable"
-                data["integrity_verdict"] = "unknown"
-                raise _effect_failure("delivery_unknown",
-                                     "message was submitted; final receipt proof is unavailable",
-                                     data=data, request_id=request_id, release_id=release_id) from exc
-            if (observed.sender is None or observed.destination is None
-                    or observed.sender.uid != route.caller.uid
-                    or observed.sender.alias != route.caller.alias
-                    or observed.destination.uid != route.peer.uid
-                    or observed.destination.alias != route.peer.alias):
-                data["receipt_observation"] = observed.receipt_observation
-                data["integrity_verdict"] = "unknown"
-                raise _effect_failure("delivery_unknown",
-                                     "message was submitted; receipt identities differ from the frozen route",
-                                     data=data, request_id=request_id, release_id=release_id)
-            data["receipt_observation"] = observed.receipt_observation
-            data["integrity_verdict"] = observed.integrity_verdict
-            if observed.integrity_verdict == "delivered":
-                data["delivery"] = "received"
-            elif observed.integrity_verdict in {"truncated", "altered"}:
-                data["delivery"] = "failed"
-                raise _effect_failure("delivery_failed",
-                                     "message receiver proof shows a byte mismatch; inspect the request",
-                                     data=data, request_id=request_id, release_id=release_id)
-            else:
-                raise _effect_failure("delivery_unknown",
-                                     f"message was submitted; {observed.reason}"
-                                     if observed.code == "unavailable" and observed.reason else
-                                     "message was submitted; final receiver proof is incomplete",
-                                     data=data, request_id=request_id, release_id=release_id)
-        return CommandOutput(data, release_id=release_id,
-                             lines=(f"{outcome.message_id}\trecording={outcome.recording}\t"
-                                    "delivery=received",))
+            return deliver_bound_message(
+                route, body=body, report=report, request_id=request_id,
+                kind=args.kind if args.public_command == "message.send" else "chat",
+                parent_message_id=parent_message_id,
+                retry_uncertain=args.retry_uncertain, caller_context=human_ctx)
     except CommandFailure:
         raise
     except ReportPayloadError as exc:
         raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
                              release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

@@ -185,6 +185,55 @@ def test_typed_reports_preserve_evidence_links_and_blocked_status_filter(report_
     assert conn.total_changes == before
 
 
+@pytest.mark.parametrize(("lookup", "seek"), [
+    ("_REPORT_STATUS_EVENT_SQL", "idx_events_task_assignment (assignment_id=?)"),
+    ("_REPORT_MARKER_SQL", "idx_events_subject (subject_uid=? AND ingest_seq>?)"),
+    ("_LEGACY_REPORT_STATUS_EVENT_SQL", "idx_events_actor (actor_uid=?)"),
+])
+def test_a_reports_companion_lookup_seeks_instead_of_walking(report_projection, lookup, seek):
+    """A report's companion fact lands right after it: a task event on its
+    assignment, or a marker on its sender. Each lookup seeks by what an index
+    holds instead of walking every task event in the plane, or every system
+    event of the sender, newest first; a legacy search reads the sender's own
+    events."""
+    conn, pr, *_ = report_projection
+    sql = getattr(pr, lookup)
+    plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, (None,) * sql.count("?"))]
+    assert any(seek in step for step in plan), plan
+
+
+def test_an_unlinked_report_reads_its_marker_and_looks_for_no_task_event(report_projection):
+    """The door gave an unlinked report a marker, never a task event."""
+    from claudlobby.report_payload import ReportPayload
+
+    conn, pr, add, _, _ = report_projection
+    msg = add(ReportPayload("completed", summary="done"))
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        row = next(r for r in pr.report_rows(conn, F) if r["plane_msg_id"] == msg)
+    finally:
+        conn.set_trace_callback(None)
+    assert row["status"] == "completed"
+    assert [s for s in statements if "e.event = 'report_status'" in s], statements
+    assert not [s for s in statements if "e.kind = 'task'" in s], statements
+
+
+def test_a_report_naming_no_assignment_still_reads_its_linked_task_event(tmp_path):
+    """Some legacy reports landed their task event on an assignment while their
+    communication named none. Their status still comes from that task event."""
+    root, _, _, _ = _scene(tmp_path)
+    wi2, asg2 = "wi_" + "2".rjust(32, "0"), "asg_" + "2".rjust(32, "0")
+    msg = _report(root, wi2, asg2, "2026-09-02T16:00:00Z", extra={"summary": "landed"},
+                  link_communication=False)
+    pr = _stdlib_readers()
+    with _ro(root) as conn:
+        row = next(x for x in pr.report_rows(conn, F) if x["plane_msg_id"] == msg)
+    assert row["assignment_id"] is None
+    assert (row["status"], row["task_event"], row["task_id"], row["summary"], row["_source"]) == (
+        "completed", "completed", "t-2-bbbb", "landed", "task_event")
+
+
 @pytest.mark.parametrize(("privacy", "truncated", "body_transform", "state"), [
     ("metadata", False, lambda body: body, "withheld"),
     ("preview", False, lambda body: body[:80], "withheld"),

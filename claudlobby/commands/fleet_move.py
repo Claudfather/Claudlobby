@@ -43,18 +43,17 @@ def _fleet_at(path: Path, root: Path, package, name: str) -> None:
 
 
 def _cold_host(root: Path, package) -> None:
-    from ..activation_state import ActivationError, read_selection
     from ..supervision_inventory import Adapter, InventoryError, collect_enrollment
 
     try:
-        if read_selection(root) is not None:
-            raise CommandFailure("conflict", "fleet move requires no selected release")
+        if any(os.path.lexists(root / "state" / name) for name in ("config.json","selected-release.json","update.json")):
+            raise CommandFailure("conflict", "fleet move requires cold authoring without an active configuration or operation")
         history = root / "state" / "activations"
         if history.is_symlink() or history.exists() and (not history.is_dir() or any(history.iterdir())):
             raise CommandFailure("conflict", "fleet move requires no activation history")
         collect_enrollment(root, (), bootstrap_empty=True,
                            adapter=Adapter(package)).require_complete()
-    except (ActivationError, InventoryError, OSError) as exc:
+    except (InventoryError, OSError) as exc:
         raise CommandFailure("conflict", "cold selection or complete native inventory cannot be proved") from exc
 
 
@@ -81,13 +80,13 @@ def _ensure_container(directory: Path) -> None:
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError, locked_activation
+    from ..git_update import UpdateStore, UpdateError
     from ..paths import _find_fleet_dir, _root_manifest_names_fleet
     from ..resources import get_resources
     from .host import _operator_shell
     from .setup import _root
 
-    _operator_shell(args.root)
+    _operator_shell()
     if (args.seed or not args.fleet or not _NAME.fullmatch(args.fleet)
             or not _NAME.fullmatch(args.system) or args.fleet == args.system):
         raise CommandFailure("invalid_argument", "fleet move requires distinct exact --fleet and --system names")
@@ -101,10 +100,12 @@ def dispatch(args) -> CommandOutput:
     container = local / args.system
     target = container / args.fleet
     package = get_resources()
+    if package.installation is None or package.installation.data_root != root:
+        raise CommandFailure("conflict", "cold fleet authoring requires this data root's managed Git installation")
 
     renamed = False
     try:
-        with locked_activation(root):
+        with UpdateStore(package.installation):
             if _root_manifest_names_fleet(root, args.fleet):
                 raise CommandFailure("conflict", "root and overlay declare the same fleet")
             try:
@@ -149,8 +150,8 @@ def dispatch(args) -> CommandOutput:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-    except ActivationError as exc:
-        raise CommandFailure("conflict", "fleet move cannot acquire or verify the host activation lock") from exc
+    except UpdateError as exc:
+        raise CommandFailure("conflict", "fleet move cannot acquire or verify the current update lock") from exc
     except OSError as exc:
         code = "commit_unknown" if renamed else "unavailable"
         raise CommandFailure(code, "fleet move result is uncertain; inspect both paths before retrying"
@@ -158,4 +159,4 @@ def dispatch(args) -> CommandOutput:
     return CommandOutput({"fleet": args.fleet, "system": args.system,
                           "source": str(source), "destination": str(target),
                           "status": "moved"},
-                         lines=(f"Moved cold fleet {args.fleet} to {target}. Review config plan and activate it separately.",))
+                         lines=(f"Moved cold fleet {args.fleet} to {target}. Review the configuration through the common Git updater separately.",))

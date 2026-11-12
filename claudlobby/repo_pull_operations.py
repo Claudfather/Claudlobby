@@ -8,7 +8,8 @@ from pathlib import Path
 import subprocess
 
 from .active_config import resolve_active_context
-from .runtime_admission import mutation_admission
+from .context import native_environment
+from .runtime_admission import mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class RepositoryPullError(RuntimeError):
@@ -21,8 +22,10 @@ class RepositoryPullError(RuntimeError):
 class RepositoryPullResult:
     fleet: str
     bot: str
-    release_id: str
+    release_id: str | None
     repositories: tuple[tuple[str, str], ...]
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def _reported(stdout: bytes) -> tuple[tuple[str, str], ...]:
@@ -47,8 +50,7 @@ def pull_repositories(root: Path, fleet: str, bot: str) -> RepositoryPullResult:
     """Pull one declared bot's immediate project repos; never choose a generic path."""
     with mutation_admission(root, expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
         context = resolve_active_context(root=root, fleet=fleet, bot=bot)
-        if context.paths.lib != release.native_path:
-            raise RepositoryPullError("repository updater differs from selected release")
+        bound_runtime_release(context.paths.package, generated=False)
         if bot not in context.fleet.bots:
             raise RepositoryPullError("bot is not declared in the selected fleet")
         bot_dir = context.paths.bot_runtime(bot)
@@ -56,14 +58,11 @@ def pull_repositories(root: Path, fleet: str, bot: str) -> RepositoryPullResult:
         if (not bot_dir.is_dir() or bot_dir.resolve() != bot_dir
                 or not projects.is_dir() or projects.resolve() != projects):
             raise RepositoryPullError("selected bot projects directory is absent or redirected")
-        script = release.native_path / "git-pull-all.sh"
+        env = {**os.environ, **native_environment(context.paths, current=release),
+               "FLEET_NAME": context.fleet.name}
+        script = context.paths.package.runtime_native / "git-pull-all.sh"
         if not script.is_file() or script.resolve() != script:
             raise RepositoryPullError("selected repository updater is absent or redirected")
-        env = {**os.environ, "CLAUDLOBBY_ROOT": str(root),
-               "CLAUDLOBBY_NATIVE_DIR": str(release.native_path),
-               "CLAUDLOBBY_RELEASE_ID": release.release_id,
-               "CLAUDLOBBY_CLI": str(release.cli_path),
-               "FLEET_NAME": context.fleet.name}
         for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "CLAUDLOBBY_FLEET"):
             env.pop(key, None)
         try:
@@ -77,4 +76,4 @@ def pull_repositories(root: Path, fleet: str, bot: str) -> RepositoryPullResult:
         if completed.returncode not in (0, 1) or (completed.returncode == 1) != failed:
             raise RepositoryPullError("native repository result disagrees with its exit status",
                                       effect_attempted=True)
-        return RepositoryPullResult(context.fleet.name, bot, release.release_id, rows)
+        return RepositoryPullResult(context.fleet.name, bot, runtime_release_id(release), rows, **runtime_provenance(release))

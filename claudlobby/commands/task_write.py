@@ -7,32 +7,13 @@ from pathlib import Path
 import os
 import re
 import sqlite3
-from uuid import UUID
 
+from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _reference(value: str, field: str) -> str:
-    # The scoped task reader identifies wrong-kind and historical references
-    # and returns a concrete canonical remedy; this command never acts on one.
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise CommandFailure("invalid_argument", f"{field} requires a task or assignment reference")
-    return value
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
-
-
-def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise CommandFailure("invalid_argument", f"{field} requires nonempty text")
-    return value
+from ..request_ids import canonical_request_id
+from ..task_operations import UNSPECIFIED_ASSIGNMENT
+from ..application_tasks import (_reference, _text, _committed_notification,
+                                 _recording_failure, task_outcome)
 
 
 def _optional(value: str | None, field: str, pattern: str) -> str | None:
@@ -77,7 +58,23 @@ def _deadline(value: str | None) -> str | None:
 
 
 def _inputs(args) -> dict:
-    _request_id(args.request_id)
+    canonical_request_id(args.request_id)
+    if args.public_command == "task.feedback":
+        from ..message_payload import MessageBody, MessagePayloadError
+        from ..plane.ids import ID_PATTERNS
+
+        try:
+            body = MessageBody.from_input(args.text)
+        except MessagePayloadError as exc:
+            raise CommandFailure("invalid_argument", str(exc)) from exc
+        if not isinstance(args.actor, str) or not re.fullmatch(r"human:[^\s:/]+", args.actor):
+            raise CommandFailure("invalid_argument", "--actor requires an existing local human: alias")
+        expected = args.expected_assignment
+        if expected != "none" and (not isinstance(expected, str)
+                or not re.fullmatch(ID_PATTERNS["assignment"], expected)):
+            raise CommandFailure("invalid_argument", "--expected-assignment requires a canonical assignment or none")
+        return {"task_id": _reference(args.task_id, "TASK_ID"), "body": body,
+                "expected_assignment_id": None if expected == "none" else expected}
     if args.public_command == "task.admit":
         return {"title": _text(args.title, "--title"), "body": _body(args.body_file),
                 "repo": _optional(args.repo, "--repo", r"[^/\s]+/[^/\s]+"),
@@ -94,6 +91,11 @@ def _inputs(args) -> dict:
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "reason": _text(args.reason, "--reason"),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "task.move":
+        return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "workstream_id": _optional(args.workstream, "--workstream", r"\S+"),
+                "reason": _text(args.reason, "--reason"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command == "task.escalate":
         return {"task_id": _reference(args.task_id, "TASK_ID"),
                 "question": _text(args.question, "--question"),
@@ -107,6 +109,11 @@ def _inputs(args) -> dict:
                 "bot_id": _optional(args.bot, "--bot", r"[A-Za-z0-9_-]+"),
                 "reason": _text(args.reason, "--reason"),
                 "expected_by": _deadline(args.expected_by),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "assignment.reschedule":
+        return {"assignment_id": _reference(args.assignment_id, "ASSIGNMENT_ID"),
+                "expected_by": _deadline(args.expected_by),
+                "reason": _text(args.reason, "--reason"),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command in _REPORTS:
         from ..report_payload import ReportPayload, ReportPayloadError
@@ -140,114 +147,60 @@ def _report_envelope(result, route, report) -> str:
             f"Assignment: {result.assignment_id}\nReport: {report.to_body()}")
 
 
-def _nudge_envelope(result, route, by, reason):
-    from ..task_operations import nudge_body
+def _task_output(result, *, fleet_name, release_id, notification_data=None, provenance=None):
+    outcome = task_outcome(result, fleet_name=fleet_name, release_id=release_id,
+                           notification_data=notification_data, provenance=provenance)
+    data = outcome.data
+    lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
+             f"recording={data['recording']}\tdelivery={result.delivery}\t"
+             f"notification={data['notification']}",)
+    return CommandOutput(data, release_id=release_id, lines=lines)
 
-    return ("[Claudlobby task nudge]\n"
-            f"Message: {result.message_id}\nFrom: {route.caller.alias}\n"
-            f"To: {route.peer.alias}\nTask: {result.task_id}\n"
-            f"Assignment: {result.assignment_id or '-'}\n"
-            "Nudge: " + nudge_body(result.task_id, result.assignment_id, by, reason))
+
+def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=None,
+                     expected_assignment_id=UNSPECIFIED_ASSIGNMENT, admit_read=None):
+    """CLI rendering of the shared nudge outcome."""
+    from ..application_tasks import nudge_bound_task as nudge
+
+    result = nudge(ctx, route, package, request_id=request_id, task_id=task_id,
+                   reason=reason, by=by, expected_assignment_id=expected_assignment_id,
+                   admit_read=admit_read)
+    data = result.data
+    return CommandOutput(data, release_id=result.release_id, lines=(
+        f"{data['task_id']}\t{data['assignment_id'] or '-'}\t{data['state']}\t"
+        f"recording={data['recording']}\tdelivery={data['delivery']}\t"
+        f"notification={data['notification']}",))
 
 
-def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True):
-    from ..message_operations import (RenderedNativeEnvelope, read_recipient_box,
-                                      repair_held_delivery, send_committed_native_attempt)
-    from ..message_queries import receipt as observe_receipt
-    from ..request_receipts import locked_request
+def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
+                        expected_assignment_id, admit_read=None):
+    """CLI rendering of the shared feedback outcome."""
+    from ..application_tasks import feedback_bound_task as feedback
 
-    data = {"message_id": result.message_id, "recipient_uid": result.recipient_uid,
-            "notification": "unknown", "transport": "unknown",
-            "transmission_recording": "unknown", "request_persisted": None,
-            "receipt_observation": None, "integrity_verdict": None}
-    native_returncode = None
-    box_before = None
-    try:
-        # The task owner has returned: its request and task locks are both
-        # released. This is the same request lock, never a nested one.
-        with locked_request(ctx.root, ctx.fleet_uid, result.request_id) as store:
-            frozen = store.load()
-            if (frozen is None or frozen.intent.route != route.receipt_binding()
-                    or frozen.intent.message_id != result.message_id
-                    or frozen.intent.task_id != result.task_id
-                    or frozen.intent.assignment_id != result.assignment_id
-                    or frozen.intent.recipient_uid != route.peer.uid):
-                raise ValueError("committed request differs from the frozen native route")
-            if result.replayed and not send_on_replay:
-                # Nudge has no uncertain-retry flag. A replay inspects any
-                # retained attempt; it never turns a crash gap into a send.
-                prior = frozen.message_attempts[-1] if frozen.message_attempts else None
-                if prior is None:
-                    data.update(transport="not_attempted", notification="pending",
-                                transmission_recording="not_attempted", request_persisted=True)
-                    return data
-                observation = prior.observation
-                data.update(transport=observation.status if observation else "unknown",
-                            notification=observation.status if observation else "unknown",
-                            transmission_recording=prior.recording_status,
-                            request_persisted=True)
-            else:
-                # The box just before the send, for the chip repair (#2105).
-                box_before = read_recipient_box(route, package)
-                attempt = send_committed_native_attempt(
-                    route, package, store, frozen,
-                    RenderedNativeEnvelope(result.message_id, envelope),
-                    request_id=result.request_id)
-                data.update(transport=attempt.delivery,
-                            notification=attempt.delivery,
-                            transmission_recording=attempt.transmission_recording,
-                            request_persisted=attempt.request_persisted)
-                native_returncode = (attempt.observation.native_returncode
-                                     if attempt.observation else None)
-        # A fresh submission, or rc 3 (#1236: the transport withheld its Enter
-        # because the box never showed the payload), waits for its receipt; a
-        # held box then gets the owner's Enter repair (#2105).
-        waits = ((data["transport"] == "submitted"
-                  or (data["transport"] == "unknown" and native_returncode == 3))
-                 and (not result.replayed or send_on_replay))
-        observed = observe_receipt(ctx, result.message_id, destination=route.peer.alias,
-                                   wait=10 if waits else 0)
-        if waits:
-            repair, observed = repair_held_delivery(
-                route, package, result.message_id, first=observed, box_before=box_before,
-                observe=lambda wait: observe_receipt(ctx, result.message_id,
-                                                     destination=route.peer.alias, wait=wait))
-            if repair is not None:
-                data["enter_repair"] = repair.as_dict()
-        data.update(receipt_observation=observed.receipt_observation,
-                    integrity_verdict=observed.integrity_verdict)
-        if (observed.exit_code == 0 and observed.receipt_observation == "received"
-                and observed.integrity_verdict == "delivered"
-                and observed.sender is not None and observed.sender.uid == route.caller.uid
-                and observed.sender.alias == route.caller.alias
-                and observed.destination is not None and observed.destination.uid == route.peer.uid
-                and observed.destination.alias == route.peer.alias):
-            data["notification"] = "received"
-        elif observed.integrity_verdict in ("truncated", "altered"):
-            data["notification"] = "failed"
-    except Exception:
-        # An error after the atomic task commit cannot erase its result. A
-        # reservation or native send may already have happened; never retry it.
-        data["notification"] = "unknown"
-    return data
+    result = feedback(ctx, route, package, request_id=request_id, task_id=task_id,
+                      body=body, expected_assignment_id=expected_assignment_id,
+                      admit_read=admit_read)
+    data = result.data
+    return CommandOutput(data, release_id=result.release_id, lines=(
+        f"{data['task_id']}\t{data['message_id']}\trecording=committed\tnotification=received",))
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_context import MessageContextError, resolve_message_route
     from ..operation_context import (OperationContextError, OperationContextUnavailableError,
-                                     resolve_operation_scope, resolve_task_mutation_context)
+                                     bind_task_context, resolve_operation_scope, resolve_task_mutation_context)
     from ..paths import InvalidPathSelector
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
-    from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_provenance, runtime_route_matches)
+    from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
-                                   complete, escalate, fail, nudge, progress, reassign,
-                                   return_assignment, withdraw)
+                                   complete, escalate, fail, move, progress, reassign,
+                                   reschedule, return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
 
@@ -259,21 +212,26 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
         values = _inputs(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
+        if args.public_command == "task.feedback" and (origin is not None or any(
+                key in os.environ for key in ("FLEET_ROOT", "CLAUDLOBBY_TIMER_CONTEXT", "BOT_SERVICE",
+                                               "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_NATIVE_ADMITTED"))):
+            # Fleet timers and admitted native children can have no bot origin.
+            # These routing carriers cannot borrow a human; marker presence is
+            # refused defensively even when empty, never used as action authority.
+            raise CommandFailure("conflict", "task feedback requires an explicit local human caller")
         fleet_name = selected.fleet.name
         if selected.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task mutations")
-        bound_release = None
-        if origin is not None:
-            bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-            if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-                raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        bound_release = _bound_release(selected.paths.package, generated=origin is not None)
         root = selected.paths.root
         with mutation_admission(root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
-            ctx = resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
-                                                package=selected.paths.package)
-            if args.public_command in _REPORTS or args.public_command == "task.nudge":
+            release_id = runtime_release_id(release)
+            ctx = (bind_task_context(selected, operator_alias=args.actor)
+                   if args.public_command == "task.feedback" else
+                   resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
+                                                 package=selected.paths.package))
+            if args.public_command in _REPORTS or args.public_command in {"task.nudge", "task.feedback"}:
                 if args.public_command in _REPORTS and (origin is None or origin.bot_id is None):
                     raise CommandFailure("conflict", "linked assignment reports require a generated bot caller",
                                          release_id=release_id)
@@ -281,7 +239,7 @@ def dispatch(args) -> CommandOutput:
                                               fleet=selected.fleet.name,
                                               package=selected.paths.package,
                                               caller_context=ctx if origin is None else None)
-                if (route.release_id != release_id or route.host_uid != ctx.host_uid
+                if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
                         or route.selected_fleet_uid != ctx.fleet_uid
                         or route.caller_fleet_uid != ctx.caller_fleet_uid
                         or route.caller != ctx.caller
@@ -298,73 +256,41 @@ def dispatch(args) -> CommandOutput:
                 notification_data = _committed_notification(
                     ctx, route, selected.paths.package, result,
                     _report_envelope(result, route, values["report"]))
+            elif args.public_command == "task.feedback":
+                return feedback_bound_task(ctx, route, selected.paths.package,
+                                           request_id=args.request_id, **values)
             elif args.public_command == "task.nudge":
-                result = nudge(ctx, args.request_id, values["task_id"],
-                               reason=values["reason"], by=values["by"],
-                               route=route.receipt_binding())
-                notification_data = _committed_notification(
-                    ctx, route, selected.paths.package, result,
-                    _nudge_envelope(result, route, values["by"] or ctx.caller.alias,
-                                    values["reason"]), send_on_replay=False)
+                return nudge_bound_task(ctx, route, selected.paths.package,
+                    request_id=args.request_id, task_id=values["task_id"],
+                    reason=values["reason"], by=values["by"])
             elif args.public_command == "task.admit":
                 result = admit(ctx, args.request_id, **values)
             elif args.public_command == "task.assign":
                 result = assign(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.withdraw":
                 result = withdraw(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "task.move":
+                result = move(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.escalate":
                 result = escalate(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.reassign":
                 result = reassign(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "assignment.reschedule":
+                result = reschedule(ctx, args.request_id, values.pop("assignment_id"), **values)
             else:
                 result = accept(ctx, args.request_id, values["assignment_id"])
-        outcome = "unchanged" if result.replayed else "committed"
-        recording = "unchanged" if result.replayed else result.recording
-        data = {"fleet": selected.fleet.name, "task_id": result.task_id,
-                "assignment_id": result.assignment_id, "state": result.task.state,
-                "outcome": outcome, "recording": recording,
-                "delivery": result.delivery, "notification": result.notification,
-                "replayed": result.replayed}
-        if notification_data is not None:
-            data.update(notification_data)
-            if data["notification"] != "received" or data["request_persisted"] is not True:
-                raise CommandFailure("notification_failed",
-                                     "task recording committed; manager notification is unverified; "
-                                     "inspect the request and message receipt",
-                                     data=data, release_id=release_id)
-        lines = (f"{result.task_id}\t{result.assignment_id or '-'}\t{result.task.state}\t"
-                 f"recording={recording}\tdelivery={result.delivery}\t"
-                 f"notification={data['notification']}",)
-        return CommandOutput(data, release_id=release_id, lines=lines)
+        return _task_output(result, fleet_name=fleet_name, release_id=release_id,
+                            notification_data=notification_data, provenance=runtime_provenance(release))
     except CommandFailure:
         raise
     except TaskRecordingError as exc:
-        data = {"fleet": fleet_name,
-                "outcome": "committed" if exc.recording == "committed" else "unknown",
-                "recording": exc.recording, "task_id": exc.task_id,
-                "assignment_id": exc.assignment_id, "message_id": exc.message_id,
-                "recipient_uid": exc.recipient_uid,
-                "request_persisted": exc.request_persisted,
-                "delivery": "not_requested", "replayed": False if exc.recording == "committed" else None}
-        if (args.public_command in _REPORTS or args.public_command == "task.nudge") \
-                and exc.recording == "committed":
-            data.update(notification="pending", transport="not_attempted",
-                        receipt_observation=None, integrity_verdict=None)
-            raise CommandFailure("notification_failed",
-                                 "task recording committed; request outcome was not retained reliably; "
-                                 "notification was not attempted; inspect the request",
-                                 data=data, release_id=release_id) from exc
-        raise CommandFailure("unavailable", "task recording is unconfirmed; inspect the request before retrying"
-                             if exc.recording != "committed" else
-                             "task committed but request outcome was not retained reliably; inspect the request",
-                             data=data, release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint) from exc
+        # nudge_bound_task translates its own recording failure.
+        raise _recording_failure(exc, fleet_name=fleet_name, release_id=release_id,
+                                 notification=args.public_command in _REPORTS) from exc
     except (OperationContextUnavailableError, PendingMigrationError, DowngradeError,
             sqlite3.Error, OSError) as exc:
         raise CommandFailure("unavailable", "task identity or storage is unavailable",
-                             retryable=True, release_id=release_id) from exc
+                             retryable=args.public_command != "task.feedback", release_id=release_id) from exc
     except (ReceiptConflict, ReceiptBusy) as exc:
         raise CommandFailure("conflict", "task request conflicts with recorded history or another caller",
                              release_id=release_id) from exc
@@ -373,13 +299,12 @@ def dispatch(args) -> CommandOutput:
                              release_id=release_id) from exc
     except TaskQueryError as exc:
         raise CommandFailure(exc.code, str(exc), hint=exc.hint,
-                             retryable=exc.retryable, release_id=release_id) from exc
+                             retryable=exc.retryable and args.public_command != "task.feedback",
+                             release_id=release_id) from exc
     except (ActivationError, PlanError, OperationContextError, MessageContextError, BotNotFoundError,
             TaskStateError) as exc:
         raise CommandFailure("conflict", "active task scope or state is incomplete",
-                             hint=f"{exc}; inspect claudlobby host releases" if isinstance(exc, ActivationError) else None,
+                             hint="inspect claudlobby host update status" if isinstance(exc, ActivationError) else None,
                              release_id=release_id) from exc
-    except ReleaseError as exc:
-        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched") from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid task root or fleet selector") from exc

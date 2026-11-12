@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import _write_exec, constructed_env
+from tests.fixtures.provider_status import STATUS_PAGE_ARM
+from tests.package_fixtures import git_package
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +29,7 @@ def _fleet(tmp_path, *, app_env=None, mint="ok", probe_code="200", pat=None):
     (root / "state").mkdir()
     # supervisor.sh is a required sibling: lib-common.sh unconditionally
     # sources it from its own directory (#1573 task 6).
-    for helper in ("creds-check.sh", "lib-common.sh", "supervisor.sh"):
+    for helper in ("creds-check.sh", "lib-common.sh", "supervisor.sh", "cli-context.sh"):
         shutil.copy(REPO_ROOT / "claudlobby/_runtime_scripts" / helper, lib / helper)
 
     # Stub mint CLI: prints a token, or fails per `mint`.
@@ -40,10 +42,12 @@ def _fleet(tmp_path, *, app_env=None, mint="ok", probe_code="200", pat=None):
     bindir.mkdir()
     # curl stub: -o /dev/null -w %{http_code} → print the code. Answers the
     # installation probe with probe_code; the PAT /user path returns 200 so a
-    # PAT test can also run through here.
+    # PAT test can also run through here. GitHub's status page is served by
+    # STATUS_PAGE_ARM (#2424).
     _write_exec(
         bindir / "curl",
         f"""#!/bin/bash
+{STATUS_PAGE_ARM}
 out="" ; prev=""
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
@@ -81,7 +85,7 @@ esac
         CLAUDLOBBY_CREDS_LOG=str(root / "creds-check.log"),
         CLAUDLOBBY_CREDS_STATE=str(state),
     )
-    return {"lib": lib, "state": state, "env": env}
+    return {"lib": lib, "state": state, "env": env, "bindir": bindir}
 
 
 def _run(f):
@@ -110,15 +114,16 @@ def test_selected_check_reads_host_tier_app_config_without_ambient_token(tmp_pat
     (home / ".env").write_text(
         "\n".join(f'{key}="{value}"' for key, value in APP.items()) + "\n"
     )
-    release_id = "r-" + "a" * 64
-    env = {**f["env"], "CLAUDLOBBY_RELEASE_ID": release_id,
+    installation = git_package(root).installation
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
            "CLAUDLOBBY_NATIVE_DIR": str(f["lib"]),
-           "CLAUDLOBBY_CLI": str(tmp_path / "selected-cli"),
+           "CLAUDLOBBY_CLI": str(installation.cli),
            "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
            "GITHUB_PAT": "ambient-token-must-not-win"}
     result = subprocess.run(
         ["bash", str(f["lib"] / "creds-check.sh"),
-         "--selected-release", release_id, "--fleet", "f",
+         "--admitted-runtime", "--fleet", "f",
          "--fleet-root", str(fleet_root),
          "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "b1"],
         env=env, capture_output=True, text=True, timeout=60,

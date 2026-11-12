@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from types import MappingProxyType
 
 # Shell-identifier pattern — the SSOT for anything that becomes a shell variable
 # name (bot.env keys, model-strategy tiers, briefing slot -> BRIEFING_SECTIONS_<SLOT>).
@@ -96,6 +97,40 @@ KNOWN_TOOL_TYPES: frozenset[str] = frozenset({"script"})
 # Valid values for BotConfig.permission_mode.
 VALID_PERMISSION_MODES: frozenset[str] = frozenset(
     {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
+)
+
+# ── Skill overrides (settings.local.json) ────────────────────────
+# Claude Code's skillOverrides states; a skill absent from the map reads as
+# "on". BotConfig.skill_overrides starts from the default below (#1388): "off"
+# removes /auto-mode-setup and the end-of-turn offer to run it, which an
+# unattended bot never answers.
+SKILL_OVERRIDE_STATES: frozenset[str] = frozenset(
+    {"on", "name-only", "user-invocable-only", "off"}
+)
+DEFAULT_SKILL_OVERRIDES = MappingProxyType({"auto-mode-setup": "off"})
+
+# ── Autocompact window (settings.local.json) ─────────────────────
+# Claude Code's autoCompactWindow takes a whole number of tokens from 100000
+# to 1000000 (per model also "auto") and drops any other value without a word.
+# Its end-of-turn autocompact offer appears only on a model with a native 1M
+# window: these, the `native_1m` models in Claude Code 2.1.316's registry.
+# With auto_compact_window: auto, a bot's settings name each of them "auto" in
+# modelSettings (#1388), and a model Claude Code adds later can show the offer
+# until it is added here. A number, the default included, blocks it on every model.
+AUTO_COMPACT_WINDOW_MIN = 100_000
+AUTO_COMPACT_WINDOW_MAX = 1_000_000
+NATIVE_1M_MODELS: tuple[str, ...] = (
+    "claude-haiku-5-5",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
 )
 
 # ── Headless env vars (bot.conf) ─────────────────────────────────
@@ -228,6 +263,9 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
     "/claudna:review-changes": "/claudna:review-work",
     "/claudna:skill-health": "/claudna:using-claudna",
     "/claudna:product-brainstorm": "/claudna:product-vision",
+    "/claudna:implement-plan": "/claudna:build",
+    # qa engine modes
+    "/claudna:visual-crawl": "/claudna:qa crawl",
 }
 
 # Live clauDNA skills that library/ content is permitted to reference by name
@@ -252,10 +290,10 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
 CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
     {
         "/claudna:audit",
+        "/claudna:build",
         "/claudna:capture",
         "/claudna:claudron",
         "/claudna:development-retro",
-        "/claudna:implement-plan",
         "/claudna:index",
         "/claudna:modal",
         "/claudna:neon",
@@ -269,8 +307,8 @@ CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
 )
 
 # ── Autonomous runner ────────────────────────────────────────────
-# The --auto-eligible subset of the renamed skills; the live values (the whole
-# space-form) are what validator.py exact-matches. Selected from the canonical
+# The --auto-eligible subset of the renamed skills; the live values are what
+# validator.py exact-matches. Selected from the canonical
 # map by key so the two can never disagree — a dropped or misspelled key here
 # fails loudly at import.
 _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
@@ -282,6 +320,8 @@ _AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
         "/claudna:access-path-audit",
         "/claudna:frontend-performance-audit",
         "/claudna:session-handoff",
+        "/claudna:implement-plan",
+        "/claudna:visual-crawl",
     )
 }
 
@@ -292,8 +332,6 @@ _AUTO_ELIGIBLE_STANDALONE: frozenset[str] = frozenset(
     {
         "/claudna:product-enhance",
         "/claudna:product-vision",
-        "/claudna:visual-crawl",
-        "/claudna:implement-plan",
     }
 )
 

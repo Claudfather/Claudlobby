@@ -64,7 +64,10 @@ def _manager_route(ctx):
                                ctx.bots["manager"].alias, native, native)
 
 
-def test_workstream_declared_wait_survives_child_completion_until_unblocked(estate):
+def test_workstream_declared_wait_survives_a_task_ending_until_its_last_task_ends(estate):
+    """A declared wait outlives a task's end while another task in the workstream is open, and
+    only `unblock` clears it then. Its last task's end closes the workstream (#1053): it reads
+    `done`, the wait ends with it, and the manager's verbs refuse it, as admit refuses a join."""
     from claudlobby.brief import _workstream_section, plane_session
     from claudlobby.workstream_operations import WorkstreamError, _reader, apply as workstream_apply
 
@@ -73,6 +76,7 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
         "project": None, "owner": None, "next": None}, request_id=str(uuid4()))
     wid = opened.workstream_ids[0]
     admitted = tasks.admit(ctx, str(uuid4()), title="Finish review", workstream_id=wid)
+    signoff = tasks.admit(ctx, str(uuid4()), title="Collect signoff", workstream_id=wid)
     assigned = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
     worker = replace(ctx, caller=ctx.bots["worker"])
     tasks.accept(worker, str(uuid4()), assigned.assignment_id)
@@ -88,24 +92,37 @@ def test_workstream_declared_wait_survives_child_completion_until_unblocked(esta
                    ReportPayload("completed", summary="Review finished"))
     workstream_apply(ctx, "progress", {"id": wid, "next": "Evidence prepared"},
                      request_id=str(uuid4()))  # progress never clears a declared wait
-    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
-    assert note is None
-    with plane:
-        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
-    assert section["active"] == []
-    assert section["blocked"][0]["id"] == wid
-    assert section["blocked"][0]["waiting_on"] == "human:reviewer"
-    assert section["blocked"][0]["note"] == "Waiting for signoff"
-    assert section["blocked"][0]["age_seconds"] is not None
+
+    def section():
+        plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
+        assert note is None
+        with plane:
+            return _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
+
+    waits = section()
+    assert waits["active"] == []
+    assert waits["blocked"][0]["id"] == wid
+    assert waits["blocked"][0]["waiting_on"] == "human:reviewer"
+    assert waits["blocked"][0]["note"] == "Waiting for signoff"
+    assert waits["blocked"][0]["age_seconds"] is not None
     unblocked = workstream_apply(ctx, "unblock", {"id": wid, "note": "Signoff received"},
                                  request_id=str(uuid4()))
     assert unblocked.workstream_ids == (wid,)
     assert _reader(ctx, 14, or_empty=False)["workstreams"][wid]["next"] == "Evidence prepared"
-    plane, note = plane_session(ctx.context.paths, ctx.context.fleet.name)
-    assert note is None
-    with plane:
-        section = _workstream_section(ctx.context.fleet, ctx.context.paths, int(time.time()), [], plane=plane)
-    assert section["blocked"] == [] and [row["id"] for row in section["active"]] == [wid]
+    after = section()
+    assert after["blocked"] == [] and [row["id"] for row in after["active"]] == [wid]
+    # Waiting again, its last open task ends: the workstream closes, and the wait with it.
+    workstream_apply(ctx, "block", {"id": wid, "on": "human:reviewer",
+        "note": "Waiting for the release note"}, request_id=str(uuid4()))
+    tasks.withdraw(ctx, str(uuid4()), signoff.task_id, reason="Signed off in person")
+    closed = _reader(ctx, 14, or_empty=False)["workstreams"][wid]
+    assert (closed["status"], closed["closed_by"]) == ("done", f"task:{signoff.task_id}")
+    ended = section()
+    assert ended["active"] == [] and ended["blocked"] == []
+    for verb, args in (("progress", {"id": wid, "next": None}),
+                       ("unblock", {"id": wid, "note": "Too late"})):
+        with pytest.raises(WorkstreamError, match="terminal workstream"):
+            workstream_apply(ctx, verb, args, request_id=str(uuid4()))
 
 
 def test_workstream_cap_renewal_archived_id_and_request_replay(estate):
@@ -566,6 +583,58 @@ def test_escalate_queued_or_assigned_and_refuse_uncommitted_retarget(estate):
     assert _counts(conn) == after
 
 
+def test_reschedule_moves_the_deadline_on_the_same_assignment(estate):
+    """#2469: one deadline_changed on the assignment the page names, with the new
+    deadline, who moved it and why. The dispatch's expected_by stays on the row,
+    the reducer reads the newest fact, and no successor assignment is written."""
+    ctx, conn = estate                       # the caller is the fleet's generated manager
+    task = tasks.admit(ctx, str(uuid4()), title="Waits on the operator")
+    routed = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker",
+                          expected_by="2026-10-01T00:00:00Z")
+    rid = str(uuid4())
+    moved = tasks.reschedule(ctx, rid, routed.assignment_id, expected_by="2026-10-04T00:00:00Z",
+                             reason="Waits on the operator's disk move")
+    assert moved.assignment_id == routed.assignment_id and moved.task.state == "assigned"
+    assert moved.task.current_assignment.expected_by == "2026-10-04T00:00:00+00:00"
+    fact = conn.execute("SELECT assignment_id, actor_uid, deadline, detail FROM events "
+                        "WHERE event='deadline_changed'").fetchone()
+    assert fact[:3] == (routed.assignment_id, ctx.caller.uid, "2026-10-04T00:00:00+00:00")
+    assert json.loads(fact[3])["reason"] == "Waits on the operator's disk move"
+    assert json.loads(fact[3])["by"] == ctx.caller.alias
+    assert conn.execute("SELECT expected_by FROM assignments").fetchone()[0] == "2026-10-01T00:00:00+00:00"
+    before = _counts(conn)
+    assert tasks.reschedule(ctx, rid, routed.assignment_id, expected_by="2026-10-04T00:00:00Z",
+                            reason="Waits on the operator's disk move").replayed
+    assert _counts(conn) == before
+    open_ended = tasks.reschedule(_feedback_human(ctx, conn), str(uuid4()), routed.assignment_id,
+                                  expected_by="none", reason="No date until the disk is in")
+    assert open_ended.task.current_assignment.expected_by is None
+    assert _counts(conn)[1] == 1
+
+
+def test_reschedule_is_the_managers_or_a_persons_and_never_a_closed_assignments(estate):
+    """The door, not only the grant: the worker the deadline binds, another bot
+    and the manager calling from another fleet are refused; so are an empty
+    reason and an assignment a reassign replaced."""
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Route me")
+    first = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    for caller in (replace(ctx, caller=ctx.bots["worker"]),
+                   replace(ctx, caller=ctx.bots["other"]),
+                   replace(ctx, caller_fleet_uid="fleet_" + "f" * 32)):
+        with pytest.raises(tasks.TaskConflictError, match="manager or a local person"):
+            tasks.reschedule(caller, str(uuid4()), first.assignment_id, expected_by="none",
+                             reason="Mine to move")
+    with pytest.raises(tasks.TaskQueryError, match="reason"):
+        tasks.reschedule(ctx, str(uuid4()), first.assignment_id, expected_by="none", reason=" ")
+    second = tasks.reassign(ctx, str(uuid4()), task.task_id, bot_id="other", reason="Specialist")
+    with pytest.raises(tasks.TaskConflictError, match="stale or closed"):
+        tasks.reschedule(ctx, str(uuid4()), first.assignment_id, expected_by="none",
+                         reason="Too late")
+    assert second.assignment_id != first.assignment_id
+    assert conn.execute("SELECT count(*) FROM events WHERE event='deadline_changed'").fetchone()[0] == 0
+
+
 def test_nudge_commits_queued_and_assigned_asks_without_retargeting_retry(estate):
     ctx, conn = estate
     task = tasks.admit(ctx, str(uuid4()), title="Need manager attention")
@@ -899,3 +968,204 @@ def test_task_flock_excludes_a_different_request_in_an_independent_process(estat
                     except ProcessLookupError:
                         pass
                     os.waitpid(child, 0)
+
+
+def test_nudge_expected_assignment_is_locked_semantics_and_completed_replay_stays_original(estate):
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Selected task")
+    request = str(uuid4())
+    options = dict(reason="Inspect progress", route=_manager_route(ctx), expected_assignment_id=None)
+    original = tasks.nudge(ctx, request, task.task_id, **options)
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id="worker")
+    before = _counts(conn)
+    replay = tasks.nudge(ctx, request, task.task_id, **options)
+    assert replay.replayed and replay.assignment_id is None and replay.message_id == original.message_id
+    assert replay.task.current_assignment.assignment_id == assigned.assignment_id
+    assert _counts(conn) == before
+    with pytest.raises(tasks.TaskConflictError, match="assignment changed"):
+        tasks.nudge(ctx, str(uuid4()), task.task_id, **options)
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, request, task.task_id, **{**options, "expected_assignment_id": assigned.assignment_id})
+    # Omitted is distinct from explicit queued, including retained request semantics.
+    with pytest.raises(ReceiptConflict):
+        tasks.nudge(ctx, request, task.task_id, reason=options["reason"], route=options["route"])
+    assert _counts(conn) == before
+    assert tasks.nudge(ctx, str(uuid4()), task.task_id, reason="CLI default", route=options["route"]).assignment_id == assigned.assignment_id
+    assert tasks.nudge(ctx, str(uuid4()), task.task_id,
+        **{**options, "expected_assignment_id": assigned.assignment_id}).assignment_id == assigned.assignment_id
+
+
+def test_nudge_rechecks_assignment_after_acquiring_task_lock(estate, monkeypatch):
+    from contextlib import contextmanager
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Task selected before routing")
+    original = tasks._locked_task
+    routed = []
+    @contextmanager
+    def concurrent_assignment(store, task_id):
+        # Change after the initial read, before this invocation acquires its lock.
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks, "_locked_task", original)
+            routed.append(tasks.assign(ctx, str(uuid4()), task_id, bot_id="worker"))
+        with original(store, task_id) as check:
+            yield check
+    monkeypatch.setattr(tasks, "_locked_task", concurrent_assignment)
+    with pytest.raises(tasks.TaskConflictError, match="assignment changed"):
+        tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Stale queued selection",
+                    route=_manager_route(ctx), expected_assignment_id=None)
+    assert routed and conn.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0] == 0
+
+
+def test_nudge_source_admission_shares_reads_and_uses_fresh_postcommit_snapshot(estate):
+    from claudlobby.plane.owner_source import admit_source, bind_source
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title="Admitted snapshot")
+    bind_source(ctx.root)
+    seen = []
+    def check(snapshot):
+        assert snapshot.in_transaction
+        admit_source(snapshot, ctx.host_uid)
+        seen.append(snapshot.execute("SELECT count(*) FROM events WHERE event='nudged'").fetchone()[0])
+    result = tasks.nudge(ctx, str(uuid4()), task.task_id, reason="Check recorded work",
+                        route=_manager_route(ctx), expected_assignment_id=None, admit_read=check)
+    assert result.recording == "committed" and seen == [0, 0, 1]
+
+
+def test_nudge_semantic_helper_preserves_recipe_omission_and_explicit_null():
+    from claudlobby.request_receipts import semantic_digest
+    task_id = 'wi_' + 'a'*32
+    fields = dict(task_id=task_id, reason=' exact reason\n', by='human:operator')
+    omitted = tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'])
+    explicit = tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'], expected_assignment_id=None)
+    assert omitted == semantic_digest(fields)
+    assert explicit == semantic_digest({**fields, 'expected_assignment_id':None})
+    assert omitted != explicit
+    with pytest.raises(tasks.TaskQueryError):
+        tasks.nudge_semantic_digest(task_id, reason=fields['reason'], by=fields['by'], expected_assignment_id='')
+
+
+def _feedback_human(ctx, conn):
+    alias = 'human:reviewer'
+    actor = tasks.TaskActor(resolve_party(conn, alias, now='2026-09-28T00:00:00Z'), alias)
+    return replace(ctx, caller=actor, caller_fleet_uid=None)
+
+
+@pytest.mark.parametrize('state', ['queued', 'assigned', 'completed', 'failed', 'cancelled'])
+def test_feedback_records_only_linked_chat_on_resolved_work(estate, state):
+    from claudlobby.message_payload import MessageBody
+    ctx, conn = estate
+    task = tasks.admit(ctx, str(uuid4()), title='Review work')
+    assignment = None
+    if state in {'assigned', 'completed', 'failed'}:
+        assignment = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id='worker').assignment_id
+        worker = replace(ctx, caller=ctx.bots['worker'])
+        if state == 'completed':
+            tasks.complete(worker, str(uuid4()), assignment, ReportPayload('completed', summary='Done'))
+        elif state == 'failed':
+            tasks.fail(worker, str(uuid4()), assignment, ReportPayload('failed', reason='Unable'))
+    elif state == 'cancelled':
+        tasks.withdraw(ctx, str(uuid4()), task.task_id, reason='Stopped')
+    human = _feedback_human(ctx, conn)
+    expected = assignment if state == 'assigned' else None
+    body = MessageBody('  Please consider café\nNext iteration  ')
+    request = str(uuid4())
+    before = _counts(conn)
+    result = tasks.feedback(human, request, task.task_id, body=body,
+                            expected_assignment_id=expected, route=_manager_route(human))
+    assert result.task.state == state and result.assignment_id == expected
+    assert _counts(conn) == (*before[:3], before[3] + 1)
+    row = conn.execute('SELECT message_class, work_item_id, assignment_id, body, command_type, '
+                       'reply_to_msg_id, sender_uid, recipient_uid FROM communications WHERE msg_id=?',
+                       (result.message_id,)).fetchone()
+    assert tuple(row) == ('chat', task.task_id, expected, body.text, None, None,
+                          human.caller.uid, ctx.bots['manager'].uid)
+    retained = _receipt(ctx, request)
+    assert retained.intent.operation == 'task.feedback'
+    assert len(retained.intent.stages[0].facts) == 1
+    assert b'Please consider' not in (ctx.root / 'state/requests' / ctx.fleet_uid / (request + '.json')).read_bytes()
+    assert tasks.feedback(human, request, task.task_id, body=body,
+        expected_assignment_id=expected, route=_manager_route(human)).replayed
+    assert _counts(conn) == (*before[:3], before[3] + 1)
+    if state in {'completed', 'failed'}:
+        with pytest.raises(tasks.TaskConflictError, match='assignment changed'):
+            tasks.feedback(human, str(uuid4()), task.task_id, body=body,
+                           expected_assignment_id=assignment, route=_manager_route(human))
+
+
+def test_feedback_replay_preserves_selection_and_unrecorded_request_never_restarts(estate):
+    from claudlobby.message_payload import MessageBody
+    ctx, conn = estate
+    human = _feedback_human(ctx, conn)
+    task = tasks.admit(ctx, str(uuid4()), title='Exact comment')
+    body = MessageBody('Original comment')
+    options = dict(body=body, expected_assignment_id=None, route=_manager_route(human))
+    request = str(uuid4())
+    original = tasks.feedback(human, request, task.task_id, **options)
+    assigned = tasks.assign(ctx, str(uuid4()), task.task_id, bot_id='worker')
+    before = _counts(conn)
+    replay = tasks.feedback(human, request, task.task_id, **options)
+    assert replay.replayed and replay.message_id == original.message_id and replay.assignment_id is None
+    assert replay.task.current_assignment.assignment_id == assigned.assignment_id
+    for changed in ({'body': MessageBody('Changed')}, {'expected_assignment_id': assigned.assignment_id}):
+        with pytest.raises(ReceiptConflict):
+            tasks.feedback(human, request, task.task_id, **{**options, **changed})
+    with pytest.raises(TypeError):
+        tasks.feedback(human, str(uuid4()), task.task_id, body=body, route=options['route'])
+    with pytest.raises(tasks.TaskConflictError, match='local human'):
+        tasks.feedback(ctx, str(uuid4()), task.task_id, **{**options, 'route': _manager_route(ctx)})
+    assert _counts(conn) == before
+    options['expected_assignment_id'] = assigned.assignment_id
+    conn.execute("CREATE TRIGGER reject_feedback BEFORE INSERT ON communications "
+                 "BEGIN SELECT RAISE(ABORT, 'private refusal'); END")
+    uncertain = str(uuid4())
+    with pytest.raises(tasks.TaskRecordingError):
+        tasks.feedback(human, uncertain, task.task_id, **options)
+    conn.execute('DROP TRIGGER reject_feedback')
+    with pytest.raises(tasks.TaskRecordingError, match='inspection-only'):
+        tasks.feedback(human, uncertain, task.task_id, **options)
+    assert _counts(conn) == before
+    assert _receipt(ctx, uncertain).message_attempts == ()
+
+
+def test_feedback_assignment_is_rechecked_under_lock_and_source_snapshot(estate, monkeypatch):
+    from contextlib import contextmanager
+    from claudlobby.message_payload import MessageBody
+    from claudlobby.plane.owner_source import admit_source, bind_source
+    ctx, conn = estate
+    human = _feedback_human(ctx, conn)
+    task = tasks.admit(ctx, str(uuid4()), title='Selection race')
+    original = tasks._locked_task
+    @contextmanager
+    def changed(store, task_id):
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks, '_locked_task', original)
+            tasks.assign(ctx, str(uuid4()), task_id, bot_id='worker')
+        with original(store, task_id) as check:
+            yield check
+    with monkeypatch.context() as patch:
+        patch.setattr(tasks, '_locked_task', changed)
+        with pytest.raises(tasks.TaskConflictError, match='assignment changed'):
+            tasks.feedback(human, str(uuid4()), task.task_id, body=MessageBody('Comment'),
+                           expected_assignment_id=None, route=_manager_route(human))
+    assert conn.execute('SELECT count(*) FROM communications').fetchone()[0] == 0
+    bind_source(ctx.root)
+    seen = []
+    def check(snapshot):
+        assert snapshot.in_transaction
+        admit_source(snapshot, ctx.host_uid)
+        seen.append(snapshot.execute('SELECT count(*) FROM communications').fetchone()[0])
+    assignment = show_task(conn, task.task_id, fleet_uid=ctx.fleet_uid).current_assignment.assignment_id
+    tasks.feedback(human, str(uuid4()), task.task_id, body=MessageBody('Comment'),
+                   expected_assignment_id=assignment, route=_manager_route(human), admit_read=check)
+    assert seen == [0, 0, 1]
+
+
+def test_feedback_digest_validates_explicit_selection_and_exact_text():
+    from claudlobby.message_payload import MessageBody
+    task_id = 'wi_' + 'a' * 32
+    body = MessageBody(' comment\n')
+    digest = tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id=None)
+    assert digest != tasks.feedback_semantic_digest(task_id, body=MessageBody('comment'), expected_assignment_id=None)
+    assert digest != tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='asg_' + 'b' * 32)
+    with pytest.raises(tasks.TaskQueryError):
+        tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='')

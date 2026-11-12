@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .contracts import ContractViolation, validate_request
+from .queue_names import name_tag
 from .queue_paths import SpoolScan, scan_spool, spool_path
 from .ingest import ingest_many  # patched in tests; keep module-level name
 
@@ -178,7 +179,9 @@ def spool_write(root: Path, finalized_requests: list[dict], error: str) -> Path:
     """Persist an already-finalized batch (event_ids + occurred_at +
     schema_version set by emit BEFORE the first db attempt — F6, §10). fsync
     file AND directory before returning: a spool 'success' that evaporates on
-    power loss is a lost event wearing a receipt (round-2 F6)."""
+    power loss is a lost event wearing a receipt (round-2 F6). The name carries
+    the message its transmissions name (queue_names), so a receipt check
+    passes over an entry of other work (#2430)."""
     lead = finalized_requests[0]["event_id"]
     entry = {
         "event_ids": [r["event_id"] for r in finalized_requests],
@@ -189,7 +192,7 @@ def spool_write(root: Path, finalized_requests: list[dict], error: str) -> Path:
         "requests": finalized_requests,
     }
     try:
-        return _write_entry_file(spool_dir(root), f"{lead}.json", entry)
+        return _write_entry_file(spool_dir(root), f"{lead}{name_tag(finalized_requests)}.json", entry)
     except OSError as exc:
         raise SpoolWriteError(f"db failed ({error}) AND spool failed ({exc})") from exc
 

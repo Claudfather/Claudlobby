@@ -4,6 +4,7 @@ import builtins
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import sqlite3
 
 import pytest
@@ -11,7 +12,39 @@ import yaml
 
 from claudlobby import composer, context
 from claudlobby.__main__ import main
-from tests.test_config_staging import staging_case, _fleet, _tree, _write
+from claudlobby.command_result import empty_fleet_conflict
+from tests.test_config_staging import staging_case as source_staging_case, _fleet, _tree, _write
+
+
+def _commit(case):
+    """Publish real frozen inputs without native effects or a registry scan."""
+    from claudlobby.active_config import publish_current_config, snapshot_from_plan
+    from claudlobby.config import load_fleet
+    from claudlobby.config_plan import ConfigPlanBuilder
+
+    manifests = [case.root / "fleet.yaml", *sorted((case.root / "local").rglob("fleet.yaml"))]
+    selected = {load_fleet(path)[0].name: path for path in manifests}
+    builder = ConfigPlanBuilder(case.root, tuple(selected),
+                                effects={"fleet_manifests": {}, "fleet_sources": {}, "units": []})
+    for fleet, manifest in selected.items():
+        projects = manifest.parent / "projects.yaml"
+        builder.effects["fleet_manifests"][fleet] = str(manifest)
+        builder.effects["fleet_sources"][fleet] = {
+            "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
+            "projects": {"path": str(projects), "sha256": builder.input_content(projects)}}
+    rendered = builder.freeze(case.package.source_revision)
+    path = case.root / "state/config.json"
+    previous = json.loads(path.read_text())["fingerprint"] if path.exists() else None
+    snapshot = snapshot_from_plan(rendered, case.package.installation, case.package.source_revision)
+    publish_current_config(snapshot, installation=case.package.installation, expected_previous=previous)
+    import shutil
+    shutil.rmtree(rendered.directory)
+
+
+@pytest.fixture
+def staging_case(source_staging_case):
+    _commit(source_staging_case)
+    return source_staging_case
 
 
 def _call(capsys, root, *operation, expected=0):
@@ -51,6 +84,7 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     composer.write_manifest_provenance(loaded.fleet, case.paths)
     worker_dir = case.paths.bot_runtime("primary-worker")
     _write(worker_dir / ".mcp.json", '{"mcpServers":{"private":{"env":{"TOKEN":"SECRET-orientation-mcp"}}}}')
+    _commit(case)
     before = _tree(case.root)
 
     shown = _call(capsys, case.root, "context", "show", "--bot", "primary-worker")["context"]
@@ -107,6 +141,88 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     assert "line " in json.loads(captured.out)["error"]["hint"]
 
 
+_ASKED = "Bash(echo SECRET-orientation-ask)"
+_ASKED_DIGEST = hashlib.sha256(_ASKED.encode()).hexdigest()
+
+
+def _stage_skill_asking(case, *rules):
+    """Rewrite the staged skill so that it declares ``rules`` as ask_grants (#2476)."""
+    asks = ("ask_grants:\n" + "".join(f'  - "{rule}"\n' for rule in rules)) if rules else ""
+    _write(case.root / "library/skills/stage-skill/SKILL.md",
+           f"---\nname: stage-skill\n{asks}---\n# Stage skill\nUse the attached instructions.\n")
+
+
+def _worker_composed(case, capsys):
+    """Compose the worker's settings as the first test does, then read its `bot capabilities`."""
+    loaded = context.load_context(case.paths)
+    worker = loaded.fleet.bots["primary-worker"]
+    rendered = composer.render_bot_files(worker, loaded.fleet, case.paths,
+                                         boot_delay_s=0, cascade={})
+    _write(case.paths.bot_runtime("primary-worker") / ".claude/settings.local.json",
+           rendered[".claude/settings.local.json"].content)
+    _commit(case)
+    return _call(capsys, case.root, "bot", "capabilities",
+                 "primary-worker")["bot"]["permissions"]["composed"]
+
+
+def test_capabilities_lists_the_composed_ask_rules_as_digests_beside_allow_and_deny(
+        staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    _stage_skill_asking(case, _ASKED)
+
+    composed = _worker_composed(case, capsys)
+
+    assert composed["ask"] == [{"tool": "Bash", "sha256": _ASKED_DIGEST}]
+    assert _ASKED_DIGEST not in [item["sha256"] for item in composed["allow"]]
+    assert "SECRET-orientation" not in json.dumps(composed)  # the arguments stay withheld
+
+    # The text view counts the ask rules and names their tools, as it does the deny rules.
+    assert main(["--root", str(case.root), "bot", "capabilities", "primary-worker"]) == 0
+    text = capsys.readouterr().out
+    assert f"allow rules, 1 ask rules, {len(composed['deny'])} deny rules." in text
+    assert "Composed ask tools: Bash" in text
+    assert "SECRET-orientation" not in text
+
+
+def test_capabilities_ask_is_empty_when_the_settings_hold_no_ask_key(staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+
+    composed = _worker_composed(case, capsys)
+
+    settings = json.loads((case.paths.bot_runtime("primary-worker")
+                           / ".claude/settings.local.json").read_text())
+    assert "ask" not in settings["permissions"]
+    assert composed["ask"] == []
+    assert composed["allow"] and composed["deny"]  # a composed file, not an absent one
+
+
+def test_capabilities_does_not_flag_a_fleet_grant_of_a_rule_a_skill_asks_about(
+        staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    doc = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    doc["fleet"]["bots"]["primary-worker"]["tool_permissions"]["allow"].append(_ASKED)
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+
+    def finding_kinds(composed):
+        return [item["kind"] for item in composed["provenance_findings"]
+                if item["rule"]["sha256"] == _ASKED_DIGEST]
+
+    # No skill asks about the rule: the fleet's grant is drift, as before.
+    _stage_skill_asking(case)
+    composed = _worker_composed(case, capsys)
+    assert finding_kinds(composed) == ["unsourced_grant"]
+    # A skill asks about it: the fleet's grant is how it is granted. The rule is
+    # allowed, no longer asked, and nothing is flagged.
+    _stage_skill_asking(case, _ASKED)
+    composed = _worker_composed(case, capsys)
+    assert finding_kinds(composed) == []
+    assert composed["ask"] == []
+    assert _ASKED_DIGEST in [item["sha256"] for item in composed["allow"]]
+
+
 def test_generated_context_defaults_are_explicit_and_never_replace_bad_identity(staging_case, monkeypatch, capsys):
     case = staging_case
     monkeypatch.setattr(context, "get_resources", lambda: case.package)
@@ -116,6 +232,7 @@ def test_generated_context_defaults_are_explicit_and_never_replace_bad_identity(
     assert json.loads(captured.out)["error"]["code"] == "invalid_argument"
     assert "SECRET-orientation" not in captured.out + captured.err
     paths = _fleet(case.root, case.root / "local/system/local-fleet", "local-fleet", case.package)
+    _commit(case)
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(case.root))
     monkeypatch.setenv("FLEET_NAME", "local-fleet")
     monkeypatch.setenv("BOT_ID", "local-fleet-worker")
@@ -216,3 +333,67 @@ def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_cas
     unknown = _call(capsys, case.root, "context", "show")["context"]["registry"]
     assert unknown["state"] == "unreadable"
     assert unknown["entity_count"] is None and unknown["entity_counts_by_type"] is None
+
+
+_REFUSING = (("config", "validate"),
+             ("context", "show", "--bot", "secondary-manager"))
+
+
+@pytest.mark.parametrize("content, says", [
+    (b"", "(0 bytes)"),
+    (b"\n \t\n", "holds no YAML document"),
+    (b"# retired fleet\n", "holds no YAML document"),
+], ids=["zero-bytes", "whitespace-only", "comment-only"])
+def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, monkeypatch, capsys,
+                                                                 content, says):
+    # #2267: an empty manifest names the file and why, at the same rc, and is left untouched.
+    monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
+    manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
+                      staging_case.package).fleet_yaml
+    _commit(staging_case)
+    manifest.write_bytes(content)
+    for operation in _REFUSING:
+        assert main(["--root", str(staging_case.root), "--json", "--fleet", "secondary", *operation]) == 4
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert error["code"] == "conflict"
+        assert str(manifest) in error["message"] and says in error["message"]
+        if content:
+            assert f"({len(content)} bytes" in error["message"]
+        assert "last good copy" in error["hint"]
+        assert (f"git -C {shlex.quote(str(manifest.parent))} log -- fleet.yaml"
+                in error["hint"])
+    assert manifest.read_bytes() == content
+    status = _call(capsys, staging_case.root, "--fleet", "secondary", "fleet", "status")
+    assert {row["name"] for row in status["bots"]} == {"secondary-manager", "secondary-worker"}
+    # A root with a space stays one argument in the suggested command.
+    spaced = Path("/tmp/data team/local/secondary/fleet.yaml")
+    assert "git -C '/tmp/data team/local/secondary' log -- fleet.yaml" in str(
+        empty_fleet_conflict(spaced, len(content)).error.hint)
+    odd = Path("/tmp/data/local/secondary/fleet copy.yaml")
+    assert "log -- 'fleet copy.yaml'" in str(empty_fleet_conflict(odd, 0).error.hint)
+
+
+@pytest.mark.parametrize("content", [
+    b"fleets:\n  token: SECRET-orientation-planted\n",
+    b"--- # SECRET-orientation-planted\n",
+    b"fleet:\n  name: \xff\xfeSECRET-orientation-planted\n",
+], ids=["malformed-mapping", "null-document", "invalid-encoding"])
+def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monkeypatch, capsys, content):
+    monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
+    manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
+                      staging_case.package).fleet_yaml
+    _commit(staging_case)
+    manifest.write_bytes(content)
+    generic = {"config": "selected fleet configuration is invalid",
+               "fleet": "context selectors or fleet configuration are invalid",
+               "context": "context selectors or fleet configuration are invalid"}
+    for operation in _REFUSING:
+        assert main(["--root", str(staging_case.root), "--json", "--fleet", "secondary", *operation]) == 4
+        captured = capsys.readouterr()
+        assert "SECRET-orientation" not in captured.out + captured.err
+        error = json.loads(captured.out)["error"]
+        assert error["code"] == "conflict" and error["message"] == generic[operation[0]]
+        assert "last good copy" not in str(error["hint"])
+    assert manifest.read_bytes() == content
+    status = _call(capsys, staging_case.root, "--fleet", "secondary", "fleet", "status")
+    assert {row["name"] for row in status["bots"]} == {"secondary-manager", "secondary-worker"}

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 from claudlobby.config import load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 
 
@@ -104,7 +104,8 @@ class TestSeedPaths:
         """Selecting a seed does not move writable source into the package."""
         paths = Paths(root=tmp_path, seed=True, package=source_package())
         assert paths.overlay_library == tmp_path / "library"
-        assert paths.overlay_voices == tmp_path / "voices"
+        assert paths.overlay_voices == tmp_path / "library" / "voices"
+        assert paths.legacy_overlay_voices == tmp_path / "voices"
         assert paths.base_library == source_package().library
         assert paths.base_voices == source_package().voices
 
@@ -184,12 +185,12 @@ def _setup_seed_tree(tmp_path: Path) -> Paths:
         (skill_dir / "SKILL.md").write_text(
             f"---\ntitle: {s}\ndescription: Skill\n---\n\n# {s}\n\nSkill.\n"
         )
-    # The real `status` skill, not a stub, so its real `tool_grants` are what
-    # a composed claudfather is granted.
-    shutil.copytree(
-        REPO_ROOT / "library" / "skills" / "status",
-        root / "library" / "skills" / "status",
-    )
+    # Preserve real status grants and the universal fleet-ops operating guide.
+    for skill in ("status", "fleet-ops"):
+        shutil.copytree(
+            REPO_ROOT / "library" / "skills" / skill,
+            root / "library" / "skills" / skill,
+        )
 
     # Lesson stubs
     tg_lessons_dir = root / "library" / "lessons" / "telegram"
@@ -223,16 +224,16 @@ def _setup_seed_tree(tmp_path: Path) -> Paths:
     )
 
     # Voices dir + voice stub
-    (root / "voices").mkdir()
-    (root / "voices" / "vito-corleone.md").write_text(
+    (root / "library" / "voices").mkdir(parents=True, exist_ok=True)
+    (root / "library" / "voices" / "vito-corleone.md").write_text(
         "---\nname: Vito Corleone\n---\n\nVoice stub.\n"
     )
 
+    data_root = tmp_path / "data"
     package = replace(
-        source_package(), library=root / "library", voices=root / "voices",
+        git_package(data_root), library=root / "library", voices=root / "library" / "voices",
         templates=root / "templates", seeds=root / "seeds",
     )
-    data_root = tmp_path / "data"
     (data_root / "runtime" / "seed" / "bots").mkdir(parents=True)
     return Paths(root=data_root, seed=True, package=package)
 

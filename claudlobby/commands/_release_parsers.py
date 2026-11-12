@@ -1,7 +1,6 @@
 """Dependency-light registration for release preparation and diagnosis."""
 
 from importlib import import_module
-from uuid import uuid4
 
 from ..command_result import execute
 
@@ -10,14 +9,19 @@ def _dispatch(args):
     return execute(args.public_command,
                    lambda: import_module(".releases", __package__).dispatch(args),
                    json_output=args.json,
-                   request_id=str(uuid4()) if args.public_command == "config.plan" else None)
+                   request_id=None)
 
 
 def _dispatch_host(args):
-    args.activation_id = (getattr(args, "resume", None) or str(uuid4())) if args.public_command == "host.activate" else None
     return execute(args.public_command,
                    lambda: import_module(".host", __package__).dispatch(args),
-                   json_output=args.json, request_id=args.activation_id)
+                   json_output=args.json, request_id=None)
+
+
+def _dispatch_backup(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_backup", __package__).dispatch(args),
+                   json_output=args.json)
 
 
 def _dispatch_doctor(args):
@@ -62,6 +66,12 @@ def _dispatch_host_update(args):
                    json_output=args.json)
 
 
+def _dispatch_host_spec(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_spec", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _dispatch_host_supervision(args):
     return execute(args.public_command,
                    lambda: import_module(".host_supervision", __package__).dispatch(args),
@@ -90,12 +100,31 @@ def _route(sub, name, command, help):
 def register_release_subparsers(sub):
     host = sub.add_parser("host", help="Host release diagnosis and explicit first activation")
     hosts = host.add_subparsers(dest="host_command", required=True)
+    backup = hosts.add_parser("backup", help="Create, inspect or restore an owner-managed private recovery bundle")
+    backups = backup.add_subparsers(dest="backup_command", required=True)
+    for action in ("create", "inspect", "restore"):
+        route = backups.add_parser(action, help=f"{action.capitalize()} an owner-managed backup")
+        route.add_argument("destination" if action == "create" else "bundle", metavar="PATH")
+        route.add_argument("--json", action="store_true", help="One schema-1 result object")
+        if action == "restore":
+            route.add_argument("--replacing-retired-host", action="store_true", required=True,
+                               help="Confirm the original deployment is retired; never clone an active host identity")
+        route.set_defaults(func=_dispatch_backup, public_command=f"host.backup.{action}")
     from ._setup_parsers import register_host_setup
     register_host_setup(hosts)
     from ._host_repos_parsers import register_host_repos
     register_host_repos(hosts)
-    supervision = hosts.add_parser("supervision", help="Inspect selected-fleet supervision cleanup")
+    from ._host_owner_parsers import register_host_owner
+    register_host_owner(hosts)
+    spec = _route(hosts, "spec", "host.spec",
+                  "Read this host's facts, each with its source, and what its OS can enforce; changes nothing")
+    spec.set_defaults(func=_dispatch_host_spec)
+    supervision = hosts.add_parser("supervision", help="Inspect the selected release's supervised units")
     supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
+    failed = supervision_actions.add_parser(
+        "failed", help="List the owned host and fleet units that are failed now; changes nothing")
+    failed.add_argument("--json", action="store_true", help="One schema-1 result object")
+    failed.set_defaults(func=_dispatch_host_supervision, public_command="host.supervision.failed")
     reap = supervision_actions.add_parser("reap-orphans", help="Reap stale units in declared bot directories")
     reap.add_argument("--bot", metavar="BOT", help="Limit to one declared bot")
     mode = reap.add_mutually_exclusive_group(required=True)
@@ -173,47 +202,8 @@ def register_release_subparsers(sub):
     doctor.add_argument("--no-delivery", dest="delivery", action="store_false", default=True,
                         help="Skip repository delivery probes, reporting that evidence as unchecked")
     _route(hosts, "releases", "host.releases", "Verify installed releases and report selection")
-    status = _route(hosts, "status", "host.status", "Inspect recorded host state; running processes are unobserved")
+    status = _route(hosts, "status", "host.status", "Inspect recorded state and passive cold-host prerequisites; no setup effects")
     status.set_defaults(func=_dispatch_host)
-    activate = _route(hosts, "activate", "host.activate", "Activate PLAN_ID from an operator shell")
-    activate.description = ("First activation requires explicit global --root. "
-                            "Use --adopt-existing only for an unsealed, already running estate. "
-                            "--resume ID can fix forward supported recorded bootstrap, pause/quiesce, "
-                            "and candidate-start stages with durable receipts. It never repeats a "
-                            "recorded bot handoff or start; a handoff or start begun without a "
-                            "recorded result requires manual recovery evidence.")
-    activate.set_defaults(func=_dispatch_host)
-    activate.add_argument("plan_id", metavar="PLAN_ID")
-    activate.add_argument("--install-directory", required=True, metavar="PATH",
-                          help="Absolute native user-unit directory; verified against the OS adapter's search paths")
-    activate.add_argument("--adopt-existing", action="store_true",
-                          help="First, forward-only adoption of a reviewed unsealed estate and its existing Plane")
-    activate.add_argument("--resume", metavar="ACTIVATION_ID",
-                          help="Fix forward the same recorded activation at a supported step with required evidence")
-    repair = _route(hosts, "repair-start", "host.repair-start",
-                    "Archive one verified-dead bot's unresolved activation start")
-    repair.description = ("Operator only. Starts nothing. Requires the selected pending bots_started "
-                          "activation, the named bot's start without a result, identical frozen unit "
-                          "bytes and an inactive unit with no private tmux server. The attempt and its "
-                          "evidence stay in the activation record; then run the sealed candidate's "
-                          "host activate --resume once to start that bot again.")
-    repair.set_defaults(func=_dispatch_host)
-    repair.add_argument("repair_activation_id", metavar="ACTIVATION_ID")
-    repair.add_argument("--fleet", dest="repair_fleet", required=True, metavar="FLEET")
-    repair.add_argument("--bot", required=True, metavar="BOT")
-    repair.add_argument("--reason", required=True, metavar="TEXT")
-    abort = _route(hosts, "abort-adoption", "host.abort-adoption",
-                   "Abort an unsealed first adoption stopped while pausing producers")
-    abort.description = ("Operator-only, from a sealed release CLI. Restores only the original producer "
-                         "files and native states of a Linux first adoption with no completed step, "
-                         "handoff, start, selection or migration. Not general rollback: bots, ingest, "
-                         "selection and SQL are untouched.")
-    abort.set_defaults(func=_dispatch_host)
-    abort.add_argument("abort_activation_id", metavar="ACTIVATION_ID")
-    abort.add_argument("--reason", required=True, metavar="TEXT", help="Recorded operator reason")
-    abort.add_argument("--expected-sql-version", required=True, type=int, metavar="INT",
-                       help="Plane user_version from the operator's retained pre-activation preflight")
-
     config = sub.add_parser("config", help="Stage and inspect configuration proposals")
     configs = config.add_subparsers(dest="config_command", required=True)
     explain = configs.add_parser("explain", help="Explain environment tiers or supported fleet/bot scalar sources without values")
@@ -233,22 +223,13 @@ def register_release_subparsers(sub):
                           help="With --warn-baseline, record warning categories to FILE")
     validate.add_argument("--json", action="store_true", help="One schema-1 result object")
     validate.set_defaults(func=_dispatch_config_validate, public_command="config.validate")
-    plan = _route(configs, "plan", "config.plan", "Stage all declared host fleets using a sealed candidate")
-    plan.add_argument("--release", required=True, metavar="ID")
-    plan.add_argument("--fleet-path", action="append", default=[], metavar="PATH",
-                      help="Explicit external fleet directory or fleet.yaml; repeatable")
     diff = _route(configs, "diff", "config.diff", "Inspect staged changes or current rendered drift without secret bytes")
-    diff.add_argument("plan_id", nargs="?", metavar="PLAN_ID",
-                      help="Staged plan to inspect; omit for current rendered drift")
+    diff.add_argument("fingerprint", nargs="?", metavar="FINGERPRINT",
+                      help="Pending Git render fingerprint; omit for committed output drift")
     diff.add_argument("--bot", metavar="BOT", help="Limit current drift to one declared bot")
 
-    migration = sub.add_parser("migration", help="Preview data migration and inspect recorded progress")
+    migration = sub.add_parser("migration", help="Inspect historical migration evidence or run explicit data converters")
     migrations = migration.add_subparsers(dest="migration_command", required=True)
-    plan = _route(migrations, "plan", "migration.plan", "Read-only migration inventory; repeat under quiescence")
-    plan.add_argument("--source-release", required=True, metavar="ID")
-    plan.add_argument("--target-release", required=True, metavar="ID")
-    plan.add_argument("--initialize-empty", action="store_true",
-                      help="Record explicit initialization intent only when both DB and WAL are absent")
     status = _route(migrations, "status", "migration.status", "Actual SQL version and recorded activation evidence")
     status.add_argument("--activation", metavar="ID", help="Inspect one named host activation")
     from ._migration_parsers import register_converter_subparsers

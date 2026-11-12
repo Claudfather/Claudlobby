@@ -4,6 +4,7 @@ import hashlib
 from email.parser import BytesParser
 from importlib import metadata as importlib_metadata
 import json
+import sysconfig
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import sys
 import tarfile
 import zipfile
 
+import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -27,6 +29,270 @@ def _run(args, cwd):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
+
+
+def _source_installation(tmp_path):
+    """A real tiny Git checkout, with no built resource/artifact copies."""
+    from claudlobby.installation import Installation, write_installation
+    installation = Installation(tmp_path / "installation", tmp_path / "persistent-data")
+    source = installation.source
+    for name in ("library/voices", "templates", "claudlobby/_runtime_scripts"):
+        (source / name).mkdir(parents=True, exist_ok=True)
+    for name in ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example", "claudlobby/system.yaml"):
+        (source / name).write_text("fixture\n")
+    for name in ("__init__.py", "resources.py", "installation.py"):
+        shutil.copy2(REPO / "claudlobby" / name, source / "claudlobby" / name)
+    (source / "templates/candidate.txt").write_text("original template\n")
+    (source / "claudlobby/_runtime_scripts/fixture.sh").write_text("#!/bin/sh\nexit 0\n")
+    (source / "library/voices/example.md").write_text("example voice\n")
+    _run(["git", "init", "--quiet", source], tmp_path)
+    # Git 2.47 and later end a commit, fetch or merge by detaching `git maintenance run --auto`,
+    # which still holds .git/objects/maintenance.lock after the command returns. A test that then
+    # deletes this checkout can list that file and find it gone at its unlink (#2717), so no
+    # command in this repository starts that maintenance.
+    _run(["git", "-C", source, "config", "maintenance.auto", "false"], tmp_path)
+    _run(["git", "-C", source, "add", "."], tmp_path)
+    _run(["git", "-C", source, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "-m", "Fixture source"], tmp_path)
+    installation.bin.mkdir()
+    installation.cli.write_text("# fixture launcher\n")
+    installation.data_root.mkdir()
+    write_installation(installation)
+    return installation
+
+
+def test_source_fixture_repository_starts_no_git_maintenance(tmp_path, monkeypatch):
+    """Neither the fixture's commit nor a later one in its repository starts `git maintenance`,
+    which since Git 2.47 outlives the command and races the tests that delete the checkout (#2717)."""
+    trace = tmp_path / "trace2.jsonl"
+    untraced = constructed_env
+    monkeypatch.setattr(sys.modules[__name__], "constructed_env",
+                        lambda **env: untraced(GIT_TRACE2_EVENT=trace, **env))
+    installation = _source_installation(tmp_path)
+    _run(["git", "-C", installation.source, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "--allow-empty", "-m", "Later commit"], tmp_path)
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    commits = [event for event in events if event.get("event") == "start" and "commit" in event["argv"]]
+    assert len(commits) == 2, "the trace must see both commits, or its silence below proves nothing"
+    maintenance = [event["argv"] for event in events if "maintenance" in event.get("argv", [])]
+    assert not maintenance, maintenance
+
+
+def test_source_resources_execute_from_explicit_installation_outside_checkout(tmp_path):
+    installation = _source_installation(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = _run([sys.executable, "-I", "-B", "-c", """
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from claudlobby.installation import read_installation
+from claudlobby.resources import get_resources, selected_cli
+installation = read_installation(pathlib.Path(sys.argv[2]))
+resources = get_resources(installation=installation)
+assert resources.library == installation.source / 'library'
+assert resources.voices == resources.library / 'voices'
+assert resources.templates == installation.source / 'templates'
+assert resources.seeds == installation.source
+assert resources.native == resources.runtime_native == installation.native
+assert resources.runtime_library == installation.source / 'library'
+assert resources.source_revision == installation.preflight()
+assert resources.artifact_id == resources.content_sha256 == ''
+assert selected_cli(installation=installation) == installation.cli
+assert not (installation.source / 'claudlobby/_artifact.json').exists()
+assert not (installation.source / 'claudlobby/_resources').exists()
+print(resources.source_revision)
+""", installation.source, installation.directory], outside)
+    assert output.strip() == installation.preflight()
+
+
+def test_source_installation_preflight_refuses_dirty_and_wrong_revision(tmp_path):
+    from claudlobby.installation import InstallationError
+    installation = _source_installation(tmp_path)
+    revision = installation.preflight()
+    with pytest.raises(InstallationError, match="revision"):
+        installation.preflight(expected_revision="0" * len(revision))
+    template = installation.source / "templates/candidate.txt"
+    template.write_text("operator edit must survive\n")
+    with pytest.raises(InstallationError, match="dirty"):
+        installation.preflight()
+    assert template.read_text() == "operator edit must survive\n"
+    template.write_text("original template\n")
+    (installation.source / "untracked.txt").write_text("untracked work\n")
+    with pytest.raises(InstallationError, match="dirty"):
+        installation.preflight()
+    assert (installation.source / "untracked.txt").read_text() == "untracked work\n"
+
+
+def test_candidate_resources_keep_final_runtime_paths(tmp_path):
+    from claudlobby.resources import get_resources, selected_cli
+    installation = _source_installation(tmp_path)
+    candidate = tmp_path / "candidate"
+    _run(["git", "clone", "--quiet", "--no-hardlinks", installation.source, candidate], tmp_path)
+    (candidate / "templates/candidate.txt").write_text("candidate bytes\n")
+    _run(["git", "-C", candidate, "add", "."], tmp_path)
+    _run(["git", "-C", candidate, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "-m", "Candidate"], tmp_path)
+    resources = get_resources(installation=installation, checkout=candidate)
+    assert (resources.templates / "candidate.txt").read_text() == "candidate bytes\n"
+    assert resources.native == candidate / "claudlobby/_runtime_scripts"
+    assert resources.runtime_native == installation.native
+    assert resources.runtime_library == installation.source / "library"
+    assert resources.source_revision != installation.preflight()
+    rendered_paths = f"{selected_cli(installation=installation)}\n{resources.runtime_native}\n{resources.runtime_library}\n"
+    assert str(candidate) not in rendered_paths
+    assert str(installation.bin) in rendered_paths and str(installation.source) in rendered_paths
+
+
+def test_installation_selection_is_explicit_and_data_stays_separate(tmp_path, monkeypatch):
+    from claudlobby.installation import Installation, InstallationError
+    from claudlobby.resources import get_resources, selected_cli
+    installation = _source_installation(tmp_path)
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
+    monkeypatch.chdir(installation.data_root)
+    assert get_resources().installation == installation
+    assert selected_cli() == installation.cli
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(tmp_path / "missing"))
+    with pytest.raises(InstallationError):
+        get_resources()
+    for directory, data in ((installation.directory, installation.source / "data"),
+                            (installation.data_root / "nested", installation.data_root)):
+        with pytest.raises(InstallationError, match="separate"):
+            Installation(directory, data)
+
+
+def test_source_resource_reads_do_not_scan_dirty_checkout(tmp_path, monkeypatch):
+    import claudlobby.installation as owner
+    from claudlobby.resources import get_resources
+    installation = _source_installation(tmp_path)
+    (installation.source / "untracked.txt").write_text("pending operator work\n")
+    commands = []
+    run = owner.subprocess.run
+    def recorded(argv, **kwargs):
+        commands.append(argv)
+        return run(argv, **kwargs)
+    monkeypatch.setattr(owner.subprocess, "run", recorded)
+    assert get_resources(installation=installation).source_revision
+    assert not any("status" in command for command in commands)
+
+
+def test_installation_record_cannot_rebind_data_or_accept_nested_git_root(tmp_path):
+    from claudlobby.installation import Installation, InstallationError, write_installation
+    installation = _source_installation(tmp_path)
+    with pytest.raises(InstallationError, match="another data root"):
+        write_installation(Installation(installation.directory, tmp_path / "other-data"))
+    # Git's parent search must not silently accept a directory inside a repo.
+    nested = Installation(installation.source / "nested-installation", tmp_path / "other-data")
+    nested.source.mkdir(parents=True)
+    with pytest.raises(InstallationError, match="exact Git checkout root"):
+        nested.preflight()
+
+
+def test_source_resources_refuse_unbound_candidate_and_escaping_resources(tmp_path):
+    from claudlobby.installation import InstallationError
+    from claudlobby.resources import get_resources
+    installation = _source_installation(tmp_path)
+    with pytest.raises(InstallationError, match="explicit installation"):
+        get_resources(checkout=installation.source)
+    templates = installation.source / "templates"
+    shutil.rmtree(templates)
+    outside = tmp_path / "foreign-templates"
+    outside.mkdir()
+    templates.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(InstallationError, match="resources are incomplete"):
+        get_resources(installation=installation)
+
+
+def _stable_launcher(tmp_path):
+    from claudlobby.installation import install_launcher
+    installation = _source_installation(tmp_path)
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    return installation
+
+
+def test_stable_launcher_requires_explicit_host_interpreter(tmp_path):
+    from claudlobby.installation import InstallationError, install_launcher
+    installation = _source_installation(tmp_path)
+    with pytest.raises(InstallationError, match="absolute host Python"):
+        install_launcher(installation, interpreter=Path("python3"))
+    assert installation.cli.read_text() == "# fixture launcher\n"
+
+
+def _launch(installation, *args, **env):
+    return subprocess.run([str(installation.cli), *map(str, args)], cwd=installation.data_root,
+                          env=constructed_env(**env), capture_output=True, text=True, timeout=30)
+
+
+def test_stable_launcher_executes_actual_source_cli_without_resource_copies(tmp_path):
+    installation = _stable_launcher(tmp_path)
+    shutil.copytree(REPO / "claudlobby", installation.source / "claudlobby", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("_artifact.json", "_resources", "__pycache__"))
+    (installation.source / "claudlobby/__init__.py").write_text('__version__ = "source-fixture"\n')
+    _run([sys.executable, "-m", "venv", "--without-pip", installation.environment], tmp_path)
+    purelib = Path(_run([installation.environment / "bin/python", "-c",
+                        "import sysconfig; print(sysconfig.get_path('purelib'))"], tmp_path).strip())
+    # Reuse the already installed test dependencies, without an installer/network.
+    (purelib / "test-dependencies.pth").write_text(sysconfig.get_path("purelib") + "\n")
+    outcome = _launch(installation, "--version")
+    assert outcome.returncode == 0, outcome.stderr
+    assert outcome.stdout == "claudlobby source-fixture\n"
+    assert not (installation.source / "claudlobby/_artifact.json").exists()
+    assert not (installation.source / "claudlobby/_resources").exists()
+    (installation.data_root / "state").mkdir(exist_ok=True)
+    (installation.data_root / "state/update.json").write_text('{"schema":1,"maintenance":false,"phase":"saving"}')
+    # Quiescing bots still need the CLI until the updater raises maintenance.
+    assert _launch(installation, "--version").stdout == "claudlobby source-fixture\n"
+
+
+@pytest.mark.parametrize("record", [
+    {"schema": 1, "maintenance": True, "phase": "stopping"},
+    {"schema": 2, "maintenance": False, "phase": "complete"},
+    {"schema": 1, "phase": "complete"},
+    {"schema": 1, "maintenance": 0, "phase": "complete"},
+    "not-json",
+])
+def test_stable_launcher_fences_before_loading_missing_source_or_environment(tmp_path, record):
+    installation = _stable_launcher(tmp_path)
+    (installation.data_root / "state").mkdir(exist_ok=True)
+    (installation.data_root / "state/update.json").write_text(record if isinstance(record, str) else json.dumps(record))
+    shutil.rmtree(installation.source)
+    outcome = _launch(installation, "--version")
+    assert outcome.returncode != 0
+    assert "maintenance" in outcome.stderr and "Traceback" not in outcome.stderr
+    assert not outcome.stdout
+
+
+def test_stable_launcher_rejects_wrong_root_before_import(tmp_path):
+    installation = _stable_launcher(tmp_path)
+    other = tmp_path / "other-data"
+    for args, env in ((("--root", other, "--version"), {}),
+                      ((f"--root={other}", "--version"), {}),
+                      (("--roo", other, "--version"), {}),
+                      (("--version",), {"CLAUDLOBBY_ROOT": str(other)})):
+        outcome = _launch(installation, *args, **env)
+        assert outcome.returncode != 0 and "data root" in outcome.stderr
+        assert "Traceback" not in outcome.stderr
+
+
+@pytest.mark.parametrize("prefix", [(), ("--json",), ("--j",), ("--fl", "example"),
+                                    ("--fl=example",), ("--verb",), ("--se",)],
+                         ids=["plain", "json", "json-prefix", "fleet-prefix", "inline-fleet-prefix",
+                              "verbose-prefix", "seed-prefix"])
+def test_stable_launcher_update_route_is_independent_and_never_falls_back(tmp_path, prefix):
+    installation = _stable_launcher(tmp_path)
+    missing = _launch(installation, *prefix, "host", "update", "status")
+    assert missing.returncode != 0 and "updater is unavailable" in missing.stderr
+    updater = installation.bin / "claudlobby-update"
+    updater.write_text(f"#!{Path(sys.executable).resolve()}\nimport sys\nprint('independent update ' + sys.argv[-1])\n")
+    updater.chmod(0o755)
+    shutil.rmtree(installation.source)
+    (installation.data_root / "state").mkdir(exist_ok=True)
+    (installation.data_root / "state/update.json").write_text('{"schema":1,"maintenance":true,"phase":"cutover"}')
+    outcome = _launch(installation, *prefix, "host", "update", "status")
+    assert outcome.returncode == 0 and outcome.stdout == "independent update status\n"
+    for action in ("runtime", "siblings"):
+        outcome = _launch(installation, *prefix, "host", "update", action)
+        assert outcome.returncode != 0 and "maintenance" in outcome.stderr
+        assert "independent update" not in outcome.stdout
 
 
 def _wheel_payload(path):
@@ -108,7 +374,7 @@ def _copy_installed_dependencies(wheel, installed):
 def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    for directory in ("claudlobby", "library", "voices", "templates", "missions"):
+    for directory in ("claudlobby", "library", "templates", "missions", "examples"):
         shutil.copytree(REPO / directory, source / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_artifact.json", "_resources"))
     for name in ("pyproject.toml", "setup.py", "README.md", ".gitignore", "fleet.yaml.seed", "fleet.yaml.example",
@@ -116,15 +382,19 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         shutil.copy2(REPO / name, source / name)
     removed_module = source / "claudlobby/_removed_for_build_smoke.py"
     removed_module.write_text("REMOVED_BUILD_SMOKE = True\n")
-    # A private index proves authored inputs without a commit, remote or identity.
+    # A private local revision lets the real bundle consumer validate its wheel identity.
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
+    assert "examples/teams/revenue-web-app/fleet.yaml" in _run(["git", "ls-files"], source).splitlines()
+    _run(["git", "-c", "user.name=Build fixture", "-c", "user.email=fixture@example.invalid",
+          "commit", "--quiet", "-m", "Record isolated package fixture"], source)
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
-               "claudlobby/_runtime_scripts/fleet-state.json")
+               "claudlobby/_runtime_scripts/fleet-state.json", "examples/teams/private/fleet.yaml")
     for name in ignored:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("PRIVATE-OPERATOR-FIXTURE-DO-NOT-PACKAGE\n")
+    assert _run(["git", "check-ignore", "examples/teams/private/fleet.yaml"], source).strip() == "examples/teams/private/fleet.yaml"
 
     before_removal = tmp_path / "before-removal"
     _run([sys.executable, "-m", "build", "--no-isolation", "--wheel",
@@ -148,7 +418,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
 
     source_inputs = {source / "setup.py", source / "pyproject.toml"}
     # Assert complete base assets, not just a sentinel file in each directory.
-    for directory in ("library", "voices", "templates"):
+    for directory in ("library", "templates"):
         expected = {path.relative_to(source).as_posix(): path for path in
                     (source / directory).rglob("*") if path.is_file()
                     and path.relative_to(source).as_posix() not in ignored}
@@ -159,8 +429,11 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
         for name, path in expected.items():
             assert payload[prefix + name] == (path.read_bytes(), path.stat().st_mode & 0o111)
         source_inputs.update(expected.values())
+    # Voices are library content (#2150): they ship there and nowhere else.
+    assert "claudlobby/_resources/library/voices/vito-corleone.md" in payload
+    assert not any(name.startswith("claudlobby/_resources/voices/") for name in payload)
     for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
-                 "missions/fleet.md.seed"):
+                 "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()
         source_inputs.add(source / name)
     assert payload["claudlobby/system.yaml"][0] == (source / "claudlobby/system.yaml").read_bytes()
@@ -197,7 +470,9 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
                   hashlib.sha256(path.read_bytes()).hexdigest()]
         digest.update((json.dumps(record, separators=(",", ":")) + "\n").encode())
     assert metadata["content_sha256"] == digest.hexdigest()
-    assert metadata["artifact_id"] == "source-" + digest.hexdigest()
+    revision = _run(["git", "rev-parse", "HEAD"], source).strip()
+    assert metadata["source_revision"] == revision
+    assert metadata["artifact_id"] == revision + "-" + digest.hexdigest()
     assert "release_id" not in metadata
     assert not set(metadata["resource_sources"]).intersection(ignored)
     with tarfile.open(next(rebuilt.glob("*.tar.gz"))) as archive:
@@ -246,6 +521,7 @@ assert r.native.is_relative_to(pathlib.Path(sys.argv[1]).resolve())
 assert (r.native / 'git-credential-github-app').stat().st_mode & 0o111
 assert (r.seeds / '.env.seed.example').is_file()
 assert (r.seeds / 'missions/fleet.md.seed').is_file()
+assert (r.seeds / 'examples/teams/revenue-web-app/fleet.yaml').is_file()
 assert not {'yaml', 'jinja2', 'pydantic'} & sys.modules.keys()
 assert not hasattr(r, 'release_id')
 print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha256}))
@@ -253,6 +529,22 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
     installed_identity = json.loads(_run(
         [python, "-I", "-S", "-B", "-c", script, installed], tmp_path))
     assert installed_identity == {key: metadata[key] for key in installed_identity}
+    # The installed consumer works with the source tree unavailable, not by
+    # resolving a nearby repository recipe.
+    _run([python, "-I", "-B", "-c", """
+from pathlib import Path
+from claudlobby.commands.setup import _template_config
+from claudlobby.config import load_fleet_snapshot
+content = _template_config('revenue-web-app', 'shop', 'example-org/shop', 'Improve checkout tests')
+fleet, _ = load_fleet_snapshot(Path('/unused/fleet.yaml'), content, None)
+assert fleet.name == 'shop' and fleet.service_prefix == 'com.claudlobby.shop'
+assert set(fleet.bots) == {'lead', 'engineer', 'reviewer'}
+assert all(bot.scope.repos == ['example-org/shop'] for bot in fleet.bots.values())
+assert 'Improve checkout tests' in fleet.mission
+assert all(not bot.channels and not bot.remote_control for bot in fleet.bots.values())
+"""], tmp_path)
+    template_help = _run([cli, "fleet", "setup", "--help"], tmp_path)
+    assert "--template {revenue-web-app}" in template_help and "--repository OWNER/REPO" in template_help
 
     data, outside = tmp_path / "data", tmp_path / "outside"
     data.mkdir()
@@ -283,10 +575,14 @@ print(json.dumps({'artifact_id': r.artifact_id, 'content_sha256': r.content_sha2
     # No sys.path or resource injection: these imports must come from the
     # installed wheel while the working directory and data root are unrelated.
     _run([python, "-I", "-B", "-c", """
-import importlib.metadata, pathlib, plistlib, shlex, sys
+import importlib.metadata, pathlib, sys
 import claudlobby
+from claudlobby.activation_state import ActivationError
 from claudlobby.context import resolve_context
 from claudlobby.composer import compose_fleet
+from claudlobby.plane.owner_access import VerifiedReader
+from claudlobby.plane.owner_messages import OwnerMessages
+assert "starlette" not in sys.modules
 from claudlobby.resources import get_resources, selected_cli
 root, package, cli = map(pathlib.Path, sys.argv[1:4])
 assert pathlib.Path(claudlobby.__file__).resolve().parent == package.resolve()
@@ -301,20 +597,17 @@ assert context.paths.package == resources
 assert context.fleet.manager == 'manager'
 assert all(bot.channels == [] for bot in context.fleet.bots.values())
 assert context.paths.find_library_file('expertise', 'orchestration') == resources.library / 'expertise/orchestration.md'
-outputs = compose_fleet(context.fleet, context.paths)
-assert set(outputs) == {'manager', 'worker'}
-for bot_id, directory in outputs.items():
-    assert directory.is_relative_to(root)
-    assert (directory / 'CLAUDE.md').stat().st_size > 0
-    conf = (directory / 'bot.conf').read_text()
-    for key, value in {'CLAUDLOBBY_ROOT': root, 'CLAUDLOBBY_NATIVE_DIR': resources.native,
-                       'CLAUDLOBBY_CLI': cli}.items():
-        assert f'export {key}={shlex.quote(str(value))}' in conf
-    unit = plistlib.loads((directory / f'com.installed-smoke.{bot_id}.plist').read_bytes())
-    assert unit['ProgramArguments'] == [str(resources.native / 'start-bot.sh'), str(directory)]
-    assert unit['EnvironmentVariables']['CLAUDLOBBY_CLI'] == str(cli)
-    assert unit['EnvironmentVariables']['CLAUDLOBBY_ROOT'] == str(root)
-assert (outputs['worker'] / '.claude/skills/installed-smoke').resolve() == root / 'library/skills/installed-smoke'
+# Wheel resources still support inspection and authoring, but cannot create a
+# second native runtime outside the managed Git installation.
+try:
+    compose_fleet(context.fleet, context.paths)
+except ActivationError as error:
+    assert str(error) == 'native unit generation requires a managed Git installation'
+else:
+    raise AssertionError('wheel-only composition admitted a native runtime')
+assert not list(context.paths.runtime_bots.rglob('bot.conf'))
+assert not list(context.paths.runtime_bots.rglob('*.plist'))
+assert not list(context.paths.runtime_bots.rglob('*.service'))
 """, data, package, cli, *dependencies], outside)
     assert _asset_hashes(package) == immutable_before
     assert not any((data / name).exists() for name in (".git", "pyproject.toml", "claudlobby", "lib"))

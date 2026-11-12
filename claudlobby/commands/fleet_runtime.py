@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
+from .bot_runtime import failure_cause, lifecycle_notes, native_state_refusal
 
 
 def dispatch(args) -> CommandOutput:
@@ -16,7 +18,6 @@ def dispatch(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from ..supervision_inventory import InventoryError
 
     action = args.public_command.removeprefix("fleet.")
@@ -41,7 +42,7 @@ def dispatch(args) -> CommandOutput:
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "tick": "completed", "bot_health": "not_asserted",
                     "summary_path": str(result.summary_path), "summary": result.summary,
-                    "stderr_tail": result.stderr_tail}
+                    "stderr_tail": result.stderr_tail, **runtime_provenance(result)}
             lines = (f"{result.fleet}: pulse tick completed; inspect the summary and events "
                      "for bot health.", result.summary.rstrip())
         elif action == "reload":
@@ -55,14 +56,14 @@ def dispatch(args) -> CommandOutput:
                     "plugins_refreshed": list(result.plugins_refreshed),
                     "bots_marked": list(result.bots_marked),
                     "bots_marked_count": len(result.bots_marked),
-                    "configuration_changed": False, "enrollment_changed": False}
+                    "configuration_changed": False, "enrollment_changed": False, **runtime_provenance(result)}
             lines = (f"{result.fleet}: refreshed {len(result.plugins_refreshed)} plugin(s); "
                      f"marked {len(result.bots_marked)} running bot(s) for idle reload.",)
         elif action == "reconcile":
             result = reconcile_fleet(root=root, fleet=args.fleet)
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "bots": [asdict(bot) for bot in result.bots],
-                    "source": "selected configuration and native inventory"}
+                    "source": "selected configuration and native inventory", **runtime_provenance(result)}
             lines = tuple(f"{result.fleet}/{bot.bot}: {bot.state} "
                           f"(declared={bot.declared}, enrolled={bot.enrolled}, "
                           f"native={bot.native_active}, session={bot.session})"
@@ -72,24 +73,30 @@ def dispatch(args) -> CommandOutput:
                                        workers_only=bool(getattr(args, "workers", False)))
             data = {"fleet": result.fleet, "release_id": result.release_id,
                     "requested": result.action, "workers_only": result.workers_only,
-                    "completed": [asdict(bot) for bot in result.completed], "failed_bot": None}
-            lines = tuple(f"{bot.fleet}/{bot.bot}: {bot.state}; readiness={bot.readiness}"
-                          for bot in result.completed)
+                    "completed": [asdict(bot) for bot in result.completed], "failed_bot": None, **runtime_provenance(result)}
+            # under each bot, what bot start or stop prints about its record (#2243)
+            lines = tuple(line for bot in result.completed for line in (
+                f"{bot.fleet}/{bot.bot}: {bot.state}; readiness={bot.readiness}",
+                *(f"{bot.fleet}/{bot.bot}: {note}" for note in lifecycle_notes(bot))))
         return CommandOutput(data, release_id=result.release_id, lines=lines)
     except FleetLifecycleError as exc:
         data["completed"] = [asdict(bot) for bot in exc.completed]
         data["failed_bot"] = exc.bot
         data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
         data["release_id"] = exc.release_id
+        data.update(runtime_provenance(exc))
+        message = str(exc)
+        if isinstance(exc.__cause__, (InventoryError, OSError)):
+            # A bot's native read failed inside the sweep or the reconciliation, which
+            # wrap the failure: name it, as bot start, stop and restart do (#2487).
+            data["cause"] = failure_cause(exc.__cause__)
+            message = f"{message}: {data['cause']}"
         raise CommandFailure("unavailable" if exc.effect_attempted or exc.unavailable else "conflict",
-                             str(exc), data=data, release_id=exc.release_id,
+                             message, data=data, release_id=exc.release_id,
                              hint="inspect the failed bot before resuming the remaining sweep"
                              if exc.bot else None) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet root or selector", data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "fleet operation requires the selected executable and release",
-                             data=data) from exc
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected fleet release differs from this executable",
                              data=data) from exc
@@ -97,4 +104,4 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("conflict", "selected fleet configuration or activation is incomplete",
                              data=data) from exc
     except (InventoryError, OSError) as exc:
-        raise CommandFailure("unavailable", "fleet native state cannot be established", data=data) from exc
+        raise native_state_refusal("fleet", exc, data) from exc

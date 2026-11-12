@@ -204,22 +204,32 @@ PY2
 # --- the DELIVERY door, for scenario 5 --------------------------------------
 # The managers are the input-box stand-in, not bare `sleep` panes: a push presses
 # Enter only once the box shows it (#1236), and a pane that draws no box is,
-# correctly, never submitted to. Fresh sessions per arm rather than clearing
-# between them: `clear-history` only drops scrollback, so a "cleared" pane still
-# shows the previous arm's push and the next count reads as a false positive
-# (rehearse-debounce-recipient.sh hit exactly this).
+# correctly, never submitted to. A fresh session per arm, each logging what it is
+# submitted (--log, emptied at each start): a push is counted from that log, never
+# from the pane, which also shows a push typed and not submitted, and the tty's
+# echo of keys typed before the stand-in read them (#2139). Each starts through
+# lib-common's harness_box_up, which returns once its box is drawn, since keys
+# typed before that are lost, and the previous one stops through
+# harness_box_down, which waits for its server to be gone, since a start that
+# reaches the exiting server fails (#2405). lib-common is sourced in a subshell
+# only, since sourcing it arms set -e and its own EXIT trap.
 MGR_BOX="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
-mgr_panes_up() {
-    tmux -L "$DECOY_SOCK"  kill-server 2>/dev/null || true
-    tmux -L "$TARGET_SOCK" kill-server 2>/dev/null || true
-    tmux -L "$DECOY_SOCK"  new-session -d -s decoy-mgr  "$MGR_BOX" 2>/dev/null || return 1
-    tmux -L "$TARGET_SOCK" new-session -d -s target-mgr "$MGR_BOX" 2>/dev/null || return 1
+mgr_up() {   # <socket> <session>: prints why it did not come up
+    (
+        # shellcheck source=/dev/null
+        . "$LIB_DIR/lib-common.sh"
+        harness_box_down "$1" "$2" || true
+        : > "$WS/$2.log"
+        got=$(harness_box_up "$1" "$2" "$MGR_BOX --log $(printf '%q' "$WS/$2.log")") \
+            || { printf '%s: %s' "$2" "$got"; exit 1; }
+    )
 }
-# How many FLEET-ALERT pushes landed in one manager's pane. Anchored on the short
-# prefix, never the whole line: the pane wraps at its width, so the reason text is
-# split across rows and a long-string grep would miss a push that did arrive.
-alerts_in() {   # <socket> <session> -> count
-    tmux -L "$1" capture-pane -t "$2" -p 2>/dev/null | grep -c 'FLEET-ALERT' || true
+mgr_panes_up() {
+    mgr_up "$DECOY_SOCK" decoy-mgr && mgr_up "$TARGET_SOCK" target-mgr
+}
+# How many FLEET-ALERT pushes one manager was submitted: one log line per submit.
+alerts_in() {   # <session> -> count
+    grep -c 'FLEET-ALERT' "$WS/$1.log" 2>/dev/null || true
 }
 
 echo "rehearse-vault-sync: throwaway root at $ROOT"
@@ -326,10 +336,10 @@ else
     rm -f "$ROOT"/state/vault-sync/*.last
     stub_claudron '{"ok": false, "error": "refusing to sync: a rebase is stopped part-way"}' 1
     before_seq="$(plane_seq)"
-    if mgr_panes_up; then
+    if why="$(mgr_panes_up)"; then
         run_job "target-mgr"          # declare the TARGET fleet's manager
-        a_target="$(alerts_in "$TARGET_SOCK" target-mgr)"
-        a_decoy="$(alerts_in "$DECOY_SOCK" decoy-mgr)"
+        a_target="$(alerts_in target-mgr)"
+        a_decoy="$(alerts_in decoy-mgr)"
         a_origin="$(recipient_field origin "$before_seq")"
         [ "$a_target" -ge 1 ] \
             && ok "arm A: the alert reached '$TARGET_FLEET'/target-mgr — the DECLARED recipient" \
@@ -350,7 +360,7 @@ else
             && ok "arm A: and disclosed nothing — a declared recipient is self-clearing (#1517)" \
             || bad "arm A: a declared recipient disclosed origin='$a_origin' — the self-clearing property is broken"
     else
-        bad "arm A: the manager sessions would not start — the routing check DID NOT RUN"
+        bad "arm A: the manager sessions would not start ($why) — the routing check DID NOT RUN"
     fi
 
     # --- arm B: nothing declared — the control ------------------------------
@@ -360,10 +370,10 @@ else
     # be present, and vice versa.
     rm -f "$ROOT"/state/vault-sync/*.last
     before_seq="$(plane_seq)"
-    if mgr_panes_up; then
+    if why="$(mgr_panes_up)"; then
         run_job                       # nothing declared
-        b_decoy="$(alerts_in "$DECOY_SOCK" decoy-mgr)"
-        b_target="$(alerts_in "$TARGET_SOCK" target-mgr)"
+        b_decoy="$(alerts_in decoy-mgr)"
+        b_target="$(alerts_in target-mgr)"
         b_origin="$(recipient_field origin "$before_seq")"
         b_fleet="$(recipient_field manager_fleet "$before_seq")"
         b_cands="$(recipient_field candidate_fleets "$before_seq")"
@@ -383,7 +393,7 @@ else
             && ok "arm B: out of $b_cands candidate fleets — a genuine choice, not a single option" \
             || bad "arm B: ${b_cands:-0} candidate fleet(s) — with fewer than 2 nothing here separates lexical-first from correct resolution"
     else
-        bad "arm B: the manager sessions would not start — arm A's control DID NOT RUN"
+        bad "arm B: the manager sessions would not start ($why) — arm A's control DID NOT RUN"
     fi
 fi
 echo

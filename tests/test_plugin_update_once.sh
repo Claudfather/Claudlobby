@@ -198,6 +198,49 @@ assert_eq "epoch unresolvable: the unavailable line is logged" "true" \
     "$(log_has "PLUGIN update-once unavailable (boot epoch unresolvable)")"
 assert_eq "epoch unresolvable: no stamp directory is even created" "false" "$(exists "$CLAUDLOBBY_ROOT/state/boot")"
 
+# Read-only policy uses the selected account, never the unrelated HOME registry.
+_reset_plugin_state
+export CLAUDE_CONFIG_DIR="$T/selected-account"
+mkdir -p "$CLAUDE_CONFIG_DIR/plugins" "$T/plugin/.claude-plugin"
+printf '{"name":"theplugin"}\n' > "$T/plugin/.claude-plugin/plugin.json"
+printf '{"version":2,"plugins":{"%s":[{"scope":"user","installPath":"%s"}]}}\n' \
+    "$PLUGIN_REF" "$T/plugin" > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json"
+_verify_python="$(command -v python3)"
+plugin_verify_required "$_verify_python" "$PLUGIN_REF" "$T/bot"
+assert_eq "verify-existing: installed artifact accepted" "0" "$?"
+assert_eq "verify-existing: no plugin manager call" "0" "$(wc -l < "$CLAUDE_ARGV_LOG" | tr -d ' ')"
+assert_eq "verify-existing: no boot stamp written" "false" "$(exists "$CLAUDLOBBY_ROOT/state/boot")"
+rm "$T/plugin/.claude-plugin/plugin.json"
+_verify_rc=0
+plugin_verify_required "$_verify_python" "$PLUGIN_REF" "$T/bot" 2> "$T/refusal" || _verify_rc=$?
+assert_eq "verify-existing: missing artifact refuses" "3" "$_verify_rc"
+printf '{"plugins":{}}\n' > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json"
+_verify_rc=0
+plugin_verify_required "$_verify_python" "$PLUGIN_REF" "$T/bot" 2> "$T/refusal" || _verify_rc=$?
+assert_eq "verify-existing: missing selected plugin refuses despite HOME install" "3" "$_verify_rc"
+printf 'not-json\n' > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json"
+_verify_rc=0
+plugin_verify_required "$_verify_python" "$PLUGIN_REF" "$T/bot" 2> "$T/refusal" || _verify_rc=$?
+assert_eq "verify-existing: unreadable registry refuses" "3" "$_verify_rc"
+assert_eq "verify-existing: refusals never install or update" "0" "$(wc -l < "$CLAUDE_ARGV_LOG" | tr -d ' ')"
+
+# Exercise the actual pane command after its environment file restores an
+# inherited sync flag. Manage keeps it; verify-existing must remove it.
+cat > "$T/bin/check-sync" <<'EOF'
+#!/bin/bash
+printf '%s' "${CLAUDE_CODE_SYNC_PLUGIN_INSTALL-unset}"
+EOF
+chmod +x "$T/bin/check-sync"
+BOT_ENV_FILE="$T/pane-env"
+CLAUDE="$T/bin/check-sync"
+CLAUDE_FLAGS=""
+SESSION_NAME=test
+eval "$(grep '^CLAUDE_CMD=' "$LIB_DIR/start-bot.sh")"
+printf 'export CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1\nexport FLEET_PLUGIN_STARTUP_POLICY=verify-existing\n' > "$BOT_ENV_FILE"
+assert_eq "verify-existing: actual exec unsets sync restored by pane env" "unset" "$(/bin/bash -c "$CLAUDE_CMD")"
+printf 'export CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1\nexport FLEET_PLUGIN_STARTUP_POLICY=manage\n' > "$BOT_ENV_FILE"
+assert_eq "manage: actual exec retains sync from pane env" "1" "$(/bin/bash -c "$CLAUDE_CMD")"
+
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1

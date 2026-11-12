@@ -1,6 +1,6 @@
 ---
 name: review-status
-description: "Self-diagnostic for code reviewer bot."
+description: "Use when a code reviewer bot is asked how it is doing. Self-diagnostic for code reviewer bot."
 ---
 
 # Review Status

@@ -1,6 +1,6 @@
 ---
 name: mission
-description: "Create or update a PROJECT_MISSION.md for a repo — defines the north star, guiding principles, and what success looks like. Used by product-vision passes and /autonomous-sprint to prioritize work."
+description: "Use when a repo is being set up for autonomous work, after a major pivot, or when a vision pass finds no PROJECT_MISSION.md. Creates or updates a repo's PROJECT_MISSION.md — defines the north star, guiding principles, and what success looks like. Used by product-vision passes and /autonomous-sprint to prioritize work."
 argument-hint: "[--bootstrap] [--edit]"
 ---
 

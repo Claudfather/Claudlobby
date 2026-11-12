@@ -4,13 +4,12 @@ title: Report-Back Protocol
 
 # Report-Back Protocol
 
-Use the canonical assignment and report commands in `/fleet-ops`. A task ID
-identifies fleet work; an **assignment ID** identifies your current claim on
-that work. Read `claudlobby --json assignment show ASSIGNMENT_ID` when the
-link is unclear. Retain a distinct request UUID for each operation.
+A task ID identifies fleet work; an **assignment ID** identifies your current
+claim on that work. Read `claudlobby --json assignment show ASSIGNMENT_ID` when
+the link is unclear.
 
-Accept the exact assignment when you receive it. Acceptance acknowledges the
-claim; it is not progress and does not complete the task:
+Acceptance acknowledges the claim; it is not progress and does not complete the
+task:
 
 ```bash
 claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
@@ -34,8 +33,12 @@ claudlobby --json assignment return ASSIGNMENT_ID --reason "Cannot retain owners
 claudlobby --json assignment fail ASSIGNMENT_ID --reason "Verification failed" --request-id FAIL_UUID
 ```
 
-`complete`, `fail`, and `return` are distinct lifecycle decisions. See
-`/fleet-ops` and each verb's `--help` for optional report evidence fields.
+`complete`, `fail`, and `return` are distinct lifecycle decisions.
+
+**Past its deadline.** An assignment your brief marks `orphaned` (your session
+restarted after the dispatch) or `overdue` is still open and still yours: record
+`assignment progress`, which holds the flag back for 45 minutes (the default);
+`block` does not. `/fleet-ops` says what each status means and what ends it.
 
 If there is **no current assignment**, submit an explicitly unlinked report
 to your own fleet manager; it does not change a task:
@@ -43,12 +46,6 @@ to your own fleet manager; it does not change a task:
 ```bash
 claudlobby --json fleet reports submit --status completed --summary "Approve on #123; detail in the review" --pr https://github.com/org/repo/pull/123 --pr-role reviewed --artifact https://github.com/org/repo/pull/123#pullrequestreview-456 --request-id REPORT_UUID
 ```
-
-A linked report records its task transition before manager notification. Read
-both outcomes; recording does not prove notification. Inspect `claudlobby
---json request show UUID` after uncertainty. Reuse the same UUID only for the
-same intended operation, and never automatically resend or mint a replacement
-UUID to repeat an uncertain report.
 
 ## Keep `<summary>` to ~200 characters
 

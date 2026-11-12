@@ -1,21 +1,19 @@
 ---
 name: setup
-description: "Bootstrap a sealed Claudlobby release and activate its first fleet."
+description: "Prepare one managed Git installation and an explicitly approved first fleet."
 argument-hint: "[--check-only]"
 ---
 
 # Setup
 
-Use [`documentation/getting-started.md`](../../../documentation/getting-started.md) as the executable cold-host walkthrough. The checkout is a build input; the installed release and mutable host data must live outside it. Do not run checkout `generate` or the retired `setup-system` installer as a substitute for activation.
+Follow [Getting started](../../../documentation/getting-started.md) for the single installation path and [First-team setup](../../../documentation/first-team-setup.md) for the optional lead/engineer/reviewer template. Browser newcomer cold-start acceptance is not established; do not promise a working browser launch or substitute historical sealed-release commands.
 
-For `--check-only`, check the host prerequisites and report what is missing without making changes. The host needs working Python with `venv` and `ssl`, `git` for a source build, `tmux`, an installed and authenticated Claude Code CLI, and a working launchd user domain or systemd user manager. Linux unattended operation additionally needs user lingering enabled through the host administrator. If the intended fleet uses Telegram, verify its channel plugin and token provisioning. Optional jobs may require their own tools; do not describe Node, `jq`, `gh`, or Claudron as installed by host setup.
+For `--check-only`, inspect prerequisites without changes: an explicit independent CPython >=3.10 that can create and run a venv with ssl, Git, tmux, jq, Claude Code, and the native user manager. Follow the [Python executable check](../../../documentation/getting-started.md#prove-the-python-executable-once). Linux unattended operation needs administrator-configured user lingering. Report missing prerequisites separately from provider authentication. Do not install system packages, change user permissions or enable lingering implicitly.
 
-For setup, follow the walkthrough in order:
+Obtain explicit trusted source, remote/ref, independent installation/data paths and interpreter from the operator. Do not search protected directories, guess a latest release or download, reset user files, or build/install an editable package. From the trusted source, run the documented stdlib `python -m claudlobby.bootstrap` command. Use its stable CLI for `host setup` with the same explicit inputs; host setup checks native prerequisites and reuses preparation, not a second installer. Preparation is distinct from activation and grants no owner access.
 
-1. Build a wheel, download dependency wheels, construct the hash lock, and install the bootstrap wheel in a separate build directory. Follow the walkthrough's outside-checkout installed-wheel check; stop on a missing or wrong installation. Verify the wheel and lock are present before assembly.
-2. Run the bootstrap wheel's `claudlobby --root DATA host setup --wheel WHEEL --dependency-lock LOCK --wheelhouse DIR --interpreter PYTHON --json`. Use the returned sealed CLI and native install directory; host setup assembles but does not select or start a release.
-3. Copy and complete `fleet.yaml.seed` and `.env.seed.example` in their authoring locations. Replace all placeholders (`-1234567890` is only a fake group-ID example) and keep secrets in the fleet `.env`, never in CLI arguments.
-4. Run the returned release CLI's `claudlobby --root DATA --fleet NAME fleet setup --config FILE --install-directory DIR`. This stages the host and activates the fleet and host jobs through the recorded activation owner. A changed existing manifest needs `--replace-config`; an interrupted activation needs explicit inspection of `host status` before another attempt.
-5. Check `host doctor` and `host status`, then verify the current bot session's channel response separately; an old startup log or another session's poller is not readiness. Report assembled, selected, active, and observed runtime states distinctly.
+Stop at the credential gate before preparing agents: verify provider sign-in and intended repository/tool access, never borrow credentials or put secrets in arguments. No Telegram is required for teams without channels. `fleet.yaml.seed` is only an explicitly chosen operator Telegram path; complete its placeholders separately.
 
-For later changes, use `config plan`, `config diff`, and `host activate` as documented in the walkthrough. Do not silently install host packages, plugins, or system configuration on the user's behalf outside the requested setup flow.
+Use one `fleet setup --config FILE` or `--template revenue-web-app` command with the exact observed `--install-directory` and `--plan-only`. Review its retained request, source revision, configuration fingerprint and native scope. Stop before agent starts/provider spending until the operator approves that exact scope. Resume only with the same stable CLI's `host update continue`; inspect `host update status` after interruption. Never replace an unknown request or resend uncertain work.
+
+Report blocked, prepared, committed and observed healthy states separately. Do not claim browser owner grants, public availability, useful work or restart durability from preparation. Preserve original receipts and keep merges/deployments under their separate authority.

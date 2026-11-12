@@ -64,11 +64,16 @@ def _run(
 ) -> tuple[int, str, str]:
     libdir = tmp_path / "lib"
     libdir.mkdir(exist_ok=True)
-    # The skill check is the REAL predicate, lifted from lib-common.sh.
-    real = re.search(
-        r"^session_command_status\(\) \{.*?^\}\n", LIB_COMMON.read_text(), re.S | re.M
-    )
-    (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON + real.group(0))
+    # Keep the real scalar predicate and its shared resolution dependencies.
+    # Extracting only the wrapper would turn every capability check into an
+    # unbound-variable failure before the briefing control flow runs.
+    source = LIB_COMMON.read_text()
+    real = []
+    for name in ("_session_plugin_paths", "_session_command_resolve", "session_command_status"):
+        function = re.search(rf"^{name}\(\) \{{.*?^\}}\n", source, re.S | re.M)
+        assert function is not None, f"missing shared capability helper: {name}"
+        real.append(function.group(0))
+    (libdir / "lib-common.sh").write_text(STUB_LIB_COMMON + "\n".join(real))
     dispatch = libdir / "dispatch.sh"
     dispatch.write_text(STUB_DISPATCH)
     dispatch.chmod(0o755)

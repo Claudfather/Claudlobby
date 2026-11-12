@@ -1,5 +1,7 @@
 """Flag contract for source-only bot authoring."""
 
+import argparse
+
 
 def register_bot_create(children, dispatch):
     pn = children.add_parser(
@@ -12,7 +14,7 @@ def register_bot_create(children, dispatch):
         "--voice", help="Path to voice file (e.g. voices/erlich-bachman.md)"
     )
     pn.add_argument(
-        "--voice-text", help="Inline voice description (creates voices/<name>.md)"
+        "--voice-text", help="Inline voice description (creates library/voices/<name>.md)"
     )
     pn.add_argument("--mission", help="One-paragraph charter")
     pn.add_argument("--model", help="opus / sonnet / haiku")
@@ -29,7 +31,11 @@ def register_bot_create(children, dispatch):
         help="Comma-separated integrations (auto-paired with mcp by default)",
     )
     pn.add_argument(
-        "--no-remote-control", action="store_true", help="Disable --remote-control flag"
+        "--remote-control",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write remote_control: true or false; omitted, the bot inherits "
+        "defaults:, else the role default (on for the fleet manager only)",
     )
     pn.add_argument(
         "--dangerously-skip-permissions",

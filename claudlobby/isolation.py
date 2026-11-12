@@ -97,10 +97,9 @@ def transcript_slug(path: object) -> str:
     """The name Claude Code gives a session's transcript dir: the session's cwd
     with every non-alphanumeric character replaced by ``-``.
 
-    The one Python copy. ``claudlobby/_runtime_scripts/transcript-digest.sh`` carries the same rule as
-    its fallback (its primary input is the hook payload's ``transcript_path``)
-    and cross-references this one. A copy that drifted would aim every row-A
-    rule at directories that do not exist, and nothing would say so."""
+    Its shell twin is ``claude_cwd_slug`` in lib-common.sh, for doors that read
+    Claude Code's per-cwd dirs without starting Python on every tick;
+    tests/test_channel_refused.py holds the two to the same answer."""
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
@@ -417,8 +416,6 @@ def _env_read_re(home: str | None = None) -> re.Pattern:
     dirs = _HOME_DIR if not home else f"(?:{_HOME_DIR}|{re.escape(home)})"
     return re.compile(_COMMAND + dirs + _ENV_FILE)
 
-
-ENV_READ = _env_read_re()
 
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FENCE = re.compile(r"\s*(`{3,}|~{3,})")

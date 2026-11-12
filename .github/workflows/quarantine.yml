@@ -1,12 +1,12 @@
 name: quarantine
 
 # Tests marked @pytest.mark.quarantine(issue=N): known-flaky tests taken out of
-# the required lanes (tests: pytest and harness; conformance: vault-tests) until
-# their tracking issue is fixed. They still run here, on every PR and every push
-# to main, so a quarantined test stays visible: this check goes red when one
-# fails, and no ruleset should require it. A separate workflow, so that a
-# quarantined failure never turns the `tests` workflow red. Lanes are pinned by
-# tests/test_ci_lanes.py.
+# the required lanes (tests: the shards, both harness jobs and pytest;
+# conformance: vault-tests) until their tracking issue is fixed. They still run
+# here, on every PR and every push to main, so a quarantined test stays
+# visible: this check goes red when one fails, and no ruleset should require
+# it. A separate workflow, so that a quarantined failure never turns the
+# `tests` workflow red. Lanes are pinned by tests/test_ci_lanes.py.
 
 on:
   push:

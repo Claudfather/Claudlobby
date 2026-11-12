@@ -189,7 +189,9 @@ class TestHelperGet:
         _run(HELPER, app_env["env"])
         argv = (app_env["stub"] / "argv.log").read_text()
         assert "ghs_" not in argv, "token leaked onto curl argv"
-        assert "eyJ" not in argv, "JWT leaked onto curl argv"
+        cfg = (app_env["stub"] / "cfg.log").read_text()
+        jwt = cfg.split("Bearer ")[1].split('"')[0]
+        assert jwt not in argv, "JWT leaked onto curl argv"
         assert "Authorization" not in argv, "auth header must ride --config"
 
     def test_jwt_iat_is_backdated(self, app_env):

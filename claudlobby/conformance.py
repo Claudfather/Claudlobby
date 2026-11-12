@@ -27,6 +27,9 @@ Runnable as ``python -m claudlobby.conformance rename-map``.
 
 from __future__ import annotations
 
+import json
+import shutil
+from datetime import datetime, timezone
 import os
 import re
 import subprocess
@@ -113,7 +116,9 @@ def resolve_claudna_ref(repo_root: Path | None = None) -> str | None:
     """The clauDNA ref the fleet composes: ``bot.claudna_version`` when a fleet
     pins one, marketplace-latest (``None`` → default branch) otherwise.
 
-    ``CLAUDNA_REF`` overrides everything (the knob CI pins its checkout to). Then
+    ``CLAUDNA_REF`` overrides local clone resolution; the rename-map CI lane
+    uses marketplace-latest. The separate export-contract lane pins its checkout
+    with ``contracts/claudna.ref``. Then
     the first ``claudna_version:`` found across the repo's ``fleet.yaml*`` files
     (a light scan — the pin is a scalar). ``None`` ⇒ let the clone track the
     marketplace default branch (the unpinned ``claudna@Claudfather`` default).
@@ -179,7 +184,97 @@ def check_rename_map(skills_dir: Path) -> tuple[int, str]:
     return 0, f"OK — all {n} rename-map live values resolve to a live clauDNA skill dir."
 
 
+def export_schema_errors(value, schema: dict) -> list[str]:
+    """Offline required/type contract floor, including local refs and nested items.
+
+    This is intentionally the keyword subset needed by the vendored export
+    schema. The connected conformance leg also uses the producer's validator.
+    """
+    errors = []
+    def walk(value, rule, path):
+        if "$ref" in rule:
+            target = schema
+            for key in rule["$ref"].removeprefix("#/").split("/"):
+                target = target[key]
+            return walk(value, target, path)
+        kinds = rule.get("type")
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        matches = {"null": value is None, "object": isinstance(value, dict),
+                   "array": isinstance(value, list), "string": isinstance(value, str),
+                   "integer": type(value) is int, "number": type(value) in (int, float),
+                   "boolean": type(value) is bool}
+        if kinds and not any(matches.get(k, False) for k in kinds):
+            errors.append(f"{path}: expected {kinds}")
+            return
+        if "const" in rule and value != rule["const"]:
+            errors.append(f"{path}: wrong const")
+        if "enum" in rule and value not in rule["enum"]:
+            errors.append(f"{path}: wrong enum")
+        if isinstance(value, dict):
+            for key in rule.get("required", []):
+                if key not in value:
+                    errors.append(f"{path}.{key}: required")
+            for key, child in value.items():
+                child_rule = rule.get("properties", {}).get(key, rule.get("additionalProperties"))
+                if isinstance(child_rule, dict):
+                    walk(child, child_rule, f"{path}.{key}")
+        if isinstance(value, list) and "items" in rule:
+            for i, child in enumerate(value):
+                walk(child, rule["items"], f"{path}[{i}]")
+    walk(value, schema, "$")
+    return errors
+
+
+def check_export_contract(clone: Path) -> tuple[int, str]:
+    """Real released export door over a capture-backed copied store; no network."""
+    source = clone / "lib/claudna/session_store"
+    if not clone.is_dir():
+        return 0, f"SKIP: clauDNA checkout {clone} is absent (local-first export-contract gate)"
+    vendored = Path(__file__).parent / "contracts/claudna-export.schema.json"
+    try:
+        upstream = source / "schemas/export.schema.json"
+        if upstream.read_bytes() != vendored.read_bytes():
+            return 1, "FAIL: vendored clauDNA export schema differs from checkout; review the ref/schema/fixture move together"
+        fixture = Path(__file__).parent.parent / "tests/fixtures/claudna_export/store"
+        with tempfile.TemporaryDirectory(prefix="claudna-export-contract-") as tmp:
+            store = Path(tmp) / "store"
+            shutil.copytree(fixture, store)
+            proc = subprocess.run([sys.executable, "-S", str(source), "export", "--root", str(store),
+                                   "--consumer", "claudlobby", "--include-skipped", "--json"],
+                                  capture_output=True, text=True, timeout=60)
+            if proc.returncode:
+                return 1, f"FAIL: clauDNA export exited {proc.returncode}: {proc.stderr[:1000]}"
+            envelope = json.loads(proc.stdout)
+            schema = json.loads(vendored.read_text())
+            errors = export_schema_errors(envelope, schema)
+            # Import the clone's own validator in its own process; never mutate
+            # this process's claudna import path or trust a producer test fixture.
+            validate = subprocess.run([sys.executable, "-S", "-c",
+                "import sys,json;sys.path.insert(0,sys.argv[1]);from claudna.session_store.schema import validate;"
+                "errors=validate(json.load(sys.stdin),json.load(open(sys.argv[2])));"
+                "print(json.dumps(errors));sys.exit(bool(errors))", str(clone / "lib"), str(vendored)],
+                input=proc.stdout, capture_output=True, text=True, timeout=60)
+            if errors or validate.returncode:
+                return 1, f"FAIL: export envelope schema: {errors}; producer validator: {validate.stdout} {validate.stderr}"
+            from .session_export import summary_record
+            for item in envelope["items"]:
+                summary_record(item, fleet="contract", bot="capture", now=datetime.now(timezone.utc))
+            statuses = {"ok" if i["summary"] is not None else "skipped" for i in envelope["items"]}
+            if statuses != {"ok", "skipped"}:
+                return 1, "FAIL: captured store must exercise both ok and skipped export items"
+            return 0, f"OK: export-contract: {len(envelope['items'])} captured items validate and map through summary_record"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        return 1, f"FAIL: export-contract: {exc}"
+
+
 def _run(argv: list[str]) -> int:
+    if argv and argv[0] == "export-contract":
+        if len(argv) != 2:
+            print("usage: python -m claudlobby.conformance export-contract <clone root>", file=sys.stderr)
+            return 2
+        code, report = check_export_contract(Path(argv[1]))
+        print(report)
+        return code
     if not argv or argv[0] != "rename-map":
         print("usage: python -m claudlobby.conformance rename-map", file=sys.stderr)
         return 2

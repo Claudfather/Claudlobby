@@ -21,7 +21,7 @@ For a question or update without an assignment, use `claudlobby --json message s
 | Situation | Action |
 |-----------|--------|
 | Engineer completes implementation with tests passing | Auto-dispatch to a reviewer (or cross-review by another engineer if reviewers aren't up) |
-| Reviewer approves (or posts ship-it as `COMMENT` per same-identity fallback) | Auto-merge (`gh pr merge --squash`) |
+| Reviewer approves (or posts ship-it as `COMMENT` per same-identity fallback) | Auto-merge (`gh pr merge --squash`) only when the selected merge guardrails allow it; obtain and check any required exact task permission first. |
 | Reviewer requests mechanical fixes (lint, unused vars, obvious bugs) | Auto-send back to the engineer with the review body |
 | Reviewer raises ambiguous concerns (scope, architecture, design trade-offs) | **Consensus loop first** (see protocols); flag the human only if consensus fails |
 | PR about to route for review | **Check `gh pr view <n> --json mergeable,mergeStateStatus` first.** If `DIRTY`, route the author to rebase-force-push-with-lease before the reviewer looks — don't waste the review slot on conflicts that'll invalidate it |
@@ -40,7 +40,7 @@ These ten situations previously required human re-invocation or informal handlin
 | Situation | Action |
 |-----------|--------|
 | Sprint ends with merges landed + mission-aligned backlog still open | **AUTO-fire the next sprint** without waiting for human re-invocation. Fleet stays in motion while the backlog has mission-aligned items. |
-| Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase + re-merge.** Don't wait for the human to notice the red bar. |
+| Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase.** Re-merge only when the selected merge guardrails allow it and any required exact task permission still covers the updated PR. Don't wait for the human to notice the red bar. |
 | Reviewer reports `context-degraded`, or has ~3+ completed rows in `claudlobby --json fleet reports list --bot <r> --status completed --since <RFC3339 instant>` | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
 | Reviewer posts Request Changes with a named fix direction | **AUTO-bounce to the engineer verbatim.** No human round-trip — the reviewer already said what's wrong. |
 | Stale PR — main moved ahead mid-review | **AUTO-rebase** before routing to review. Saves a review cycle that would be invalidated by the merge anyway. |
@@ -58,7 +58,7 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 
 - **Before assigning:** if a worker has reported `context-degraded`, or shows
   ~3+ completed rows in `claudlobby --json fleet reports list --bot <w>
-  --status completed --since <RFC3339 instant>`, tell it to `/compact` first or restart it. Do
+  --status completed --since <RFC3339 instant>`, tell it to `/compact` first or give it a fresh session (Restart, below). Do
   NOT ask a worker for a context percentage — no bot can measure one
   (`context-management`), so asking only invites a fabricated number you would
   then route on. Note `claudlobby fleet uptime` does not currently give a per-bot
@@ -66,11 +66,15 @@ Bots accumulate context; bad context degrades output. Proactively manage:
 
   Use the selected fleet context; name `--fleet FLEET` explicitly when reading
   another active fleet. A failed or unavailable read is not zero completed work.
-- **Between unrelated tasks:** preserve a fresh handoff and use the supported restart flow when a fresh session is needed.
-- **Reviewers:** use the supported compaction command between substantial reviews. Consider a fresh session after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
-- **Restart:** honor operator holds and the safe-worker-restart protocol. Request
-  `claudlobby --json bot handoff WORKER`, require `data.handoff=saved`, then use
-  `claudlobby --json bot restart WORKER` and inspect its readiness result.
+- **Between unrelated tasks:** when a fresh session is needed, preserve a fresh handoff and use `bot restart WORKER --fresh` (Restart, below).
+- **Reviewers:** compact between substantial reviews (`claudlobby --json bot compact REVIEWER`). Consider a fresh session (`bot restart REVIEWER --fresh`) after completed work and a verified handoff; respect operator holds and never interrupt an active review because of a report count alone.
+- **Restart:** honor operator holds and the safe-worker-restart protocol. A plain
+  `claudlobby --json bot restart WORKER` continues the worker's exact conversation
+  and reads no handoff. A restart to shed context, anywhere in this role (the
+  reviewer rule above included), is a fresh session: request
+  `claudlobby --json bot handoff WORKER` and require `data.handoff=saved` from it
+  or, after a `timeout`, from `claudlobby --json bot handoff WORKER --check`; then
+  use `claudlobby --json bot restart WORKER --fresh`. Inspect the readiness result.
 - **Compaction:** use `claudlobby --json bot compact WORKER`; an accepted control
   submission is not proof that compaction has finished. Read the selected bot's
   session/status before claiming success. Unknown outcomes do not allow resend.
@@ -111,5 +115,5 @@ restart or an unrecorded task send.
 ## Self-Restart
 
 Follow the `/restart` skill to save a fresh self-handoff, then call
-`claudlobby --json bot restart BOT` with your literal generated bot ID. A self-restart interrupts this
-session; only a fresh session can confirm successful resumption.
+`claudlobby --json bot restart BOT --fresh` with your literal generated bot ID. A self-restart interrupts this
+session; only the fresh session can confirm successful resumption.

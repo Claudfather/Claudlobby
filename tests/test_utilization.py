@@ -317,21 +317,25 @@ class TestComputeFleetUtilization:
             compute_fleet_utilization(bots_dir, self._paths(tmp_path))
 
     def test_public_read_reports_missing_bot_history_as_unknown(self, tmp_path, monkeypatch, capsys):
+        from dataclasses import replace
         from types import SimpleNamespace
-        from claudlobby import activation_state
+        from claudlobby import active_config
         from claudlobby.__main__ import main
         from claudlobby.commands import orientation
+        from tests.package_fixtures import git_package
 
         now = datetime.now(timezone.utc)
         # An unrelated heartbeat establishes the fleet in a reachable Plane;
         # the declared worker still has no observed BUSY/IDLE duration.
         _land_heartbeats(tmp_path, "f", "other", [(now - timedelta(minutes=1), "IDLE")])
-        paths = self._paths(tmp_path)
+        paths = replace(self._paths(tmp_path), package=git_package(tmp_path))
         monkeypatch.setattr(orientation, "_context", lambda args: SimpleNamespace(
             paths=paths, fleet=SimpleNamespace(name="f", bots={"worker": object()})))
-        monkeypatch.setattr(activation_state, "read_selection", lambda root: None)
+        stamp = active_config.RuntimeReadStamp("git", source_revision=paths.package.source_revision,
+                                               config_fingerprint="b" * 64)
+        monkeypatch.setattr(active_config, "runtime_read_stamp", lambda *args, **kwargs: stamp)
 
-        assert main(["--json", "fleet", "utilization"]) == 0
+        assert main(["--root", str(tmp_path), "--json", "fleet", "utilization"]) == 0
         result = json.loads(capsys.readouterr().out)
         assert result["command"] == "fleet.utilization"
         worker = result["data"]["items"][0]

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from functools import reduce
 
 from ..command_result import CommandFailure, CommandOutput
 
 
 def _config_field(key, bot):
-    from ..config import BotConfig, FleetConfig
+    from ..config import BotConfig, FleetConfig, _STRICT_MAPPING_FIELDS
 
     if key.startswith("fleet.defaults."):
         field = key.removeprefix("fleet.defaults.")
@@ -21,15 +22,19 @@ def _config_field(key, bot):
     elif key.startswith("bot."):
         field = key.removeprefix("bot.")
         scope = "bot"
-    elif bot and key in BotConfig.__dataclass_fields__:
+    elif bot and key.split(".", 1)[0] in BotConfig.__dataclass_fields__:
         field, scope = key, "bot"
     elif key in FleetConfig.__dataclass_fields__:
         field, scope = key, "fleet"
     else:
         return None
     model = BotConfig if scope == "bot" else FleetConfig
-    if field not in model.__dataclass_fields__:
+    head, dot, sub = field.partition(".")
+    if head not in model.__dataclass_fields__ or (dot and sub not in _STRICT_MAPPING_FIELDS.get(head, {})):
         raise CommandFailure("not_found", "configuration key is not a declared model field")
+    if head in _STRICT_MAPPING_FIELDS and not dot:
+        choices = ", ".join(f"{head}.{k}" for k in _STRICT_MAPPING_FIELDS[head])
+        raise CommandFailure("invalid_argument", f"{head} is a mapping — name a sub-field: {choices}")
     if scope == "bot" and not bot:
         raise CommandFailure("invalid_argument", "bot configuration requires --bot BOT")
     return scope, field
@@ -38,10 +43,12 @@ def _config_field(key, bot):
 def dispatch(args) -> CommandOutput:
     from ..context import BotNotFoundError, generated_selectors, load_context, resolve_paths
     from ..env_register import ResolverUnavailable, build, exits_nonzero, format_report
+    from .config_validation import _configuration_hint
     import yaml
 
     if args.key is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", args.key):
         raise CommandFailure("invalid_argument", "KEY must be an environment name or fleet/bot field")
+    paths = None
     try:
         fleet, bot = generated_selectors(fleet=args.fleet, bot=args.bot,
                                         include_bot=True, seed=args.seed)
@@ -54,8 +61,12 @@ def dispatch(args) -> CommandOutput:
     except RuntimeError as exc:
         raise CommandFailure("unavailable", "installed library package is unavailable",
                              hint="build and select a sealed release with packaged resources") from exc
-    except (ValueError, yaml.YAMLError) as exc:
-        raise CommandFailure("conflict", "configuration or requested scope is invalid") from exc
+    except yaml.YAMLError as exc:
+        raise CommandFailure("conflict", "configuration or requested scope is invalid",
+                             hint=_configuration_hint(paths, exc)) from exc
+    except ValueError as exc:
+        raise CommandFailure("conflict", "configuration or requested scope is invalid",
+                             hint=_configuration_hint(paths)) from exc
     config_field = _config_field(args.key, bot) if args.key else None
     if config_field:
         from ..config import scalar_config_origin
@@ -67,13 +78,15 @@ def dispatch(args) -> CommandOutput:
                 bot=bot if scope == "bot" else None)
         except NotImplementedError as exc:
             raise CommandFailure("unavailable", "provenance unsupported for this configuration field") from exc
-        effective = getattr(context.fleet.bots[bot] if scope == "bot" else context.fleet, field)
+        effective = reduce(getattr, field.split("."), context.fleet.bots[bot] if scope == "bot" else context.fleet)
         key = f"{scope}.{field}"
         state = "unset" if effective is None else "set"
         data = {"fleet": context.fleet.name, "bot": bot if scope == "bot" else None,
                 "key": key, "kind": "configuration", "source": source,
                 "declaration": declaration, "state": state, "next_cursor": None}
-        return CommandOutput(data, lines=(f"{key}: {state} from {declaration or 'built-in default'}",))
+        origin = (f"role default ({declaration})" if source == "role_default"
+                  else declaration or "built-in default")
+        return CommandOutput(data, lines=(f"{key}: {state} from {origin}",))
     try:
         register = build(context.fleet, paths, bot=bot, key=args.key)
     except KeyError as exc:

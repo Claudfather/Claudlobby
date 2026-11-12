@@ -42,6 +42,7 @@ BUILTIN_COMMANDS: frozenset[str] = frozenset(
         "/clear",
         "/reload",
         "/mcp",
+        "/remote-control",
         # Ships with Claude Code. `vera`'s #1250 enumeration filed this under
         # "fleet-local, confirmed via frontmatter"; there is no
         # library/skills/simplify/, so it resolves here instead. The only

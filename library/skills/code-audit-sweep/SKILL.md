@@ -1,6 +1,6 @@
 ---
 name: code-audit-sweep
-description: "Run one automated code audit on a specific repo, dispatched by the rolling-sweep selector. Pulls latest main, runs the audit non-interactively, filing GitHub issues, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
+description: "Use when the rolling-sweep selector dispatches `/code-audit-sweep <org/repo> <audit-type>` into your session. Runs that one automated code audit: pulls latest main, runs the audit non-interactively, filing GitHub issues, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
 argument-hint: "<org/repo> <audit-type>"
 ---
 

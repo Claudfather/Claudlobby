@@ -1,20 +1,15 @@
 """Dependency-light registration for canonical message observations."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".message_read", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".message_read")
 
 
 def _route(children, verb, command, help_text):
     parser = children.add_parser(verb, help=help_text)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
-    parser.add_argument("message_id", metavar="MESSAGE_ID")
+    parser.add_argument("message_id", metavar="MESSAGE_ID",
+                        help="A message ID, or msg_ and at least 8 of its hex digits")
     parser.set_defaults(func=_dispatch, public_command=command)
     return parser
 

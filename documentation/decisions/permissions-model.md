@@ -17,7 +17,7 @@ Sources: Claude Code official documentation, `~/.claude/settings.json` reference
 
 ## Permission Pattern Syntax
 
-Claude Code supports these pattern formats in `permissions.allow` and `permissions.deny`:
+Claude Code supports these pattern formats in `permissions.allow`, `permissions.ask` and `permissions.deny`:
 
 ### Plain tool names
 
@@ -148,6 +148,8 @@ Same syntax as Bash: `PowerShell(Get-ChildItem *)`, `PowerShell(Remove-Item *)`.
 
 **Deny always wins.** There is no way to override a deny rule with an allow rule at the same scope. This is the key design constraint for the compositor: put broad allows at the base, and let deny rules carve out restrictions.
 
+The compositor composes a skill's or integration's `ask_grants` into `permissions.ask`, so a matching call prompts in every permission mode, auto included, even where an allow rule also matches. The fleet drops one by naming the same rule, in exact text, under `tool_permissions.allow`; a broader allow rule, or another library item's `tool_grants`, does not. A skill's or integration's `deny_grants` are appended to `permissions.deny`: a matching call is refused in every permission mode, and no allow rule overrides it.
+
 ---
 
 ## Headless Mode Behavior
@@ -219,7 +221,7 @@ Data-plane servers whose writes are real-world mutations (Shopify catalog, Print
 ```
 
 - **Reads compose automatically.** Every bot that attaches the server gets exact `mcp__<server>__<tool>` allows for the read set (per instance), so headless workers never wedge on a safe-read permission prompt.
-- **Writes always prompt.** No library-derived path may cover them, enforced twice: the paired `library/integrations/<name>.md` `tool_grants` must mirror the read-only set exactly (a wildcard, write-tool, or missing-read entry fails `generate` with a directional error), and a union-layer assert re-checks the accumulated allow list — so a skill/expertise/guardrail grant covering a write of a split server also fails `generate`. A `read_only_tools` entry absent from `tools` fails too (typo/rename protection).
+- **Writes always prompt.** No library-derived path may cover them, enforced twice: the paired `library/integrations/<name>.md` `tool_grants` must mirror the read-only set exactly (a wildcard, write-tool, or missing-read entry fails composition with a directional error), and a union-layer assert re-checks the accumulated allow list — so a skill/expertise/guardrail grant covering a write of a split server also fails composition. A `read_only_tools` entry absent from `tools` fails too (typo/rename protection).
 - **Operator escape hatch.** A bot that genuinely needs an unattended write gets it explicitly in fleet.yaml: `tool_permissions: {allow: ["mcp__shopify__createProduct"]}` (per-bot, or fleet-wide via `defaults.tool_permissions.allow`). Operator-declared and auditable — never a library default; this layer is appended after the union-layer assert, deliberately exempt.
 
 Declaration paths, summarized: the read/write **facts** live in the fragment `_permissions_contract`; the composed **auto-grants** live in the integration file's `tool_grants` (kept mirror-equal by the compose-time gates); **exceptions** live in fleet.yaml `tool_permissions.allow`.
@@ -283,6 +285,16 @@ Bash(lsof *)
 
 These are the patterns from the current global settings.json. A "base" set that every bot gets.
 
+### Workers' privilege denies (role-keyed)
+
+`compose_settings_local()` adds `WORKER_SUDO_DENY` to every worker's deny list: `Bash(NAME *)`, `Bash(/usr/bin/NAME *)` and `Bash(/bin/NAME *)` for each of `sudo`, `sudoedit`, `su`, `pkexec`, `doas` and `run0`. The role test is `fleet.manager_bots()`, so the fleet manager gets none of them, even alone in its fleet. A trailing ` *` also matches the bare command, and `Bash(sudo *)` does not match `sudoedit`, hence one rule per name.
+
+The deny gates the session's own tool calls. Claude Code checks every subcommand, including one in a subshell or `$(…)`, and looks past a leading assignment and its built-in wrappers (`timeout`, `nice`, `nohup`, `stdbuf`, `command`, `time`, `xargs`). It cannot see `bash -c '…'`, a script, an interpreter, an unresolvable expansion, a link to the program under another name, or a session that edits its own settings file, while the OS user keeps its sudo rights (`library/guardrails/permissions-are-not-a-control.md`). Measured on Claude Code 2.1.309, it also misses `sudo`, `doas` or `pkexec` running a command behind `env`, `setsid`, `ionice` or `watch` (`env sudo ls`), and a relative path to one that runs a command (`./bin/sudo ls`). It is a guard rail; a separate OS user without sudo is the wall (#1606).
+
+A refused call tells the worker only that permission was denied, so the same role test composes `## Commands that need root` into every worker's `CLAUDE.md` (`templates/claude.md.j2`). It names the denied commands and the remedy, `assignment block` naming the command and why it needs root (with no assignment, `fleet reports submit --status blocked`), and forbids taking the routes above instead. Every worker pays for it on every turn and a manager pays nothing, which is why it is a template section on the deny's own role test rather than a guardrail every bot composes. `tests/test_worker_root_steps.py` pins its size, its remedy's commands, and that it reaches exactly the bots the deny reaches.
+
+Claude Code checks the rules against the command a PreToolUse hook hands back, not the one typed, so a hook that rewrites a command must not move a word a composed rule keys on out of first place. The heavy-slot hook never looks past a privilege runner, and `tests/test_heavy_slot_compose.py` checks it against every Bash deny the compositor writes for a worker. The hook still puts its wrapper in front of the other runners it looks past and of the heavy tool itself, so a deny an operator adds for one of those (`Bash(pip install *)` in `tool_permissions.deny`) does not see a command the hook rewrites (measured on 2.1.309). The compositor writes no such deny.
+
 ---
 
 ## Path-Scoped Patterns
@@ -312,10 +324,10 @@ for sibling in siblings:
 
 Layer 0 names a sibling's bot dir, and most cross-bot content is not there. A transcript is written under the shared config dir (`<config>/projects/<cwd-slug>/`), beside the shared prompt history, the OAuth credential and the account config; the `.env` tiers and the install's code sit elsewhere again. With `isolation.shared_config: true` on a bot (`fleet-yaml-schema.md`, `isolation`), `claudlobby/isolation.py` adds deny rules for eight classes: other bots' transcripts, `history.jsonl`, `.credentials.json`, the account config, every `.env` tier (the bot's own included), Edit on the install's code, other bots' Telegram state dirs, and Edit on the shared settings surfaces.
 
-- **Keyed on the bot's name**, not its path, where a move would change the path: `<config>/projects/<slug(root)>*-runtime-bots-<name>/**` and its `-*` subdirectory form, and `<root>/**/runtime/bots/<name>/.env*`. A path-keyed rule leaves a moved bot's new home open until every fleet regenerates, and the regeneration then drops the rule on its old one.
+- **Keyed on the bot's name**, not its path, where a move would change the path: `<config>/projects/<slug(root)>*-runtime-bots-<name>/**` and its `-*` subdirectory form, and `<root>/**/runtime/bots/<name>/.env*`. A path-keyed rule leaves a moved bot's new home open until the next host update recomposes every fleet, and that update then drops the rule on its old one.
 - **Per bot, never a blanket `projects/**`.** Deny always wins, and a `!` negation cannot reach a `//`-anchored rule, so "everything but mine" cannot be written. The same fact means no deny list covers sessions nobody can name in advance (the operator's own, harness runs); only a separate config dir does (#932, #1606).
 - **The bound is the one stated above**: Claude's own tools, literal paths. On a single-operator host that covers the likely failure, an accidental read, and nothing more. Every rule's documentation says so, and nothing that composes these rules may call them confidentiality.
-- **Opt-in**, registered in `switches.py`: a composed deny binds on the next tool call with no restart, and the nightly `reload-fleet` generate would carry a default-on rule set onto every bot with no canary.
+- **Opt-in**, registered in `switches.py`: a composed deny binds on the next tool call with no restart, and the next host update would carry a default-on rule set onto every bot with no canary.
 
 For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged from all scopes, not replaced) are the lever, and they need `sandbox.enabled: true`.
 
@@ -351,6 +363,9 @@ For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged 
     "deny": [
       "Read(<sibling_dir>/**)"
     ],
+    "ask": [
+      "<rule>"
+    ],
     "allow": [
       "<tool>(**)"
     ]
@@ -359,6 +374,8 @@ For OS-level isolation, `sandbox.filesystem.denyRead`/`denyWrite` paths (merged 
   "hooks": { ... }
 }
 ```
+
+`ask` is written only when a rule survives, so a bot with none keeps the same file. It holds the `ask_grants` of the bot's skills and integrations, less any rule the fleet names in exact text under `tool_permissions.allow`; the same skills' and integrations' `deny_grants` are appended to `deny`.
 
 **Issue with current pattern format:** The compositor appends `(**)` to tool names from `bot.tools.allow/deny`:
 
@@ -520,3 +537,5 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 6. **Not separately verified** — sandbox path merge behavior is a Claude Code platform fact, not compositor-specific; treat as still accurate.
 
 7. **Shipped.** Sibling isolation emits a `Read` and an `Edit` rule per sibling (#873), both `//`-anchored (#1312). There is no `Write` rule, because Claude Code never consults one and `Edit` covers every file-editing tool. Layer 0b (#1665, opt-in) extends the named paths past bot dirs; see Path-Scoped Patterns.
+
+8. **Shipped.** Skills and integrations may declare `ask_grants` and `deny_grants` beside `tool_grants` (#2476). `ask_grants` compose into `permissions.ask`, so a matching call prompts in every permission mode, auto included, and the ask rule wins over an allow rule that also matches; the fleet grants one by naming the same rule, in exact text, under `tool_permissions.allow`, and the compositor then drops it from `permissions.ask`. `deny_grants` are appended to `permissions.deny`. A rule matches the command's text, so it stops the plain form of a call and not every way of making it (another client, an absolute path, `bash <script>`); do not present one as the only gate on a change.

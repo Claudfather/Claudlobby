@@ -25,13 +25,15 @@ failed=0
 total=0
 
 # check <label> <expected rc> <pane text> [locale]
+# Asks pane_is_held, or the predicate named in PREDICATE.
 check() {
     local label="$1" want="$2" pane="$3" loc="${4:-}" rc
+    local predicate="${PREDICATE:-pane_is_held}"
     total=$((total + 1))
     if [ -n "$loc" ]; then
-        LC_ALL="$loc" pane_is_held "$pane"; rc=$?
+        LC_ALL="$loc" "$predicate" "$pane"; rc=$?
     else
-        pane_is_held "$pane"; rc=$?
+        "$predicate" "$pane"; rc=$?
     fi
     if [ "$rc" = "$want" ]; then
         passed=$((passed + 1))
@@ -55,7 +57,7 @@ for loc in "" C; do
     # Not held: Claude Code's own text in the box (the queued-message hint, an
     # empty box's suggestion), a menu where an Enter would choose, empty
     # boxes, and frames with no box at all.
-    for f in input-queued-hint idle-placeholder menu-option input-clean-submit \
+    for f in input-queued-hint idle-placeholder menu-option usage-limit-menu input-clean-submit \
              idle-prompt idle-chevron idle-remote-control idle-permission \
              unknown-output unknown-blank verb-no-esc predraw-empty busy-spinner; do
         check "$f (not held)" 1 "$(fixture "$f.txt")" "$loc"
@@ -68,6 +70,53 @@ check "glyph and a no-break space only" 1 "$(printf '\342\235\257\302\240\n')"
 check "ascii glyph with text" 0 "$(printf '> continue the review\n')"
 check "a second menu option selected" 1 \
     "$(printf '    1. Yes\n  \342\235\257 2. No, and tell Claude what to do differently\n\n  Esc to cancel\n')"
+
+# Authored words must not masquerade as a menu footer, including a wrapped
+# draft whose entire next line happens to be the exit label.
+for loc in "" C; do
+    for phrase in 'Esc to cancel' 'Esc to go back'; do
+        check "draft mentions $phrase" 0 "$(printf '> Please explain %s\n' "$phrase")" "$loc"
+        check "wrapped draft contains $phrase" 0 "$(printf '> Draft reason\n  %s\n' "$phrase")" "$loc"
+        check "draft is exactly $phrase" 0 "$(printf '> %s\n' "$phrase")" "$loc"
+        check "bordered draft contains $phrase" 0 \
+            "$(printf '> Draft reason\n  %s\n────────────────────\n  auto mode on\n' "$phrase")" "$loc"
+        check "actual footer outside box: $phrase" 1 \
+            "$(printf '> selected control\n────────────────────\n  %s\n' "$phrase")" "$loc"
+    done
+done
+
+echo ""
+echo "=== pane_is_menu: a menu holds the screen, so a send types nothing ==="
+# The menu half of pane_is_held's evidence, asked on its own: every frame
+# pane_is_held refuses as a menu is one, and no held box, empty box or
+# hint is. Whole frames too, since pane_send_verified reads the whole pane.
+credits_first=$(sed -e 's/❯ 1\. Stop and wait for limit to reset/❯ 1. Switch to usage credits/' \
+    -e 's/^\(  *\)3\. Switch to usage credits/\13. Stop and wait for limit to reset/' \
+    "$FIXTURE_DIR/usage-limit-menu.txt")
+case "$credits_first" in
+    *'❯ 1. Switch to usage credits'*'3. Stop and wait for limit to reset'*) ;;
+    *) echo "  FAIL  the credits-first frame was not built"; failed=$((failed + 1)) ;;
+esac
+for loc in "" C; do
+    for f in menu-option usage-limit-menu; do
+        PREDICATE=pane_is_menu check "$f (menu)" 0 "$(fixture "$f.txt")" "$loc"
+        PREDICATE=pane_is_menu check "$f, whole frame (menu)" 0 "$(cat "$FIXTURE_DIR/$f.txt")" "$loc"
+    done
+    PREDICATE=pane_is_menu check "usage credits listed first (menu)" 0 "$credits_first" "$loc"
+    PREDICATE=pane_is_menu check "a second menu option selected (menu)" 0 \
+        "$(printf '    1. Yes\n  \342\235\257 2. No, and tell Claude what to do differently\n\n  Esc to cancel\n')" "$loc"
+    PREDICATE=pane_is_menu check "exit offered outside the box (menu)" 0 \
+        "$(printf '> selected control\n────────────────────\n  Esc to cancel\n')" "$loc"
+    for f in input-stuck-literal input-stuck-wrapped input-held-cr input-queued-hint \
+             idle-placeholder input-clean-submit idle-prompt idle-chevron \
+             idle-remote-control usage-limit-held usage-limit-menu-closed \
+             usage-limit-native-armed unknown-blank busy-spinner; do
+        PREDICATE=pane_is_menu check "$f (no menu)" 1 "$(fixture "$f.txt")" "$loc"
+    done
+    PREDICATE=pane_is_menu check "a draft naming the exit (no menu)" 1 \
+        "$(printf '> Please explain Esc to cancel\n')" "$loc"
+done
+PREDICATE=pane_is_menu check "empty pane (no menu)" 1 ""
 
 echo ""
 echo "=== $passed/$total passed, $failed failed ==="

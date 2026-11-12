@@ -19,6 +19,16 @@ def _command(module: str, name: str):
 def register_subparsers(sub) -> None:
     """Register all CLI subcommands on the given subparsers action."""
 
+    native_session = sub.add_parser("_native-session", help=argparse.SUPPRESS)
+    native_session.add_argument("action", choices=("capture", "launch", "confirm"))
+    native_session.add_argument("directory")
+    native_session.add_argument("label")
+    native_session.add_argument("tmpdir")
+    def native_session_entry(args):
+        from ..native_session import entry
+        return entry(args)
+    native_session.set_defaults(func=native_session_entry)
+
     from ._release_parsers import register_release_subparsers
     register_release_subparsers(sub)
     from ._orientation_parsers import register_orientation_subparsers
@@ -34,6 +44,9 @@ def register_subparsers(sub) -> None:
     pb.add_argument("--json", action="store_true", help="One schema-1 result containing a schema-2 brief")
     pb.add_argument("--usage-since", metavar="DURATION",
                     help="Include bounded viewer transcript usage for up to 7d (for example 24h)")
+    pb.add_argument("--startup-wait", type=int, metavar="SECONDS",
+                    help="Wait 1–300 seconds for this selected late startup to become active; "
+                         "read the brief once afterward (not available with --boot)")
     pb.add_argument(
         "--boot",
         action="store_true",
@@ -66,6 +79,12 @@ def register_subparsers(sub) -> None:
     tick = sub.add_parser("_task-recheck-tick", help=argparse.SUPPRESS)
     tick.add_argument("tick_fleet", metavar="FLEET")
     tick.set_defaults(func=_command("task_recheck", "tick"))
+
+    summary_tick = sub.add_parser("_session-export-tick", help=argparse.SUPPRESS)
+    summary_tick.add_argument("tick_fleet", metavar="FLEET")
+    summary_tick.add_argument("--dry-run", action="store_true")
+    summary_tick.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    summary_tick.set_defaults(func=_command("session_export", "tick"))
 
     from ._message_read_parsers import register_message_read_subparsers
     message_children = register_message_read_subparsers(sub)

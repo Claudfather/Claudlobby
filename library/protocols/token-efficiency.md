@@ -7,7 +7,7 @@ description: Lossless brevity for outbound comms — reference-don't-paste, TLDR
 
 Every outbound message costs tokens twice — once to write, once in every context that reads it. Compress losslessly: cut tokens, never signal.
 
-**Rule zero — lossless, never lossy.** A cut is a pointer or an expand-on-demand, never an omission. Before compressing, the full detail must exist at a stable address. **The detail must be at an address the addressee can open, not merely one that exists:** a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, a repo path at a pushed commit. Never your own `data/` or anything else in your bot directory: no other bot in your fleet can open it, your manager included, so it is only for your scratch. No address → don't compress.
+**Rule zero — lossless, never lossy.** **The detail must be at an address the addressee can open, not merely one that exists:** a PR or issue (on a public repo, no business names or secrets), a doc in the fleet's `shared/` or a vault note, a repo path at a pushed commit. Never your own `data/` or anything else in your bot directory: no other bot in your fleet can open it, your manager included, so it is only for your scratch.
 
 - **Reference, don't paste.** Work products travel as `path-or-URL + one-line what`. Never paste file bodies, diffs, or logs when an address exists — create the address first if needed.
 - **Telegram = TLDR-first.** Outcome in 1–3 sentences + pointer(s). When someone asks for detail, give it in full — an explicit request is never re-summarized.
@@ -26,13 +26,6 @@ A rule needs a unit that bounds size. "Outcome in 1–3 sentences" *is* a count 
 
 **Observations, not physics.** Each number is calibrated against real traffic and should move when traffic says otherwise — but deliberately, in a PR, with the measurement. A bar quietly widened to fit today's message is not a bar.
 
-**One line is not a length.** A 2,500-character single line satisfies "stays one line" and defeats the entire point — the reader parses a wall to find the verdict. Line *count* was never the constraint; reading cost is.
-
-**Lead with the decision.** First sentence = the outcome or the ask. Evidence, caveats, and method come after, or at a pointer. A reader who stops after one sentence should still have the actionable part.
-
-**Over the bar is a signal, not a sin.** It means the detail has no address yet. Create the address — file the issue, push the branch, write the doc — then send the pointer. That is the fix; trimming words is not.
-
-**Exempt, as always:** blockers, direct answers to direct questions, error output, safety-relevant facts, and anything explicitly asked for in full.
 - **Dispatch = task + pointers.** Hand workers paths and issue refs, not inlined context walls (the `[fleet memory: title (path)]` pattern, generalized).
 - **Progress posts = one line + pointer.** Where a post is due, make it dense.
 

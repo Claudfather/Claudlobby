@@ -7,17 +7,28 @@ from ..command_result import execute
 _DEADLINE_HELP = ("RFC3339 deadline, or 'none' for open-ended; omitted freezes now plus the "
                   "fleet manager's observability.dispatch_deadline (default 86400s, 0 open-ended)")
 
+# The page `assignment progress --help` prints (#2546). The 45 minutes and the 24 hours are the matcher's
+# DEFAULT_PROGRESS_GRACE_S and DEFAULT_OVERDUE_MAX_AGE_S, pinned by tests/test_assignee_attention.py.
+_PROGRESS_HELP = ("Record that you are working on the assignment, with what is done and what is next, then notify "
+                  "the fleet manager. This is the report the deadline watch reads: in claudlobby brief, an "
+                  "assignment past its deadline reads overdue, or orphaned when your session restarted after the "
+                  "dispatch, until you report; for the 45 minutes after a report (the default) it reads past_due. "
+                  "More than 24 hours after the dispatch (the default) or, once the manager has moved the deadline, "
+                  "after the move or the new deadline, whichever is later, it reads past_due with or without a "
+                  "report. complete, fail and return end the assignment. block does not clear the watch.")
+
 
 def _dispatch(args):
-    module = (".assignment_delivery" if args.public_command == "assignment.deliver" else
+    module = (".task_permissions" if args.public_command.startswith("task.permission.") else
+              ".assignment_delivery" if args.public_command == "assignment.deliver" else
               ".task_recheck" if args.public_command == "task.recheck" else ".task_write")
     return execute(args.public_command,
                    lambda: import_module(module, __package__).dispatch(args),
-                   json_output=args.json, request_id=args.request_id)
+                   json_output=args.json, request_id=getattr(args, "request_id", None))
 
 
-def _route(children, verb, command, help):
-    parser = children.add_parser(verb, help=help)
+def _route(children, verb, command, help, description=None):
+    parser = children.add_parser(verb, help=help, description=description)
     parser.add_argument("--json", action="store_true", help="One schema-1 result object")
     parser.add_argument("--request-id", required=True, metavar="UUID",
                         help="Caller-retained canonical UUID for this operation")
@@ -34,13 +45,33 @@ def add_report_flags(parser):
     parser.add_argument("--skill", metavar="NAME")
 
 
+def _register_permissions(task_children):
+    parser = task_children.add_parser("permission", help="Request and decide exact task permissions")
+    children = parser.add_subparsers(dest="permission_action", required=True)
+    for verb in ("request", "show", "check", "approve", "decline", "revoke"):
+        child = children.add_parser(verb)
+        child.add_argument("--json", action="store_true")
+        child.add_argument("task_id" if verb == "request" else "permission_id")
+        if verb not in {"show", "check"}:
+            child.add_argument("--request-id", required=True, metavar="UUID")
+            child.add_argument("--reason", required=True, metavar="TEXT")
+        if verb in {"request", "check"}:
+            child.add_argument("--scope-file", required=True, metavar="JSON")
+        if verb in {"approve", "decline", "revoke"}:
+            child.add_argument("--scope-sha256", required=True,
+                               help="Exact digest displayed by permission show")
+        child.set_defaults(func=_dispatch, public_command="task.permission." + verb)
+
+
 def register_task_write_subparsers(task_children, assignment_children):
+    _register_permissions(task_children)
     admitting = _route(task_children, "admit", "task.admit", "Admit unassigned fleet work")
     admitting.add_argument("--title", required=True, metavar="TEXT")
     admitting.add_argument("--body-file", metavar="FILE")
     admitting.add_argument("--repo", metavar="OWNER/REPO")
     admitting.add_argument("--project", metavar="KEY")
-    admitting.add_argument("--workstream", metavar="ID")
+    admitting.add_argument("--workstream", metavar="ID",
+                           help="Join this open workstream; without it, admit opens the task's own")
     admitting.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
     assigning = _route(task_children, "assign", "task.assign", "Assign queued work without delivery")
@@ -55,6 +86,14 @@ def register_task_write_subparsers(task_children, assignment_children):
     withdrawing.add_argument("--reason", required=True, metavar="TEXT")
     withdrawing.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
 
+    moving = _route(task_children, "move", "task.move",
+                    "Move open fleet work into another open workstream")
+    moving.add_argument("task_id", metavar="TASK_ID")
+    moving.add_argument("--workstream", required=True, metavar="ID",
+                        help="The open workstream of the task's fleet and project that it joins")
+    moving.add_argument("--reason", required=True, metavar="TEXT")
+    moving.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
     escalating = _route(task_children, "escalate", "task.escalate",
                         "Ask for human guidance on open fleet work")
     escalating.add_argument("task_id", metavar="TASK_ID")
@@ -66,6 +105,15 @@ def register_task_write_subparsers(task_children, assignment_children):
     nudging.add_argument("task_id", metavar="TASK_ID")
     nudging.add_argument("--reason", required=True, metavar="TEXT")
     nudging.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
+    feedback = _route(task_children, "feedback", "task.feedback",
+                      "Comment on resolved task work and notify its configured lead")
+    feedback.add_argument("task_id", metavar="TASK_ID")
+    feedback.add_argument("--actor", required=True, metavar="human:ACTOR",
+                          help="Explicit existing local human actor")
+    feedback.add_argument("--expected-assignment", required=True, metavar="ASG_ID|none",
+                          help="Selected current assignment, or explicit none for unassigned/terminal work")
+    feedback.add_argument("--text", required=True, metavar="TEXT")
 
     rechecking = _route(task_children, "recheck", "task.recheck",
                         "Ask the current fleet manager about overdue open work")
@@ -93,9 +141,18 @@ def register_task_write_subparsers(task_children, assignment_children):
     delivering.add_argument("--file", required=True, metavar="FILE")
     delivering.add_argument("--retry-uncertain", action="store_true")
 
+    rescheduling = _route(assignment_children, "reschedule", "assignment.reschedule",
+                          "Move an open assignment's deadline, recorded on the same assignment")
+    rescheduling.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
+    rescheduling.add_argument("--expected-by", required=True, metavar="RFC3339|none",
+                              help="The new RFC3339 deadline, or 'none' for open-ended")
+    rescheduling.add_argument("--reason", required=True, metavar="TEXT")
+    rescheduling.add_argument("--by", metavar="ACTOR", help="Provenance, never caller authority")
+
     for verb in ("progress", "block", "return", "complete", "fail"):
         reporting = _route(assignment_children, verb, "assignment." + verb,
-                           "Record a linked report, then notify the fleet manager")
+                           "Record a linked report, then notify the fleet manager",
+                           description=_PROGRESS_HELP if verb == "progress" else None)
         reporting.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
         reporting.add_argument("--summary" if verb in ("progress", "complete") else "--reason",
                                required=True, metavar="TEXT")

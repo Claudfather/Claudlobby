@@ -10,20 +10,31 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp, resolve_active_context
+    from ..context import resolve_paths, generated_selectors
+    from ..config_plan import PlanError
     from ..status import collect_fleet_status, format_bot_detail, format_json, format_table
     from .orientation import _context
 
-    context = _context(args)
     try:
-        selected = read_selection(context.paths.root)
-    except ActivationError as exc:
-        raise CommandFailure("conflict", "release selection cannot be read") from exc
-    release_id = selected["release_id"] if selected else None
-    if args.public_command == "fleet.utilization":
-        return _utilization(context, release_id)
-    if args.public_command == "fleet.uptime":
-        return _uptime(args, context, release_id)
+        paths = resolve_paths(root=getattr(args, "root", None), seed=getattr(args, "seed", False))
+        if paths.package.installation is not None:
+            fleet, _ = generated_selectors(fleet=args.fleet)
+            context = resolve_active_context(root=paths.root, fleet=fleet, package=paths.package)
+        else:
+            context = _context(args)
+        stamp = runtime_read_stamp(context.paths.root, package=context.paths.package)
+    except (ActivationError, PlanError, OSError) as exc:
+        raise CommandFailure("conflict", "current status configuration cannot be read") from exc
+    release_id = stamp.release_id if stamp else None
+    if args.public_command in {"fleet.utilization", "fleet.uptime"}:
+        result = (_utilization(context, release_id) if args.public_command == "fleet.utilization"
+                  else _uptime(args, context, release_id))
+        if stamp is not None:
+            stamp.check(context.paths.root, package=context.paths.package)
+            result.data.update(stamp.provenance)
+        return result
 
     if args.public_command == "bot.status" and args.bot_id not in context.fleet.bots:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet")
@@ -40,14 +51,25 @@ def dispatch(args) -> CommandOutput:
     else:
         statuses = collect_fleet_status(context.fleet, context.paths)
         switch_states = None
+        switch_note = None
         try:
             from ..switches import resolve
             switch_states = resolve(context.paths, context.fleet)
         except Exception:
-            # Status remains readable when the optional switch header cannot be resolved.
-            pass
+            # Keep native/Plane status readable, without presenting an unread
+            # switch set as an observed absence of disabled reactions.
+            switch_note = "Switch states unavailable; inspect claudlobby host doctor --switches."
         data = json.loads(format_json(statuses, context.fleet.name, switch_states))
         lines = (format_table(statuses, context.fleet.name, switch_states).rstrip(),)
+        if switch_note:
+            data.update(switches_state="unavailable", switches_note=switch_note)
+            lines += (switch_note,)
+    if stamp is not None:
+        stamp.check(context.paths.root, package=context.paths.package,
+                    message="current configuration changed during status read")
+        data.update(stamp.provenance)
+        if stamp.kind == "git":
+            data["running_source_revision"] = None
     return CommandOutput(data, release_id=release_id, lines=lines)
 
 

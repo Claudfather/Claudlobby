@@ -887,3 +887,98 @@ class TestCollectFleetStatus:
         assert alex.tmux_alive is False
         assert alex.state == "down", alex.state
         assert (alex.state == "down") == (not alex.tmux_alive)
+
+
+class TestRecordedStop:
+    """#2243 F8: a bot the stop door stopped reads `stopped`, with who and since, in place of
+    `down`. The facts are fleet-pulse's: no installed unit file, and the stop door's record. A
+    missing unit with no record is never `stopped`."""
+
+    def _stage(self, tmp_path, mock_paths, monkeypatch, *, record, unit):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        alice = mock_paths.bot_runtime("alice")
+        (alice / "data").mkdir(parents=True, exist_ok=True)
+        (alice / "bot.conf").write_text("BOT_SERVICE=com.test.alice\n")
+        if unit:
+            path = home / ".config/systemd/user/com.test.alice.service"
+            path.parent.mkdir(parents=True)
+            path.write_text("[Service]\n")
+        if record:
+            (alice / "data" / ".stopped").write_text(json.dumps({
+                "by": "bot:test-fleet/bob", "reason": "parked", "request_id": "r-1",
+                "stopped_at": "2026-10-09T20:40:00Z", "stopped_epoch": 1791578400},
+                sort_keys=True) + "\n")
+
+    def _alice(self, mock_fleet, mock_paths):
+        with (
+            patch("claudlobby.status.platform.system", return_value="Linux"),
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        rows = json.loads(format_json(results, "test-fleet"))["bots"]
+        return next(bs for bs in results if bs.name == "alice"), next(r for r in rows if r["name"] == "alice")
+
+    def test_a_recorded_stop_reads_stopped_with_who_and_since(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=True, unit=False)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state == "stopped"
+        assert (row["state"], row["stopped_by"], row["stopped_since"], row["stop_reason"]) == (
+            "stopped", "bot:test-fleet/bob", "2026-10-09T20:40:00Z", "parked")
+        assert "stopped" in format_table([alice], "test-fleet")
+
+    def test_a_missing_unit_with_no_record_is_not_stopped(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=False, unit=False)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state != "stopped" and row["stopped_by"] is None
+
+    def test_a_record_beside_an_installed_unit_is_stale_not_a_stop(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=True, unit=True)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state != "stopped" and row["stopped_by"] is None
+
+
+# -- each bot's live context (#2206) -------------------------------------------
+
+
+class TestContextInStatus:
+    """Each bot's live context rides fleet status from the transcript reader
+    `fleet usage` uses: null with the reader's reason when the transcript
+    cannot answer, never 0."""
+
+    def _transcript(self, mock_paths, bot, rows):
+        from claudlobby.isolation import transcript_slug
+        from tests.conftest import write_jsonl
+
+        directory = Path.home() / ".claude" / "projects" / transcript_slug(
+            mock_paths.bot_runtime(bot))
+        directory.mkdir(parents=True)
+        write_jsonl(directory / "s1.jsonl", rows)
+
+    def test_each_bots_context_rides_fleet_status(self, mock_fleet, mock_paths):
+        self._transcript(mock_paths, "alice", [{
+            "type": "assistant", "isSidechain": False, "sessionId": "s1",
+            "timestamp": "2026-10-06T20:31:02Z",
+            "message": {"role": "assistant", "model": "m", "content": [],
+                        "usage": {"input_tokens": 7, "cache_creation_input_tokens": 300,
+                                  "cache_read_input_tokens": 503079, "output_tokens": 9}}}])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        bob = next(bs for bs in results if bs.name == "bob")
+        assert alice.context["tokens"] == 503386          # 7 + 300 + 503079
+        assert bob.context["tokens"] is None              # no transcript: unknown, not 0
+        assert bob.context["reason"] == "transcript_directory_missing_or_untrusted"
+        rows = {row["name"]: row for row in json.loads(format_json(results, "f"))["bots"]}
+        assert rows["alice"]["context"]["tokens"] == 503386
+        assert rows["alice"]["context"]["at"] == "2026-10-06T20:31:02+00:00"
+        assert rows["bob"]["context"]["tokens"] is None
+        table = format_table(results, "test-fleet")
+        assert "CONTEXT" in table and "503k" in table
+        assert "Context:    503,386 tokens" in format_bot_detail(alice)
+        assert ("Context:    unknown (transcript_directory_missing_or_untrusted)"
+                in format_bot_detail(bob))

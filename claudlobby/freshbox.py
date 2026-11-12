@@ -33,7 +33,9 @@ from .composer import (
     _resolve_fleet_ops_grants,
     _resolve_guardrail_permissions,
     _resolve_integration_grants,
+    _resolve_integration_rules,
     _resolve_mcp_permissions,
+    _resolve_resume_permission,
     _resolve_skill_grants,
     _resolve_skill_permissions,
     compose_settings_local,
@@ -83,9 +85,24 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
         bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
     )
     sourced |= set(_resolve_skill_permissions(effective_skills))
+    sourced |= set(_resolve_resume_permission(bot, fleet, paths, effective_skills))
     sourced |= set(_resolve_skill_grants(effective_skills, paths))
     sourced |= set(_resolve_fleet_ops_grants(bot, fleet))
     return sourced
+
+
+def _sourced_ask_rules(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
+    """Every ask rule the bot's equipped skills and integrations declare (#2476).
+
+    Taken before the fleet's ``tool_permissions.allow`` drops the ones it grants,
+    so :func:`classify_grants` can tell a fleet grant of an asked rule, the
+    designed way to grant one, from an override no source declares.
+    """
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    asked = set(_resolve_skill_grants(effective_skills, paths, key="ask_grants"))
+    return asked | set(_resolve_integration_rules(bot, paths, "ask_grants"))
 
 
 # Grant finding vocabulary — kind → (severity, allow-list detail suffix). One
@@ -114,6 +131,7 @@ def classify_grants(
     sourced: set[str],
     base: set[str],
     override: set[str],
+    asked: frozenset[str] | set[str] = frozenset(),
 ) -> list[tuple[str, str, str]]:
     """Classify each grant against its provenance — the pure, testable core.
 
@@ -124,6 +142,10 @@ def classify_grants(
         fleet ``tool_permissions.allow`` override (drift signal — no source contract).
       - ``under_grant`` (fail): a source-declared grant that is not denied yet
         never reached the allow list (the bot would rely on the retired global).
+
+    An allow entry the fleet override grants that an equipped source declares as
+    an ask rule (``asked``, #2476) gets no finding: that override is how a fleet
+    grants an asked rule.
     """
     results: list[tuple[str, str, str]] = []
     allow_set = set(allow)
@@ -131,6 +153,8 @@ def classify_grants(
 
     for grant in allow:
         if grant in sourced or grant in base:
+            continue
+        if grant in override and grant in asked:
             continue
         kind = "unsourced_grant" if grant in override else "orphan_grant"
         results.append((kind, _GRANT_KINDS[kind][0], grant))
@@ -199,9 +223,7 @@ def _isolation_findings(
         composed = set(json.loads(target.read_text())["permissions"]["deny"])
     except (OSError, ValueError, KeyError, TypeError):
         composed = None
-    remedy = ("stage `claudlobby --root <data-root> config plan --release <sealed-release-id>`"
-              " and activate the returned plan with `claudlobby --root <data-root>"
-              " host activate <plan-id> --install-directory <native-user-unit-dir>`")
+    remedy = "run `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`"
     if composed is None:
         findings.append(Finding(
             bot.bot_id, "isolation_not_composed", WARN,
@@ -678,6 +700,7 @@ def audit_bot(
         sourced=_sourced_grants(bot, fleet, paths),
         base=set(BASE_TOOLS),
         override=set(bot.tool_permissions.allow),
+        asked=_sourced_ask_rules(bot, fleet, paths),
     )
     findings = [
         Finding(bot.bot_id, kind, sev, f"{grant} {_GRANT_KINDS[kind][1]}")
@@ -699,12 +722,13 @@ def _fleet_pulse_env_findings(
     """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
 
     ``claudlobby/_runtime_scripts/fleet-pulse.sh`` runs from a composed timer unit that sources no
-    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
-    a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
-    its own default. The operator sees no change and cannot tell "ignored" from
-    "applied, and the condition is genuinely still firing". That is the shape
-    this rung exists to make audible: without it the only feedback is an audit
-    weeks later.
+    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — and
+    ``fleet notify`` and a message write's alert read the same keys from the
+    active fleet.yaml block (#2234), so a ``FLEET_PULSE_*`` key in any tier
+    reaches nothing and the script keeps its own default. The operator sees no
+    change and cannot tell "ignored" from "applied, and the condition is
+    genuinely still firing". That is the shape this rung exists to make
+    audible: without it the only feedback is an audit weeks later.
 
     FAIL at every tier, deliberately, and not the F5 rung's tier-derived
     severity — for the same reason ``_env_secret_leak_findings`` departs from
@@ -733,10 +757,12 @@ def _fleet_pulse_env_findings(
                             "fleet_pulse_env_inert",
                             FAIL,
                             f"{path}: {key} is set but reaches nothing — the "
-                            "composed fleet-pulse timer unit sources no .env, so "
-                            "this is silently ignored and the script keeps its "
-                            "default. Move it to the fleet.yaml `fleet_pulse:` "
-                            "block, which composes into the unit's Environment=.",
+                            "composed fleet-pulse timer unit sources no .env, and "
+                            "`fleet notify` and a message write's alert read the "
+                            "fleet.yaml block, so this is silently ignored and the "
+                            "script keeps its default. Move it to the fleet.yaml "
+                            "`fleet_pulse:` block, which composes into the unit's "
+                            "Environment=.",
                         )
                     )
     return findings
@@ -791,37 +817,3 @@ def exits_nonzero(findings: list[Finding], *, strict: bool) -> bool:
     if has_failures(findings):
         return True
     return strict and any(f.severity == WARN for f in findings)
-
-
-def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
-    """Human-readable fresh-box self-containment report (the over-grant report)."""
-    lines = [
-        f"Fresh-box self-containment audit — {fleet.name} ({len(fleet.bots)} bots)"
-    ]
-    # INFO is visibility only (it never blocks, even under --strict), so it
-    # must not hide the verdict either: a fleet whose only findings are INFO
-    # lines is still self-contained, and says so above them.
-    if not [f for f in findings if f.severity != INFO]:
-        lines.append(
-            "  OK — every grant traces to an equipped source; Tier-A settings "
-            "composed per-bot. Self-contained."
-        )
-        if not findings:
-            return "\n".join(lines)
-
-    by_bot: dict[str, list[Finding]] = {}
-    for f in findings:
-        by_bot.setdefault(f.bot_id, []).append(f)
-    icons = {FAIL: "FAIL", WARN: "warn", INFO: "info"}
-    for bot_id in sorted(by_bot):
-        lines.append(f"  {bot_id}:")
-        for f in by_bot[bot_id]:
-            lines.append(
-                f"    [{icons.get(f.severity, f.severity)}] {f.kind}: {f.detail}"
-            )
-
-    fails = sum(1 for f in findings if f.severity == FAIL)
-    warns = sum(1 for f in findings if f.severity == WARN)
-    infos = sum(1 for f in findings if f.severity == INFO)
-    lines.append(f"  {fails} fail, {warns} warn, {infos} info")
-    return "\n".join(lines)

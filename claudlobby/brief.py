@@ -120,7 +120,8 @@ def _assert_selected_identity(plane, fleet: str, bot_id: str,
 ALERT_WINDOW_H = 24
 
 # Rows any ONE text section will print before truncating. The JSON envelope is
-# not capped, except its reports section (``REPORT_ROW_LIMIT``, below).
+# not capped, except its reports and workstreams sections (``REPORT_ROW_LIMIT``
+# and ``WORKSTREAM_ROW_LIMIT``, below).
 #
 # Measured need, not a round number: this fleet's live brief rendered 335 unacked
 # reports as 335 lines. The read door's job is to route attention, and a section
@@ -141,6 +142,14 @@ TEXT_ROW_LIMIT = 10
 # labeled in `degraded[]`, with the count.
 REPORTS_LIST_COMMAND = "claudlobby --json fleet reports list --unacknowledged"
 REPORT_ROW_LIMIT = 50
+
+# Every task admitted since #1053 has a workstream of its own, so the active
+# workstreams grow with the fleet's open work: one row for each open task. Each
+# workstream list keeps its oldest WORKSTREAM_ROW_LIMIT rows, the reports bound,
+# and a cut is labeled in `degraded[]`, with the count and the command that
+# lists them all.
+WORKSTREAMS_LIST_COMMAND = "claudlobby --json workstream list"
+WORKSTREAM_ROW_LIMIT = 50
 
 # Workstream staleness window, in days, shared with selected fleet policy.
 DEFAULT_LEASE_DAYS = 14
@@ -366,15 +375,19 @@ def _mission_section(fleet, bot, paths: Paths) -> dict:
 
 def _work_section(
     doors, paths: Paths, fleet, bot_id: str, now: int,
-    degraded: list[Degradation], *, plane,
+    degraded: list[Degradation], *, plane, snapshot=None,
 ) -> dict:
-    """Fleet-owned open work from the canonical reducer, with watchdog attention."""
+    """Fleet-owned open work from the canonical reducer, with watchdog attention.
+
+    *snapshot* is the fleet's reducer read, taken once in the brief's snapshot
+    for this section and the workstream section; None reads it here."""
     import sqlite3
     from .task_state import TaskStateError, read_tasks
 
     try:
-        fleet_uid = plane.pr.fleet_uid(plane.conn, plane.fleet)
-        snapshot = read_tasks(plane.conn, fleet_uid=fleet_uid)
+        if snapshot is None:
+            fleet_uid = plane.pr.fleet_uid(plane.conn, plane.fleet)
+            snapshot = read_tasks(plane.conn, fleet_uid=fleet_uid)
     except (sqlite3.Error, TaskStateError, ValueError, doors.PlaneUnreachable) as exc:
         degraded.append(Degradation(
             field="work", mode="omitted", issue="#1747",
@@ -437,6 +450,7 @@ def _work_section(
         items.append({
             "task_id": task.task_id, "title": task.title, "state": task.state,
             "admitted_at": task.occurred_at,
+            "workstream_id": task.workstream_id,
             "deadline": assignment.expected_by if assignment else None,
             "assignment": ({
                 "assignment_id": assignment.assignment_id,
@@ -476,7 +490,7 @@ def _work_section(
 
 
 def _workstream_section(
-    fleet, paths: Paths, now: int, degraded: list[Degradation], plane=None
+    fleet, paths: Paths, now: int, degraded: list[Degradation], plane=None, tasks=None
 ) -> dict:
     """Active workstreams with the stall flags the pulse consumer never shipped.
 
@@ -485,10 +499,16 @@ def _workstream_section(
     expired`` means the lease itself has run out. They are independent — a
     renewed workstream keeps its lease while its ``last_progress_ts`` stays put
     (the workstream operation is explicit that renew does not advance
-    progress), which is exactly the state worth surfacing.
+    progress), which is exactly the state worth surfacing. A workstream that
+    holds an open task is neither (#1053): its lease runs only while it holds
+    none, and its tasks' own deadline watch is in ``work``, by the IDs in its
+    ``open_task_ids``. Each list keeps its oldest ``WORKSTREAM_ROW_LIMIT`` rows,
+    and a cut is labeled. *tasks* is the fleet's reducer read the brief already
+    holds; None lets the registry read its own.
     """
     from .workstreams import blocked_waits, plane_workstreams
-    workstreams, note = plane_workstreams(paths, plane=plane, lease_days=_lease_days(fleet))
+    workstreams, note = plane_workstreams(paths, plane=plane, lease_days=_lease_days(fleet),
+                                          tasks=tasks)
     if workstreams is None:
         # 'no workstreams' from a plane that could not be read is the silent
         # drop this door exists to refuse: omitted, with the note.
@@ -502,6 +522,7 @@ def _workstream_section(
             continue
         progress = _epoch(w.get("last_progress_ts"))
         lease = _epoch(w.get("lease_expires_ts"))
+        open_tasks = list(w.get("open_task_ids") or [])
         entry = {
             "id": w.get("id"),
             "title": w.get("title"),
@@ -509,14 +530,23 @@ def _workstream_section(
             "next": w.get("next"),
             "last_progress_ts": w.get("last_progress_ts"),
             "lease_expires_ts": w.get("lease_expires_ts"),
-            "stalled": progress is not None and (now - progress) > lease_s,
-            "lease_expired": lease is not None and lease < now,
+            "open_task_ids": open_tasks,
+            "stalled": not open_tasks and progress is not None and (now - progress) > lease_s,
+            "lease_expired": not open_tasks and lease is not None and lease < now,
         }
         active.append(entry)
         if entry["stalled"] or entry["lease_expired"]:
             stalled.append(entry)
-    return {"active": active, "stalled": stalled,
-            "blocked": blocked_waits(workstreams, now)}
+    section = {"active": active, "stalled": stalled,
+               "blocked": blocked_waits(workstreams, now)}
+    for field, rows in list(section.items()):
+        if len(rows) > WORKSTREAM_ROW_LIMIT:
+            degraded.append(Degradation(
+                field=f"workstreams.{field}", mode="labeled", issue="#1053", count=len(rows),
+                reason=f"showing the oldest {WORKSTREAM_ROW_LIMIT} of {len(rows)} {field}"
+                       " workstreams; list them all with " + WORKSTREAMS_LIST_COMMAND))
+            section[field] = rows[:WORKSTREAM_ROW_LIMIT]
+    return section
 
 
 def _reports_section(
@@ -660,7 +690,7 @@ def _alerts_section(
             "data": e.get("data", {}),
         }
         for e in events
-        if isinstance(e.get("ts"), str) and e["ts"] >= cutoff
+        if isinstance(e.get("ts"), str)
     ]
 
 
@@ -695,6 +725,18 @@ def _emit_losses_label(paths: Paths, now: int, degraded: list[Degradation]) -> N
 
 
 # --- composition --------------------------------------------------------------
+
+
+def _fleet_tasks(plane):
+    """The fleet's canonical tasks, read once in the brief's snapshot for its work
+    and workstream sections (#1053). None when they cannot be read: each section
+    then reads for itself and names what it could not serve."""
+    from .task_state import read_tasks
+
+    try:
+        return read_tasks(plane.conn, fleet_uid=plane.pr.fleet_uid(plane.conn, plane.fleet))
+    except Exception:  # noqa: BLE001 — each section's own read reports the cause
+        return None
 
 
 def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
@@ -732,10 +774,13 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int, *,
             plane.roster = plane.pr.roster(plane.conn, plane.fleet)
             if selected_identity is not None:
                 _assert_selected_identity(plane, fleet.name, bot_id, selected_identity)
+            snapshot = _fleet_tasks(plane)
             sections = {
                 "work": _work_section(doors, paths, fleet, bot_id, now, degraded,
-                                      plane=plane),
-                "workstreams": _workstream_section(fleet, paths, now, degraded, plane=plane),
+                                      plane=plane, snapshot=snapshot),
+                "workstreams": _workstream_section(
+                    fleet, paths, now, degraded, plane=plane,
+                    tasks=None if snapshot is None else snapshot.tasks),
                 "reports": _reports_section(paths, bot_id, terminal, degraded, plane=plane,
                                             manager=_manages_fleet(fleet, bot_id)),
                 "alerts": _alerts_section(paths, bot_id, now, degraded, plane=plane),
@@ -782,8 +827,49 @@ def _row_text(title: str | None) -> str:
     return _clip(title) if (title or "").strip() else "(title not recorded)"
 
 
+# One line under an assignment whose attention does not say what it means (#2546).
+# Keyed by (status, reason). `overdue` and `not_due` say it in their names; `unknown`
+# is explained by the DEGRADED section. The 45 minutes and 24 hours are the matcher's
+# defaults (DEFAULT_PROGRESS_GRACE_S, DEFAULT_OVERDUE_MAX_AGE_S), pinned by
+# tests/test_assignee_attention.py. The JSON brief carries status and reason only.
+_WATCH_NOTES = {
+    ("orphaned", "respawned_after_dispatch"):
+        "orphaned: past its deadline, issued to a session that has since restarted; "
+        "assignment progress moves it to past_due for 45 minutes (the default), block does not",
+    ("past_due", "progress_grace"):
+        "past_due: held back by a progress report under 45 minutes old (the default); "
+        "without a newer one it reads overdue or orphaned again",
+    ("past_due", "max_age_cap"):
+        "past_due: more than 24 hours after the dispatch or, once the manager has moved the deadline, after the "
+        "move or the new deadline, whichever is later (the default); no longer flagged, and not resolved",
+}
+
+
 def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
+
+
+def _by_workstream(shown: list, items: list):
+    """The WORK rows grouped by workstream (#1053), as (header, item) pairs.
+
+    A group stands in its oldest shown task's place and keeps oldest first
+    inside it; the tasks in no workstream group under "no workstream". Each
+    header counts its group's open tasks, and says how many of them are shown
+    when the row limit cut some.
+    """
+    totals: dict = {}
+    for item in items:
+        totals[item.get("workstream_id")] = totals.get(item.get("workstream_id"), 0) + 1
+    groups: dict = {}
+    for item in shown:
+        groups.setdefault(item.get("workstream_id"), []).append(item)
+    for workstream_id, members in groups.items():
+        label = f"workstream {workstream_id}" if workstream_id else "no workstream"
+        total = totals[workstream_id]
+        count = f"{total}" if len(members) == total else f"{len(members)} of {total}"
+        yield f"  {label}: {count} open task(s)", members[0]
+        for item in members[1:]:
+            yield None, item
 
 
 def format_brief(brief: dict) -> str:
@@ -848,7 +934,9 @@ def format_brief(brief: dict) -> str:
         scope = "fleet intake" if work["scope"] == "fleet" else "assigned to this bot"
         out.append(f"  {scope}: {len(items)} open task(s)")
         shown, more = rows(items)
-        for item in shown:
+        for header, item in _by_workstream(shown, items):
+            if header:
+                out.append(header)
             out.append(
                 f"    {item['task_id']}  {item['state']}  {_row_text(item['title'])}"
             )
@@ -862,6 +950,9 @@ def format_brief(brief: dict) -> str:
                 )
                 if attention and attention.get("past_due"):
                     out.append("      PAST DUE (literal deadline; watchdog status above)")
+                note = _WATCH_NOTES.get((status, attention.get("reason"))) if attention else None
+                if note:
+                    out.append(f"      {note}")
             if item["historical_references"]:
                 out.append(
                     "      historical references: "
@@ -892,6 +983,12 @@ def format_brief(brief: dict) -> str:
         if not w.get("active"):
             out.append("  (none active)")
         shown, more = rows(w["active"])
+        # The JSON may itself be a cut (WORKSTREAM_ROW_LIMIT): then count against
+        # the whole list, and name the door that lists it.
+        cut = next((d for d in deg if d["field"] == "workstreams.active" and d.get("count")), None)
+        if cut:
+            more = [f"    ... showing the oldest {len(shown)} of {cut['count']}"
+                    f" — list them all with {WORKSTREAMS_LIST_COMMAND}"]
         for e in shown:
             flags = []
             if e["stalled"]:
@@ -949,7 +1046,7 @@ def format_brief(brief: dict) -> str:
         out.append("  (unavailable — see DEGRADED)")
     else:
         out.append(
-            f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}){mark('alerts')}"
+            f"ALERTS — critical events, last {ALERT_WINDOW_H}h ({len(alerts)}), UTC{mark('alerts')}"
         )
         shown, more = rows(alerts)
         for a in shown:
@@ -970,6 +1067,11 @@ def format_brief(brief: dict) -> str:
                    f"skipped>={coverage['files_skipped_at_least']} "
                    f"issues={','.join(coverage['issues']) or '-'}")
         out.append("  quota=unavailable (no provider observation)")
+        context = brief.get("context")
+        if context is not None:
+            out.append(f"  context now: {context['tokens']:,} tokens (the newest main-chain call, "
+                       f"{context['at']})" if context["tokens"] is not None else
+                       f"  context now: unknown ({context['reason']})")
         out.append("")
     if deg:
         out.append("DEGRADED — fields this door will not serve as plain truth")
@@ -1021,6 +1123,13 @@ BOOT_CHAR_BUDGET = 1000
 # else), then overdue, then open oldest-first.
 BOOT_DETAIL_LIMIT = 3
 
+# What an ORPHANED row means, said once above the rows (#2546). The session reading
+# this payload holds the assignment, and its own progress report is what clears
+# the status. Cap-exempt like the header; the 45 minutes is the matcher's
+# DEFAULT_PROGRESS_GRACE_S, pinned by tests/test_assignee_attention.py.
+BOOT_ORPHANED_HINT = ("  orphaned: past its deadline, issued to a session that has since restarted; "
+                      "assignment progress clears it for 45 minutes by default")
+
 
 def boot_provenance(paths: Paths, now: int, *, fleet_name: str | None = None,
                     viewer: str | None = None,
@@ -1049,7 +1158,7 @@ def boot_provenance(paths: Paths, now: int, *, fleet_name: str | None = None,
             and epoch >= now - 24 * 3600
         )
         entries = len(pr.workstream_registry(
-            conn, fleet, lease_days=lease_days_env()).get("workstreams", {}))
+            conn, fleet, lease_days=lease_days_env(), tasks=snapshot.tasks).get("workstreams", {}))
     except BriefIdentityMismatch:
         raise
     except Exception as exc:
@@ -1084,9 +1193,7 @@ def _boot_detail_lines(work: dict, now: int) -> tuple[list[str], int]:
         age = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
         assignment_id = f" / {assignment['assignment_id']}" if assignment else ""
         note = ""
-        if status == "orphaned":
-            note = " (issued pre-restart; may need re-issue)"
-        elif status == "overdue":
+        if status == "overdue":
             overdue_s = observation.get("elapsed_past_deadline_s") or 0
             note = f" (+{overdue_s // 60}m past deadline)"
         lines.append(f"  {status.upper()} {item['task_id']}{assignment_id} — {age} old{note}:"
@@ -1128,6 +1235,8 @@ def format_boot_brief(brief: dict, prov: dict) -> str:
                 f"work: {len(items)} open, {queued} queued, {overdue} overdue, "
                 f"{orphaned} orphaned, {history_issues} history issue(s){mark}"
             )
+            if orphaned:
+                exempt.append(BOOT_ORPHANED_HINT)
             detail, hidden = _boot_detail_lines(work, _epoch(brief["generated_at"]) or 0)
             if hidden:
                 exempt.append(f"  (+{hidden} more — door)")

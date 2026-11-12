@@ -39,13 +39,15 @@ SWEEP = re.compile(r"(?<![\w.-])data/")
 
 #: library-relative path -> (lines SWEEP matches, why they survive).
 KEEP = {
+    "guardrails/task-scoped-effects.md": (1, "the requester's own restart-safe permission payload and UUID, not an address sent to another bot"),
     "protocols/token-efficiency.md": (1, "rule zero says your own data/ is not an address"),
     "protocols/comms-topology.md": (4, "Bot to bot says how a path in your bot directory fails its reader"),
     "protocols/report-back.md": (1, "Where the detail goes says never your own data/"),
     "expertise/code-review.md": (1, "what a bot may write in its own directory"),
     "skills/gws-reauth/SKILL.md": (2, "the bot's own scratch file for a callback URL"),
     "tools/README.md": (2, "where a tool's runtime output goes"),
-    "protocols/fleet-observability.md": (4, "framework marker files scripts read, and the retired event files"),
+    "protocols/fleet-observability.md": (2, "a framework marker file scripts read (the idle marker), and the retired event files"),
+    "skills/fleet-pulse/fleet-observability-reference.md": (3, "framework marker files scripts read (the idle marker, the stop record)"),
     "skills/adversarial-review/SKILL.md": (1, "users/data/systems, not a directory"),
     "lessons/review/empirical-verification.md": (1, "evidence the author quotes; no reader is sent to the path"),
 }

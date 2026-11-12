@@ -36,7 +36,7 @@ from claudlobby.recording_alerts import ChannelOutcome, RecordingAlertOutcome
 from tests.package_fixtures import source_package
 from tests.plane_fixtures import F as SCENE_FLEET, _scene
 from tests.plane_setup import initialize_plane
-from tests.test_activation import cold, tmp_path  # noqa: F401 — short private activation root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private activation root
 from tests.test_releases import installed  # noqa: F401 — cold dependency
 from tests.test_task_read_cli import active  # noqa: F401 — active private Plane fixture
 from tests.test_message_write_cli import _assigned, _call, _delivery_call, _generated
@@ -110,7 +110,7 @@ def _send(capsys, root, *, expected):
 
 def test_a_held_delivery_gets_one_enter_and_is_received(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=1)
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=0)
@@ -125,7 +125,7 @@ def test_the_recipe_a_second_enter_only_for_the_same_match(active, monkeypatch, 
     # The first Enter can only strip the CR a swallowed Enter left (#1236); the
     # second submits. It is pressed only on the match the first look saw.
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=2, verdict="chip", match="chip#1")
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=0)
@@ -139,7 +139,7 @@ def test_the_recipe_a_second_enter_only_for_the_same_match(active, monkeypatch, 
 
 def test_never_a_third_enter(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=99)
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=5)
@@ -151,7 +151,7 @@ def test_never_a_third_enter(active, monkeypatch, capsys):
 @pytest.mark.parametrize("verdict", ["busy", "not-held", "glued", "not-shown", "chips"])
 def test_no_enter_when_the_box_is_busy_menued_or_holds_other_text(active, monkeypatch, capsys, verdict):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(verdict=verdict)
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=5)
@@ -163,7 +163,7 @@ def test_no_enter_when_the_box_is_busy_menued_or_holds_other_text(active, monkey
 
 def test_no_look_while_the_receipt_proof_is_still_queued(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=1)
     _held(monkeypatch, box)
     def queued(ctx, message_id, *, destination, wait):
@@ -178,7 +178,7 @@ def test_a_withheld_enter_rc3_is_repaired_once_the_box_holds_it(active, monkeypa
     # #1236's rc 3: the box never showed the payload, so the transport withheld
     # its Enter. On main the command stops there; the text can still land.
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=1)
     _held(monkeypatch, box, rc=3)
     out = _send(capsys, root, expected=0)
@@ -187,7 +187,7 @@ def test_a_withheld_enter_rc3_is_repaired_once_the_box_holds_it(active, monkeypa
 
 def test_an_assignment_delivery_held_in_the_box_is_repaired(active, monkeypatch, capsys, tmp_path):  # noqa: F811
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     ctx, task, assigned = _assigned(root)
     body = tmp_path / "assignment.txt"
     body.write_text("Private assignment delivery", encoding="utf-8")
@@ -210,7 +210,7 @@ def test_the_box_read_before_the_send_reaches_every_look(active, monkeypatch, ca
     """Option (c): the owner reads the recipient's box once, just before its send,
     and gives that read to each look, which presses a chip only on an empty one."""
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=99, before="held")
     _held(monkeypatch, box)
     _send(capsys, root, expected=5)
@@ -242,7 +242,7 @@ def test_a_press_is_recorded_even_when_the_receipt_read_after_it_raises():
 
 def test_the_repair_is_a_fleet_event_with_its_match_and_every_look(active, monkeypatch, capsys):
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     box = _Box(needs=2, verdict="chip", match="chip#3")
     _held(monkeypatch, box)
     out = _send(capsys, root, expected=0)
@@ -456,7 +456,7 @@ def test_the_box_is_read_before_the_send_and_handed_to_every_look_on_message_sen
 ):
     """Option (c)'s ORDER and hand-over on the message path: the stub box answers the read, the wrapped send marks the send."""
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     events = []
     box = _Box(needs=2, verdict="chip", match="chip#1", before="empty")
     real_read = box.read_box
@@ -484,7 +484,7 @@ def test_the_box_is_read_before_the_send_and_handed_to_every_look_on_assignment_
 ):  # noqa: F811
     """The same pin on the assignment path, the one that carries long bodies (the chips): the suite's other test there never reads what the look was given."""
     root, host = active
-    _generated(monkeypatch, root, host.release)
+    _generated(monkeypatch, root, host.installation)
     ctx, task, assigned = _assigned(root)
     body = tmp_path / "assignment.txt"
     body.write_text("Private assignment delivery", encoding="utf-8")

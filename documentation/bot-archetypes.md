@@ -28,7 +28,7 @@ These are available to every bot on the system:
 | `/audit design` | Visual/UX audit of deployed apps |
 | `/audit frontend-perf` | Performance analysis |
 | `/product-vision` | Architecture-aware product roadmapping |
-| `/implement-plan` | Execute a written plan step-by-step |
+| `/build` | Execute a written plan step-by-step |
 | `/session handoff` | Capture context for session continuity |
 | `/session resume` | Restore context from a previous session |
 | `/investigate-app` | Debug production issues |
@@ -132,7 +132,7 @@ Focused executor. Takes tasks from the manager, works in worktrees, creates PRs.
 | `/restart` | Graceful self-restart |
 | `/eng-status` | Self-diagnostic (uptime, memory, session) |
 
-**Inherits from global:** `/review-work pr`, `/worktree`, `/commit-push-pr`, `/audit tech-debt`, `/audit security`, `/implement-plan`
+**Inherits from global:** `/review-work pr`, `/worktree`, `/commit-push-pr`, `/audit tech-debt`, `/audit security`, `/build`
 
 ### CLAUDE.md Essentials
 

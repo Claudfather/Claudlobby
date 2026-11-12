@@ -1,10 +1,9 @@
 """Render reviewed configuration without writing generated runtime paths.
 
-The selected candidate renders its own code/resources. Callers supply the
-host's declared fleet Paths, including external/vault declarations; activation
-must reconcile this explicit coverage with the actual enrolled consumers.
-Source authoring (.env scaffolding included), enrollment, registry receipts and
-release selection belong to their separate owners, never to this planner.
+The Git candidate renders its own code/resources with final runtime paths.
+Callers supply the host's exact fleet Paths, including external declarations;
+the updater reconciles that coverage with native consumers. Source authoring,
+enrollment and registry receipts remain with their canonical owners.
 """
 
 from __future__ import annotations
@@ -13,14 +12,14 @@ import json
 from pathlib import Path
 import tempfile
 
+from . import claudron_compat
 from . import composer as compose
 from .config import host_override_path, host_unit_name, load_fleet_snapshot
-from .config_plan import ConfigPlan, ConfigPlanBuilder, PlanError
+from .config_plan import ConfigPlanBuilder, PlanError, RenderedConfiguration
 from .config_units import job_units, unit_family
 from .context import Context
 from .paths import Paths, _iter_fleet_dirs
-from .releases import ReleaseManifest, read_release
-from .resources import get_resources, selected_cli
+from .resources import selected_cli
 from .runtime_admission import RESIDENT_UNIT_PHASES
 from .validator import validate
 
@@ -49,17 +48,17 @@ def _snapshot(source: Path) -> dict[str, tuple[bytes, int]]:
 
 def _inputs(builder: ConfigPlanBuilder, paths: Paths) -> None:
     for path in (paths.fleet_yaml, paths.projects_yaml, paths.overlay_library,
-                 paths.overlay_voices, paths.overlay_templates):
+                 paths.legacy_overlay_voices, paths.overlay_templates):
         builder.input(path)
     for tier in paths.env_tiers():
         if tier.path is not None:
             builder.input(tier.path)
 
 
-def _access(builder, bot, fleet) -> None:
+def _access(builder, bot, fleet) -> Path | None:
     fresh = compose.compose_access_json(bot, fleet)
     if fresh is None:
-        return
+        return None
     target = Path.home() / compose.telegram_channel_rel(bot.telegram.handle) / "access.json"
     builder.input(target)  # the merge reads runtime-owned pending/access fields
     if target.exists():
@@ -68,6 +67,7 @@ def _access(builder, bot, fleet) -> None:
             raise PlanError(f"channel access is not an object: {target}")
         fresh = compose.reconcile_access_content(existing, fresh, bot, fleet)
     builder.file(target, (json.dumps(fresh, indent=2) + "\n").encode(), mode=0o600)
+    return target
 
 
 def _bot(builder, context, bot, delay, cascade, log) -> None:
@@ -83,7 +83,7 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
               for name in (unit_name + ".service", unit_name + ".plist")}
     builder.effects["units"].extend(unit_family(
         family, destination=directory, scope="bot", phase="bots",
-        release_id=builder.release_id, fleet=fleet.name, bot=bot.bot_id))
+        fleet=fleet.name, bot=bot.bot_id))
     tools = {}
     for name, artifact in rendered.items():
         if name.startswith("tools/"):
@@ -94,7 +94,9 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
         else:
             builder.file(directory / name, artifact.content.encode(), mode=artifact.mode)
     builder.tree(directory / "tools", tools)
-    builder.symlink(directory / ".cli/bin/claudlobby", selected_cli())
+    installation = paths.package.installation
+    builder.symlink(directory / ".cli/bin/claudlobby",
+                    selected_cli(installation=installation))
 
     skills = compose.resolve_effective_skills(
         bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots())
@@ -103,6 +105,11 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
     for leaf, source in sources.items():
         builder.input(source)
         frozen.update({f"{leaf}/{name}": item for name, item in _snapshot(source).items()})
+    # Each shared partial sits beside the copied skills, as in library/skills/,
+    # so a skill's ../_<name>.md link resolves in the bot's copy too.
+    for name, partial in paths.skill_partials().items():
+        content, _digest = builder.input_snapshot(partial)
+        frozen[name] = (content, partial.stat().st_mode & 0o777)
     builder.tree(directory / ".claude/skills", frozen)
 
     mounts = directory / "mounts"
@@ -112,26 +119,31 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
                 builder.remove(child)
     for name, target in compose.resolve_mount_sources(bot, directory, log).items():
         builder.symlink(mounts / name, target)
-    _access(builder, bot, fleet)
+    access = _access(builder, bot, fleet)
+    # Every path staged for this bot sits in its directory or is its channel
+    # access file; config diff names the bots a content change reaches (#2449).
+    builder.effects["bot_paths"][f"{fleet.name}/{bot.bot_id}"] = [
+        str(path) for path in (directory, access) if path is not None]
 
 
-def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
-                        *, log=lambda message: None) -> ConfigPlan:
-    """Stage all supplied fleets and shared host artifacts as one immutable plan.
-
-    No selected-bot shortcut: permissions, hooks, skills and host equipment must
-    enter through the same coordinated activation. An empty fleet selection is
-    refused, never interpreted as authority to remove an estate.
-    """
+def render_git_configuration(fleet_paths: list[Paths], *, revision: str,
+                             log=lambda message: None, validation_warning=None) -> RenderedConfiguration:
+    """Render candidate resources once with final installation paths, without a release seal."""
     if not fleet_paths:
-        raise PlanError("select the declared host fleets before planning configuration")
-    root = fleet_paths[0].root
-    current = read_release(root, release.release_id)
-    package = get_resources()
-    if (current != release or selected_cli().absolute() != release.cli_path
-            or package.native != release.native_path
-            or package.artifact_id != release.inputs.artifact_id):
-        raise PlanError("run configuration planning with the sealed candidate release CLI")
+        raise PlanError("select the declared host fleets before rendering configuration")
+    package = fleet_paths[0].package
+    installation = package.installation
+    if (installation is None or installation.data_root != fleet_paths[0].root
+            or package.source_revision != revision or package.artifact_id):
+        raise PlanError("Git rendering requires the exact candidate installation/revision binding")
+    builder = ConfigPlanBuilder(installation.data_root, effects={})
+    return _render_configuration(fleet_paths, builder, log=log,
+                                 validation_warning=validation_warning).freeze(revision)
+
+
+def _render_configuration(fleet_paths, builder, *, log, validation_warning):
+    """Render the managed Git candidate using final runtime paths."""
+    root, package = fleet_paths[0].root, fleet_paths[0].package
     if any(paths.root != root or paths.package != package or paths.seed for paths in fleet_paths):
         raise PlanError("configuration fleets must share one data root and candidate package")
     manifests = {paths.fleet_yaml.resolve() for paths in fleet_paths}
@@ -147,11 +159,11 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
     if missing:
         raise PlanError("host plan omits local fleet declarations: "
                         + ", ".join(map(str, sorted(missing))))
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256, (), effects={})
     builder.input(host_override_path())
     builder.input(Path.home() / ".gitconfig")
     contexts = []
     source_digests = {}
+    migration_reader = claudron_compat.vault_migration_reader()
     for paths in sorted(fleet_paths, key=lambda item: str(item.fleet_yaml)):
         _inputs(builder, paths)
         fleet_content, fleet_digest = builder.input_snapshot(paths.fleet_yaml)
@@ -171,11 +183,14 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
                     builder.input(tier.path)
             bot = context.fleet.bots[bot_id]
             builder.input(compose.account_settings_path(bot, context.fleet, paths))
-        report = validate(context.fleet, paths)
+        report = validate(context.fleet, paths, migration_reader=migration_reader)
         if report.has_errors:
             raise PlanError("invalid fleet configuration: " + "; ".join(map(str, report.errors)))
-        for warning in report.warnings:
-            log(str(warning))
+        for kind, warning in report.categorized():
+            if validation_warning is None:
+                log(str(warning))
+            else:
+                validation_warning(kind)
         contexts.append(context)
         source_digests[fleet.name] = {"fleet": fleet_digest, "projects": projects_digest}
     names = [context.fleet.name for context in contexts]
@@ -190,6 +205,11 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             "projects": {"path": str(c.paths.projects_yaml), "sha256": source_digests[c.fleet.name]["projects"]},
         } for c in contexts},
         "restart_bots": [f"{c.fleet.name}/{bot}" for c in contexts for bot in c.fleet.bots],
+        # Activation never reads restart_bots: it pauses every installed unit
+        # and starts every planned one, so the list is every bot (#2449).
+        "restart_reason": "host activate stops each enrolled bot and starts each declared one, "
+                          "whatever the plan changes",
+        "bot_paths": {},
         "reload_supervision": True,
         "coverage": "declared fleets; activation must reconcile enrolled consumers",
         "units": [],
@@ -217,7 +237,7 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             files = _snapshot(timers)
             builder.effects["units"].extend(job_units(
                 files, destination=paths.runtime_fleet / "timers", scope="fleet",
-                release_id=release.release_id, fleet=fleet.name))
+                fleet=fleet.name))
             builder.tree(paths.runtime_fleet / "timers", files)
             if paths.shared_docs:
                 for name in ("planning/active", "planning/completed", "decisions", "knowledge", "runbooks"):
@@ -232,7 +252,6 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
         files = _snapshot(timers)
         builder.effects["units"].extend(job_units(
             files, destination=root / "runtime/_host/timers", scope="host",
-            release_id=release.release_id,
             # This is the declared host ingest service, not a pattern over
             # installed unit names. It must survive until the controlled drain.
             resident_phases={host_unit_name(name): phase
@@ -242,4 +261,4 @@ def stage_configuration(fleet_paths: list[Paths], release: ReleaseManifest,
             result = render(paths, output_dir=host, manifests=sorted(manifests))
             paths.assert_writable(root / "runtime/_host" / result.name)
             builder.file(root / "runtime/_host" / result.name, result.read_bytes())
-    return builder.seal()
+    return builder

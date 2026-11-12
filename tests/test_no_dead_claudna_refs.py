@@ -6,13 +6,15 @@ with no aliases. Library fragments compose into live bot CLAUDE.md files and
 claudlobby/_runtime_scripts/ scripts inject skill keystrokes into live sessions, so a dead name here
 becomes a dead runtime affordance in every fleet. Both the plugin-namespaced
 form (``/claudna:security-audit``) and the bare doc-idiom form
-(``/security-audit``) are banned.
+(``/security-audit``) are banned, except a bare name that is also a Claudlobby
+library skill (``/visual-crawl``, #2543).
 """
 
 import re
 from pathlib import Path
 
 from claudlobby.known_values import CLAUDNA_SKILL_RENAMES
+from claudlobby.skill_refs import fleet_skill_names
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
@@ -40,8 +42,13 @@ SNOWFLAKE_DEFERRED = (
 # enumerated renames, and `session-[a-z-]+` bans hyphen-typos of the live
 # space-form session verbs (e.g. /claudna:session-checkpoint) that have no
 # dead ancestor in the map.
+#
+# Library-skill names enter namespaced, so only /claudna:<name> matches: a bare
+# /visual-crawl is Claudlobby's own library skill, not clauDNA's dead one (#2543).
+LIBRARY_SKILLS = fleet_skill_names(REPO_DIR / "library")
+_DEAD = sorted(k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES)
 _DEAD_NAMES = "|".join(
-    sorted(re.escape(k.removeprefix("/claudna:")) for k in CLAUDNA_SKILL_RENAMES)
+    re.escape(f"claudna:{name}" if name in LIBRARY_SKILLS else name) for name in _DEAD
 )
 DEAD_REF = re.compile(
     r"/(?:claudna:)?(?:"

@@ -18,7 +18,7 @@ from textwrap import dedent
 from claudlobby.composer import compose_fleet_timers
 from claudlobby.config import load_fleet
 from claudlobby.env_tiers import Resolution, ResolverUnavailable
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 _FLEET = """\
@@ -42,7 +42,7 @@ def _compose(tmp_path: Path, monkeypatch, armed: str):
     root.mkdir(parents=True, exist_ok=True)
     (root / "fleet.yaml").write_text(dedent(_FLEET))
     fleet, md = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
 
     # The composer does `from . import env_tiers` at the call site, so
     # patching the module's functions is exactly what it will see.
@@ -86,7 +86,7 @@ def test_resolver_unavailable_composes_unarmed_not_crashed(tmp_path, monkeypatch
     root.mkdir(parents=True, exist_ok=True)
     (root / "fleet.yaml").write_text(dedent(_FLEET))
     fleet, md = load_fleet(root / "fleet.yaml")
-    timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=source_package()), md)
+    timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), md)
     service = (timers / "com.test.briefing-kev-morning.service").read_text()
     assert "PLANE_EMIT_ENABLED" not in service
 
@@ -99,7 +99,7 @@ def _compose_with_defaults(tmp_path: Path, monkeypatch, armed: str):
     root.mkdir(parents=True, exist_ok=True)
     (root / "fleet.yaml").write_text(fl)
     fleet, md = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
     import claudlobby.env_tiers as env_tiers_mod
     res = Resolution(
         name="PLANE_EMIT_ENABLED", value=armed, tier="fleet", path=None,

@@ -86,9 +86,9 @@ class NativeDestination:
 class MessageRouteBinding:
     """Selection and parties that authorized one immutable message request."""
 
-    activation_id: str
-    plan_id: str
-    release_id: str
+    activation_id: str | None
+    plan_id: str | None
+    release_id: str | None
     caller_fleet_uid: str | None
     peer_fleet_uid: str
     caller_alias: str
@@ -97,6 +97,8 @@ class MessageRouteBinding:
     manager_alias: str
     peer_destination: NativeDestination
     manager_destination: NativeDestination
+    revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,13 +107,15 @@ class RecordedReplyBinding:
     by nothing, because a human has no pane. The recipient is named positively,
     so a reply whose native route is merely missing never takes this shape."""
 
-    activation_id: str
-    plan_id: str
-    release_id: str
+    activation_id: str | None
+    plan_id: str | None
+    release_id: str | None
     caller_fleet_uid: str
     caller_alias: str
     recipient_alias: str
     parent_message_id: str
+    revision: str | None = None
+    config_fingerprint: str | None = None
 
 
 def same_native_route(frozen: MessageRouteBinding | RecordedReplyBinding | None,
@@ -122,7 +126,8 @@ def same_native_route(frozen: MessageRouteBinding | RecordedReplyBinding | None,
     return (type(frozen) is type(current)
             and isinstance(current, (MessageRouteBinding, RecordedReplyBinding))
             and replace(frozen, activation_id=current.activation_id,
-                        plan_id=current.plan_id, release_id=current.release_id) == current)
+                        plan_id=current.plan_id, release_id=current.release_id,
+                        revision=current.revision, config_fingerprint=current.config_fingerprint) == current)
 
 
 @dataclass(frozen=True)
@@ -178,11 +183,12 @@ class RequestReceipt:
 
 
 _OPERATIONS = frozenset(
-    "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck "
-    "assignment.deliver assignment.accept assignment.progress assignment.block assignment.return "
+    "task.permission.request task.permission.approve task.permission.decline task.permission.revoke "
+    "task.admit task.assign task.withdraw task.reassign task.escalate task.nudge task.recheck task.feedback task.move "
+    "assignment.deliver assignment.reschedule assignment.accept assignment.progress assignment.block assignment.return "
     "assignment.complete assignment.fail message.send message.reply fleet.reports.submit fleet.reports.ack "
     "checkin.record workstream.open workstream.progress workstream.renew workstream.block "
-    "workstream.unblock workstream.close workstream.prune".split())
+    "workstream.unblock workstream.close workstream.prune workstream.backfill".split())
 _STATUSES = {"recording": {"prepared", "unknown", "committed", "unrecorded"},
              "delivery": {"prepared", "unknown", "received", "submitted", "failed"},
              "notification": {"prepared", "unknown", "received", "submitted", "failed"}}
@@ -194,11 +200,11 @@ _NATIVE_STAGES = {
     "message.send": "delivery", "message.reply": "delivery",
     "fleet.reports.submit": "delivery",
     "assignment.deliver": "delivery",
-    "task.nudge": "notification", "task.recheck": "notification",
+    "task.nudge": "notification", "task.recheck": "notification", "task.feedback": "notification",
     **{f"assignment.{verb}": "notification"
        for verb in ("progress", "block", "return", "complete", "fail")},
 }
-_STRICT_NATIVE = frozenset({"task.nudge", "task.recheck", "assignment.deliver", "assignment.progress", "assignment.block",
+_STRICT_NATIVE = frozenset({"task.nudge", "task.recheck", "task.feedback", "assignment.deliver", "assignment.progress", "assignment.block",
                             "assignment.return", "assignment.complete", "assignment.fail"})
 _O1_NATIVE = frozenset({"message.send", "message.reply", "fleet.reports.submit"})
 
@@ -236,20 +242,30 @@ def _native_destination(destination):
             raise ReceiptError("invalid message native destination")
 
 
+def _selection_stamp(route):
+    sealed = (route.activation_id, route.plan_id, route.release_id)
+    if route.revision is not None or route.config_fingerprint is not None:
+        if (any(value is not None for value in sealed) or not isinstance(route.revision, str)
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", route.revision)):
+            raise ReceiptError("invalid Git message selection stamp")
+        _sha(route.config_fingerprint)
+    elif any(not isinstance(value, str)
+             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) for value in sealed):
+        raise ReceiptError("invalid message selection stamp")
+
+
 def _message_route(intent):
     route = intent.route
     if not isinstance(route, MessageRouteBinding) or intent.recipient_uid is None or intent.message_id is None:
         raise ReceiptError("message request requires a frozen route, recipient and message ID")
-    for value in (route.activation_id, route.plan_id, route.release_id):
-        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
-            raise ReceiptError("invalid message selection stamp")
+    _selection_stamp(route)
     _id(route.peer_fleet_uid, "fleet")
     if not isinstance(route.caller_alias, str):
         raise ReceiptError("invalid frozen message caller alias")
     if route.caller_alias.startswith("human:"):
         if route.caller_fleet_uid is not None or not re.fullmatch(r"human:[^\s:/]+", route.caller_alias):
             raise ReceiptError("local human route has a foreign caller fleet or alias")
-        if intent.operation not in {"message.send", "message.reply", "task.nudge", "task.recheck"}:
+        if intent.operation not in {"message.send", "message.reply", "task.nudge", "task.recheck", "task.feedback"}:
             raise ReceiptError("local human route is not supported for this operation")
     else:
         _id(route.caller_fleet_uid, "fleet")
@@ -279,9 +295,7 @@ def _recorded_reply(intent):
         raise ReceiptError("only a reply can be recorded without a carrier")
     if intent.recipient_uid is None or intent.message_id is None:
         raise ReceiptError("a recorded reply requires a recipient and message ID")
-    for value in (route.activation_id, route.plan_id, route.release_id):
-        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
-            raise ReceiptError("invalid message selection stamp")
+    _selection_stamp(route)
     _id(route.caller_fleet_uid, "fleet")
     _id(route.parent_message_id, "msg")
     if (not isinstance(route.caller_alias, str)
@@ -341,6 +355,17 @@ def _validate(receipt):
             raise ReceiptError("message transmission facts belong to reserved attempts")
     elif receipt.message_attempts and (intent.route is None or native_stage is None):
         raise ReceiptError("native attempts require a frozen message route")
+    if intent.operation == "task.feedback":
+        if (not isinstance(intent.route, MessageRouteBinding) or intent.task_id is None
+                or intent.route.caller_fleet_uid is not None
+                or not intent.route.caller_alias.startswith("human:")
+                or intent.recipient_uid != intent.route.manager_uid
+                or intent.route.recipient_alias != intent.route.manager_alias
+                or intent.route.peer_fleet_uid != intent.fleet_uid
+                or tuple(plan.kind for plan in intent.stages) != ("recording", "notification")
+                or len(intent.stages[0].facts) != 1
+                or intent.stages[0].facts[0].family != "communication" or intent.stages[1].facts):
+            raise ReceiptError("feedback requires one human task comment and a frozen manager notification")
     if type(receipt.attempt) is not int or receipt.attempt < 0 or len(intent.stages) != len(receipt.stages):
         raise ReceiptError("invalid receipt attempt/stages")
     seen = set()
@@ -411,6 +436,16 @@ def _validate(receipt):
                 raise ReceiptError("delivery disagrees with retained native observation")
 
 
+def _receipt_payload(receipt):
+    """Preserve historical sealed route fields; Git provenance is explicit."""
+    payload = asdict(receipt)
+    route = payload["intent"]["route"]
+    if route is not None and route["revision"] is None and route["config_fingerprint"] is None:
+        route.pop("revision")
+        route.pop("config_fingerprint")
+    return payload
+
+
 def _decode(raw):
     try:
         if "expected_by" not in raw["intent"]:
@@ -418,6 +453,10 @@ def _decode(raw):
             raw = {**raw, "intent": {**raw["intent"], "expected_by": None}}
         intent = raw["intent"]
         route = intent["route"]
+        if route is not None and "revision" not in route and "config_fingerprint" not in route:
+            route = {**route, "revision": None, "config_fingerprint": None}
+            intent = {**intent, "route": route}
+            raw = {**raw, "intent": intent}
         if route is not None and "peer_destination" not in route:
             route = RecordedReplyBinding(**route)
         elif route is not None:
@@ -523,7 +562,7 @@ class RequestStore:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, "wb") as stream:
-                stream.write((json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":")) + "\n").encode())
+                stream.write((json.dumps(_receipt_payload(receipt), sort_keys=True, separators=(",", ":")) + "\n").encode())
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)

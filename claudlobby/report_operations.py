@@ -90,8 +90,8 @@ def ack_reports(ctx, selected: dict, cursor: str, *, request_id: str) -> AckResu
     An existing UUID is reconciled before any new effect. No missing/partial
     proof becomes an empty report set, and no recording outage enters a spool.
     """
-    from .activation_identity import read_selected_identity_bindings
-    from .activation_state import read_selection
+    from .activation_identity import read_current_identity_bindings
+    from .active_config import RuntimeReadStamp, runtime_read_stamp
     from .brief import ack_request, plane_session
     from .plane import PLANE_SCHEMA_VERSION
     from .plane.emit_api import emit_batch, validate_item
@@ -106,24 +106,28 @@ def ack_reports(ctx, selected: dict, cursor: str, *, request_id: str) -> AckResu
     fleet = ctx.context.fleet.name
     viewers = [name for name, actor in ctx.bots.items() if actor == ctx.caller]
     bot = viewers[0] if len(viewers) == 1 else None
-    if (not isinstance(selected, dict) or set(selected) != {
-            "schema", "activation_id", "release_id", "plan_id"}
-            or read_selection(root) != selected or bot not in ctx.context.fleet.bots
-            or ctx.caller.alias != f"bot:{fleet}/{bot}"
-            or ctx.caller_fleet_uid != ctx.fleet_uid):
+    package = ctx.context.paths.package
+    if isinstance(selected, RuntimeReadStamp):
+        stamp = selected
+    elif (isinstance(selected, dict) and set(selected) == {
+            "schema", "activation_id", "release_id", "plan_id"} and package.installation is None):
+        stamp = RuntimeReadStamp("sealed", selection=selected)
+    else:
+        raise AckError("conflict", "report ACK requires the selected generated viewer")
+    if (runtime_read_stamp(root, package=package) != stamp or bot not in ctx.context.fleet.bots
+            or ctx.caller.alias != f"bot:{fleet}/{bot}" or ctx.caller_fleet_uid != ctx.fleet_uid):
         raise AckError("conflict", "report ACK requires the selected generated viewer")
     try:
         if str(UUID(request_id)) != request_id:
             raise ValueError
     except (TypeError, ValueError, AttributeError) as exc:
         raise AckError("invalid_argument", "report ACK requires a canonical request UUID") from exc
-    bindings = read_selected_identity_bindings(root, fleet, package=ctx.context.paths.package)
+    bindings = read_current_identity_bindings(root, fleet, package=ctx.context.paths.package)
     if (bindings["host_uid"] != ctx.host_uid or bindings["fleet_uid"] != ctx.fleet_uid
             or bindings["bots"].get(bot) != ctx.caller.uid):
         raise AckError("conflict", "report viewer differs from active identity bindings")
     identity = {"host_uid": ctx.host_uid, "fleet_uid": ctx.fleet_uid,
-                "viewer_uid": ctx.caller.uid, "release_id": selected["release_id"],
-                "activation_id": selected["activation_id"], "plan_id": selected["plan_id"]}
+                "viewer_uid": ctx.caller.uid, **stamp.cursor_scope}
     try:
         prefix = decode_cursor(root, cursor, identity=identity)
     except CursorError as exc:
@@ -184,7 +188,7 @@ def ack_reports(ctx, selected: dict, cursor: str, *, request_id: str) -> AckResu
                         validate_prefix(prefix, rows)
                     except CursorError as exc:
                         raise AckError("conflict", "served report prefix changed") from exc
-                if read_selection(root) != selected:
+                if runtime_read_stamp(root, package=package) != stamp:
                     raise AckError("conflict", "active report selection changed")
 
                 raw = ack_request(fleet, bot, acked_through_seq=prefix.through_seq,

@@ -116,9 +116,9 @@ emit_teardown_receipt() {
 # BOT_NAME. If bot.conf is gone the bot was already reaped (or this is not a bot
 # dir) — a clean no-op keeps the reaper idempotent.
 _selected_cli="${CLAUDLOBBY_CLI-}"
-_selected_release="${CLAUDLOBBY_RELEASE_ID-}"
+_selected_installation="${CLAUDLOBBY_INSTALLATION-}"
 _selected_native="${CLAUDLOBBY_NATIVE_DIR-}"
-_selected_artifact="${CLAUDLOBBY_ARTIFACT_ID-}"
+_selected_library="${CLAUDLOBBY_LIBRARY_DIR-}"
 _selected_root="${CLAUDLOBBY_ROOT-}"
 _selected_fleet="${FLEET_NAME-}"
 _selected_plane_disabled="${PLANE_EMIT_DISABLED-}"
@@ -128,10 +128,12 @@ if ! load_bot_conf "$BOT_DIR" 2>/dev/null; then
     exit 0
 fi
 if [ -n "$RETIRED_SERVICE" ]; then
-    # The retained bot.conf can name an older sealed release. Its identity is
-    # useful for teardown, but the receipt must use the selected executable.
-    export CLAUDLOBBY_CLI="$_selected_cli" CLAUDLOBBY_RELEASE_ID="$_selected_release"
-    export CLAUDLOBBY_NATIVE_DIR="$_selected_native" CLAUDLOBBY_ARTIFACT_ID="$_selected_artifact"
+    # Retained bot.conf supplies teardown identity; the receipt still belongs
+    # to the caller admitted through the current managed Git installation.
+    case "$_selected_installation" in /*) ;; *) echo 'managed Git teardown context required' >&2; exit 3 ;; esac
+    export CLAUDLOBBY_CLI="$_selected_cli" CLAUDLOBBY_INSTALLATION="$_selected_installation"
+    export CLAUDLOBBY_NATIVE_DIR="$_selected_native" CLAUDLOBBY_LIBRARY_DIR="$_selected_library"
+    unset CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_ARTIFACT_ID
     export CLAUDLOBBY_ROOT="$_selected_root" FLEET_NAME="$_selected_fleet"
     export PLANE_EMIT_DISABLED="$_selected_plane_disabled"
     export SPINDOWN_RECEIPT_ENABLED="$_selected_receipt_enabled"

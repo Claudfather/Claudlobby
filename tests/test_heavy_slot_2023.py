@@ -116,8 +116,8 @@ WRAPPER_GATED = [
     ("xargs --replace pytest {}", "W xargs --replace pytest {}"),
     ("xargs -l pytest", "W xargs -l pytest"),
     ("xargs -I {} pytest {}", "W xargs -I {} pytest {}"),
-    # sudo -u <user> is already a runner; confirm it still sees the suite
-    ("sudo -u ci pytest -q", "W sudo -u ci pytest -q"),
+    # (sudo -u ci pytest -q is left as typed, so a worker's sudo deny sees it:
+    # the NOT_GATED table in test_heavy_slot_match.py)
 ]
 
 
@@ -159,7 +159,6 @@ FAMILY_ACCEPT = [
     # the wrapper checks the TOOL: a quiet flag it only sees after expansion
     # (`uv add $FLAGS x`) must never refuse a job the hook sent
     ["uv", "add", "--no-sync", "requests"],
-    ["sudo", "-u", "ci", "pytest"],
 ]
 
 
@@ -174,6 +173,8 @@ FAMILY_REFUSE = [
     ["pip", "list"],
     ["uv", "--version"],
     ["uv", "lock"],
+    # the hook never sends a privilege runner, so the wrapper never runs one (#2464)
+    ["sudo", "-u", "ci", "pytest"],
 ]
 
 

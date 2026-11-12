@@ -247,8 +247,8 @@ class TypeObservation:
 
         This is the state that makes a Phase 2 PR look landed while changing no
         bot: populating ``REGISTRY[<type>].entries`` moves the constant, but
-        ``config.py`` consumes only ``DEFAULT_GUARDRAILS`` — nothing feeds
-        ``resolve(<type>)`` into the merge for the other eleven. Measured: a
+        ``config.py`` consumes only ``DEFAULT_GUARDRAILS`` and ``DEFAULT_RESOURCES``
+        — nothing feeds ``resolve(<type>)`` into that merge for the other ten. Measured: a
         REAL skill (`doctor`) placed in the registry composed no symlink, while
         the same skill DECLARED in fleet.yaml composed one. So the registry is
         the source of the DECISION but not yet of the BEHAVIOUR, and a gate that
@@ -583,6 +583,11 @@ def scrub(text: str, root: Path, package: Path | None = None) -> str:
     which host recorded them, not only within one.
     """
     candidates = {str(root): "$EXPORT", str(root.resolve()): "$EXPORT"}
+    # Native output binds the helper's sibling Git installation, whose path
+    # varies with the export just as the installed candidate's path does.
+    for export in (root, root.resolve()):
+        installation = export.parent / (".harness-installation-" + export.name)
+        candidates[str(installation)] = "$INSTALLATION"
     if package is not None:
         candidates.update({str(package): "$PACKAGE", str(package.resolve()): "$PACKAGE"})
     for candidate in sorted(candidates, key=len, reverse=True):

@@ -496,9 +496,8 @@ count_send_retries() {
 # window between send-keys and Enter (the #1109 hypothesis knob);
 # PANE_READY_TICKS governs the pre-send box wait, forwarded so an arming change
 # in start-bot.sh starts honoring it with no sampler change — but INERT today:
-# start-bot.sh arms its own value at both pane_send_verified call sites
-# (start-bot.sh:371,381 as of #1109), so a forwarded override cannot reach the
-# injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
+# start-bot.sh passes its own value through startup_inject to _startup_send
+# so a forwarded override cannot reach the injection path. knob_disclosure says so in the output. PANE_SEND_SHOWN_TICKS
 # (#1236) bounds the wait for the box to show the payload before the Enter, the
 # step a boot strand is now decided in, and PANE_SEND_ENTER_TRIES how many
 # Enters a payload still in the box after it gets.
@@ -511,8 +510,8 @@ count_send_retries() {
 # the primitive directly against the recipient transcript rather than through a
 # whole boot. Forwarding them here would put a second, unpinned arm axis into a
 # design whose arm identity is already pre-registered. PANE_RECEIPT_WAIT_S
-# (#1099) is here because no boot send calls the receipt gate: it is
-# dispatch-task.sh's. The #2036 send-lock knobs are here too: the lock wait
+# (#1099) is here because no boot send calls the receipt gate. The #2036
+# send-lock knobs are here too: the lock wait
 # only ever runs when another sender holds the pane, which a boot sample does
 # not arrange, and PANE_SEND_LOCK_DIR is a test seam that a measurement must
 # never move (senders that disagree on it do not exclude each other).

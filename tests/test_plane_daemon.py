@@ -20,6 +20,8 @@ import tempfile
 import sqlite3
 import threading
 import time
+import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -174,10 +176,9 @@ def test_oversize_request_refused_not_fatal(running):
     blob = b"x" * (MAX_REQUEST_BYTES + 2)
     try:
         client.sendall(blob)
+        client.shutdown(socket.SHUT_WR)  # macOS: ENOTCONN once the daemon has closed (#2215)
     except OSError:
         pass  # daemon may reset mid-send after refusing; either way it answered/closed
-    else:
-        client.shutdown(socket.SHUT_WR)
     try:
         buf = client.recv(65536)
         if buf:
@@ -724,7 +725,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     emit(fresh, {"event_type": "work_item", "emitter": "t9",
                  "fleet": "f", "payload": {
                      "work_item_id": "wi_" + "9" * 32, "title": "t",
-                     "created_by": "bot:f/a"}})
+                     "created_by": "bot:f/a", "workstream_id": "ws-test"}})
     # An initialized plane with no daemon records no hook or timer emit, so
     # "never armed" is ATTENTION, and so is anything staged meanwhile (S5a-02).
     r2 = _doctor(fresh)
@@ -1250,26 +1251,263 @@ def test_staged_replay_keeps_batches_under_a_broken_capture_config_and_bounds_a_
         daemon.writer.close()
 
 
+def _client_stage(staged: Path, *events: dict) -> None:
+    """Stage a batch the way the socket client does once it has missed the
+    socket: finalized, capture-policy-applied and named by its own writer."""
+    import runpy
+    client = runpy.run_path(str(Path(__file__).resolve().parent.parent
+                                / "claudlobby/_runtime_scripts/plane-socket-client.py"))
+    assert client["_stage_pending"](str(staged), client["_finalize"](list(events)),
+                                    "socket transport: timeout") == 7
+
+
+def _tool_call(n: int) -> dict:
+    """A bot's tool call, the bulk of what the hooks stage under load."""
+    from claudlobby.plane.fleet_events import fleet_event_request
+    return fleet_event_request(
+        "tool_call", fleet="example-fleet", subject_kind="actor", subject="bot:example-fleet/alpha",
+        source="vitals", data={"event": "PreToolUse", "tool": "Bash", "n": n})
+
+
+def _received(msg_id: str) -> dict:
+    """The receiver hook's proof of a message, as the socket client sends it."""
+    return {"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example-fleet",
+            "payload": {"msg_id": msg_id, "attempt_no": 1, "carrier": "tmux", "destination": "alpha",
+                        "state": "received", "received_bytes": 12, "received_sha256": "sha256:" + "a" * 64}}
+
+
+def _landed(root: Path, msg_id: str) -> int:
+    conn = connect(db_path(root))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'transmission' AND msg_id = ?",
+                            (msg_id,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_replay_takes_a_staged_transmission_before_the_work_staged_ahead_of_it(tmp_path):
+    """#2430. Under load nearly every hook emit stages, and replay took the queue
+    oldest first, so a receiver's proof waited behind every tool call staged
+    before it, and its receipt read "unavailable" until replay got there.
+    Batches that hold a transmission now go first, oldest first among them, and
+    the rest follow in their order. Two proofs, so a replay that took the newer
+    one first fails here too (#2446)."""
+    initialize_plane(tmp_path)
+    staged = tmp_path / "state" / "plane" / "staged"
+    for n in range(5):
+        _client_stage(staged, _tool_call(n))
+    older, newer = "msg_" + "7" * 32, "msg_" + "8" * 32
+    _client_stage(staged, _received(older))
+    for n in range(5, 8):
+        _client_stage(staged, _tool_call(n))
+    _client_stage(staged, _received(newer))
+    others = sorted(p.name for p in staged.glob("*.np.batch"))
+    daemon = PlaneDaemon(tmp_path)
+    try:
+        ticks, landed = [], []
+        for _ in range(3):
+            ticks.append(daemon._replay_staged(max_batches=1))
+            landed.append((_landed(tmp_path, older), _landed(tmp_path, newer)))
+    finally:
+        daemon.writer.close()
+    assert all(tick.limited and tick.committed == 1 for tick in ticks), ticks
+    assert landed == [(1, 0), (1, 1), (1, 1)], "a proof waited behind work staged before it, or the newer went first"
+    assert sorted(p.name for p in staged.glob("*.batch")) == others[1:], "the rest went out of order"
+
+
+# --- #2446: a proof the daemon spooled is tried again soon ----------------------
+
+class _Full(sqlite3.OperationalError):
+    sqlite_errorcode = 13                # SQLITE_FULL: retryable, so emit_batch spools
+
+
+def _full(conn, items, **kwargs):
+    raise _Full("synthetic full condition")
+
+
+def _fill_the_disk_for_batches(monkeypatch):
+    """Every batch the daemon ingests through emit_batch fails as on a full
+    disk, and spools, except the daemon's own lifecycle receipts."""
+    from claudlobby.plane import emit_api
+    real = emit_api.ingest_many
+
+    def ingest(conn, items, **kwargs):
+        if all(request.emitter == "plane-daemon" for request, _ in items):
+            return real(conn, items, **kwargs)
+        return _full(conn, items, **kwargs)
+    monkeypatch.setattr(emit_api, "ingest_many", ingest)
+
+
+@contextmanager
+def _serving(root: Path, *, drain_interval: float = 9999):
+    """A live daemon on a short socket, with no interval drain in a test's time
+    unless the test moves the daemon's clock past `drain_interval`."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    daemon = PlaneDaemon(root, socket_override=sock, drain_interval=drain_interval)
+    t = threading.Thread(target=lambda: daemon.serve(install_signals=False), daemon=True)
+    t.start()
+    try:
+        _until(sock.exists)
+        yield sock
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+    assert not t.is_alive(), "daemon did not stop"
+
+
+def _attempts(entry: Path):
+    """A spool entry's attempt count; None while a drain has it claimed."""
+    try:
+        return json.loads(entry.read_text())["attempts"]
+    except FileNotFoundError:
+        return None
+
+
+def _move_the_daemon_clock(monkeypatch):
+    """Put daemon.py's time.monotonic() on real time plus an offset, and return
+    advance(seconds), which adds to it. The daemon's deadlines stay the
+    production ones and pass at the step a test names, never where a slow
+    runner puts them (tests/deadline_clock.py does the same for the HTTP doors).
+    The module's other `time` attributes are the real ones. Its client calls
+    read this clock too, so advance only between requests."""
+    from claudlobby.plane import daemon as dm
+    offset = [0.0]
+    clock = types.SimpleNamespace(**vars(time))
+    clock.monotonic = lambda: time.monotonic() + offset[0]
+    monkeypatch.setattr(dm, "time", clock)
+
+    def advance(seconds):
+        offset[0] += seconds
+    return advance
+
+
+# How long a probe that orders a test's steps waits for the daemon's answer.
+# The probe waits out the round in progress, and a round's disk work can take
+# seconds on a busy host: one retry's drain took 3.1 s, past the probe's own
+# 2 s, which is for asking which daemon serves. So the probe gets the 30 s
+# send_batch gives a batch, and a daemon that never answers still fails (#2460).
+_ANSWER_S = 30.0
+
+
+def _one_turn(sock: Path) -> None:
+    """Return once the serve loop has gone round since the call. It runs the
+    drains, the retry and the replay at the top of each round, and it is
+    serial, so it accepts the second of two requests only after the round that
+    follows the first."""
+    from claudlobby.plane import daemon as dm
+    for _ in range(2):
+        assert dm.probe_daemon_info(sock, timeout=_ANSWER_S) is not None, "the daemon did not answer a probe"
+
+
+def test_a_proof_the_daemon_spooled_after_a_database_error_is_tried_again_soon(tmp_path, monkeypatch):
+    """#2446. A batch spooled after a database error waited for the interval
+    drain, up to 10 minutes, and a receiver's proof in it held its message's
+    receipt "pending" all that time: its name is tagged, so the check finds it.
+    A batch that may hold a transmission is now tried again
+    SPOOLED_PROOF_RETRY_S after the daemon spooled it, whether it came in a
+    live request or from staged replay."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    monkeypatch.setattr(dm, "SPOOLED_PROOF_RETRY_S", 1.0, raising=False)
+    initialize_plane(tmp_path)
+    staged_proof, live_proof = "msg_" + "7" * 32, "msg_" + "8" * 32
+    _client_stage(tmp_path / "state" / "plane" / "staged", _received(staged_proof))
+    with _serving(tmp_path) as sock:
+        reply = send_batch(sock, [_received(live_proof)])["results"][0]
+        assert reply["status"] == "spooled", reply
+        _until(lambda: _landed(tmp_path, staged_proof) and _landed(tmp_path, live_proof))
+    assert not list(spool_dir(tmp_path).glob("*.json"))
+
+
+def test_a_spooled_proof_is_tried_again_once_and_other_work_waits_for_the_interval(tmp_path, monkeypatch):
+    """#2446. The retry must not spend the spool's attempts: a drain counts one
+    against each entry it cannot ingest, and at five it quarantines the entry,
+    where nothing replays it. So a batch that may hold a transmission is tried
+    again once, and other work waits for the interval drain, as before."""
+    from claudlobby.plane import daemon as dm, spool
+    _fill_the_disk_for_batches(monkeypatch)
+    monkeypatch.setattr(spool, "ingest_many", _full)  # and the disk stays full
+    monkeypatch.setattr(dm, "SPOOLED_PROOF_RETRY_S", 1.0, raising=False)
+    initialize_plane(tmp_path)
+    with _serving(tmp_path) as sock:
+        proof = Path(send_batch(sock, [_received("msg_" + "7" * 32)])["results"][0]["detail"])
+        other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
+        _until(lambda: _attempts(proof) == 1)
+        time.sleep(3.0)  # three retry periods more
+        assert (_attempts(proof), _attempts(other)) == (1, 0)
+
+
+def test_the_retry_of_a_spooled_proof_never_puts_the_interval_drain_off(tmp_path, monkeypatch):
+    """#2460. Only the interval drain takes other spooled work, one interval
+    after the last interval drain. A proof's retry is not that drain and must
+    not move its deadline: proofs spooling less than an interval apart would
+    then put the other work off for as long as they kept coming."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    advance = _move_the_daemon_clock(monkeypatch)
+    initialize_plane(tmp_path)
+    proof = "msg_" + "7" * 32
+    with _serving(tmp_path, drain_interval=dm.DEFAULT_DRAIN_INTERVAL) as sock:  # from the startup drain
+        other = Path(send_batch(sock, [_tool_call(1)])["results"][0]["detail"])
+        assert send_batch(sock, [_received(proof)])["results"][0]["status"] == "spooled"
+        # The daemon notes a spooled proof after it replies, and answers this probe only after that.
+        assert dm.probe_daemon_info(sock, timeout=_ANSWER_S) is not None
+        advance(dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert _landed(tmp_path, proof) and other.exists(), "the retry did not run, or took the other work"
+        advance(dm.DEFAULT_DRAIN_INTERVAL - dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert not other.exists(), "the interval drain did not run one interval after the startup drain"
+
+
+def test_a_spooled_proof_is_not_tried_again_once_a_controlled_drain_has_begun(tmp_path, monkeypatch):
+    """#2460. A cutover's controlled drain (drain_pending) reports what each
+    queue still holds, and the cutover decides on that report, so from then on
+    the serve loop takes nothing by itself. That includes the retry of a proof
+    spooled before the drain began: run, it would ingest an entry the report
+    says remains."""
+    from claudlobby.plane import daemon as dm
+    _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
+    advance = _move_the_daemon_clock(monkeypatch)
+    initialize_plane(tmp_path)
+    # A controlled drain binds the executing Git installation. As in the test below, only the
+    # observation of the Git identity is substituted; the drain and ingest are real.
+    identity = dm._serving_identity(tmp_path)
+    identity.update(source_revision="a" * 40, installation=str(tmp_path / "installation"))
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
+    proof = "msg_" + "7" * 32
+    with _serving(tmp_path) as sock:
+        entry = Path(send_batch(sock, [_received(proof)])["results"][0]["detail"])
+        expected = dm.probe_daemon_info(sock, timeout=_ANSWER_S)
+        report = dm.drain_daemon(sock, expected=expected, approved={"spool": {}, "staged": {}})
+        assert report["ok"] and report["retained"]["spool"] == [entry.name], report
+        advance(dm.SPOOLED_PROOF_RETRY_S)
+        _one_turn(sock)
+        assert (_attempts(entry), _landed(tmp_path, proof)) == (0, 0), "the retry ran after the controlled drain"
+
+
 def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_evidence(tmp_path, monkeypatch):
     from claudlobby.plane import daemon as dm
     from claudlobby.plane.emit_api import _finalize
 
     initialize_plane(tmp_path)
-    # Identity binding is the existing sealed-release owner. This fixture only
+    # Identity binding is the existing managed Git runtime owner. This fixture only
     # substitutes its observation; queue replay/validation/ingest are real.
     identity = dm._serving_identity(tmp_path)
-    identity.update(release_id="r-" + "a" * 64, seal_sha256="b" * 64)
+    identity.update(source_revision="a" * 40, installation=str(tmp_path / "installation"))
     monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
     daemon = PlaneDaemon(tmp_path)
     expected = daemon.serving_info()
-    monkeypatch.setattr(dm, "_serving_identity", lambda _: {**identity, "release_id": "r-" + "c" * 64})
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: {**identity, "source_revision": "c" * 40})
     assert daemon.serving_info() == expected  # selection changes cannot relabel a serving process
     staged = tmp_path / "state/plane/staged"
 
     def work(suffix):
         return _finalize({"event_type": "work_item", "emitter": "old-task-writer", "fleet": "example-fleet",
                           "payload": {"work_item_id": "wi_" + suffix * 32, "title": "old conditional work",
-                                      "created_by": "bot:example-fleet/alpha"}})
+                                      "created_by": "bot:example-fleet/alpha", "workstream_id": "ws-test"}})
 
     spool = spool_write(tmp_path, [work("1")], "previous outage")
     _stage(staged, "approved.batch", [work("2")])
@@ -1278,7 +1516,7 @@ def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_
     approved = {"spool": {spool.name: hashlib.sha256(spool.read_bytes()).hexdigest()},
                 "staged": {"approved.batch": hashlib.sha256((staged / "approved.batch").read_bytes()).hexdigest()}}
     try:
-        refused = daemon.drain_pending(expected={**expected, "release_id": "r-" + "d" * 64}, approved=approved)
+        refused = daemon.drain_pending(expected={**expected, "source_revision": "d" * 40}, approved=approved)
         assert refused["code"] == "release_mismatch" and not daemon._controlled_drain
         frozen = daemon.drain_pending(expected=expected, approved={"spool": {}, "staged": {}})
         assert frozen["ok"] and daemon._controlled_drain and spool.exists()

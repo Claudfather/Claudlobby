@@ -10,23 +10,27 @@ import os
 import re
 import sqlite3
 
-from ..command_result import CommandFailure, CommandOutput
 from ..activation_state import ActivationError
+from ..command_result import CommandFailure, CommandOutput
 from ..context import resolve_paths
 from ..plane.db import connect, connect_ro, db_file
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError
 from ..plane.schema_state import PendingMigrationError, preflight_schema, require_current_schema
+from ..plane.queue_names import TAG
 from ..plane.spool import drain, quarantine_dir, quarantine_entry, spool_dir, spool_entries
 from ..plane.queue_paths import scan_spool, spool_path
-from ..runtime_admission import RuntimeIdentity, mutation_admission
+from ..runtime_admission import (RuntimeIdentity, mutation_admission, runtime_release_id,
+                                 runtime_provenance)
 
 
-_SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}\.json")
+# A spool entry's name may carry the tag naming the message its transmissions
+# name (`plane/queue_names.py`, #2430): `<lead event>[<tag>].json`.
+_SPOOL_NAME = re.compile(r"ev_[0-9a-f]{32}(?:" + TAG + r")?\.json")
 # What else the quarantine holds (#2165): a staged batch or orphan stage that
-# replay refused keeps its stage name, `<time_ns>-<lead event>[.batch.<pid>].json`.
+# replay refused keeps its stage name, `<time_ns>-<lead event>[<tag>][.batch.<pid>].json`.
 # `inspect` reads these too; `quarantine` (a move) still takes spool names only.
-_QUARANTINED_NAME = re.compile(r"(?:\d+-)?ev_[0-9a-f]{32}(?:\.batch\.\d+)?\.json")
+_QUARANTINED_NAME = re.compile(r"(?:\d+-)?ev_[0-9a-f]{32}(?:" + TAG + r")?(?:\.batch\.\d+)?\.json")
 
 QUARANTINE_LIST_LIMIT = 50
 QUARANTINE_LIST_MAX = 500
@@ -208,10 +212,10 @@ def spool(args) -> CommandOutput:
                     # The reason sidecar may already have been written. The
                     # move is unproved; inspect before any explicit retry.
                     raise CommandFailure("commit_unknown", "quarantine outcome unknown; inspect the entry before retrying",
-                                         data={"name": name, "quarantined": "unknown"},
-                                         release_id=release.release_id) from exc
-                return CommandOutput({"name": name, "quarantined": True},
-                                     release_id=release.release_id, lines=(f"quarantined {name}",))
+                                         data={"name": name, "quarantined": "unknown", **runtime_provenance(release)},
+                                         release_id=runtime_release_id(release)) from exc
+                return CommandOutput({"name": name, "quarantined": True, **runtime_provenance(release)},
+                                     release_id=runtime_release_id(release), lines=(f"quarantined {name}",))
         except ActivationError as exc:
             raise CommandFailure("release_mismatch", f"spool quarantine refused: {exc}") from exc
     if action != "retry":
@@ -238,7 +242,7 @@ def spool(args) -> CommandOutput:
     data = {"ingested": report.ingested, "duplicates": report.duplicates,
             "quarantined": report.quarantined, "remaining": report.remaining,
             "attempted": report.attempted, "refused": list(report.refused),
-            "limited": report.limited}
+            "limited": report.limited, **runtime_provenance(release)}
     line = (f"ingested={report.ingested} duplicates={report.duplicates}"
             f" quarantined={report.quarantined} remaining={report.remaining}")
     if report.quarantined or report.refused:
@@ -246,7 +250,7 @@ def spool(args) -> CommandOutput:
                              data=data)
     if report.remaining or report.limited:
         raise CommandFailure("spooled", "spool entries remain pending; inspect before retrying", data=data)
-    return CommandOutput(data, release_id=release.release_id, lines=(line,))
+    return CommandOutput(data, release_id=runtime_release_id(release), lines=(line,))
 
 
 def prune(args) -> CommandOutput:
@@ -261,7 +265,9 @@ def prune(args) -> CommandOutput:
     try:
         with mutation_admission(root, identity=RuntimeIdentity.current(),
                                 expected_release=os.environ.get("CLAUDLOBBY_RELEASE_ID")) as release:
-            return _prune_under_scope(root, args, days, release.release_id)
+            result = _prune_under_scope(root, args, days, runtime_release_id(release))
+            result.data.update(runtime_provenance(release))
+            return result
     except ActivationError as exc:
         raise CommandFailure("release_mismatch", f"prune refused: {exc}") from exc
 

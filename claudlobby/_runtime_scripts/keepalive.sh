@@ -2,15 +2,17 @@
 # Bot keepalive — restart dead sessions, log idle state.
 # Usage: keepalive.sh /path/to/bot/dir
 #
-# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for the one
-# gated reload path below. Pressing Enter at an empty prompt submits any "ghost"
-# text — including Claude Code's greyed-out auto-completion suggestions — which
-# causes the bot to act on input the user never typed. The reload path is safe
-# because it types a FIXED slash command as the first input, then Enter (so Enter
-# submits that command, never ghost text), and fires ONLY when a fleet reload is
-# pending (data/.reload-pending) and the pane is confirmed IDLE. This is the
-# single activation point for Mechanism 1 of the fleet update lifecycle:
-# reload-fleet.sh marks bots; keepalive performs the /reload at the next idle tick.
+# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for two gated
+# paths below, the reload and the compaction. Pressing Enter at an empty prompt
+# submits any "ghost" text — including Claude Code's greyed-out auto-completion
+# suggestions — which causes the bot to act on input the user never typed. Both
+# paths are safe because each types a FIXED slash command as the first input,
+# then Enter (so Enter submits that command, never ghost text). The reload path
+# fires ONLY when a fleet reload is pending (data/.reload-pending) and the pane
+# is confirmed IDLE: the single activation point for Mechanism 1 of the fleet
+# update lifecycle (reload-fleet.sh marks bots; keepalive performs the /reload at
+# the next idle tick). The compaction path (compact_tick, #1053) types /compact
+# ONLY for a pending request (data/.compact-request), once its guards hold.
 
 set -euo pipefail
 
@@ -310,6 +312,37 @@ _bridge_heal_bounce() {
     restart_bot_service "bridge poller dark (heal $attempt/$max)"
 }
 
+# _channel_check
+# Whether Claude Code still delivers this bot's Telegram channel (#2423): the
+# channel decision in the plugin's MCP log (lib-common.sh), which no process check
+# can see, since a refused channel leaves the poller up. Bring-up reads it once;
+# a session decides again at every reconnect (the /reload-plugins this script
+# sends among them), so this reads it on every live tick. It reads one file and
+# types nothing, so it runs whatever the pane shows. A session younger than the
+# bridge grace is bring-up's to judge, and no log or no decision changes nothing.
+_channel_check() {
+    [ -n "${TELEGRAM_BOT_HANDLE:-}" ] || return 0
+    local grace="${OBSERVABILITY_BRIDGE_DOWN_GRACE:-300}" log kind detail
+    if [ "$grace" -gt 0 ] 2>/dev/null && marker_age_within "$BOT_DIR/data/.spawn" "$grace"; then
+        return 0
+    fi
+    log="$(channel_mcp_log "$BOT_DIR" || true)"
+    case "$log" in /*) ;; *) return 0 ;; esac
+    IFS=$'\t' read -r kind detail <<<"$(channel_decision "$log")"
+    case "$kind" in
+        refused)
+            if channel_refused_report "$BOT_DIR" "$log" "$detail" keepalive; then
+                echo "$(ts_iso) CHANNEL_REFUSED — Claude Code refused the Telegram channel (\"$detail\"): inbound is dark while the poller is up; a restart on the same login comes up refused again" >> "$LOG"
+            fi
+            ;;
+        registered)
+            if channel_refused_clear "$BOT_DIR"; then
+                echo "$(ts_iso) CHANNEL — Claude Code registered the Telegram channel again; refusal cleared" >> "$LOG"
+            fi
+            ;;
+    esac
+}
+
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
 # reach the user bus, otherwise it fails silently with "Failed to connect to
 # bus" while we still log a "RESTART" line — so the bot looks supervised
@@ -368,6 +401,240 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
 fi
 
 # ---------------------------------------------------------------------------
+# Compaction for a pending request (#1053, build PR 4)
+# ---------------------------------------------------------------------------
+# A bot asks for its own compaction with `bot compact <its own ID>` (PR 2): the
+# request is data/.compact-request. On every tick with one pending, compact_tick
+# types the one fixed command /compact once every guard holds:
+#   - the request's own (compact-guard.py check): under 2 hours old by its
+#     requested_epoch; no assignment delivered to the bot since it; no
+#     compaction, and no new session, since it; for a request made at a close,
+#     a context still at or over the floor; and no composed PreCompact hook that
+#     would refuse the first compaction;
+#   - the turn markers (PR 1): the last turn ended COMPACT_TURN_SETTLE_S (10 s)
+#     ago or more, after the last input and the last tool call;
+#   - the whole screen (pane_compact_ready): no running turn, no menu or dialog,
+#     no text in the box, and a prompt;
+#   - the host's compaction slot (compaction-slot.py): free, and taken.
+# Then, holding the pane's send lock, it reads the request, the markers and the
+# screen again: a screen that changed since the tick's read, or any other fact
+# that moved, vetoes and frees the slot. It types through pane_send_verified's
+# locked send with its repairs off, as `bot compact` does, takes the request
+# away and writes compaction_sent. Nothing from the request is ever typed.
+#
+# Each later tick looks for the proof, the compaction's compact_boundary row
+# newer than the send (compact-guard.py proof): compaction_proven with its
+# sizes, and the slot is released. None within the lease's 10 minutes is
+# compaction_not_proven (critical), and nothing resends. While a send waits for
+# its proof (data/.compact-sent), no request is acted on. A guard that says
+# "not now" writes compaction_skipped once per reason per request
+# (data/.compact-skipped); one that ends a request writes it once. A typed
+# /compact runs no UserPromptSubmit hook and no Stop (measured on 2.1.319), so
+# the executor's own send moves neither turn marker.
+_COMPACT_SENT="$BOT_DIR/data/.compact-sent"
+_COMPACT_SKIPPED="$BOT_DIR/data/.compact-skipped"
+_COMPACT_PROOF_S=600   # compaction-slot.py's LEASE_S: the proof's deadline
+
+# _compact_transcripts: the bot's transcript directory, as transcript_usage's
+# transcript_source finds it: its account's config dir (bot.conf, else the
+# environment, else ~/.claude), projects/, the bot dir's slug.
+_compact_transcripts() {
+    local cfg slug
+    cfg="$(bot_conf_get_path "$BOT_DIR" CLAUDE_CONFIG_DIR "" 2>/dev/null || true)"
+    [ -n "$cfg" ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    case "$cfg" in \~/*) cfg="$HOME/${cfg#\~/}" ;; esac
+    slug="$(claude_cwd_slug "$BOT_DIR")"
+    printf '%s/projects/%s' "$cfg" "$slug"
+}
+
+# _compact_guard <verb> <args...>: compact-guard.py, stdlib, stderr to the log.
+_compact_guard() {
+    python3 -S -E "$LIB_DIR/compact-guard.py" "$@" 2>>"$LOG"
+}
+
+# _compact_markers_idle: prints why the turn markers do not say idle, or
+# nothing (rc 0) when the last turn ended long enough ago, after the last input
+# and the last tool call.
+_compact_markers_idle() {
+    local ended="$BOT_DIR/data/.turn-ended" e now
+    e=$(stat_mtime "$ended" 2>/dev/null) || { printf 'no_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.turn-input" || { printf 'input_after_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.last-tool-call" || { printf 'tool_call_after_turn_end'; return 1; }
+    now=$(date +%s)
+    if [ "$(( now - e ))" -lt "${COMPACT_TURN_SETTLE_S:-10}" ]; then
+        printf 'turn_ended_%ss_ago' "$(( now - e ))"
+        return 1
+    fi
+    return 0
+}
+
+# _compact_once <request_id> <reason> <data_json>: one compaction_skipped row
+# per reason per request.
+_compact_once() {
+    local key
+    key="$1"$'\t'"$2"
+    if [ -f "$_COMPACT_SKIPPED" ] && grep -qxF "$key" "$_COMPACT_SKIPPED" 2>/dev/null; then
+        return 0
+    fi
+    emit_fleet_event compaction_skipped keepalive "$3" "$BOT_DIR" "$BOT_NAME" || true
+    printf '%s\n' "$key" >> "$_COMPACT_SKIPPED" 2>/dev/null || true
+}
+
+# _compact_request_over: a request ended; its once-per-reason marks and the
+# guard's cached engine reading go with it.
+_compact_request_over() {
+    rm -f "$_COMPACT_SKIPPED" "$BOT_DIR/data/.compact-guard-cache"
+}
+
+# _compact_release <lease>: free the slot; a lease already over changes nothing.
+_compact_release() {
+    [ -n "$1" ] && [ "$1" != "-" ] || return 0
+    python3 -S -E "$LIB_DIR/compaction-slot.py" release --fleet "$FLEET_NAME" \
+        --bot "$BOT_NAME" --lease "$1" >>"$LOG" 2>&1 || true
+}
+
+# _compact_num <value>: a JSON number, or null.
+_compact_num() {
+    case "$1" in ''|*[!0-9]*) printf 'null' ;; *) printf '%s' "$1" ;; esac
+}
+
+# _compact_send_locked <request_id> <frame>: run under the pane's send lock.
+# Reads the request, the markers and the screen again, then types /compact.
+# Prints "veto <why>" and returns 5 when a fact moved since the tick's read.
+_compact_send_locked() {
+    local rid="$1" before="$2" now_frame why
+    if ! grep -qF "\"request_id\": \"$rid\"" "$BOT_DIR/data/.compact-request" 2>/dev/null; then
+        printf 'veto request_gone'; return 5
+    fi
+    why=$(_compact_markers_idle) || { printf 'veto markers:%s' "$why"; return 5; }
+    now_frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) \
+        || { printf 'veto capture_failed'; return 5; }
+    [ "$now_frame" = "$before" ] || { printf 'veto frame_changed'; return 5; }
+    why=$(pane_compact_ready "$now_frame") || { printf 'veto screen:%s' "$why"; return 5; }
+    PANE_SEND_VERIFY_TICKS=0 _pane_send_verified_locked "$TMUX_SOCKET" "$TMUX_SESSION" /compact
+}
+
+# _compact_proof <transcripts>: a send in flight: proven, not proven, or wait.
+_compact_proof() {
+    local t0="" lease="" rid="" by="" req_at="" out state at trig pre post now row
+    IFS=$'\t' read -r t0 lease rid by req_at < "$_COMPACT_SENT" 2>/dev/null || true
+    case "$t0" in
+        ''|*[!0-9]*)
+            echo "$(ts_iso) COMPACT — $_COMPACT_SENT unreadable; removed" >> "$LOG"
+            rm -f "$_COMPACT_SENT"; return 0 ;;
+    esac
+    out=$(_compact_guard proof --transcripts "$1" --since "$t0") || out="unknown	guard_failed"
+    IFS=$'\t' read -r state at trig pre post <<< "${out%%$'\n'*}" || true
+    now=$(date +%s)
+    if [ "$state" = proven ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","at":"%s","trigger":"%s","pre_tokens":%s,"post_tokens":%s,"lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(json_escape "$at")" "$(json_escape "$trig")" \
+            "$(_compact_num "$pre")" "$(_compact_num "$post")" "$(json_escape "$lease")"
+        emit_fleet_event compaction_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — proven: boundary at $at, $pre to $post tokens" >> "$LOG"
+    elif [ "$(( now - t0 ))" -ge "$_COMPACT_PROOF_S" ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","waited_s":%s,"proof":"%s","lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(( now - t0 ))" "$(json_escape "${state:-unknown} ${at:-}")" \
+            "$(json_escape "$lease")"
+        emit_fleet_event compaction_not_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — NOT proven: no compact_boundary row in $(( now - t0 ))s since the send (${state:-unknown} ${at:-}); nothing resent" >> "$LOG"
+    else
+        echo "$(ts_iso) COMPACT — sent $(( now - t0 ))s ago, waiting for its boundary row (${state:-unknown})" >> "$LOG"
+    fi
+}
+
+compact_tick() {
+    local transcripts out verdict reason hook rid by req_at req_epoch data why frame
+    local slot srsn lease ends rc t0 sent
+    transcripts=$(_compact_transcripts)
+    if [ -f "$_COMPACT_SENT" ]; then
+        _compact_proof "$transcripts"
+        return 0
+    fi
+    [ -f "$BOT_DIR/data/.compact-request" ] || return 0
+    out=$(_compact_guard check --bot-dir "$BOT_DIR" --root "${CLAUDLOBBY_ROOT:-}" \
+        --fleet "${FLEET_NAME:-}" --bot "$BOT_NAME" --transcripts "$transcripts" \
+        --loop "$(bot_conf_get "$BOT_DIR" CLAUDRON_SESSION_LOOP "")" \
+        --reflect "$(bot_conf_get "$BOT_DIR" CLAUDNA_PRECOMPACT_REFLECT "")") || {
+        echo "$(ts_iso) COMPACT — compact-guard.py failed; the request stays" >> "$LOG"
+        return 0
+    }
+    IFS=$'\t' read -r verdict reason hook rid by req_at req_epoch <<< "${out%%$'\n'*}" || true
+    [ "$hook" != - ] || hook=""
+    data="${out#*$'\n'}"
+    case "$data" in '{'*'}') ;; *) data='{}' ;; esac
+    case "$verdict" in
+        none) return 0 ;;
+        drop)
+            emit_fleet_event compaction_skipped keepalive "$data" "$BOT_DIR" "$BOT_NAME" || true
+            _compact_request_over
+            echo "$(ts_iso) COMPACT — request $rid dropped unsent: $reason" >> "$LOG"
+            return 0 ;;
+        skip)
+            _compact_once "$rid" "$reason" "$data"
+            echo "$(ts_iso) COMPACT — request $rid kept, not now: $reason${hook:+ ($hook)}" >> "$LOG"
+            return 0 ;;
+        go) ;;
+        *)
+            echo "$(ts_iso) COMPACT — compact-guard.py gave no verdict; the request stays" >> "$LOG"
+            return 0 ;;
+    esac
+    why=$(_compact_markers_idle) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: $why" >> "$LOG"; return 0; }
+    frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: the pane could not be read" >> "$LOG"; return 0; }
+    why=$(pane_compact_ready "$frame") || {
+        echo "$(ts_iso) COMPACT — request $rid waits: screen $why" >> "$LOG"; return 0; }
+    rc=0
+    slot=$(python3 -S -E "$LIB_DIR/compaction-slot.py" take --fleet "${FLEET_NAME:-}" \
+        --bot "$BOT_NAME" --json 2>>"$LOG") || rc=$?
+    case "$slot" in '{'*'}') ;; *) slot='{}' ;; esac
+    if [ "$rc" -ne 0 ]; then
+        srsn=$(printf '%s' "$slot" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')
+        _compact_once "$rid" "slot_${srsn:-refused}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"slot_%s","request":"kept","slot":%s,"guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "${srsn:-refused}" "$slot" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept: the compaction slot refused (${srsn:-rc $rc})" >> "$LOG"
+        return 0
+    fi
+    lease=$(printf '%s' "$slot" | sed -n 's/.*"lease": "\([0-9a-f]*\)".*/\1/p')
+    ends=$(printf '%s' "$slot" | sed -n 's/.*"ends_at": "\([^"]*\)".*/\1/p')
+    t0=$(date +%s)
+    rc=0
+    sent=$(_pane_with_send_lock compact "${COMPACT_LOCK_WAIT_S:-10}" "$TMUX_SOCKET" "$TMUX_SESSION" \
+        _compact_send_locked "$rid" "$frame") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _compact_release "$lease"
+        case "$rc" in
+            5) why="${sent#veto }" ;;
+            75) why="send_lock_busy" ;;
+            3) why="send_not_submitted" ;;
+            4) why="send_refused_held_or_menu" ;;
+            *) why="send_failed_rc_$rc" ;;
+        esac
+        _compact_once "$rid" "${why%%:*}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"%s","request":"kept","guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(json_escape "$why")" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept, no keys: $why" >> "$LOG"
+        return 0
+    fi
+    _compact_guard take --bot-dir "$BOT_DIR" >/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t0" "${lease:--}" "$rid" "$by" "$req_at" > "$_COMPACT_SENT"
+    _compact_request_over
+    emit_fleet_event compaction_sent keepalive "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","lease":"%s","lease_ends_at":"%s","guard":%s}' \
+        "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+        "$(epoch_to_iso_utc "$t0")" "$(json_escape "$lease")" "$(json_escape "$ends")" "$data")" \
+        "$BOT_DIR" "$BOT_NAME" || true
+    echo "$(ts_iso) COMPACT — sent /compact for request $rid (lease $lease until $ends)" >> "$LOG"
+}
+
+# ---------------------------------------------------------------------------
 # Pane-state classification
 # ---------------------------------------------------------------------------
 # Detection strategy (ordered by reliability):
@@ -401,7 +668,9 @@ fi
 #
 #   UNKNOWN — Neither signal matched.  Consecutive UNKNOWNs are tracked in
 #             a counter file; crossing a threshold logs a warning so fleet
-#             dashboards can surface stuck bots.
+#             dashboards can surface stuck bots. data/.unknown holds the
+#             epoch of the run's first UNKNOWN tick, which fleet-pulse
+#             pages pane_unknown from (#997).
 #
 # Operators can extend patterns without editing this script:
 #   KEEPALIVE_BUSY_PATTERNS  — extra ERE appended to the spinner check
@@ -427,48 +696,308 @@ classify_pane() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Usage limit (#996)
+# ---------------------------------------------------------------------------
+# A claude.ai usage limit stops a turn with one line in the transcript. On a
+# bot with --remote-control (by default only the fleet manager) nothing resumes
+# it: while that bridge is up Claude Code arms neither its own automatic
+# continue nor its limit menu (2.1.291 and 2.1.292 check the bridge first). The
+# pane is left at an empty prompt, which read as IDLE: data/.idle kept
+# activity_stuck quiet, and the bot sat until someone noticed (#996: 75 and 85
+# minutes). A bot without the bridge, every worker by default, shows the menu
+# instead, its options in no fixed order: _limit_resume presses Enter only on
+# the wait label, and no framework send types into a menu (pane_is_menu).
+#
+# LIMIT names that frame. It takes two facts, never one:
+#   - data/.usage-limit, written by usage-limit-hook.sh when Claude Code ends
+#     a turn with StopFailure error=rate_limit, and no older than the last tool
+#     call: the bot's own record of the stop, which a limit line quoted in a
+#     bot's own message never writes;
+#   - usage-limit.py over the WHOLE pane (the line sits above tail -10): the
+#     limit line is still the bot's last word, with no newer prompt drawn under
+#     it (#2348: what else Claude Code draws there changes between releases),
+#     and it says what holds the screen now (the input box, the usage-limit
+#     menu, or another dialog).
+# A record the pane does not confirm leaves the tick IDLE, and the IDLE line
+# says so (_ul_note), so a stop read wrong names itself in keepalive.log.
+# LIMIT writes data/.limit (fleet-pulse pages usage_limit_held from it once the
+# reset has passed), never data/.idle, and sends no reload and no bridge heal.
+#
+# The resume is opt-in per bot (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its
+# bot.conf; claudlobby/switches.py says why). Once the printed reset minute,
+# plus 60 s (the print drops the seconds), plus KEEPALIVE_LIMIT_RESUME_GRACE_S
+# (default 120) has passed, it takes ONE action for that reset: if the
+# usage-limit menu is up with its pointer on the exact label "Stop and wait for
+# limit to reset", one Enter (by label, never by position: a server flag can put
+# credits first, and a pointer anywhere else gets no keys); then the resume
+# prompt, through pane_send_verified. Any other menu or dialog, a box holding
+# text, a running turn, or a frame the reader does not know gets no keys. The
+# action is recorded in data/.limit-resumed before its first key and emitted
+# as keepalive_limit_resume, so no later tick acts on the same reset again.
+_LIMIT_RESUME_PROMPT="Your usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete. (keepalive, #996)"
+_ul_verdict=""
+_ul_note=""
+_ul_hit=""
+# fleet-pulse's _HELD_FRESH_S: a data/.limit older than this is no hold.
+_LIMIT_HOLD_FRESH_S=300
+
+# usage_limit_read <pane> <anchor>
+# usage-limit.py's one-line verdict for a whole pane capture: screen, reset
+# epoch, menu pointer, Claude Code's own continue, limit name, reset text
+# (tab-separated). Empty when the reader cannot run, which reads as no limit.
+usage_limit_read() {
+    printf '%s' "$1" | python3 -S -E "$LIB_DIR/usage-limit.py" read --anchor "$2" --tz "${TZ:-}" 2>/dev/null || true
+}
+
+# usage_limit_keep_anchor <pane>
+# A hit that prints the same limit and the same reset text as the hold it lands
+# in is that hold's limit, still up: the resumed turn, or a message, met it again
+# after the reset. Its hook record moves the anchor past the reset, and a reset
+# with no date read from there is tomorrow's: no resume and no page for a day.
+# So while data/.limit is fresh (re-stamped every LIMIT tick) and names this
+# limit and this reset text, the reset is read from the hit the hold first read
+# it from. Any other text is a new reset, read from its own hit: read from the
+# hold's first hit, a reset nearly 24 hours after the new one reads a day early.
+usage_limit_keep_anchor() {
+    local a0="" name="" text="" vname="" vtext=""
+    marker_age_within "$BOT_DIR/data/.limit" "$_LIMIT_HOLD_FRESH_S" || return 0
+    { read -r _ _ _ _ a0 _; read -r name; read -r text; } 2>/dev/null < "$BOT_DIR/data/.limit" || return 0
+    case "$a0" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$a0" != "$_ul_hit" ] || return 0
+    IFS=$'\t' read -r _ _ _ _ vname vtext <<< "$_ul_verdict"
+    [ -n "$vtext" ] && [ "$vname" = "$name" ] && [ "$vtext" = "$text" ] || return 0
+    _ul_hit=$a0
+    _ul_verdict=$(usage_limit_read "$1" "$_ul_hit")
+}
+
+# _limit_resumed_record <reset> <stage>: the one action for <reset>, recorded.
+_limit_resumed_record() {
+    local tmp
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s\n' "$1" "$(date +%s)" "$2" > "$tmp" && mv "$tmp" "$BOT_DIR/data/.limit-resumed"
+}
+
+# _limit_resumed_for <reset>: whether the one action for <reset> was taken.
+_limit_resumed_for() {
+    local done_reset=""
+    read -r done_reset _ 2>/dev/null < "$BOT_DIR/data/.limit-resumed" || true
+    [ -n "$done_reset" ] && [ "$done_reset" = "$1" ]
+}
+
+# _limit_resume_event <reset> <text> <name> <menu> <outcome>
+_limit_resume_event() {
+    echo "$(ts_iso) LIMIT RESUME — reset $2 ($1), menu $4, outcome $5" >> "$LOG"
+    emit_fleet_event keepalive_limit_resume keepalive \
+        "{\"reset_epoch\":$1,\"reset\":\"$(json_escape "$2")\",\"limit\":\"$(json_escape "$3")\",\"menu\":\"$4\",\"outcome\":\"$5\"}" \
+        "$BOT_DIR" "$BOT_NAME" || true
+}
+
+# _limit_resume <reset> <name> <text>
+# The ONE action for a reset. The pane is read again now, and must still show
+# this reset:
+#   the usage-limit menu, pointer on the wait label  one Enter, then the box
+#   the input box, empty, no turn running            the resume prompt
+#   anything else                                     no keys, logged
+_limit_resume() {
+    local reset="$1" name="$2" text="$3" pane v ustate vreset pointer menu=none rc=0
+    pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+    v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+    IFS=$'\t' read -r ustate vreset pointer _ <<< "$v"
+    # Busy and held are read where classify_pane reads them, the last 10 lines:
+    # an answer higher up that ends in an ellipsis is not a running turn.
+    if [ "$vreset" != "$reset" ] || pane_is_busy "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — the pane changed before the resume (now: ${ustate:-unread}); no keys this tick" >> "$LOG"
+        return 0
+    fi
+    case "$ustate" in
+        menu)
+            if [ "$pointer" != wait ]; then
+                echo "$(ts_iso) LIMIT — reset passed, but the usage-limit menu's pointer is not on \"Stop and wait for limit to reset\"; no keys (an operator chooses that option)" >> "$LOG"
+                return 0
+            fi
+            _limit_resumed_record "$reset" menu
+            if ! pane_send_key "$TMUX_SOCKET" "$TMUX_SESSION" Enter limit-menu; then
+                _limit_resume_event "$reset" "$text" "$name" none menu-key-not-sent
+                return 0
+            fi
+            menu=confirmed
+            sleep "${KEEPALIVE_LIMIT_MENU_SETTLE_S:-2}"
+            pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+            v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+            IFS=$'\t' read -r ustate _ <<< "$v"
+            if [ "$ustate" != limit ]; then
+                _limit_resume_event "$reset" "$text" "$name" "$menu" "no-box-after-menu"
+                return 0
+            fi
+            ;;
+        limit) ;;
+        *)
+            echo "$(ts_iso) LIMIT — reset passed, but a dialog other than the usage-limit menu holds the screen ($ustate); no keys (an operator looks)" >> "$LOG"
+            return 0
+            ;;
+    esac
+    if pane_is_held "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — reset passed, but the input box holds text; no keys (an operator Enter submits it)" >> "$LOG"
+        [ "$menu" = none ] || _limit_resume_event "$reset" "$text" "$name" "$menu" box-held
+        return 0
+    fi
+    _limit_resumed_record "$reset" prompt
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_LIMIT_RESUME_PROMPT" || rc=$?
+    case "$rc" in
+        0) _limit_resume_event "$reset" "$text" "$name" "$menu" submitted ;;
+        3) _limit_resume_event "$reset" "$text" "$name" "$menu" unsubmitted ;;
+        *) _limit_resume_event "$reset" "$text" "$name" "$menu" send-failed ;;
+    esac
+}
+
+# usage_limit_tick <verdict>
+# One LIMIT tick: stamp data/.limit (first seen, reset epoch, screen, Claude
+# Code's own continue, the hit the reset was read from; then the limit name and
+# the reset text), log the state with its reset time, and resume once the reset
+# has passed, when armed.
+usage_limit_tick() {
+    local ustate reset pointer native name text now first="" prev_reset="" tmp grace due plan
+    IFS=$'\t' read -r ustate reset pointer native name text <<< "$1"
+    now=$(date +%s)
+    read -r first prev_reset _ 2>/dev/null < "$BOT_DIR/data/.limit" || true
+    [ "$prev_reset" = "$reset" ] || first=""
+    case "$first" in ''|*[!0-9]*) first=$now ;; esac
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s %s %s\n%s\n%s\n' "$first" "$reset" "$ustate" "$native" "$_ul_hit" "$name" "$text" > "$tmp" \
+        && mv "$tmp" "$BOT_DIR/data/.limit"
+    grace="${KEEPALIVE_LIMIT_RESUME_GRACE_S:-120}"
+    case "$grace" in ''|*[!0-9]*) grace=120 ;; esac
+    if [ "$reset" = "-" ]; then
+        plan="no reset time it can read, so no resume: an operator sends a prompt once the limit has reset"
+    else
+        due=$(( reset + 60 + grace ))
+        if [ "$now" -lt "$due" ]; then
+            plan="resume due $(epoch_to_iso_utc "$due")"
+            [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" = 1 ] || plan="no resume here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it)"
+        elif [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" != 1 ]; then
+            plan="reset passed; resume OFF here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it), so an operator sends a prompt"
+        elif _limit_resumed_for "$reset"; then
+            plan="reset passed; already resumed once for this reset, so no more keys: an operator looks"
+        else
+            echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets $text [$(epoch_to_iso_utc "$reset")]; reset passed, resuming" >> "$LOG"
+            _limit_resume "$reset" "$name" "$text"
+            return 0
+        fi
+    fi
+    if [ "$native" = armed ]; then plan="$plan; Claude Code's own continue is armed"; fi
+    local when=""
+    [ "$reset" = "-" ] || when=" [$(epoch_to_iso_utc "$reset")]"
+    echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets ${text:-unknown}$when; screen: $ustate; $plan" >> "$LOG"
+}
+
 # Liveness = active recently OR active now (err toward BUSY; see header). Primary:
 # a data/.last-tool-call marker within the recency window — rendering-immune, and
-# a short-circuit so a busy bot skips the pane capture entirely. Fallback: the
-# pane's "esc to interrupt" affordance, for a long think/long single call that
-# left no recent marker. The pane is only captured on the fallback path.
+# it decides BUSY without reading the pane. Fallback: the pane's "esc to
+# interrupt" affordance, for a long think/long single call that left no recent
+# marker. The pane is captured on every tick all the same, a busy one included,
+# because the input box is read on every tick (#2854, "The input box" below).
+_pane_read=0
+if pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null); then
+    _pane_read=1
+else
+    pane_content=""
+fi
 if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
     state=BUSY
 else
-    pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
     last_lines=$(echo "$pane_content" | tail -10)
     state=$(classify_pane "$last_lines")
+    # #996: an IDLE or UNKNOWN pane is LIMIT when the bot's own hook recorded a
+    # usage-limit stop with no tool call since, and the whole pane still shows
+    # that limit as its last word (see "Usage limit" above).
+    if [ "$state" = IDLE ] || [ "$state" = UNKNOWN ]; then
+        if [ -f "$BOT_DIR/data/.usage-limit" ] \
+            && marker_is_newer "$BOT_DIR/data/.usage-limit" "$BOT_DIR/data/.last-tool-call"; then
+            _ul_hit=$(head -n 1 "$BOT_DIR/data/.usage-limit" 2>/dev/null | tr -cd '0-9' || true)
+            [ -n "$_ul_hit" ] || _ul_hit=$(date +%s)
+            _ul_verdict=$(usage_limit_read "$pane_content" "$_ul_hit")
+            usage_limit_keep_anchor "$pane_content"
+            case "${_ul_verdict%%$'\t'*}" in
+                limit|menu|modal) state=LIMIT ;;
+                none) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but the pane shows no limit as its last word" ;;
+                *) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but usage-limit.py gave no answer" ;;
+            esac
+        fi
+    fi
 fi
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
+
+# #2391: a tick with no turn running (IDLE, HELD or LIMIT) stamps
+# data/.last-no-turn, and no verdict removes it. Once the BUSY tick of a new
+# turn removes .idle or .limit, it still says when keepalive last saw no
+# turn running, which is where fleet-pulse starts that turn's stall clock. A
+# HELD tick whose whole screen shows a running turn stamps nothing: text typed
+# into a busy bot's box, a message on its way in, reads HELD on the last ten
+# lines alone (#2082), and a message must not restart a hung turn's clock.
+case "$state" in
+    IDLE|LIMIT) touch "$BOT_DIR/data/.last-no-turn" ;;
+    HELD) pane_is_busy "$pane_content" || touch "$BOT_DIR/data/.last-no-turn" ;;
+esac
+
+# The input box (#2854): data/.held follows the box itself on every tick,
+# whatever the verdict. The box holds text that was never submitted when the
+# send path's own test says so (pane_send_verified refuses on pane_is_held or
+# pane_box_end_held, on the whole capture), so the page and the refusals read
+# the box the same way. The marker holds the epoch the box was first seen
+# holding text, is re-stamped on each tick it still does, and is removed once a
+# capture shows the box empty. A box held under a running turn counts: no
+# message typed into it lands, and a bot that keeps working never reaches the
+# HELD verdict. data/.held-turn, written before data/.held, says a turn was
+# running at that tick; fleet-pulse names it in the page and leaves a running
+# turn to activity_stuck. A capture that failed says nothing about the box, so
+# it changes neither marker.
+if [ "$_pane_read" = 1 ]; then
+    if pane_is_held "$pane_content" || pane_box_end_held "$pane_content"; then
+        if pane_is_busy "$pane_content"; then
+            touch "$BOT_DIR/data/.held-turn"
+        else
+            rm -f "$BOT_DIR/data/.held-turn"
+        fi
+        if [ -f "$BOT_DIR/data/.held" ]; then
+            touch "$BOT_DIR/data/.held"
+        else
+            date +%s > "$BOT_DIR/data/.held"
+        fi
+    elif [ -e "$BOT_DIR/data/.held" ] || [ -e "$BOT_DIR/data/.held-turn" ]; then
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.held-turn"
+    fi
+fi
 
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Clear idle marker — bot is actively working
-        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
+        ;;
+    LIMIT)
+        # #996: held by a usage limit. Named, never IDLE: no data/.idle (so
+        # fleet-pulse pages usage_limit_held instead of staying quiet), no
+        # reload and no bridge heal into the pane. The one key path is
+        # usage_limit_tick's resume, once per reset, when armed.
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
+        usage_limit_tick "$_ul_verdict"
         ;;
     HELD)
         # #2070: text sits in the input box and no turn runs. Name it, so the
         # page says what an operator does; send NOTHING into the box (no reload,
-        # no bridge heal). data/.held holds the epoch it was first seen, and is
-        # re-stamped every HELD tick so fleet-pulse can tell a live hold from a
-        # stale marker.
+        # no bridge heal). data/.held is the box reading's, above.
         echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, then stop and look: a menu or modal may be taking the Enter; do not restart)" >> "$LOG"
-        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle"
-        if [ -f "$BOT_DIR/data/.held" ]; then
-            touch "$BOT_DIR/data/.held"
-        else
-            date +%s > "$BOT_DIR/data/.held"
-        fi
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
         ;;
     IDLE)
-        echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
+        echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
-        rm -f "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
         # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
         # plugin/skill update pending, perform it now that the pane is IDLE, then
         # clear the marker. This is the one place keepalive presses Enter on an
@@ -479,6 +1008,10 @@ case "$state" in
         # that later lands in the box makes the pane read HELD (#2070) or
         # UNKNOWN, never IDLE, so it is never typed twice.
         if [ -f "$BOT_DIR/data/.reload-pending" ]; then
+            # #1053: a tick that tries the reload types no /compact, whatever the
+            # send returns: a command that did not submit can sit in the box, or
+            # arrive there, under the /compact.
+            _reload_tried=1
             if send_reload_command "/reload-plugins" && send_reload_command "/reload-skills"; then
                 rm -f "$BOT_DIR/data/.reload-pending"
                 echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
@@ -493,7 +1026,18 @@ case "$state" in
         ;;
     *)
         # Track consecutive UNKNOWN runs
-        rm -f "$BOT_DIR/data/.held"
+        rm -f "$BOT_DIR/data/.limit"
+        # #997: data/.unknown holds the epoch of the run's first UNKNOWN tick
+        # and is re-stamped every UNKNOWN tick, as data/.held is, so fleet-pulse
+        # can page pane_unknown once a pane stays unreadable past its
+        # threshold. This arm keeps data/.idle, so activity_stuck cannot see
+        # such a pane after an IDLE tick; every other verdict removes the
+        # marker, and start-bot.sh removes it when a session starts.
+        if [ -f "$BOT_DIR/data/.unknown" ]; then
+            touch "$BOT_DIR/data/.unknown"
+        else
+            date +%s > "$BOT_DIR/data/.unknown"
+        fi
         prev=0
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))
@@ -508,4 +1052,10 @@ case "$state" in
         fi
         ;;
 esac
+# #1053: a pending compaction request (see compact_tick), on any tick but a
+# usage limit's or one that tried to type a reload, whatever that send returned.
+if [ "$state" != LIMIT ] && [ -z "${_reload_tried:-}" ]; then
+    compact_tick
+fi
+_channel_check
 plane_presence_samples "$state"

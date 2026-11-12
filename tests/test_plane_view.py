@@ -42,7 +42,7 @@ def _seed_conversation(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "Review PR #7768",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": "f",
          "payload": {"assignment_id": f"asg_{H}", "work_item_id": f"wi_{H}",
                      "assignee": worker, "assigned_by": mgr,
@@ -93,6 +93,44 @@ def test_no_write_routes_exist(tmp_path):
         methods = getattr(route, "methods", None)
         if methods:
             assert methods <= {"GET", "HEAD"}, (route.path, methods)
+
+
+def test_channel_shows_bounded_checkin_history_without_a_telegram_conversation(tmp_path):
+    from tests.test_checkins_cli import _decision, _query, F
+
+    for i in range(12):
+        _decision(tmp_path, "lead", f"ck_{i:032x}", age_h=i,
+                  action="ask", raise_={"decided": True, "reason": "Which goal next?", "held": []})
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    data = client.get("/api/channel", params={"fleet": F}).json()["data"]
+    assert data["threads"] == []
+    assert data["checkins_state"] == "ok" and data["checkins_truncated"]
+    assert len(data["checkins"]) == data["checkins_limit"] == 10
+    canonical = _query(tmp_path, limit=10)
+    assert [r["checkin_id"] for r in data["checkins"]] == [r["checkin_id"] for r in canonical]
+    assert data["checkins"][0]["actor_uid"] == canonical[0]["actor_uid"]
+    assert data["checkins"][0]["actor_alias"] == f"bot:{F}/lead"
+    assert data["checkins"][0]["reason"] == "Which goal next?"
+    assert client.get("/api/channel").json()["data"]["checkins"] == data["checkins"]
+    assert client.get("/api/channel?fleet=other").json()["state"] == "unknown"
+
+
+def test_checkin_read_failure_does_not_hide_conversations_or_claim_no_decisions(tmp_path, monkeypatch):
+    from claudlobby.commands import checkins
+    from tests.test_checkins_cli import _decision, CK1
+
+    _seed_conversation(tmp_path)
+    _decision(tmp_path, "lead", CK1, age_h=0)
+    original = checkins.collect_checkins
+    def unavailable(*args, **kwargs):
+        assert kwargs["include_dispatches"] is False
+        if args[1] == "f":
+            raise ValueError("unreadable recorded detail")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(checkins, "collect_checkins", unavailable)
+    data = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()["data"]
+    assert data["threads"] and data["checkins_state"] == "unavailable"
+    assert [r["checkin_id"] for r in data["checkins"]] == [CK1]
 
 
 def test_connections_are_query_only(tmp_path):
@@ -152,6 +190,87 @@ def test_healthz_503_when_absent(client):
     assert r.json()["state"] == "absent"
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_envelope_interrupts_sql_after_admission_and_releases_connection(tmp_path, monkeypatch, admitted):
+    import sqlite3
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    ticks = []
+    def clock():
+        ticks.append(len(ticks) * 2.0)
+        return ticks[-1]
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=clock))
+    opened = []
+    original = view._ro_conn
+    def connect(db):
+        conn = original(db)
+        opened.append(conn)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", connect)
+    def admission(conn):
+        assert conn.in_transaction
+        # The real source admission replaces then clears its own handler.
+        conn.set_progress_handler(lambda: 0, 10_000)
+        conn.execute("SELECT 1").fetchone()
+        conn.set_progress_handler(None, 0)
+    def expensive(conn):
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    result = view._envelope(tmp_path, expensive,
+                            admit_connection=admission if admitted else None,
+                            snapshot=True)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert ticks[-1] == view._QUERY_SECONDS  # real VM callback reached cutoff
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+    # No expired state or interrupted connection leaks into a following read.
+    ticks.clear()
+    healthy = view._envelope(tmp_path, lambda conn: conn.execute("SELECT 7").fetchone()[0])
+    assert healthy["state"] == "ok" and healthy["data"] == 7
+    assert "last_ingest_seq" in healthy["provenance"]
+
+
+@pytest.mark.parametrize("outcome", ["ok", "unknown", "detail", "short"])
+def test_envelope_budget_includes_success_and_error_provenance(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    elapsed = 0.0
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    def body(conn):
+        nonlocal elapsed
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+        elapsed = 9.0
+        if outcome == "unknown":
+            raise view.UnknownFleet("not this fleet")
+        if outcome == "detail":
+            raise view.TaskDetailError("unknown", "not this task")
+        return {"private": "must not escape on timeout"}
+    def provenance(root, conn):
+        nonlocal elapsed
+        # Body used most of the SAME budget; provenance must not get ten more
+        # seconds, including when called from a typed exception handler.
+        elapsed = 10.0
+        if outcome == "short":
+            # A short statement may not reach the VM callback interval.
+            return {"head": conn.execute("SELECT 1").fetchone()[0]}
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    monkeypatch.setattr(view, "_provenance", provenance)
+    result = view._envelope(tmp_path, body)
+    assert result["state"] == "unreadable" and "data" not in result
+    assert result["reason"] == "query_timeout"
+    assert result["remediation"] == "query timed out — retry this read"
+    assert set(result["provenance"]) == {"db", "checked_at"}
+
+
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     initialize_plane(tmp_path)
@@ -190,6 +309,128 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert t["delivered"] is True
     assert t["terminal"] == "completed"
     assert "recipient_raw" not in dispatch            # §11: raw id stays home
+
+
+
+def test_channel_grouped_histories_use_key_indexes_and_keep_chronology(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    # Key order differs from ledger order, including the latest thread.
+    keys = ("b" * 32, "a" * 32, "c" * 32)
+    rows = []
+    for key in keys:
+        rows.extend([
+            {"event_type": "work_item", "emitter": "t", "fleet": "f",
+             "payload": {"work_item_id": f"wi_{key}", "title": "Recorded task",
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
+            {"event_type": "communication", "emitter": "t", "fleet": "f",
+             "payload": {"msg_id": f"msg_{key}", "sender": "bot:f/mgr",
+                         "recipient": "bot:f/worker", "message_class": "chat",
+                         "work_item_id": f"wi_{key}", "body": "Recorded message"}},
+        ])
+    for state, event in (("carrier_queued", "progress"),
+                         ("pane_submitted", "completed"),
+                         ("carrier_queued", "superseded")):
+        for key in keys:
+            rows.extend([
+                {"event_type": "transmission", "emitter": "t", "fleet": "f",
+                 "payload": {"msg_id": f"msg_{key}", "attempt_no": 1,
+                             "carrier": "tmux", "destination": "worker", "state": state}},
+                {"event_type": "task", "emitter": "t", "fleet": "f",
+                 "payload": {"work_item_id": f"wi_{key}", "assignment_id": f"asg_{key}",
+                             "event": event, "actor": "bot:f/worker"}},
+            ])
+    emit_batch(tmp_path, rows)
+    # Unselected history must not encourage a whole event-kind traversal.
+    emit_batch(tmp_path, [
+        {"event_type": kind, "emitter": "t", "fleet": "f", "payload": payload}
+        for number in range(100)
+        for kind, payload in (
+            ("transmission", {"msg_id": _lineage_id("msg", 1000 + number),
+                              "attempt_no": 1, "carrier": "tmux", "destination": "worker",
+                              "state": "carrier_queued"}),
+            ("task", {"work_item_id": _lineage_id("wi", 1000 + number),
+                      "assignment_id": _lineage_id("asg", 1000 + number), "event": "progress"}),
+        )])
+    original = view._ro_conn
+    plans = {}
+    class IndexedReader:
+        def __init__(self, conn): self.conn = conn
+        def execute(self, sql, parameters=()):
+            index = ("idx_events_msg" if "AND event <> 'received'" in sql else
+                     "idx_events_item" if "detail FROM events" in sql and "WHERE kind='task'" in sql else None)
+            if index:
+                plan = self.conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+                assert any(f"USING INDEX {index} (" in row[3] for row in plan), [tuple(row) for row in plan]
+                assert not any("idx_events_kind_seq" in row[3] for row in plan), plan
+                plans[index] = plan
+            return self.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(self.conn, name)
+    monkeypatch.setattr(view, "_ro_conn", lambda db: IndexedReader(original(db)))
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel").json()
+    assert body["state"] == "ok"
+    threads = body["data"]["threads"]
+    assert [t["work_item_id"] for t in threads] == [f"wi_{key}" for key in reversed(keys)]
+    assert set(plans) == {"idx_events_msg", "idx_events_item"}
+    for thread in threads:
+        assert [e["event"] for e in thread["task_events"]] == ["progress", "completed", "superseded"]
+        assert thread["terminal"] == "completed" and thread["delivered"]
+        assert [x["event"] for x in thread["messages"][0]["tx"]] == [
+            "carrier_queued", "pane_submitted", "carrier_queued"]
+        assert thread["latest_seq"] == thread["task_events"][-1]["ingest_seq"]
+
+def test_channel_projects_canonical_report_content_without_promoting_other_messages(tmp_path):
+    from uuid import uuid4
+    from claudlobby.report_payload import ReportPayload, encode_report_facts
+
+    report = ReportPayload("completed", summary="Ready for review <please>",
+        pr_url="https://github.com/example/project/pull/1", pr_role="authored",
+        artifacts=("https://example.org/result", "s3://example/result"),
+        issues=("https://github.com/example/project/issues/2",))
+    for mode in ("full", "metadata"):
+        root = tmp_path / mode
+        initialize_plane(root)
+        (root / "state/plane/capture.json").write_text(json.dumps({"*": mode}))
+        facts = encode_report_facts(report, fleet="f", sender="bot:f/worker",
+            recipient="bot:f/manager", msg_id="msg_" + uuid4().hex,
+            event_ids=("ev_" + uuid4().hex, "ev_" + uuid4().hex),
+            occurred_at="2026-10-10T00:00:00Z")
+        emit_batch(root, list(facts), require_commit=True)
+        response = TestClient(create_app(root, package=source_package())).get("/api/channel").json()
+        message = response["data"]["threads"][0]["messages"][0]
+        if mode == "full":
+            assert message["body"] == report.to_body()
+            assert message["body_words"] == report.summary
+            assert message["report"] == dict(state="captured", status="completed", percent=None,
+                pr_url=report.pr_url, pr_role="authored", artifacts=list(report.artifacts),
+                issues=list(report.issues), skill=None)
+        else:
+            assert message["report"] == {"state": "withheld"}
+        assert response["data"]["threads"][0]["terminal"] is None
+
+    # An ordinary chat or foreign emitter must not become a typed result.
+    for field, value in (("message_class", "chat"), ("emitter", "other-producer")):
+        raw = json.loads(json.dumps(facts[0]))
+        raw["event_id"] = "ev_" + uuid4().hex
+        raw["payload"]["msg_id"] = "msg_" + uuid4().hex
+        (raw["payload"] if field == "message_class" else raw)[field] = value
+        emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    messages = [m for t in rows["data"]["threads"] for m in t["messages"]]
+    assert sum("report" in m for m in messages) == 1
+    assert all(m["body_words"] == report.to_body() for m in messages if "report" not in m)
+
+    failed = ReportPayload("failed", reason="Repository preparation needs attention")
+    raw = json.loads(json.dumps(facts[0]))
+    raw["event_id"] = "ev_" + uuid4().hex
+    raw["payload"].update(msg_id="msg_" + uuid4().hex, body=failed.to_body())
+    emit_batch(tmp_path / "full", [raw], require_commit=True)
+    rows = TestClient(create_app(tmp_path / "full", package=source_package())).get("/api/channel").json()
+    message = next(m for t in rows["data"]["threads"] for m in t["messages"]
+                   if m["msg_id"] == raw["payload"]["msg_id"])
+    assert message["body_words"] == failed.reason and message["report"]["status"] == "failed"
 
 
 def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
@@ -277,7 +518,7 @@ def _seed_one_sided(root, tagged_side):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "One-sided tag",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "f",
          "payload": {"msg_id": "msg_" + "e" * 32, "sender": "bot:f/mgr",
                      "recipient": "bot:f/w1", "message_class": "task_request",
@@ -303,6 +544,264 @@ def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
     assert len(threads[0]["messages"]) == 2
 
 
+def _lineage_id(kind, number):
+    return f"{kind}_{number:032x}"
+
+
+def _seed_reply_lineage(root, *, depth=1, padding=120):
+    """A recent answer whose exact task-linked ancestors have old bodies."""
+    _full_capture(root)
+    initialize_plane(root)
+    task = _lineage_id("wi", 1)
+    rows = [{"event_type": "work_item", "emitter": "t", "fleet": "f",
+             "payload": {"work_item_id": task, "title": "Recorded task",
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}]
+    for number in range(depth):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", number + 1),
+                "sender": "human:operator" if number == 0 else "bot:f/mgr",
+                "recipient": "bot:f/mgr" if number == 0 else "human:operator",
+                "message_class": "chat" if number == 0 else "answer",
+                "body": "HISTORIC BODY MUST NOT BE FETCHED",
+                **({"work_item_id": task} if number == 0 else
+                   {"reply_to_msg_id": _lineage_id("msg", number)})}})
+    for number in range(padding):
+        rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+            "payload": {"msg_id": _lineage_id("msg", 1000 + number),
+                "sender": "bot:f/mgr", "recipient": "human:operator",
+                "message_class": "chat", "body": "Unrelated ordinary conversation"}})
+    answer = _lineage_id("msg", depth + 1)
+    rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
+        "payload": {"msg_id": answer, "sender": "bot:f/mgr",
+                    "recipient": "human:operator", "message_class": "answer",
+                    "body": "Recent answer", "reply_to_msg_id": _lineage_id("msg", depth)}})
+    emit_batch(root, rows, require_commit=True)
+    return task, answer
+
+
+def _recent_answer(root, *, limit=120, fleet="f"):
+    result = TestClient(create_app(root, package=source_package())).get(
+        "/api/channel", params={"fleet": fleet, "limit": limit}).json()
+    assert result["state"] == "ok", result
+    thread = next(t for t in result["data"]["threads"]
+                  if any(m["body"] == "Recent answer" for m in t["messages"]))
+    return result, thread
+
+
+@pytest.mark.parametrize("depth", [1, 3, 32])
+def test_recent_reply_inherits_exact_outside_window_task_without_old_bodies(tmp_path, depth):
+    task, answer = _seed_reply_lineage(tmp_path, depth=depth)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert thread["title"] == "Recorded task"
+    assert [m["msg_id"] for m in thread["messages"]] == [answer]
+    assert "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_in_window_lineage_control_keeps_both_messages(tmp_path):
+    task, answer = _seed_reply_lineage(tmp_path, padding=0)
+    _, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task
+    assert [m["msg_id"] for m in thread["messages"]] == [_lineage_id("msg", 1), answer]
+
+
+@pytest.mark.parametrize("fault", ["missing", "cycle", "conflict", "foreign_host", "foreign_task_host", "wrong_fleet", "foreign_owner", "missing_task"])
+def test_unresolved_reply_lineage_never_assigns_task(tmp_path, fault):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    if fault in {"conflict", "wrong_fleet"}:
+        emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t",
+            "fleet": "g" if fault == "wrong_fleet" else "f",
+            "payload": {"work_item_id": _lineage_id("wi", 2),
+                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr",
+                        "workstream_id": "ws-test"}}],
+            require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        if fault == "missing":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (_lineage_id("msg", 9999), answer))
+        elif fault == "cycle":
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?", (answer, _lineage_id("msg", 1)))
+        elif fault == "conflict":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), answer))
+        elif fault == "foreign_host":
+            conn.execute("UPDATE communications SET host_uid=? WHERE msg_id=?", ("host_" + "f" * 32, _lineage_id("msg", 1)))
+        elif fault == "foreign_task_host":
+            conn.execute("UPDATE work_items SET host_uid=? WHERE work_item_id=?", ("host_" + "f" * 32, task))
+        elif fault == "foreign_owner":
+            conn.execute("UPDATE identity_registry SET parent_uid=? WHERE uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                         ("host_" + "f" * 32, task))
+        elif fault == "wrong_fleet":
+            conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (_lineage_id("wi", 2), _lineage_id("msg", 1)))
+        else:
+            conn.execute("DELETE FROM work_items WHERE work_item_id=?", (task,))
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert thread["task_events"] == [] and thread["title"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+    assert "Must not inherit this unrelated task" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("sibling_task", [None, 2])
+def test_incomplete_lineage_keeps_only_a_messages_own_valid_task(tmp_path, sibling_task):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    sibling, missing = _lineage_id("msg", 5000), _lineage_id("msg", 9999)
+    rows = [{"event_type": "communication", "emitter": "t", "fleet": "f",
+             "payload": {"msg_id": sibling, "sender": "bot:f/mgr",
+                         "recipient": "human:operator", "message_class": "answer",
+                         "body": "Untagged sibling"}}]
+    if sibling_task:
+        rows.insert(0, {"event_type": "work_item", "emitter": "t", "fleet": "f",
+            "payload": {"work_item_id": _lineage_id("wi", sibling_task),
+                        "title": "Other task", "created_by": "bot:f/mgr", "workstream_id": "ws-test"}})
+    emit_batch(tmp_path, rows, require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, task, answer))
+        conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
+                     (missing, sibling_task and _lineage_id("wi", sibling_task), sibling))
+    result, thread = _recent_answer(tmp_path)
+    other = next(t for t in result["data"]["threads"]
+                 if any(m["msg_id"] == sibling for m in t["messages"]))
+    assert other["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 1
+    if sibling_task:
+        # Contradictory siblings stay fail-closed: neither direct tag is trusted.
+        assert thread["work_item_id"] is None
+        assert result["data"]["lineage"]["reasons"] == {"conflicting_tasks": 1}
+    else:
+        assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+        assert [m["msg_id"] for m in thread["messages"]] == [answer]
+        assert result["data"]["lineage"]["reasons"] == {"missing_parent": 1}
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_reply_lineage_emitting_fleet_cannot_authorize_task(tmp_path, incomplete):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _, answer = _seed_reply_lineage(tmp_path)
+    task = _lineage_id("wi", 2)
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
+        "payload": {"work_item_id": task, "title": "Unrelated emitting-fleet task",
+                    "created_by": "bot:g/mgr", "workstream_id": "ws-test"}}], require_commit=True)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        # Both recorded parties remain in f. Only the emitting fleet matches g.
+        conn.execute("UPDATE communications SET fleet_uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
+                     (task,))
+        tagged = answer if incomplete else _lineage_id("msg", 1)
+        conn.execute("UPDATE communications SET work_item_id=? WHERE msg_id=?", (task, tagged))
+        if incomplete:
+            conn.execute("UPDATE communications SET reply_to_msg_id=? WHERE msg_id=?",
+                         (_lineage_id("msg", 9999), answer))
+    result, thread = _recent_answer(tmp_path, fleet="g")
+    assert thread["work_item_id"] is None
+    assert thread["title"] is None and thread["task_events"] == []
+    assert "Unrelated emitting-fleet task" not in json.dumps(result)
+    assert result["data"]["lineage"]["unresolved_threads"] >= 1
+
+
+def test_reply_lineage_hop_exhaustion_is_bounded_and_unlinked(tmp_path):
+    _seed_reply_lineage(tmp_path, depth=33)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["reasons"]["hop_limit"] == 1
+
+
+def test_reply_lineage_unique_lookup_budget_does_not_guess(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    monkeypatch.setattr(view, "_CHANNEL_LINEAGE_ANCESTORS", 2, raising=False)
+    _seed_reply_lineage(tmp_path, depth=3)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] is None
+    assert result["data"]["lineage"]["ancestor_lookups"] == 2
+    assert result["data"]["lineage"]["reasons"]["lookup_limit"] == 1
+
+
+@pytest.mark.parametrize("room", ["engineering", "data"])
+def test_outside_window_reply_keeps_legitimate_cross_fleet_task_owner(tmp_path, room):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    _seed_cross_fleet(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DELETE FROM communications WHERE msg_id=?", ("msg_" + "d" * 32,))
+        conn.execute("UPDATE communications SET work_item_id=NULL,body='Recent answer' WHERE msg_id=?", ("msg_" + "f" * 32,))
+    result, thread = _recent_answer(tmp_path, limit=1, fleet=room)
+    assert thread["work_item_id"] == "wi_" + "e" * 32
+    assert thread["cross_fleet"] is True
+    assert thread["messages"][0]["sender_short"] == "data/worker"
+    assert thread["messages"][0]["recipient_short"] == "engineering/lead"
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_metadata_queries_are_indexed_batched_and_body_free(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    _seed_reply_lineage(tmp_path, depth=3, padding=500)
+    original = view._ro_conn
+    queries = []
+    class BoundedReader:
+        def __init__(self, conn): self.conn = conn
+        def execute(self, sql, parameters=()):
+            if "s.parent_uid AS sender_fleet_uid" in sql:
+                assert len(parameters) <= 400
+                assert "body" not in sql.partition("FROM")[0]
+                plan = self.conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+                assert any("SEARCH c USING INDEX" in row[3] for row in plan)
+                assert not any("SCAN c" in row[3] for row in plan)
+                queries.append(sql)
+            return self.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(self.conn, name)
+    monkeypatch.setattr(view, "_ro_conn", lambda db: BoundedReader(original(db)))
+    result, thread = _recent_answer(tmp_path, limit=500)
+    assert thread["work_item_id"] == _lineage_id("wi", 1)
+    assert queries and "HISTORIC BODY MUST NOT BE FETCHED" not in json.dumps(result)
+
+
+def test_reply_lineage_does_not_infer_task_from_body_or_actor_alias(tmp_path):
+    import sqlite3
+    from claudlobby.plane.db import db_file
+    task, answer = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE communications SET reply_to_msg_id=NULL,body=? WHERE msg_id=?",
+                     (json.dumps({"work_item_id": task, "sender": "bot:f/mgr"}), answer))
+    result = TestClient(create_app(tmp_path, package=source_package())).get("/api/channel?limit=1&fleet=f").json()
+    assert result["data"]["threads"][0]["work_item_id"] is None
+    assert result["data"]["lineage"]["unresolved_threads"] == 0
+
+
+def test_reply_lineage_read_preserves_database_bytes(tmp_path):
+    import hashlib
+    from claudlobby.plane.db import db_file
+    _seed_reply_lineage(tmp_path)
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    _recent_answer(tmp_path)
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
+def test_channel_reply_lineage_and_provenance_share_snapshot(tmp_path, monkeypatch):
+    import sqlite3
+    from claudlobby.plane import view
+    from claudlobby.plane.db import db_file
+    task, _ = _seed_reply_lineage(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn: conn.execute("PRAGMA journal_mode=WAL")
+    original = view._fetch_channel
+    heads = []
+    def concurrent(conn, *args):
+        assert conn.in_transaction
+        heads.append(conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger").fetchone()[0])
+        with sqlite3.connect(db_file(tmp_path)) as writer:
+            writer.execute("UPDATE communications SET work_item_id=NULL WHERE msg_id=?", (_lineage_id("msg", 1),))
+            writer.execute("UPDATE work_items SET title='later title' WHERE work_item_id=?", (task,))
+            writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES('later','events','later')")
+        return original(conn, *args)
+    monkeypatch.setattr(view, "_fetch_channel", concurrent)
+    result, thread = _recent_answer(tmp_path)
+    assert thread["work_item_id"] == task and thread["title"] == "Recorded task"
+    assert result["provenance"]["last_ingest_seq"] == heads[0]
+
+
 def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
     """The reducer's rule: a late terminal never rewrites — the channel must
     agree with TASK_STATUS_SQL (the client copy took the LAST terminal and
@@ -321,7 +820,7 @@ def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
 def test_body_words_strips_real_door_shapes():
     from claudlobby.plane.view import body_words
     d = ("[BOTCOMMAND] erlich | task | Review the thing carefully"
-         " | repo:Artemis-xyz/huntress | priority:high | task:t-123-abcd")
+         " | repo:Example-Org/huntress | priority:high | task:t-123-abcd")
     assert body_words(d) == "Review the thing carefully"
     r = ("[BOTREPORT] jian-yang | completed | Approve on #2073"
          " | progress:100 | pr:https://github.com/x/y/pull/1 | task:t-1-ffff")
@@ -380,11 +879,25 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
-def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
+def test_healthz_ok_is_one_envelope_with_summary(tmp_path, monkeypatch):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
+    assert data["counts"] is None and data["counts_state"] == "not_counted"
+    summary = client.get("/api/summary").json()
+    assert summary["state"] == "ok"
+    assert summary["data"]["counts"] is None and summary["data"]["counts_state"] == "not_counted"
+    assert not any("COUNT(" in query.upper() for query in queries)
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
     assert data["schema_user_version"] == SCHEMA_USER_VERSION
     assert "counts" in data and "spool_files" in data
@@ -394,17 +907,78 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
 def test_index_served_from_package_data(tmp_path):
     r = TestClient(create_app(tmp_path, package=source_package())).get("/")
     assert r.status_code == 200
-    assert "observable plane" in r.text
+    assert "<title>Your teams · Claudfather</title>" in r.text
     assert r.headers.get("cache-control") == "no-store"
     # asset refs carry the cache-bust token (defeats a pinned ES module)
     assert "/app.js?v=" in r.text
+    assert "/workspace.css?v=" in r.text
 
 
 def test_app_js_import_is_cache_busted(tmp_path):
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/app.js")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/app.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
-    assert "/panel-state.js?v=" in r.text  # intra-module import busts too
+    assert 'from "./panel-state.js?v=' in r.text  # intra-module import busts too
+    assert 'from "./api-client.js?v=' in r.text
+    assert 'from "./work-loop.js?v=' in r.text
+    work_loop = client.get("/work-loop.js")
+    assert work_loop.status_code == 200
+    assert work_loop.headers.get("cache-control") == "no-store"
+    assert 'from "./action-state.js?v=' in work_loop.text
+    assert 'from "./panel-state.js?v=' in work_loop.text
+    assert 'from "./permission-panel.js?v=' in work_loop.text
+    permissions = client.get("/permission-panel.js")
+    assert permissions.status_code == 200 and permissions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in permissions.text
+    assert 'from "./panel-state.js?v=' in permissions.text
+    transport = client.get("/api-client.js")
+    assert transport.status_code == 200
+    assert transport.headers.get("cache-control") == "no-store"
+
+
+def test_connected_reader_asset_uses_same_versioned_owner_graph(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from claudlobby.plane import view
+    ui = tmp_path / "ui"
+    shutil.copytree(view.UI_DIR, ui)
+    monkeypatch.setattr(view, "UI_DIR", ui)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    before = client.get("/connected-read-client.js")
+    assert before.status_code == 200
+    assert before.headers["cache-control"] == "no-store"
+    assert 'from "./owner-api-client.js?v=' in before.text
+    assert 'from "./connected-actions.js?v=' in before.text
+    actions = client.get("/connected-actions.js")
+    assert actions.status_code == 200 and actions.headers["cache-control"] == "no-store"
+    assert 'from "./action-state.js?v=' in actions.text
+    module = ui / "connected-read-client.js"
+    info = module.stat()
+    os.utime(module, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    after = client.get("/connected-read-client.js")
+    assert before.text != after.text
+
+
+def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path):
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    api = client.get("/api-client.js")
+    assert api.status_code == 200 and api.headers["cache-control"] == "no-store"
+    assert 'from "./connected-workspace.js?v=' in api.text
+    head = client.head("/api-client.js")
+    assert head.status_code == 200 and head.content == b""
+    assert head.headers["content-length"] == api.headers["content-length"]
+    assert head.headers["cache-control"] == "no-store"
+    workspace = client.get("/connected-workspace.js")
+    assert workspace.status_code == 200
+    assert 'from "./workspace-enrollment.js?v=' in workspace.text
+    assert workspace.headers["cache-control"] == "no-store"
+    enrollment = client.get("/workspace-enrollment.js")
+    assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
+    assert 'from "./connected-read-client.js?v=' in workspace.text
+    assert 'from "./two-source-read.js?v=' in workspace.text
+    assert "import(" not in workspace.text
+    assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):
@@ -473,7 +1047,7 @@ def _seed_twins(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "t", "fleet": fleet,
              "payload": {"assignment_id": "asg_" + h * 32,
                          "work_item_id": "wi_" + h * 32,
@@ -590,7 +1164,7 @@ def test_index_ids_are_unique_and_the_room_panel_owns_its_id(tmp_path):
     assert "fleet-room" in ids and "fleet" in ids
     js = ui.joinpath("app.js").read_text()
     assert '$("fleet-room")' in js
-    assert 'jget("/api/fleets")' in js          # the dimension's source
+    assert re.search(r'\bjget\("/api/fleets"\s*[,)]', js)  # exact dimension source
     assert "localStorage" in js and "try {" in js   # the remembered pick
 
 
@@ -610,7 +1184,7 @@ def _seed_cross_fleet(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross",
-                     "created_by": "bot:engineering/lead"}},
+                     "created_by": "bot:engineering/lead", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "engineering",
          "payload": {"msg_id": "msg_" + "e" * 32,
                      "sender": "bot:engineering/lead",
@@ -694,7 +1268,7 @@ def _seed_twins_with_deadlines(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             asg,
             {"event_type": "communication", "emitter": "t", "fleet": fleet,
              "payload": {"msg_id": "msg_" + h * 32, "sender": mgr,
@@ -769,7 +1343,7 @@ class _TwinSampler:
         pass
 
 
-def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
+def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path, monkeypatch):
     """U3: every figure on a fleet card is a plane fact through the door
     that defines it — presence scoped like the panel, the open set through
     OPEN_ASSIGNMENTS_AT_SQL, attention/overdue through ATTENTION_SQL with
@@ -777,8 +1351,18 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
     client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
+    assert not any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+                   for query in queries)
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
     assert sorted(rows) == ["data", "engineering"]
@@ -800,7 +1384,14 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     h = ov["data"]["host"]
     assert h["daemon_serving"] is False
     assert (h["spool_files"], h["spool_state"]) == (0, "ok")
-    assert isinstance(h["ingest_lag_s"], float) and h["rows"] > 0
+    assert isinstance(h["ingest_lag_s"], float)
+    assert h["rows"] is None and h["rows_reason"] == "not_counted"
+    # Exact counts remain available when the operator requests diagnostics.
+    summary = client.get("/api/summary?counts=true").json()
+    assert summary["state"] == "ok" and summary["data"]["counts"]["ingest_ledger"] > 0
+    assert summary["data"]["counts_state"] == "counted"
+    assert any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+               for query in queries)
     assert h["last_ingest_at"] == ov["provenance"]["last_ingest_at"]
 
     # the orphan split once the bots' directories exist: engineering's
@@ -856,15 +1447,17 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     """Structural: the page owns the strip's panel, app.js fetches the
     overview door and routes card clicks through the ONE pick path the
     tabs use, and the mark + the strip are styled."""
+    import re
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     html = ui.joinpath("index.html").read_text()
     assert 'id="overview"' in html
     js = ui.joinpath("app.js").read_text()
-    assert 'jget("/api/overview")' in js and "function renderOverview" in js
+    assert re.search(r'\bjget\("/api/overview"\s*[,)]', js)
+    assert "function renderOverview" in js
     assert js.count("function pickFleet") == 1
     assert "pickFleet(b.dataset.fleet)" in js       # the tab row
-    assert "pickFleet(c.dataset.fleet)" in js       # the strip's cards
+    assert "pickFleet(button.dataset.overviewFleet)" in js  # explicit strip button
     assert "t.cross_fleet" in js and "xfleet" in js
     css = ui.joinpath("style.css").read_text()
     assert ".tag.xfleet" in css and ".ov-card" in css
@@ -908,7 +1501,7 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
     emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": title,
-                     "created_by": mgr}}]) + [
+                     "created_by": mgr, "workstream_id": "ws-test"}}]) + [
         assignment,
         {"event_type": "communication", "emitter": "t", "fleet": fleet,
          "payload": {"msg_id": "msg_" + stem, "sender": mgr,
@@ -958,10 +1551,12 @@ def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_
 
 def test_ui_reads_in_the_operators_language():
     """Structural (chunk L, #1479 + its fold): the page's RULES, not its
-    identifiers. The header and the machinery rail read the overview envelope
-    and are BLANKED when its source fails (§16); the page keeps no copy of a
+    identifiers. The header and the machinery rail read the overview envelope;
+    scoped invalidation may retain safe sibling snapshots, while an unscoped
+    source failure or paused session clears them (§16). The page keeps no copy of a
     server vocabulary and re-derives no magnitude of its own; the clamp height
     is derived from the one constant that decides a body is long."""
+    import re
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     html = ui.joinpath("index.html").read_text()
@@ -969,9 +1564,20 @@ def test_ui_reads_in_the_operators_language():
     assert 'id="age"' not in html and 'id="total"' not in html and 'id="spool"' not in html
     js = ui.joinpath("app.js").read_text()
     # one door for both: the header's totals and the rail's host line come
-    # from the overview envelope, and both clear on a source failure
+    # from the overview envelope. Only an active session may retain a scoped
+    # snapshot; unscoped source failures still clear all three panels.
     assert "renderHeader(ov)" in js and "renderHostFacts(ov)" in js
-    assert "renderHeader(null)" in js and "renderHostFacts(null)" in js
+    invalidator = re.search(r"function invalidateOverview\([^)]*\) \{([\s\S]*?)\n\}", js)
+    assert invalidator is not None
+    invalidation = invalidator.group(1)
+    assert re.search(r"!sessionPaused\s*&&\s*snapshot\?\.data\?\.sources\s*\?\s*snapshot\s*:", invalidation)
+    assert 'state: "unavailable"' in invalidation and "provenance: null" in invalidation
+    assert all(f"render{panel}(env)" in invalidation for panel in ("Header", "HostFacts", "Overview"))
+    source_failure = js.split('es.addEventListener("source", (ev) => {', 1)[1].split("es.onerror", 1)[0]
+    assert "invalidateOverview();" in source_failure
+    scoped_failure = js.split('function openStream()', 1)[1].split('es.addEventListener("source"', 1)[0]
+    assert "payload.coverage_changed || payload.overview_invalidated" in scoped_failure
+    assert "invalidateOverview(payload.overview || payload.overview_invalidated)" in scoped_failure
     assert "hostFacts" not in js              # the dead module state is gone
     # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
     assert "TERMINAL_STATUSES" not in js
@@ -979,6 +1585,8 @@ def test_ui_reads_in_the_operators_language():
     assert 'dueLabel(r.expected_by).replace' not in js
     assert "attention_since" in js and "never delivered" in js
     assert "check the worker" in js and "send failed" in js
+    # an overdue card names the remedy that keeps the assignment (#2469)
+    assert "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by" in js
     # the clamp: ONE number, read by the stylesheet; the toggle finds its
     # body by structure and remembers what the operator opened
     assert "--clamp-lines" in js and "openBodies" in js
@@ -1059,7 +1667,7 @@ def _canonical_delivery(root: Path, h: str, *, tx_state: str | None,
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": fleet,
          "payload": {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
                      "assignee": worker, "assigned_by": mgr,
@@ -1112,6 +1720,134 @@ def test_overview_attention_is_the_boards_owning_fleet_count(tmp_path):
         assert fleets[alias]["attention_scope"] == "owning_fleet_tasks"
     assert (fleets["a"]["attention"], fleets["b"]["attention"]) == (1, 0)
     assert fleets["b"]["open_scope"] == "assigned_to_fleet_bots"
+
+
+
+def test_overview_summary_skips_board_presentation_and_delivery_evidence(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+
+    _canonical_delivery(tmp_path, "d1", tx_state="failed", fleet="a")
+    _dispatch(tmp_path, "d2", fleet="a", worker="bot:b/ramanujan",
+              expected_by=PAST, tx_state=None)
+    _canonical_delivery(tmp_path, "d3", tx_state="pane_submitted", fleet="b")
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    boards = {alias: client.get(f"/api/tasks?fleet={alias}").json()["data"]
+              for alias in ("a", "b")}
+    # The shared reducer still supplies failed-delivery/deadline attention;
+    # only the board's presentation and extra evidence reads are unnecessary.
+    def no_cards(*args, **kwargs):
+        pytest.fail("overview constructed board presentation")
+    for name in ("_fetch_tasks", "_task_assignment", "_task_event"):
+        monkeypatch.setattr(view, name, no_cards)
+    for name in ("NUDGE_STATE_SQL", "ASSIGNMENT_DELIVERY_MSG_SQL", "DELIVERY_STATUS_SQL"):
+        monkeypatch.setattr(view, name, "INVALID presentation-only SQL")
+    body = client.get("/api/overview").json()
+    assert body["state"] == "ok"
+    fleets = {row["alias"]: row for row in body["data"]["fleets"]}
+    for alias, board in boards.items():
+        assert fleets[alias]["attention"] == board["attention_count"]
+        assert fleets[alias]["overdue"] == sum(
+            "overdue" in card["attention_reason"] for card in board["tasks"])
+        assert fleets[alias]["attention_truncated"] == board["truncated"]
+    assert (fleets["a"]["attention"], fleets["a"]["overdue"]) == (2, 1)
+    assert fleets["b"]["attention"] == 0
+
+
+def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path):
+    import sqlite3
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    _full_capture(tmp_path)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    empty = view._ro_conn(db)
+    try:
+        assert view._host_samples(empty) is None
+    finally:
+        empty.close()
+    emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "probe",
+        "payload": {"subject_kind": "host", "subject": host,
+                    "metric": "host.load", "value": value}}
+        for host, value in (("first", 1), ("second", 2))])
+    db = tmp_path / "state" / "plane" / "plane.db"
+    conn = sqlite3.connect(db)
+    host, subject = conn.execute(
+        "SELECT host_uid, subject_uid FROM metric_samples ORDER BY ingest_seq LIMIT 1"
+    ).fetchone()
+    conn.executemany(
+        "INSERT INTO metric_samples (ingest_seq,event_id,schema_version,"
+        "occurred_at,ingested_at,host_uid,emitter,subject_kind,subject_uid,metric,value) "
+        "VALUES (?,?,'1','2020-01-01','2026-01-01',?,'probe','host',?,'host.load',?)",
+        [(1_000_000 + n, f"sample_{n}", host, subject,
+          "null" if n == 19_999 else "3") for n in range(20_000)])
+    # Retained samples still count after their subject leaves the registry.
+    conn.execute("DELETE FROM identity_registry WHERE uid=?", (subject,))
+    conn.commit()
+    conn.close()
+    conn = view._ro_conn(db)
+    steps = 0
+    def bounded_work():
+        nonlocal steps
+        steps += 1
+        # Index seeks stay below 10,000 VM steps; DISTINCT walks this history.
+        return int(steps > 10)
+    conn.set_progress_handler(bounded_work, 1000)
+    try:
+        samples = view._host_samples(conn)
+    finally:
+        conn.close()
+    # Newest ingest wins across hosts, even with an older producer timestamp;
+    # a recorded JSON null stays unknown, never replaced by an older value.
+    assert samples == {"host.load": {"value": None, "occurred_at": "2020-01-01"}}
+
+
+@pytest.mark.parametrize("history", ["other-fleet-requests", "own-fleet-system"])
+def test_task_permission_probe_does_not_scan_other_fleet_history(tmp_path, history):
+    """Unrelated system history must not exhaust a small board's read budget.
+
+    Count SQLite VM work instead of wall time: the old unscoped permission
+    prefilter walked every system row before examining one selected task.
+    """
+    import sqlite3
+    from claudlobby.plane import view
+    from claudlobby.task_permissions import EMITTER
+
+    _dispatch(tmp_path, "a1", fleet="owned", expected_by=FUTURE,
+              tx_state="pane_submitted")
+    db = tmp_path / "state" / "plane" / "plane.db"
+    conn = sqlite3.connect(db)
+    host, fleet, task_id = conn.execute(
+        "SELECT host_uid, fleet_uid, work_item_id FROM work_items LIMIT 1").fetchone()
+    # Direct writers stay inside this pytest-owned database. Neither another
+    # fleet's requests nor unrelated own-fleet events confer task authority.
+    conn.executemany(
+        "INSERT INTO events (ingest_seq,event_id,schema_version,occurred_at,"
+        "ingested_at,host_uid,fleet_uid,emitter,kind,event,detail) "
+        "VALUES (?,?,?,'2026-01-01','2026-01-01',?,?,?,'system',?,?)",
+        [(1_000_000 + n, f"ev_{n:032x}", "1", host,
+          fleet if history == "own-fleet-system" else "fleet_" + "f" * 32,
+          EMITTER, "heartbeat" if history == "own-fleet-system" else "permission_requested",
+          json.dumps({"task_id": task_id})) for n in range(12_000)])
+    conn.commit()
+    conn.close()
+
+    conn = view._ro_conn(db)
+    steps = 0
+    # One tick per 1,000 VM steps. The board reads in under 1,000 on the
+    # permission index; the fleet-system index walks the 12,000 own-fleet
+    # rows in about 85,000, so 10,000 tells the two apart (#2525).
+    def bounded_work():
+        nonlocal steps
+        steps += 1
+        return int(steps > 10)
+    conn.set_progress_handler(bounded_work, 1000)
+    try:
+        board = view._fetch_tasks(conn, "owned", root=tmp_path)
+    finally:
+        conn.close()
+    assert len(board["tasks"]) == 1
+    assert board["attention_count"] == 0
+    assert board["tasks"][0]["task_id"] == task_id
 
 
 def test_the_arms_query_selects_exactly_the_attention_query(tmp_path):
@@ -1184,10 +1920,10 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": queued, "title": "Unassigned intake",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": moved, "title": "Move this task",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"assignment_id": first, "work_item_id": moved,
                      "assignee": "bot:g/worker", "assigned_by": "bot:f/mgr"}},
@@ -1240,12 +1976,16 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": f"wi_{i:032x}", "title": f"Later {i}",
-                     "created_by": "bot:f/mgr"}}
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}
         for i in range(201)], require_commit=True)
     capped = client.get("/api/tasks?fleet=f").json()["data"]
     assert len(capped["tasks"]) == 200 and capped["truncated"] is True
     assert queued not in {card["task_id"] for card in capped["tasks"]}
     assert capped["attention_count"] == 0  # only the visible slice is counted
+    team = next(row for row in client.get("/api/overview").json()["data"]["fleets"]
+                if row["alias"] == "f")
+    assert team["attention"] == 0 and team["overdue"] == 0
+    assert team["attention_truncated"] is True
 
 
 def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):
@@ -1258,10 +1998,10 @@ def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "claudlobby.tasks.v999",
                           "fleet": "f", "payload": {"work_item_id": task_id,
                                                      "title": "Unknown producer",
-                                                     "created_by": "bot:f/mgr"}},
+                                                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
                           "payload": {"work_item_id": ambiguous, "title": "Ambiguous workers",
-                                      "created_by": "bot:f/mgr"}},
+                                      "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          *({"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
                             "payload": {"assignment_id": "asg_" + stem * 32,
                                         "work_item_id": ambiguous,
@@ -1529,7 +2269,7 @@ def test_every_arm_carries_its_own_date_column(tmp_path):
 
 
 def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
-    """Attention names SQL arms; lifecycle labels name only reducer states."""
+    """Attention names canonical work/permission reasons; lifecycle stays unchanged."""
     import re
     from pathlib import Path as _P
 
@@ -1539,7 +2279,8 @@ def test_the_page_speaks_exactly_the_arms_and_canonical_task_states():
            / "app.js").read_text()
     why = src.split("const WHY = {", 1)[1].split("\n};", 1)[0]
     assert set(re.findall(r"^  (\w+):", why, re.M)) == \
-        {name for name, _s, _a, _w in ATTENTION_ARMS}
+        ({name for name, _s, _a, _w in ATTENTION_ARMS}
+         | {"permission_pending", "permission_unavailable"})
     status = src.split("const TASK_STATUS = {", 1)[1].split("\n};", 1)[0]
     labelled = set(re.findall(r"^  (\w+):", status, re.M))
     assert labelled == {"queued", "assigned", "active", "blocked",

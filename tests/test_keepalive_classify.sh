@@ -93,6 +93,33 @@ assert_state "busy-spinner.txt" "BUSY"
 # UNKNOWN (see _BUSY_PATTERN_BASE in lib-common.sh for the rationale).
 assert_state "verb-no-esc.txt" "UNKNOWN"
 
+# A running turn whose only busy sign is the activity line (hooks running, no
+# esc affordance): BUSY through _BUSY_ACTIVITY_LINE_RE.
+assert_state "hooks-running-turn.txt" "BUSY"
+
+# The same two frames above one 2 MiB line (#2428). pane_is_busy piped the
+# pane into grep -q, which exits at its first match; the rest of the pane then
+# met a closed pipe, and pipefail read the match as a miss, so a running turn
+# read as not busy. A pipe holds 64 KiB to 256 KiB, so 2 MiB outlasts it on
+# every host. busy-spinner matches the esc pattern; hooks-running-turn matches
+# only the activity line, the second grep.
+long_line=$(awk 'BEGIN { s = "x"; while (length(s) < 2097152) s = s s; print s }')
+assert_state_long() {
+    local fixture="$1" expected="$2" content actual
+    total=$((total + 1))
+    content=$(tail -10 "$FIXTURE_DIR/$fixture")
+    actual=$(classify_pane "$content"$'\n'"$long_line")
+    if [ "$actual" = "$expected" ]; then
+        passed=$((passed + 1))
+        printf "  PASS  %-35s → %s [above a 2 MiB line]\n" "$fixture" "$actual"
+    else
+        failed=$((failed + 1))
+        printf "  FAIL  %-35s → %s (expected %s) [above a 2 MiB line]\n" "$fixture" "$actual" "$expected"
+    fi
+}
+assert_state_long "busy-spinner.txt" "BUSY"
+assert_state_long "hooks-running-turn.txt" "BUSY"
+
 # IDLE fixtures
 assert_state "idle-prompt.txt" "IDLE"
 assert_state "idle-chevron.txt" "IDLE"

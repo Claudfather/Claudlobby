@@ -1,0 +1,3 @@
+### Added — a test of keepalive's compaction tick under the compaction slot's stop (#2829)
+
+Test 6 in `tests/test_keepalive_compact.py`, the host slot, gains the stop's case. With a `disabled` file in the slot's directory, two of keepalive's real compaction ticks type no keys, keep the pending request, record one `compaction_skipped` with the reason `slot_disabled`, and leave the directory holding only `disabled`. Once the file is removed, the next tick types `/compact` and records `compaction_sent`. The stop (#2826) was pinned only by `compaction-slot.py`'s own tests, so a keepalive change that read the slot differently could have typed `/compact` under the stop and still passed. Tests only: no code outside `tests/` changes.

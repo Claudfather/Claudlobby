@@ -414,6 +414,15 @@ session_cli_path() {
     done
 }
 
+# --- Browser processes ------------------------------------------------------
+# What makes a process a browser: anchored alternatives over its executable's
+# name, so `chrome-notes.sh` or a checkout named `playwright-tests` is not one.
+# `headless_shell` is what recent Playwright execs; the crashpad handlers are
+# the stragglers that outlive a browser. orphan-browser-reaper.sh reaps by it
+# and fleet-pulse's browser check reports by it (#2332), so the two never
+# disagree about what a browser is.
+BROWSER_EXE_PATTERN='^(chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|Google Chrome|Google Chrome Helper|chrome_crashpad_handler|crashpad_handler|headless_shell|playwright|playwright.sh|msedge|Microsoft Edge)$'
+
 # --- Portable external tools ------------------------------------------------
 # timeout(1) and flock(1) are GNU/util-linux — absent on a stock macOS host.
 # Resolve GNU variants if present (Homebrew installs them with a `g` prefix).
@@ -501,7 +510,10 @@ parse_env_file() {
     local file="${1:?Usage: parse_env_file /path/to/.env}"
     [ -f "$file" ] || return 0
     local line key value
+    # Positional parameters cannot be overwritten by accepted KEY assignments.
+    set -- "$file" 0
     while IFS= read -r line || [ -n "$line" ]; do
+        set -- "$1" "$(($2 + 1))"
         # Skip comments and blank lines
         case "$line" in
             ''|\#*) continue ;;
@@ -514,12 +526,12 @@ parse_env_file() {
         esac
         # Only accept KEY=VALUE where KEY is a valid shell identifier
         if ! printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
-            echo "parse_env_file: skipping invalid line in $file: ${line:0:40}" >&2
+            printf 'parse_env_file: %s:%s: invalid assignment\n' "$1" "$2" >&2
             continue
         fi
         # Reject lines with command substitution, backticks, pipes, semicolons
         if printf '%s' "$line" | grep -qE '(\$\(|`|\||\;)'; then
-            echo "parse_env_file: rejecting dangerous line in $file: ${line:0:40}" >&2
+            printf 'parse_env_file: %s:%s: disallowed shell syntax\n' "$1" "$2" >&2
             continue
         fi
         key="${line%%=*}"
@@ -1153,8 +1165,8 @@ resolve_bot_telegram_token() {
 # pair check both call it, so the path that pages a human and the check that
 # certifies it cannot read the same file differently (#1771, #1608). In a
 # subshell, so none of the file's other keys reach the caller; the parser's
-# skipped-line warnings are dropped because they quote the head of the line,
-# which for a malformed token line is the token; an unreadable file is simply no
+# skipped-line warnings are dropped, so a parser that ever quotes a malformed
+# token line again cannot print the token; an unreadable file is simply no
 # token, never a failing command the caller's ERR trap would record. Empty
 # output = no token there.
 channel_state_token() {
@@ -1360,6 +1372,137 @@ bridge_down_state() {
     esac
 }
 
+# --- The channel decision (#2423) ---------------------------------------------
+# Each time Claude Code connects a channel plugin's MCP server it decides whether
+# to deliver that plugin's messages into the session, and it records the decision
+# in the plugin's MCP log and nowhere else (not the transcript, not the pane):
+# "Channel notifications registered", or "Channel notifications skipped: <reason>".
+# A skip leaves everything else working. The poller runs as the session's child,
+# so bridge_state reads `up`, and outbound replies go out, but no inbound message
+# reaches the session. Measured on Linux with Claude Code 2.1.304 and 2.1.306: a
+# login whose org has not allowed the plugin skips it at every connect, so a
+# restart on that login is refused again.
+#
+# The log's path, its file names and both lines are Claude Code internals, not an
+# interface it publishes. If any of them changes, these helpers find no log or no
+# decision and answer `unknown`, which no caller reads as ready.
+
+# claude_cwd_slug <dir>
+# The name Claude Code gives a cwd in its per-project dirs: the physical path with
+# every byte that is not an ASCII letter or digit replaced by "-". The shell twin
+# of claudlobby.isolation.transcript_slug, for doors that cannot start Python on
+# every tick; tests/test_channel_refused.py holds the two to the same answer. A
+# path with non-ASCII characters differs (bytes here, characters there). Prints
+# nothing for a dir it cannot enter.
+claude_cwd_slug() {
+    local cwd LC_ALL=C
+    cwd="$(cd "${1:?Usage: claude_cwd_slug <dir>}" 2>/dev/null && pwd -P || true)"
+    printf '%s' "${cwd//[!A-Za-z0-9]/-}"
+}
+
+# channel_mcp_log <bot_dir>
+# The Telegram channel plugin's MCP log for the bot's current session: prints its
+# path, or prints why there is none (a path starts with "/", a reason never does)
+# and returns 1. It lives under Claude Code's cache dir ($XDG_CACHE_HOME, else
+# ~/.cache, on Linux, measured; ~/Library/Caches on macOS, the same convention,
+# unmeasured), in a directory keyed by the session's cwd, the bot dir
+# (claude_cwd_slug). A session writes one file, named for its UTC start
+# (2026-10-21T16-05-25-798Z.jsonl), so the greatest name is the newest session; a
+# name of any other shape is not read, and neither is a session that started
+# before the bot's spawn marker (data/.spawn, stamped as start-bot.sh starts the
+# session), which is a previous session's.
+channel_mcp_log() {
+    local bot_dir="${1:?Usage: channel_mcp_log <bot_dir>}"
+    local slug dir newest spawn floor LC_ALL=C
+    local -a logs
+    slug="$(claude_cwd_slug "$bot_dir")"
+    if [ -z "$slug" ]; then printf 'no bot dir at %s' "$bot_dir"; return 1; fi
+    case "$_OS" in
+        Darwin) dir="$HOME/Library/Caches/claude-cli-nodejs" ;;
+        *) dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-cli-nodejs" ;;
+    esac
+    dir="$dir/$slug/mcp-logs-plugin-telegram-telegram"
+    # Pathname expansion sorts in the C locale, so the last name is the newest.
+    logs=("$dir"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z.jsonl)
+    newest="${logs[${#logs[@]}-1]}"
+    if [ ! -e "$newest" ]; then printf 'no channel MCP log in %s' "$dir"; return 1; fi
+    newest="${newest##*/}"
+    spawn="$(stat_mtime "$bot_dir/data/.spawn" 2>/dev/null || true)"
+    if [ -n "$spawn" ]; then
+        floor="$(epoch_to_iso_utc "$spawn" 2>/dev/null || true)"
+        if [ -z "$floor" ]; then printf 'cannot read the session start %s' "$spawn"; return 1; fi
+        floor="${floor//:/-}"
+        if [[ "${newest:0:19}" < "${floor:0:19}" ]]; then
+            printf 'no channel MCP log in %s from the session started at %s (newest %s)' \
+                "$dir" "${floor:0:19}" "$newest"
+            return 1
+        fi
+    fi
+    printf '%s/%s' "$dir" "$newest"
+}
+
+# channel_decision <log>
+# Claude Code's last decision in a channel plugin's MCP log, as one line:
+#   registered            it delivers the channel's messages
+#   refused<TAB>reason    it skipped them; the reason is its own words, cut at the
+#                         first quote (a JSON string ends there) and at 300 bytes
+#   pending               the log holds no decision yet: the server connects
+#                         first, and the decision followed 0.1 to 0.3 s later
+#   unknown<TAB>why       the log cannot be read
+# A session decides again at every reconnect (a /reload-plugins, a server
+# restart), so the last decision is the current one. A decision is matched as
+# Claude Code writes it, "debug":"Channel notifications ..." with bare quotes: the
+# plugin server's own stderr lands in the same log JSON-escaped, so nothing the
+# server prints can pass for one.
+channel_decision() {
+    local log="${1:?Usage: channel_decision <log>}" decision
+    if [ ! -r "$log" ]; then printf 'unknown\tcannot read %s\n' "$log"; return 0; fi
+    decision="$(awk '
+        {
+            i = index($0, "\"debug\":\"Channel notifications ")
+            if (i == 0) next
+            rest = substr($0, i + 31)
+            if (substr(rest, 1, 10) == "registered") v = "registered"
+            else if (substr(rest, 1, 7) == "skipped") {
+                r = substr(rest, 8); sub(/^:[ ]*/, "", r)
+                j = index(r, "\""); if (j > 0) r = substr(r, 1, j - 1)
+                sub(/\\$/, "", r)
+                v = "refused\t" substr(r, 1, 300)
+            }
+        }
+        END { printf "%s", v }
+    ' "$log" 2>/dev/null || true)"
+    printf '%s\n' "${decision:-pending}"
+}
+
+# channel_refused_report <bot_dir> <log> <reason> <where>
+# Raise a refused channel once per session: the critical channel_refused alert
+# (emit_failure_alert: a plane event, the manager pane, Telegram) and the marker
+# data/.channel-refused, which names the session log it was raised for. Returns 1,
+# raising nothing, when the marker already names <log>. The marker is written
+# whether or not the alert was delivered, so a host with no alert target is not
+# paged on every keepalive tick; debounce_notify is not used, because its re-arm
+# window would hold back the alert for another session refused within it.
+channel_refused_report() {
+    local bot_dir="${1:?Usage: channel_refused_report <bot_dir> <log> <reason> <where>}"
+    local key="${2##*/}" reason="$3" where="$4" marker="$1/data/.channel-refused" seen=""
+    if [ -f "$marker" ]; then IFS= read -r seen < "$marker" || true; fi
+    [ "$seen" != "$key" ] || return 1
+    mkdir -p "$bot_dir/data" 2>/dev/null || true
+    printf '%s\n' "$key" > "$marker" 2>/dev/null || true
+    emit_failure_alert "$(dirname "$bot_dir")" "channel_refused" \
+        "${bot_dir##*/} Telegram channel refused by Claude Code ($where): inbound messages never reach the session, while the poller and outbound replies keep working. Claude Code: \"${reason:-no reason given}\". The login refuses the plugin (its account or its org managed settings), so a restart on the same login comes up refused again; allow the plugin for that login." || true
+}
+
+# channel_refused_clear <bot_dir>
+# Remove the refusal marker once the channel is registered: returns 0 when there
+# was one to remove.
+channel_refused_clear() {
+    local marker="${1:?Usage: channel_refused_clear <bot_dir>}/data/.channel-refused"
+    [ -f "$marker" ] || return 1
+    rm -f "$marker"
+}
+
 # bridge_bringup_verify <bot_dir> <bots_dir> [timeout_seconds]
 # One-shot post-boot Telegram-bridge verification for start-bot.sh (Phase 3b/3c).
 # "remote-control is active" is a SEPARATE subsystem from the channel poller, so a
@@ -1379,6 +1522,13 @@ bridge_down_state() {
 #
 # Prints one status token for the caller to log:
 #   ready | missing:no_bridge | missing:no_token | unknown | no_handle
+# With the poller up, Claude Code's channel decision picks one of three (#2423):
+# `ready` only for a registered channel, `refused<TAB>reason` for one it skipped
+# (alerted once per session through channel_refused_report), and
+# `unknown:channel<TAB>why` when no decision can be read, which is not ready.
+# bridge_state cannot see a skip: the poller it proves is alive, ours and under a
+# live claude either way. A log with no decision yet is re-read for up to
+# CHANNEL_DECISION_WAIT_S seconds (default 10).
 bridge_bringup_verify() {
     local bot_dir="${1:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local bots_dir="${2:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
@@ -1422,7 +1572,29 @@ bridge_bringup_verify() {
     case "$state" in
         up)
             rm -f "$marker" 2>/dev/null || true
-            printf '%s' "ready" ;;
+            local log kind detail cwait="${CHANNEL_DECISION_WAIT_S:-10}" cwaited=0
+            case "$cwait" in ''|*[!0-9]*) cwait=10 ;; esac
+            kind=unknown
+            detail="$(channel_mcp_log "$bot_dir" || true)"
+            case "$detail" in /*) log="$detail" ;; *) log="" ;; esac
+            while [ -n "$log" ]; do
+                IFS=$'\t' read -r kind detail <<<"$(channel_decision "$log")"
+                if [ "$kind" != pending ] || [ "$cwaited" -ge "$cwait" ]; then break; fi
+                sleep 1
+                cwaited=$((cwaited + 1))
+            done
+            case "$kind" in
+                registered)
+                    channel_refused_clear "$bot_dir" || true
+                    printf '%s' "ready" ;;
+                refused)
+                    channel_refused_report "$bot_dir" "$log" "$detail" bring-up || true
+                    printf 'refused\t%s' "$detail" ;;
+                pending)
+                    printf 'unknown:channel\tno decision in %s after %ss' "$log" "$cwaited" ;;
+                *)
+                    printf 'unknown:channel\t%s' "$detail" ;;
+            esac ;;
         no_handle)
             printf '%s' "no_handle" ;;
         no_token)
@@ -1596,6 +1768,11 @@ wait_bridge_ready_state() {
 # serial rolling restart (#689); the caller serializes / halts rather than
 # proceed-anyway across the fleet (the #688/#689 mass-restart outage).
 #
+# A boot that logged its channel refused (BRIDGE_REFUSED) or its channel decision
+# unread (BRIDGE_UNVERIFIED) after the marker has answered (#2423): return 1 at
+# once, WAIT_BRIDGE_READY_OUTCOME refused or unknown, where a ceiling reached
+# returns 1 with the outcome empty.
+#
 # Why a marker, not a byte offset (#696 review, finding 1): log-rotate.sh keeps
 # only a line-count tail, so a rotation mid-restart-window invalidates a byte
 # offset AND can leave a prior boot's POLL_START…BRIDGE_READY as the "newest"
@@ -1636,6 +1813,10 @@ wait_bridge_ready() {
                     *'BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN)'*)
                         WAIT_BRIDGE_READY_OUTCOME=session; return 0 ;;
                 esac ;;
+        esac
+        case "$after" in
+            *BRIDGE_REFUSED*) WAIT_BRIDGE_READY_OUTCOME=refused; return 1 ;;
+            *BRIDGE_UNVERIFIED*) WAIT_BRIDGE_READY_OUTCOME=unknown; return 1 ;;
         esac
         [ "$waited" -ge "$ceiling" ] && return 1
         sleep "$step"
@@ -2249,7 +2430,18 @@ bot_tmux_send() {
             echo "bot_tmux_send: PLANE_MSG_ID '$PLANE_MSG_ID' is not a minted id -- no plane trailer appended" >&2
         fi
     fi
-    pane_send_verified "$peer_socket" "$session" "$safe"
+    local rc=0
+    pane_send_verified "$peer_socket" "$session" "$safe" || rc=$?
+    if [ "$rc" -eq 4 ]; then
+        # The proof was prepared before admission, but no bytes crossed the
+        # pane. Clear it here: the locked helper runs in a subshell and cannot
+        # reset these caller globals or their cross-process output itself.
+        PLANE_WIRE_SHA256=""; PLANE_WIRE_BYTES=""
+        if [ -n "${PLANE_WIRE_OUT:-}" ]; then
+            : > "$PLANE_WIRE_OUT" 2>/dev/null || true
+        fi
+    fi
+    return "$rc"
 }
 
 # --- verified pane send -------------------------------------------------------
@@ -2701,8 +2893,10 @@ _PANE_INPUT_GLYPH_RE='^[[:space:]]*(>|❯)'
 # instead reaches UP into the transcript, where a cleanly-submitted command is
 # still visible, and would re-fire Enter at an already-idle prompt.
 #
-# Empty output when the pane has no prompt glyph at all: no prompt means nothing
-# is sitting unsubmitted, so the caller must not retry.
+# Empty output when the pane has no prompt glyph at all. That alone does not
+# mean nothing sits unsubmitted: a box taller than the pane has lost its prompt
+# line, and the send reads that box's bottom edge instead
+# (pane_box_end_shows_payload, #2669).
 #
 # One awk pass, not grep|tail|cut to find the anchor plus a second serialization
 # through sed to re-slice the same text: this runs per poll tick, and the
@@ -2769,7 +2963,15 @@ pane_input_region() {
 _pane_trace_candidate() {
     local pane="$1" payload="$2" region line stripped floor first="" seen_first=0
     region=$(pane_input_region "$pane")
-    [ -n "$region" ] || { printf 'no-region'; return 0; }
+    if [ -z "$region" ]; then
+        # A box taller than the pane, read as pane_holds_unsubmitted reads it (#2669).
+        if [ -n "$payload" ] && pane_box_end_shows_payload "$pane" "$payload"; then
+            printf 'held'
+        else
+            printf 'no-region'
+        fi
+        return 0
+    fi
     if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
         printf 'held'; return 0
     fi
@@ -2873,7 +3075,8 @@ EOF
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
-    [ -n "$region" ] || return 1
+    # No prompt line in view: a box taller than the pane (#2669).
+    [ -n "$region" ] || { pane_box_end_shows_payload "$1" "$2"; return; }
     pane_shows_payload "$region" "$2"
 }
 
@@ -3049,8 +3252,11 @@ pane_shows_payload() {
     # payload but not of its first N characters.
     local pane="$1" payload="$2" floor line stripped
     # Collapsed paste — the box shows a placeholder INSTEAD of any payload text,
-    # so no containment test of either direction can see it. Checked first.
-    printf '%s\n' "$pane" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER" && return 0
+    # so no containment test of either direction can see it. Checked first, as
+    # a bash pattern (#2428): piped into grep -q, which exits at the marker,
+    # the pane lines still to be written met a closed pipe, and pipefail read
+    # the marker as absent, so a held paste passed for submitted.
+    [[ $pane == *"$_PANE_PASTE_COLLAPSE_MARKER"* ]] && return 0
     [ -n "$payload" ] || return 1
     floor=$_PANE_MIN_VISIBLE_MATCH
     [ "${#payload}" -lt "$floor" ] && floor=${#payload}
@@ -3105,6 +3311,62 @@ pane_shows_payload_end() {
         }'
 }
 
+# pane_box_end_shows_payload <pane_text> <payload>
+# Returns 0 when an input box whose prompt line has scrolled out of the pane
+# shows the END of the payload on its last lines, right above the rule drawn
+# under the box (#2669). The gate before the Enter and the verify after it ask
+# this when pane_input_region finds no prompt line.
+#
+# A box taller than the pane loses its top: Claude Code draws in the alternate
+# screen, so the rows above the pane are gone, prompt line included. Measured at
+# 80x24 with the one-prompt bootstrap (23 lines and more): what stays in view is
+# the box's last lines, then its bottom rule and the footer.
+#
+# It answers only for a capture with NO prompt-glyph line (a capture with one is
+# pane_input_region's), and only at the box's bottom edge: the payload's last
+# characters must END the text above the first rule, where
+# pane_shows_payload_end accepts them anywhere in the region. That anchor stands
+# in for the glyph. Text that merely contains the payload's end, such as a
+# transcript above a dialog's rule, has other lines between that end and the
+# rule. The tail and the blanks are pane_shows_payload_end's.
+pane_box_end_shows_payload() {
+    [ -n "$2" ] || return 1
+    _pane_box_end "$1" "$2"
+}
+
+# pane_box_end_held <pane_text>
+# Returns 0 when an input box whose prompt line has scrolled out of the pane
+# holds text: no prompt-glyph line, a rule, and text above it. A send types
+# nothing into such a box (rc 4), as into one pane_is_held reads as held: the
+# box end would show the new payload's end, and its Enter would submit the
+# text already there with it.
+pane_box_end_held() {
+    _pane_box_end "$1" ""
+}
+
+# _pane_box_end <pane_text> <payload>
+# The two predicates above in one awk pass, under LC_ALL=C: the glyph (U+276F)
+# and the rule (U+2500, alone on its line, as _held_box_squeezed reads it) are
+# matched as bytes. An empty <payload> asks only whether the box holds text.
+_pane_box_end() {
+    printf '%s\n' "$1" | _PANE_PROBE="$2" LC_ALL=C awk \
+        -v re="$_PANE_INPUT_GLYPH_RE" -v floor="$_PANE_MIN_VISIBLE_MATCH" '
+        function squeeze(s) { gsub(/[ \t\r\n]/, "", s); gsub("\302\240", "", s); return s }
+        $0 ~ re { glyph = 1; exit }
+        rule { next }
+        { t = $0; gsub("\342\224\200", "", t)
+          if (t ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) rule = NR; else box = box $0 }
+        END {
+            if (glyph || !rule) exit 1
+            b = squeeze(box); m = length(b)
+            if (m == 0) exit 1
+            p = squeeze(ENVIRON["_PANE_PROBE"]); n = length(p)
+            if (n == 0) exit 0
+            k = (n < floor) ? n : floor
+            exit (m >= k && substr(b, m - k + 1) == substr(p, n - k + 1)) ? 0 : 1
+        }'
+}
+
 # _pane_await_payload_shown <socket> <session> <text> <box> <repair>
 # The gate between the keystrokes and the Enter (#1236): poll until the input
 # box shows the END of the payload (pane_shows_payload_end). rc 0 = shown, so
@@ -3152,7 +3414,11 @@ _pane_await_payload_shown() {
         # does, so a pre-draw wait pays no fork per tick.
         case "$pane" in *[![:space:]]*) ;; *) continue ;; esac
         region=$(pane_input_region "$pane")
-        [ -n "$region" ] || continue
+        if [ -z "$region" ]; then
+            # No prompt line in view: a box taller than the pane (#2669).
+            pane_box_end_shows_payload "$pane" "$text" && return 0
+            continue
+        fi
         pane_shows_payload_end "$region" "$text" && return 0
         # The pre-draw repair is ruled ONCE, on the first frame with a box, as
         # it was when it ran after the Enter: the whole-frame scan costs forks
@@ -3358,7 +3624,11 @@ pane_send_key() {
 # withheld, or it still held the payload after the last Enter. A 3 is not a
 # failure to deliver: the text is in the box, or may still arrive there, typed
 # and unsubmitted. A caller under set -e must handle it, since nothing a send
-# leaves behind is a crash.
+# leaves behind is a crash. Returns 4 when a fresh capture under the send lock
+# proves the input box already holds text: no new payload or Enter is sent, and
+# the existing input is left untouched. Unreadable captures are not held proof.
+# It returns 4 too, typing nothing, when that capture shows a menu
+# (pane_is_menu), which would read the keystrokes as choices.
 #
 # The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
 # send-keys — see _pane_send_payload and the knobs above for the measurement
@@ -3408,6 +3678,29 @@ _pane_send_verified_locked() {
         emit_fleet_event send_blind dispatch \
             "$(printf '{"session":"%s","reason":"input-box-never-drawn","box":"%s"}' \
                 "$(json_escape "$session")" "$box")"
+    fi
+
+    # A previous send may have typed text but withheld its Enter. Appending a
+    # new payload would submit both as one prompt. Inspect after readiness and
+    # under the same recipient lock as the write; never clear or submit the hold.
+    local before
+    if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) &&
+        { pane_is_held "$before" || pane_box_end_held "$before"; }; then
+        emit_fleet_event send_miss dispatch \
+            "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
+                "$(json_escape "$session")")"
+        printf 'pane_send: recipient-input-held; no payload or Enter was sent\n' >&2
+        return 4
+    fi
+    # A menu takes typed keys as choices (pane_is_menu), so nothing goes into
+    # one: not the payload, whose digits or line feed could choose an option by
+    # its position, and not an Enter.
+    if pane_is_menu "$before"; then
+        emit_fleet_event send_miss dispatch \
+            "$(printf '{"session":"%s","reason":"recipient-menu-open"}' \
+                "$(json_escape "$session")")"
+        printf 'pane_send: recipient-menu-open; no payload or Enter was sent\n' >&2
+        return 4
     fi
 
     # #1236: arm the trace BEFORE the send, so the one mkdir this costs happens
@@ -3563,15 +3856,19 @@ _IDLE_PATTERN_BASE='([>❯].{0,3}$|Remote Control act|Enter.*to close|Yes\/No|Al
 
 # pane_is_idle <pane_text>
 # Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
-# Used by fleet-pulse to avoid flagging a finished, at-prompt bot as
-# activity_stuck. Operators extend via KEEPALIVE_IDLE_PATTERNS.
+# Read by keepalive's classify_pane, by pane_compact_ready and by supervisor.sh's
+# idle check. Operators extend via KEEPALIVE_IDLE_PATTERNS.
 pane_is_idle() {
     local text="$1"
     local _idle_pattern="$_IDLE_PATTERN_BASE"
     if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_idle_pattern"
+    # A here-string, never a pipe into grep (#2428, #2863). grep -q exits at its
+    # first match; the pane lines still to be written then met a closed pipe, and
+    # under pipefail that failure read the match as a miss: an idle screen read
+    # as not idle.
+    grep -qE "$_idle_pattern" <<<"$text"
 }
 
 # Base busy-detection regex — single source of truth for keepalive.sh
@@ -3613,8 +3910,12 @@ pane_is_busy() {
     if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
         _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
     fi
-    printf '%s' "$text" | grep -qE "$_busy_pattern" && return 0
-    printf '%s\n' "$text" | LC_ALL=C grep -qE "$_BUSY_ACTIVITY_LINE_RE"
+    # Here-strings, never a pipe into grep (#2428). grep -q exits at its first
+    # match; the pane lines still to be written then met a closed pipe, and
+    # under pipefail that failure read the match as a miss: a running turn
+    # read as not busy.
+    grep -qE "$_busy_pattern" <<<"$text" && return 0
+    LC_ALL=C grep -qE "$_BUSY_ACTIVITY_LINE_RE" <<<"$text"
 }
 
 # pane_is_held <pane_text>
@@ -3631,12 +3932,14 @@ pane_is_busy() {
 #   Press up to edit queued messages   a message queued behind a running turn
 #   1. Yes, try it                     a menu's selected option: Enter CHOOSES
 # A menu also offers its own exit below the options ("Esc to cancel").
+# Exit words inside authored text are not chrome. An unnumbered footer is
+# recognized only as an exact line outside the rule below the input box.
 #
 # It says nothing about whether a turn is running, so a caller asks
-# pane_is_busy first; keepalive's classify_pane does. Byte-safe and fork-free
-# past pane_input_region: literal case patterns, so the answer does not move
-# with the locale. The idle bracket's does: under LC_ALL=C it matches a box
-# border's bytes, which is why classify_pane asks this before pane_is_idle.
+# pane_is_busy first; keepalive's classify_pane does. Byte-safe literal patterns
+# and a C-locale footer scan keep the verdict independent of locale. The idle
+# bracket's does: under LC_ALL=C it matches a box border's bytes, which is why
+# classify_pane asks this before pane_is_idle.
 pane_is_held() {
     local region first
     region=$(pane_input_region "$1")
@@ -3645,12 +3948,90 @@ pane_is_held() {
     [ -n "$first" ] || return 1
     case "$first" in
         'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
-        [0-9].\ *|[0-9][0-9].\ *) return 1 ;;
     esac
-    case "$region" in
-        *'Esc to cancel'*|*'Esc to go back'*) return 1 ;;
-    esac
+    _pane_region_is_menu "$region" "$first" && return 1
     return 0
+}
+
+# pane_is_menu <pane_text>
+# Returns 0 when a menu or dialog holds the input region: Claude Code's
+# usage-limit menu, a permission or safeguards dialog, a picker. A menu reads
+# typed keys as choices, so a digit or a line feed in a payload can choose an
+# option by its position, and the usage-limit menu can list usage credits
+# first. pane_send_verified types nothing while one is open. The evidence is
+# the menu half of pane_is_held, so the two never disagree about a frame.
+pane_is_menu() {
+    local region first
+    region=$(pane_input_region "$1")
+    [ -n "$region" ] || return 1
+    first=$(_pane_strip_chrome "${region%%$'\n'*}")
+    [ -n "$first" ] || return 1
+    _pane_region_is_menu "$region" "$first"
+}
+
+# _pane_region_is_menu <region> <first>
+# The menu evidence pane_is_held and pane_is_menu share. <region> is
+# pane_input_region's output and <first> its input line with the chrome
+# stripped: a numbered option under the pointer (an Enter CHOOSES it), or the
+# menu's own exit offered as an exact line outside the rule below the box.
+_pane_region_is_menu() {
+    case "$2" in
+        [0-9].\ *|[0-9][0-9].\ *) return 0 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C awk '
+        NR > 1 {
+            line = $0; gsub("\342\224\200", "", line)
+            if (line ~ /^[ \t]*$/ && $0 ~ /\342\224\200/) outside = 1
+            if (outside && $0 ~ /^[ \t]*(Enter to confirm · )?Esc to (cancel|go back)[ \t]*$/) found = 1
+        }
+        END { exit !found }'
+}
+
+# pane_compact_ready <pane_text>
+# The whole-screen idle test #1053's executor reads before it types /compact
+# (keepalive.sh, compact_tick): on the tick's capture, and again on a capture
+# taken under the pane's send lock just before the keys. Four facts, each a
+# veto, read in this order on the WHOLE screen, never keepalive's last ten
+# lines: no running turn (pane_is_busy; a task list or an agent tree drawn under
+# the activity line pushes it out of those ten lines), no menu or dialog
+# (pane_is_menu), no text in the input box (pane_is_held, pane_box_end_held),
+# and an input prompt (pane_input_region finds the box, and pane_is_idle reads
+# the screen idle). pane_is_idle alone proves nothing: it reads most running
+# turns' screens as idle too, so it is the last leg, after the vetoes.
+#
+# Prints nothing and returns 0 when all four hold. Otherwise prints the first
+# that failed (busy, menu, held, no_prompt) and returns 1, or no_utf8_locale
+# when the host has no UTF-8 locale to read under. The locale is pinned
+# (_pane_utf8_locale): under LC_ALL=C pane_is_idle reads frames idle that it
+# does not under UTF-8, and keepalive's own unit runs under en_US.UTF-8.
+pane_compact_ready() {
+    local text="$1" region
+    _pane_utf8_locale || { printf 'no_utf8_locale'; return 1; }
+    local -x LC_ALL="$_PANE_UTF8_LOCALE"
+    if pane_is_busy "$text"; then printf 'busy'; return 1; fi
+    if pane_is_menu "$text"; then printf 'menu'; return 1; fi
+    if pane_is_held "$text" || pane_box_end_held "$text"; then printf 'held'; return 1; fi
+    region=$(pane_input_region "$text")
+    if [ -z "$region" ] || ! pane_is_idle "$text"; then printf 'no_prompt'; return 1; fi
+    return 0
+}
+
+# _pane_utf8_locale
+# Sets _PANE_UTF8_LOCALE to the UTF-8 locale pane_compact_ready reads under:
+# en_US.UTF-8, the one keepalive's unit runs under, where the host has it, else
+# C.UTF-8, in either spelling `locale -a` lists. Read once per shell; returns 1,
+# setting nothing, when the host has neither.
+_PANE_UTF8_LOCALE=""
+_pane_utf8_locale() {
+    [ -z "$_PANE_UTF8_LOCALE" ] || return 0
+    local have name
+    have=$'\n'"$(locale -a 2>/dev/null || true)"$'\n'
+    for name in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
+        case "$have" in
+            *$'\n'"$name"$'\n'*) _PANE_UTF8_LOCALE="$name"; return 0 ;;
+        esac
+    done
+    return 1
 }
 
 # _held_box_squeezed <region>
@@ -3702,6 +4083,11 @@ held_delivery_match() {
     if pane_is_busy "$pane"; then printf busy; return 1; fi
     if ! pane_is_held "$pane"; then printf not-held; return 1; fi
     region=$(pane_input_region "$pane")
+    # Repair Enter requires stronger menu exclusion than a new-send refusal.
+    # Even authored exit words are ambiguous here: never choose a dialog.
+    case "$region" in
+        *'Esc to cancel'*|*'Esc to go back'*) printf not-held; return 1 ;;
+    esac
     trailer="⟦plane:${msg_id}⟧"
     if ! pane_shows_payload_end "$region" "$trailer"; then printf not-shown; return 1; fi
     box=$(_held_box_squeezed "$region")
@@ -3740,13 +4126,65 @@ bot_dir_for_session() {
     printf '%s' "$target"
 }
 
+# The host compaction slot's own reader, asked about one bot (#1053, build PR
+# 6): compaction-slot.py's status(), the function behind its `status --json`,
+# so the rule for a live lease stays written once, in the slot. argv: the slot
+# script, the fleet, the bot. One line on stdout, and exit 0, always: `held
+# <seconds left>`, `free`, or `unreadable <why>`. claudlobby/message_transport.py
+# runs the same text with no shell; a test holds the two equal, so change both.
+_COMPACTION_LEASE_PY='# compaction-lease (#1053)
+import importlib.util, sys
+def answer(path, fleet, bot):
+    spec = importlib.util.spec_from_file_location("compaction_slot", path)
+    slot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(slot)
+    out = slot.status()[1]
+    lease = out.get("lease") or {}
+    if out.get("state") != "held" or (lease.get("fleet"), lease.get("bot")) != (fleet, bot):
+        return "free"
+    left = lease.get("left_s")
+    return "held %.1f" % (left if isinstance(left, (int, float)) else 0.0)
+try:
+    print(answer(*sys.argv[1:4]))
+except Exception as e:
+    print("unreadable %s: %s" % (type(e).__name__, " ".join(str(e).split())[:200]))
+'
+
+# compaction_lease_left <fleet> <bot>
+# Whether a Claude Code compaction is in flight for <fleet>/<bot>, by the host
+# compaction slot (compaction-slot.py, beside this file), whose lease the
+# build's executor takes just before it types /compact (#1053, build PR 6).
+# Prints the seconds left on a live lease that names the bot, and returns 0.
+# Returns 1, printing nothing, when none does: no slot in this release, no
+# lease, another bot's or another fleet's, one that has ended (released, at its
+# end, or taken before a host reset), or a record the slot cannot read, which
+# holds nothing by the slot's own rule. Returns 3, saying why on stderr, when
+# the slot cannot be asked at all (no python3, no data root); the callers then
+# go on as they did before the slot, so a broken reader never stops a send. A
+# bot is named as its lease names it: its fleet and its ID, which is also the
+# name of its tmux session. A python3 start per call: bot_is_busy asks only
+# once the marker and the pane have read the bot idle.
+compaction_lease_left() {
+    local fleet="${1:-}" bot="${2:-}" slot="$_LIB_COMMON_DIR/compaction-slot.py" out
+    [ -n "$fleet" ] && [ -n "$bot" ] && [ -f "$slot" ] || return 1
+    out=$(python3 -I -S -c "$_COMPACTION_LEASE_PY" "$slot" "$fleet" "$bot" 2>/dev/null || true)
+    case "$out" in
+        'held '*) printf '%s\n' "${out#held }"; return 0 ;;
+        free) return 1 ;;
+    esac
+    printf 'compaction_lease_left: the compaction slot could not be read for %s/%s (%s); read as no compaction in flight\n' \
+        "$fleet" "$bot" "${out:-no answer from python3}" >&2
+    return 3
+}
+
 # bot_is_busy <socket> <session> [bot_dir]
 # THE busy check for keystroke injectors. Marker-first: a data/.last-tool-call
 # fresher than KEEPALIVE_ACTIVE_WINDOW_S (default _ACTIVE_WINDOW_DEFAULT)
 # reads BUSY without touching tmux (rendering-immune, and the common case for
-# a working bot). Fallback: capture the pane and apply pane_is_busy. bot_dir
-# is resolved from the session name when not supplied; when unresolvable the
-# pane alone decides.
+# a working bot). Fallback: capture the pane and apply pane_is_busy; a pane it
+# reads idle is still busy while a compaction lease names the bot
+# (compaction_lease_left). bot_dir is resolved from the session name when not
+# supplied; when unresolvable the pane and the lease decide.
 # Returns 0 = busy (do NOT inject), 1 = not busy; rc 2 on empty session.
 bot_is_busy() {
     local socket="${1:-}" session="${2:-}" bot_dir="${3:-}"
@@ -3760,9 +4198,18 @@ bot_is_busy() {
     if [ -n "$bot_dir" ] && marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
         return 0
     fi
-    local pane
+    local pane fleet
     pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
-    pane_is_busy "$pane"
+    pane_is_busy "$pane" && return 0
+    # #1053 (build PR 6): the slot's lease decides for a compacting bot. On
+    # Claude Code 2.1.319 its pane's footer draws "esc to interrupt" while the box
+    # is empty or shows queued messages, but not while typed text sits in the box,
+    # and its "Compacting conversation…" line is not the activity line's shape.
+    # The bot's fleet comes from its own bot.conf; its ID is its session's name.
+    fleet="${FLEET_NAME:-}"
+    [ -z "$bot_dir" ] || fleet=$(bot_conf_get "$bot_dir" FLEET_NAME "$fleet")
+    compaction_lease_left "$fleet" "$session" >/dev/null && return 0
+    return 1
 }
 
 # marker_is_newer <marker_a> <marker_b>
@@ -3926,8 +4373,11 @@ debounce_notify() {
 }
 
 # debounce_clear <state_dir> <bot_id> <marker_suffix>
-# Remove the debounce marker so the next occurrence fires again.
+# Remove the debounce marker so the next occurrence fires again. With no marker
+# it forks nothing: fleet-pulse clears every closed episode of every bot on
+# every sweep.
 debounce_clear() {
+    [ -e "$1/${2}.${3}" ] || return 0
     rm -f "$1/${2}.${3}"
 }
 
@@ -4040,12 +4490,16 @@ session_md_handoff_epoch() {
     # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    # A missing or unparseable field is settled inside each substitution: on
+    # bash 3.2 a failure there fires an ERR trap set by the caller, however the
+    # call is guarded.
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
     [ -f "$file" ] || return 1
     iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
-        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//' || true)
     if [ -n "$iso" ]; then
-        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+        epoch=$(iso_to_epoch "$iso" || true)
+        [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
 }
@@ -4069,17 +4523,22 @@ _SESSION_HANDOFF_COMMAND_DEFAULT='/claudna:session handoff --auto'
 # Both layouts are checked because the cache is keyed by MARKETPLACE and the
 # plugin lives under it (measured: cache/Claudfather/claudna), while the
 # unpacked skills live under marketplaces/.
-_plugin_installed() {
-    local p="${1:?}" base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins" d
+_session_plugin_paths() {
+    local p="${1:?}" base="${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}/plugins" d found=1
     for d in "$base"/cache/*/"$p" "$base"/marketplaces/*/"$p" "$base"/cache/"$p" ; do
-        [ -d "$d" ] && return 0
+        if [ -d "$d" ]; then printf '%s\n' "$d"; found=0; fi
     done
-    return 1
+    return "$found"
+}
+
+_plugin_installed() {
+    local paths
+    paths="$(_session_plugin_paths "$1" || true)"
+    [ -n "$paths" ]
 }
 
 # session_command_status <command> [bot_dir] — echo one status token. Serves
-# every session verb (resume at boot, handoff at shutdown): one predicate, not
-# one per call site.
+# explicit handoff commands; routine continuation does not inject a Skill.
 #   rc 0 -> INJECT      available | unverifiable
 #   rc 1 -> SKIP        no-command | provider-absent:<plugin>
 #
@@ -4089,60 +4548,92 @@ _plugin_installed() {
 # should have costs the session its context, SILENTLY — which is the failure
 # #1163 opened with. So only a positive finding of absence suppresses the send;
 # "I could not tell" sends and says so.
-session_command_status() {
-    local cmd="${1-}" bot_dir="${2-}" first plugin skill
-    if [ -z "$cmd" ]; then printf 'no-command'; return 1; fi
-    # Only the FIRST token can carry a plugin qualifier; checking the whole
-    # string would read a colon in a later argument as one.
-    first="${cmd%% *}"
-    case "$first" in
+# One resolution owner. The scalar compatibility door below preserves the old
+# verdicts; bootstrap consumes the same selected account and discovered paths.
+_session_command_resolve() {
+    local cmd="${1-}" bot_dir="${2-}" plugin skill
+    _SESSION_COMMAND_ACCOUNT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    _SESSION_COMMAND_FIRST="${cmd%% *}"
+    _SESSION_COMMAND_ARGS="${cmd#"$_SESSION_COMMAND_FIRST"}"
+    _SESSION_COMMAND_PATHS=""
+    _SESSION_COMMAND_LOCAL=""
+    _SESSION_COMMAND_STATUS=unverifiable
+    if [ -z "$cmd" ]; then _SESSION_COMMAND_STATUS=no-command; return 1; fi
+    case "$_SESSION_COMMAND_FIRST" in
         /*:*)
-            plugin="${first#/}"; plugin="${plugin%%:*}"
-            if _plugin_installed "$plugin"; then printf 'available'; return 0; fi
-            printf 'provider-absent:%s' "$plugin"; return 1 ;;
-        /*)
-            # A BARE /word. This branch checks the bot's skills dir and then
-            # does NOT suppress on a miss, which looks asymmetric against the
-            # plugin branch above and is deliberate — do not "fix" it by
-            # symmetrizing the two.
-            #
-            # The difference is what a negative MEANS on each path. A
-            # plugin-qualified command names a plugin, and a plugin absent from
-            # the cache is a POSITIVE finding of absence. A bare /word does not
-            # name a plugin, and the namespace includes Claude Code's own
-            # NATIVE commands — /compact, /clear and friends — which have no
-            # filesystem representation anywhere, so a miss here is ambiguous
-            # rather than a finding. Treating it as absence would silently
-            # refuse to send every native command a fleet ever configured.
-            #
-            # So the lookup is worth doing (a hit is a real positive, and
-            # upgrades the status from unverifiable to available) while the
-            # miss stays unverifiable and still sends, per the fail-open rule
-            # above.
-            skill="${first#/}"
-            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
-                printf 'available'; return 0
+            plugin="${_SESSION_COMMAND_FIRST#/}"; plugin="${plugin%%:*}"
+            _SESSION_COMMAND_PATHS="$(_session_plugin_paths "$plugin" "$_SESSION_COMMAND_ACCOUNT" || true)"
+            if [ -n "$_SESSION_COMMAND_PATHS" ]; then
+                _SESSION_COMMAND_STATUS=available; return 0
             fi
-            printf 'unverifiable'; return 0 ;;
-        *)  printf 'unverifiable'; return 0 ;;
+            _SESSION_COMMAND_STATUS="provider-absent:$plugin"; return 1 ;;
+        /*)
+            skill="${_SESSION_COMMAND_FIRST#/}"
+            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
+                _SESSION_COMMAND_LOCAL="$bot_dir/.claude/skills/$skill"
+                _SESSION_COMMAND_STATUS=available
+            fi ;;
     esac
+    return 0
 }
 
-should_resume_session() {
-    # F6 age gate: decide whether a handoff checkpoint is fresh enough to resume
-    # from. Returns 0 (resume) when the handoff timestamp is within
-    # <max_age_seconds> of now; returns 1 (skip — clean start) when older, or
-    # when the file is absent/unreadable. A future-dated checkpoint (clock skew)
-    # counts as fresh.
-    local file="${1:?Usage: should_resume_session <file> <max_age_seconds>}"
-    local max_age="${2:?Usage: should_resume_session <file> <max_age_seconds>}"
-    local epoch now age
-    [ -f "$file" ] || return 1
-    epoch=$(session_md_handoff_epoch "$file") || return 1
-    [ -n "$epoch" ] || return 1
-    now=$(date +%s)
-    age=$(( now - epoch ))
-    [ "$age" -lt "$max_age" ]
+session_command_status() {
+    local rc=0
+    _session_command_resolve "$@" || rc=$?
+    printf '%s' "$_SESSION_COMMAND_STATUS"
+    return "$rc"
+}
+
+# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks>
+# A fresh native session (`bot restart --fresh`, or any launch that mints a new
+# UUID) first restores the bot's saved handoff, so a fresh session means an
+# empty context, not a lost one (#2696). It sends SESSION_RESUME_COMMAND (empty
+# sends nothing) as its own submission before the authored startup, while the
+# handoff's last_updated, else its mtime, is under RESUME_MAX_AGE_S (86400) old.
+# Exact continuation already holds the conversation and sends nothing. Success
+# is submission evidence only, never a completed resume.
+fresh_session_resume() {
+    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6"
+    local handoff="$2/.claude/session.md" max_age="${RESUME_MAX_AGE_S:-86400}" epoch=""
+    local command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
+    [ "$mode" = fresh ] && [ -f "$handoff" ] || return 0
+    case "$max_age" in ''|*[!0-9]*) max_age=86400 ;; esac
+    epoch="$(session_md_handoff_epoch "$handoff" || true)"
+    case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$(( $(date +%s) - epoch ))" -ge "$max_age" ]; then
+        printf '%s RESUME SKIP — fresh session; handoff older than %ss, starting clean\n' \
+            "$(ts_iso)" "$max_age" >> "$log"
+        return 0
+    fi
+    if ! _session_command_resolve "$command" "$bot_dir"; then
+        printf '%s RESUME SKIP — fresh session and handoff, but no resume command [%s]; it stays at %s\n' \
+            "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$handoff" >> "$log"
+        emit_fleet_event resume_skipped startup \
+            "{\"reason\":\"$_SESSION_COMMAND_STATUS\",\"handoff\":\"$handoff\"}" || true
+        return 0
+    fi
+    printf '%s RESUME — injecting resume command [%s; fresh session]: %s\n' \
+        "$(ts_iso)" "$_SESSION_COMMAND_STATUS" "$command" >> "$log"
+    _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" resume RESUME "$command"
+}
+
+_startup_send() {
+    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5" kind="$6" label="$7" text="$8"
+    local started rc=0
+    started="$(inject_stamp "$bot_dir" "$kind" sending)"
+    PANE_READY_TICKS="$ticks" pane_send_verified "$socket" "$session" "$text" || rc=$?
+    inject_stamp "$bot_dir" "$kind" done "$rc" "$started" >/dev/null
+    boot_send_settled "$label" "$rc" "$log"
+}
+
+# Only a genuinely new native session receives the authored startup prompt.
+# Continuation resumes the provider transcript without another model turn.
+startup_inject() {
+    local bot_dir="$1" socket="$2" session="$3" log="$4" ticks="$5"
+    local startup="${STARTUP_PROMPT:-}"
+    if [ -n "$startup" ]; then
+        _startup_send "$bot_dir" "$socket" "$session" "$log" "$ticks" startup STARTUP "set +H; $startup"
+    fi
 }
 
 # --- Portable sed -i ---------------------------------------------------------
@@ -4211,7 +4702,7 @@ proc_rss_kb() {
 # --- Fleet path resolution ---------------------------------------------------
 
 # resolve_fleet_dir <fleet> — echo the fleet overlay dir, flat OR nested.
-# Flat local/<fleet>/ wins (byte-identical to pre-nesting). Else the unique
+# A real flat local/<fleet>/ wins. A marker-less flat husk yields to the unique
 # local/<system>/<fleet>/ carrying a fleet.yaml (one level under a container).
 # Marker-agnostic: a fleet is a dir with fleet.yaml. Empty output + nonzero if
 # none. The bash twin of Python paths._find_fleet_dir — the ONE home for the
@@ -4220,15 +4711,22 @@ resolve_fleet_dir() {
     require_data_root || return $?
     local fleet="$1" root="${CLAUDLOBBY_ROOT:?}" flat d
     flat="$root/local/$fleet"
-    # Flat wins first — byte-identical: a bare dir resolves (scaffolding relies on it).
-    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
+    # Preserve the real-flat collision branch until callers distinguish
+    # ambiguity from absence (#1608); they currently fall back to this path.
+    if [ -f "$flat/fleet.yaml" ]; then printf '%s\n' "$flat"; return 0; fi
     # Nested: the unique local/<system>/<fleet>/ that carries a fleet.yaml.
     local match="" n=0
     for d in "$root"/local/*/"$fleet"; do
+        # A real flat fleet is not a system container, even if a child has
+        # the requested name and a fleet.yaml of its own (Python twin rule).
+        [ -f "${d%/*}/fleet.yaml" ] && continue
         [ -f "$d/fleet.yaml" ] || continue
         match="$d"; n=$((n+1))
     done
     if [ "$n" -eq 1 ]; then printf '%s\n' "$match"; return 0; fi
+    # Keep bare scaffolding (and existing ambiguous-husk behavior) when no
+    # unique nested fleet can replace it. Never move or remove husk contents.
+    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
     return 1   # none, or ambiguous (F5 — caller decides; keep flat-first semantics)
 }
 
@@ -4434,18 +4932,29 @@ bot_in_fleet() {
     # a caller that WRITES, RESTARTS or DELETES behind this predicate, read the
     # door note above declared_bots_strict and use the loud door instead.
     [ -z "$2" ] && return 0
-    printf '%s\n' "$2" | grep -qx "$1"
+    # A here-string, never a pipe into grep (#2428). grep -q exits at its first
+    # match; the roster lines still to be written then met a closed pipe, and
+    # under pipefail that failure read a declared bot as undeclared.
+    grep -qx "$1" <<<"$2"
 }
 
-# declared_bots_strict [bad_manifest_outfile]
+# declared_bots_strict [--bad-out FILE]
 # Emit "<bot><TAB><fleet><TAB><bot_dir>" for every bot DECLARED across every
-# fleet manifest on this host — the union, never a directory walk.
+# fleet manifest on this host — the union, never a directory walk. It finds the
+# manifests itself (discover_fleet_manifests) and takes none as an argument.
 #
-#   rc 0  every manifest parsed
+#   rc 0  every manifest parsed. FILE, when given, is left empty (created if it
+#         was absent).
 #   rc 1  at least one manifest was unusable. Rows for the parseable fleets are
 #         still emitted, and one "<path><TAB><reason>" line per broken manifest
-#         is written to <bad_manifest_outfile> (stderr when no file is given),
-#         so the CALLER decides whether a partial roster is acceptable.
+#         goes to FILE (stderr without --bad-out), so the CALLER decides whether
+#         a partial roster is acceptable.
+#   rc 2  refused before anything is read or written: an argument other than
+#         --bad-out FILE, or a FILE that already holds content.
+#
+# FILE is an output and must be absent or empty. The helper only appends to it,
+# so a path passed by mistake, such as a fleet.yaml read as the manifest to
+# check, keeps every byte (#1131).
 #
 # THE SECOND DOOR, and why it is not parse_fleet_bots. That helper soft-fails by
 # contract: a missing or unreadable fleet.yaml yields NO output, and bot_in_fleet
@@ -4482,8 +4991,25 @@ bot_in_fleet() {
 # happy path and diverge only on the failure path — gated by a test that runs
 # both over the same manifests.
 declared_bots_strict() {
+    local bad_out="" fleet man names b bdir rc=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --bad-out)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "declared_bots_strict: --bad-out needs a file" >&2
+                    return 2
+                fi
+                bad_out="$2"; shift 2 ;;
+            *)
+                echo "declared_bots_strict: refusing argument '$1': the helper reads every manifest itself, and its only option is --bad-out FILE, an output for the broken-manifest lines" >&2
+                return 2 ;;
+        esac
+    done
+    if [ -n "$bad_out" ] && [ -s "$bad_out" ]; then
+        echo "declared_bots_strict: refusing --bad-out '$bad_out': it already holds content" >&2
+        return 2
+    fi
     require_data_root || return $?
-    local bad_out="${1:-}" fleet man names b bdir rc=0
     : "${CLAUDLOBBY_ROOT:?declared_bots_strict needs CLAUDLOBBY_ROOT}"
     local tmp_bad
     tmp_bad="$(mktemp "${TMPDIR:-/tmp}/declbots.XXXXXX")" || return 2
@@ -4511,9 +5037,9 @@ $(discover_fleet_manifests)
 EOF
     if [ -s "$tmp_bad" ]; then
         rc=1
-        if [ -n "$bad_out" ]; then cat "$tmp_bad" > "$bad_out"; else cat "$tmp_bad" >&2; fi
+        if [ -n "$bad_out" ]; then cat "$tmp_bad" >> "$bad_out"; else cat "$tmp_bad" >&2; fi
     elif [ -n "$bad_out" ]; then
-        : > "$bad_out"
+        : >> "$bad_out"
     fi
     rm -f "$tmp_bad"
     return "$rc"
@@ -4605,7 +5131,7 @@ _bots_from_manifest() {
 # of the self-started count, so it cannot inflate the headline — the one
 # direction a measurement must not fail in.
 boot_start_class() {
-    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc=""
+    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc="" wrapped=""
     for f in "$tdir"/*.jsonl; do
         [ -f "$f" ] || continue
         first="$(printf '%s\n%s\n' "$first" "$(awk -v boot="$boot_cmp" '
@@ -4635,10 +5161,12 @@ boot_start_class() {
         # The record holds the prompt JSON-encoded, so the needle is escaped the
         # same way before a fixed-string search. Backslash first, or the escaping
         # of the quotes is itself re-escaped.
-        esc="$(printf '%s' "$prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        esc="$(json_escape "$prompt")"
+        wrapped="FLEET_STARTUP_INSTRUCTIONS_BEGIN\\n${esc}\\nFLEET_STARTUP_INSTRUCTIONS_END"
         for f in "$tdir"/*.jsonl; do
             [ -f "$f" ] || continue
-            prose="$(printf '%s\n%s\n' "$prose" "$(grep -F "set +H; $esc" "$f" 2>/dev/null \
+            prose="$(printf '%s\n%s\n' "$prose" "$({ grep -F "set +H; $esc" "$f" 2>/dev/null; \
+                    grep -F 'set +H; FLEET_STARTUP_BOOTSTRAP_V1' "$f" 2>/dev/null | grep -F "$wrapped" || true; } \
                 | grep '"type":"user"' \
                 | grep -o '"timestamp":"[^"]*"' | sed 's/.*:"//; s/"$//' \
                 | awk -v boot="$boot_cmp" '$0 > boot')" | grep -v '^$' | sort | head -1)"
@@ -4822,9 +5350,11 @@ inject_stamp() {
 # pane_send_verified's "not submitted" (#1236): the box never showed the
 # payload, or still held it after the last Enter. The bot is up and that prompt
 # was not submitted, so the boot goes on and the log says so (send_unsubmitted
-# records which on the plane, and the send's stderr line says it too). Any
-# other failure is returned, so under the caller's set -e and error trap it
-# ends the boot as the unguarded send used to. Here rather than in start-bot.sh
+# records which on the plane, and the send's stderr line says it too). rc 4
+# means existing input refused the send without any new keystrokes; log NOT
+# SENT and also continue, leaving the existing text untouched. Any other
+# failure is returned, so under the caller's set -e and error trap it ends the
+# boot as the unguarded send used to. Here rather than in start-bot.sh
 # because a test runs start-bot's injection branches against this file alone.
 boot_send_settled() {
     case "$2" in
@@ -4832,8 +5362,52 @@ boot_send_settled() {
         3) printf '%s %s — NOT SUBMITTED: the input box never showed it, or still held it after the last Enter (#1236)\n' \
                "$(ts_iso)" "$1" >> "$3"
            return 0 ;;
+        4) printf '%s %s — NOT SENT: the input box already held text, or a menu held the screen; no payload or Enter was sent\n' \
+               "$(ts_iso)" "$1" >> "$3"
+           return 0 ;;
         *) return "$2" ;;
     esac
+}
+
+# plugin_verify_required <python> <required-list> <bot-dir>
+# Read only the selected account registry and installed plugin artifacts.
+# Refuse unavailable evidence; never call the plugin manager or seed stamps.
+plugin_verify_required() {
+    local python="${1:?}" required="${2-}" bot_dir="${3:?}"
+    "$python" -I -B - "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$required" "$bot_dir" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+account, required, bot_dir = sys.argv[1:]
+if not required.split():
+    sys.exit(0)
+try:
+    plugins = json.loads((Path(account) / "plugins/installed_plugins.json").read_bytes())["plugins"]
+    if not isinstance(plugins, dict):
+        raise ValueError()
+    for ref in required.split():
+        entries = plugins.get(ref)
+        if not isinstance(entries, list) or not entries:
+            raise ValueError()
+        available = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError()
+            scope = entry.get("scope")
+            if scope != "user" and not (scope in ("project", "local") and entry.get("projectPath") == bot_dir):
+                continue
+            location = entry.get("installPath")
+            if isinstance(location, str) and Path(location).is_absolute():
+                manifest = json.loads((Path(location) / ".claude-plugin/plugin.json").read_bytes())
+                if isinstance(manifest, dict) and manifest.get("name") == ref.split("@", 1)[0]:
+                    available = True
+        if not available:
+            raise ValueError()
+except (OSError, ValueError, TypeError, KeyError):
+    print("start-bot: verify-existing requires readable installed plugins for this account; no plugins changed, launch refused", file=sys.stderr)
+    sys.exit(3)
+PY
 }
 
 # plugin_ensure <plugin> <claude_bin> <log> <once_flag>
@@ -4872,6 +5446,7 @@ boot_send_settled() {
 # a bare `epoch="$(door)"` whose door returns 1 IS a failing statement under
 # set -e, and the first cut aborted its own suite on exactly the
 # unresolvable-clock case.
+
 plugin_ensure() {
     local plugin="${1:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
     local claude_bin="${2:?Usage: plugin_ensure <plugin> <claude_bin> <log> <once_flag>}"
@@ -6033,7 +6608,7 @@ EOF
     printf '%s' "$hit"
 }
 
-# resolve_alert_target <bots_dir> [fleet|any]
+# resolve_alert_target <bots_dir> [fleet|any] [roster]
 # THE fleet-alert delivery-target resolver, shared by every env-less alert path
 # (fleet-pulse escalation, _emit_fleet_signal, creds-check). It resolves the chat
 # AND its sender -- the channel state dir tg-post reads the token from -- as ONE
@@ -6046,7 +6621,8 @@ EOF
 #   2. TELEGRAM_GROUP_CHAT_ID from the env (a fleet timer's composed chat):
 #      paired with TELEGRAM_STATE_DIR when that is set beside it, else with a bot
 #      in <bots_dir> -- the caller's own fleet, never a cross-fleet scan -- whose
-#      OWN chat it is. None: REFUSED.
+#      OWN chat it is, among the bots <roster> names (one per line; the
+#      fleet.yaml beside <bots_dir> when it is empty). None: REFUSED.
 #   3. No env chat: the first bot the scan finds supplies both. scan_scope "any"
 #      (default) is cross-fleet for host jobs, which run fleet-less; "fleet"
 #      restricts it to <bots_dir>.
@@ -6060,7 +6636,7 @@ EOF
 # undeliverable, so a refusal is never a send.
 # Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
-    local bots_dir="${1:-}" scan_scope="${2:-any}" _bot
+    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot
     _alert_chat_id=""
     _alert_state_dir=""
     _alert_target_src=""
@@ -6085,7 +6661,7 @@ resolve_alert_target() {
             _alert_token="${TELEGRAM_BOT_TOKEN:-}"
             return 0
         fi
-        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" || true)
+        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" "$roster" || true)
         if [ -n "$_bot" ]; then
             _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
             _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
@@ -6108,18 +6684,19 @@ resolve_alert_target() {
     fi
 }
 
-# _bot_with_own_chat <bots_dir> <chat_id>
-# The first bot dir in <bots_dir> (lexical) that its fleet.yaml declares (every
-# dir when the roster is empty), whose OWN TELEGRAM_GROUP_CHAT_ID is <chat_id>,
-# that is a channel bot (TELEGRAM_BOT_HANDLE: every bot.conf carries a state
-# dir, a channel-less one too) and that declares a channel state dir; prints it,
-# or returns 1. Both filters are creds-check's: move-bot leaves a moved bot's old
-# dir behind by default. The validator warns at generate time when no declared
-# bot qualifies (composer.fleet_alert_sender_state_dir).
+# _bot_with_own_chat <bots_dir> <chat_id> [roster]
+# The first bot dir in <bots_dir> (lexical) that <roster> names, or else its
+# fleet.yaml declares (every dir when both are empty), whose OWN
+# TELEGRAM_GROUP_CHAT_ID is <chat_id>, that is a channel bot
+# (TELEGRAM_BOT_HANDLE: every bot.conf carries a state dir, a channel-less one
+# too) and that declares a channel state dir; prints it, or returns 1. Both
+# filters are creds-check's: move-bot leaves a moved bot's old dir behind by
+# default. The validator warns at generate time when no declared bot qualifies
+# (composer.fleet_alert_sender_state_dir).
 _bot_with_own_chat() {
-    local bots_dir="$1" chat="$2" d declared
+    local bots_dir="$1" chat="$2" declared="${3:-}" d
     [ -d "$bots_dir" ] || return 1
-    declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
+    [ -n "$declared" ] || declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$d")" "$declared" || continue
@@ -6234,6 +6811,60 @@ _harness_take_refusals() {
 _harness_refused() {
     fail=$((fail + 1)); refused=$((${refused:-0} + 1))
     printf '  FAIL  %s\n' "$1"
+}
+
+# --- Test-harness input box ---------------------------------------------------
+
+# harness_box_up <socket> <session> <command> [<new-session option>...]
+# Start a pane whose program draws an input box (the stand-in every harness
+# sends into, tests/fixtures/input-box-stub.py) in a new detached session, and
+# return once the box is drawn. The stand-in enters raw mode before it draws,
+# which discards the keys typed before it, as a Claude Code session that has not
+# drawn its box loses them (#860); so a harness types nothing into the pane
+# before this returns (#2139). The wait is pane_await_input_box, for
+# HARNESS_BOX_TICKS polls of 0.2 s (default 100). Prints "drawn" and returns 0,
+# or prints why not and returns 1: "did not start: " and the tmux error, or the
+# wait's verdict. The caller stops at that setup step rather than scoring every
+# check that needed the pane (#2405). An empty <socket> is the default server.
+harness_box_up() {
+    local socket="$1" session="$2" command="$3" err verdict
+    shift 3
+    if ! err=$(bot_tmux "$socket" new-session -d "$@" -s "$session" "$command" 2>&1); then
+        printf 'did not start: %s\n' "$(printf '%s' "$err" | tr '\n' ' ')"
+        return 1
+    fi
+    verdict=$(PANE_READY_TICKS="${HARNESS_BOX_TICKS:-100}" PANE_READY_POLL_S=0.2 \
+        pane_await_input_box "$socket" "$session")
+    printf '%s\n' "$verdict"
+    [ "$verdict" = "$_PANE_BOX_DRAWN" ]
+}
+
+# harness_box_down <socket> <session>
+# End a session harness_box_up started. When it is the last session on its
+# server, the server exits too, and while it exits it still accepts a
+# connection: a start on that socket then reaches the exiting server, and tmux
+# fails it ("server exited unexpectedly") with no session (#2405; 6 of 800 such
+# restarts on a Pi 5). So when it is the last, this waits, up to 5 s, for that
+# server to be gone. If it is not, this names the server's pid and the seconds
+# it waited in one line on stderr, and returns 1: callers discard the status,
+# and a caller can run inside a command substitution, which captures stdout.
+# No such session: returns 0.
+harness_box_down() {
+    local socket="$1" session="$2" pid count i=0 start
+    pid=$(bot_tmux "$socket" display-message -p -t "$session" '#{pid}' 2>/dev/null) || return 0
+    count=$(bot_tmux "$socket" list-sessions 2>/dev/null | wc -l) || true
+    bot_tmux "$socket" kill-session -t "$session" 2>/dev/null || true
+    [ "$count" -le 1 ] || return 0
+    start=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+        [ "$i" -lt 100 ] || {
+            printf 'harness_box_down: tmux server %s is still running %s s after its last session (%s) ended\n' \
+                "$pid" "$((SECONDS - start))" "$session" >&2
+            return 1
+        }
+        sleep 0.05
+        i=$((i + 1))
+    done
 }
 
 # seed_claude_auth <config_dir> <host_creds>

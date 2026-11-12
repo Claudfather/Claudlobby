@@ -11,7 +11,7 @@ import sys
 from typing import Callable
 from uuid import uuid4
 
-from .reference_hints import ReferenceHint
+from .reference_hints import PrefixHint, ReferenceHint
 
 
 _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "not_found": 3,
@@ -22,11 +22,13 @@ _EXITS = {"internal_error": 1, "selection_defect": 1, "invalid_argument": 2, "no
           "release_mismatch": 7, "timeout": 8,
           "receipt_unobservable": 9, "receipt_mismatch": 10, "recording_degraded": 11}
 _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", "status"): "host.status",
+           ("host", "spec"): "host.spec",
            ("library", "list"): "library.list", ("library", "create"): "library.create",
            ("host", "env", "tiers"): "host.env.tiers", ("host", "cache", "warm"): "host.cache.warm",
            ("host", "job", "list"): "host.job.list", ("host", "job", "show"): "host.job.show",
            ("host", "job", "run"): "host.job.run",
            ("host", "supervision", "reap-orphans"): "host.supervision.reap-orphans",
+           ("host", "supervision", "failed"): "host.supervision.failed",
            ("host", "credentials", "reconcile"): "host.credentials.reconcile",
            ("host", "credentials", "check"): "host.credentials.check",
            ("host", "channels", "check"): "host.channels.check",
@@ -38,13 +40,14 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
            ("host", "update", "siblings"): "host.update.siblings",
            ("host", "setup"): "host.setup", ("host", "doctor"): "host.doctor", ("fleet", "setup"): "fleet.setup",
            ("host", "activate"): "host.activate", ("host", "repair-start"): "host.repair-start",
+           ("host", "repair-after-reset"): "host.repair-after-reset",
            ("host", "abort-adoption"): "host.abort-adoption",
            ("config", "validate"): "config.validate",
            ("config", "plan"): "config.plan", ("config", "explain"): "config.explain",
            ("config", "diff"): "config.diff", ("migration", "plan"): "migration.plan",
            ("migration", "status"): "migration.status",
            **{("migration", name): f"migration.{name}" for name in
-              ("env", "data", "cron", "memory", "lessons", "workstreams")},
+              ("env", "data", "cron", "memory", "lessons", "workstreams", "workstream-backfill")},
            ("fleet", "reports", "submit"): "fleet.reports.submit",
            ("fleet", "reports", "list"): "fleet.reports.list",
            ("fleet", "reports", "ack"): "fleet.reports.ack",
@@ -55,14 +58,22 @@ _PUBLIC = {("brief",): "brief", ("host", "releases"): "host.releases", ("host", 
 _PUBLIC.update({(domain, verb): f"{domain}.{verb}" for domain, verbs in (
     ("context", ("show",)), ("bot", ("list", "show", "capabilities", "status", "session", "logs", "usage", "start", "stop", "restart", "handoff", "interrupt", "compact", "move", "create", "remove")),
     ("fleet", ("show", "status", "logs", "uptime", "utilization", "inbox", "usage", "start", "stop", "restart", "reconcile", "reload", "pulse", "notify", "move")), ("project", ("list", "show")),
-    ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge")),
-    ("assignment", ("show", "deliver", "accept", "progress", "block", "return", "complete", "fail")),
+    ("task", ("list", "show", "reviews", "admit", "assign", "withdraw", "reassign", "escalate", "nudge", "move", "feedback")),
+    ("assignment", ("show", "deliver", "reschedule", "accept", "progress", "block", "return", "complete", "fail")),
     ("message", ("show", "receipt", "wait", "send", "reply")),
     ("request", ("show",)),
     ("workstream", ("list", "show", "open", "progress", "renew", "block", "unblock", "close", "prune")),
     ("event", ("list", "show"))) for verb in verbs})
 _PUBLIC.update({("bot", "automation", action): f"bot.automation.{action}"
                 for action in ("status", "pause", "resume", "record")})
+_PUBLIC.update({("task", "permission", action): f"task.permission.{action}"
+                for action in ("request", "show", "check", "approve", "decline", "revoke")})
+_PUBLIC.update({("host", "backup", action): f"host.backup.{action}"
+                for action in ("create", "inspect", "restore")})
+_PUBLIC.update({("host", "owner", action): f"host.owner.{action}"
+                for action in ("status", "initialize", "confirm", "revoke", "serve", "bind-source",
+                               "allow-messages", "revoke-messages", "allow-nudges", "revoke-nudges",
+                               "allow-feedback", "revoke-feedback", "allow-permissions", "revoke-permissions")})
 _PUBLIC.update({("plane", action): f"plane.{action}" for action in
                 ("doctor", "emit", "emit-batch", "expire", "status", "spool", "prune", "registry")})
 _invocation = ContextVar("public_cli_invocation", default=(None, False))
@@ -73,7 +84,7 @@ class CommandError:
     code: str
     message: str
     retryable: bool = False
-    hint: str | ReferenceHint | None = None
+    hint: str | ReferenceHint | PrefixHint | None = None
 
 
 @dataclass(frozen=True)
@@ -99,7 +110,8 @@ class CommandOutput:
 
 
 class CommandFailure(Exception):
-    def __init__(self, code: str, message: str, *, hint: str | ReferenceHint | None = None,
+    def __init__(self, code: str, message: str, *,
+                 hint: str | ReferenceHint | PrefixHint | None = None,
                  retryable: bool = False, data: dict | None = None,
                  release_id: str | None = None):
         if code not in _EXITS:
@@ -108,6 +120,17 @@ class CommandFailure(Exception):
         self.data = data if data is not None else {}
         self.release_id = release_id
         super().__init__(message)
+
+
+def empty_fleet_conflict(path, size: int) -> CommandFailure:
+    """Name an empty fleet.yaml by path and size, which hold no authored value (#2267)."""
+    message = (f"fleet configuration is empty: {path} (0 bytes)" if size == 0 else
+               f"fleet configuration holds no YAML document: {path} "
+               f"({size} bytes of whitespace or comments)")
+    return CommandFailure("conflict", message,
+                          hint=f"restore {path} from its last good copy; where the file is tracked, "
+                               f"`git -C {shlex.quote(str(path.parent))} log -- {shlex.quote(path.name)}` "
+                               "lists the copies")
 
 
 def selection_read_conflict(message: str, *, release_id: str | None = None,
@@ -135,6 +158,15 @@ def emit(result: CommandResult, *, json_output: bool, lines: tuple[str, ...] = (
                     if hint.total_matches > len(hint.candidates):
                         print(f"{hint.total_matches - len(hint.candidates)} more candidates; "
                               "select a canonical ID", file=sys.stderr)
+            elif isinstance(hint, PrefixHint):
+                for candidate in hint.candidates:
+                    print(f"candidate {candidate.id}: claudlobby {shlex.join(candidate.command)}",
+                          file=sys.stderr)
+                if hint.total_matches > len(hint.candidates):
+                    print(f"{hint.total_matches - len(hint.candidates)} more candidates; "
+                          "give more of the ID", file=sys.stderr)
+                if hint.next_command:
+                    print(f"inspect claudlobby {shlex.join(hint.next_command)}", file=sys.stderr)
             else:
                 print(hint, file=sys.stderr)
     else:
@@ -184,6 +216,10 @@ def _command_from_argv(tokens: list[str]) -> str | None:
         return None
     return None
 
+
+
+_PUBLIC.update({("host", "owner", action): "host.owner." + action
+                for action in ("allow-setup", "setup-status", "revoke-setup")})
 
 class ResultArgumentParser(argparse.ArgumentParser):
     """Structured syntax errors for migrated routes, argparse behavior elsewhere."""

@@ -1,6 +1,6 @@
 ---
 name: status
-description: "Manager readout for the human: what moved, and what is waiting on their decision. One line each, bounds stated. Consumes `claudlobby brief` and adds the PR surface brief does not carry."
+description: "Use when the human asks a manager what's the latest, what moved, or what is waiting on them. Manager readout for the human: what moved, and what is waiting on their decision. One line each, bounds stated. Consumes `claudlobby brief` and adds the PR surface brief does not carry."
 argument-hint: "[24h|7d|since <ISO>]"
 tool_grants:
   - "Bash(claudlobby --json brief)"
@@ -38,7 +38,8 @@ hand-rolled reader silently disagrees with the framework's own, and yours is the
 It gives you: `mission`, `work.items` (canonical open task and assignment IDs,
 including queued manager intake), `work.issues` (unresolved history),
 assignment-keyed `work.items[].attention` (including overdue/orphaned or an
-explicit unknown), `workstreams`, `reports.count` and `reports.unacked` (the manager's
+explicit unknown; `/fleet-ops` says what each status means), `workstreams`,
+`reports.count` and `reports.unacked` (the manager's
 view lists the oldest 50; any other viewer gets the count and the command that lists them),
 `alerts`, and — load-bearing — `degraded[]`.
 For current escalations use `claudlobby --json fleet inbox`; an empty brief work view

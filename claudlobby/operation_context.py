@@ -17,12 +17,11 @@ from pathlib import Path
 import pwd
 import re
 import sqlite3
-import stat
 
 from .active_config import resolve_active_context
 from .context import Context, generated_selectors
 from .plane.db import connect_ro, db_file
-from .plane.ids import ID_PATTERNS, derive_uid
+from .plane.ids import ID_PATTERNS, derive_uid, read_host_uid
 from .plane.registry_read import current_entities
 from .plane.schema_state import require_current_schema
 from .resources import PackageResources
@@ -51,19 +50,8 @@ def _valid_human_alias(alias: object) -> bool:
 
 def _host_uid(root: Path) -> str:
     try:
-        if (root / "state").is_symlink():
-            raise ValueError("redirected state")
-        fd = os.open(root / "state/host-uid", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "r") as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600):
-                raise ValueError("host identity is not an owned private file")
-            value = stream.read().strip()
-        if not re.fullmatch(ID_PATTERNS["host"], value):
-            raise ValueError("malformed host identity")
-        return value
-    except (OSError, ValueError, UnicodeError) as exc:
+        return read_host_uid(root / "state")
+    except ValueError as exc:
         raise OperationContextError("existing host identity is unavailable or invalid") from exc
 
 
@@ -172,13 +160,15 @@ def resolve_task_provenance(ctx: TaskOperationContext, alias: str | None,
 
 
 def _selected_task_contexts(*, root: Path | None, fleet: str | None,
-                            package: PackageResources | None) -> tuple[Context, Context | None]:
+                            package: PackageResources | None,
+                            _resolver=None) -> tuple[Context, Context | None]:
     """Resolve selectors before either read or mutation can choose an actor.
 
     Environment selectors are read before applying explicit destination flags,
     so malformed bot context cannot be bypassed by naming another fleet/root.
     This is trusted local provenance binding, not authentication.
     """
+    resolver = resolve_active_context if _resolver is None else _resolver
     origin_fleet, origin_bot = generated_selectors(include_bot=True)
     if ("FLEET_NAME" in os.environ and "CLAUDLOBBY_FLEET" in os.environ
             and os.environ["FLEET_NAME"] != os.environ["CLAUDLOBBY_FLEET"]):
@@ -187,7 +177,7 @@ def _selected_task_contexts(*, root: Path | None, fleet: str | None,
     if origin_bot is not None:
         if not origin_fleet or not os.environ.get("CLAUDLOBBY_ROOT", "").strip():
             raise OperationContextError("generated bot origin requires its own root and fleet")
-        origin = resolve_active_context(root=Path(os.environ["CLAUDLOBBY_ROOT"]), fleet=origin_fleet,
+        origin = resolver(root=Path(os.environ["CLAUDLOBBY_ROOT"]), fleet=origin_fleet,
                                  bot=origin_bot, package=package)
         for key, expected in (("FLEET_ROOT", origin.paths.fleet_config_dir),
                               ("BOT_DIR", origin.paths.bot_runtime(origin_bot))):
@@ -202,19 +192,19 @@ def _selected_task_contexts(*, root: Path | None, fleet: str | None,
         # destination; it cannot claim a different fleet through CLI flags.
         if not origin_fleet or not os.environ.get("CLAUDLOBBY_ROOT", "").strip():
             raise OperationContextError("generated fleet path requires its own root and fleet")
-        fleet_origin = resolve_active_context(root=Path(os.environ["CLAUDLOBBY_ROOT"]),
+        fleet_origin = resolver(root=Path(os.environ["CLAUDLOBBY_ROOT"]),
                                               fleet=origin_fleet, package=package)
         declared = os.environ["FLEET_ROOT"]
         if (not declared.strip() or Path(declared).expanduser().resolve()
                 != fleet_origin.paths.fleet_config_dir.resolve()):
             raise OperationContextError("generated FLEET_ROOT conflicts with caller fleet")
-        destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
+        destination = resolver(root=root, fleet=fleet if fleet is not None else origin_fleet,
                                              package=package)
         if (destination.paths.root != fleet_origin.paths.root
                 or destination.fleet.name != fleet_origin.fleet.name):
             raise OperationContextError("generated fleet carrier conflicts with destination")
         return destination, None
-    destination = resolve_active_context(root=root, fleet=fleet if fleet is not None else origin_fleet,
+    destination = resolver(root=root, fleet=fleet if fleet is not None else origin_fleet,
                                   package=package)
     return destination, origin
 

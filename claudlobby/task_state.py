@@ -15,6 +15,7 @@ responsible for its separate pending-migration gate. No migrations run here.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -85,12 +86,20 @@ class TaskEvent(Fact):
     successor_id: str | None
 
 
+def _newest_deadline_fact(history) -> TaskEvent | None:
+    """The newest `deadline_changed` on an assignment, by ingest order (#2469)."""
+    return max((e for e in history if e.event == "deadline_changed"),
+               key=lambda e: e.ingest_seq, default=None)
+
+
 @dataclass(frozen=True)
 class Assignment(Fact):
     assignment_id: str
     task_id: str
     assignee_uid: str
     assigned_by_uid: str
+    #: The deadline in force: the newest deadline fact's (None = open-ended),
+    #: else the dispatch's. The stored assignment row keeps the dispatch's.
     expected_by: str | None
     dispatch_message_id: str | None
     state: AssignmentState
@@ -100,6 +109,13 @@ class Assignment(Fact):
     @property
     def current(self) -> bool:
         return self.terminal_event is None
+
+    @property
+    def deadline_set_at(self) -> str | None:
+        """When a manager last moved the deadline, None while the dispatch's
+        stands; the watchdog's expiry cap counts from it."""
+        fact = _newest_deadline_fact(self.history)
+        return fact.occurred_at if fact else None
 
 
 @dataclass(frozen=True)
@@ -273,8 +289,82 @@ def task_closures(events, assignment_rows, work_rows=()) -> TaskClosures:
     return TaskClosures(tasks, assignments)
 
 
+#: A manager's move of a task into another workstream (#1053): one system row,
+#: recorded by ``task_operations.move`` under the task emitter, with the task,
+#: the workstream it left and the one it joined in its ``data``. A task's
+#: workstream is the one its newest move joined, else the one it was admitted
+#: into. The row's subject is the fleet itself, and the read seeks the fleet's
+#: own subject rows (``idx_events_subject``): no index holds a system row's
+#: event name, so a read by name scans the fleet's whole system history, and a
+#: task verb never mints an identity the row could have as its own subject.
+TASK_MOVED = "task_moved"
+_MOVES_SQL = (
+    "SELECT event_id, ingest_seq, occurred_at, detail, detail_truncated"
+    " FROM events INDEXED BY idx_events_subject"
+    " WHERE kind = 'system' AND subject_uid = ? AND event = ? AND fleet_uid = ?"
+    " AND emitter = ? ORDER BY ingest_seq"
+)
+
+
+@dataclass(frozen=True)
+class TaskMove:
+    """One recorded move. ``left`` is None for a task admitted without a
+    workstream."""
+    event_id: str
+    ingest_seq: int
+    occurred_at: str
+    task_id: str
+    left: str | None
+    joined: str
+
+
+def read_moves(conn: sqlite3.Connection, *, fleet_uid: str) -> tuple[TaskMove, ...]:
+    """Every move recorded in one fleet, oldest first.
+
+    A row this reader cannot parse refuses the read rather than being passed
+    over: the task it moved would read the wrong workstream."""
+    moves = []
+    for event_id, seq, at, detail, truncated in conn.execute(
+            _MOVES_SQL, (fleet_uid, TASK_MOVED, fleet_uid, TASK_EMITTER)):
+        try:
+            data = json.loads(detail) if detail and not truncated else None
+            move = TaskMove(event_id, seq, at, data["task_id"], data["from_workstream_id"],
+                            data["to_workstream_id"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise TaskStateError(f"task move {event_id} is unreadable") from exc
+        if not (isinstance(move.task_id, str) and move.task_id and isinstance(move.joined, str)
+                and move.joined and (move.left is None or isinstance(move.left, str) and move.left)):
+            raise TaskStateError(f"task move {event_id} is unreadable")
+        moves.append(move)
+    return tuple(moves)
+
+
+def newest_moves(moves: Iterable[TaskMove]) -> dict[str, TaskMove]:
+    """Each moved task's newest move, from *moves* in ingest order."""
+    return {move.task_id: move for move in sorted(moves, key=lambda move: move.ingest_seq)}
+
+
+def workstream_task_ids(conn: sqlite3.Connection, *, fleet_uid: str, workstream_id: str,
+                        moves: Iterable[TaskMove] | None = None) -> tuple[tuple[str, ...], bool]:
+    """The workstream's tasks after moves, and whether a move ever took a task
+    out of it.
+
+    Its tasks are the ones admitted into it that no move has taken elsewhere,
+    and the ones whose newest move joined it. The second answer lets a reader
+    tell a workstream a move emptied from one that never held a task."""
+    moves = read_moves(conn, fleet_uid=fleet_uid) if moves is None else tuple(moves)
+    newest = newest_moves(moves)
+    ids = [row[0] for row in conn.execute(
+        "SELECT work_item_id FROM work_items WHERE workstream_id=? AND fleet_uid=?"
+        " ORDER BY ingest_seq", (workstream_id, fleet_uid))
+        if row[0] not in newest or newest[row[0]].joined == workstream_id]
+    ids += [tid for tid, move in newest.items() if move.joined == workstream_id and tid not in ids]
+    return tuple(ids), any(move.left == workstream_id for move in moves)
+
+
 def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str,
-               task_ids: Iterable[str] | None = None) -> TaskSnapshot:
+               task_ids: Iterable[str] | None = None,
+               moves: Iterable[TaskMove] | None = None) -> TaskSnapshot:
     """Read one fleet's work, or an explicit task-ID projection, in one snapshot.
 
     No assigner/name/source-prefix ownership inference. Fetch histories by
@@ -284,7 +374,8 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str,
     subset (including empty) uses work-item IDs plus only legacy display
     siblings needed for faithful selected-task state. Issues in the returned
     projection name selected tasks; only whole-fleet reads audit unrelated
-    orphan history.
+    orphan history. *moves* is the fleet's ``read_moves`` that a caller
+    already holds in the same snapshot; None reads them here.
     """
     if not fleet_uid:
         raise ValueError("fleet_uid is required")
@@ -356,8 +447,10 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str,
                                       [r["assignment_id"] for r in orphan_assignments], task_events=True)
         else:
             orphan_assignments = orphan_events = orphan_history = []
+        moves = (newest_moves(read_moves(conn, fleet_uid=fleet_uid) if moves is None else moves)
+                 if tasks else {})
         result = _reduce(version, fleet_uid, tasks, assignments, known_assignments,
-                         events, orphan_assignments, orphan_events, orphan_history)
+                         events, orphan_assignments, orphan_events, orphan_history, moves)
         if selected is None:
             return result
         return replace(result,
@@ -369,7 +462,7 @@ def read_tasks(conn: sqlite3.Connection, *, fleet_uid: str,
 
 
 def _reduce(version, fleet, rows, assignment_rows, known_assignments,
-            event_rows, orphan_assignments, orphan_events, orphan_history):
+            event_rows, orphan_assignments, orphan_events, orphan_history, moves=None):
     events = tuple(task_event_from_row(row) for row in event_rows)
     by_task, by_assignment = defaultdict(list), defaultdict(list)
     for event in events:
@@ -417,9 +510,11 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
                           blocking=unresolved_link_is_active(event))
                 if known_task_producer(event.emitter) and event.event in _ACTIVITY:
                     state = _ACTIVITY[event.event]
+            moved = _newest_deadline_fact(ahistory)
             assignments.append(Assignment(**_fact(assignment), assignment_id=aid, task_id=tid,
                 assignee_uid=assignment["assignee_uid"], assigned_by_uid=assignment["assigned_by_uid"],
-                expected_by=assignment["expected_by"], dispatch_message_id=assignment["dispatch_msg_id"],
+                expected_by=moved.deadline if moved else assignment["expected_by"],
+                dispatch_message_id=assignment["dispatch_msg_id"],
                 state="closed" if closed else state, terminal_event=closed, history=ahistory))
         for event in {e.event_id: e for e in history + tuple(
                 e for a in assignments for e in a.history)}.values():
@@ -445,7 +540,8 @@ def _reduce(version, fleet, rows, assignment_rows, known_assignments,
         if not terminal and any(i.blocking for i in issues):
             state = None
         tasks.append(Task(**_fact(row), task_id=tid, title=row["title"], body=row["body"],
-            repo=row["repo"], project_key=row["project_key"], workstream_id=row["workstream_id"],
+            repo=row["repo"], project_key=row["project_key"],
+            workstream_id=moves[tid].joined if moves and tid in moves else row["workstream_id"],
             created_by_uid=row["created_by_uid"], state=state,
             current_assignment=current[0] if len(current) == 1 and not terminal and not any(i.blocking for i in issues) else None,
             assignments=tuple(assignments), history=history, terminal_event=terminal,

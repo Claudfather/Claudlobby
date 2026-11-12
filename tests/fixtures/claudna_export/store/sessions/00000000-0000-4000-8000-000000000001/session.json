@@ -1,0 +1,45 @@
+{
+  "actor": {
+    "bot_id": "summary-armed",
+    "bot_name": "summary-armed",
+    "entrypoint": "sdk-cli",
+    "fleet": "summary-canary",
+    "kind": "bot",
+    "model": null
+  },
+  "agent_cli": "claude",
+  "chain_id": "00000000-0000-4000-8000-000000000001",
+  "children": [],
+  "close_reason": "other",
+  "closed_at": "2026-10-15T21:46:25.248Z",
+  "opened_at": "2026-10-15T21:46:21.046Z",
+  "opened_by": "startup",
+  "origin": {
+    "branch": null,
+    "cwd": "/example/transcript.jsonl",
+    "head": null,
+    "repo": null
+  },
+  "parent_sid": null,
+  "private": false,
+  "projected_from": {
+    "bytes": 1718,
+    "lines": 6,
+    "skipped": 0
+  },
+  "schema": "claudna.session/2",
+  "segments": {
+    "count": 1,
+    "open": null,
+    "retired": 0
+  },
+  "sid": "00000000-0000-4000-8000-000000000001",
+  "status": "closed",
+  "summary": {
+    "segments_done": 1,
+    "segments_failed": 0,
+    "segments_pending": 0,
+    "segments_skipped": 0
+  },
+  "transcript_path": "/example/transcript.jsonl"
+}

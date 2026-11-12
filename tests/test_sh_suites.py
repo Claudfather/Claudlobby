@@ -5,11 +5,13 @@ so without this wrapper an edit to a helper they cover breaks them with zero CI
 signal — a green badge that does not actually cover the shell suites (#723; the
 earlier #696 finding-3 that ``10/10 hermetic`` was never gated). This wrapper
 discovers *every* ``tests/test_*.sh`` by glob and runs each via subprocess,
-failing if it exits non-zero.
+failing if it exits non-zero, except the few in ``WRAPPED``: another test module
+runs each of those already, under assertions stronger than these (#1945).
 
 Glob, not a hand-maintained list: a new suite is gated the moment it lands, with
 no allowlist to forget — that drift is exactly what let ``test_tg_post.sh`` ship
-ungated. Discovery is guarded below so it can never silently collapse to zero.
+ungated. Discovery is guarded below so it can never silently collapse to zero,
+and each ``WRAPPED`` suite is checked to have its wrapper.
 
 Contract: every ``tests/*.sh`` suite must be hermetic — it stubs tmux, network
 (curl/gh), sudo, and any real service onto a private PATH so it runs clean on the
@@ -17,6 +19,7 @@ Linux CI runner. A suite that reaches a real service is a bug in the suite; fix
 the suite, do not drop it from the glob.
 """
 
+import importlib
 import re
 import shutil
 import subprocess
@@ -31,6 +34,19 @@ TESTS_DIR = Path(__file__).resolve().parent
 # Every bash suite in tests/, discovered by glob so the collected set never drifts
 # from what is on disk. Sorted for a stable parametrize order and test-id sequence.
 SH_SUITES = sorted(p.name for p in TESTS_DIR.glob("test_*.sh"))
+
+# Suites another test module runs already, each under a wrapper that asserts more
+# than this file does: the suite's exit status, and a count of the cases it ran or
+# the line it prints only after its last case, so a run that asserted nothing
+# fails there too. Running them here as well ran each twice in every CI lane
+# (#1945). test_every_wrapped_suite_runs_in_its_wrapper keeps this map true.
+WRAPPED = {
+    "test_alert_recipient.sh": "test_alert_recipient",
+    "test_boot_capture.sh": "test_boot_capture",
+    "test_plane_emit.sh": "test_plane_emit_shim",
+    "test_selfstart_snapshot.sh": "test_selfstart_snapshot",
+}
+RUN_HERE = [suite for suite in SH_SUITES if suite not in WRAPPED]
 
 # bash's exact wording when a SOURCED file fails to parse (final wave item 8).
 # A syntax error inside claudlobby/_runtime_scripts/supervisor.sh (sourced by lib-common.sh, sourced
@@ -62,7 +78,18 @@ def test_sh_suites_discovered():
     assert SH_SUITES, f"no tests/test_*.sh suites discovered under {TESTS_DIR}"
 
 
-@pytest.mark.parametrize("suite", SH_SUITES)
+@pytest.mark.parametrize("suite", sorted(WRAPPED))
+def test_every_wrapped_suite_runs_in_its_wrapper(suite):
+    """A suite left out of the glob still runs: it is still a suite here, and
+    its wrapper module exists and names its file. A wrapper deleted, renamed or
+    pointed at another suite fails here instead of leaving the suite unrun."""
+    assert suite in SH_SUITES, f"{suite} is no longer a suite in {TESTS_DIR}"
+    wrapper = importlib.import_module(f"tests.{WRAPPED[suite]}")
+    paths = {value for value in vars(wrapper).values() if isinstance(value, Path)}
+    assert TESTS_DIR / suite in paths, (WRAPPED[suite], sorted(map(str, paths)))
+
+
+@pytest.mark.parametrize("suite", RUN_HERE)
 def test_hermetic_bash_suite(suite, tmp_path):
     path = TESTS_DIR / suite
     assert path.is_file(), f"missing bash suite: {suite}"

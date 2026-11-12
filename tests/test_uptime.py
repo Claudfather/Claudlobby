@@ -16,7 +16,6 @@ from claudlobby.uptime import (
     compute_metrics,
     aggregate_fleet,
     format_table,
-    format_json,
     _fmt_duration,
 )
 
@@ -24,11 +23,6 @@ from claudlobby.uptime import (
 # -- Helpers ---------------------------------------------------------------
 
 TZ = timezone(timedelta(hours=-4))
-
-
-def _ts(hour: int, minute: int = 0) -> str:
-    """Build an ISO timestamp string for 2026-05-17 at given hour:min -04:00."""
-    return datetime(2026, 5, 17, hour, minute, tzinfo=TZ).isoformat()
 
 
 class TestComputeMetrics:
@@ -332,19 +326,6 @@ class TestFormatTable:
         table = format_table(results, window="24h")
         assert "empty" in table
         assert "\u2014" in table
-
-
-# -- format_json -----------------------------------------------------------
-
-
-class TestFormatJson:
-    def test_valid_json_output(self):
-        import json
-
-        results = {"bot1": {"24h": {"uptime_pct": 99.0}}}
-        output = format_json(results)
-        parsed = json.loads(output)
-        assert parsed["bot1"]["24h"]["uptime_pct"] == 99.0
 
 
 # -- _fmt_duration ---------------------------------------------------------

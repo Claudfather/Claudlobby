@@ -6,22 +6,27 @@ flattens lists, and resolves team membership.
 
 from __future__ import annotations
 import difflib
+import locale
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
 from . import defaults as _defaults
 
 from .known_values import (
+    AUTO_COMPACT_WINDOW_MAX,
+    AUTO_COMPACT_WINDOW_MIN,
+    DEFAULT_SKILL_OVERRIDES,
     KNOWN_EFFORTS,
     KNOWN_AGENT_CLIS,
     PROJECT_KEYS,
     SHELL_IDENT_RE,
+    SKILL_OVERRIDE_STATES,
     VALID_PERMISSION_MODES,
     closest_match,
 )
@@ -99,7 +104,7 @@ class SystemDefaultsConfig:
     disabling all injection.  Per-category bools allow surgical opt-out.
 
     KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
-    Nine of the twelve library entity types still have no opt-out, and an
+    Eight of the twelve library entity types still have no opt-out, and an
     unrecognised key is silently dropped — so a fleet cannot yet tell a working
     opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
     gives a type an opt-out; the check is in the code that consumes the default.
@@ -118,6 +123,10 @@ class SystemDefaultsConfig:
     # default is role-scoped, so it is resolved per bot there. One bot can
     # switch it off for itself with BotSystemDefaultsConfig below.
     skills: bool = True
+    # Consumed in the load_fleet merge below, beside guardrails: the resources
+    # default has no availability gate and no role, so every reader of
+    # `bot.resources` sees it.
+    resources: bool = True
 
 
 @dataclass
@@ -190,6 +199,7 @@ FLEET_PULSE_ENV_KEYS: dict[str, str] = {
     "escalation_state_dir": "FLEET_PULSE_ESCALATION_STATE_DIR",
     "renotify_after_s": "FLEET_PULSE_RENOTIFY_AFTER_S",
     "rearm_window_s": "FLEET_PULSE_REARM_WINDOW_S",
+    "stopped_remind_days": "FLEET_PULSE_STOPPED_REMIND_DAYS",
 }
 
 
@@ -227,6 +237,8 @@ class FleetPulseConfig:
     escalation_state_dir: str | None = None
     renotify_after_s: int | None = None
     rearm_window_s: int | None = None
+    # Days a bot stopped through `bot stop` waits for a reminder push (#2243).
+    stopped_remind_days: int | None = None
     # The sweep's time cap in seconds (#2059). Read by claudlobby/fleet_pulse.py
     # from this config, not the unit's Environment=, so a hand-run
     # `claudlobby fleet pulse` gets it too; unset, the cap scales with load.
@@ -675,6 +687,23 @@ class IsolationConfig:
     exempt: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class ClaudnaConfig:
+    """clauDNA session knobs; None composes the bot default, which is off for all
+    three: summaries and harvest spend model calls, and the capture prompt
+    refuses every other compaction until a capture nobody runs (#941)."""
+
+    session_summary: bool | None = None
+    harvest: bool | None = None
+    precompact_reflect: bool | None = None
+
+
+# The autocompact window a bot composes when neither its entry nor the fleet's
+# defaults set one, in tokens: a bound on how far one conversation grows before
+# Claude Code compacts it, the same on any host (#1053). "auto" turns it off.
+DEFAULT_AUTO_COMPACT_WINDOW = 700_000
+
+
 @dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
@@ -718,7 +747,9 @@ class BotConfig:
     # values — carried so `validate` can say so, never consumed by a door.
     retired_keys: dict[str, Any] = field(default_factory=dict)
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
-    remote_control: bool = True  # --remote-control
+    # --remote-control. Unset (None) takes the role default when FleetConfig is
+    # built: on for the fleet manager, off for every other bot.
+    remote_control: bool | None = None
     # Conservative default: with neither field set the composer emits
     # `--permission-mode acceptEdits` (see compose_bot_conf). dangerously_skip is
     # an explicit opt-in.
@@ -744,6 +775,18 @@ class BotConfig:
     # settings.local.json preferredNotifChannel
     preferred_notif_channel: str = "notifications_disabled"
     prefers_reduced_motion: bool = True  # settings.local.json prefersReducedMotion
+    # settings.local.json skillOverrides: skill name -> SKILL_OVERRIDE_STATES,
+    # merged per skill (built-in, fleet defaults, bot). The built-in turns
+    # /auto-mode-setup and its end-of-turn offer off (#1388).
+    skill_overrides: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_SKILL_OVERRIDES)
+    )
+    # settings.local.json autocompact window: a whole number of tokens sets the
+    # window for every model, capped at each model's own; the default bounds how
+    # far a conversation grows before Claude Code compacts it (#1053). "auto"
+    # keeps Claude Code's own window instead. Either blocks Claude Code's
+    # end-of-turn autocompact offer (#1388).
+    auto_compact_window: str | int = DEFAULT_AUTO_COMPACT_WINDOW
     extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -816,6 +859,7 @@ class BotConfig:
     # #1665 Layer 0b, opt-in per bot: deny rules on the shared config dir, the
     # .env tiers and the install's code (composer.compose_settings_local).
     isolation: IsolationConfig = field(default_factory=IsolationConfig)
+    claudna: ClaudnaConfig = field(default_factory=ClaudnaConfig)
 
 
 @dataclass
@@ -830,6 +874,7 @@ class PluginsConfig:
     marketplaces: dict[str, dict] = field(default_factory=dict)
     required: list[str] = field(default_factory=list)
     include_defaults: bool = True
+    startup_policy: str = "manage"
 
 
 # Built-in defaults — installed + enabled on every bot unless
@@ -845,6 +890,12 @@ DEFAULT_MARKETPLACES: dict[str, dict] = {
         "source": {"source": "github", "repo": "anthropics/claude-plugins-official"}
     },
 }
+
+# The authored resume default for newly composed bots. bot.conf uses a
+# presence-based fallback so inherited/.env overrides (including empty) retain
+# their precedence. lib-common keeps its fallback for old generated configs.
+DEFAULT_SESSION_RESUME_COMMAND = "/claudna:session resume --auto"
+
 
 DEFAULT_PLUGINS: list[str] = [
     "claudna@Claudfather",
@@ -863,6 +914,7 @@ DEFAULT_PLUGINS: list[str] = [
 # The membership test this entry had to clear, and the tier it belongs to, live
 # beside it in the registry.
 DEFAULT_GUARDRAILS = _defaults.DEFAULT_GUARDRAILS
+DEFAULT_RESOURCES = _defaults.DEFAULT_RESOURCES
 
 
 @dataclass
@@ -928,6 +980,13 @@ class FleetConfig:
                     f"team '{team.name}': manager '{team.manager}' must match "
                     f"fleet.manager '{self.manager}'"
                 )
+        # Bots are coerced before their fleet exists, so a role default can
+        # only be applied here. An explicit bot or `defaults:` value is
+        # already set and stays as declared.
+        managers = self.manager_bots()
+        for bot in self.bots.values():
+            if bot.remote_control is None:
+                bot.remote_control = bot.bot_id in managers
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -957,6 +1016,85 @@ class FleetConfig:
 
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]
+
+
+# ----------------------------------------------------------------------
+# Telegram identity
+# ----------------------------------------------------------------------
+# Plain facts about a bot's Telegram channel. They live here rather than in
+# the composer, so a runtime reader such as the alert path (#2654) needs no
+# compositor; the composer imports them from here.
+
+
+def _has_telegram_channel(channels: list[str]) -> bool:
+    """True when a bot launches with a Telegram channel.
+
+    A channel entry names the channel either bare (``telegram``) or as a
+    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
+    both mean the same channel. ``channels: []`` — the documented way to declare
+    a bot with no channel — yields False.
+    """
+    return any(
+        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
+    )
+
+
+def telegram_channel_rel(handle: str) -> str:
+    """A channel bot's Telegram state dir, relative to the home dir: the ONE
+    definition behind its consumers (#1786), which need it in two forms.
+    ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
+    exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
+    (#976); ``access.json``, ``fleet_alert_sender_state_dir`` and
+    ``manager_alert_target`` take it absolute, as ``Path.home() / <this>``."""
+    return f".claude/channels/telegram-{handle}"
+
+
+def telegram_handle(bot: BotConfig) -> str | None:
+    """This bot's Telegram handle, or None when it is not a channel bot.
+
+    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
+    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
+    since #43; the readers of the handle VARIABLE never did. So a fleet using
+    the documented default composed a working state dir, a live bridge, and no
+    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
+    the bot had no channel at all: bridge_state returned `no_handle` for a
+    provably live bridge, halting rolling-restart on its first bot (#1107), and
+    creds-check's Telegram probe skipped every bot on the host (#1097). One
+    resolver, so the default cannot drift apart again.
+
+    Returns None for a bot with no Telegram channel AND no declared handle —
+    the genuine non-channel class, which must stay expressible because
+    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
+    (#901) both rest on it. An explicitly declared handle still wins outright,
+    channel or not: it names an existing state dir, and silently re-pointing
+    that path would orphan a live channel.
+    """
+    if bot.telegram.handle:
+        return bot.telegram.handle
+    if _has_telegram_channel(bot.channels):
+        return bot.bot_id
+    return None
+
+
+def manager_alert_target(fleet: FleetConfig) -> tuple[str, str] | None:
+    """The fleet manager's own Telegram chat and sender, or None (#2654).
+
+    Where a fleet alert goes when the fleet declares no ``fleet_pulse``
+    escalation pair: the chat the manager is composed with (its
+    ``telegram.chat_id``, else ``telegram_group_chat_id``, as
+    ``_bot_template_context`` writes it into its ``bot.conf``) and the manager's
+    own channel state dir. A bot's own chat is one it is in, as
+    ``_bot_with_own_chat`` takes it, so the two are one pair from one source
+    (#1771). Nothing here reads a token: tg-post reads the manager's from that
+    dir, as for a declared pair. None when the manager is not a channel bot or
+    has no chat.
+    """
+    bot = fleet.bots[fleet.manager]
+    handle = telegram_handle(bot)
+    chat = bot.telegram.chat_id or fleet.telegram_group_chat_id
+    if handle is None or not chat:
+        return None
+    return str(chat), str(Path.home() / telegram_channel_rel(handle))
 
 
 # ----------------------------------------------------------------------
@@ -1090,6 +1228,9 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
     include_defaults = True
     additional: list[str] = []
     extra_marketplaces: dict[str, dict] = {}
+    startup_policy = (raw or {}).get("startup_policy", "manage")
+    if startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
 
     if raw:
         include_defaults = bool(raw.get("include_defaults", True))
@@ -1116,6 +1257,7 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
         marketplaces=marketplaces,
         required=required,
         include_defaults=include_defaults,
+        startup_policy=startup_policy,
     )
 
 
@@ -1487,6 +1629,7 @@ def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
         escalation_state_dir=None if sender in (None, "") else sender,
         renotify_after_s=_int("renotify_after_s"),
         rearm_window_s=_int("rearm_window_s"),
+        stopped_remind_days=_int("stopped_remind_days"),
         timeout_s=_int("timeout_s"),
     )
 
@@ -1772,6 +1915,76 @@ def _select_bot_scalar(raw: dict, defaults: dict, key: str, fallback=None) -> tu
     return fallback, "built_in"
 
 
+def _parse_strict_mapping(raw: Any, where: str, fields: dict[str, Callable[[str, Any], Any]]) -> dict:
+    """Parse only fields this tier sets; null inherits from the next tier."""
+    if raw is None:
+        return {}
+    raw = _shaped(f"'{where}'", raw, dict, "{" + next(iter(fields)) + ": …}")
+    unknown = sorted(str(k) for k in raw if k not in fields)
+    if unknown:
+        raise ValueError(f"'{where}': unknown key(s) {', '.join(unknown)} — accepted: {', '.join(fields)}")
+    return {k: parse(f"{where}.{k}", raw[k]) for k, parse in fields.items() if raw.get(k) is not None}
+
+
+def _parse_skill_overrides(defaults_raw: Any, bot_raw: Any, name: str) -> dict[str, str]:
+    """``skill_overrides``, merged per skill: built-in, then fleet ``defaults:``,
+    then the bot, so a fleet that sets one skill keeps the default for the rest."""
+    merged = dict(DEFAULT_SKILL_OVERRIDES)
+    states = ", ".join(sorted(SKILL_OVERRIDE_STATES))
+    for where, layer in (("defaults.skill_overrides", defaults_raw),
+                         (f"bots.{name}.skill_overrides", bot_raw)):
+        if layer is None:
+            continue
+        if not isinstance(layer, dict):
+            raise ValueError(f"'{where}' must be a mapping of skill name to one of: {states}")
+        for skill, state in layer.items():
+            if not isinstance(skill, str) or not skill:
+                raise ValueError(f"'{where}': a skill name must be a non-empty string, not {skill!r}")
+            if isinstance(state, bool) or state is None:
+                raise ValueError(f"'{where}.{skill}': YAML read {state!r}, not a state; quote "
+                                 f"one of: {states} (a bare on or off reads as a boolean)")
+            merged[skill] = _parse_enum(f"{where}.{skill}", state, SKILL_OVERRIDE_STATES)
+    return merged
+
+
+def _parse_auto_compact_window(raw: dict, defaults: dict, name: str) -> str | int:
+    """``auto_compact_window``: "auto", or a whole number of tokens Claude Code
+    accepts (100000 to 1000000). Claude Code drops any other value without a word,
+    which would bring back the offer the default blocks (#1388)."""
+    value, source = _select_bot_scalar(raw, defaults, "auto_compact_window", DEFAULT_AUTO_COMPACT_WINDOW)
+    if value == "auto":
+        return "auto"
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not AUTO_COMPACT_WINDOW_MIN <= value <= AUTO_COMPACT_WINDOW_MAX):
+        where = ("defaults.auto_compact_window" if source == "fleet.defaults"
+                 else f"bots.{name}.auto_compact_window")
+        raise ValueError(
+            f"'{where}' must be \"auto\" or a whole number of tokens from "
+            f"{AUTO_COMPACT_WINDOW_MIN} to {AUTO_COMPACT_WINDOW_MAX}, not {value!r}")
+    return value
+
+
+def _merge_fieldwise(cls, defaults_raw: Any, bot_raw: Any, name: str, key: str, fields: dict):
+    """Bot over defaults over built-in, independently for each field."""
+    return cls(**{**_parse_strict_mapping(defaults_raw, f"defaults.{key}", fields),
+                  **_parse_strict_mapping(bot_raw, f"bots.{name}.{key}", fields)})
+
+
+_CLAUDNA_FIELDS = {
+    "session_summary": lambda where, v: _strict_bool(f"'{where}'", v),
+    "harvest": lambda where, v: _strict_bool(f"'{where}'", v),
+    "precompact_reflect": lambda where, v: _strict_bool(f"'{where}'", v),
+}
+_STRICT_MAPPING_FIELDS: dict[str, dict] = {"claudna": _CLAUDNA_FIELDS}
+
+
+def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig:
+    if cfg.harvest is True and cfg.session_summary is False:
+        raise ValueError(f"'{where}': claudna.harvest: true needs session_summary unset or true — "
+                         "clauDNA's gate never summarizes a bot on harvest alone")
+    return cfg
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -1790,6 +2003,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     def _bool(key: str, fallback: bool) -> bool:
         return bool(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
+    def _role_bool(key: str) -> bool | None:
+        """`_bool` without a fixed fallback: unset stays None for FleetConfig's
+        role default. Presence-based like `_bool`, so `config explain` names
+        the same source the loader used."""
+        value, source = _select_bot_scalar(raw, defaults, key)
+        return None if source == "built_in" else bool(value)
+
     def _str(key: str, fallback: str) -> str:
         return str(_select_bot_scalar(raw, defaults, key, fallback)[0])
 
@@ -1800,11 +2020,12 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         YAML null (`key:` with no value) is treated as unset, not False, so a bare
         key never silently disables a vault-wired loop (the sibling string fields
         like `claudron_vault_path` fall through on null the same way)."""
+        inherited = defaults.get(key)
+        if inherited is not None:
+            inherited = _strict_bool(f"fleet defaults '{key}'", inherited)
         if raw.get(key) is not None:
-            return bool(raw[key])
-        if defaults.get(key) is not None:
-            return bool(defaults[key])
-        return None
+            return _strict_bool(f"bot '{name}' '{key}'", raw[key])
+        return inherited
 
     return BotConfig(
         bot_id=name,
@@ -1849,7 +2070,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "agent_cli", _select_bot_scalar(raw, defaults, "agent_cli")[0], KNOWN_AGENT_CLIS,
         ) or "claude",
         retired_keys={key: raw[key] for key in _RETIRED_BOT_KEYS if key in raw},
-        remote_control=_bool("remote_control", True),
+        remote_control=_role_bool("remote_control"),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
         permission_mode=_parse_enum(
             "permission_mode",
@@ -1867,6 +2088,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "preferred_notif_channel", "notifications_disabled"
         ),
         prefers_reduced_motion=_bool("prefers_reduced_motion", True),
+        skill_overrides=_parse_skill_overrides(
+            defaults.get("skill_overrides"), raw.get("skill_overrides"), name
+        ),
+        auto_compact_window=_parse_auto_compact_window(raw, defaults, name),
         # Presence-based via `.get` defaults (not `x or default`): an explicit
         # `channels: []` must win over the fleet default — the documented way
         # to make a bot channel-less, e.g. to pair with RC-killing env (see the
@@ -1967,6 +2192,8 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "'public_write_guard'",
             raw.get("public_write_guard", defaults.get("public_write_guard", False)),
         ),
+        claudna=_check_claudna(_merge_fieldwise(ClaudnaConfig, defaults.get("claudna"), raw.get("claudna"),
+                                                name, "claudna", _CLAUDNA_FIELDS), f"bots.{name}"),
         isolation=_parse_isolation(
             defaults.get("isolation"), raw.get("isolation"), name
         ),
@@ -1992,6 +2219,7 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             guardrails=bool(raw.get("guardrails", True)),
             protocols=bool(raw.get("protocols", True)),
             skills=bool(raw.get("skills", True)),
+            resources=bool(raw.get("resources", True)),
         )
     return SystemDefaultsConfig()
 
@@ -2282,13 +2510,31 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
     return merged
 
 
+class EmptyFleetConfigError(ValueError):
+    """fleet.yaml holds no YAML document: zero bytes, whitespace or comments (#2267).
+
+    Carries only the path and the byte count, which hold no authored value.
+    """
+
+    def __init__(self, path: Path, size: int):
+        self.path, self.size = path, size
+        super().__init__(f"{path}: fleet configuration holds no YAML document ({size} bytes)")
+
+
 def load_fleet(fleet_yaml: Path, *, projects_yaml: Path | None = None) -> tuple[FleetConfig, dict]:
     """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
-    with fleet_yaml.open() as f:
-        doc = yaml.safe_load(f)
+    content = fleet_yaml.read_bytes()
+    # Whitespace is judged on the bytes: PyYAML refuses a tab where no token may start.
+    if not content.strip():
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
+    # Decode as open() did, so a bad encoding stays a UnicodeDecodeError (a ValueError).
+    text = content.decode(locale.getpreferredencoding(False))
+    doc = yaml.safe_load(text)
+    if doc is None and yaml.compose(text) is None:  # comments only; `---` or `null` is a document
+        raise EmptyFleetConfigError(fleet_yaml, len(content))
     return _fleet_document(fleet_yaml, doc, lambda: load_projects(
         projects_yaml if projects_yaml is not None else fleet_yaml.parent / "projects.yaml"))
 
@@ -2301,18 +2547,20 @@ _EXPLAIN_BOT_INHERITED_SCALARS = frozenset({
     "account", "model", "effort", "agent_cli", "remote_control", "dangerously_skip_permissions",
     "skip_auto_permission_prompt", "skip_dangerous_mode_permission_prompt",
     "prompt_suggestions", "disable_nonessential_traffic", "spinner_tips_enabled",
-    "preferred_notif_channel", "prefers_reduced_motion",
+    "preferred_notif_channel", "prefers_reduced_motion", "auto_compact_window",
 })
 _EXPLAIN_BOT_LOCAL_SCALARS = frozenset({"name", "voice", "reports_to", "startup_prompt"})
+# Inherited scalars whose built-in default follows the bot's role, which
+# `fleet.manager` decides (FleetConfig.__post_init__).
+_EXPLAIN_BOT_ROLE_DEFAULTS = frozenset({"remote_control"})
 
 
 def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
                          *, bot: str | None = None) -> tuple[str, str | None]:
     """Name the authored source of supported scalar fields; never return values.
 
-    Only fields with a simple, known selection path are covered. Complex
-    unions, per-field mappings and composer-resolved defaults need their own
-    operation owner; callers must report those as unsupported.
+    Scalars and registered strict-mapping subfields have known selection paths.
+    Complex unions and composer-resolved defaults remain unsupported.
     """
     with fleet_yaml.open() as source:
         raw_fleet = yaml.safe_load(source)["fleet"]
@@ -2323,6 +2571,8 @@ def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
     raw_bot = (raw_fleet.get("bots") or {}).get(bot) or {}
     if field in _EXPLAIN_BOT_INHERITED_SCALARS:
         _, source = _select_bot_scalar(raw_bot, merged_defaults, field)
+        if source == "built_in" and field in _EXPLAIN_BOT_ROLE_DEFAULTS:
+            return "role_default", "fleet.manager"
         if source == "fleet.defaults" and field not in (raw_fleet.get("defaults") or {}):
             source = "system_defaults"
         declaration = (f"fleet.bots.{bot}.{field}" if source == "bot" else
@@ -2331,6 +2581,15 @@ def scalar_config_origin(fleet_yaml: Path, merged_defaults: dict, field: str,
         return source, declaration
     if field in _EXPLAIN_BOT_LOCAL_SCALARS:
         return ("bot", f"fleet.bots.{bot}.{field}") if field in raw_bot else ("built_in", None)
+    head, dot, sub = field.partition(".")
+    if dot and sub in _STRICT_MAPPING_FIELDS.get(head, {}):
+        for source, mapping, declaration in (
+            ("bot", raw_bot, f"fleet.bots.{bot}.{field}"),
+            ("fleet.defaults", raw_fleet.get("defaults") or {}, f"fleet.defaults.{field}"),
+        ):
+            if (mapping.get(head) or {}).get(sub) is not None:
+                return source, declaration
+        return "built_in", None
     raise NotImplementedError
 
 
@@ -2398,17 +2657,19 @@ def _fleet_document(fleet_yaml: Path, doc, projects_reader) -> tuple[FleetConfig
             effective_system["jobs"] = system_section.get("jobs", {})
     merged_defaults = _merge_system_into_defaults(effective_system, defaults)
 
-    if system_defaults_cfg.enabled and system_defaults_cfg.guardrails:
-        # Applied AFTER the system.yaml merge, and unioned rather than assigned.
-        # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
-        # seeded fleet supplies one — and the merge above replaces a fleet-set
-        # key rather than combining it, which would drop these for exactly the
-        # new fleets the default exists to protect. Opting out is
-        # `system_defaults.guardrails: false`, visible in fleet.yaml; declaring
-        # a guardrail list is not an opt-out and must not act as one.
-        merged_defaults["guardrails"] = _merge_lists(
-            DEFAULT_GUARDRAILS, merged_defaults.get("guardrails")
-        )
+    # Applied AFTER the system.yaml merge, and unioned rather than assigned.
+    # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
+    # seeded fleet supplies one — and the merge above replaces a fleet-set
+    # key rather than combining it, which would drop these for exactly the
+    # new fleets the default exists to protect. The defaults go AHEAD of the
+    # fleet's own list. Opting out is `system_defaults.<type>: false`, visible
+    # in fleet.yaml; declaring a list is not an opt-out and must not act as one.
+    for key, enabled, registered in (
+        ("guardrails", system_defaults_cfg.guardrails, DEFAULT_GUARDRAILS),
+        ("resources", system_defaults_cfg.resources, DEFAULT_RESOURCES),
+    ):
+        if system_defaults_cfg.enabled and enabled:
+            merged_defaults[key] = _merge_lists(registered, merged_defaults.get(key))
 
     bots = {
         bot_name: _coerce_bot(bot_name, bot_def, merged_defaults)

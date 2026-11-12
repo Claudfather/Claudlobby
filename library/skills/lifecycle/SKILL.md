@@ -1,6 +1,6 @@
 ---
 name: lifecycle
-description: "Full development lifecycle: implement → review → iterate → merge → retro → issues. Orchestrates fleet bots."
+description: "Use when a manager takes a development task all the way from implementation through review and merge to a retro. Full development lifecycle: implement → review → iterate → merge → retro → issues. Orchestrates fleet bots."
 argument-hint: "<task description> [--repo <repo>] [--engineer <bot-name>] [--issue <url>] [--skip-retro]"
 ---
 

@@ -44,6 +44,7 @@ def ro(root: Path):
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -52,6 +53,22 @@ REPO = Path(__file__).resolve().parent.parent
 F = "f"
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
+
+
+def _at(seconds: float) -> str:
+    """The instant `seconds` from NOW_EPOCH, as a door stamps it."""
+    return datetime.fromtimestamp(NOW_EPOCH + seconds, timezone.utc).isoformat()
+
+
+# A plan step that walks: a scan, or a seek on the kind alone.
+WALK = re.compile(r"^SCAN|\(kind=\?\)")
+
+
+def plan_steps(conn, sql: str, params, aliases: str) -> list[str]:
+    """The EXPLAIN QUERY PLAN steps on the tables aliased *aliases* (one letter each)."""
+    plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    # "SEARCH t" on SQLite 3.36 and later, "SEARCH TABLE events AS t" before it
+    return [d for d in plan if re.match(rf"(SEARCH|SCAN) (TABLE \w+ AS )?[{aliases}]\b", d)]
 MATCHER = REPO / "claudlobby/_runtime_scripts" / "dispatch-overdue.py"
 FLEET_YAML = ("fleet:\n  manager: w2\n  name: f\n  service_prefix: com.test\n  bots:\n"
               "    w1:\n      expertise: [software-engineering]\n"
@@ -93,10 +110,13 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger=None):
 _REPORT_SEQ = [0]
 
 
-def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None):
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None,
+            link_communication=True):
     """What the REAL report door lands for one report: the `report` communication
     and, when it resolved an assignment, the task event — both under one
-    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
+    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing;
+    `link_communication=False` = a legacy report whose communication names no
+    assignment beside its linked task event.)"""
     from claudlobby.plane.emit_api import emit_batch
     initialize_plane(root)
     _REPORT_SEQ[0] += 1
@@ -106,7 +126,8 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
                "source_ref": ref, "occurred_at": ts,
                "payload": {"msg_id": msg, "sender": f"bot:{F}/{bot}", "recipient": f"bot:{F}/mgr",
                            "recipient_raw": "mgr", "message_class": "report",
-                           **({"work_item_id": wi, "assignment_id": asg} if event else {}), "body": "r"}}]
+                           **({"work_item_id": wi, "assignment_id": asg} if event and link_communication else {}),
+                           "body": "r"}}]
     if event:
         events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
                        "source_ref": ref, "occurred_at": ts,
@@ -119,6 +140,16 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
                                    "subject": f"bot:{F}/{bot}", "data": {"status": status, "msg_id": msg}}})
     emit_batch(root, events)
     return msg
+
+
+def _deadline_changed(root, wi, asg, deadline, *, ts):
+    """What `assignment reschedule` records (#2469): a deadline_changed on the
+    SAME assignment, its new deadline (None = open-ended), by the manager."""
+    emit_batch(root, [{"event_type": "task", "emitter": "claudlobby.tasks.v1", "fleet": F,
+                       "source_ref": f"request:deadline-{asg}-{ts}", "occurred_at": ts,
+                       "payload": {"work_item_id": wi, "assignment_id": asg, "event": "deadline_changed",
+                                   "actor": f"bot:{F}/mgr", "by": f"bot:{F}/mgr",
+                                   "reason": "waits on the operator", "deadline": deadline}}])
 
 
 def _complete(root, wi, asg, ts, task_id, reports=None, *, bot="w1"):
@@ -187,7 +218,8 @@ def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=No
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
-         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr"}},
+         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr",
+                     "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,

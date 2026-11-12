@@ -19,7 +19,7 @@ runtime/
 # runtime, .env, etc. Never committed to the public claudlobby repo.
 local/
 
-# Local-only voices (legacy path — use local/<fleet>/voices/ now)
+# Local-only voices (legacy path — use local/<fleet>/library/voices/ now)
 voices/local/
 
 # Claude Code state (auth, channels, sessions) — but allow project-level skills
@@ -74,6 +74,7 @@ vaults/
 
 # Active fleet config (root mode) — the .example files are the canonical templates
 fleet.yaml
+!/examples/teams/revenue-web-app/fleet.yaml
 projects.yaml
 
 # Claude fleet bot telemetry — supervision hooks may write these relative to
@@ -82,6 +83,7 @@ projects.yaml
 **/data/events/fleet-*.jsonl
 **/data/.last-tool-call
 **/data/.idle
+**/data/.last-no-turn
 
 # fleet charter (the .seed beside it is the committed template)
 missions/*.md

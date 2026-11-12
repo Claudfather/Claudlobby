@@ -33,6 +33,7 @@ def _stub_mint(bindir: Path) -> Path:
 
     FAIL_FIRST=<k>: calls 1..k fail (rc 1, empty stdout — the D9 shape).
     FAIL_AFTER=<k>: every call AFTER the k-th fails.
+    FAIL_UNTIL=<path>: every call fails until <path> is a non-empty file.
     """
     mint = bindir / "mint-stub"
     _write_exec(
@@ -47,6 +48,10 @@ if [ "$n" -le "${FAIL_FIRST:-0}" ]; then
   exit 1
 fi
 if [ "${FAIL_AFTER:-0}" -gt 0 ] && [ "$n" -gt "${FAIL_AFTER}" ]; then
+  printf 'mint-stub: simulated failure %s\\n' "$n" >&2
+  exit 1
+fi
+if [ -n "${FAIL_UNTIL:-}" ] && [ ! -s "$FAIL_UNTIL" ]; then
   printf 'mint-stub: simulated failure %s\\n' "$n" >&2
   exit 1
 fi
@@ -273,21 +278,27 @@ class TestRefreshLoop:
     def test_pat_bridge_upgrades_to_app_when_minting_heals(self, tmp_path):
         # Boot inside the Pi clock window with a PAT: serve the bridge NOW,
         # then rotate up to App identity at the short cadence — not 50min of
-        # wrong attribution.
+        # wrong attribution. Minting heals once the bridge has logged its
+        # token: a heal on a retry count can land before the bridge child
+        # runs, and the upgrade then stops a child that never logs its spawn.
         mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
         env = _env(
             tmp_path,
             mint,
-            FAIL_FIRST="1",
+            FAIL_UNTIL=str(tmp_path / "spawns.log"),
             GITHUB_PAT="ghp_FALLBACKPAT",
             GITHUB_MCP_REFRESH_SECONDS="600",
             GITHUB_MCP_REFRESH_RETRY_SECONDS="0.2",
         )
         proc = _start(env)
         try:
-            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15)
-            assert _spawns(tmp_path) == ["ghp_FALLBACKPAT", "ghs_MINT2"]
+            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15), (
+                f"no App child after the bridge: spawns {_spawns(tmp_path)}, "
+                f"{_mints(tmp_path)} mints, wrapper exit {proc.poll()}"
+            )
+            # The healed mint is the last one: the App child refreshes in 600s.
+            assert _spawns(tmp_path) == ["ghp_FALLBACKPAT", f"ghs_MINT{_mints(tmp_path)}"]
         finally:
             _stop(proc)
 

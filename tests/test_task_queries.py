@@ -1,11 +1,15 @@
 """Scoped reads against actual SQL and the shared reducer's storage fixtures."""
 
+import base64
+import json
+import re
 import sqlite3
 
 import pytest
 
 from claudlobby.plane.migrations import migrate
-from claudlobby.task_audit import audit_tasks
+from claudlobby.plane.queries import ASSIGNMENT_DELIVERY_MSG_SQL
+from claudlobby import task_queries
 from claudlobby.task_queries import (
     AmbiguousTaskReferenceError,
     InvalidTaskCursorError,
@@ -17,7 +21,7 @@ from claudlobby.task_queries import (
     show_assignment,
     show_task,
 )
-from tests.test_task_state import _assignment, _event, _task
+from tests.test_task_state import _assignment, _event, _insert, _task
 
 
 @pytest.fixture
@@ -79,6 +83,12 @@ def test_cursor_continues_admission_order_without_duplicates_or_scope_drift(conn
             list_tasks(conn, **kwargs)
     with pytest.raises(InvalidTaskCursorError):
         list_tasks(conn, fleet_uid="fleet_a", cursor="not a cursor")
+    payload = json.loads(base64.urlsafe_b64decode(first.next_cursor + "=" * (-len(first.next_cursor) % 4)))
+    for oversized in (2 ** 63, 10 ** 100):
+        payload["after"][0] = oversized
+        forged = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        with pytest.raises(InvalidTaskCursorError):
+            list_tasks(conn, fleet_uid="fleet_a", limit=2, cursor=forged)
 
 
 def test_canonical_reads_refuse_wrong_kind_and_display_alias_with_scoped_recovery(conn):
@@ -92,8 +102,7 @@ def test_canonical_reads_refuse_wrong_kind_and_display_alias_with_scoped_recover
         hint = raised.value.hint
         assert hint.next_command == ("task", "show", "wi_local")
         assert (hint.candidates[0].task_id, hint.candidates[0].assignment_id) == ("wi_local", "asg_local")
-        mapping = audit_tasks(conn).preview(reference, fleet_uid="fleet_a").mapping
-        assert (mapping.task_id, mapping.assignment_id) == ("wi_local", "asg_local")
+        assert hint.total_matches == 1
     with pytest.raises(WrongTaskReferenceError) as raised:
         show_assignment(conn, "wi_local", fleet_uid="fleet_a")
     assert raised.value.hint.next_command == ("assignment", "show", "asg_local")
@@ -124,9 +133,8 @@ def test_ambiguous_reference_keeps_closed_candidates_and_bounds_hints(conn):
     _event(conn, "wi_retry", "asg_retry", "returned_blocked")
     with pytest.raises(AmbiguousTaskReferenceError) as raised:
         show_assignment(conn, "wi_retry", fleet_uid="fleet_a")
-    expected = audit_tasks(conn).preview("wi_retry", fleet_uid="fleet_a")
     assert {(r.task_id, r.assignment_id) for r in raised.value.hint.candidates} == {
-        (r.task_id, r.assignment_id) for r in expected.candidates}
+        ("wi_retry", None), ("wi_retry", "asg_retry")}
 
 
 def test_escalations_follow_current_work_and_expose_broken_history(conn):
@@ -214,3 +222,92 @@ def test_queries_preserve_read_only_connection_and_validate_bounds(conn):
             list_tasks(conn, **{"fleet_uid": "fleet_a", **invalid})
     with pytest.raises(TaskQueryError):
         list_task_escalations(conn, fleet_uid="")
+
+
+_REQUEST = "11111111-1111-4111-8111-111111111111"
+
+
+def _delivery_message(conn, msg_id, tid, aid, **fields):
+    row = dict(msg_id=msg_id, sender_uid="actor_manager", sender_alias="bot:a/manager",
+               recipient_uid="actor_worker", recipient_alias="bot:a/worker", recipient_raw="worker",
+               message_class="task_request", command_type="task", work_item_id=tid,
+               assignment_id=aid, body_bytes=0, privacy="metadata")
+    row.update(fields)
+    _insert(conn, "communications", **row)
+
+
+def _transmission(conn, msg_id, event, attempt_no, *, occurred_at=None, host_uid=None):
+    event_id = _insert(conn, "events", kind="transmission", event=event, msg_id=msg_id,
+                       carrier="tmux", attempt_no=attempt_no)
+    # _insert fixes the instant and the host itself, so set them afterwards.
+    if occurred_at is not None:
+        conn.execute("UPDATE events SET occurred_at = ? WHERE event_id = ?", (occurred_at, event_id))
+    if host_uid is not None:
+        conn.execute("UPDATE events SET host_uid = ? WHERE event_id = ?", (host_uid, event_id))
+
+
+def _board_message(conn, assignment_id):
+    """The delivery message the plane's board names for the same assignment."""
+    return conn.execute(ASSIGNMENT_DELIVERY_MSG_SQL.format(ph="?"), (assignment_id,)).fetchone()[1]
+
+
+def test_assignment_delivery_reads_each_delivery_message_and_its_attempts(conn):
+    """#2379: the delivery is read from the communication `assignment deliver`
+    commits and the sender's transmissions of it; nothing else counts."""
+    delivery = task_queries.assignment_delivery
+    first, second = "msg_" + "1" * 32, "msg_" + "2" * 32
+    _task(conn, "wi_sent")
+    _assignment(conn, "asg_sent", "wi_sent")
+    assignment = show_assignment(conn, "asg_sent", fleet_uid="fleet_a").assignment
+    assert delivery(conn, assignment) is None  # assigned, never sent
+    _delivery_message(conn, first, "wi_sent", "asg_sent", source_ref="request:" + _REQUEST)
+    _transmission(conn, first, "unknown", 2)
+    _transmission(conn, first, "pane_submitted", 3, occurred_at="2026-09-01T00:00:05Z")
+    _transmission(conn, first, "pane_submitted", 4, host_uid="host_other")  # another host's row
+    # Not this assignment's delivery: the worker's report, another assignment's delivery.
+    _delivery_message(conn, "msg_" + "3" * 32, "wi_sent", "asg_sent", sender_uid="actor_worker",
+                      recipient_uid="actor_manager", message_class="report", command_type=None)
+    _delivery_message(conn, "msg_" + "4" * 32, "wi_sent", "asg_other")
+    got = delivery(conn, assignment)
+    assert (got.message_id, got.message_ids) == (first, (first,))
+    assert got.message_id == _board_message(conn, "asg_sent")
+    assert (got.request_id, got.recorded_at) == (_REQUEST, "2026-09-01T00:00:00Z")
+    assert got.attempts == 2
+    assert got.last_attempt == task_queries.DeliveryAttempt(3, "pane_submitted", "2026-09-01T00:00:05Z")
+    assert (got.receipt_observation, got.integrity_verdict, got.received_at) == (
+        "not_recorded", "unconfirmed", None)
+    _delivery_message(conn, second, "wi_sent", "asg_sent", source_ref="dispatch-log:not-a-request")
+    got = delivery(conn, assignment)
+    assert (got.message_id, got.message_ids) == (second, (first, second))
+    assert got.message_id == _board_message(conn, "asg_sent")
+    assert (got.request_id, got.attempts, got.last_attempt) == (None, 0, None)
+    assert (got.receipt_observation, got.integrity_verdict) == ("not_recorded", "unknown")
+
+
+def test_assignment_delivery_names_a_legacy_dispatch_message(conn):
+    legacy = "msg_" + "5" * 32
+    _task(conn, "wi_old", emitter="dispatch-task", source_ref="dispatch-log:old-1")
+    _assignment(conn, "asg_old", "wi_old", emitter="dispatch-task", source_ref="dispatch-log:old-1",
+                dispatch_msg_id=legacy)
+    assignment = show_assignment(conn, "asg_old", fleet_uid="fleet_a").assignment
+    got = task_queries.assignment_delivery(conn, assignment)
+    assert (got.message_id, got.message_ids, got.recorded_at) == (legacy, (legacy,), None)
+    _delivery_message(conn, legacy, "wi_old", "asg_old", source_ref="dispatch-log:old-1")
+    _delivery_message(conn, "msg_" + "6" * 32, "wi_old", "asg_old")  # a later delivery
+    got = task_queries.assignment_delivery(conn, assignment)
+    assert (got.message_id, got.recorded_at) == (legacy, "2026-09-01T00:00:00Z")
+    assert got.message_ids == (legacy, "msg_" + "6" * 32)
+    assert got.message_id == _board_message(conn, "asg_old")
+
+
+def test_assignment_delivery_reads_by_index_never_a_scan(conn):
+    """The read a manager pays on every `assignment show` (the #2378 lesson):
+    each statement seeks one assignment's, message's or event's rows. A scan,
+    or a seek on a fleet or an event kind alone, walks the fleet's history."""
+    statements = task_queries.ASSIGNMENT_DELIVERY_STATEMENTS
+    assert set(statements) == {"deliveries", "message", "attempts", "receipt", "received_at"}
+    for name, sql in statements.items():
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?"))]
+        walks = [step for step in plan
+                 if step.startswith("SCAN") or re.search(r"\((fleet_uid|kind)=\?\)", step)]
+        assert plan and not walks, (name, plan)

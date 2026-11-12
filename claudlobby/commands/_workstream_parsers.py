@@ -1,14 +1,8 @@
 """Canonical workstream grammar, loaded without domain imports."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".workstream", __package__).dispatch(args),
-                   json_output=args.json, request_id=getattr(args, "request_id", None))
+_dispatch = lazy(".workstream", request_id=True)
 
 
 def register_workstream_subparsers(sub):
