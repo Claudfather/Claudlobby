@@ -205,7 +205,10 @@ def _report_back() -> str:
 
 
 def _fleet_ops() -> str:
-    return _flat(_span(_text("library/skills/fleet-ops/SKILL.md"), "**The deadline watch.**", "**Ending it.**"))
+    # Completion/handoff guidance now spans several paragraphs. Include its
+    # final assignment/deadline paragraph, not only the first Ending it paragraph.
+    return _flat(_span(_text("library/skills/fleet-ops/SKILL.md"), "**The deadline watch.**",
+                       "`complete`, `fail` and `return` leave your open assignments."))
 
 
 def _status_table() -> str:
@@ -255,7 +258,13 @@ def test_fleet_ops_explains_every_attention_status():
     assert "no progress since its dispatch in the last 45 minutes" in table
     assert "held back by a progress report made since its dispatch and under 45 minutes old" in table
     assert "`block` is not progress" in section
-    assert "`complete`, `fail` and `return` end the assignment" in section
+    assert "`assignment complete` closes the whole task, not just your part of it" in section
+    assert "`fail` also ends the task; `return` ends only your assignment" in section
+    assert "`complete`, `fail` and `return` leave your open assignments" in section
+    assert "Report implementation-ready work with `assignment progress`" in section
+    assert "reassigns that same open task to the reviewer" in section
+    assert "reassigns the same task to itself, accepts that final assignment" in section
+    assert "Only complete once the reviewed outcome is verified" in section
     assert "`assignment reschedule`" in section and "`block --reason`" in section
     assert "task nudge" not in section and "task nudge" not in table
 
