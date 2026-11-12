@@ -1129,6 +1129,11 @@ function renderOverview(env) {
       <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
         ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
       ${s.overview_retry_paused ? `<div class="ov-line">Automatic summary retries paused. Timeout recorded ${esc(s.overview_checked_at || 'at an unknown time')}.${s.overview_read_at ? ` Last successful summary ${esc(s.overview_read_at)}.` : ' No successful summary recorded in this connection.'}</div>
+        <details class="ov-team-details"><summary>Summary diagnostics</summary><div class="ov-line">${s.overview_failure_boundary === 'server_query_budget'
+          ? 'Computer query budget expired. The server returned a timeout response.'
+          : s.overview_failure_boundary === 'carrier_deadline'
+          ? 'Browser read deadline expired. No server timeout response was established.'
+          : 'Timeout boundary not identified.'} This does not identify the slow query or imply a connection failure.</div></details>
         ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
     </div>`).join('');
     return;

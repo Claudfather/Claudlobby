@@ -112,8 +112,9 @@ export function createWorkspaceReadTransport({ sources }) {
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
     if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return sourceFailure(e);
-    const timedOut = e.readFailure?.(url) === 'timed_out'
-      || value?.state === 'unreadable' && value.reason === 'query_timeout';
+    const carrierTimeout = e.readFailure?.(url) === 'timed_out';
+    const serverTimeout = value?.state === 'unreadable' && value.reason === 'query_timeout';
+    const timedOut = carrierTimeout || serverTimeout;
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
       value = failed('unavailable', 'This panel could not be read. Other reads and the computer connection are independent.');
     if (value.state !== 'ok' && timedOut) value = {...value,
@@ -121,6 +122,8 @@ export function createWorkspaceReadTransport({ sources }) {
     if (overview) {
       const checkedAt = new Date().toISOString();
       value = {...value, overview_checked_at:checkedAt, overview_read_at:e.overviewReadAt,
+        overview_failure_boundary:value.state === 'ok' ? null : carrierTimeout === serverTimeout ? 'unknown'
+          : serverTimeout ? 'server_query_budget' : 'carrier_deadline',
         overview_retry_paused:value.state !== 'ok' && timedOut};
       // Only this endpoint's deadline is latched. Stream activity, status checks
       // and automatic renewal cannot turn it into another aggregate request.
@@ -172,6 +175,7 @@ export function createWorkspaceReadTransport({ sources }) {
       provenance: values[i].provenance, remediation: values[i].remediation,
       ...(path === '/api/overview' ? { host: values[i].state === 'ok' || values[i].overview_retained ? values[i].data.host : null,
         overview_retained:values[i].overview_retained === true,
+        overview_failure_boundary:values[i].overview_failure_boundary ?? null,
         overview_retry_paused:values[i].overview_retry_paused === true, overview_checked_at:values[i].overview_checked_at, overview_read_at:values[i].overview_read_at } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
