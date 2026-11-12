@@ -58,7 +58,9 @@ def test_valid_inheritance_preserves_composed_hooks(tmp_path, bot_value, default
     commands = [h["command"] for groups in settings.get("hooks", {}).values()
                 for group in groups for h in group["hooks"]]
     loop_commands = [c for c in commands if " hook " in c]
-    enabled = vault if expected is None else expected
+    # The loop's hooks compose only when it resolves on and a vault root is
+    # set: an explicit true with no vault composes none (#2799).
+    enabled = vault and expected is not False
     assert len(loop_commands) == (3 if enabled else 0)
     for event in ("session-start", "pre-compact", "session-end"):
         assert any(c.endswith(f"hook {event}") for c in loop_commands) is enabled
