@@ -132,9 +132,54 @@ def test_missing_or_empty_resolver_remains_unknown(private_fleet, failure):
     assert len(warnings) == 1
     assert "registry check did NOT run" in warnings[0]
     assert "declared packages resolve" in warnings[0]
+    # read_tiers puts the resolver's path in its own message; the warning must not carry it.
+    assert str(paths.root) not in warnings[0]
     assert ("mcp-unchecked", warnings[0]) in result.categorized()
     assert probes == []
     assert not result.has_errors
+
+
+def write_non_text_resolver(paths, stream):
+    """A resolver whose output no text encoding accepts: 0xFF opens no UTF-8 sequence and is not ASCII. The octal escapes of bash's
+    printf are written as raw bytes. On stderr the resolver also exits non-zero, the case where read_tiers quotes stderr."""
+    emit = "printf '\\377\\376\\n'"
+    body = f"{emit}\n" if stream == "stdout" else f"{emit} >&2\nexit 3\n"
+    (paths.lib / "env-tiers.sh").write_text("#!/bin/bash\n" + body)
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_read_tiers_reports_output_that_is_not_text_as_unavailable(private_fleet, stream):
+    fleet, paths, probes = private_fleet
+    write_non_text_resolver(paths, stream)
+    with pytest.raises(env_tiers.ResolverUnavailable) as caught:
+        env_tiers.read_tiers(paths, bot_name="one", fleet_name=fleet.name)
+    # The decoding error stays attached for whoever diagnoses it.
+    assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_resolver_output_that_is_not_text_is_unknown_not_an_exception(private_fleet, stream):
+    fleet, paths, probes = private_fleet
+    write_non_text_resolver(paths, stream)
+    result = validator.validate(fleet, paths)
+    package = query_warning(result)
+    per_bot = [w for w in result.warnings if "authored .env tiers could not be resolved" in w]
+    assert len(package) == 1
+    assert len(per_bot) == 1
+    assert "registry check did NOT run" in package[0]
+    assert all(str(paths.root) not in w for w in package + per_bot)
+    assert ("mcp-unchecked", package[0]) in result.categorized()
+    assert probes == []
+    assert not result.has_errors
+
+
+def test_a_resolver_path_the_os_refuses_to_examine_is_unavailable(private_fleet):
+    fleet, paths, probes = private_fleet
+    # A directory name past NAME_MAX makes the OS refuse the stat with ENAMETOOLONG. Path.is_file() answers False for an
+    # absent path and raises for an error like this one, so it reached the callers as an OSError.
+    refused = Paths(root=paths.root, package=replace(paths.package, native=paths.root / ("x" * 300)))
+    with pytest.raises(env_tiers.ResolverUnavailable):
+        env_tiers.read_tiers(refused, fleet_name=fleet.name)
 
 
 @pytest.mark.parametrize("setting", [None, "0", ""])
