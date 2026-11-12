@@ -1072,6 +1072,99 @@ function ovNum(n, word, bad = true) {
   if (n === null || n === undefined) return `<span class="ov-warn">${esc(word)} unknown</span>`;
   return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${n} ${esc(word)}</span>`;
 }
+function overviewQueryDiagnosticHTML(source) {
+  if (source.overview_failure_boundary !== 'server_query_budget') return '';
+  const value = source.overview_query_diagnostic;
+  const phases = {
+    "query_start": [
+      null,
+      "Query startup"
+    ],
+    "overview": [
+      null,
+      "Overview reduction"
+    ],
+    "capture_config": [
+      null,
+      "Capture configuration"
+    ],
+    "heartbeat": [
+      null,
+      "Heartbeat read"
+    ],
+    "bot_directories": [
+      null,
+      "Bot directories"
+    ],
+    "fleet_actors": [
+      null,
+      "Fleet actors"
+    ],
+    "reader_module": [
+      null,
+      "Reader loading"
+    ],
+    "fleets": [
+      null,
+      "Fleet read"
+    ],
+    "presence": [
+      null,
+      "Presence reduction"
+    ],
+    "open_assignments": [
+      "OPEN_ASSIGNMENTS_AT_SQL",
+      "Open assignments"
+    ],
+    "task_summary": [
+      null,
+      "Task summary"
+    ],
+    "newest_report": [
+      "_NEWEST_REPORT_SQL",
+      "Newest report"
+    ],
+    "reports_since": [
+      "_REPORTS_SINCE_SQL",
+      "Report count"
+    ],
+    "newest_ack": [
+      null,
+      "Newest acknowledgement"
+    ],
+    "post_ack_report_rows": [
+      null,
+      "Post-acknowledgement reports"
+    ],
+    "post_ack_reduce": [
+      null,
+      "Post-acknowledgement reduction"
+    ],
+    "provenance": [
+      null,
+      "Provenance read"
+    ],
+    "host_samples": [
+      null,
+      "Host samples"
+    ],
+    "recorder_state": [
+      null,
+      "Recorder state"
+    ]
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join() !== 'elapsed_ms,phase,phase_elapsed_ms,progress_callbacks,statement,version' ||
+      value.version !== 1 || typeof value.phase !== 'string' || !Object.hasOwn(phases,value.phase) ||
+      value.statement !== phases[value.phase][0]) return '';
+  for (const [key,max] of [['elapsed_ms',86400000],['phase_elapsed_ms',86400000],['progress_callbacks',1000000]]) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > max) return '';
+  }
+  if (value.phase_elapsed_ms > value.elapsed_ms) return '';
+  const [statement,label] = phases[value.phase];
+  return `<div class="ov-line">Active at budget check: ${label} (${statement === null ? 'helper' : 'statement'}). Request elapsed: ${value.elapsed_ms} ms; active phase: ${value.phase_elapsed_ms} ms. SQLite progress callbacks: ${value.progress_callbacks}. Wall time does not isolate SQL cost; a helper may contain several statements.</div>`;
+}
+
 function renderOverview(env) {
   const el = $("overview");
   if (!el) return;
@@ -1133,7 +1226,7 @@ function renderOverview(env) {
           ? 'Computer query budget expired. The server returned a timeout response.'
           : s.overview_failure_boundary === 'carrier_deadline'
           ? 'Browser read deadline expired. No server timeout response was established.'
-          : 'Timeout boundary not identified.'} This does not identify the slow query or imply a connection failure.</div></details>
+          : 'Timeout boundary not identified.'} This does not identify the slow query or imply a connection failure.</div>${overviewQueryDiagnosticHTML(s)}</details>
         ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
     </div>`).join('');
     return;

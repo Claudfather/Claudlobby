@@ -8,6 +8,41 @@ const failed = (state = 'unavailable', remediation = 'This read is unavailable i
 const sum = (rows, key) => rows.every(r => Number.isSafeInteger(r[key]) && r[key] >= 0)
   ? rows.reduce((n, r) => n + r[key], 0) : null;
 
+// A response may contain private fields; project only the fixed timeout shape.
+function overviewQueryDiagnostic(value) {
+  const statements = {
+    "query_start": null,
+    "overview": null,
+    "capture_config": null,
+    "heartbeat": null,
+    "bot_directories": null,
+    "fleet_actors": null,
+    "reader_module": null,
+    "fleets": null,
+    "presence": null,
+    "open_assignments": "OPEN_ASSIGNMENTS_AT_SQL",
+    "task_summary": null,
+    "newest_report": "_NEWEST_REPORT_SQL",
+    "reports_since": "_REPORTS_SINCE_SQL",
+    "newest_ack": null,
+    "post_ack_report_rows": null,
+    "post_ack_reduce": null,
+    "provenance": null,
+    "host_samples": null,
+    "recorder_state": null
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join() !== 'elapsed_ms,phase,phase_elapsed_ms,progress_callbacks,statement,version' ||
+      value.version !== 1 || typeof value.phase !== 'string' || !Object.hasOwn(statements,value.phase) ||
+      value.statement !== statements[value.phase]) return null;
+  for (const [key,max] of [['elapsed_ms',86400000],['phase_elapsed_ms',86400000],['progress_callbacks',1000000]]) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > max) return null;
+  }
+  if (value.phase_elapsed_ms > value.elapsed_ms) return null;
+  return {version:1,phase:value.phase,statement:value.statement,elapsed_ms:value.elapsed_ms,
+    phase_elapsed_ms:value.phase_elapsed_ms,progress_callbacks:value.progress_callbacks};
+}
+
 export { MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES };
 
 export function createTwoSourceReadTransport({ sources }) {
@@ -176,6 +211,8 @@ export function createWorkspaceReadTransport({ sources }) {
       ...(path === '/api/overview' ? { host: values[i].state === 'ok' || values[i].overview_retained ? values[i].data.host : null,
         overview_retained:values[i].overview_retained === true,
         overview_failure_boundary:values[i].overview_failure_boundary ?? null,
+        overview_query_diagnostic:values[i].overview_failure_boundary === 'server_query_budget'
+          ? overviewQueryDiagnostic(values[i].query_diagnostic) : null,
         overview_retry_paused:values[i].overview_retry_paused === true, overview_checked_at:values[i].overview_checked_at, overview_read_at:values[i].overview_read_at } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
