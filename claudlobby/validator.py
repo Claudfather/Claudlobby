@@ -2737,9 +2737,9 @@ def _validate_mcp_packages(
         report.warn(
             "mcp-unchecked",
             f"could not read whether {_mp.PROBE_FLAG} is armed — runtime .env "
-            "tier resolution failed; check lib/env-tiers.sh and its dependencies. "
-            "The registry check did NOT run; this is not a statement that the "
-            "declared packages resolve"
+            "tier resolution failed; check claudlobby/_runtime_scripts/env-tiers.sh "
+            "and its dependencies. The registry check did NOT run; this is not a "
+            "statement that the declared packages resolve"
         )
         return
     if not armed:
