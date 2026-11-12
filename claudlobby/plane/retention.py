@@ -12,7 +12,7 @@ enforced here:
 
     **The "and NOTHING else" this docstring used to claim was load-bearing
     for code outside this module**, which is why the second lane is an
-    allowlist rather than an age sweep. ``lib/selfstart-snapshot.sh``
+    allowlist rather than an age sweep. ``claudlobby/_runtime_scripts/selfstart-snapshot.sh``
     reads ``fleet_rescue`` receipts from the plane and its boot gate fails
     CLOSED on an UNREACHABLE read (exit 7, "a receipt gate that fails OPEN
     is the one failure this measurement must never have") — but a receipt
@@ -86,7 +86,7 @@ class RetentionResult:
 #: `wip_uncommitted` out of 15,422 system events that day. Keeping the set
 #: minimal therefore costs ~2% of the win and removes most of the risk.
 PRUNABLE_SYSTEM_EVENTS = frozenset({
-    "tool_call",        # one per guarded hook invocation (lib/bot-vitals.sh)
+    "tool_call",        # one per guarded hook invocation (claudlobby/_runtime_scripts/bot-vitals.sh)
     "wip_uncommitted",  # one per dirty repo per fleet-pulse tick
 })
 

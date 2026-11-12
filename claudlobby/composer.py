@@ -19,9 +19,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 _log = logging.getLogger(__name__)
 
@@ -32,16 +34,25 @@ from jinja2.sandbox import SandboxedEnvironment
 from . import defaults, dotenv, tool_resolve
 from . import switches as _switches
 from .boot import BootPolicy, bot_conf_lines, resolve_boot_policy
+from .context import native_environment
+from .resources import selected_cli
 from .config import (
     GITHUB_APP_ENV_VARS,
+    _has_telegram_channel,
+    telegram_channel_rel,
+    telegram_handle,
+    DEFAULT_SESSION_RESUME_COMMAND,
     BotConfig,
     FleetConfig,
-    _resolve_system_yaml,
     load_fleet,
     load_host_boot,
     load_host_jobs,
+    load_host_unit_prefix,
+    host_unit_name,
+    HOST_OVERRIDE_ENV,
+    host_override_path,
 )
-from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, NATIVE_1M_MODELS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -49,6 +60,7 @@ from .loader import (
     iter_guardrail_permissions,
     iter_library_requires,
     iter_skill_grants,
+    load_library_item,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -62,6 +74,9 @@ from .mcp_resolve import (
 from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
+from .runtime_admission import (
+    RESIDENT_UNIT_PHASES, unit_systemd_command, unit_systemd_environment, wrap_unit_argv,
+)
 
 
 # ----------------------------------------------------------------------
@@ -90,7 +105,7 @@ def _bot_template_context(
         "BOT_NAME_UPPER": bot.name.upper(),
         "FLEET_NAME": fleet.name,
         "SERVICE_PREFIX": fleet.service_prefix,
-        "CLAUDLOBBY_ROOT": str(paths.root),
+        **native_environment(paths),
         "BOT_DIR": str(bot_dir),
         "TELEGRAM_GROUP_CHAT_ID": (
             bot.telegram.chat_id or fleet.telegram_group_chat_id or ""
@@ -155,9 +170,9 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
     `local/<fleet>/templates/claude.md.j2`.
     """
     search = []
-    if paths.fleet_dir and (paths.fleet_dir / "templates").is_dir():
-        search.append(str(paths.fleet_dir / "templates"))
-    search.append(str(paths.root / "templates"))
+    if paths.overlay_templates.is_dir():
+        search.append(str(paths.overlay_templates))
+    search.append(str(paths.base_templates))
     env = SandboxedEnvironment(
         loader=jinja2.FileSystemLoader(search),
         autoescape=False,
@@ -211,11 +226,44 @@ def _mcp_identities_by_fragment(bot: BotConfig) -> dict[str, list[ExpandedMcp]]:
 
 
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
-    """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict."""
+    """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict.
+
+    An armed bot's servers that must keep npx (#1604) are named in ONE warning,
+    so the saving it forgoes is visible during config planning."""
+    from . import mcp_direct
+
+    merged, npx_fallbacks = mcp_launch_plan(bot, paths)
+    if npx_fallbacks:
+        listed = "; ".join(
+            f"{name} ({spec + ': ' if spec else ''}{why})" for name, spec, why in npx_fallbacks
+        )
+        fix = (
+            " Run `claudlobby --fleet <fleet> host cache warm`, then stage and activate a new config plan."
+            if any(why == mcp_direct.NOT_INSTALLED for _n, _s, why in npx_fallbacks)
+            else ""
+        )
+        _log.warning(
+            "%s: mcp_direct_launch is on, but %d MCP server(s) still launch through npx: %s.%s",
+            bot.bot_id, len(npx_fallbacks), listed, fix,
+        )
+    return merged
+
+
+def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str, str, str]]]:
+    """The composed .mcp.json, and for an ARMED bot every npx server that could
+    not launch directly, as ``(server, spec, reason)``.
+
+    The one plan config staging and `doctor` both read (#1604), so the two cannot
+    disagree about which servers still carry an npm wrapper."""
     import shutil
+
+    from . import mcp_direct
 
     identities = _mcp_identities_by_fragment(bot)
     merged: dict = {"mcpServers": {}}
+    # (server, spec, reason) for every npx server an ARMED bot could not
+    # launch directly, reported once below so the forgone saving is visible.
+    npx_fallbacks: list[tuple[str, str, str]] = []
     for entry in bot.mcp:
         instances = identities.pop(entry.name, None)
         if instances is None:
@@ -243,6 +291,22 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
             instance_config = copy.deepcopy(server_config)
 
+            # #1604, opt-in per bot: the pinned package runs as `node <entry>`
+            # from the copy warm-cache installed, so no `npm exec` wrapper
+            # stays resident beside the server. It goes FIRST: a PATH-global
+            # binary is whatever version someone installed, the copy is the
+            # fragment's exact pin. Anything that cannot launch directly keeps
+            # npx, which cannot break a server, only forgo the saving.
+            direct_why: tuple[str, str] | None = None
+            if bot.mcp_direct_launch and instance_config.get("command") == "npx":
+                direct, spec, why = mcp_direct.direct_launch(
+                    instance_config, paths.root, grammar(paths)
+                )
+                if direct is not None:
+                    instance_config = direct
+                else:
+                    direct_why = (spec, why)
+
             # Use global binary if available (saves ~0.8s npx overhead per server)
             resolved_binary = shutil.which(global_binary) if global_binary else None
             if resolved_binary and instance_config.get("command") == "npx":
@@ -254,12 +318,17 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                 # below, which is why that moved out and this test did not.
                 instance_config["command"] = "node"
                 # [-y, pkg, ...rest] -> [binary, ...rest]. The split is
-                # `lib/mcp-package-grammar.py`'s: warm-cache wants the package
+                # `claudlobby/_runtime_scripts/mcp-package-grammar.py`'s: warm-cache wants the package
                 # this discards, so one parse decides the boundary for both.
                 _pkg, rest_args = grammar(paths).split_npx_args(
                     instance_config.get("args", [])
                 )
                 instance_config["args"] = [resolved_binary] + rest_args
+
+            # Only a server still on npx is a fallback: the global-binary swap
+            # above also removes the wrapper, just not at the pinned version.
+            if direct_why is not None and instance_config.get("command") == "npx":
+                npx_fallbacks.append((output_name, *direct_why))
 
             # Resolve ${VAR} placeholders (instance-scoped vars get prefixed)
             for field in ["env", "url", "args", "headers"]:
@@ -270,7 +339,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
             merged["mcpServers"][output_name] = instance_config
 
-    return merged
+    return merged, npx_fallbacks
 
 
 def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
@@ -306,6 +375,28 @@ def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
                 "and keep read_only_tools a subset of it."
             )
     return contract
+
+
+def _mcp_deprecation(paths: Paths, name: str) -> str | None:
+    """The ``_deprecated`` note of MCP fragment *name*, or ``None`` when it is current.
+
+    A deprecated fragment still composes for a bot that lists it: its server is
+    wired, and its ``_permissions_contract`` still grants its reads and keeps its
+    writes prompting. The note names what to use instead, and ``config validate``
+    repeats it for the bots that list the fragment. A ``_deprecated`` key with no
+    note still marks the fragment. Malformed JSON reads as current, as it does for
+    :func:`_load_mcp_contract`; :func:`compose_mcp_json` refuses that fragment.
+    """
+    try:
+        frag = _load_mcp_fragment(name, paths)
+    except ValueError:
+        return None
+    if not isinstance(frag, dict) or "_deprecated" not in frag:
+        return None
+    note = frag["_deprecated"]
+    if isinstance(note, str) and note.strip():
+        return note.strip()
+    return "no replacement is named"
 
 
 def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
@@ -358,7 +449,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
     ``_resolve_mcp_permissions`` grant role (and its superset gate) is cut:
     add a tool upstream and the directional error here names the fix. A bot
     that genuinely needs a write tool gets it explicitly via fleet.yaml
-    ``tools.allow``; that operator path is untouched here.
+    ``tool_permissions.allow``; that operator path is untouched here.
     """
     contract = _load_mcp_contract(paths, name)
     if not contract:
@@ -373,7 +464,7 @@ def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) ->
             f"integration {name!r}: tool_grants {extra} not auto-grantable — the mcp "
             f"fragment declares read_only_tools, so grants must be exact "
             f"mcp__{name}__<tool> entries from that read-only set. Writes stay "
-            "prompt-gated; grant one per-bot via tools.allow if genuinely needed."
+            "prompt-gated; grant one per-bot via tool_permissions.allow if genuinely needed."
         )
     missing = sorted(mirror - set(tool_grants))
     if missing:
@@ -395,7 +486,7 @@ def _assert_no_write_autoallows(
     would otherwise compose every catalog write into each equipping bot. This
     is the union-layer invariant: for every attached server whose contract
     declares ``read_only_tools``, no accumulated pattern may reach beyond the
-    read set. Runs before fleet.yaml ``tools.allow`` is appended — that layer
+    read set. Runs before fleet.yaml ``tool_permissions.allow`` is appended — that layer
     is the operator's deliberate, auditable escape hatch and stays exempt.
     """
     for entry in bot.mcp:
@@ -420,7 +511,7 @@ def _assert_no_write_autoallows(
                     f"bot {bot.bot_id!r}: allow patterns {bad} cover non-read tools "
                     f"of read-only server {server!r} — no library-derived layer "
                     "(integration, skill, expertise, guardrail) may auto-allow a "
-                    "write. Grant it per-bot via fleet.yaml tools.allow if "
+                    "write. Grant it per-bot via fleet.yaml tool_permissions.allow if "
                     "genuinely needed."
                 )
 
@@ -457,19 +548,49 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
         if not tool_grants:
             continue
         _assert_read_only_grants(name, tool_grants, paths)
-        instances = identities.get(name)
-        if instances is None:
-            grants.extend(tool_grants)
-            continue
-        prefix = f"mcp__{name}__"
-        for grant in tool_grants:
-            if grant.startswith(prefix):
-                rest = grant[len(prefix) :]
-                for identity in instances:
-                    grants.append(f"mcp__{identity.output_name}__{rest}")
-            else:
-                grants.append(grant)
+        grants.extend(_instance_rules(bot, name, tool_grants))
     return grants
+
+
+def _instance_rules(bot: BotConfig, name: str, rules: list[str]) -> list[str]:
+    """``rules`` with each ``mcp__<name>__`` prefix rewritten per instance.
+
+    Applies when a ``bot.mcp`` entry shares the integration's name (``default`` ->
+    ``mcp__<name>__``; named -> ``mcp__<name>-<instance>__``); every other rule,
+    and every rule of an integration with no such entry, is kept as written.
+    """
+    entry = next((e for e in bot.mcp if e.name == name), None)
+    if entry is None:
+        return list(rules)
+    prefix = f"mcp__{name}__"
+    out: list[str] = []
+    for rule in rules:
+        if rule.startswith(prefix):
+            rest = rule[len(prefix) :]
+            for instance in entry.instances:
+                out.append(f"mcp__{entry.output_name(instance)}__{rest}")
+        else:
+            out.append(rule)
+    return out
+
+
+def _resolve_integration_rules(bot: BotConfig, paths: Paths, key: str) -> list[str]:
+    """The ``ask_grants`` or ``deny_grants`` (``key``) of the bot's effective integrations.
+
+    #2476. An ``mcp__<name>__`` rule is rewritten per instance, as a grant is in
+    :func:`_resolve_integration_grants`, so it names the server the bot runs: a
+    rule left naming another server would never match, and an ask or deny that
+    never matches fails open. The read-only contract does not apply: asking about
+    or refusing a write tool is what these lists are for.
+    """
+    from .loader import iter_integration_grants
+
+    rules: list[str] = []
+    for name, declared in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths), key=key
+    ):
+        rules.extend(_instance_rules(bot, name, declared))
+    return rules
 
 
 # ----------------------------------------------------------------------
@@ -540,54 +661,40 @@ def _channel_plugins(channels: list[str]) -> list[str]:
     return plugins
 
 
-def _has_telegram_channel(channels: list[str]) -> bool:
-    """True when a bot launches with a Telegram channel.
-
-    A channel entry names the channel either bare (``telegram``) or as a
-    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
-    both mean the same channel. ``channels: []`` — the documented way to declare
-    a bot with no channel — yields False.
-    """
-    return any(
-        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
-    )
+def account_dir(bot: BotConfig, fleet: FleetConfig) -> str:
+    """The Claude config dir *bot* runs with, as the manifest spells it (often
+    ``~/.claude``): its account's dir, else the fleet's default account. One
+    expression for its two consumers: ``bot.conf``'s ``CLAUDE_CONFIG_DIR`` line
+    and the Layer 0b rules that name the dir (#1665)."""
+    return fleet.accounts.get(bot.account, fleet.accounts.get("default", "~/.claude"))
 
 
-def telegram_channel_rel(handle: str) -> str:
-    """A channel bot's Telegram state dir, relative to the home dir: the ONE
-    definition behind its three consumers (#1786), which need it in two forms.
-    ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
-    exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
-    (#976); ``access.json`` and ``fleet_alert_sender_state_dir`` take it
-    absolute, as ``Path.home() / <this>``."""
-    return f".claude/channels/telegram-{handle}"
+def account_settings_path(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> Path:
+    """The selected Claude account settings read by this bot at session start."""
+    directory = Path(account_dir(bot, fleet)).expanduser()
+    if not directory.is_absolute():
+        directory = paths.bot_runtime(bot.bot_id) / directory
+    return directory / "settings.json"
 
 
-def telegram_handle(bot: BotConfig) -> str | None:
-    """This bot's Telegram handle, or None when it is not a channel bot.
-
-    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
-    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
-    since #43; the readers of the handle VARIABLE never did. So a fleet using
-    the documented default composed a working state dir, a live bridge, and no
-    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
-    the bot had no channel at all: bridge_state returned `no_handle` for a
-    provably live bridge, halting rolling-restart on its first bot (#1107), and
-    creds-check's Telegram probe skipped every bot on the host (#1097). One
-    resolver, so the default cannot drift apart again.
-
-    Returns None for a bot with no Telegram channel AND no declared handle —
-    the genuine non-channel class, which must stay expressible because
-    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
-    (#901) both rest on it. An explicitly declared handle still wins outright,
-    channel or not: it names an existing state dir, and silently re-pointing
-    that path would orphan a live channel.
-    """
-    if bot.telegram.handle:
-        return bot.telegram.handle
-    if _has_telegram_channel(bot.channels):
-        return bot.bot_id
-    return None
+def _account_enabled_plugins(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
+    """Plugin keys inherited from the selected account, never another account."""
+    source = account_settings_path(bot, fleet, paths)
+    try:
+        settings = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read selected account settings at {source}: {exc}") from exc
+    if not isinstance(settings, dict):
+        raise ValueError(f"selected account settings at {source} must be an object")
+    enabled = settings.get("enabledPlugins", {})
+    if not isinstance(enabled, dict) or any(
+        not isinstance(key, str) or not isinstance(value, bool)
+        for key, value in enabled.items()
+    ):
+        raise ValueError(f"selected account enabledPlugins at {source} must map names to booleans")
+    return set(enabled)
 
 
 def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
@@ -614,6 +721,13 @@ def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
 
 
 GITCONFIG_FILENAME = ".gitconfig"
+# The bot's own clauDNA root, relative to BOT_DIR (#2145 F14). Readers that need a bot's
+# store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's
+# "$BOT_DIR/..." text, which only a sourcing shell expands.
+CLAUDNA_STATE_SUBDIR = "data/claudna"
+# Env names compose_bot_conf exports for every bot as invariants. bot.env/secret_files
+# are emitted after them, so the validator reserves these names (_validate_reserved_env).
+COMPOSED_INVARIANT_ENV = frozenset({"CLAUDNA_STATE_DIR"})
 # Sibling of the composed .gitconfig holding ONLY the App [user] block, pulled
 # in by a per-org `includeIf hasconfig:remote.*.url` from the main file when an
 # App declares `orgs:` + an identity (#1300). Kept separate because includeIf
@@ -685,7 +799,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 
     Covers BOTH declaration surfaces: per-org PAT routing (``git_credentials``)
     and GitHub App routing (``github_app``, App-auth P3 #1273). The App block
-    references ``lib/git-credential-github-app`` by BAKED ABSOLUTE PATH (the
+    references ``claudlobby/_runtime_scripts/git-credential-github-app`` by BAKED ABSOLUTE PATH (the
     same precedent as the operator-gitconfig include and the resolved gh
     fallback — gitconfig files do not expand env vars), layers ``cache
     --timeout=3000`` in front so a mint is amortized across git operations,
@@ -754,7 +868,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
     if not (bot.git_credentials or bot.github_app):
         return None
 
-    out = f"""# Generated by claudlobby — do not hand-edit (regenerated by `claudlobby generate`).
+    out = f"""# Generated by claudlobby — do not hand-edit (replaced by a staged config plan and host activation).
 # Per-org / GitHub App git credential routing. See
 # documentation/plans/2026-07-27-per-org-git-credential-routing.md
 
@@ -777,7 +891,7 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 """
     app = bot.github_app
     if app:
-        app_helper = paths.root / "lib" / "git-credential-github-app"
+        app_helper = paths.package.runtime_native / "git-credential-github-app"
         # One fork for every scoped-vs-generic artifact below: None = all of
         # github.com. App tokens are HTTPS-only either way, which is what the
         # insteadOf rewrites are for.
@@ -927,9 +1041,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    account_dir = fleet.accounts.get(
-        bot.account, fleet.accounts.get("default", "~/.claude")
-    )
+    config_dir = str(account_settings_path(bot, fleet, paths).parent)
 
     bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
@@ -937,21 +1049,23 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # value, two of the three identity axes (the third is the dir-slug session).
     bot_service = f"{fleet.service_prefix}.{bot.bot_id}"
     lines = [
-        "# Generated by claudlobby — do not hand-edit. Edit fleet.yaml + library/, then re-run `claudlobby generate`.",
+        "# Generated by claudlobby — do not hand-edit. Edit authored fleet.yaml/library, then config plan, review config diff PLAN_ID, and host activate PLAN_ID.",
         f"# Bot: {bot.bot_id}",
         "",
         f"export CLAUDLOBBY_ROOT={_shq(str(paths.root))}",
+        *(f"export {key}={_shq(value)}" for key, value in native_environment(paths).items()
+          if key not in {"CLAUDLOBBY_ROOT", "FLEET_ROOT"}),
         "",
         f"export BOT_ID={_shq(bot.bot_id)}",
         f"BOT_NAME={_shq(bot.name)}",
         f"BOT_SERVICE={_shq(bot_service)}",
         # Per-bot tmux server socket (the `-L` name) — equals BOT_SERVICE so one
         # server's death drops only this bot. Resolved for peer bots via
-        # tmux_socket_for_bot() (lib/lib-common.sh).
+        # tmux_socket_for_bot() (claudlobby/_runtime_scripts/lib-common.sh).
         f"TMUX_SOCKET={_shq(bot_service)}",
         f"BOT_LABEL={_shq(bot.bot_id.upper())}",
         bot_dir_line,
-        # Exported, unlike the bot.conf vars above: lib/ reads those from the
+        # Exported, unlike the bot.conf vars above: claudlobby/_runtime_scripts/ reads those from the
         # file via bot_conf_get, but this one must reach the `claude` CHILD
         # process environment. The telegram plugin resolves its state dir from
         # process.env.TELEGRAM_STATE_DIR and silently falls back to the shared
@@ -965,12 +1079,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         "# Claude Code config dir (multi-account support)",
     ]
     if bot.account != "default":
-        lines.append(f"CLAUDE_CONFIG_DIR={_shq(account_dir)}")
+        lines.append(f"CLAUDE_CONFIG_DIR={_shq(config_dir)}")
     else:
-        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(account_dir)}  # default account")
+        lines.append(f"# CLAUDE_CONFIG_DIR={_shq(config_dir)}  # default account")
     lines.append("")
 
-    # Assemble the full claude CLI flag set. lib/start-bot.sh reads
+    # Assemble the full claude CLI flag set. claudlobby/_runtime_scripts/start-bot.sh reads
     # CLAUDE_FLAGS verbatim and appends only --name <session>.
     flags: list[str] = []
     for ch in bot.channels:
@@ -1012,6 +1126,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
+    # #2145 §2.2: the doors derive the caller's session uid from its agent CLI's
+    # session-id env; this names the agent CLI so they derive with the right rule.
+    lines.append(f"export CLAUDLOBBY_AGENT_CLI={_shq(bot.agent_cli)}")
     # #1722. The ONE provenance value that may live here, and only because it is
     # CONTENT-derived: it changes exactly when fleet.yaml changes, which is
     # exactly when `generate` would legitimately rewrite bot.conf anyway. So
@@ -1163,7 +1280,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             if not _SHELL_IDENT_RE.match(tier_var):
                 raise ValueError(
                     f"project key '{key}' does not yield a valid env name "
-                    f"(run claudlobby validate)"
+                    f"(run claudlobby config validate)"
                 )
             for repo in project.repos:
                 # Emit-time corruption backstop (mirrors the slug raise
@@ -1172,7 +1289,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                 if any(c.isspace() for c in repo):
                     raise ValueError(
                         f"project '{key}': repos entry '{repo}' contains "
-                        f"whitespace (run claudlobby validate)"
+                        f"whitespace (run claudlobby config validate)"
                     )
             lines.append(f"export {tier_var}={_shq(project.validation.tier)}")
             lines.append(
@@ -1183,7 +1300,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     # THE ESTATE SILENCER, carried to the session (F2). start-bot.sh sources
     # the .env tiers BEFORE `set -a`, so a bare `PLANE_EMIT_DISABLED=1` in a
     # tier is assigned unexported and dies with that shell — it never reaches
-    # `claude`, its hooks, or any lib/ door a bot runs itself. bot.conf IS the
+    # `claude`, its hooks, or any claudlobby/_runtime_scripts/ door a bot runs itself. bot.conf IS the
     # session carrier, so the composer bridges the tier's resolved value here.
     # Stamped only when a tier actually says 0 or 1: an unset flag must leave
     # the door's own default as the ONE place the answer lives (an empty
@@ -1192,23 +1309,19 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                             ("PLANE_EMIT_DISABLED",))
     if _silencer:
         lines.append("")
-        lines.append("# Plane recording (the estate silencer; claudlobby doctor --switches)")
+        lines.append("# Plane recording (the estate silencer; claudlobby host doctor --switches)")
         for _k, _v in _silencer.items():
             lines.append(f"export {_k}={_shq(_v)}")
 
-    # Workstream registry bounds (fleet.workstreams). Read from the env by the
-    # single-writer helper (lib/workstream-update.sh) at open/renew time.
-    # Emitted into EVERY bot.conf rather than manager-gated so the fleet-wide
-    # cap/lease applies regardless of team topology — a teamless fleet would
-    # silently lose its config under a manager-only gate. Defaults (12/14) apply
-    # when the fleet omits the block.
+    # The canonical writer reads selected fleet policy. Keep the lease carrier
+    # for current session readers that resolve the brief's boot observations.
     lines.append("")
     lines.append("# Workstream registry (fleet.workstreams)")
     lines.append(f"export WORKSTREAM_MAX_ACTIVE={_shq(fleet.workstreams.max_active)}")
     lines.append(f"export WORKSTREAM_LEASE_DAYS={_shq(fleet.workstreams.lease_days)}")
 
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
-    # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
+    # fleet-level selector (claudlobby/_runtime_scripts/code-audit-sweep.sh) resolves exactly one owner.
     # repos default to the owner's scope.repos when sweep.repos is unset.
     if fleet.sweep_enabled() and fleet.sweep.owner_bot == bot.bot_id:
         sweep_repos = fleet.sweep.repos or (bot.scope.repos if bot.scope else [])
@@ -1242,28 +1355,55 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
                     f"{_shq(' '.join(sections))}"
                 )
 
-    # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
-    if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
-        lines.append("")
-        lines.append("# Ecosystem")
-        if bot.claudna_version:
-            lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot_is_vault_wired(bot):
-            lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
-        if bot.claudosseum_tenant_id:
-            lines.append(
-                f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
-            )
+    # Ecosystem — the per-bot clauDNA root (an invariant, #2145 F14; bot.conf is
+    # sourced after the .env tiers, so it wins), then the optional pins.
+    lines.append("")
+    lines.append("# Ecosystem")
+    lines.append(f'export CLAUDNA_STATE_DIR="$BOT_DIR/{CLAUDNA_STATE_SUBDIR}"')
+    if bot.claudna_version:
+        lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
+    if bot_is_vault_wired(bot):
+        lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
+    if bot.claudosseum_tenant_id:
+        lines.append(
+            f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
+        )
+
+    # #2145 P3: clauDNA reads these at session open. Its summary_gate checks
+    # SESSION_SUMMARY before the bot/headless gate (project.py): harvest alone
+    # cannot summarize a bot. Always compose 0 for an unarmed bot (disabled).
+    lines.append(f"export CLAUDNA_SESSION_SUMMARY={1 if (bot.claudna.session_summary or bot.claudna.harvest) else 0}")
+    if bot.claudna.harvest is not None:
+        lines.append(f"export CLAUDNA_HARVEST={1 if bot.claudna.harvest else 0}")
+    # #941: clauDNA's PreCompact hook refuses every other compaction until
+    # /claudna:capture runs, and nobody at a bot's pane runs it. Its own default
+    # is on, so compose 0 unless the fleet arms it.
+    lines.append(f"export CLAUDNA_PRECOMPACT_REFLECT={1 if bot.claudna.precompact_reflect else 0}")
+    # #1053: 1 where this compose adds the engine's session-loop hooks, PreCompact
+    # among them, by the same test as the hook merge, so the two cannot disagree.
+    lines.append(f"export CLAUDRON_SESSION_LOOP={1 if claudron_session_loop_composed(bot, bot_dir) else 0}")
+
+    # Default only when absent: inherited values and later .env tiers keep
+    # their existing precedence, including explicit-empty resume disabling.
+    # An authored bot.env assignment below retains its existing literal form.
+    if "SESSION_RESUME_COMMAND" not in bot.env:
+        lines.append('export SESSION_RESUME_COMMAND="${SESSION_RESUME_COMMAND-'
+                     + _configured_resume_command(bot) + '}"')
 
     # Plugin sync — restore third-party plugins on session start. Union the
     # plugins this bot's channels pin (see _channel_plugins) so a cold box
     # installs them alongside the fleet's declared plugins.
     plugins_required = list(fleet.plugins.required)
+    if fleet.plugins.startup_policy not in ("manage", "verify-existing"):
+        raise ValueError("plugins.startup_policy must be manage or verify-existing")
+    if fleet.plugins.startup_policy == "verify-existing":
+        lines.append("export FLEET_PLUGIN_STARTUP_POLICY=verify-existing")
     for _chan_plugin in _channel_plugins(bot.channels):
         if _chan_plugin not in plugins_required:
             plugins_required.append(_chan_plugin)
     if plugins_required:
-        lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+        if fleet.plugins.startup_policy == "manage":
+            lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
             f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
@@ -1323,19 +1463,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
 
     lines.append("")
 
-    for team in fleet.teams.values():
-        if bot.bot_id in team.workers:
-            lines.append(f"export MANAGER_TMUX={_shq(team.manager)}")
-            # The manager's private tmux socket — mirrors MANAGER_TMUX, mapped to
-            # the manager's BOT_SERVICE so report-back / pulse / sprint sends
-            # reach the manager's own server (see bot_tmux_send).
-            lines.append(
-                f"export MANAGER_TMUX_SOCKET={_shq(f'{fleet.service_prefix}.{team.manager}')}"
-            )
-            break
-    if bot.bot_id in fleet.manager_bots():
-        lines.append(f"export MANAGER_TMUX={_shq(bot.bot_id)}  # this bot is a manager")
-        lines.append(f"export MANAGER_TMUX_SOCKET={_shq(bot_service)}")
+    # The fleet has one declared manager. Team grouping and reports_to are
+    # organizational metadata, never an alternative task/report destination.
+    lines.append(f"export MANAGER_TMUX={_shq(fleet.manager)}")
+    lines.append(
+        f"export MANAGER_TMUX_SOCKET={_shq(f'{fleet.service_prefix}.{fleet.manager}')}"
+    )
 
     # Git credential routing — point git at the composed per-org gitconfig. Only
     # when the bot declares credentials, so fleets that declare none compose
@@ -1356,27 +1489,34 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         rendered = _render_startup_prompt(bot.startup_prompt, bot, fleet)
         lines.append(f"STARTUP_PROMPT={json.dumps(rendered)}")
     else:
-        # #1633: a bot with no declared prompt used to be told to idle on its
-        # very first turn — every boot spent on a fleet that cannot start its
-        # own turn. The default now names a READ and an ACT instead. Two
-        # forms, because the state can arrive two ways and only one needs a
-        # Bash grant (see compose_settings_local's matching branch, which
-        # composes the exact grant this text names):
-        #   - brief.on_start armed: the bot's own SessionStart hook already
-        #     injected its brief, so the prompt points at what is already in
-        #     context rather than naming a read the bot must run itself.
-        #   - otherwise: name the one `claudlobby brief` read that shows the
-        #     bot its own open rows.
+        # A bot with no declared prompt begins through the universal fleet-ops
+        # skill, whose exact grants cover context show and brief. Two forms,
+        # because the brief can arrive two ways:
+        #   - brief.on_start armed: reuse the hook's usable payload, with one
+        #     bounded normal read only when that payload did not arrive.
+        #   - otherwise: ask for the canonical brief read after context show.
         # NOTE: no backticks around the command. bot.conf is fully `source`d
-        # (lib/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
+        # (claudlobby/_runtime_scripts/lib-common.sh:load_bot_conf → `. "$bot_dir/bot.conf"`), and
         # json.dumps() does not escape `` ` `` or `$` — a literal backtick
         # here would run as a real command substitution at every boot,
         # not render as text.
-        fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
+        preface = (
+            "Welcome back. Read your CLAUDE.md, including its automatically supplied "
+            "fleet-ops section. If that section is unavailable, invoke /fleet-ops; "
+            "reconsult /fleet-ops when needed. "
+            "Run claudlobby --json context show to confirm your generated "
+            "fleet and bot. If a read refuses, report its error and stop; "
+            "do not guess context from environment variables. "
+        )
         if _boot_brief_armed(bot):
             default = (
-                "Welcome back. Read your CLAUDE.md and the fleet-brief you "
-                "were given at session start. If it shows open rows of "
+                preface + "Then read the fleet-brief you were given at session "
+                "start. Reuse a usable injected brief even if individual sections "
+                "are unavailable. Only if no usable boot payload arrived or the "
+                "hook printed fleet-brief unavailable (rc ...), run "
+                "claudlobby --json brief --startup-wait 120 once with a Bash tool "
+                "timeout of 180000 ms. If that read refuses, report its error and "
+                "stop; do not activate or resend anything. If the brief shows open rows of "
                 "yours, continue them and report; if anything is blocked, "
                 "say so. Otherwise idle and await messages."
             )
@@ -1385,10 +1525,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
             # does not decode \u escapes in a plain double-quoted string, so
             # an em-dash here would render to the bot as the literal 6
             # characters, not the glyph (measured via a real
-            # `claudlobby generate`).
+            # private composition).
             default = (
-                "Welcome back. Read your CLAUDE.md, then run: claudlobby"
-                f"{fleet_arg} brief --bot {bot.bot_id} - act on what it "
+                preface + "Then run claudlobby --json brief --startup-wait 120 "
+                "once with a Bash tool timeout of 180000 ms. Act on what it "
                 "shows: continue your own open rows, report anything "
                 "blocked, then idle and await messages."
             )
@@ -1417,29 +1557,6 @@ def _boot_brief_armed(bot: BotConfig) -> bool:
     ever does.
     """
     return bot.brief_on_start
-
-
-def _resolve_default_boot_grant(bot: BotConfig, paths: Paths) -> list[str]:
-    """The exact Bash grant the DEFAULT boot prompt names (#1633), or empty.
-
-    A NAMED resolver — matching every other ``_resolve_*_permissions`` /
-    ``_resolve_*_grants`` function in this module — rather than inline logic
-    in ``compose_settings_local``, because ``freshbox._sourced_grants`` calls
-    each of those independently to re-derive what SHOULD be granted and diff
-    it against what IS. Inline logic here is invisible to that re-derivation:
-    freshbox has no way to know this grant exists, and reports it as an
-    ``orphan_grant`` (fail) — composition emitting a grant nothing produced,
-    by freshbox's own read, when in fact something did (this function; it
-    was just never told). Empty under the same condition
-    ``compose_bot_conf``'s ``else`` branch uses to skip the read-then-act
-    default text: a custom ``startup_prompt`` or an armed ``brief.on_start``
-    hook both name no Bash read for the bot to run itself, so neither grants
-    one.
-    """
-    if bot.startup_prompt or _boot_brief_armed(bot):
-        return []
-    fleet_arg = f" --fleet {paths.fleet_dir.name}" if paths.fleet_dir else ""
-    return [f"Bash(claudlobby{fleet_arg} brief --bot {bot.bot_id})"]
 
 
 def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> str:
@@ -1473,7 +1590,7 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
 # ----------------------------------------------------------------------
 
 
-def _scheduler_tool_path(root: Path | None = None) -> str:
+def _scheduler_tool_path(paths: Paths | None = None) -> str:
     """PATH for composed timer units so their jobs can resolve fleet tools.
 
     systemd and launchd hand a scheduled job a minimal PATH that excludes
@@ -1484,19 +1601,19 @@ def _scheduler_tool_path(root: Path | None = None) -> str:
     start-bot.sh exports, so a tool resolves identically under a timer as in a
     bot session (tests/test_claude_version.py pins the two), resolved at
     compose time: ``$HOME`` → the composing user's home; Homebrew → the host
-    layout (lib/lib-common.sh detect_os — /opt/homebrew on Apple Silicon,
+    layout (claudlobby/_runtime_scripts/lib-common.sh detect_os — /opt/homebrew on Apple Silicon,
     /usr/local on Intel, absent off macOS). On Intel the Homebrew segment
     intentionally re-collides with the leading /usr/local/bin, matching
     fleet_launch_path's own duplication — a harmless, deliberate mirror.
 
-    ``root`` appends ``<root>/.venv/bin`` (#805). The user-prefix segments above
-    cover ``claude``, but ``claudlobby`` is a *console script* whose location
-    depends on which python ran ``pip install -e .`` — with a repo-local venv it
-    lands in ``.venv/bin`` and on no system PATH at all, so a timer fixed for
-    ``claude`` alone still died one line later on ``claudlobby generate``.
+    The selected release console directory comes first; ambient executables
+    cannot override its CLI. Other tool directories preserve their ordering.
     """
     home = Path.home()
+    installation = paths.package.installation if paths is not None else None
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     segments = [
+        str(cli.parent),
         "/usr/local/bin",
         "/usr/bin",
         "/bin",
@@ -1508,8 +1625,6 @@ def _scheduler_tool_path(root: Path | None = None) -> str:
         segments.append(
             "/opt/homebrew/bin" if Path("/opt/homebrew").is_dir() else "/usr/local/bin"
         )
-    if root is not None:
-        segments.append(f"{root}/.venv/bin")
     return ":".join(segments)
 
 
@@ -1567,7 +1682,15 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             elif entry.is_dir():
                 shutil.rmtree(entry)
     bot_skills_dir.mkdir(parents=True, exist_ok=True)
+    for leaf, src in resolve_skill_sources(paths, skills, log).items():
+        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
+
+def resolve_skill_sources(paths: Paths, skills: list[str], log) -> dict[str, Path]:
+    """Leaf name -> source dir for every entry of *skills*, the way
+    :func:`link_skills` links them (first wins on a leaf collision, which is
+    logged). One resolution for the linker and for the readers that must see
+    the same files a bot is handed (the Layer 0b ``~/.env`` scan)."""
     linked: dict[str, Path] = {}  # leaf name → source dir, for collision detection
 
     def _add(leaf: str, src: Path) -> None:
@@ -1575,7 +1698,6 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
             log(f"  skill '{leaf}' already linked from {linked[leaf]} — skipping {src}")
             return
         linked[leaf] = src
-        (bot_skills_dir / leaf).symlink_to(src.resolve())
 
     for skill in skills:
         if skill.endswith("/"):
@@ -1592,6 +1714,20 @@ def link_skills(bot: BotConfig, paths: Paths, log, *, skills: list[str]) -> None
                 log(f"  skill '{skill}' missing — skipped")
                 continue
             _add(src.name, src)
+    return linked
+
+
+def compose_fleet_ops_orientation(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Load the effective guide as library prose, without frontmatter or grants."""
+    skills = resolve_effective_skills(bot, fleet, paths,
+                                      is_manager=bot.bot_id in fleet.manager_bots())
+    source = resolve_skill_sources(paths, skills, _log.warning).get("fleet-ops")
+    if source is None:
+        raise ValueError("the universal fleet-ops skill is unavailable")
+    item = load_library_item(source / "SKILL.md")
+    if item is None or not item.body.strip():
+        raise ValueError("the universal fleet-ops guide is empty")
+    return item.body
 
 
 def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
@@ -1609,6 +1745,18 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
         if entry.is_symlink() and entry.name not in bot.mounts:
             entry.unlink()
 
+    for name, target_path in resolve_mount_sources(bot, bot_dir, log).items():
+        link = mounts_dir / name
+        if link.is_symlink():
+            if link.resolve() == target_path.resolve():
+                continue
+            link.unlink()
+        link.symlink_to(target_path)
+
+
+def resolve_mount_sources(bot: BotConfig, bot_dir: Path, log) -> dict[str, Path]:
+    """Return allowed mount targets without changing links or creating directories."""
+    sources: dict[str, Path] = {}
     for name, target in bot.mounts.items():
         target_path = Path(target).expanduser()
         try:
@@ -1623,11 +1771,11 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
         except (ValueError, OSError):
             log(f"  mount '{name}': could not resolve target {target_path} — skipping")
             continue
-        link = mounts_dir / name
+        link = bot_dir / "mounts" / name
         if link.is_symlink():
             if link.resolve() == target_path.resolve():
+                sources[name] = target_path
                 continue  # already correct
-            link.unlink()
         elif link.exists():
             log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
             continue
@@ -1635,11 +1783,20 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
             log(
                 f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
             )
-        link.symlink_to(target_path)
+        sources[name] = target_path
+    return sources
 
 
 # ----------------------------------------------------------------------
 # Tools — composited scripts (library/tools/<name>/ → bot_dir/tools/)
+
+
+@dataclass(frozen=True)
+class RenderedFile:
+    """One generated artifact's complete content and intended permission mode."""
+
+    content: str
+    mode: int = 0o644
 
 
 def compose_tool_outputs(
@@ -1714,7 +1871,7 @@ def compose_tool_outputs(
 # would be the silent operator-identity substitution the helper's quit=1
 # exists to stop, one surface over.
 _GH_APP_SHIM = """#!/bin/bash
-# Generated by claudlobby — do not hand-edit (regenerated by generate).
+# Generated by claudlobby — do not hand-edit (replaced by a staged config plan and host activation).
 # gh with the App identity, mechanically (App-auth P3). Mints per call (F5):
 # the token dies in about an hour, so nothing is exported at boot.
 set -euo pipefail
@@ -1736,7 +1893,7 @@ if [ -z "$_real" ]; then
     exit 127
 fi
 if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
-    if ! GH_TOKEN="$("$CLAUDLOBBY_ROOT/lib/mint-github-token.sh")"; then
+    if ! GH_TOKEN="$("$CLAUDLOBBY_NATIVE_DIR/mint-github-token.sh")"; then
         printf 'gh (App shim): mint failed — refusing to fall through to another identity; see stderr above\\n' >&2
         exit 1
     fi
@@ -1755,14 +1912,22 @@ def compose_tools(
     detached tools are removed on every generate; a tool's runtime outputs
     (snapshots, ledgers) belong in data/, which this never touches.
     """
-    outputs = compose_tool_outputs(bot, fleet, paths, bot_dir)
+    outputs = {
+        name: RenderedFile(content, 0o755)
+        for name, content in compose_tool_outputs(bot, fleet, paths, bot_dir).items()
+    }
+    _write_tool_outputs(bot_dir, outputs)
+
+
+def _write_tool_outputs(bot_dir: Path, outputs: dict[str, RenderedFile]) -> None:
+    """Write and reconcile already-rendered tools; never render against a staging path."""
     tools_dir = bot_dir / "tools"
     if outputs:
         tools_dir.mkdir(exist_ok=True)
-    for target_name, content in outputs.items():
+    for target_name, rendered in outputs.items():
         target = tools_dir / target_name
-        target.write_text(content)
-        target.chmod(0o755)
+        target.write_text(rendered.content)
+        target.chmod(rendered.mode)
     if tools_dir.is_dir():
         for existing in sorted(tools_dir.iterdir()):
             if existing.is_file() and existing.name not in outputs:
@@ -1775,9 +1940,7 @@ def compose_tools(
 
 
 def _compose_org_structure(bot: BotConfig, fleet: FleetConfig) -> str | None:
-    """Render the org-structure block for CLAUDE.md when reports_to/manages is set."""
-    if not bot.reports_to and not bot.manages:
-        return None
+    """Name the fleet task owner; reporting metadata does not change routing."""
 
     def _ref(bot_id: str) -> str:
         b = fleet.bots.get(bot_id)
@@ -1785,11 +1948,11 @@ def _compose_org_structure(bot: BotConfig, fleet: FleetConfig) -> str | None:
             return f"{b.name} (`{bot_id}`)"
         return bot_id
 
-    lines: list[str] = []
+    lines = [f"- **Fleet manager:** {_ref(fleet.manager)} (routes fleet-owned work)."]
     if bot.reports_to:
-        lines.append(f"- **Reports to:** {_ref(bot.reports_to)}")
+        lines.append(f"- **Reports to (organizational):** {_ref(bot.reports_to)}")
     if bot.manages:
-        lines.append("- **Direct reports:**")
+        lines.append("- **Direct reports (organizational):**")
         for mid in bot.manages:
             lines.append(f"  - {_ref(mid)}")
     return "\n".join(lines)
@@ -1850,12 +2013,23 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # ----------------------------------------------------------------------
 
 
+def default_roles(bot: BotConfig, fleet: FleetConfig, *, is_manager: bool) -> tuple[str, ...]:
+    """The roles a bot holds for the defaults registry's role overlays: every
+    manager, and the leaf managers among them (``defaults.DETECTABLE_ROLES``).
+    ONE derivation for every entity type's overlay, so the protocols and
+    skills defaults can never disagree about who is a manager."""
+    return ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
+        (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ()
+    )
+
+
 def resolve_effective_protocols(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
     """The protocols a bot is ACTUALLY composed with: the declared list plus
     the system defaults that are available to this fleet (manager-role
-    defaults only for a manager), then the fleet-fit exclusions applied to
+    defaults only for a manager) and the ``requires.protocols`` entries of
+    its effective integrations, then the fleet-fit exclusions applied to
     the FINAL list. ONE definition: the compose path and the plane's
     registry keyframe both call this, so what the registry records is what
     the bot runs with — a keyframe of the declared-only list read every
@@ -1872,15 +2046,25 @@ def resolve_effective_protocols(
     facts = defaults.Facts(
         shared_docs=paths.shared_docs is not None,
         vault_wired=bot_is_vault_wired(bot),
+        telegram_channel=_has_telegram_channel(bot.channels),
     )
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
-        roles = ((defaults.ROLE_MANAGER,) if is_manager else ()) + (
-            (defaults.ROLE_LEAF_MANAGER,) if bot.bot_id in fleet.leaf_manager_bots() else ())
+        roles = default_roles(bot, fleet, is_manager=is_manager)
         for name in defaults.resolve("protocols", roles):
             if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
+    # An integration brings the protocols its ``requires.protocols`` names, so
+    # one ``integrations:`` line equips them and deleting the line removes
+    # them. They join before the exclusions, which apply to them as they do
+    # to a declared protocol.
+    for _name, requires in iter_library_requires(
+        paths, "integrations", resolve_effective_integrations(bot, paths)
+    ):
+        for required in requires.get("protocols", []):
+            if required not in protocol_names:
+                protocol_names.append(required)
     return defaults.resolve_exclusions(protocol_names, facts)
 
 
@@ -1916,8 +2100,12 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
 def resolve_effective_skills(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
 ) -> list[str]:
-    """The skills a bot is ACTUALLY composed with: declared, plus every
-    ``requires.skills`` entry of its EFFECTIVE protocols (spec §10).
+    """The skills a bot is ACTUALLY composed with: declared, the universal
+    ``fleet-ops`` guide, ``briefing`` when it equips a ``briefing:`` stanza,
+    the registry's skill defaults for the bot's roles (``status`` for every
+    manager, #2010) unless the fleet or the bot switched them off, and every
+    ``requires.skills`` entry of its EFFECTIVE protocols and integrations
+    (spec §10).
 
     ONE definition, for the reason ``resolve_effective_protocols`` states two
     functions up: the compose path, the validator, freshbox and the plane's
@@ -1927,10 +2115,41 @@ def resolve_effective_skills(
     declared is not duplicated.
     """
     skills = list(bot.skills)
+    # The operating guide is part of every bot's CLI surface, even when the
+    # manifest disables optional system defaults. Explicit equipment stays
+    # first and is never duplicated.
+    if "fleet-ops" not in skills:
+        skills.append("fleet-ops")
+    # The stanza's timers fire /briefing into the bot's own session; without the
+    # skill Claude Code rejects the command locally and the send reads OK (#1819).
+    if bot.briefing and bot.briefing.slots and "briefing" not in skills:
+        skills.append("briefing")
+    sd = fleet.system_defaults
+    if sd.enabled and sd.skills and bot.system_defaults.skills:
+        # Gate each skill default on availability, as the protocol defaults are
+        # (resolve_effective_protocols): a role default naming a skill the
+        # library lacks must not compose, or it dangles and the validator flags
+        # skill-missing (#2010 follow-up). `status` is available only where the
+        # library provides it.
+        facts = defaults.Facts(
+            shared_docs=paths.shared_docs is not None,
+            vault_wired=bot_is_vault_wired(bot),
+            available_skills=frozenset(paths.expand_skill_folder("")),
+            telegram_channel=_has_telegram_channel(bot.channels),
+        )
+        for name in defaults.resolve(
+            "skills", default_roles(bot, fleet, is_manager=is_manager)
+        ):
+            if defaults.available(name, facts) and name not in skills:
+                skills.append(name)
     protocol_names = resolve_effective_protocols(
         bot, fleet, paths, is_manager=is_manager
     )
-    for _name, requires in iter_library_requires(paths, "protocols", protocol_names):
+    integration_names = resolve_effective_integrations(bot, paths)
+    for _name, requires in (
+        *iter_library_requires(paths, "protocols", protocol_names),
+        *iter_library_requires(paths, "integrations", integration_names),
+    ):
         for required in requires.get("skills", []):
             if required not in skills:
                 skills.append(required)
@@ -1940,6 +2159,81 @@ def resolve_effective_skills(
 # ----------------------------------------------------------------------
 # CLAUDE.md composition (template-driven)
 # ----------------------------------------------------------------------
+
+
+def claude_md_items(
+    bot: BotConfig, paths: Paths, ctx: dict[str, str], *, protocol_names: list[str]
+) -> dict[str, list[LibraryItem]]:
+    """The library items a bot's CLAUDE.md composes, by template slot, each
+    expanded and carrying its ``source_path``. One definition for the render
+    and for :func:`composed_text_sources`, so what the scan reads is what the
+    bot is told."""
+
+    def _items(names: list[str], kind: str) -> list[LibraryItem]:
+        return [
+            _expand_item(it, ctx)
+            for it in load_library_items_overlay(names, paths, kind)
+        ]
+
+    return {
+        "resources": _items(bot.resources, "resources"),
+        "integrations": _items(
+            resolve_effective_integrations(bot, paths), "integrations"
+        ),
+        "principles": _items(bot.principles, "principles"),
+        "permissions": _items(bot.permissions, "permissions"),
+        "protocols": _items(protocol_names, "protocols"),
+        "guardrails": _items(bot.guardrails, "guardrails"),
+        "lessons": _items(bot.lessons, "lessons"),
+        "post_actions": _items(bot.post_actions, "post_actions"),
+    }
+
+
+def composed_text_sources(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[tuple[Path, str]]:
+    """``(source file, text)`` for everything a bot is TOLD: the expertise,
+    voice and library items its CLAUDE.md composes, the charter a manager
+    composes, every markdown file of every skill it is linked and the shared
+    partials beside those skills (the text a skill hands the model). Scripts
+    are left out on purpose: the model runs a script, it does not retype its
+    lines, and a deny rule never gates what a script does itself."""
+    ctx = _bot_template_context(bot, fleet, paths)
+    is_manager = bot.bot_id in fleet.manager_bots()
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+
+    def _add_file(told: Path | None) -> None:
+        if told is not None and told.is_file() and told not in seen:
+            seen.add(told)
+            try:
+                out.append((told, told.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                pass
+
+    for area in bot.expertise:
+        _add_file(paths.find_library_file("expertise", area, ".md"))
+    if bot.voice:
+        _add_file(paths.find_voice_file(bot.voice))
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager
+    )
+    # The FILE, not the loaded body: a finding must point at the file's own
+    # line, and the loader strips the frontmatter and the H1 above it.
+    for items in claude_md_items(
+        bot, paths, ctx, protocol_names=protocol_names
+    ).values():
+        for it in items:
+            _add_file(it.source_path)
+    if fleet.mission_file and is_manager:
+        _add_file(paths.fleet_config_dir / fleet.mission_file)
+    skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
+    for src in resolve_skill_sources(paths, skills, lambda _msg: None).values():
+        for md in sorted(src.rglob("*.md")):
+            _add_file(md)
+    for partial in paths.skill_partials().values():
+        _add_file(partial)
+    return out
 
 
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
@@ -1956,18 +2250,12 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if voice_item is not None:
                 voice_item = _expand_item(voice_item, ctx)
 
-    def _items(names: list[str], kind: str) -> list[LibraryItem]:
-        return [
-            _expand_item(it, ctx)
-            for it in load_library_items_overlay(names, paths, kind)
-        ]
-
-    integration_names = resolve_effective_integrations(bot, paths)
-
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+    # The role test compose_settings_local denies the sudo family on.
+    privilege_runners = () if is_manager else PRIVILEGE_RUNNERS
 
     # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
     # than named here. This used to be a literal `append("shared-documentation")`
@@ -2007,7 +2295,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if "\n" in p.title or "|" in p.title:
             raise ValueError(
                 f"project '{p.key}': title contains newline or '|' — refusing "
-                f"to render it into CLAUDE.md (run claudlobby validate)"
+                f"to render it into CLAUDE.md (run claudlobby config validate)"
             )
 
     # Fleet-mission extra content under the paragraph, decided in ONE place:
@@ -2022,7 +2310,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         # composed instructions.
         raise ValueError(
             "fleet.mission contains newlines — refusing to render it into "
-            "CLAUDE.md (run claudlobby validate)"
+            "CLAUDE.md (run claudlobby config validate)"
         )
     if fleet.mission_file:
         charter = paths.fleet_config_dir / fleet.mission_file
@@ -2052,15 +2340,10 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         projects_derived=fleet.projects_derived,
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
+        privilege_runners=privilege_runners,
+        fleet_ops_body=compose_fleet_ops_orientation(bot, fleet, paths),
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
-        resources=_items(bot.resources, "resources"),
-        integrations=_items(integration_names, "integrations"),
-        principles=_items(bot.principles, "principles"),
-        permissions=_items(bot.permissions, "permissions"),
-        protocols=_items(protocol_names, "protocols"),
-        guardrails=_items(bot.guardrails, "guardrails"),
-        lessons=_items(bot.lessons, "lessons"),
-        post_actions=_items(bot.post_actions, "post_actions"),
+        **claude_md_items(bot, paths, ctx, protocol_names=protocol_names),
     )
     # Collapse 3+ blank lines → 2 to keep output tidy.
     while "\n\n\n\n" in rendered:
@@ -2122,35 +2405,37 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
 # approaches this, the held #1123 lazy-import branch lands before arming).
 BRIEF_HOOK_TIMEOUT_S = 10
 
+#: The heavy-job slot's PreToolUse hook (#1686), composed for a bot that set
+#: `heavy_slot: true` and for no other. Its script and the wrapper it inserts
+#: are the selected release's native code, like every other composed bot hook;
+#: the slot itself is host state under the data root.
+HEAVY_SLOT_HOOK = "$CLAUDLOBBY_NATIVE_DIR/heavy-slot-guard.sh"
+
+#: The public-write guard's PreToolUse hook, composed for a bot that set
+#: `public_write_guard: true` and for no other. It matches Bash and every
+#: GitHub MCP tool. Its script and decider are the selected release's native
+#: code; the host's list, its off switch and its cache are read per use.
+PUBLIC_WRITE_GUARD_HOOK = "$CLAUDLOBBY_NATIVE_DIR/public-write-guard.sh"
+PUBLIC_WRITE_GUARD_MATCHER = "Bash|mcp__.*github.*"
+
 
 @functools.cache
-def _brief_cli_probe() -> tuple[str | None, str]:
-    """(certified executable, "") — or (None, why) when arming must refuse.
-
-    The compose-time arming gate: a subprocess probe of the PATH-resolved
-    binary, never an import check of THIS package — composed settings outlive
-    installs on this estate (the merged-but-not-installed gap was measured
-    live during R3-F1 ratification, #1102), so probing our own parser would
-    certify the wrong artifact. The returned path is composed into the hook
-    verbatim (the C2 absolute-path contract `_resolve_claudron_executable`
-    states for this same settings file), so the certified artifact and the
-    runtime artifact are one object.
-
-    The ``--boot`` containment check reads argparse's own generated help — the
-    option's self-description, not a source grep. Cached: host-invariant
-    within one compose process, and it runs per armed bot across generate,
-    validate, and freshbox otherwise.
-    """
-    import shutil
-    import subprocess
-
-    exe = shutil.which("claudlobby")
-    if exe is None:
-        return None, "no `claudlobby` on PATH at compose time"
+def _brief_cli_probe(installation=None, source: Path | None = None) -> tuple[str | None, str]:
+    """Certify and pin the selected release CLI, never a stale PATH entry."""
     try:
-        r = subprocess.run(
-            [exe, "brief", "--help"], capture_output=True, text=True, timeout=15
-        )
+        exe = str(selected_cli(installation=installation) if installation is not None else selected_cli())
+    except RuntimeError as exc:
+        return None, str(exc)
+    try:
+        # Probe candidate code, but emit the stable destination. The active
+        # installation may still be running the previous commit during render.
+        argv = [exe, "brief", "--help"]
+        if installation is not None:
+            argv = [sys.executable, "-I", "-B", "-c",
+                    "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
+                    "runpy.run_module('claudlobby',run_name='__main__')",
+                    str(source), "brief", "--help"]
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"probing `claudlobby brief --help` failed: {e}"
     if r.returncode != 0:
@@ -2192,7 +2477,8 @@ def _with_brief_boot_hook(
     fleet_arg = f" --fleet {fleet}" if fleet else ""
     fallback = (
         f'echo "fleet-brief unavailable (rc $?) — '
-        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
+        f'claudlobby{fleet_arg} brief --bot {bot_id} --startup-wait 120; '
+        f'use a Bash tool timeout of 180000 ms for this one read"'
     )
     cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
     out = {k: list(v) for k, v in hooks.items()}
@@ -2201,6 +2487,36 @@ def _with_brief_boot_hook(
         entries.append(
             {"command": cmd, "matcher": matcher, "timeout": BRIEF_HOOK_TIMEOUT_S}
         )
+    return out
+
+
+def _with_heavy_slot_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the heavy-job
+    slot's PreToolUse entry appended, matcher ``Bash`` (#1686).
+
+    Composed only for a bot whose ``heavy_slot`` is true: a composed hook is
+    live on every bot the moment ``generate`` writes it (#1310), so composing
+    it per bot is what makes the manifest key a canary, and a bot that did not
+    opt in runs no process for it at all."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append({"command": HEAVY_SLOT_HOOK, "matcher": "Bash"})
+    return out
+
+
+def _with_public_write_guard_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the public-write
+    guard's PreToolUse entry appended, matched on Bash and the GitHub MCP tools.
+
+    Composed only for a bot whose ``public_write_guard`` is true, for the same
+    reason as the heavy-job slot: a composed hook is live on every bot the
+    moment ``generate`` writes it (#1310), so the manifest key is the canary."""
+    out = {k: list(v) for k, v in hooks.items()}
+    out.setdefault("PreToolUse", []).append(
+        {"command": PUBLIC_WRITE_GUARD_HOOK, "matcher": PUBLIC_WRITE_GUARD_MATCHER})
     return out
 
 
@@ -2296,21 +2612,56 @@ def _resolve_claudron_executable() -> tuple[str, str | None]:
     )
 
 
-def _claudron_hook_entries(executable: str) -> dict[str, list]:
+def _claudron_hook_vault_root(bot: BotConfig, bot_dir: Path) -> str | None:
+    """The absolute vault root a vault-wired bot's hook commands name, or None.
+
+    ``~`` is expanded here because nothing downstream expands it: the engine
+    reads the address as ``Path(hint).resolve()``, and a shell does not expand
+    a quoted ``~``, so ``~/vault`` would name a directory called ``~`` under
+    the hook's cwd. A relative path is anchored at the bot dir, where a
+    session runs and so where its ``CLAUDRON_VAULT_PATH`` export resolves it.
+    Symlinks are left to the engine, which resolves them at run time.
+    """
+    if not bot.claudron_vault_path:
+        return None
+    return str(bot_dir / Path(bot.claudron_vault_path).expanduser())
+
+
+def claudron_session_loop_composed(bot: BotConfig, bot_dir: Path) -> bool:
+    """Whether a compose adds the engine's session-loop hooks, its ``hook
+    pre-compact`` among them, to this bot's settings (#1053).
+
+    One test for the three places that state it: the hook merge in
+    ``compose_settings_local``, ``CLAUDRON_SESSION_LOOP`` in ``bot.conf``, and
+    ``bot show``'s ``precompact`` block. The loop resolves on and a vault root
+    resolves; an explicit ``claudron_session_loop: true`` with no vault composes
+    no hook, so it reads false here too.
+    """
+    return _session_loop_enabled(bot) and _claudron_hook_vault_root(bot, bot_dir) is not None
+
+
+def _claudron_hook_entries(executable: str, vault_root: str) -> dict[str, list]:
     """The engine's session-loop hook entries in Claude Code settings shape.
 
     Emitted INLINE (never by shelling ``claudron hooks install``) so composition
     works on a CLI-less host. Byte-for-byte identical to the pinned engine's
-    ``claudron.hooks.settings_snippet(executable)["hooks"]`` — the parity gate
-    in tests/test_claudron_loop.py enforces that.
+    ``claudron.hooks.settings_snippet(executable, vault_root)["hooks"]`` — the
+    parity gate in tests/test_claudron_loop.py enforces that.
+
+    Each command names its vault with the global ``--vault``, ahead of the
+    ``hook <event>`` identity suffix (Claudron #183): walk-up binds only a
+    directory carrying ``.claudron-vault``, so an address is what makes the
+    hook independent of the environment and cwd it was launched with. The
+    root is shell-quoted, because Claude Code runs the command through a
+    shell; the executable is not, as in the engine, which treats it as a
+    command prefix.
     """
+    prefix = f"{executable} --vault {shlex.quote(vault_root)}"
     return {
         event: [
             {
                 "matcher": "",
-                "hooks": [
-                    {"type": "command", "command": f"{executable} hook {event_cmd}"}
-                ],
+                "hooks": [{"type": "command", "command": f"{prefix} hook {event_cmd}"}],
             }
         ]
         for event, event_cmd in _CLAUDRON_HOOK_EVENTS.items()
@@ -2320,14 +2671,17 @@ def _claudron_hook_entries(executable: str) -> dict[str, list]:
 def _is_claudron_hook_entry(group: dict, event_cmd: str) -> bool:
     """A claudron entry's identity is its ``hook <event>`` command SUFFIX, not the
     full string (mirrors the engine's ``merge_settings`` key). Keying on the full
-    path would append a duplicate whenever the resolved executable moved."""
+    string would append a duplicate whenever the resolved executable or the
+    bot's vault moved."""
     return any(
         str(h.get("command", "")).endswith(f"hook {event_cmd}")
         for h in (group.get("hooks") or [])
     )
 
 
-def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, list]:
+def _merge_claudron_hooks(
+    hooks: dict[str, list], executable: str, vault_root: str
+) -> dict[str, list]:
     """Merge the engine's session-loop entries into a composed hooks block.
 
     Self-replacing per event (a stale claudron entry for the same event is
@@ -2337,7 +2691,7 @@ def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, 
     composer-installed loop converge on the same file. Idempotent.
     """
     merged = dict(hooks)
-    for event, entries in _claudron_hook_entries(executable).items():
+    for event, entries in _claudron_hook_entries(executable, vault_root).items():
         event_cmd = _CLAUDRON_HOOK_EVENTS[event]
         kept = [
             g
@@ -2372,6 +2726,33 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
+def _configured_resume_command(bot: BotConfig) -> str:
+    """Authored command, not runtime discovery; preserve explicit empty."""
+    return bot.env.get("SESSION_RESUME_COMMAND", DEFAULT_SESSION_RESUME_COMMAND)
+
+
+def _resolve_resume_permission(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                               effective_skills: list[str]) -> list[str]:
+    """Grant only the configured entry's whole Skill invocation.
+
+    Equipment is authored here; installed/callable proof remains the runtime
+    capability owner's job. No .env/account reads or native permission matcher.
+    A runtime-only override needs its own explicit tool_permissions.allow.
+    """
+    first = _configured_resume_command(bot).partition(" ")[0]
+    if not re.fullmatch(r"/[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?", first):
+        return []
+    name = first[1:]
+    if ":" in name:
+        plugin = name.split(":", 1)[0]
+        selected = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+        if not any(ref.split("@", 1)[0] == plugin for ref in selected):
+            return []
+    elif name not in resolve_skill_sources(paths, effective_skills, _log.warning):
+        return []
+    return [f"Skill({name})"]
+
+
 def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     """Auto-derive Skill() permission patterns from a resolved skill list.
 
@@ -2387,7 +2768,9 @@ def _resolve_skill_permissions(skills: list[str]) -> list[str]:
     return patterns
 
 
-def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
+def _resolve_skill_grants(
+    skills: list[str], paths: Paths, key: str = "tool_grants"
+) -> list[str]:
     """Additive ``tool_grants`` declared by the resolved skill list (F2/F6).
 
     :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
@@ -2398,13 +2781,90 @@ def _resolve_skill_grants(skills: list[str], paths: Paths) -> list[str]:
     ``tool_grants`` path; de-duplication against the allow list happens in
     :func:`compose_settings_local`. Takes the EFFECTIVE skill list
     (:func:`resolve_effective_skills`), never ``bot.skills`` directly — same
-    reason as :func:`_resolve_skill_permissions`.
+    reason as :func:`_resolve_skill_permissions`. ``key`` reads the skills'
+    ``ask_grants`` or ``deny_grants`` instead (#2476).
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, skills)
+        for _name, grants in iter_skill_grants(paths, skills, key=key)
         for grant in grants
     ]
+
+
+def _resolve_fleet_ops_grants(bot: BotConfig, fleet: FleetConfig) -> list[str]:
+    """Narrow work and lifecycle grants for the selected bot's fleet role.
+
+    The CLI resolves generated bot origin and task ownership; these exact
+    command prefixes do not grant an explicit ``--fleet`` target, a host verb,
+    or a general shell. Keep this named resolver visible to freshbox's
+    independent source audit, rather than adding grants only at compose time.
+    """
+    grants = [
+        "Bash(claudlobby --json config validate)",
+        "Bash(claudlobby --json task admit *)",
+        "Bash(claudlobby --json assignment accept *)",
+        "Bash(claudlobby --json assignment progress *)",
+        "Bash(claudlobby --json assignment block *)",
+        "Bash(claudlobby --json assignment return *)",
+        "Bash(claudlobby --json assignment complete *)",
+        "Bash(claudlobby --json assignment fail *)",
+        "Bash(claudlobby --json workstream list)",
+        "Bash(claudlobby --json workstream show *)",
+    ]
+    if bot.bot_id in fleet.manager_bots():
+        grants.extend((
+            "Bash(claudlobby --json task assign *)",
+            "Bash(claudlobby --json assignment deliver *)",
+            "Bash(claudlobby --json task withdraw *)",
+            "Bash(claudlobby --json task reassign *)",
+            "Bash(claudlobby --json assignment reschedule *)",
+            "Bash(claudlobby --json task escalate *)",
+            "Bash(claudlobby --json task nudge *)",
+            "Bash(claudlobby --json task move *)",
+            "Bash(claudlobby --json workstream open *)",
+            "Bash(claudlobby --json workstream progress *)",
+            "Bash(claudlobby --json workstream renew *)",
+            "Bash(claudlobby --json workstream block *)",
+            "Bash(claudlobby --json workstream unblock *)",
+            "Bash(claudlobby --json workstream close *)",
+            "Bash(claudlobby --json workstream prune *)",
+        ))
+    if bot.bot_id == fleet.manager:
+        grants.append("Bash(claudlobby --json fleet reload)")
+        grants.append("Bash(claudlobby --json fleet pulse)")
+        grants.append("Bash(claudlobby --json event list)")
+        grants.append("Bash(claudlobby --json event list *)")
+        grants.append("Bash(claudlobby --json event show *)")
+        grants.append("Bash(claudlobby --json fleet logs)")
+        grants.append("Bash(claudlobby --json fleet logs --lines *)")
+        grants.append("Bash(claudlobby --json fleet notify --level * --event * --message *)")
+        for verb in ("start", "stop", "restart"):
+            grants.append(f"Bash(claudlobby --json fleet {verb} --workers)")
+        # The public lifecycle guard admits only this exact manager operating
+        # another declared bot. Enumerate targets to avoid a wildcard mutation.
+        for target in fleet.bots:
+            if target == bot.bot_id:
+                continue
+            grants.append(f"Bash(claudlobby --json bot session {target})")
+            grants.append(f"Bash(claudlobby --json bot logs {target})")
+            grants.append(f"Bash(claudlobby --json bot logs {target} --lines *)")
+            grants.append(f"Bash(claudlobby --json bot handoff {target})")
+            grants.append(f"Bash(claudlobby --json bot handoff {target} --check)")
+            grants.append(f"Bash(claudlobby --json bot interrupt {target})")
+            grants.append(f"Bash(claudlobby --json bot compact {target})")
+            for verb in ("start", "stop", "restart"):
+                grants.append(f"Bash(claudlobby --json bot {verb} {target})")
+            grants.append(f"Bash(claudlobby --json bot stop {target} --reason *)")
+            grants.append(f"Bash(claudlobby --json bot restart {target} --ceiling *)")
+            grants.append(f"Bash(claudlobby --json bot restart {target} --fresh)")
+    # Any generated bot can request only its own restart: continuing its session,
+    # or into a fresh one that resumes from its saved handoff (#2696).
+    grants.append(f"Bash(claudlobby --json bot session {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot logs {bot.bot_id} --lines *)")
+    grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id})")
+    grants.append(f"Bash(claudlobby --json bot restart {bot.bot_id} --fresh)")
+    return grants
 
 
 # Full tool set an ``allow_all`` permission profile expands to.
@@ -2515,6 +2975,21 @@ def _resolve_guardrail_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
+#: The sudo family, which a worker may not run and its fleet manager may: a
+#: worker's settings deny each command (``WORKER_SUDO_DENY``), and its
+#: CLAUDE.md names them with what to do when the deny refuses one.
+PRIVILEGE_RUNNERS = ("sudo", "sudoedit", "su", "pkexec", "doas", "run0")
+
+#: The sudo family a worker's settings deny, each command by bare name and by
+#: absolute path. A guard rail, not a wall: the routes it cannot see are in
+#: ``documentation/decisions/permissions-model.md`` (Workers' privilege denies).
+WORKER_SUDO_DENY = tuple(
+    f"Bash({prefix}{name} *)"
+    for name in PRIVILEGE_RUNNERS
+    for prefix in ("", "/usr/bin/", "/bin/")
+)
+
+
 def _assert_grant_superset(bot_id: str, legacy: list[str], new: list[str]) -> None:
     """Fail generation unless the new integration ``tool_grants`` cover every legacy grant.
 
@@ -2560,10 +3035,35 @@ def compose_settings_local(
 
     settings: dict = {
         "autoMemoryDirectory": memory_dir,
+        # The data root's developer guide is outside the bot's sealed release.
+        # Exclude only that file, preserving bot and project instructions (#2057).
+        "claudeMdExcludes": [str(paths.root / "CLAUDE.md")],
     }
 
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
+
+    # Operator-only doors, destructive or deciding for a human, are never bot
+    # equipment. These narrow command denies catch ordinary direct invocations
+    # before the CLI guard; native ancestry still supplies the selected-host
+    # accidental-context check. A bot's own permission verbs (request, check,
+    # show) stay reachable.
+    deny_patterns.extend((
+        "Bash(claudlobby bot remove *)", "Bash(claudlobby * bot remove *)",
+        "Bash(claudlobby fleet move *)", "Bash(claudlobby * fleet move *)",
+        "Bash(claudlobby host job run *)", "Bash(claudlobby * host job run *)",
+        "Bash(claudlobby host repos pull *)", "Bash(claudlobby * host repos pull *)",
+        "Bash(claudlobby host channels approve*)", "Bash(claudlobby * host channels approve*)",
+        "Bash(claudlobby host owner *)", "Bash(claudlobby * host owner *)",
+        "Bash(claudlobby task permission approve*)", "Bash(claudlobby * task permission approve*)",
+        "Bash(claudlobby task permission decline*)", "Bash(claudlobby * task permission decline*)",
+        "Bash(claudlobby task permission revoke*)", "Bash(claudlobby * task permission revoke*)",
+    ))
+
+    # Workers may not raise their own privileges; the fleet manager may.
+    is_manager = bot.bot_id in fleet.manager_bots()
+    if not is_manager:
+        deny_patterns.extend(WORKER_SUDO_DENY)
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
     # dir. Two rules, both DOUBLE-slash, and every part of that shape is a fix
@@ -2602,6 +3102,22 @@ def compose_settings_local(
             )
         )
 
+    # Layer 0b: shared-config isolation (#1665), OPT-IN per bot. The bot dir
+    # Layer 0 names is not where most cross-bot content lives: transcripts,
+    # the prompt history, the credential, the account config, the .env tiers,
+    # the install's code and the shared settings surfaces do. isolation.py
+    # derives the rules and states their bound: they gate Claude's own tool
+    # calls, never a process, so they reduce accidental reads and are not
+    # confidentiality. Every note is a place the set falls short, said here
+    # on every generate and by freshbox and validate.
+    if bot.isolation.shared_config:
+        from .isolation import layer0b
+
+        result = layer0b(bot, fleet, paths)
+        for note in result.notes:
+            _log.warning("bot %s: Layer 0b: %s", bot.bot_id, note)
+        _append_unique(deny_patterns, result.deny)
+
     # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
     # schema). Guardrails are usually deny-only; their rare allows join Layer 2.
     guardrail_allow, guardrail_deny = _resolve_guardrail_permissions(bot, paths)
@@ -2631,7 +3147,19 @@ def compose_settings_local(
     # alone already covers legacy, the precondition for cutting _permissions_contract.
     legacy_grants = _resolve_mcp_permissions(bot, paths)
     integration_grants = _resolve_integration_grants(bot, paths)
-    _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
+    # A deprecated fragment keeps granting its reads from its own contract until it
+    # is removed, and no integration is meant to cover them, so the gate skips it.
+    deprecated = tuple(
+        f"mcp__{entry.output_name(instance)}__"
+        for entry in bot.mcp
+        if _mcp_deprecation(paths, entry.name) is not None
+        for instance in entry.instances
+    )
+    _assert_grant_superset(
+        bot.bot_id,
+        [g for g in legacy_grants if not g.startswith(deprecated)],
+        integration_grants,
+    )
     _append_unique(allow_patterns, (*legacy_grants, *integration_grants))
 
     # Layer 4: Channel/plugin tools (auto-derived from config)
@@ -2639,18 +3167,18 @@ def compose_settings_local(
 
     # Layer 5: Skill patterns (auto-derived from the EFFECTIVE skill set —
     # declared, plus every requires.skills entry of the bot's effective
-    # protocols, spec §10 — computed once and shared with layer 5b so a
-    # required skill is granted exactly like a declared one, never only
-    # linked (cycle-1 B8)).
-    effective_skills = resolve_effective_skills(
-        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
-    )
+    # protocols and integrations, spec §10 — computed once and shared with
+    # layer 5b so a required skill is granted exactly like a declared one,
+    # never only linked (cycle-1 B8)).
+    effective_skills = resolve_effective_skills(bot, fleet, paths, is_manager=is_manager)
     allow_patterns.extend(_resolve_skill_permissions(effective_skills))
+    _append_unique(allow_patterns, _resolve_resume_permission(bot, fleet, paths, effective_skills))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
     # additive path; Skill(<name>) above only grants invocation.
     _append_unique(allow_patterns, _resolve_skill_grants(effective_skills, paths))
+    _append_unique(allow_patterns, _resolve_fleet_ops_grants(bot, fleet))
 
     # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
     # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
@@ -2660,24 +3188,36 @@ def compose_settings_local(
     if _session_loop_enabled(bot):
         _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
 
-    # Layer 5d: the exact read the DEFAULT boot prompt names (#1633). The
-    # bot's own read, no wildcard: reusing the checkin skill's
-    # `Bash(claudlobby --fleet * brief *)` would widen every such bot's
-    # surface to any fleet's brief for any bot. Named resolver (see its own
-    # docstring) so freshbox's independent re-derivation can see it too.
-    _append_unique(allow_patterns, _resolve_default_boot_grant(bot, paths))
-
     # Union-layer write guardrail: with every library-derived layer accumulated
-    # (and before the operator's tools.allow escape hatch below), nothing may
+    # (and before the operator's tool_permissions.allow escape hatch below), nothing may
     # cover a non-read tool of a read-only-contracted server (#661).
     _assert_no_write_autoallows(bot, paths, allow_patterns)
 
-    # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
+    # Layer 6/7: Explicit tool_permissions.allow from fleet defaults + bot config
     _append_unique(allow_patterns, bot.tool_permissions.allow)
 
     # Bot-level deny wins over all allow layers
     bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
+
+    # Ask and deny rules that skills and integrations declare (#2476). An ask
+    # rule prompts in every permission mode, auto included, even where an allow
+    # rule also matches, so no library grant can allow what a source asks about.
+    # The fleet grants an asked rule by naming it, exactly, under
+    # tool_permissions.allow, which drops it from the ask list. A list that would
+    # not compose as written raises ValueError naming its source
+    # (loader._read_tool_grants), so no rule of it reaches the settings.
+    fleet_allow = set(bot.tool_permissions.allow)
+    ask_patterns: list[str] = []
+    _append_unique(
+        ask_patterns, _resolve_skill_grants(effective_skills, paths, key="ask_grants")
+    )
+    _append_unique(ask_patterns, _resolve_integration_rules(bot, paths, "ask_grants"))
+    ask_patterns = [p for p in ask_patterns if p not in fleet_allow]
+    _append_unique(
+        deny_patterns, _resolve_skill_grants(effective_skills, paths, key="deny_grants")
+    )
+    _append_unique(deny_patterns, _resolve_integration_rules(bot, paths, "deny_grants"))
 
     # Ensure base tools are present whenever allow list is non-empty
     # (settings.local.json allow REPLACES global — without these, bots lose basic access)
@@ -2689,7 +3229,9 @@ def compose_settings_local(
     # L1 source guard (#702) — an ALLOW grant carrying an absolute path must
     # anchor it (${FLEET_ROOT}/…) or declare it (external_paths), same as any
     # other source value: granting access to a raw absolute is the self-containment
-    # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
+    # violation (it dangles the moment the fleet runs elsewhere). An ASK rule is
+    # held to the same line (#2476): one that dangles stops matching, and the
+    # command it gated then runs unasked, by the classifier in auto. Deny grants are
     # restrictions, not wiring-to-a-path, so they are not classified — which also
     # sidesteps the composer-derived sibling-isolation denies above (a resolved
     # absolute the composer emits, never a source). No composer-derived allow layer
@@ -2705,7 +3247,7 @@ def compose_settings_local(
     )
 
     grant_findings: list[SourceFinding] = []
-    for grant in allow_patterns:
+    for grant in allow_patterns + ask_patterns:
         for denied in classify_grant_paths(grant, bot.external_paths):
             grant_findings.append(
                 SourceFinding(
@@ -2719,15 +3261,17 @@ def compose_settings_local(
     if grant_findings:
         raise source_findings_error(bot.bot_id, grant_findings)
 
+    # Keys in evaluation order: deny, then ask, then allow. ``ask`` is written
+    # only when a rule survives, so a bot with none keeps the old file shape.
+    permissions: dict = {}
     if deny_patterns:
-        permissions: dict = {"deny": deny_patterns}
-        if allow_patterns:
-            permissions["allow"] = allow_patterns
+        permissions["deny"] = deny_patterns
+    if ask_patterns:
+        permissions["ask"] = ask_patterns
+    if allow_patterns:
+        permissions["allow"] = allow_patterns
+    if permissions:
         settings["permissions"] = permissions
-    elif allow_patterns:
-        settings["permissions"] = {
-            "allow": allow_patterns,
-        }
 
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}
@@ -2765,7 +3309,9 @@ def compose_settings_local(
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
     bot_hooks = bot.hooks
     if bot.brief_on_start:
-        exe, why = _brief_cli_probe()
+        installation = paths.package.installation
+        exe, why = (_brief_cli_probe(installation, paths.package.system_yaml.parent.parent)
+                    if installation is not None else _brief_cli_probe())
         if exe is None:
             raise ValueError(
                 f"bot {bot.bot_id}: brief.on_start is set but the installed "
@@ -2784,19 +3330,42 @@ def compose_settings_local(
             exe,
             fleet=paths.fleet_dir.name if paths.fleet_dir else None,
         )
+    if bot.heavy_slot:
+        bot_hooks = _with_heavy_slot_hook(bot_hooks)
+    if bot.public_write_guard:
+        bot_hooks = _with_public_write_guard_hook(bot_hooks)
+    # Native continuation metadata is lifecycle state, independent of optional
+    # model skills/brief hooks. The hook is silent and never requests a turn.
+    installation = paths.package.installation
+    if installation is not None:
+        bot_hooks = {key: list(value) for key, value in bot_hooks.items()}
+        capture = shlex.join([str(installation.cli), "--root", str(paths.root), "_native-session", "capture",
+                              str(bot_dir), f"{fleet.service_prefix}.{bot.bot_id}", _TMUX_TMPDIR])
+        bot_hooks.setdefault("SessionStart", []).append({"command": capture, "timeout": 10})
     hooks = _compose_hooks(bot_hooks)
-    if _session_loop_enabled(bot):
+    # No vault, no hooks: an explicit `claudron_session_loop: true` with no
+    # `claudron_vault_path` has no address to render. The engine refuses to
+    # install such a loop (Claudron #183), and the validator errors on it, so
+    # generate stops before it gets here; the loud refusal is the validator's.
+    vault_root = _claudron_hook_vault_root(bot, bot_dir)
+    if claudron_session_loop_composed(bot, bot_dir):
         executable, warning = _resolve_claudron_executable()
         if warning:
             _log.warning("bot %s: %s", bot.bot_id, warning)
-        hooks = _merge_claudron_hooks(hooks, executable)
+        hooks = _merge_claudron_hooks(hooks, executable, vault_root)
     if hooks:
         settings["hooks"] = hooks
 
-    # Plugins — enabledPlugins + extraKnownMarketplaces from fleet config
-    if fleet.plugins.required:
-        settings["enabledPlugins"] = {plugin: True for plugin in fleet.plugins.required}
-    if fleet.plugins.marketplaces:
+    # A local settings file inherits account-level plugin enablement. Bind every
+    # inherited key to this bot's selected equipment instead of allowing a
+    # channel-less bot to load a host-enabled channel plugin.
+    selected_plugins = set(fleet.plugins.required) | set(_channel_plugins(bot.channels))
+    inherited_plugins = _account_enabled_plugins(bot, fleet, paths)
+    settings["enabledPlugins"] = {
+        plugin: plugin in selected_plugins
+        for plugin in sorted(inherited_plugins | selected_plugins)
+    }
+    if fleet.plugins.marketplaces and fleet.plugins.startup_policy == "manage":
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
     # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.
@@ -2819,7 +3388,52 @@ def compose_settings_local(
         bot.skip_dangerous_mode_permission_prompt
     )
 
+    # #1388: once auto mode has blocked several actions, Claude Code ends a turn
+    # on "Teach auto mode about your environment?", which nobody at a bot's pane
+    # answers, and an accepted draft would land in the host-shared
+    # ~/.claude/settings.json. "off" removes /auto-mode-setup and that offer.
+    # fleet.yaml-overridable per skill, under defaults: or per bot.
+    if bot.skill_overrides:
+        settings["skillOverrides"] = dict(bot.skill_overrides)
+
+    # #1388: on a model with a native 1M window, Claude Code can end a turn past
+    # 200k tokens on "Want to autocompact at 400k tokens instead?", which nobody
+    # at a bot's pane answers. The answer is kept per account and model, so a
+    # new one asks again. A window set outside user settings stops the asking.
+    # "auto" names Claude Code's own window for each model it can ask about, the
+    # window it uses with nothing set; a number caps every model's window.
+    if bot.auto_compact_window == "auto":
+        settings["modelSettings"] = {
+            model: {"autoCompactWindow": "auto"} for model in NATIVE_1M_MODELS
+        }
+    else:
+        settings["autoCompactWindow"] = bot.auto_compact_window
+
     return settings
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a write that fails part-way leaves the old file whole.
+
+    The file keeps the mode it had, and a new one is created 0600, as the Telegram plugin
+    creates access.json. The temporary file is new and uniquely named, because the plugin
+    writes ``access.json.tmp`` itself, and it has that mode before any text reaches it, so
+    the rename never hands the file the default mode.
+    """
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o600
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        os.chmod(tmp, mode)
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _reconcile_access_json(
@@ -2853,25 +3467,106 @@ def _reconcile_access_json(
             log(msg)
         return
 
+    reconciled = reconcile_access_content(existing, fresh, bot, fleet)
+    _write_atomic(access_path, json.dumps(reconciled, indent=2) + "\n")
+
+
+def reconcile_access_content(
+    existing: dict, fresh: dict, bot: BotConfig, fleet: FleetConfig,
+) -> dict:
+    """Reconcile fleet-controlled Telegram fields without mutating either input."""
+    reconciled = copy.deepcopy(existing)
     chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
-    existing["dmPolicy"] = fresh["dmPolicy"]
+    reconciled["dmPolicy"] = fresh["dmPolicy"]
 
     if chat_id:
-        existing.setdefault("groups", {})
-        if chat_id in existing["groups"]:
-            existing["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
+        reconciled.setdefault("groups", {})
+        if chat_id in reconciled["groups"]:
+            reconciled["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
         else:
-            existing["groups"][chat_id] = {
+            reconciled["groups"][chat_id] = {
                 "requireMention": bot.telegram.require_mention,
                 "allowFrom": [],
             }
 
     if fleet.human_telegram_id:
-        allow = existing.setdefault("allowFrom", [])
+        allow = reconciled.setdefault("allowFrom", [])
         if fleet.human_telegram_id not in allow:
             allow.append(fleet.human_telegram_id)
 
-    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+    return reconciled
+
+
+def render_bot_files(
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    *,
+    boot_delay_s: int | None = None,
+    cascade: dict | None = None,
+) -> dict[str, RenderedFile | None]:
+    """Render and validate bot-relative artifacts without changing files or config.
+
+    Paths describe the real destination even when a caller will stage the bytes
+    elsewhere. None means an optional git artifact must be absent. Links and
+    Telegram state are reconciled separately by their owners.
+    """
+    from .path_audit import (
+        _wiring_files, _without_deny_rules, assert_bot_sources, improper_fleet_paths,
+    )
+
+    bot_dir = paths.assert_writable(paths.bot_runtime(bot.bot_id))
+    for name in (".claude", ".claude/skills", ".cli", ".cli/bin", "memory", "projects",
+                 "data", "data/events", "logs", "tools"):
+        paths.assert_writable(bot_dir / name)
+    assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
+    if boot_delay_s is None:
+        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
+
+    mcp = compose_mcp_json(bot, paths)
+    files: dict[str, RenderedFile | None] = {
+        "CLAUDE.md": RenderedFile(compose_claude_md(bot, fleet, paths)),
+        ".mcp.json": RenderedFile(json.dumps(mcp, indent=2) + "\n"),
+        "bot.conf": RenderedFile(compose_bot_conf(bot, fleet, paths, cascade=cascade)),
+        ".claude/settings.local.json": RenderedFile(json.dumps(
+            compose_settings_local(bot, fleet, paths, list(mcp["mcpServers"])),
+            indent=2,
+        ) + "\n"),
+        f"{fleet.service_prefix}.{bot.bot_id}.service": RenderedFile(
+            compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)),
+        f"{fleet.service_prefix}.{bot.bot_id}.plist": RenderedFile(
+            compose_launchd_plist(bot, fleet, paths)),
+    }
+    for name, content in (
+        (GITCONFIG_FILENAME, compose_bot_gitconfig(bot, paths)),
+        (GH_APP_IDENTITY_FILENAME, compose_bot_gitconfig_app_identity(bot)),
+    ):
+        files[name] = RenderedFile(content) if content is not None else None
+    files.update({
+        f"tools/{name}": RenderedFile(content, 0o755)
+        for name, content in compose_tool_outputs(bot, fleet, paths, bot_dir).items()
+    })
+    for name in files:
+        paths.assert_writable(bot_dir / name)
+
+    # The same L2 predicate and exclusions as the postwrite audit, applied to
+    # rendered bytes so staging cannot approve wiring that generate would reject.
+    findings: list[str] = []
+    for name in (*_wiring_files(bot, fleet), *(n for n in files if n.startswith("tools/"))):
+        rendered = files.get(name)
+        if rendered is None:
+            continue
+        text = rendered.content
+        if name == ".claude/settings.local.json":
+            text = _without_deny_rules(text)
+        for path, reason in improper_fleet_paths(text, bot, paths):
+            findings.append(f"  {name}: {path}\n      {reason}")
+    if findings:
+        raise ValueError(
+            f"bot {bot.bot_id!r}: improper absolute fleet path(s) in rendered wiring:\n"
+            + "\n".join(findings)
+        )
+    return files
 
 
 def compose_bot(
@@ -2887,21 +3582,13 @@ def compose_bot(
 
     ``boot_delay_s`` defaults to this bot's own rung on the host boot ladder,
     DERIVED rather than threaded: every caller that composes a single bot
-    (``generate --bot``, ``move-bot``, ``new-bot``) would otherwise silently
+    (``generate --bot`` and ``move-bot``) would otherwise silently
     write a unit with no stagger at all, collapsing that bot to rung 0 and
     re-creating the collision the ladder exists to prevent (#1002). Pass an
     explicit value only to compose a unit off the host ladder, e.g. in tests.
     """
-    expand_mcp_entries(bot.mcp)  # refuse ambiguous wiring before any runtime mutation
-    if boot_delay_s is None:
-        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
-    bot_dir = paths.bot_runtime(bot.bot_id)
-    # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
-    # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
-    # disk write, so a failing bot leaves no partial wiring behind.
-    from .path_audit import assert_bot_sources
-
-    assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
+    files = render_bot_files(bot, fleet, paths, boot_delay_s=boot_delay_s, cascade=cascade)
+    bot_dir = paths.assert_writable(paths.bot_runtime(bot.bot_id))
 
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / ".claude").mkdir(exist_ok=True)
@@ -2911,40 +3598,15 @@ def compose_bot(
     (bot_dir / "data" / "events").mkdir(exist_ok=True)
     (bot_dir / "logs").mkdir(exist_ok=True)
 
-    (bot_dir / "CLAUDE.md").write_text(compose_claude_md(bot, fleet, paths))
-
-    mcp = compose_mcp_json(bot, paths)
-    (bot_dir / ".mcp.json").write_text(json.dumps(mcp, indent=2) + "\n")
-
-    (bot_dir / "bot.conf").write_text(
-        compose_bot_conf(bot, fleet, paths, cascade=cascade))
-
-    # Per-org git credential routing. None ⇒ the bot declares no credentials, so
-    # remove any file a previous compose left behind rather than stranding stale
-    # routing after the fleet.yaml declaration is dropped.
-    gitconfig = compose_bot_gitconfig(bot, paths)
-    gitconfig_path = bot_dir / GITCONFIG_FILENAME
-    if gitconfig is None:
-        gitconfig_path.unlink(missing_ok=True)
-    else:
-        gitconfig_path.write_text(gitconfig)
-
-    # Sibling App-identity fragment (#1300), pulled in by a per-org includeIf.
-    # Written only for an org-scoped App identity; reaped otherwise, same
-    # lifecycle as the gitconfig itself.
-    app_id_fragment = compose_bot_gitconfig_app_identity(bot)
-    app_id_path = bot_dir / GH_APP_IDENTITY_FILENAME
-    if app_id_fragment is None:
-        app_id_path.unlink(missing_ok=True)
-    else:
-        app_id_path.write_text(app_id_fragment)
-
-    settings_local = compose_settings_local(
-        bot, fleet, paths, list(mcp["mcpServers"].keys())
-    )
-    (bot_dir / ".claude" / "settings.local.json").write_text(
-        json.dumps(settings_local, indent=2) + "\n"
-    )
+    for name, rendered in files.items():
+        if name.startswith("tools/"):
+            continue
+        target = bot_dir / name
+        if rendered is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_text(rendered.content)
+            target.chmod(rendered.mode)
 
     _emit = log if log is not None else _log.info
     link_skills(
@@ -2956,7 +3618,11 @@ def compose_bot(
         ),
     )
     link_mounts(bot, bot_dir, _emit)
-    compose_tools(bot, fleet, paths, bot_dir)
+    _write_tool_outputs(bot_dir, {
+        name.removeprefix("tools/"): rendered
+        for name, rendered in files.items()
+        if name.startswith("tools/") and rendered is not None
+    })
 
     # Telegram access.json — write to channel state dir so the plugin
     # picks up correct requireMention/dmPolicy on first boot.
@@ -2976,19 +3642,25 @@ def compose_bot(
                 )
         else:
             channel_dir = Path.home() / telegram_channel_rel(handle)
-            channel_dir.mkdir(parents=True, exist_ok=True)
             access_path = channel_dir / "access.json"
-            if access_path.exists():
-                _reconcile_access_json(access_path, access, bot, fleet, log)
-            else:
-                access_path.write_text(json.dumps(access, indent=2) + "\n")
-
-    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.service").write_text(
-        compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)
-    )
-    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.plist").write_text(
-        compose_launchd_plist(bot, fleet, paths)
-    )
+            # This write lands in the host-global ~/.claude, outside the tree
+            # being composed. Like the invalid-handle branch above, a failure is
+            # a named warning, not a traceback that stops the fleet's generate.
+            try:
+                channel_dir.mkdir(parents=True, exist_ok=True)
+                if access_path.exists():
+                    _reconcile_access_json(access_path, access, bot, fleet, log)
+                else:
+                    _write_atomic(access_path, json.dumps(access, indent=2) + "\n")
+            except OSError as exc:
+                msg = (
+                    f"bot {bot.bot_id}: could not write {access_path} "
+                    f"({exc.strerror or exc.__class__.__name__}), skipping access.json, so the bot's "
+                    "Telegram group settings may be missing or stale; fix the path and re-run generate"
+                )
+                _log.warning("%s", msg)
+                if log is not None:
+                    log(f"  WARNING: {msg}")
 
     # Path-ownership guarantee: fail loud if any composed wiring file carries a
     # flat/dangling/improper absolute fleet path (a hand-typed path that would not
@@ -3234,8 +3906,8 @@ def _scaffold_env_merge(
         existing_keys = set(dotenv.read(env_path).keys())
         # dotenv.read skips comment lines, so a stub this function previously
         # commented out is invisible to it and would be appended again on the
-        # next run — unbounded growth, once per generate, and reload-fleet.sh
-        # runs generate on a daily fleet-wide timer. Count them as present.
+        # next composition — unbounded growth across staged config changes.
+        # Count them as present.
         existing_keys |= set(_COMMENTED_STUB_RE.findall(existing_content))
         # Neutralise a stub that was written live BEFORE its var gained an
         # upstream value. `provided_upstream` is otherwise consulted only when a
@@ -3281,7 +3953,7 @@ def _scaffold_env_merge(
         lines.append(existing_content.rstrip("\n"))
     else:
         lines.append(header)
-        lines.append("# Generated by claudlobby generate — fill in real values.")
+        lines.append("# Generated by claudlobby composition — fill in real values.")
         lines.append("")
 
     if new_vars:
@@ -3347,7 +4019,7 @@ def _upstream_env_names(paths: Paths, *, for_tier: str = "bot") -> frozenset[str
     #
     # The tier -> PATH mapping below is the one place in the compositor that
     # still restates something the resolver knows, and it is deliberate rather
-    # than overlooked: reading it from lib/env-tiers.sh means a bash subprocess
+    # than overlooked: reading it from claudlobby/_runtime_scripts/env-tiers.sh means a bash subprocess
     # inside `generate`, and no test fixture root carries a lib/. The order —
     # the part that actually drifted and caused #1226 — now comes from the
     # pinned registry; only the leaf names are local. Tracked as the residual.
@@ -3522,8 +4194,8 @@ def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
     REMOVING or RENAMING a fleet — or promoting a bot to manager — reshuffles the
     rungs of other fleets, and those fleets keep their old ladder until *they*
     regenerate. Until then some rungs can collide again, degrading to today's
-    behaviour, never worse. ``lib/setup-fleets`` regenerates every fleet in one
-    pass, which is the sanctioned way to re-converge the ladder.
+    behaviour, never worse. A staged host plan followed by activation is the
+    supported way to re-converge the ladder across fleets.
 
     A fleet with no place in the host ladder — root mode, or an explicitly-
     pointed overlay outside ``local/`` — ladders standalone off ``own_managers``,
@@ -3533,7 +4205,7 @@ def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
     Cached for the process: every bot in a fleet asks the same question, and the
     walk parses every sibling manifest to answer it. No shipped path mutates a
     manifest and re-composes without re-exec — ``generate`` is one-shot,
-    ``setup-fleets`` forks per fleet, and ``move-bot`` requires the target stanza
+    staged planning uses a fresh process, and ``move-bot`` requires the target stanza
     to exist before it runs.
     """
     standalone = (0, own_managers)
@@ -3557,7 +4229,8 @@ def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
     return managers_before, managers_total + workers_before
 
 
-def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
+def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths,
+                     *, bases: tuple[int, int] | None = None) -> int:
     """This bot's rung on the host-global boot ladder, in seconds.
 
     Derived from (manager or worker, fleet position on the host, position among
@@ -3566,8 +4239,7 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
 
     Manager-ness comes from ``FleetConfig.manager_bots`` — the same declaration
     that decides what ``MANAGER_TMUX`` is composed to. It is deliberately not
-    re-derived from the composed value, which carries a trailing comment that a
-    naive parse gets wrong.
+    re-derived from the composed value.
     """
     # Intersected with the bot list so this fleet's tier is sized by the same
     # rule _fleet_manager_worker_counts applies to every sibling: a team naming
@@ -3579,7 +4251,8 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
         index = tier.index(bot.bot_id)
     except ValueError:  # composing a bot the fleet does not list (scaffolding)
         index = 0
-    manager_base, worker_base = _host_boot_rung_bases(paths, len(managers))
+    manager_base, worker_base = (bases if bases is not None else
+                                 _host_boot_rung_bases(paths, len(managers)))
     base = manager_base if is_manager else worker_base
     return (base + index) * _BOOT_STAGGER_SECONDS
 
@@ -3588,16 +4261,124 @@ def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
 # Fleet-level timer generation
 # ---------------------------------------------------------------------------
 
+# An interval job whose interval divides an hour or a day is anchored to the
+# clock (OnCalendar=, in UTC) at its own second of the minute. Every run is due
+# at its own clock point, so a late start delays only that run. A timer
+# counting from its last start (OnUnitActiveSec=) cannot keep copies apart:
+# every start pulled early by a wake of the user manager, or delayed by load,
+# moves all its later ticks, and copies that meet share a wake from then on.
+# AccuracySec=1 lets a start come up to a second after its point; a stalled
+# user manager can start it later still.
+_ANCHORED_ACCURACY_S = 1
+# Any other interval keeps OnUnitActiveSec=, and only its first run after a
+# start gets a slot: copies spread over at most this long, or the interval when
+# that is shorter, so no copy's first run moves by 150 s or more.
+_INTERVAL_SPREAD_S = 150
 
-def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
+
+def _host_timer_slot(paths: Paths, *, host: bool = False) -> tuple[int, int]:
+    """This fleet's slot among the host's copies of an interval job, and how many slots there are.
+
+    Every fleet composes the same interval timers, and identical timers fire in
+    the same second. Each slot owns its own band of seconds of every minute
+    (``_calendar_seconds``), so no anchored unit is due in the same second as
+    any other unit on the host; a job longer than a minute also runs one
+    minute after the previous slot's copy. An unanchored interval gets only a
+    first-run offset (``_interval_phase_s``), which later ticks lose.
+
+    Fleets are numbered in the sorted overlay enumeration the boot ladder uses
+    (``_iter_fleet_dirs``), so every compose path assigns the same slots, and
+    host jobs take the slot after the last fleet's. A fleet with no place under
+    ``local/`` (root mode, or an overlay pointed at explicitly) takes slot 0,
+    as it ladders standalone. Slots come from the manifests present at compose
+    time: adding, removing or renaming a fleet moves the fleets after it, and a
+    staged host plan composes every fleet at once, so one activation moves them
+    all together.
+    """
+    fleets = [directory.resolve() for directory in _iter_fleet_dirs(paths.root / "local")
+              if (directory / "fleet.yaml").is_file()]
+    slots = max(len(fleets), 1) + 1
+    if host:
+        return slots - 1, slots
+    here = paths.fleet_dir.resolve() if paths.fleet_dir is not None else None
+    return (fleets.index(here) if here in fleets else 0), slots
+
+
+def _anchored(interval_s: int) -> bool:
+    """Whether every *interval_s* seconds is a fixed set of clock points each hour or day."""
+    return ((interval_s % 60 == 0 and 3600 % interval_s == 0)
+            or (interval_s % 3600 == 0 and 86400 % interval_s == 0))
+
+
+def _interval_calendar(interval_s: int, position_s: int) -> str:
+    """OnCalendar= for every *interval_s* seconds, *position_s* into each cycle from 00:00 UTC."""
+    hours, rest = divmod(position_s, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if interval_s == 60:
+        return f"*-*-* *:*:{seconds:02d} UTC"
+    if interval_s < 3600:
+        return f"*-*-* *:{minutes:02d}/{interval_s // 60}:{seconds:02d} UTC"
+    if interval_s == 3600:
+        return f"*-*-* *:{minutes:02d}:{seconds:02d} UTC"
+    if interval_s < 86400:
+        return f"*-*-* {hours:02d}/{interval_s // 3600}:{minutes:02d}:{seconds:02d} UTC"
+    return f"*-*-* {hours:02d}:{minutes:02d}:{seconds:02d} UTC"
+
+
+def _calendar_seconds(schedules: dict, slot: tuple[int, int]) -> dict[str, int]:
+    """The second of the minute each of one owner's anchored interval jobs runs at.
+
+    The minute is split into one band per slot (12 s each with four fleets and
+    the host). Each anchored job the owner declares takes its own second in the
+    owner's band, the shortest interval first, so no two units on the host
+    are due in the same second while a band holds all its owner's jobs. A fleet
+    ranks the jobs it declares, composed or not, so whether a gated job
+    composes never moves another job's second.
+    """
+    index, slots = slot
+    band = max(60 // slots, 1)
+    names = sorted((name for name, sched in schedules.items()
+                    if sched["type"] == "interval" and _anchored(sched["seconds"])),
+                   key=lambda name: (schedules[name]["seconds"], schedules[name]["startup"], name))
+    step = max(band // len(names), 1) if names else 1
+    return {name: index * band + (rank * step) % band for rank, name in enumerate(names)}
+
+
+def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
+    """How much later than slot 0's copy this slot's copy of an interval job first runs.
+
+    The copies sit in equal steps across the shorter of the interval and
+    ``_INTERVAL_SPREAD_S``, so the offset is always less than the interval.
+    """
+    index, slots = slot
+    return index * (min(interval_s, _INTERVAL_SPREAD_S) // slots)
+
+
+def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
+                            slot: tuple[int, int] | None = None, second: int | None = None) -> dict:
     """Resolve timer scheduling from config.
 
     Returns a dict describing the schedule type:
-      {"type": "interval", "seconds": 300}
+      {"type": "interval", "seconds": 300, "startup": 330, "phase": 0,
+       "calendar": "*-*-* *:01/5:14 UTC"}
+      {"type": "interval", "seconds": 420, "startup": 450, "phase": 30, "calendar": None}
       {"type": "calendar", "expression": "*-*-* 06:00:00"}
+
+    An interval job stays type "interval" (launchd keeps StartInterval). With
+    its host ``slot`` and its ``second`` of the minute (``_calendar_seconds``)
+    an anchored interval gets ``calendar``: its ``startup_delay`` into each
+    cycle, rounded down to the minute, one minute later per slot before it, at
+    that second. Its first run after any start is its next point. Any other
+    interval keeps ``startup``, the first run's delay from the timer's own start
+    (OnActiveSec=): ``startup_delay``, else the interval up to 900 s, plus
+    ``phase`` for its slot (``_interval_phase_s``). A past OnBootSec= or
+    OnStartupSec= point fires a timer at once (systemd.timer(5)). An activation
+    counts every OnActiveSec= from its last daemon-reload, and every
+    daemon-reload re-arms OnActiveSec= for a waiting timer.
     """
     if "schedule" in timer_cfg:
         return {"type": "calendar", "expression": timer_cfg["schedule"]}
+    seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
@@ -3605,12 +4386,89 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
             obs = merged_defaults.get("observability", {})
             val = obs.get(field)
             if val is not None:
-                return {"type": "interval", "seconds": int(val)}
-    return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
+                seconds = int(val)
+    startup = timer_cfg.get("startup_delay")
+    startup = min(seconds, 900) if startup is None else int(startup)
+    if slot is not None and second is not None and _anchored(seconds):
+        minutes = ((startup % seconds) // 60 + slot[0]) % (seconds // 60)
+        return {"type": "interval", "seconds": seconds, "startup": startup, "phase": 0,
+                "calendar": _interval_calendar(seconds, minutes * 60 + second)}
+    phase = _interval_phase_s(seconds, slot) if slot is not None else 0
+    return {"type": "interval", "seconds": seconds, "startup": startup + phase, "phase": phase,
+            "calendar": None}
 
 
 # The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
 _FLEET_PULSE_JOB = "fleet-pulse"
+
+#: The fleet's failure template (#2522). Every service the composer generates
+#: for a fleet job names it in OnFailure=, so a job that fails on every run is
+#: heard: systemd starts one instance per failed unit, named for it, and the
+#: instance runs the selected release's `fleet notify`. Bot services stay out
+#: (fleet-pulse watches them), and so do host jobs and launchd, which has no
+#: OnFailure=: fleet-pulse reports a failed one of those once an episode (#2532).
+JOB_FAILED_TEMPLATE = "job-failed"
+#: The `--event` the template's alert carries. `fleet notify` records a
+#: `fleet_alert` whose data names it, so `event list --type fleet_alert` finds it.
+JOB_FAILED_EVENT = "job_failed"
+# A bound for one alert. The CLI refuses at once while an activation holds the
+# host lock, and each of its two channels has its own 8 s limit.
+_JOB_FAILED_TIMEOUT_S = 120
+
+
+def job_failed_template(prefix: str) -> str:
+    """The unit name of a fleet's failure template: ``<prefix>.job-failed@.service``."""
+    return f"{prefix}.{JOB_FAILED_TEMPLATE}@.service"
+
+
+def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, paths: Paths,
+                               plane_env: dict[str, str] | None = None) -> str:
+    """Write the fleet's failure template beside its job units; return its stem.
+
+    The instance calls the selected CLI directly, not through the unit-start
+    wrapper, whose argv names exactly one unit: `fleet notify` takes its own
+    admission, bound to the committed Git runtime. ``%i`` is the
+    failed unit's name. The template has no OnFailure= of its own: an instance
+    whose alert fails stays failed, and fleet-pulse reports it (#2532). It has
+    no [Install] section: only OnFailure= starts it.
+    """
+    environment = native_environment(paths)
+    argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+            "--fleet", fleet_name, "fleet", "notify", "--level", "alert",
+            "--event", JOB_FAILED_EVENT]
+    # Quoted by hand so that its %i specifiers reach systemd, which puts the
+    # failed unit's name there; unit_systemd_command would escape them.
+    message = '"%i failed: journalctl --user -u %i"'
+    lines = [
+        "# Generated by claudlobby — do not hand-edit.",
+        "[Unit]",
+        f"Description=claudlobby job-failed alert for %i ({fleet_name})",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        f"WorkingDirectory={paths.root}",
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
+        unit_systemd_environment("PATH", _scheduler_tool_path(paths)),
+        unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name),
+        # The plane switch lines every fleet job unit carries (job_baseline_env).
+        *(unit_systemd_environment(key, value) for key, value in (plane_env or {}).items()),
+        f"TimeoutStartSec={_JOB_FAILED_TIMEOUT_S}",
+        f"ExecStart={unit_systemd_command(argv)} \"--message\" {message}",
+    ]
+    name = job_failed_template(prefix)
+    (timers_dir / name).write_text("\n".join(lines) + "\n")
+    return name.removesuffix(".service")
+
+
+def _native_script_argv(script: str, environment: dict[str, str]) -> list[str]:
+    """Tokenize declared syntax before inserting literal selected paths."""
+    argv = shlex.split(script)
+    for index, part in enumerate(argv):
+        for key, value in environment.items():
+            part = part.replace("${" + key + "}", value)
+            part = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, part)
+        argv[index] = part
+    return argv
 
 
 def _write_service_units(
@@ -3619,6 +4477,10 @@ def _write_service_units(
     name: str,
     script: str,
     paths: Paths,
+    *, create_runtime_dirs: bool = True,
+    host_override: str | None = None,
+    phase: str | None = None,
+    owner_config: dict | None = None,
 ) -> None:
     """Write the .service/.plist for a RESIDENT host service — no .timer
     (nothing schedules it; supervision restarts it). systemd Restart=always /
@@ -3658,8 +4520,42 @@ def _write_service_units(
     if _svc_findings:
         raise source_findings_error(_svc_id, _svc_findings)
 
-    script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
-    tool_path = _scheduler_tool_path(paths.root)
+    environment = native_environment(paths)
+    command = None
+    resident_cli = {
+        "plane-daemon": ("plane-daemon.sh", "serve", (("PLANE_SOCKET", "--socket"),
+                                                     ("PLANE_DRAIN_INTERVAL", "--drain-interval"))),
+        "plane-view": ("plane-view.sh", "view", (("PLANE_VIEW_HOST", "--host"),
+                                               ("PLANE_VIEW_PORT", "--port"))),
+    }
+    if name in resident_cli:
+        launcher, verb, options = resident_cli[name]
+        if _native_script_argv(script, environment) == [str(paths.package.runtime_native / launcher)]:
+            # A shell wrapper would re-enter the ordinary CLI and hold its
+            # reader lock for the daemon lifetime. Direct admitted CLI exec
+            # releases startup exclusion before the resident process runs.
+            command = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"], "plane", verb]
+            for key, flag in options:
+                if environment.get(key):
+                    command.extend([flag, environment[key]])
+    if owner_config is not None:
+        from .plane.owner_service import service_command
+        command = service_command(paths.root, environment["CLAUDLOBBY_CLI"], owner_config)
+        # This is a host-only operator server, not a generated fleet caller.
+        # Keep the CLI's refusal of all bot/fleet selectors unchanged.
+        environment.pop("FLEET_ROOT", None)
+    if host_override is not None:
+        environment[HOST_OVERRIDE_ENV] = host_override
+    script_expanded = script
+    for key, value in environment.items():
+        script_expanded = script_expanded.replace("${" + key + "}", value)
+        script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
+    argv = wrap_unit_argv(environment, unit=service_name,
+                          phase=phase or RESIDENT_UNIT_PHASES.get(name, "producers"), mode="exec",
+                          argv=command if command is not None else _native_script_argv(script, environment))
+    guarded = "CLAUDLOBBY_INSTALLATION" in environment
+    exec_start = unit_systemd_command(argv) if command is not None or guarded else script_expanded
+    tool_path = _scheduler_tool_path(paths)
 
     # #1485 fold — WHERE THE RELAUNCH LOOP IS VISIBLE. The ingest daemon's
     # one exit line is the only record of a stale-daemon exit (a process that
@@ -3673,8 +4569,9 @@ def _write_service_units(
     # unredirected unit's stderr already lands in the journal
     # (`journalctl --user -u claudlobby-<name>`), which is why the .service
     # below carries no StandardOutput=/StandardError= of its own.
-    log_path = paths.root / "state" / f"{name}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = paths.assert_writable(paths.root / "state" / f"{name}.log")
+    if create_runtime_dirs:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     service_lines = [
         "# Generated by claudlobby — do not hand-edit.",
@@ -3684,9 +4581,9 @@ def _write_service_units(
         "[Service]",
         "Type=simple",
         f"WorkingDirectory={paths.root}",
-        f"Environment=CLAUDLOBBY_ROOT={paths.root}",
-        f"Environment=PATH={tool_path}",
-        f"ExecStart={script_expanded}",
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
+        unit_systemd_environment("PATH", tool_path),
+        f"ExecStart={exec_start}",
         "Restart=always",
         "RestartSec=5",
         "",
@@ -3709,24 +4606,24 @@ def _write_service_units(
         "  <array>",
     ]
     plist_lines.extend(
-        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+        f"    <string>{escape(part)}</string>" for part in argv
     )
     plist_lines.extend(
         [
             "  </array>",
             "  <key>EnvironmentVariables</key>",
             "  <dict>",
-            "    <key>CLAUDLOBBY_ROOT</key>",
-            f"    <string>{paths.root}</string>",
+            *(line for key, value in environment.items()
+              for line in (f"    <key>{escape(key)}</key>", f"    <string>{escape(value)}</string>")),
             "    <key>PATH</key>",
             f"    <string>{tool_path}</string>",
             "  </dict>",
             "  <key>WorkingDirectory</key>",
-            f"  <string>{paths.root}</string>",
+            f"  <string>{escape(str(paths.root))}</string>",
             "  <key>StandardOutPath</key>",
-            f"  <string>{log_path}</string>",
+            f"  <string>{escape(str(log_path))}</string>",
             "  <key>StandardErrorPath</key>",
-            f"  <string>{log_path}</string>",
+            f"  <string>{escape(str(log_path))}</string>",
             "  <key>RunAtLoad</key>",
             "  <true/>",
             "  <key>KeepAlive</key>",
@@ -3755,8 +4652,10 @@ def _write_timer_units(
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
+    time_limit: tuple[int, int] | None = None,
     extra_env: dict[str, str] | None = None,
     abandon_children: bool = False,
+    on_failure: str | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -3772,6 +4671,8 @@ def _write_timer_units(
     plist ignores them. ``exec_args`` appends extra positional arguments after
     the fleet name on both the systemd ``ExecStart`` and the launchd
     ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
+    ``on_failure`` names the unit systemd starts when the service fails (the
+    fleet's failure template, #2522); the plist has no equivalent.
     """
     # L1 source guard (#702) — a timer's script is a compose source. A
     # $CLAUDLOBBY_ROOT-anchored script (the shape system.yaml / fleet jobs use)
@@ -3793,32 +4694,51 @@ def _write_timer_units(
         raise source_findings_error(_timer_id, _timer_findings)
 
     scope = fleet_name if fleet_name is not None else "host"
-    script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
+    environment = native_environment(paths)
+    script_expanded = script
+    for key, value in environment.items():
+        script_expanded = script_expanded.replace("${" + key + "}", value)
+        script_expanded = re.sub(r"\$" + key + r"(?![A-Za-z0-9_])", lambda _: value, script_expanded)
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
     if exec_args:
         exec_start = f"{exec_start} {' '.join(exec_args)}"
+    if fleet_name and name == _FLEET_PULSE_JOB:
+        # The scheduler enters the same selected command as a manager/operator;
+        # the command alone releases the private native sweep.
+        argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
+                "--fleet", fleet_name, "fleet", "pulse"]
+    else:
+        argv = _native_script_argv(script, environment)
+        if fleet_name:
+            argv.append(fleet_name)
+        argv.extend(exec_args or [])
+    argv = wrap_unit_argv(environment, unit=service_name, phase="producers", mode="oneshot", argv=argv)
+    if ("CLAUDLOBBY_INSTALLATION" in environment
+            or (fleet_name and name == _FLEET_PULSE_JOB)):
+        exec_start = unit_systemd_command(argv)
 
     # Compute the tool PATH once so systemd and launchd emit an identical value
     # (see _scheduler_tool_path, #798); the parity test asserts they match.
-    tool_path = _scheduler_tool_path(paths.root)
+    tool_path = _scheduler_tool_path(paths)
 
     # --- systemd service unit ---
     service_lines = [
         "# Generated by claudlobby — do not hand-edit.",
         "[Unit]",
         f"Description=claudlobby {name} ({scope})",
+        *([f"OnFailure={on_failure}"] if on_failure else []),
         "",
         "[Service]",
         f"Type={svc_type}",
         # Pin cwd to the install root so jobs never depend on the
         # supervisor's spawn cwd.
         f"WorkingDirectory={paths.root}",
-        f"Environment=CLAUDLOBBY_ROOT={paths.root}",
+        *(unit_systemd_environment(key, value) for key, value in environment.items()),
         # Carry the fleet tool PATH into the timer env (#798).
-        f"Environment=PATH={tool_path}",
+        unit_systemd_environment("PATH", tool_path),
     ]
     if fleet_name:
-        service_lines.append(f"Environment=CLAUDLOBBY_FLEET={fleet_name}")
+        service_lines.append(unit_systemd_environment("CLAUDLOBBY_FLEET", fleet_name))
     # Fleet timers run in a minimal scheduler env (systemd/launchd start with
     # almost nothing). Carry the fleet Telegram group: it is where a scheduled
     # job's alert goes, rather than the first bot's own chat. The sender is picked
@@ -3826,7 +4746,7 @@ def _write_timer_units(
     # (resolve_alert_target, #1771).
     if fleet_name and telegram_group_chat_id:
         service_lines.append(
-            f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
+            unit_systemd_environment("TELEGRAM_GROUP_CHAT_ID", telegram_group_chat_id)
         )
     # #1120: the fleet-pulse escalation knobs. Same reasoning as the line above
     # and the same door — a scheduler starts with almost no environment, and
@@ -3836,14 +4756,19 @@ def _write_timer_units(
     # other job consumes them, so a wider grant would buy nothing.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            service_lines.append(f"Environment={var}={value}")
+            service_lines.append(unit_systemd_environment(var, value))
     # Caller-scoped extra env (gauntlet round; first tenant: PLANE_EMIT_ENABLED
     # on briefing timers). Same mechanism as the two blocks above — a scheduler
     # env is closed, so an Environment= line is the only thing the script can
     # read — generalized so the next timer-reachable var is a call-site dict,
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
-        service_lines.append(f"Environment={var}={value}")
+        service_lines.append(unit_systemd_environment(var, value))
+    if time_limit:
+        # The job's own bound: systemd ends a run its command cannot stop, then
+        # waits TimeoutStopSec= in each kill phase.
+        service_lines.append(f"TimeoutStartSec={time_limit[0]}")
+        service_lines.append(f"TimeoutStopSec={time_limit[1]}")
     if abandon_children:
         # The script backgrounds work that must outlive the job (keepalive's
         # per-bot plane emit, reaped on its own clock). With the default
@@ -3866,15 +4791,28 @@ def _write_timer_units(
         timer_lines.append(
             f"Description=claudlobby {name} timer ({scope}) -- tick every {secs}s"
         )
-        timer_lines.extend(
-            [
-                "",
-                "[Timer]",
-                f"OnBootSec={secs}",
-                f"OnUnitActiveSec={secs}",
-                "AccuracySec=10",
-            ]
-        )
+        timer_lines.extend(["", "[Timer]"])
+        if sched.get("calendar"):
+            timer_lines.extend(
+                [
+                    "# Anchored to the clock at this unit's own second on the host.",
+                    f"OnCalendar={sched['calendar']}",
+                    f"AccuracySec={_ANCHORED_ACCURACY_S}",
+                ]
+            )
+        else:
+            if sched.get("phase"):
+                timer_lines.append(
+                    f"# First run: a {sched['startup'] - sched['phase']} s startup delay,"
+                    f" plus {sched['phase']} s for this unit's slot on the host."
+                )
+            timer_lines.extend(
+                [
+                    f"OnActiveSec={sched['startup']}",
+                    f"OnUnitActiveSec={secs}",
+                    "AccuracySec=10",
+                ]
+            )
     else:
         expr = sched["expression"]
         timer_lines.append(f"Description=claudlobby {name} timer ({scope}) -- {expr}")
@@ -3886,7 +4824,9 @@ def _write_timer_units(
                 "AccuracySec=60",
             ]
         )
-    if persistent:
+    # An anchored interval job never catches up a missed run: at an activation
+    # that would fire every one of them at once (#2059).
+    if persistent and not sched.get("calendar"):
         timer_lines.append("Persistent=true")
     if randomized_delay:
         timer_lines.append(f"RandomizedDelaySec={randomized_delay}")
@@ -3919,19 +4859,15 @@ def _write_timer_units(
     # same argv, flags before the fleet name exactly as systemd would pass them
     # (#969).
     plist_lines.extend(
-        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+        f"    <string>{escape(part)}</string>" for part in argv
     )
-    if fleet_name:
-        plist_lines.append(f"    <string>{fleet_name}</string>")
-    for arg in exec_args or []:
-        plist_lines.append(f"    <string>{arg}</string>")
     plist_lines.extend(
         [
             "  </array>",
             "  <key>EnvironmentVariables</key>",
             "  <dict>",
-            "    <key>CLAUDLOBBY_ROOT</key>",
-            f"    <string>{paths.root}</string>",
+            *(line for key, value in environment.items()
+              for line in (f"    <key>{escape(key)}</key>", f"    <string>{escape(value)}</string>")),
             # Carry the fleet tool PATH into the timer env (#798).
             "    <key>PATH</key>",
             f"    <string>{tool_path}</string>",
@@ -3969,7 +4905,7 @@ def _write_timer_units(
     plist_lines.extend(
         [
             "  <key>WorkingDirectory</key>",
-            f"  <string>{paths.root}</string>",
+            f"  <string>{escape(str(paths.root))}</string>",
         ]
     )
     if sched["type"] == "interval":
@@ -4026,8 +4962,100 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
 
 
+#: The three files one composed unit basename owns. One tuple, because a prune
+#: that deletes two of the three leaves a unit the next reader still finds.
+_UNIT_EXTS: tuple[str, ...] = ("service", "timer", "plist")
+
+
+class FleetTimerCompositionError(ValueError):
+    """A timer compose cannot safely replace its previously generated tree."""
+
+
+def _prune_stale_units(
+    timers_dir: Path,
+    stale: set[str],
+    composed: set[str],
+    n_expected: int,
+    family: str,
+    *,
+    declaration_torn: bool = False,
+    require_complete: bool = False,
+) -> list[str]:
+    """Delete each basename in *stale* — unless the compose looks TORN, in which
+    case delete nothing and say so.
+
+    The shared tail of both reconcilers in this file. What differs between the
+    briefing family and the named-job family is only how each derives its own
+    ``stale`` set (a glob it cannot enumerate in advance, versus a directory
+    scan minus that family); the guard and the unlink are one rule, and the two
+    hand-typed copies this replaces had already drifted in their warning text.
+
+    The guard (modeled on ``migrate_legacy_keepalive``'s verify-before-disable):
+    if fewer units composed than the config declares, a bug or an interrupted
+    generate dropped part of the set — SKIP the prune entirely and warn, so a
+    compose shortfall can never wholesale-delete live timers. A legitimate full
+    removal passes ``n_expected == 0`` and prunes everything; the fully-empty
+    composed set is its limit case, not its trigger.
+
+    *declaration_torn* is the SECOND reason to refuse, and it lives here rather
+    than in the caller for the reason this function exists at all: a refusal is
+    a guard, a warning and a ``return []``, and a hand-typed second copy of that
+    shape one frame up is exactly the drift the extraction retired. The guard
+    below cannot see this case — ``len(composed)`` and ``n_expected`` both derive
+    from the declared set, so emptying that set makes them agree at zero, which
+    is the signature of a legitimate full removal. Only the caller can know its
+    declaration is torn, so it passes the fact and this function owns the
+    response. The briefing family never sets it (its declared set is the bots'
+    own stanzas, which cannot be torn by an upstream read).
+
+    *family* names the caller in the warning, so an operator reading a skipped
+    prune knows which half of the directory refused.
+    """
+    if require_complete and declaration_torn:
+        raise FleetTimerCompositionError(
+            f"{family} reconcile: torn declaration; refusing a replacement timer tree")
+    if require_complete and len(composed) < n_expected:
+        raise FleetTimerCompositionError(
+            f"{family} reconcile: partial composed set ({len(composed)} of {n_expected}); "
+            "refusing a replacement timer tree")
+    if not stale:
+        return []
+    if declaration_torn:
+        _log.warning(
+            "%s reconcile: the declared set is EMPTY while the fleet still asks "
+            "for these units — a torn declaration, not a teardown. SKIPPING "
+            "prune of %d existing unit(s); a fleet that means to compose none "
+            "says so at the source (system_defaults.timers: false). Check that "
+            "the install's system.yaml is intact.",
+            family,
+            len(stale),
+        )
+        return []
+    if len(composed) < n_expected:
+        _log.warning(
+            "%s reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
+            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
+            "wholesale delete; units left untouched (re-run once composition is "
+            "fixed)",
+            family,
+            len(composed),
+            n_expected,
+            len(stale),
+        )
+        return []
+    pruned: list[str] = []
+    for base in sorted(stale):
+        for ext in _UNIT_EXTS:
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+        pruned.append(base)
+    return pruned
+
+
 def _reconcile_briefing_units(
-    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
+    timers_dir: Path, prefix: str, composed: set[str], n_expected: int,
+    *, require_complete: bool = False,
 ) -> list[str]:
     """Prune stale ``<prefix>.briefing-*`` unit files — glob-bounded, with a
     verify-before-disable partial/degenerate guard (F3).
@@ -4051,35 +5079,104 @@ def _reconcile_briefing_units(
     passes ``n_expected == 0`` and prunes everything. The glob bound means it can
     never touch a non-briefing unit. Returns the pruned unit basenames.
     """
-    if not timers_dir.is_dir():
-        return []
-    existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
-    stale = existing - composed
-    if not stale:
-        return []
-    # Partial/degenerate: config declares n_expected (bot,slot) units but fewer
-    # composed — a torn or interrupted compose, not an intended teardown. Refuse
-    # the prune so a shortfall can never wholesale-delete live timers. Empty is
-    # the limit case (0 < n_expected); a real full removal passes n_expected == 0.
-    if len(composed) < n_expected:
-        _log.warning(
-            "briefing reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
-            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
-            "wholesale delete; units left untouched (re-run once composition is "
-            "fixed)",
-            len(composed),
-            n_expected,
-            len(stale),
-        )
-        return []
-    pruned: list[str] = []
-    for base in sorted(stale):
-        for ext in ("service", "timer", "plist"):
-            f = timers_dir / f"{base}.{ext}"
-            if f.exists():
-                f.unlink()
-        pruned.append(base)
-    return pruned
+    existing = ({p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
+                if timers_dir.is_dir() else set())
+    return _prune_stale_units(
+        timers_dir, existing - composed, composed, n_expected, "briefing",
+        require_complete=require_complete,
+    )
+
+
+def _reconcile_fleet_job_units(
+    timers_dir: Path,
+    prefix: str,
+    composed: set[str],
+    n_expected: int,
+    *,
+    declaration_torn: bool = False,
+    require_complete: bool = False,
+) -> list[str]:
+    """Prune stale ``<prefix>.<job>`` unit files for a job this fleet no longer
+    composes — the named-job half of what :func:`_reconcile_briefing_units`
+    does for the per-(bot,slot) family.
+
+    Until this existed, ``compose_fleet_timers`` only ever WROTE: a job removed
+    from ``system.yaml`` (or a fleet that turned ``system_defaults.timers``
+    off, or dropped ``fleet.sweep``) left its units on disk forever, and the
+    setup backbone enrolls what it finds in this directory. Measured, #1764:
+    ``plane-shadow`` was deleted from ``system.yaml`` at the F18 R2a closure
+    together with the ``lib/plane-shadow.sh`` it execs, and eighteen days later
+    the nightly ``reload-fleet`` was still re-creating its LaunchAgent from the
+    stale composed plist — a unit whose script does not exist, exiting 78
+    (``EX_CONFIG``) every night, sitting beside the ``.retired-*`` copy of
+    itself an operator had already walked back by hand.
+
+    ``composed`` is the set of unit basenames just written this generate;
+    ``n_expected`` is how many the fleet config declares — the config truth a
+    composition bug cannot fake. Guard and limit case are
+    :func:`_reconcile_briefing_units`'s, deliberately, so the two halves of
+    this directory answer "is this a teardown or a torn generate?" the same
+    way: fewer composed than declared means an interrupted or buggy run, so
+    SKIP the prune entirely and warn; ``n_expected == 0`` is a legitimate full
+    removal and prunes everything.
+
+    **The briefing family is carved out explicitly**, and that carve-out is
+    the whole reason this is not a two-line sweep. A naive "delete every
+    ``<prefix>.*`` not written this run" would eat the per-(bot,slot) briefing
+    units, whose basenames the composer cannot enumerate in advance and whose
+    prune is guarded by its OWN independent count (``BRIEFING_EXPECTED``).
+    Letting this function touch them would route those files past that guard
+    using a count that knows nothing about them — the exact wholesale-delete
+    the briefing guard exists to refuse. They are owned by
+    :func:`_reconcile_briefing_units` and skipped here by name.
+
+    **A torn DECLARATION refuses, and the shared guard cannot see that case**
+    (#1765 review). ``len(composed) < n_expected`` compares two numbers that
+    BOTH derive from the merged job set, so it discriminates a torn write loop
+    and is structurally blind to a torn declared COUNT: empty it, and
+    ``n_expected`` is 0, which is the documented signature of a legitimate full
+    removal. Reproduced end to end — a fleet still declaring
+    ``system_defaults.timers`` had every composed job unit deleted, no
+    exception raised anywhere, on BOTH call sites (the reviewer found the
+    early-return one; the write path reaches it too whenever briefing or sweep
+    keeps the function past that branch). So the caller passes
+    ``declaration_torn``, computed from the one fact that does NOT come from
+    the merged set: the fleet's own manifest still asking for these timers. A
+    real teardown says so at the source (``system_defaults: false``, or
+    ``timers: false``), where that flag is False and this is False with it.
+
+    **It overlaps :func:`_prune_leaf_manager_gated_units` and that one still
+    stays**, which is a narrower guarantee rather than a forked one. A fleet
+    with no leaf manager has `manager-checkin` filtered out of `timers` before
+    `composed` is built, so on an ORDINARY generate this function removes its
+    units too and the older helper finds nothing left to unlink. The two part
+    on exactly one case: this one refuses to prune anything on a torn compose,
+    while that one runs unconditionally — correctly, because its removal reason
+    (`FleetConfig.leaf_manager_bots()` is empty) is derived from config alone
+    and is unaffected by some OTHER job failing to write. Collapsing them would
+    put a job whose eligibility cannot be torn behind a torn-compose guard.
+
+    Returns the pruned unit basenames.
+    """
+    # Exactly `<prefix>.<job>`, the job ONE dotless segment: a longer dotted
+    # name (`com.review.child.keepalive` under `com.review`) is a unit of a
+    # fleet whose prefix EXTENDS this one, not a job of this fleet (#1765
+    # review). A dotted job name of this fleet's own is never pruned, which
+    # fails safe.
+    existing = {
+        f.stem
+        for f in (timers_dir.iterdir() if timers_dir.is_dir() else ())
+        if f.is_file()
+        and f.suffix.lstrip(".") in _UNIT_EXTS
+        and f.name.startswith(f"{prefix}.")
+        and "." not in f.stem[len(prefix) + 1:]
+    }
+    briefing = {b for b in existing if b.startswith(f"{prefix}.briefing-")}
+    return _prune_stale_units(
+        timers_dir, existing - composed - briefing, composed, n_expected,
+        "fleet job", declaration_torn=declaration_torn,
+        require_complete=require_complete,
+    )
 
 
 #: Fleet jobs whose composition depends on the fleet having at least one
@@ -4108,8 +5205,8 @@ def _prune_leaf_manager_gated_units(timers_dir: Path, prefix: str) -> list[str]:
     whether anything is composed this run: a fleet that HAD a leaf manager at
     an earlier generate and lost it (the manager was removed, or its last
     non-manager report was) must not leave `manager-checkin`'s units on disk
-    — that is exactly the shape a later ``enroll: true`` or a setup-fleet run
-    reading a stale-but-present unit would enroll for real, with nobody
+    — that is exactly the shape a later ``enroll: true`` activation reading
+    a stale-but-present unit could enroll for real, with nobody
     having armed anything. A no-op when the timers dir does not exist yet
     (nothing composed, so nothing to prune) or the files are already absent.
     """
@@ -4133,10 +5230,9 @@ def _write_timers_manifest(
     ``BRIEFING_EXPECTED``): comment ``header`` lines followed by one unit
     basename per line, sorted.
 
-    The setup backbone reads these mid-run (``unit_is_dormant``,
-    ``reconcile_briefing_timers``), so the write is atomic (temp + ``replace``) —
-    a torn file would under-list and either wrongly enroll a dormant unit or
-    under-count the reconcile guard. A no-op when the timers dir does not exist
+    The private composer and drift audit read these sidecars, so the write is
+    atomic (temp + ``replace``); a torn file would under-list declared units.
+    A no-op when the timers dir does not exist
     (nothing composed, so nothing to annotate).
     """
     if not timers_dir.is_dir():
@@ -4149,17 +5245,16 @@ def _write_timers_manifest(
 
 def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
     """Write the config-truth ``BRIEFING_EXPECTED`` manifest — the declared
-    ``<prefix>.briefing-<bot>-<slot>`` basenames setup-fleet's reconcile reads as
-    the independent expected count (a composed dir shorter than this is a
-    partial/torn generate, and the live-timer disable is refused). Thin
+    ``<prefix>.briefing-<bot>-<slot>`` basenames for composition diagnostics.
+    Sealed activation derives retirement from its selected source and plan.
+    Thin
     briefing-header wrapper over the shared atomic manifest writer.
     """
     _write_timers_manifest(
         timers_dir,
         "BRIEFING_EXPECTED",
         [
-            "# Config-declared briefing (bot,slot) units. setup-fleet reconcile",
-            "# refuses to disable live briefing timers when fewer than these compose.",
+            "# Config-declared briefing (bot,slot) units for composition diagnostics.",
         ],
         expected,
     )
@@ -4216,6 +5311,7 @@ def compose_fleet_timers(
     merged_defaults: dict,
     *,
     output_dir: Path | None = None,
+    require_complete: bool = False,
 ) -> Path:
     """Generate fleet-level systemd/launchd timer units into runtime/fleet/timers/.
 
@@ -4225,8 +5321,8 @@ def compose_fleet_timers(
 
     Jobs flagged ``enroll: false`` are composed-but-dormant: their units are
     emitted like any other, but their basenames land in the ``DORMANT``
-    manifest beside the units, and the setup backbone (setup-fleet,
-    reconcile's job-drift audit) skips them. A fleet opts in per job via
+    manifest beside the units; sealed activation and reconcile's job-drift
+    audit skip them. A fleet opts in per job via
     ``defaults.jobs.<name>.enroll: true`` in fleet.yaml.
 
     A job in :data:`LEAF_MANAGER_GATED_JOBS` (today: ``manager-checkin``) is
@@ -4243,6 +5339,10 @@ def compose_fleet_timers(
     temp dir here so it can hand this function the real ``Paths`` — keeping the
     diff and generate code paths on an identical ``Paths`` surface — while writing
     the expected units somewhere other than ``runtime/``.
+
+    ``require_complete`` is for a staged whole-tree replacement: a guard that
+    would merely skip pruning in ordinary generate must refuse the plan even
+    when the scratch directory contains no stale units.
     """
     timers = merged_defaults.get("jobs", {})
     has_leaf_manager = bool(fleet.leaf_manager_bots())
@@ -4262,8 +5362,23 @@ def compose_fleet_timers(
     ]
     briefing_on = bool(briefing_bots)
 
+    # The one fact about the job set that does NOT come from the job set
+    # (#1765 review): this fleet's own manifest still asks for system-default
+    # job timers while the merged set is empty. That is a torn read upstream —
+    # a missing/empty package system.yaml is the measured route — never an
+    # intended teardown, which is spelled `system_defaults: false` (or
+    # `timers: false`) and lands here with `sd.timers` already False.
+    # NB `merged_defaults`, not the local `timers`: that name has already had
+    # LEAF_MANAGER_GATED_JOBS stripped from it above, so on a fleet with no leaf
+    # manager a shrinking job roster could empty it legitimately and make this
+    # misfire — refusing a prune that was owed. The raw merged set is the thing
+    # a torn read empties, and it is immune to that filter.
+    jobs_declaration_torn = (
+        bool(sd.enabled and sd.timers) and not merged_defaults.get("jobs")
+    )
+
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
-    timers_dir = base_dir / "timers"
+    timers_dir = paths.assert_writable(base_dir / "timers", output_root=output_dir)
     if not has_leaf_manager:
         # Unconditional on emit_defaults/sweep_on/briefing_on below: a fleet
         # that lost its last leaf manager must have manager-checkin's units
@@ -4282,11 +5397,24 @@ def compose_fleet_timers(
                 removed, fleet.name,
             )
     if not emit_defaults and not sweep_on and not briefing_on:
-        # Nothing to emit — but a prior generate may have left briefing units a
-        # now-removed stanza should prune. Reconcile only if the dir exists, and
-        # record zero declared units so setup-fleet confirms the teardown is
-        # intended (config truth) rather than a torn compose.
-        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
+        # Nothing to emit — but a prior generate may have left units a
+        # now-removed stanza should prune, in EITHER family. Reconcile only if
+        # the dir exists, and record zero declared units for diagnostics.
+        # The job half runs here too, not only on the write path
+        # below: a fleet that turns `system_defaults.timers` off never reaches
+        # that path again, so its job units would otherwise be stranded on
+        # disk forever for a later plan to rediscover.
+        for removed in _reconcile_fleet_job_units(
+            timers_dir, fleet.service_prefix, set(), 0,
+            declaration_torn=jobs_declaration_torn,
+            require_complete=require_complete,
+        ):
+            _log.info(
+                "pruned stale fleet job unit %s (%s composes no fleet timers)",
+                removed, fleet.name,
+            )
+        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0,
+                                  require_complete=require_complete)
         _write_briefing_manifest(timers_dir, set())
         return timers_dir
 
@@ -4348,9 +5476,39 @@ def compose_fleet_timers(
             exc,
         )
 
+    # Config truth for the job half of the reconcile below: what this fleet
+    # DECLARES, independent of what the write loop managed to produce. Counted
+    # as unit BASENAMES, not declarations: a defaults job named
+    # `code-audit-sweep` and an enabled `fleet.sweep` both write
+    # `<prefix>.code-audit-sweep`, and counting both read every complete
+    # compose as PARTIAL, so the prune never ran (#1765 review).
+    expected_jobs = {f"{prefix}.{name}" for name in timers} if emit_defaults else set()
+    if sweep_on:
+        expected_jobs.add(f"{prefix}.code-audit-sweep")
+    # Every fleet that reaches this point composes at least one job unit, and
+    # each names the fleet's failure template (#2522). The template is pruned
+    # with the job units: its stem is one dotless segment after the prefix.
+    expected_jobs.add(job_failed_template(prefix).removesuffix(".service"))
+    n_expected_jobs = len(expected_jobs)
+    composed_jobs: set[str] = {
+        _write_job_failed_template(timers_dir, prefix, fleet.name, paths, job_baseline_env)}
+    on_failure = f"{prefix}.{JOB_FAILED_TEMPLATE}@%n.service"
+
     if emit_defaults:
+        slot = _host_timer_slot(paths)
+        # Ranked over every job the fleet declares, the leaf-manager-gated ones
+        # included, so the gate never moves another job's second.
+        seconds = _calendar_seconds(
+            {name: _resolve_timer_schedule(cfg, merged_defaults)
+             for name, cfg in merged_defaults.get("jobs", {}).items()}, slot)
+        # Imported here: at module level it would add the CLI's runtime modules to
+        # composer's. The pulse bounds its own runs (claudlobby/fleet_pulse.py).
+        from .fleet_pulse import UNIT_STOP_S, unit_time_limit
+
+        pulse_limit = (unit_time_limit(fleet.fleet_pulse.timeout_s if fleet.fleet_pulse else None),
+                       UNIT_STOP_S)
         for name, cfg in timers.items():
-            sched = _resolve_timer_schedule(cfg, merged_defaults)
+            sched = _resolve_timer_schedule(cfg, merged_defaults, slot, seconds.get(name))
             script = cfg.get("script", "")
             svc_type = cfg.get("type", "oneshot")
             _write_timer_units(
@@ -4369,8 +5527,11 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                time_limit=pulse_limit if name == _FLEET_PULSE_JOB else None,
                 extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
+                on_failure=on_failure,
             )
+            composed_jobs.add(f"{prefix}.{name}")
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
         ]
@@ -4391,11 +5552,26 @@ def compose_fleet_timers(
             f"{prefix}.code-audit-sweep",
             "code-audit-sweep",
             {"type": "calendar", "expression": fleet.sweep.schedule},
-            "$CLAUDLOBBY_ROOT/lib/code-audit-sweep.sh",
+            "$CLAUDLOBBY_NATIVE_DIR/code-audit-sweep.sh",
             "oneshot",
             fleet.name,
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
+            on_failure=on_failure,
+        )
+        composed_jobs.add(f"{prefix}.code-audit-sweep")
+
+    # Every named job this fleet still composes is now on disk, so anything
+    # else carrying this prefix — bar the briefing family, which owns its own
+    # guarded prune — is a job the config no longer declares (#1764).
+    for removed in _reconcile_fleet_job_units(
+        timers_dir, prefix, composed_jobs, n_expected_jobs,
+        declaration_torn=jobs_declaration_torn,
+        require_complete=require_complete,
+    ):
+        _log.info(
+            "pruned stale fleet job unit %s (%s no longer declares it)",
+            removed, fleet.name,
         )
 
     # Equippable briefing (bots.<bot>.briefing) — the first dynamic
@@ -4407,8 +5583,7 @@ def compose_fleet_timers(
     # than config declares (a torn/partial generate), of which "none composed" is
     # only the limit case. The BRIEFING_EXPECTED manifest — the config truth a
     # partial compose can't fake — is emitted BEFORE the per-unit write loop so an
-    # interrupted generate still leaves the full declared count for setup-fleet's
-    # reconcile to compare a short timers dir against.
+    # interrupted generate still leaves the full declared count for diagnostics.
     expected_briefing = {
         f"{prefix}.briefing-{bot_id}-{slot}"
         for bot_id, bot in briefing_bots
@@ -4437,17 +5612,19 @@ def compose_fleet_timers(
                 unit,
                 f"briefing-{bot_id}-{slot}",
                 {"type": "calendar", "expression": expr},
-                "$CLAUDLOBBY_ROOT/lib/briefing-trigger.sh",
+                "$CLAUDLOBBY_NATIVE_DIR/briefing-trigger.sh",
                 "oneshot",
                 fleet.name,
                 paths,
                 exec_args=[bot_id, slot],
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
                 extra_env=briefing_extra_env,
+                on_failure=on_failure,
             )
             composed_briefing.add(unit)
     _reconcile_briefing_units(
-        timers_dir, prefix, composed_briefing, len(expected_briefing)
+        timers_dir, prefix, composed_briefing, len(expected_briefing),
+        require_complete=require_complete,
     )
 
     return timers_dir
@@ -4456,8 +5633,25 @@ def compose_fleet_timers(
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+def _host_guard_manifests(paths: Paths, manifests: Iterable[Path] | None):
+    explicit = manifests is not None
+    if manifests is None:
+        manifests = (directory / "fleet.yaml"
+                     for directory in _iter_fleet_dirs(paths.root / "local"))
+    for manifest in manifests:
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            if explicit:
+                raise  # a staged host plan must cover every selected fleet
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
 def compose_host_mention_allowlist(
-    paths: Paths, *, output_dir: Path | None = None
+    paths: Paths, *, output_dir: Path | None = None,
+    manifests: Iterable[Path] | None = None,
 ) -> Path:
     """Handles a bot MAY @-mention on GitHub. Everything else is rewritten.
 
@@ -4479,35 +5673,32 @@ def compose_host_mention_allowlist(
     until someone says so, in writing, in a manifest.
 
     A composed BOT name always wins over this list — see the deny-override in
-    lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
+    claudlobby/_runtime_scripts/mention-rewrite.py. Without that, someone eventually allowlists a bot's
     name meaning our bot and silently re-arms the original bug.
     """
     names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(data, dict):
-            gh = (data.get("fleet") or {}).get("github") or {}
-            if isinstance(gh, dict):
-                names.update(gh.get("mention_allowlist") or [])
+    for data in _host_guard_manifests(paths, manifests):
+        gh = (data.get("fleet") or {}).get("github") or {}
+        if isinstance(gh, dict):
+            names.update(gh.get("mention_allowlist") or [])
 
-    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    base = paths.assert_writable(
+        output_dir if output_dir is not None else paths.root / "runtime" / "_host",
+        output_root=output_dir)
     base.mkdir(parents=True, exist_ok=True)
-    target = base / "mention-allowlist"
+    target = paths.assert_writable(base / "mention-allowlist", output_root=output_dir)
     safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
     target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
     return target
 
 
-def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) -> Path:
+def compose_host_bot_handles(
+    paths: Paths, *, output_dir: Path | None = None,
+    manifests: Iterable[Path] | None = None,
+) -> Path:
     """Write every bot name on the HOST, one per line, for the mention guard.
 
-    Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
+    Consumed by ``claudlobby/_runtime_scripts/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
     out of GitHub-bound tool calls. Every one of this estate's bot names is also
     a real GitHub account — all 21 resolve, 19 of them to real people and 2 to
     organizations — so an unguarded teammate reference emails a stranger. One of
@@ -4528,24 +5719,13 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
     fleet's generate. The cost is a narrower guard, which the hook reports.
     """
     names: set[str] = set()
-    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
-        manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():  # a container or a non-fleet dir
-            continue
-        try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            # A sibling fleet's unreadable manifest must not stop this generate.
-            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
-            # missing `import yaml` raised NameError on EVERY fleet and was
-            # swallowed as "all four manifests are broken" — the guard composed
-            # an empty list and would have protected nothing, silently.
-            continue
-        if isinstance(data, dict):
-            names.update((data.get("fleet") or {}).get("bots") or {})
-    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    for data in _host_guard_manifests(paths, manifests):
+        names.update((data.get("fleet") or {}).get("bots") or {})
+    base = paths.assert_writable(
+        output_dir if output_dir is not None else paths.root / "runtime" / "_host",
+        output_root=output_dir)
     base.mkdir(parents=True, exist_ok=True)
-    target = base / "bot-handles"
+    target = paths.assert_writable(base / "bot-handles", output_root=output_dir)
     # Only names safe to drop into the hook's regex alternation. Deliberately
     # NOT SHELL_IDENT_RE, which forbids hyphens — `worker-1` is a real bot name
     # shape (fleet.yaml.example uses it), and excluding it would leave exactly
@@ -4570,28 +5750,53 @@ def _prune_host_units(timers_dir: Path, base: str) -> None:
                       leftover.name)
 
 
+def _host_job_armed(name: str, cfg: dict) -> bool:
+    """Whether a host job composes a unit: declared armed, and its install extra imports.
+
+    The two shapes default OPPOSITE ways, and the asymmetry is the safety
+    property rather than an oversight: a TIMER with no `enroll` key is armed
+    (that is how every shipped host job reads), while a SERVICE must say
+    `enroll: true` in as many words — the macOS leg bootstraps every
+    claudlobby-*.plist it finds, so a resident process must never arrive by
+    omission.
+    """
+    if cfg.get("unit") == "service":
+        declared = cfg.get("enroll") is True
+    else:
+        declared = cfg.get("enroll", True) is not False
+    return declared and not _switches.missing_extra(name)
+
+
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
-    Host jobs are platform equipment with a fixed ``claudlobby-<name>``
-    identity (no fleet prefix): one instance per host, package-owned, NOT
-    layered through the fleet defaults merge. ``generate`` (and the
-    ``host-timers`` subcommand) compose them; ``setup-system`` enrolls them.
+    Host jobs are platform equipment with a default ``claudlobby-<name>``
+    identity (or this host's validated prefix): one instance per host,
+    package-owned and outside the fleet defaults merge. ``generate`` and
+    ``host-timers`` compose them; sealed CLI activation enrolls custom labels.
 
     Returns the host timers dir (``runtime/_host/timers/`` under the repo
     root), only created when host jobs are declared.
     """
     host_jobs = load_host_jobs()
+    prefix = load_host_unit_prefix()
+    host_override = (str(host_override_path().resolve())
+                     if HOST_OVERRIDE_ENV in os.environ else None)
     base_dir = (
         output_dir if output_dir is not None else (paths.root / "runtime" / "_host")
     )
-    timers_dir = base_dir / "timers"
+    timers_dir = paths.assert_writable(base_dir / "timers", output_root=output_dir)
     if not host_jobs:
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
     _host_cascade: dict = {}      # lazily filled by the first job that asks
+    host_slot = _host_timer_slot(paths, host=True)
+    host_seconds = _calendar_seconds(
+        {name: _resolve_timer_schedule(cfg, {}) for name, cfg in host_jobs.items()
+         if cfg.get("unit") != "service" and _host_job_armed(name, cfg)}, host_slot)
     for name, cfg in host_jobs.items():
+        unit = host_unit_name(name, prefix=prefix)
         # COMPOSE-TIME DORMANCY, now for every host job shape (F7). A host
         # timer that is not armed composes NO unit, exactly as a service does
         # — so there is no manifest to keep, nothing for setup-system to skip,
@@ -4611,17 +5816,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         # composing it keeps the honest failure honest, and the switch table
         # prints the pip line as its arm.
         _extra = _switches.missing_extra(name)
-        # The two shapes default OPPOSITE ways, and the asymmetry is the
-        # safety property rather than an oversight: a TIMER with no `enroll`
-        # key is armed (that is how every shipped host job reads), while a
-        # SERVICE must say `enroll: true` in as many words — the macOS leg
-        # bootstraps every claudlobby-*.plist it finds, so a resident process
-        # must never arrive by omission.
-        if cfg.get("unit") == "service":
-            _declared = cfg.get("enroll") is True
-        else:
-            _declared = cfg.get("enroll", True) is not False
-        _armed = _declared and not _extra
+        _armed = _host_job_armed(name, cfg)
         if not _armed:
             if _extra:
                 _log.warning(
@@ -4629,9 +5824,11 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                     " unit (a supervised unit that cannot start is a crash"
                     " loop). %s", name, _extra,
                     _switches.extra_install_line(_extra))
-            _prune_host_units(timers_dir, f"claudlobby-{name}")
+            _prune_host_units(timers_dir, unit)
             continue
         if cfg.get("unit") == "service":
+            if name == "plane-owner" and cfg.get("script") != "$CLAUDLOBBY_CLI":
+                raise ValueError("plane-owner uses the sealed owner CLI; configure its origin and paths, not script")
             # Resident host services (first tenant: the plane ingest daemon).
             # Dormancy is COMPOSE-time, not enroll-time, and that is a safety
             # property rather than a style choice: setup-system's macOS leg
@@ -4646,11 +5843,15 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             # unit keeps running until disabled; the disarm recipe is printed
             # beside the knob in system.yaml.
             _write_service_units(
-                timers_dir, f"claudlobby-{name}", name,
+                timers_dir, unit, name,
                 cfg.get("script", ""), paths,
+                create_runtime_dirs=output_dir is None,
+                host_override=host_override,
+                phase=RESIDENT_UNIT_PHASES.get(name, "producers"),
+                owner_config=cfg if name == "plane-owner" else None,
             )
             continue
-        sched = _resolve_timer_schedule(cfg, {})
+        sched = _resolve_timer_schedule(cfg, {}, host_slot, host_seconds.get(name))
         # Switch carrier for a self-gated host door (chunk 3a.1): a host timer
         # starts with a CLOSED env, so a door that consults a flag needs it
         # stamped as an Environment= line — the same problem the keepalive
@@ -4662,10 +5863,12 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         # that needs it (a resolver subprocess costs ~240ms on a Pi and every
         # host job would otherwise pay it).
         extra_env = _host_job_switch_env(
-            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade)
+            paths, HOST_JOB_ARMING.get(name, ()), _host_cascade) or {}
+        if host_override is not None:
+            extra_env[HOST_OVERRIDE_ENV] = host_override
         _write_timer_units(
             timers_dir,
-            f"claudlobby-{name}",
+            unit,
             name,
             sched,
             cfg.get("script", ""),
@@ -4766,9 +5969,7 @@ def manifest_inputs(fleet: FleetConfig, paths: Paths) -> dict[str, Path]:
     }
     if fleet.mission_file:
         out["mission_file"] = paths.fleet_config_dir / fleet.mission_file
-    system_yaml = _resolve_system_yaml(Path(__file__).resolve().parent)
-    if system_yaml is not None:
-        out["system.yaml"] = system_yaml
+    out["system.yaml"] = paths.package.system_yaml
     return out
 
 
@@ -4922,8 +6123,8 @@ def write_manifest_provenance(fleet: FleetConfig, paths: Paths) -> dict:
     manifest does — goes into bot.conf.
     """
     prov = manifest_provenance(fleet, paths)
-    paths.runtime.mkdir(parents=True, exist_ok=True)
-    (paths.runtime / "composed.json").write_text(
+    paths.assert_writable(paths.runtime).mkdir(parents=True, exist_ok=True)
+    paths.assert_writable(paths.runtime / "composed.json").write_text(
         json.dumps(prov, indent=2, sort_keys=True) + "\n")
     return prov
 
@@ -5000,7 +6201,7 @@ def changed_manifest_inputs(fleet: FleetConfig, paths: Paths,
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
     """Compose every bot in the fleet; returns a dict of bot_id -> bot_dir."""
-    paths.runtime_bots.mkdir(parents=True, exist_ok=True)
+    paths.assert_writable(paths.runtime_bots).mkdir(parents=True, exist_ok=True)
 
     # Scaffold shared documentation directories
     if paths.shared_docs:
@@ -5011,7 +6212,7 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
             "knowledge",
             "runbooks",
         ]:
-            (paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
+            paths.assert_writable(paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
 
     # ONE resolver read per generate, threaded into every bot.conf: the switch
     # carriers the composer bridges (today the estate silencer) come from the

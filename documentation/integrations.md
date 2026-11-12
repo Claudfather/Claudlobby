@@ -143,20 +143,20 @@ Orders, products, customers, inventory. Essential for any e-commerce bot.
 
 ### Printify
 
-Print-on-demand fulfillment, product management, order tracking.
+Print-on-demand fulfillment, product management, order tracking. Reached through the Printify REST API with the `printify` skill, not an MCP server:
 
-```json
-{
-  "printify": {
-    "command": "npx",
-    "args": ["-y", "printify-mcp"],
-    "env": {
-      "PRINTIFY_API_KEY": "your_printify_token",
-      "PRINTIFY_SHOP_ID": "your_shop_id"
-    }
-  }
-}
+```yaml
+skills: [printify]          # library/skills/printify: reads, and draft-first writes
+integrations: [printify]    # library/integrations/printify.md: the guide and the env contract
 ```
+
+```bash
+# fleet-tier .env
+PRINTIFY_API_KEY=your_printify_token
+PRINTIFY_SHOP_ID=your_shop_id
+```
+
+The Printify MCP fragment (`library/mcp/printify.json`, `@tsavo/printify-mcp`) is deprecated. A bot that still lists `mcp: [printify]` composes as before, and `config validate` warns `mcp-deprecated`.
 
 **Setup:** Printify → Settings → Connections → Generate Personal Access Token. Get shop ID via `curl -s 'https://api.printify.com/v1/shops.json' -H 'Authorization: Bearer YOUR_TOKEN'`.
 
@@ -280,15 +280,16 @@ Read-only product analytics — funnels, trends, saved insights, event/property 
 
 ### Home Assistant
 
-Control lights, switches, sensors, automations. Requires HA running on the same network. This is an HTTP-type MCP entry that connects straight to HA's own `/api/mcp/` endpoint — there's no separate MCP server process to install or keep updated.
+Control lights, switches, sensors, automations. Requires HA reachable from the host. The entry runs the community server hass-mcp, pinned to one release, over stdio through `uvx`, so the host needs `uv`. HA's built-in MCP server (`/api/mcp`) is not used. `library/integrations/homeassistant.md` names the tools, what the token can reach, and the REST calls to use when the server does not connect.
 
 ```json
 {
   "homeassistant": {
-    "type": "http",
-    "url": "http://localhost:8123/api/mcp/",
-    "headers": {
-      "Authorization": "Bearer your_long_lived_access_token"
+    "command": "uvx",
+    "args": ["--from", "hass-mcp==0.6.0", "hass-mcp"],
+    "env": {
+      "HA_URL": "http://localhost:8123",
+      "HA_TOKEN": "your_long_lived_access_token"
     }
   }
 }
@@ -309,7 +310,9 @@ Manage containers on the Pi — list, start, stop, logs, images.
 }
 ```
 
-**Setup:** User must be in `docker` group: `sudo usermod -aG docker $USER`. No token needed — uses local Docker socket.
+**Setup:** No token needed — uses local Docker socket, which the bots' user must be able to reach. The usual way is the `docker` group: `sudo usermod -aG docker $USER`.
+
+**The `docker` group is root by another name.** A member can start a container that mounts `/` and act as root inside it, so once your user joins, every bot on the host has root, whatever the `sudo` rules say. Docker's [post-install notes](https://docs.docker.com/engine/install/linux-postinstall/) give the same warning, and the README's [Safety model](../README.md#safety-model) lists the other rights a bot inherits from your account. The alternative is [rootless Docker](https://docs.docker.com/engine/security/rootless/), which runs the daemon as your user, so a container gets no more than your account has. Its socket is not at `/var/run/docker.sock`, so check that the server finds it before you rely on it.
 
 ## Productivity
 
@@ -396,6 +399,18 @@ Warehouse queries and schema exploration.
 **Skills:** `/claudna:snowflake-query` (run SQL / explore schema), `/claudna:snowflake-cutover` (migrate a project's connection to RSA key-pair auth).
 
 **Setup:** RSA key-pair auth via a 7-var env-contract — `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY` — no dbt or `profiles.yml` involved. **READ ONLY by default:** SELECT queries only, unless a human explicitly approves DDL/DML. See [library/integrations/snowflake.md](../library/integrations/snowflake.md).
+
+## Security
+
+### GitGuardian
+
+Secret incidents: the secrets GitGuardian detected in the repositories it monitors. One entry equips a bot, through GitGuardian's REST API rather than an MCP server:
+
+```yaml
+integrations: [gitguardian]   # library/integrations/gitguardian.md: brings the gitguardian skill and the secret-incidents protocol
+```
+
+**Setup:** set `GITGUARDIAN_API_KEY` in the equipped bot's own `.env` (the bot tier, so no other bot holds it): a personal access token with the `incidents:read` scope only. An EU workspace also sets `GITGUARDIAN_API_URL=https://api.eu1.gitguardian.com`. The skill's helper sends only GET requests on the incident routes, whatever the token's scopes: the bot lists and triages incidents, and the operator closes them in GitGuardian's dashboard. Removing the entry leaves the token's line in the bot's `.env`, so delete that line and revoke the token too. See [library/integrations/gitguardian.md](../library/integrations/gitguardian.md).
 
 ## Integration Patterns
 

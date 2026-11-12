@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+import claudlobby.composer as composer_mod
 from claudlobby.composer import (
     CLAUDRON_LOOP_GRANTS,
     _claudron_hook_entries,
@@ -33,6 +35,7 @@ from claudlobby.composer import (
     compose_settings_local,
 )
 from claudlobby.config import BotConfig, FleetConfig, _coerce_bot
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
@@ -61,11 +64,11 @@ def _paths(tmp_path: Path) -> Paths:
     root = tmp_path / "claudlobby"
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     (root / "lib").mkdir(exist_ok=True)
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def _fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
 
 def _compose(tmp_path: Path, **bot_kw) -> tuple[dict, BotConfig]:
@@ -79,6 +82,26 @@ def _hook_commands(settings: dict) -> list[str]:
         for groups in settings.get("hooks", {}).values()
         for g in groups
         for h in g.get("hooks", [])
+    ]
+
+
+# The engine's dispatch verb per event, written out here rather than read from
+# the composer's own table, so a wrong table cannot pass its own test.
+EVENT_CMD = {
+    "SessionStart": "session-start",
+    "PreCompact": "pre-compact",
+    "SessionEnd": "session-end",
+}
+
+
+def _claudron_commands(settings: dict, event: str) -> list[str]:
+    """The claudron commands composed for one event: its identity is the
+    ``hook <event>`` suffix, whatever sits in front of it."""
+    return [
+        h["command"]
+        for g in settings.get("hooks", {}).get(event, [])
+        for h in g.get("hooks", [])
+        if h["command"].endswith(f"hook {EVENT_CMD[event]}")
     ]
 
 
@@ -182,6 +205,50 @@ class TestHookComposition:
         assert any(c.endswith("hook pre-compact") for c in cmds)
         assert any(c.endswith("hook session-end") for c in cmds)
 
+    def test_every_hook_command_names_the_bots_vault(self, tmp_path):
+        # Claudron #183: walk-up binds only a directory carrying
+        # `.claudron-vault`, so each command names the bot's own vault with the
+        # global `--vault`, ahead of the `hook <event>` identity suffix.
+        settings, _ = _compose(tmp_path, claudron_vault_path="/srv/v")
+        for event, event_cmd in EVENT_CMD.items():
+            (cmd,) = _claudron_commands(settings, event)
+            assert shlex.split(cmd)[-4:] == ["--vault", "/srv/v", "hook", event_cmd], cmd
+
+    def test_a_vault_path_that_needs_quoting_survives_the_shell(self, tmp_path):
+        # Claude Code runs a hook command through a shell.
+        vault = "/srv/My Vault"
+        settings, _ = _compose(tmp_path, claudron_vault_path=vault)
+        for event, event_cmd in EVENT_CMD.items():
+            (cmd,) = _claudron_commands(settings, event)
+            assert shlex.split(cmd)[-4:] == ["--vault", vault, "hook", event_cmd], cmd
+
+    def test_a_tilde_in_the_vault_path_is_expanded(self, tmp_path, monkeypatch):
+        # The engine reads the address as Path(hint).resolve(), which never
+        # expands "~", and a shell does not expand a quoted one: left as it is,
+        # "~/vault" names a directory called "~" under the hook's cwd.
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        settings, _ = _compose(tmp_path, claudron_vault_path="~/vault")
+        (cmd,) = _claudron_commands(settings, "SessionStart")
+        assert shlex.split(cmd)[-3] == str(home / "vault"), cmd
+
+    def test_a_relative_vault_path_is_anchored_at_the_bot_dir(self, tmp_path):
+        # A session runs in its bot dir, which is where the bot's
+        # CLAUDRON_VAULT_PATH export resolves a relative path; the hook names
+        # the same directory, absolutely.
+        settings, bot = _compose(tmp_path, claudron_vault_path="vault")
+        bot_dir = _paths(tmp_path).bot_runtime(bot.bot_id)
+        (cmd,) = _claudron_commands(settings, "SessionStart")
+        assert shlex.split(cmd)[-3] == str(bot_dir / "vault"), cmd
+
+    def test_a_loop_with_no_vault_composes_no_hooks(self, tmp_path):
+        # `claudron_session_loop: true` with no vault: the engine refuses to
+        # install a loop with no address (Claudron #183) and the validator
+        # refuses to generate one, so the composer renders none either.
+        settings, _ = _compose(tmp_path, claudron_session_loop=True)
+        for event in EVENT_CMD:
+            assert not _claudron_commands(settings, event), event
+
     def test_loop_off_installs_no_hooks(self, tmp_path):
         settings, _ = _compose(
             tmp_path, claudron_vault_path="/srv/v", claudron_session_loop=False
@@ -225,11 +292,22 @@ class TestHookComposition:
 
     def test_merge_self_replaces_stale_executable(self):
         # A moved venv/pipx path must REPLACE, not duplicate (suffix identity).
-        old = _merge_claudron_hooks({}, "/old/venv/bin/claudron")
-        new = _merge_claudron_hooks(old, "/new/venv/bin/claudron")
+        old = _merge_claudron_hooks({}, "/old/venv/bin/claudron", "/srv/v")
+        new = _merge_claudron_hooks(old, "/new/venv/bin/claudron", "/srv/v")
         for event in ("SessionStart", "PreCompact", "SessionEnd"):
             assert len(new[event]) == 1
             assert new[event][0]["hooks"][0]["command"].startswith("/new/venv/bin/claudron")
+
+    def test_merge_self_replaces_a_moved_vault(self):
+        # Re-pointing a bot at another vault replaces its entries on the
+        # identity suffix; no entry is left naming the old vault.
+        exe = "/opt/claudron/bin/claudron"
+        old = _merge_claudron_hooks({}, exe, "/srv/old-vault")
+        new = _merge_claudron_hooks(old, exe, "/srv/new-vault")
+        for event, event_cmd in EVENT_CMD.items():
+            (group,) = new[event]
+            assert shlex.split(group["hooks"][0]["command"]) == [
+                exe, "--vault", "/srv/new-vault", "hook", event_cmd]
 
     def test_executable_absolute_when_on_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr(shutil, "which", lambda name: "/abs/bin/claudron")
@@ -365,6 +443,207 @@ class TestValidator:
         assert not self._loop_errors(tmp_path, bot)
 
 
+class TestVaultMigrationWarnings:
+    """Synthetic CLI answers exercise the consumer contract, not engine internals."""
+
+    @staticmethod
+    def _setup(tmp_path, monkeypatch, *, data=None, findings=(), caps=("doctor",),
+               rc=0, status_rc=0, answer=None, status_data=None, loop=True, bots=1):
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True, exist_ok=True)
+        calls = tmp_path / "calls.jsonl"
+        status = {"ok": True, "command": "status", "warnings": [], "errors": [], "data": status_data if status_data is not None else {"capabilities": list(caps), "engine_version": "test"}}
+        envelope = {"ok": True, "command": "doctor", "data": data if data is not None else {
+            "vault_format": 3, "engine_format": 3, "pending": []},
+            "errors": [{"code": code, "message": code} for code in findings] if rc == 1 else [],
+            "warnings": [] if rc == 1 else [{"code": code, "message": code} for code in findings]}
+        envelope["ok"] = not envelope["errors"]
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "claudron"
+        stub.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            f"with open({str(calls)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"if sys.argv[1] == 'status': print({json.dumps(status)!r}); sys.exit({status_rc})\n"
+            f"if sys.argv[1] == 'doctor': print({answer if answer is not None else json.dumps(envelope)!r}); sys.exit({rc})\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+        fleet = _fleet(BotConfig(bot_id="b1", name="b1", expertise=["eng"],
+            claudron_vault_path=str(vault), claudron_session_loop=loop))
+        for i in range(2, bots + 1):
+            fleet.bots[f"b{i}"] = BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"],
+                claudron_vault_path=str(vault), claudron_session_loop=loop)
+        return vault, calls, fleet, _paths(tmp_path)
+
+    @staticmethod
+    def _migration_rows(report):
+        return [(kind, text) for kind, text in report.categorized()
+                if kind in {"claudron-migration", "claudron-doctor"}]
+
+    @pytest.mark.parametrize("data,findings", [
+        ({"vault_format": 2, "engine_format": 3, "pending": [{"id": "m003", "title": "memory homes"}]}, ()),
+        ({"vault_format": 2, "engine_format": 3, "pending": []}, ()),
+        ({"vault_format": 4, "engine_format": 3, "pending": []}, ()),
+        ({"vault_format": 3, "engine_format": 3, "pending": []}, ("D001",)),
+    ])
+    def test_pending_or_unequal_format_warns_with_explicit_human_command(
+        self, tmp_path, monkeypatch, data, findings
+    ):
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, data=data,
+            findings=findings, rc=1 if findings else 0)
+        report = validate(fleet, paths)
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-migration"
+        assert str(vault) in rows[0][1]
+        assert f"claudron doctor --fix --json --vault {vault}" in rows[0][1]
+        assert "one clone" in rows[0][1] and "pull" in rows[0][1] and "plans again" in rows[0][1]
+        assert not any("migration" in error for error in report.errors)
+        assert "--fix" not in calls.read_text()
+
+    @pytest.mark.parametrize("code", ["D007", "D008", "D009", "D010", "S001"])
+    def test_unrelated_findings_do_not_warn_migration(self, tmp_path, monkeypatch, code):
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch, findings=(code,), rc=1)
+        assert self._migration_rows(validate(fleet, paths)) == []
+
+    @pytest.mark.parametrize("engine,why", [
+        ({"caps": ()}, "does not declare"),
+        ({"rc": 3}, "no vault"),
+        ({"status_rc": 3}, "no vault resolved"),
+        ({"answer": "not json"}, "without its envelope"),
+        ({"answer": '{"command":"doctor","data":{},"errors":"bad","warnings":[]}'}, "without its envelope"),
+        ({"data": {"pending": []}}, "format"),
+        ({"data": {"pending": [], "vault_format": True, "engine_format": 3}}, "format"),
+    ])
+    def test_unavailable_state_warns_unknown(self, tmp_path, monkeypatch, engine, why):
+        vault, _, fleet, paths = self._setup(tmp_path, monkeypatch, **engine)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert why in rows[0][1] and str(vault) in rows[0][1]
+
+    def test_timeout_warns_unknown(self, tmp_path, monkeypatch):
+        from claudlobby import claudron_compat as compat
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch)
+        def run(argv, **kwargs):
+            return (0, '{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}') if argv[1] == "status" else (124, "")
+        monkeypatch.setattr(compat, "_run", run)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert "60s" in rows[0][1] and "unknown" in rows[0][1]
+
+    @pytest.mark.parametrize("phase", ["status", "doctor"])
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_undecodable_cli_reply_warns_unknown(self, tmp_path, monkeypatch, phase, stream):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch)
+        status = {"ok": True, "command": "status", "data": {"capabilities": ["doctor"]},
+                  "warnings": [], "errors": []}
+        stub = tmp_path / "bin" / "claudron"
+        stub.write_text(f"#!{sys.executable}\nimport sys\n"
+            f"if sys.argv[1] == {phase!r}: getattr(sys, {stream!r}).buffer.write(bytes([255])); sys.exit(0)\n"
+            f"if sys.argv[1] == 'status': print({json.dumps(status)!r})\n")
+        report = validate(fleet, paths)
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert not any("migration" in error for error in report.errors)
+        doctor_report = DoctorReport()
+        check_claudron(fleet, paths, doctor_report)
+        assert any(row.name == "claudron-doctor" and row.status == "warn" for row in doctor_report.checks)
+
+    def test_doctor_exit_one_without_findings_is_unknown_in_both_readers(self, tmp_path, monkeypatch):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        _, _, fleet, paths = self._setup(tmp_path, monkeypatch, rc=1)
+        rows = self._migration_rows(validate(fleet, paths))
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        assert next(row for row in report.checks if row.name == "claudron-doctor").status == "warn"
+
+    def test_loop_disabled_does_not_probe(self, tmp_path, monkeypatch):
+        _, calls, fleet, paths = self._setup(tmp_path, monkeypatch, loop=False)
+        assert self._migration_rows(validate(fleet, paths)) == []
+        assert not calls.exists()
+
+    def test_unresolved_vault_does_not_probe(self, tmp_path, monkeypatch):
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch)
+        (vault / "_shared").rmdir()
+        assert self._migration_rows(validate(fleet, paths)) == []
+        assert not calls.exists()
+
+    def test_cli_absent_does_not_probe(self, tmp_path, monkeypatch):
+        import claudlobby.claudron_compat as compat
+        _, calls, fleet, paths = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setenv("PATH", str(tmp_path / "absent"))
+        monkeypatch.setattr(compat, "vault_migration_state", lambda *a, **kw: pytest.fail("off-PATH probe"))
+        report = validate(fleet, paths)
+        assert self._migration_rows(report) == []
+        assert "claudron-path" in report.warning_categories and not calls.exists()
+
+    @pytest.mark.parametrize("entrypoint", ["validate", "bots", "bots-shared"])
+    def test_one_probe_per_vault_and_fresh_reader_next_call(self, tmp_path, monkeypatch, entrypoint):
+        import claudlobby.claudron_compat as compat
+        from claudlobby.validator import ValidationReport, _validate_bots
+        vault, calls, fleet, paths = self._setup(tmp_path, monkeypatch, bots=2,
+            data={"vault_format": 2, "engine_format": 3, "pending": []})
+        def read():
+            if entrypoint == "validate":
+                return validate(fleet, paths)
+            report = ValidationReport()
+            if entrypoint == "bots-shared":
+                reader = compat.vault_migration_reader()
+                with monkeypatch.context() as shared:
+                    shared.setattr(compat, "vault_migration_reader", lambda **kw: pytest.fail(
+                        "a supplied migration reader must remain the request owner"))
+                    _validate_bots(fleet, paths, {}, report, migration_reader=reader)
+            else:
+                _validate_bots(fleet, paths, {}, report)
+            return report
+        report = read()
+        rows = self._migration_rows(report)
+        assert len(rows) == 1 and "affects 2 bot(s)" in rows[0][1]
+        argv = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert [a[0] for a in argv] == ["status", "doctor"]
+        seen = []
+        def replacement(path, **kwargs):
+            seen.append(path)
+            return compat.VaultMigrationState("ok", (), 3, 3, "")
+        monkeypatch.setattr(compat, "vault_migration_state", replacement)
+        assert self._migration_rows(read()) == []
+        assert seen == [str(vault)]
+
+
+class TestMalformedVaultMigrationEnvelopes:
+    @pytest.mark.parametrize("field,value", [
+        ("capabilities", 7), ("capabilities", "doctor"), ("capabilities", ["doctor", 7]),
+        ("pending", ["m003"]), ("pending", [7]), ("pending", [{}]),
+        ("pending", [{"id": 3, "title": "migration"}]),
+        ("warnings", ["D009"]), ("errors", [7]), ("errors", [{}]),
+        ("warnings", [{"code": "D009", "message": 7}]),
+    ])
+    def test_malformed_collections_warn_in_validator_and_doctor(
+        self, tmp_path, monkeypatch, field, value
+    ):
+        from claudlobby.doctor import DoctorReport, check_claudron
+        data = {"vault_format": 3, "engine_format": 3, "pending": []}
+        envelope = {"ok": True, "command": "doctor", "data": data, "errors": [], "warnings": []}
+        kwargs = {}
+        if field == "capabilities":
+            kwargs["status_data"] = {"capabilities": value}
+        else:
+            (data if field == "pending" else envelope)[field] = value
+            kwargs["answer"] = json.dumps(envelope)
+        vault, _, fleet, paths = TestVaultMigrationWarnings._setup(tmp_path, monkeypatch, **kwargs)
+        report = validate(fleet, paths)
+        rows = TestVaultMigrationWarnings._migration_rows(report)
+        assert len(rows) == 1 and rows[0][0] == "claudron-doctor"
+        assert str(vault) in rows[0][1]
+        assert not any("migration" in error for error in report.errors)
+        doctor_report = DoctorReport()
+        check_claudron(fleet, paths, doctor_report)
+        diagnostic = next(c for c in doctor_report.checks if c.name == "claudron-doctor")
+        assert diagnostic.status == "warn"
+        assert "unknown" in diagnostic.detail or "envelope" in diagnostic.detail
+
+
 # ---------------------------------------------------------------------------
 # The R3 drift gate — composed entries == the pinned engine's snippet.
 # (Skipped when the [vault] extra is not installed; runs in the vault-mode CI.)
@@ -374,15 +653,23 @@ class TestValidator:
 @pytest.mark.vault
 class TestSnippetParity:
     EXE = "/opt/claudron/bin/claudron"
+    VAULT = "/srv/vault"
 
-    def test_entries_match_engine_settings_snippet(self):
+    # The second vault needs shell quoting, the case most likely to drift.
+    @pytest.mark.parametrize("vault", ["/srv/vault", "/srv/My Vault"])
+    def test_entries_match_engine_settings_snippet(self, vault):
         hooks = pytest.importorskip("claudron.hooks")
-        assert _claudron_hook_entries(self.EXE) == hooks.settings_snippet(self.EXE)["hooks"]
+        assert (
+            _claudron_hook_entries(self.EXE, vault)
+            == hooks.settings_snippet(self.EXE, vault)["hooks"]
+        )
 
     def test_merge_matches_engine_merge_settings(self):
         hooks = pytest.importorskip("claudron.hooks")
-        composed = _merge_claudron_hooks({}, self.EXE)
-        engine = hooks.merge_settings({}, hooks.settings_snippet(self.EXE))["hooks"]
+        composed = _merge_claudron_hooks({}, self.EXE, self.VAULT)
+        engine = hooks.merge_settings({}, hooks.settings_snippet(self.EXE, self.VAULT))[
+            "hooks"
+        ]
         assert composed == engine
 
     def test_merge_self_replace_matches_engine(self):
@@ -392,24 +679,66 @@ class TestSnippetParity:
         guards. The empty-base case above cannot exercise it."""
         hooks = pytest.importorskip("claudron.hooks")
         old_exe, new_exe = "/old/venv/bin/claudron", "/new/venv/bin/claudron"
+        old_vault, new_vault = "/srv/old-vault", "/srv/new-vault"
         foreign = {"matcher": "", "hooks": [{"type": "command", "command": "fleet-own.sh"}]}
 
         def base():  # a hooks block: stale claudron entries (old exe) + a foreign hook
-            b = _merge_claudron_hooks({}, old_exe)
+            b = _merge_claudron_hooks({}, old_exe, old_vault)
             event = next(iter(b))
             b[event] = b[event] + [foreign]
             return b, event
 
         b_composer, event = base()
         b_engine, _ = base()
-        composed = _merge_claudron_hooks(b_composer, new_exe)
+        composed = _merge_claudron_hooks(b_composer, new_exe, new_vault)
         engine = hooks.merge_settings(
-            {"hooks": b_engine}, hooks.settings_snippet(new_exe)
+            {"hooks": b_engine}, hooks.settings_snippet(new_exe, new_vault)
         )["hooks"]
         assert composed == engine
-        # sanity: foreign hook survived; the stale executable is fully gone
+        # sanity: foreign hook survived; the stale executable and vault are gone
         assert foreign in composed[event]
         assert not any(old_exe in json.dumps(v) for v in composed.values())
+        assert not any(old_vault in json.dumps(v) for v in composed.values())
+
+
+@pytest.mark.vault
+class TestComposedHookFindsTheVault:
+    """Claudron #183 end to end. The composed SessionStart command, run by a
+    shell from outside the vault with no vault in its environment, reaches the
+    bot's own vault. The fixture vault carries no `.claudron-vault`, so walk-up
+    could never bind it: only the composed address can."""
+
+    def test_a_session_started_outside_the_vault_resolves_it(self, tmp_path, monkeypatch):
+        cli = pytest.importorskip("claudron.cli")
+        vault = tmp_path / "vault"
+        (vault / "_shared" / "knowledge").mkdir(parents=True)
+        home, outside, tmp = tmp_path / "home", tmp_path / "elsewhere", tmp_path / "tmp"
+        for d in (home, outside, tmp):
+            d.mkdir()
+        # The engine this interpreter imports, which is the pinned one; a
+        # claudron found on PATH could be another install.
+        exe = f"{sys.executable} -m claudron.cli"
+        monkeypatch.setattr(
+            composer_mod, "_resolve_claudron_executable", lambda: (exe, None)
+        )
+        settings, _ = _compose(tmp_path, claudron_vault_path=str(vault))
+        (command,) = _claudron_commands(settings, "SessionStart")
+        env = {k: v for k, v in os.environ.items() if k not in cli.VAULT_ENV_VARS}
+        env.update(HOME=str(home), TMPDIR=str(tmp))
+
+        def run(cmd: str) -> None:
+            subprocess.run(["sh", "-c", cmd], cwd=outside, env=env, input="{}",
+                           capture_output=True, text=True, check=True, timeout=60)
+
+        # The control: the same hook with no address finds nothing, and says
+        # so where a hook with no vault logs.
+        run(f"{exe} hook session-start")
+        assert "no vault resolvable" in (tmp / "claudron-hooks.log").read_text()
+        (tmp / "claudron-hooks.log").unlink()
+
+        run(command)
+        assert not (tmp / "claudron-hooks.log").exists(), "the composed hook found no vault"
+        assert "[session-start]" in (vault / ".claudron" / "hooks.log").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +808,9 @@ class TestSessionEndContention:
         _git(seed, "config", "user.name", "fleet")
         (seed / "_shared").mkdir()
         (seed / "_shared" / "CONVENTIONS.md").write_text("# conv\n")
+        # The vault identity file: hooks find this vault by walk-up from each
+        # bot dir, and walk-up binds only a directory carrying it (Claudron #183).
+        (seed / ".claudron-vault").write_text("claudron: 2\nname: seed\nhub: _shared\n")
         # Gitignore .claudron/ exactly like a real vault (claudron.vault
         # _GITIGNORE_CONTENT) — otherwise the hooks' `git add -A` commits each
         # clone's own .claudron/hooks.log, and those divergent per-clone logs
@@ -517,9 +849,8 @@ class TestSessionEndContention:
         end_argv = _claudron_hook_argv("session-end")
         start_argv = _claudron_hook_argv("session-start")
         # Resolve each vault via CWD walk-up (contract row 3), which every engine
-        # version honors — deliberately NOT via CLAUDRON_VAULT_PATH: the pinned
-        # v0.2.0 reads the old CLAUDRON_VAULT spelling, and this test validates
-        # concurrent-sync fail-open + recovery, not the env-address contract (which
+        # version honors — deliberately NOT via CLAUDRON_VAULT_PATH: this test
+        # validates concurrent-sync fail-open + recovery, not the env-address contract (which
         # has its own tests). Each subprocess sets cwd=<clone-i>.
         env = dict(os.environ)
 
@@ -566,19 +897,33 @@ class TestSessionEndContention:
         for i, clone in enumerate(clones):
             assert (clone / "_shared" / "knowledge" / f"note-{i}.md").is_file()
 
-        # (4) Eventual consistency — "unpushed work travels the next session": a
-        #     bounded reconcile (SessionStart pull+rebase, then SessionEnd push over
-        #     each clone) converges the remote to all N notes. Adds never conflict
-        #     (distinct files), so one pass suffices; the loop is bounded and
-        #     version-independent. THIS is the recovery #682 says must actually run
-        #     — and it now does (reconcile_cycles >= 1, asserted below).
+        # (4a) Hooks alone do NOT reconcile divergence — the Claudron >= 0.5.0
+        #      contract (Claudron #156): SessionStart only fast-forwards and never
+        #      rebases the live tree; SessionEnd only pushes. A clone whose push
+        #      lost the race is diverged, so a full hook cycle leaves it stranded.
+        #      Pinned so nobody re-reads the hooks as the recovery path: on a
+        #      multi-host estate, claudlobby/_runtime_scripts/vault-sync.sh (the scheduled `claudron sync`)
+        #      is what carries a raced capture home.
+        for clone in clones:
+            subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+            subprocess.run(end_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+        assert self._notes_on_remote(remote) == burst_landed, (
+            "a hook cycle reconciled a diverged clone — hooks are fast-forward/push "
+            "only since Claudron 0.5.0 (#156); if the engine changed, revisit (4a)/(4b)"
+        )
+
+        # (4b) Eventual consistency via the reconciliation door: a bounded
+        #      `claudron sync` over each clone — the exact command claudlobby/_runtime_scripts/vault-sync.sh
+        #      runs — converges the remote to all N notes. Adds never conflict
+        #      (distinct files), so one pass suffices; the loop is bounded. THIS is
+        #      the recovery #682 says must actually run (reconcile_cycles >= 1).
+        sync_argv = end_argv[: end_argv.index("hook")] + ["sync"]
         cycles = 0
         for _ in range(N_BOTS):
             if self._notes_on_remote(remote) == N_BOTS:
                 break
             for clone in clones:
-                subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
-                subprocess.run(end_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+                subprocess.run(sync_argv, env=env, cwd=str(clone), capture_output=True, text=True, timeout=120)
             cycles += 1
         final = self._notes_on_remote(remote)
         assert final == N_BOTS, f"only {final}/{N_BOTS} notes reached the remote after reconcile"

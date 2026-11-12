@@ -29,7 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -39,7 +39,7 @@ assert_eq() {
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 # call_wait <args...> — invoke wait_bridge_ready_state and capture its stdout
@@ -237,7 +237,7 @@ assert_eq "normal 1s/probe advance: prints the last state (no_bridge)" "no_bridg
 # every iteration into "started" and the loop never expired -- measured
 # against a 1s ceiling: still polling when it was killed at 130s. It is not
 # hypothetical:
-# lib/validate-bot-change.sh drives the real start-bot.sh with
+# harness/validate-bot-change.sh drives the real start-bot.sh with
 # RC_READY_TIMEOUT_S=1, and a probe there costs seconds under load. A ceiling
 # that cannot expire hangs the harness (start-bot.sh never returns, so the
 # `|| true` after it is never reached) and, for PR B, is a gate holder that

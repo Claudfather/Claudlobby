@@ -1,6 +1,6 @@
 # Autonomous Worker — Bot Archetype
 
-A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a procedural `--auto` skill to resolve them (clauDNA's `/claudna:implement-plan` is the usual choice). Never merges. Reports outcomes to Telegram.
+A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a procedural `--auto` skill to resolve them (clauDNA's `/claudna:build` is the usual choice). Never merges. Reports outcomes to Telegram.
 
 This archetype is the recipe for composing a bot around the `autonomous-runner` skill. If/when other archetypes emerge (Manager Bot, Auditor Bot, Reviewer Bot), promote shared archetype documentation to a top-level `library/archetypes/` category.
 
@@ -9,6 +9,7 @@ This archetype is the recipe for composing a bot around the `autonomous-runner` 
 - Your bots have a procedural `--auto` skill available (clauDNA provides these; check what is installed)
 - You have a target repository with a healthy backlog of well-formed issues (each containing an `## Implementation Plan` section, ideally produced by `/claudna:audit tech-debt --auto` or similar)
 - You want overnight or cadence-based PR generation without per-issue human intervention
+- The picker label is applied by people who can triage the repo: the bot takes only issues whose author can triage, or whose label one of them applied, with no change to its title or body since (`issue-intake.py`, SKILL.md Step 3)
 - You're OK with PRs awaiting a human review before merge (the contract is hard: this bot never merges)
 
 ## Composition

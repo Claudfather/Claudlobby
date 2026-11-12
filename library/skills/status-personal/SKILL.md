@@ -1,6 +1,6 @@
 ---
 name: status
-description: "Self-diagnostic for an always-on personal-assistant bot. Adds cron/briefing/snapshot checks on top of the fleet-generic checks. Template — replace <ASSISTANT_TOOLS_DIR> with your own tooling path."
+description: "Use when an always-on personal-assistant bot is asked how it is doing, or its crons, briefings or snapshots look stale. Its self-diagnostic: adds cron/briefing/snapshot checks on top of the fleet-generic checks. Template — replace <ASSISTANT_TOOLS_DIR> with your own tooling path."
 argument-hint: "[full|mcp|cron|telegram]"
 ---
 
@@ -16,7 +16,7 @@ Full self-diagnostic for an always-on personal assistant. Extends the generic ma
 ### 1. Session Info
 
 ```bash
-"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
+"$CLAUDLOBBY_NATIVE_DIR/claude-session-pid.sh" --summary
 tmux list-sessions 2>/dev/null
 ```
 

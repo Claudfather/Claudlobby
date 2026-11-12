@@ -25,25 +25,22 @@ host:
       enroll: true
 ```
 
-then:
-
-```
-lib/setup-system
-systemctl --user list-timers | grep vault-sync      # Linux
-```
+then apply the reviewed commit with `host update apply FULL_COMMIT` using the
+stable installation CLI, and inspect it with `host update status` ([Managed Git delivery](../fleet-update-lifecycle.md#managed-git-delivery)). On Linux, inspect the enrolled
+timer with `systemctl --user list-timers | grep vault-sync`.
 
 Arm **one** host, watch `vault.sync_ok` for a week, then arm the second.
-`claudlobby doctor --switches` lists the job either way, so the off state is
+`claudlobby host doctor --switches` lists the job either way, so the off state is
 visible rather than merely documented.
 
-**Backout:** `enroll: false` + `lib/setup-system` — the unit disappears.
+**Backout limitation:** the current Git updater refuses removal of an already declared native unit. Setting `enroll: false` alone does not stop an installed timer. Keep its original configuration and use an explicitly reviewed operator stop until unit removal is supported; do not treat a refused update as a completed backout.
 
 **If you arm this once the engine carries `sync --check`, read the first few
 `vault.state` samples yourself and confirm they carry the verdict you expect
 before trusting the quiet.** That is the whole ask; the rest of this block is why.
 
 **The rehearsal has never run the state you will be in.** All five scenarios in
-`lib/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
+`harness/rehearse-vault-sync.sh` drive a stub whose `--check` arm exits 2
 unconditionally, so **every** scenario runs with `state=unknown` and **none has
 ever seen an rc-0 verdict**. That was harmless while no engine had the flag. It
 stops being harmless the moment the engine carrying `sync --check` is pulled here
@@ -89,12 +86,15 @@ is precisely the success-shaped output this program exists to end.
 
 ```
 FLEET ALERT vault_sync_failed — vault sync FAILED for vault:<name> (state=…):
-<detail> — run 'claudron sync --check' in that vault; this job never resolves
+<detail> — run 'claudron sync --check --vault <path>'; this job never resolves
 a conflict
 ```
 
-1. **Run the check it names**, in that vault: `claudron sync --check` (or
-   `claudron sync` on an engine without the flag) and read the refusal.
+1. **Run the check it names:** `claudron sync --check --vault <path>` (or
+   `claudron sync --vault <path>` on an engine without `--check`), and read the
+   refusal. Name the vault as the job does (#1993). The walk-up form,
+   `claudron sync --check` run inside the vault, finds nothing on a 0.5.2+
+   engine until the vault's `.claudron-vault` identity file is committed.
 2. **The job does not fix anything, by design.** It never resolves a conflict,
    aborts a rebase or expires a lock — Claudron's `sync` does those or refuses
    them, and a scheduled door that rewrites a tree under a running fleet is the
@@ -121,7 +121,7 @@ It is **recorded, not lost**: every tick writes a `vault.state` sample, so the
 change is on the plane and queryable —
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50   # the failures
+claudlobby --fleet <name> event list --type vault_sync --limit 50   # the failures
 ```
 
 — and the samples themselves (`vault.state`) carry the verdict per run. If you
@@ -153,7 +153,7 @@ verdict will be a real one.
 ## Reading the history
 
 ```
-claudlobby --fleet <name> events --type vault_sync --tail 50
+claudlobby --fleet <name> event list --type vault_sync --limit 50
 ```
 
 The samples answer "when did this vault last sync successfully, and how often
@@ -161,7 +161,7 @@ does it fail" — the denominator the hook-only path never had.
 
 ## Rehearsing it
 
-`bash lib/rehearse-vault-sync.sh` drives the real job through clean → wedged →
+`bash harness/rehearse-vault-sync.sh` drives the real job through clean → wedged →
 still-wedged → recovered against a real plane in a throwaway root, with a
 stubbed engine and a fake escalation chat. It carries a positive control: a
 *changed* failure state must page again, or the debounce is muting rather than

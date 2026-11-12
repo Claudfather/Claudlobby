@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 
 from tests.conftest import read_fleet_events
+from tests.plane_fixtures import F
 from tests.test_fleet_pulse_escalated import _pulse, _pulse_lib, _scene, needs_tmux
 
 CHAT_ESC = "-1003333333333"
@@ -29,13 +30,13 @@ def _events(root, kind):
 
 
 def _marker(root):
-    return root / "state" / "pulse" / "fleet.alert_target_refused"
+    return root / "state" / "pulse" / f"{F}.alert_target_refused"
 
 
 # --- a refused escalation target is loud ------------------------------------------
 
 
-def test_a_refused_escalation_chat_is_loud(tmp_path):
+def test_a_refused_escalation_chat_is_loud(tmp_path, *, scratch_plane_env):
     root, paths, wi, asg = _scene(tmp_path)
     capture = tmp_path / "tg.log"
     libdir = _pulse_lib(tmp_path, capture)
@@ -45,7 +46,7 @@ def test_a_refused_escalation_chat_is_loud(tmp_path):
         **FAST,
     }
 
-    r = _pulse(root, libdir, **refused)
+    r = _pulse(root, libdir, **refused, scratch_plane_env=scratch_plane_env)
     assert r.returncode == 0, r.stderr[-2000:]
     # loud, and it names the fix
     assert "escalation Telegram target REFUSED" in r.stderr, r.stderr[-1500:]

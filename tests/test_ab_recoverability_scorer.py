@@ -1,4 +1,4 @@
-"""Tests for lib/ab-recoverability-scorer.py — the #881 A2 recoverability axis.
+"""Tests for harness/ab-recoverability-scorer.py — the #881 A2 recoverability axis.
 
 A2 is the anti-lossy guard: A1 is gamed by saying less, so A2 asks whether the
 detail that was compressed out still comes back on a follow-up, in full and
@@ -15,7 +15,7 @@ than a rubber stamp:
   4. No verdict is emitted. A2's bar is not ratified; the module emits a
      comparable score and stops.
 
-The module is loaded by path because lib/ filenames are hyphenated and so are
+The module is loaded by path because claudlobby/_runtime_scripts/ filenames are hyphenated and so are
 not importable as modules — the ab-comms-verdict.py precedent.
 """
 
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
-MODULE_PATH = REPO_DIR / "lib" / "ab-recoverability-scorer.py"
+MODULE_PATH = REPO_DIR / "harness" / "ab-recoverability-scorer.py"
 
 
 def _load_module():
@@ -127,7 +127,7 @@ class TestScorePair:
         assert scorer.has_address("done. PR #954")
         assert scorer.has_address("see https://github.com/o/r/pull/1")
         assert scorer.has_address("detail in data/worklog/t-1785-ab.md")
-        assert scorer.has_address("lib/ab-comms-verdict.py has it")
+        assert scorer.has_address("harness/ab-comms-verdict.py has it")
         assert not scorer.has_address("all finished, looks good")
 
 

@@ -1,0 +1,40 @@
+{
+  "blocks": [],
+  "index": 1,
+  "input": {
+    "range": {
+      "end": 51621,
+      "start": 0
+    },
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "transcript_path": "/example/transcript.jsonl",
+    "turns": 2
+  },
+  "journey": {
+    "arc": [
+      {
+        "result": "Harmless command completed",
+        "step": "Run local probe"
+      }
+    ],
+    "done": [
+      {
+        "text": "Validated local protocol path"
+      }
+    ],
+    "in_progress": [],
+    "intent": "Verify sealed segment export",
+    "next": [],
+    "outcome": "shipped",
+    "title": "Local summary consumer canary"
+  },
+  "procedures": [],
+  "producer": {
+    "cost_usd": 1.4000000000000001e-05,
+    "duration_ms": 2283,
+    "model": "haiku",
+    "prompt_version": "segment-summary/2"
+  },
+  "schema": "claudna.segment-summary/1",
+  "sid": "00000000-0000-4000-8000-000000000001"
+}

@@ -11,6 +11,11 @@ here is the CLASSIFIER's behaviour on synthetic specs, plus the structural fact
 that every shipped fragment is readable by the grammar — both stable under any
 remedy anyone chooses.
 
+One guard is the exception, and it points the other way: no shipped fragment
+may launch an UNPINNED npx package (#1890). Pinning satisfies it, so it never
+blocks the remedy; it blocks the regression, a new fragment that runs whatever
+the registry serves at boot.
+
 The network path is exercised for real in the PR body's live run, not here:
 these tests make no network call.
 """
@@ -20,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -31,7 +37,7 @@ from claudlobby import mcp_packages as mp  # noqa: E402
 
 def _grammar():
     spec = importlib.util.spec_from_file_location(
-        "mcp_package_grammar", REPO_ROOT / "lib" / "mcp-package-grammar.py"
+        "mcp_package_grammar", REPO_ROOT / "claudlobby/_runtime_scripts" / "mcp-package-grammar.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -127,23 +133,6 @@ class TestIsPinned:
         spec = "Google_Analytics_MCP"
         assert g.bare_name("uvx", spec) != spec  # the shortcut would say "pinned"
         assert g.is_pinned("uvx", spec) is False  # the real answer
-
-
-class TestWarmArgv:
-    def test_it_is_the_exact_command_the_fragment_would_run(self):
-        argv = g.warm_argv("npx", ["-y", "printify-mcp"])
-        assert argv == ["npx", "-y", "printify-mcp", "--help"]
-
-    def test_server_flags_and_placeholders_are_not_carried_into_the_probe(self):
-        """A fragment's own args can hold unexpanded ${VAR}; the probe is the
-        package identity only, so they never reach a subprocess."""
-        argv = g.warm_argv(
-            "npx", ["-y", "mcp-remote@0.1.38", "https://x/${TOKEN}", "--port", "${P}"]
-        )
-        assert argv == ["npx", "-y", "mcp-remote@0.1.38", "--help"]
-
-    def test_unreadable_shape_returns_none_rather_than_guessing(self):
-        assert g.warm_argv("npx", []) is None
 
 
 class TestProbeVerdicts:
@@ -258,7 +247,20 @@ class TestFindingMessages:
 
 
 class TestAgainstTheShippedLibrary:
-    """Structural only — never which fragments are unpinned (see module docstring)."""
+    """Structural, plus the one guard the module docstring names."""
+
+    def test_no_shipped_fragment_launches_an_unpinned_npx_package(self):
+        # #1890: an unversioned `npx -y <pkg>` runs whatever the registry serves
+        # at boot on every bot equipping the fragment, and an unscoped name
+        # nobody owns can be claimed by anyone (printify-mcp was one). #1058's
+        # own predicate, over the whole shipped library.
+        rows = g.declared_packages([str(REPO_ROOT / "library" / "mcp")])
+        unpinned = {f.fragment for f in mp.pinning_findings(rows) if f.runtime == "npx"}
+        # One allowance: spotify.json names a package npm does not have
+        # (@modelcontextprotocol/server-spotify, E404), so there is no version
+        # to pin, and the scope is npm-owned, so the name cannot be claimed.
+        # A SUBSET, so removing or replacing it passes.
+        assert unpinned <= {"spotify.json"}, sorted(unpinned)
 
     def test_every_shipped_fragment_is_readable_by_the_grammar(self):
         rows = g.declared_packages([str(REPO_ROOT / "library" / "mcp")])
@@ -283,10 +285,6 @@ class TestTheRungIsAWarningNeverAnError:
 
         mcp_dir = tmp_path / "library" / "mcp"
         mcp_dir.mkdir(parents=True)
-        # The REAL shared grammar, not a stand-in: mcp_grammar refuses rather
-        # than falling back, so a test root without lib/ exercises the refusal
-        # path instead of the rung.
-        (tmp_path / "lib").symlink_to(REPO_ROOT / "lib")
         for name, body in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(body))
         bot = BotConfig(
@@ -295,12 +293,13 @@ class TestTheRungIsAWarningNeverAnError:
             expertise=["software-engineering"],
             mcp=[McpEntry(name=n) for n in fragments],
         )
-        return FleetConfig(
+        return FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
 
     def test_an_unpinned_declaration_warns_and_never_errors(self, tmp_path, monkeypatch):
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet = self._fleet(
@@ -310,7 +309,7 @@ class TestTheRungIsAWarningNeverAnError:
                 "solid": {"solid": {"command": "npx", "args": ["-y", "solid-pkg@1.0.0"]}},
             },
         )
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         report = validator.ValidationReport()
         # Disarmed: the offline signal must stand on its own, with the
         # resolution probe never invoked. Guarding `_probe` rather than
@@ -340,15 +339,19 @@ class TestTheRungIsAWarningNeverAnError:
         """
         from claudlobby.config import BotConfig, FleetConfig
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
-        # No lib/, no library/ — the grammar cannot load from this root at all.
+        # No native directory or library — the grammar cannot load at all.
         bot = BotConfig(bot_id="alpha", name="alpha", expertise=["x"], mcp=[])
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert report.warnings == []
         assert report.errors == []
@@ -358,6 +361,7 @@ class TestTheRungIsAWarningNeverAnError:
         must not interpolate a filesystem path (see the regression above)."""
         from claudlobby.config import BotConfig, FleetConfig, McpEntry
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         mcp_dir = tmp_path / "library" / "mcp"
@@ -368,11 +372,14 @@ class TestTheRungIsAWarningNeverAnError:
         bot = BotConfig(
             bot_id="alpha", name="alpha", expertise=["x"], mcp=[McpEntry(name="ghost")]
         )
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="alpha",
             name="probe", service_prefix="com.example.probe", bots={"alpha": bot}
         )
         report = validator.ValidationReport()
-        validator._validate_mcp_packages(fleet, Paths(root=tmp_path), report)
+        paths = Paths(root=tmp_path, package=replace(
+            source_package(), library=tmp_path / "library",
+            native=tmp_path / "missing-native"))
+        validator._validate_mcp_packages(fleet, paths, report)
 
         assert len(report.warnings) == 1
         assert "UNKNOWN" in report.warnings[0]
@@ -384,13 +391,14 @@ class TestTheRungIsAWarningNeverAnError:
         self, tmp_path, monkeypatch
     ):
         from claudlobby import validator
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet = self._fleet(
             tmp_path, {"ghost": {"ghost": {"command": "npx", "args": ["-y", "ghost-pkg"]}}}
         )
         (tmp_path / ".env").write_text(f"{mp.PROBE_FLAG}=1\n")
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         report = validator.ValidationReport()
 
         seen = []

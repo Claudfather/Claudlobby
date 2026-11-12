@@ -1,23 +1,21 @@
 # tests/test_checkins_summary.py
-"""`claudlobby checkins --summary` (manager check-in PR 3, task 3): the window
+"""Canonical check-in summary: the window
 rolled up -- actions, ask rate, considered lengths, unavailable frequencies and
 dispatch outcomes, grouped by project_key. `summarize(rows)` is a PURE function
 of the row dicts `collect_checkins` returns (no db, no clock), so the math is
-unit-tested with hand-built rows below; the CLI-level tests drive the same
+unit-tested with hand-built rows below; the real-row test drives the same
 fixtures `test_checkins_outcome_join.py` imports from `test_checkins_cli.py`
 rather than inventing a second seeding path.
 
 This door produces FACTS ONLY -- a count, a distribution -- never a verdict:
-no threshold, no "healthy"/"unhealthy" wording anywhere here or in cmd_checkins."""
+no threshold, no "healthy"/"unhealthy" wording anywhere in the rollup."""
 
 from __future__ import annotations
 
 import copy
-import re
 
 from claudlobby.commands import checkins as cmd
-from claudlobby.plane.emit_api import emit_batch
-from tests.test_checkins_cli import F, _Args, _decision, _out, root  # noqa: F401
+from tests.test_checkins_cli import _decision, _query, root  # noqa: F401
 
 CK1, CK2, CK3 = ("ck_" + c * 32 for c in "abc")
 
@@ -81,13 +79,16 @@ def test_the_unavailable_frequencies_are_per_token():
 
 def test_dispatch_outcomes_count_join_rows_and_the_unjoined_decisions():
     rows = [
-        _r(action="dispatch", dispatches=[{"outcome": "completed", "status": "completed"}]),
-        _r(action="dispatch", dispatches=[{"outcome": "open", "status": "progress"}]),
+        _r(action="dispatch", dispatches=[{"outcome": "completed", "assignment_state": "closed",
+                                           "terminal_event": "completed"}]),
+        _r(action="dispatch", dispatches=[{"outcome": "open", "assignment_state": "active",
+                                           "terminal_event": None}]),
         _r(action="dispatch", dispatches=[]),          # a dispatch decision with no join row
     ]
     totals = cmd.summarize(rows)["totals"]
     assert totals["dispatch_outcomes"] == {"completed": 1, "blocked": 0, "failed": 0,
-                                            "retired": 0, "open": 1, "unjoined": 1}
+                                            "retired": 0, "open": 1, "unknown": 0,
+                                            "unjoined": 1}
     assert totals["dispatches"] == 2
 
 
@@ -98,19 +99,20 @@ def test_a_non_dispatch_decision_with_no_join_row_is_not_unjoined():
     assert totals["dispatches"] == 0
 
 
-def test_dispatch_statuses_count_the_raw_plane_statuses_and_skip_the_missing_ones():
+def test_assignment_states_and_terminal_events_skip_unjoined_links():
     rows = [
         _r(action="dispatch", dispatches=[
-            {"outcome": "completed", "status": "completed"},
-            {"outcome": "blocked", "status": "returned_blocked"},
+            {"outcome": "completed", "assignment_state": "closed", "terminal_event": "completed"},
+            {"outcome": "blocked", "assignment_state": "closed", "terminal_event": "returned_blocked"},
         ]),
         _r(action="dispatch", dispatches=[
-            {"outcome": "completed", "status": "completed"},
-            {"outcome": "unjoined", "status": None},       # no assignment row -- must not count as a status
+            {"outcome": "completed", "assignment_state": "closed", "terminal_event": "completed"},
+            {"outcome": "unjoined", "assignment_state": None, "terminal_event": None},
         ]),
     ]
     totals = cmd.summarize(rows)["totals"]
-    assert totals["dispatch_statuses"] == {"completed": 2, "returned_blocked": 1}
+    assert totals["assignment_states"] == {"closed": 3}
+    assert totals["terminal_events"] == {"completed": 2, "returned_blocked": 1}
 
 
 def test_the_groups_are_by_project_key_with_null_last():
@@ -133,69 +135,23 @@ def test_summarize_does_not_mutate_its_rows():
     rows = [
         _r(action="nothing", record=None),
         _r(action="dispatch", project_key="shop",
-           dispatches=[{"outcome": "completed", "status": "completed"}]),
+           dispatches=[{"outcome": "completed", "assignment_state": "closed",
+                        "terminal_event": "completed"}]),
     ]
     before = copy.deepcopy(rows)
     cmd.summarize(rows)
     assert rows == before
 
 
-# --- cmd_checkins --summary: CLI-level, through the real emit spine ---------
+# --- shared query and pure rollup stay one owner -------------------------------
 
-def test_summary_refuses_last_and_limit(root, capsys):
-    rc = cmd.cmd_checkins(_Args(root, summary=True, last=True))
-    out, err = capsys.readouterr()
-    assert rc == 2 and out == "" and "--last" in err
-
-    rc = cmd.cmd_checkins(_Args(root, summary=True, limit=3))
-    out, err = capsys.readouterr()
-    assert rc == 2 and out == "" and "--limit" in err
-
-
-def test_summary_json_and_text_agree_on_the_counts(root, capsys):
+def test_window_rollup_counts_real_decision_rows(root):  # noqa: F811 — imported shared pytest fixture
     _decision(root, "mgr", CK1, age_h=3, action="dispatch")
     _decision(root, "mgr", CK2, age_h=2, action="ask",
               raise_={"decided": True, "reason": "a fork", "held": []})
     _decision(root, "mgr", CK3, age_h=1, action="nothing")
-
-    assert cmd.cmd_checkins(_Args(root, summary=True, json=True)) == 0
-    totals = _out(capsys)["totals"]
-
-    assert cmd.cmd_checkins(_Args(root, summary=True)) == 0
-    text = capsys.readouterr().out
-
-    assert f"checkins: {totals['checkins']}" in text
-    assert f"raised: {totals['raised']}" in text
-    # the k=v pairs stop at the trailing asymmetry clause (the "(" below) --
-    # never swallowed into the parsed counts
-    m = re.search(r"dispatch_outcomes:\s*([^(\n]+)", text)
-    assert m is not None
-    parsed = {k: int(v) for k, v in (pair.split("=") for pair in m.group(1).split())}
-    assert parsed == totals["dispatch_outcomes"]
-    # A2: the asymmetry (unjoined counts BOTH a join row naming an unknown
-    # assignment AND a dispatch decision that joined no row) is visible on
-    # the same line a reader meets the counts, not just in a docstring
-    assert "unjoined also counts dispatch decisions that joined nothing" in text
-
-
-def test_summary_over_an_empty_window_answers_at_rc_0(root, capsys):
-    # a plane that has SEEN the fleet (one identity row) but holds no decision
-    # is EMPTY, not unreachable -- the same shape as PR 1's own rc-0 test
-    emit_batch(root, [{"event_type": "system", "emitter": "t", "fleet": F,
-                       "payload": {"event": "report_status", "subject_kind": "actor",
-                                   "subject": f"bot:{F}/w1", "data": {"status": "progress"}}}])
-    assert cmd.cmd_checkins(_Args(root, summary=True, json=True)) == 0
-    env = _out(capsys)
-    assert env["totals"]["checkins"] == 0
-    assert env["projects"] == []
-
-    assert cmd.cmd_checkins(_Args(root, summary=True)) == 0
-    text = capsys.readouterr().out
-    assert "checkins: 0" in text
-
-
-def test_summary_on_an_unreachable_plane_refuses_at_rc_3(tmp_path, capsys):
-    bare = tmp_path / "bare"
-    bare.mkdir()
-    assert cmd.cmd_checkins(_Args(bare, summary=True)) == 3
-    assert "UNREACHABLE" in capsys.readouterr().err
+    summary = cmd.summarize(_query(root, since="7d"))
+    assert summary["totals"]["checkins"] == 3
+    assert summary["totals"]["raised"] == 1
+    assert summary["totals"]["dispatch_outcomes"]["unjoined"] == 1
+    assert cmd.summarize([])["totals"]["checkins"] == 0

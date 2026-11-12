@@ -22,8 +22,8 @@ been hand-rolled twice independently, and the second time it had a bug — a
 scoped name carrying no version stripped to the empty string, the registry root
 answered 200, and a dead fragment read healthy. That is why nothing here
 composes a registry URL: the probe runs the EXACT argv the fragment would run,
-via `mcp-package-grammar.warm_argv`, and lets npm do its own name encoding.
-npm's own URL for the spotify fragment is
+which `mcp-package-grammar.declared_packages` puts in each row, and lets npm do
+its own name encoding. npm's own URL for the spotify fragment is
 `registry.npmjs.org/@modelcontextprotocol%2fserver-spotify`; the percent-encoded
 slash is precisely what a hand-composed URL gets wrong.
 
@@ -129,7 +129,7 @@ def declared_fragments(fleet: "FleetConfig", paths: "Paths") -> list[str]:
     Scoped to declared fragments rather than the whole library on purpose: the
     warning exists for the fleet that would actually get the dead server, and a
     fleet is not served by warnings about a fragment it never names. The library
-    as a whole is the operator's question, which `claudlobby doctor` answers.
+    as a whole is the operator's question, which `claudlobby host doctor` answers.
     """
     wanted: list[str] = []
     for bot in fleet.bots.values():
