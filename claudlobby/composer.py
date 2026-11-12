@@ -205,6 +205,14 @@ def _load_mcp_fragment(name: str, paths: Paths) -> dict | None:
         raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
 
 
+def _mcp_identities_by_fragment(bot: BotConfig) -> dict[str, list[ExpandedMcp]]:
+    """Keep empty declarations distinct from absent ones while grouping identities."""
+    identities: dict[str, list[ExpandedMcp]] = {entry.name: [] for entry in bot.mcp}
+    for identity in expand_mcp_entries(bot.mcp):
+        identities[identity.name].append(identity)
+    return identities
+
+
 def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
     """Every present MCP fragment for a bot, keyed by name — the ``{name: frag}``
     dict the L1 source guard classifies. The one assembly point shared by
@@ -215,14 +223,6 @@ def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
         for entry in bot.mcp
         if (frag := _load_mcp_fragment(entry.name, paths)) is not None
     }
-
-
-def _mcp_identities_by_fragment(bot: BotConfig) -> dict[str, list[ExpandedMcp]]:
-    """Keep empty declarations distinct from absent ones while grouping identities."""
-    identities: dict[str, list[ExpandedMcp]] = {entry.name: [] for entry in bot.mcp}
-    for identity in expand_mcp_entries(bot.mcp):
-        identities[identity.name].append(identity)
-    return identities
 
 
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
@@ -259,17 +259,17 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
 
     from . import mcp_direct
 
-    identities = _mcp_identities_by_fragment(bot)
     merged: dict = {"mcpServers": {}}
     # (server, spec, reason) for every npx server an ARMED bot could not
     # launch directly, reported once below so the forgone saving is visible.
     npx_fallbacks: list[tuple[str, str, str]] = []
+    identities = _mcp_identities_by_fragment(bot)
     for entry in bot.mcp:
-        instances = identities.pop(entry.name, None)
-        if instances is None:
-            continue
         frag = _load_mcp_fragment(entry.name, paths)
         if frag is None:
+            continue
+        instances = identities.pop(entry.name, None)
+        if instances is None:
             continue
         contract = frag.pop("_env_contract", {})
         global_binary = frag.pop("_global_binary", None)
