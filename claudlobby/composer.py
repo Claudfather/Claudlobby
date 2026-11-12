@@ -65,7 +65,12 @@ from .loader import (
     load_voice,
     parse_expertise_file,
 )
-from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
+from .mcp_resolve import (
+    ExpandedMcp,
+    expand_mcp_entries,
+    iter_operator_contract_vars,
+    resolve_placeholders,
+)
 from .mcp_grammar import grammar
 from .paths import Paths, _iter_fleet_dirs
 from .supervision import build_supervision_spec, render_launchd_plist, render_systemd_unit
@@ -200,6 +205,14 @@ def _load_mcp_fragment(name: str, paths: Paths) -> dict | None:
         raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
 
 
+def _mcp_identities_by_fragment(bot: BotConfig) -> dict[str, list[ExpandedMcp]]:
+    """Keep empty declarations distinct from absent ones while grouping identities."""
+    identities: dict[str, list[ExpandedMcp]] = {entry.name: [] for entry in bot.mcp}
+    for identity in expand_mcp_entries(bot.mcp):
+        identities[identity.name].append(identity)
+    return identities
+
+
 def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
     """Every present MCP fragment for a bot, keyed by name — the ``{name: frag}``
     dict the L1 source guard classifies. The one assembly point shared by
@@ -250,9 +263,13 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
     # (server, spec, reason) for every npx server an ARMED bot could not
     # launch directly, reported once below so the forgone saving is visible.
     npx_fallbacks: list[tuple[str, str, str]] = []
+    identities = _mcp_identities_by_fragment(bot)
     for entry in bot.mcp:
         frag = _load_mcp_fragment(entry.name, paths)
         if frag is None:
+            continue
+        instances = identities.pop(entry.name, None)
+        if instances is None:
             continue
         contract = frag.pop("_env_contract", {})
         global_binary = frag.pop("_global_binary", None)
@@ -269,8 +286,8 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
             continue
 
         # Generate one server entry per instance
-        for instance in entry.instances:
-            output_name = entry.output_name(instance)
+        for identity in instances:
+            output_name = identity.output_name
 
             instance_config = copy.deepcopy(server_config)
 
@@ -317,7 +334,7 @@ def mcp_launch_plan(bot: BotConfig, paths: Paths) -> tuple[dict, list[tuple[str,
             for field in ["env", "url", "args", "headers"]:
                 if field in instance_config:
                     instance_config[field] = resolve_placeholders(
-                        instance_config[field], contract, entry, instance
+                        instance_config[field], contract, entry, identity.instance
                     )
 
             merged["mcpServers"][output_name] = instance_config
@@ -396,14 +413,18 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
       This keeps settings.local.json compact and prevents staleness when the
       server adds new tools.
     """
+    identities = _mcp_identities_by_fragment(bot)
     patterns: list[str] = []
     for entry in bot.mcp:
+        instances = identities.pop(entry.name, None)
+        if instances is None:
+            continue
         contract = _load_mcp_contract(paths, entry.name)
         if not contract:
             continue
         read_only = contract.get("read_only_tools")
-        for instance in entry.instances:
-            output_name = entry.output_name(instance)
+        for identity in instances:
+            output_name = identity.output_name
             if read_only is not None:
                 patterns.extend(f"mcp__{output_name}__{tool}" for tool in read_only)
             elif contract.get("tools"):
@@ -517,6 +538,9 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
     """
     from .loader import iter_integration_grants
 
+    # Refuse ambiguous wiring before any grant is rewritten (#1808): _instance_rules
+    # rewrites one entry at a time, so it cannot tell when two identities name one server.
+    expand_mcp_entries(bot.mcp)
     grants: list[str] = []
     # Folder-aware (dir/ expansion) so generate resolves the same grant set the
     # validator shape-checks — the reader is shared with validator.py.
