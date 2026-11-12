@@ -1454,12 +1454,20 @@ svc_inventory_catalog() {
     printf 'manager\t%s\n' "$_OS"
     case "$_OS" in
         Linux)
-            output=$(systemd-analyze --user unit-paths) || return 3
-            while IFS= read -r path; do
-                case "$path" in /*) printf 'directory\t%s\n' "$path" ;; *) return 3 ;; esac
-            done <<EOF
-$output
-EOF
+            # Ask the running manager, not caller-dependent XDG defaults.
+            # UnitPath is a space-separated property; unsupported escaping or
+            # multiline output must refuse rather than hide a search directory.
+            output=$(systemctl --user show --property=UnitPath --value) || return 3
+            case "$output" in ''|*$'\n'*|*$'\r'*|*$'\t'*|*\\*) return 3 ;; esac
+            local -a unit_paths
+            IFS=' ' read -r -a unit_paths <<< "$output"
+            [ "${#unit_paths[@]}" -gt 0 ] || return 3
+            for path in "${unit_paths[@]}"; do
+                case "$path" in /*) ;; *) return 3 ;; esac
+            done
+            for path in "${unit_paths[@]}"; do
+                printf 'directory\t%s\n' "$path"
+            done
             output=$(systemctl --user list-unit-files --no-legend --no-pager --plain) || return 3
             while read -r name rest; do
                 [ -z "$name" ] || printf 'installed\t%s\n' "$name"
