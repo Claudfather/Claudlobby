@@ -10,11 +10,11 @@ from ..command_result import CommandFailure, CommandOutput
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
+    from ..config_plan import PlanError
     from ..env_tiers import ResolverUnavailable
     from ..host_update_operations import HostUpdateError, run_host_update
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
     from .releases import _host_root
 
     if any(key in os.environ for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE")):
@@ -32,10 +32,11 @@ def dispatch(args) -> CommandOutput:
         data["native_outcome"] = "unknown" if exc.effect_attempted else "unattempted"
         raise CommandFailure("unavailable" if exc.effect_attempted else "conflict", str(exc),
                              data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "host update requires the selected executable",
-                             data=data) from exc
-    except (ActivationError, ReleaseError, InvalidPathSelector, ResolverUnavailable, RuntimeError) as exc:
+    except (ActivationError, PlanError, ReleaseError, InvalidPathSelector, ResolverUnavailable, RuntimeError) as exc:
         raise CommandFailure("conflict", "selected host update scope cannot be verified", data=data) from exc
-    return CommandOutput(asdict(result), result.release_id,
+    data = asdict(result)
+    if result.source_revision is None:
+        data.pop("source_revision")
+        data.pop("config_fingerprint")
+    return CommandOutput(data, result.release_id,
                          (f"{action} update tick completed; inspect its log for per-target outcomes.",))

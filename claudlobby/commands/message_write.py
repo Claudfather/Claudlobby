@@ -7,18 +7,10 @@ import os
 import re
 import sqlite3
 import stat
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
+from ..request_ids import canonical_request_id
+from ..runtime_admission import bound_runtime_release as _bound_release
 
 
 def _body(args):
@@ -48,17 +40,19 @@ def _body(args):
         raise CommandFailure("invalid_argument", "message body is empty, invalid or over the byte cap") from exc
 
 
-def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> CommandOutput:
+def _answer_human(selected, origin, parent, body, *, request_id, current) -> CommandOutput:
     """A generated bot's answer to its human sender (#2068): recorded on the
     Plane, carried by nothing, read with `message wait --for reply`."""
     from ..message_context import resolve_human_reply_route
     from ..message_operations import record_reply_to_human
     from ..task_operations import TaskActor
+    from ..runtime_admission import runtime_release_id, runtime_provenance, runtime_route_matches
 
+    release_id = runtime_release_id(current)
     route = resolve_human_reply_route(TaskActor(parent.sender.uid, parent.sender.alias),
                                       root=selected.paths.root, fleet=selected.fleet.name,
                                       package=selected.paths.package)
-    if route.release_id != release_id:
+    if not runtime_route_matches(current, route):
         raise CommandFailure("release_mismatch", "message route differs from selected release",
                              release_id=release_id)
     if (route.caller.alias != f"bot:{origin.fleet.name}/{origin.bot_id}"
@@ -73,7 +67,8 @@ def _answer_human(selected, origin, parent, body, *, request_id, release_id) -> 
             "recording": outcome.recording, "request_persisted": outcome.request_persisted,
             "transport": "not_requested", "delivery": "not_requested",
             "receipt_observation": None, "integrity_verdict": None,
-            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id}
+            "replayed": outcome.replayed, "alert": None, "reply_to_message_id": parent.message_id,
+            **runtime_provenance(current)}
     if outcome.recording != "committed":
         raise CommandFailure(
             "unavailable", f"message {outcome.message_id}: recording {outcome.recording}. A reply to a "
@@ -118,13 +113,14 @@ def dispatch(args) -> CommandOutput:
     from ..releases import ReleaseError
     from ..report_payload import ReportPayload, ReportPayloadError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_route_matches)
 
     release_id = None
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
         body = report = None
         if is_report:
@@ -140,13 +136,12 @@ def dispatch(args) -> CommandOutput:
             raise CommandFailure("conflict", "unlinked reports require a generated bot caller")
         if is_report and origin.fleet.name != selected.fleet.name:
             raise CommandFailure("conflict", "unlinked reports go to the caller's own fleet manager")
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
-        if origin is not None and (origin.bot_id is None or not bound_release
-                                   or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
-            raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+        if origin is not None and origin.bot_id is None:
+            raise CommandFailure("release_mismatch", "generated caller lacks a bot identity")
+        bound_release = _bound_release(selected.paths.package, generated=origin is not None)
         with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
+            release_id = runtime_release_id(release)
             human_ctx = (resolve_task_mutation_context(root=selected.paths.root,
                          fleet=selected.fleet.name, package=selected.paths.package)
                          if origin is None else None)
@@ -165,7 +160,7 @@ def dispatch(args) -> CommandOutput:
                 if (addressed and origin is not None and parent.sender.fleet_uid is None
                         and parent.sender.alias.startswith("human:")):
                     return _answer_human(selected, origin, parent, body,
-                                         request_id=request_id, release_id=release_id)
+                                         request_id=request_id, current=release)
                 if not addressed or not parent.sender.alias.startswith("bot:") or parent.sender.fleet_uid is None:
                     raise CommandFailure("conflict", "reply requires a recorded bot or human sender and this caller as recipient",
                                          release_id=release_id)
@@ -174,7 +169,7 @@ def dispatch(args) -> CommandOutput:
                                           fleet=selected.fleet.name,
                                           package=selected.paths.package,
                                           caller_context=human_ctx)
-            if (route.release_id != release_id
+            if (not runtime_route_matches(release, route)
                     or human_ctx is not None and route.caller != human_ctx.caller
                     or origin is not None and route.caller.alias !=
                     f"bot:{origin.fleet.name}/{origin.bot_id}"):
@@ -197,9 +192,6 @@ def dispatch(args) -> CommandOutput:
     except ReportPayloadError as exc:
         raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
                              release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

@@ -32,7 +32,7 @@ def test_native_entrypoints_refuse_before_runtime_effects(tmp_path):
         result = subprocess.run(["/bin/bash", str(ROOT / "claudlobby/_runtime_scripts" / name), str(bot)],
                                 env=env, text=True, capture_output=True, timeout=5)
         assert result.returncode == 7, (result.stdout, result.stderr)
-        assert "selected release interpreter/CLI unavailable" in result.stderr
+        assert "managed Git installation identity required" in result.stderr
         assert {str(path.relative_to(tmp_path)): path.read_bytes()
                 for path in tmp_path.rglob("*") if path.is_file()} == before
         assert list(scratch.iterdir()) == []
@@ -51,18 +51,18 @@ def test_guard_is_only_at_native_start_and_watchdog_boundary():
 def test_shell_guard_preserves_temporary_pause_exit(tmp_path):
     root = tmp_path / "data"
     (root / "state").mkdir(parents=True)
-    (root / "state/activation.lock").write_text("")
+    (root / "state/runtime-use.lock").write_text("")
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("python", "claudlobby"):
-        tool = bindir / name
-        tool.write_text("#!/bin/sh\nexit 75\n" if name == "python" else "#!/bin/sh\n")
-        tool.chmod(0o755)
+    tool = bindir / "claudlobby"
+    tool.write_text("#!/bin/sh\nexit 75\n")
+    tool.chmod(0o755)
     script = (f'CLAUDLOBBY_ROOT={shlex.quote(str(root))}\n'
               f'BOT_DIR={shlex.quote(str(root / "bot"))}\n'
               f'CLAUDLOBBY_CLI={shlex.quote(str(bindir / "claudlobby"))}\n'
               f'LIB_DIR={shlex.quote(str(ROOT / "claudlobby/_runtime_scripts"))}\n'
-              'CLAUDLOBBY_RELEASE_ID=r-test\nCLAUDLOBBY_ARTIFACT_ID=a-test\n'
+              f'CLAUDLOBBY_INSTALLATION={shlex.quote(str(tmp_path / "installation"))}\n'
+              'unset CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_ARTIFACT_ID\n'
               f'. {shlex.quote(str(ROOT / "claudlobby/_runtime_scripts/runtime-admission.sh"))}\n'
               'native_admission keepalive\n')
     result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)

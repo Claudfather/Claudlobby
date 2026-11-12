@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Sonnet 5.5 · API Usage Billing
+ ▝▝   ▝▝   /work/example/scratch/cwd
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ Say hello pr4-live-P1-782b45ec.
+
+● Stand-in reply.
+
+✻ Cogitated for 0s · done 12:01 AM
+
+❯ Say goodbye pr4-live-P2-4dace5e5.
+
+● Stand-in reply.
+
+✻ Cogitated for 0s · done 12:01 AM
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Wait a moment pr4-live-HOLD-a63014ea.
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

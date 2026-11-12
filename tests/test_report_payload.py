@@ -65,6 +65,17 @@ def test_decoder_distinguishes_redacted_legacy_invalid_and_future_content():
     assert decode_report_body(body.replace('"version":1', '"version":2')).state == "unsupported"
     assert decode_report_body(body.replace('"version":1', '"version":1,"version":1')).state == "invalid"
     assert decode_report_body(body.replace('"percent":0', '"percent":false')).payload is None
+    from dataclasses import asdict
+    from claudlobby.commands.report_read import _line
+    for decoded in (decode_report_body(None, privacy="metadata"),
+                    decode_report_body(body[:80], truncated=True),
+                    decode_report_body(body.replace('"version":1', '"version":2'))):
+        shown = _line({"report": asdict(decoded), "summary": "SECRET-not-captured",
+                       "message_id": "msg-example", "author": "worker", "status": "blocked"})
+        assert decoded.reason in shown and "SECRET-not-captured" not in shown
+    hidden = _line({"report": {"state": "invalid", "reason": "SECRET-nested-error"},
+                    "summary": "", "message_id": "msg-example", "author": "worker", "status": None})
+    assert "SECRET-nested-error" not in hidden and "missing or invalid" in hidden
 
 
 def test_explicit_link_preserves_task_semantics_and_unlinked_marker_has_no_content():

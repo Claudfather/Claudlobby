@@ -10,8 +10,7 @@ from claudlobby.plane import owner_actions
 from claudlobby.plane.owner_browser import COOKIE_NAME, create_owner_browser_app
 from claudlobby.plane.owner_source import bind_source
 from tests.test_plane_owner_messages import gateway, native_receiver  # noqa: F401
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_two_fleets import _Sampler
 from tests.test_plane_owner_browser import ORIGIN, _post, _raw_http
@@ -172,9 +171,9 @@ def test_cancelled_http_wait_preserves_owned_send(browser_actions, monkeypatch):
     asyncio.run(asyncio.wait_for(exercise(), 5))
 
 
-def test_missing_activation_returns_generic_unavailable(browser_actions):
+def test_missing_current_configuration_returns_generic_unavailable(browser_actions):
     _, client, adapter, *_ = browser_actions
-    (adapter.root / "state/selected-release.json").unlink()
+    (adapter.root / "state/config.json").unlink()
     response = post(client, "context", {"room": "example"})
     assert response.status_code == 503 and response.json() == {"state": "unavailable"}
 

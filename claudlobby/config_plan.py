@@ -1,9 +1,7 @@
-"""Content-addressed configuration proposals; never an activation writer.
+"""Frozen Git configuration and strict read-only historical plan evidence.
 
-Renderers supply exact destinations and bytes. This store binds them to the
-release, source inputs and current generated files, so reviewing a proposal
-cannot change a running bot and applying a stale proposal can be refused.
-Only the coordinated host activation owner may consume changes as writes.
+Renderers retain exact inputs, destinations and bytes for the current updater.
+Historical plans can be inspected but never created or admitted for deployment.
 """
 
 from __future__ import annotations
@@ -83,27 +81,8 @@ class ConfigChange:
     after: dict
 
 
-@dataclass(frozen=True)
-class ConfigPlan:
-    directory: Path
-    data_root: Path
-    release_id: str
-    release_seal: str
-    fleets: tuple[str, ...]
-    inputs: dict[str, dict]
-    changes: tuple[ConfigChange, ...]
-    effects: dict
-
-    def payload(self) -> dict:
-        return {"schema": CONFIG_PLAN_VERSION, "data_root": str(self.data_root),
-                "release_id": self.release_id, "release_seal": self.release_seal,
-                "fleets": list(self.fleets), "inputs": self.inputs,
-                "changes": [asdict(change) for change in self.changes],
-                "effects": self.effects}
-
-    @property
-    def plan_id(self) -> str:
-        return "p-" + _digest(_json(self.payload()))
+class _FrozenConfiguration:
+    """Verified retained bytes and inputs, independent of deployment identity."""
 
     def content(self, change: ConfigChange) -> bytes:
         if change.after.get("kind") != "file":
@@ -115,7 +94,8 @@ class ConfigPlan:
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise PlanError("invalid staged content digest")
         content_path = self.directory / "files" / digest
-        if not content_path.is_file() or content_path.is_symlink():
+        if (not content_path.is_file() or content_path.is_symlink()
+                or content_path.parent.is_symlink() or content_path.resolve() != content_path):
             raise PlanError(f"missing staged content: {digest}")
         data = content_path.read_bytes()
         if _digest(data) != digest:
@@ -143,13 +123,12 @@ class ConfigPlan:
             raise PlanError("frozen source differs from its reviewed input")
         return path, self.blob(digest)
 
-    def check_fresh(self) -> None:
-        """Called under the activation lock, before the first live change."""
-        from .releases import read_release
+    def check_inputs(self) -> None:
+        """Recheck authored inputs and generated destinations without code identity.
 
-        release = read_release(self.data_root, self.release_id)
-        if release.seal_sha256 != self.release_seal:
-            raise PlanError("candidate release changed; create a new configuration plan")
+        The Git updater separately binds the exact source revision. Sharing this
+        check keeps composition/publication independent of release packaging.
+        """
         for path, recorded in self.inputs.items():
             if path_state(Path(path), source=recorded["follow_links"]) != recorded["state"]:
                 raise PlanError(f"configuration input changed: {path}; create a new plan")
@@ -158,19 +137,67 @@ class ConfigPlan:
                 raise PlanError(f"generated destination changed: {change.target}; create a new plan")
 
 
+@dataclass(frozen=True)
+class ConfigPlan(_FrozenConfiguration):
+    """Read-only archived sealed-plan evidence; never an executable proposal."""
+
+    directory: Path
+    data_root: Path
+    release_id: str
+    release_seal: str
+    fleets: tuple[str, ...]
+    inputs: dict[str, dict]
+    changes: tuple[ConfigChange, ...]
+    effects: dict
+
+    def payload(self) -> dict:
+        return {"schema": CONFIG_PLAN_VERSION, "data_root": str(self.data_root),
+                "release_id": self.release_id, "release_seal": self.release_seal,
+                "fleets": list(self.fleets), "inputs": self.inputs,
+                "changes": [asdict(change) for change in self.changes],
+                "effects": self.effects}
+
+    @property
+    def plan_id(self) -> str:
+        return "p-" + _digest(_json(self.payload()))
+
+
+@dataclass(frozen=True)
+class RenderedConfiguration(_FrozenConfiguration):
+    """The one pending render, retained only for its current update operation."""
+
+    directory: Path
+    data_root: Path
+    revision: str
+    fleets: tuple[str, ...]
+    inputs: dict[str, dict]
+    changes: tuple[ConfigChange, ...]
+    effects: dict
+
+    def payload(self) -> dict:
+        return {"schema": 1, "data_root": str(self.data_root), "revision": self.revision,
+                "fleets": list(self.fleets), "inputs": self.inputs,
+                "changes": [asdict(change) for change in self.changes], "effects": self.effects}
+
+    @property
+    def fingerprint(self) -> str:
+        return _digest(_json(self.payload()))
+
+    def check_fresh(self) -> None:
+        """Check this Git operation's inputs and destinations before publication."""
+        self.check_inputs()
+
+
 class ConfigPlanBuilder:
     """Accumulate one reviewed rendering; never write its target paths.
 
     The compositor remains responsible for ownership checks and desired bytes.
-    Inputs are captured before rendering and rechecked on sealing. Directories
+    Inputs are captured before rendering and rechecked on freezing. Directories
     may be replaced only when a renderer explicitly owns their entire content.
     """
 
-    def __init__(self, data_root: Path, release_id: str, release_seal: str,
-                 fleets: tuple[str, ...], *, effects: dict):
+    def __init__(self, data_root: Path, fleets: tuple[str, ...] = (), *, effects: dict):
         self.root = _absolute(data_root).resolve()
-        self.release_id = release_id
-        self.release_seal = release_seal
         self.fleets = tuple(sorted(fleets))
         self.effects = effects
         self.inputs: dict[str, dict] = {}
@@ -187,8 +214,8 @@ class ConfigPlanBuilder:
     def input_snapshot(self, path: Path) -> tuple[bytes | None, str | None]:
         """Retain and return the exact authored bytes used by staged rendering.
 
-        Its fingerprint remains a freshness gate before activation; its sealed
-        bytes remain authoritative after activation, while authoring continues.
+        Its fingerprint remains a freshness gate before publication; its frozen
+        bytes remain authoritative after publication, while authoring continues.
         """
         self.input(path)
         recorded = self.inputs[str(_absolute(path))]["state"]["node"]
@@ -267,42 +294,44 @@ class ConfigPlanBuilder:
         if not target.exists():
             self._add(target, {"kind": "directory", "mode": 0o755})
 
-    def seal(self) -> ConfigPlan:
-        # No proposal may overlap its own store, including via a parent link.
-        store = self.root / "state" / "config-plans"
-        if store.resolve() != store:
-            raise PlanError("configuration plan store is redirected")
+    def freeze(self, revision: str) -> RenderedConfiguration:
+        """Freeze this operation's render without a permanent plan/release store.
+
+        Caller holds the current update lock and clears only completed owned
+        scratch before preparing a different operation. Existing pending bytes
+        are immutable; they are never replaced by a repeated preview.
+        """
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+            raise PlanError("render needs an exact Git revision")
+        directory = self.root / "state/update-work/render"
+        if directory.resolve() != directory:
+            raise PlanError("pending render is redirected")
         for change in self.changes.values():
-            destination = Path(change.target).resolve()
-            if destination.is_relative_to(store) or store.is_relative_to(destination):
-                raise PlanError("configuration output overlaps its plan store")
-        for path, recorded in self.inputs.items():
-            if path_state(Path(path), source=recorded["follow_links"]) != recorded["state"]:
-                raise PlanError(f"input changed during rendering: {path}")
-        plan = ConfigPlan(store, self.root, self.release_id, self.release_seal,
-                          self.fleets, self.inputs,
-                          tuple(self.changes[key] for key in sorted(self.changes)),
-                          self.effects)
-        destination = store / plan.plan_id
-        if destination.exists():
-            return read_plan(self.root, plan.plan_id)
-        store.mkdir(mode=0o700, parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=".preparing-", dir=store))
+            destination = Path(change.target).parent.resolve() / Path(change.target).name
+            state = self.root / "state"
+            if destination.is_relative_to(state) or state.is_relative_to(destination):
+                raise PlanError("generated output overlaps persistent state")
+        rendered = RenderedConfiguration(directory, self.root, revision, self.fleets,
+                                         self.inputs, tuple(self.changes[key] for key in sorted(self.changes)),
+                                         self.effects)
+        rendered.check_inputs()
+        if directory.exists():
+            return read_rendered(self.root, rendered.fingerprint)
+        directory.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".render-", dir=directory.parent))
         try:
-            files = temporary / "files"
-            files.mkdir(mode=0o700)
+            (temporary / "files").mkdir(mode=0o700)
             for digest, content in self.contents.items():
-                _write(files / digest, content)
-            _write(temporary / "plan.json", _json(plan.payload()))
-            for directory in (files, temporary):
-                _sync(directory)
-            # The plan ID binds all bytes; never update a published proposal.
-            os.rename(temporary, destination)
-            _sync(store)
+                _write(temporary / "files" / digest, content)
+            _write(temporary / "render.json", _json(rendered.payload()))
+            _sync(temporary / "files")
+            _sync(temporary)
+            os.rename(temporary, directory)
+            _sync(directory.parent)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-        return read_plan(self.root, plan.plan_id)
+        return read_rendered(self.root, rendered.fingerprint)
 
 
 def _write(path: Path, content: bytes) -> None:
@@ -356,3 +385,34 @@ def read_plan(data_root: Path, plan_id: str) -> ConfigPlan:
         return plan
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise PlanError(f"cannot read configuration plan {plan_id}: {exc}") from exc
+
+
+def read_rendered(data_root: Path, fingerprint: str) -> RenderedConfiguration:
+    """Read the current operation's exact render; the operation owns its digest."""
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise PlanError("invalid rendered configuration fingerprint")
+    root = _absolute(data_root)
+    directory = root / "state/update-work/render"
+    if directory.resolve() != directory or (directory / "render.json").is_symlink():
+        raise PlanError("pending render is redirected")
+    try:
+        payload = json.loads((directory / "render.json").read_bytes())
+        rendered = RenderedConfiguration(directory, root, payload["revision"], tuple(payload["fleets"]),
+                                         payload["inputs"], tuple(ConfigChange(**c) for c in payload["changes"]),
+                                         payload["effects"])
+        if (payload != rendered.payload() or payload["data_root"] != str(root)
+                or rendered.fingerprint != fingerprint
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", rendered.revision)):
+            raise PlanError("pending render changed or belongs to another root")
+        for change in rendered.changes:
+            if change.after.get("kind") == "file":
+                rendered.content(change)
+            elif change.after.get("kind") == "tree":
+                for item in change.after["files"].values():
+                    rendered.blob(item["sha256"])
+        for item in rendered.effects.get("fleet_sources", {}).values():
+            rendered.frozen_input(item["fleet"], required=True)
+            rendered.frozen_input(item["projects"])
+        return rendered
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise PlanError(f"cannot read pending render: {exc}") from exc

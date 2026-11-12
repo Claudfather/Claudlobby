@@ -15,10 +15,11 @@ issue (the pre-scope comment, final forks):
 - the escalation sends every cause over its threshold in a sweep as ONE message.
 
 Each test drives the REAL sweep against a throwaway plane through the real
-doors, with two stubs: `tg-post.sh` captures the fleet page, and `systemctl`
+doors: `tg-post.sh` captures the fleet page, and `systemctl`
 answers from per-unit state files (a unit with no state file reads as systemd
 reads a unit it cannot find). A unit counts as installed when its file is in
-the scene's HOME, the fact `svc_is_registered` reads.
+the scene's HOME, the fact `svc_is_registered` reads. The unrelated job-unit
+read returns no rows; this scene declares only bots, without native job placement.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ class Fleet:
     def __init__(self, tmp_path):
         self.tmp = tmp_path
         self.root = plane_root(tmp_path, initialize=True)
+        (self.root / ".claudlobby-harness-root").write_text(str(self.root.resolve()))
         # The overdue reader refuses a plane that holds no bot of the fleet, and
         # pages that it cannot see (#1014's class); its scan runs before the
         # sweep's first row. A live fleet's plane holds its bots, so seed the
@@ -112,6 +114,15 @@ class Fleet:
         self.bots_dir.mkdir(parents=True)
         self.capture = tmp_path / "tg.log"
         self.libdir = _pulse_lib(tmp_path, self.capture)
+        common = self.libdir / "lib-common.sh"
+        content = common.read_text()
+        common.unlink()
+        # Replace only the unrelated job-unit read, retaining public admission
+        # and the real per-bot systemctl observations for every stopped/outage pin.
+        common.write_text(content + '\nclaudlobby_cli() {\n  case "$*" in\n'
+                          '    *"host supervision failed") printf \'%s\\n\' '
+                          '\'{"ok":true,"data":{"units":[]}}\' ;;\n'
+                          '    *) "$CLAUDLOBBY_CLI" "$@" ;;\n  esac\n}\n')
         self.names: list[str] = []
 
     def bot(self, name, *, unit=None, record=None, service=True):
@@ -149,7 +160,7 @@ class Fleet:
             )
         self.names.append(name)
         (self.root / "local" / F / "fleet.yaml").write_text(
-            "fleet:\n  name: f\n  bots:\n"
+            f"fleet:\n  name: f\n  manager: {self.names[0]}\n  service_prefix: com.t\n  bots:\n"
             + "".join(
                 f"    {n}:\n      expertise: [software-engineering]\n"
                 for n in self.names

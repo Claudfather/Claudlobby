@@ -1,4 +1,4 @@
-import { ActionState, scopeKey, validPermissionContext, samePermissionReceipt } from "./action-state.js";
+import { runtimeFields, ActionState, scopeKey, validPermissionContext, samePermissionReceipt } from "./action-state.js";
 import { esc } from "./panel-state.js";
 
 // Presentation and pending UUIDs only; all authority and decisions stay on host.
@@ -7,7 +7,7 @@ export function createPermissionPanel({api, storage}) {
   let element = null, task = null, context = null, epoch = 0, busy = false, form = null, note = '';
   const labels = {approve:'Approve', decline:'Decline', revoke:'Revoke'};
   const target = p => ({permission_id:p.permission_id, task_id:p.task_id,
-    scope_sha256:p.scope_sha256, release_id:context.release_id});
+    scope_sha256:p.scope_sha256, ...runtimeFields(context)});
   const draftRow = (p, decision) => ({version:2, kind:'permission', scope:context.scope, target:target(p), decision});
   const visible = row => context && row.target.task_id === task.task_id
     && ['workspace','host','fleet'].every(k => row.scope[k] === context.scope[k]);

@@ -6,7 +6,7 @@ owner: chris
 created: 2026-07-18
 tags: [claudron, ecosystem, mcp, clauna, decision, play:ecosystem]
 links: ["#509", "#511", "#512", "#513", "#560", "#561", "Claudfather/Claudron#17", "Claudfather/Claudron#60"]
-supersedes_scope: "reshapes P2/P3/P4 of documentation/plans/2026-07-07-claudron-consumption.md"
+supersedes_scope: "reshapes P2/P3/P4 of the Claudron consumption epic, #509"
 ---
 
 # Claudron consumption door — decision
@@ -52,7 +52,7 @@ The clauDNA CLI-skill door is the fleet-consumption path, on the record. The `li
 
 Pull the MCP fragment forward off the parked fork **iff** Claudron ships E3 **and** the fleet needs per-tool permission scoping of vault access (the natural tie-in to the #644 permissions model) — or a non-clauDNA MCP consumer appears.
 
-## Impact on the epic (documentation/plans/2026-07-07-claudron-consumption.md)
+## Impact on the epic (#509)
 
 - **P2 (#511)** — park the fragment-mount work (2b fragment review, 2e `claudron[mcp]` pipx install, the MCP half of 2d). Option-agnostic wiring (vault reachability, compat floor) folds into #560–564.
 - **P3 (#512)** — collapse the `mcp__claudron__*` protocol cutover into "point bots at `/recall` + `/capture` + the #561 navigate-vs-query protocol."

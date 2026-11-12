@@ -509,12 +509,14 @@ def test_a_real_eval_refuses_when_its_claude_cannot_run(tmp_path):
     assert "COVERAGE_AB_RESULT" not in r.stdout
 
 
-def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path, built_test_cli):
+def test_a_dry_run_pins_dry_run_whatever_binary_is_installed(tmp_path):
     """A dry run makes no model call, so a runnable claude on PATH is not part of
     its evidence and must not become its pin."""
-    r = _eval(
-        tmp_path, healthy("2.1.281"), "--dry-run", "--experiment", "coverage-honesty",
-        "--reps", "1", CLAUDLOBBY_CLI=built_test_cli,
+    binary = _stub(tmp_path, "claude", healthy("2.1.281"))
+    pin = _shell_function("ab-comms-eval.sh", "pin_claude_version")
+    r = _bash(
+        tmp_path, f'{pin}DRY_RUN=1; pin_claude_version; printf "claude=%s" "$CLAUDE_VER"',
+        PATH=f"{binary.parent}{os.pathsep}{os.environ['PATH']}",
     )
     out = r.stdout + r.stderr
     assert r.returncode == 0, out[-1500:]
@@ -657,6 +659,31 @@ def test_no_other_script_reads_a_claude_version():
         # Runtime scripts are covered above and build copies of assets retain
         # their source owners; this half checks the Python implementation package.
         if p.relative_to(REPO / "claudlobby").parts[0] not in {"_runtime_scripts", "_resources"}
-        and '"--version"' in p.read_text() and p.name != "__main__.py"
+        # Both entries parse Claudlobby's own --version option; neither reads
+        # the Claude binary's version. The stable launcher must route it too.
+        and '"--version"' in p.read_text() and p.name not in {"__main__.py", "installation.py"}
     ]
     assert py == [], py
+
+
+def _version_tool_path(tmp_path):
+    """Expose the real timeout utility only on a private composed tool path."""
+    import shutil
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout is None:
+        pytest.skip("real timeout/gtimeout is required for bounded version measurement")
+    tools = tmp_path / "composed-tools"
+    tools.mkdir()
+    (tools / "timeout").symlink_to(Path(timeout).resolve())
+    return str(tools) + ":/usr/bin:/bin"
+
+
+def test_explicit_launch_path_bounds_the_actual_version_door_under_minimal_updater_path(tmp_path, monkeypatch):
+    from claudlobby import claude_version
+    canonical = _version_tool_path(tmp_path)
+    binary = _stub(tmp_path, "configured-private-provider", healthy("2.1.318"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    result = claude_version.measure(_paths(tmp_path), str(binary), launch_path=canonical)
+    assert (result.version, result.why) == ("2.1.318", None)
+    assert os.environ["PATH"] == "/usr/bin:/bin"

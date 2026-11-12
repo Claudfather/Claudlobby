@@ -10,13 +10,13 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import activation, context
+from claudlobby import context
 from claudlobby.__main__ import main
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.plane.db import db_file
 from claudlobby.isolation import transcript_slug
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — short private socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private socket root
 from tests.test_checkin_contract import _decision
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_sprint_selection_record import _record as selection_record
@@ -35,8 +35,7 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
         "    manager:\n      expertise: [orchestration]\n"
         "      autonomous_runner: {skill: /claudna:tech-debt, cadence: 1h, target_repo: org/repo}"))
     effects = deepcopy(plan.effects)
-    builder = ConfigPlanBuilder(root, release.release_id, release.seal_sha256,
-                                plan.fleets, effects=effects)
+    builder = ConfigPlanBuilder(root, fleets=plan.fleets, effects=effects)
     for path in plan.inputs:
         digest = builder.input_content(Path(path))
         if Path(path) == manifest:
@@ -48,13 +47,21 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
         else:
             assert change.after["kind"] == "file"
             builder.file(target, plan.blob(change.after["sha256"]), mode=change.after["mode"])
-    plan = builder.seal()
+    # Retire only this completed fixture's owned render before preparing the
+    # changed authored inputs. This is test preparation, never a service action.
+    import shutil
+    shutil.rmtree(plan.directory)
+    plan = builder.freeze(host.package.source_revision)
+    from claudlobby import active_config
+    snapshot = active_config.snapshot_from_plan(plan, release, host.package.source_revision,
+        identities=host.snapshot["identities"], supervision=host.snapshot["supervision"])
+    active_config.publish_current_config(snapshot, installation=release,
+        expected_previous=host.snapshot["fingerprint"])
+    host.snapshot = snapshot
     for key in ("FLEET_NAME", "CLAUDLOBBY_FLEET", "BOT_ID", "BOT_NAME", "BOT_DIR",
                 "FLEET_ROOT", "CLAUDLOBBY_RELEASE_ID"):
         monkeypatch.delenv(key, raising=False)
-    activation.bootstrap_activation(root, "cold", plan.plan_id, host.directory, adapter=host)
-    package = replace(source_package(), native=release.native_path,
-                      artifact_id=release.inputs.artifact_id)
+    package = host.package
     monkeypatch.setattr(context, "get_resources", lambda: package)
     # This fixture seals minimal native assets. Keep real reader/decoder logic
     # while selecting the private test tree's assets at the import boundary.
@@ -62,7 +69,7 @@ def active(cold, monkeypatch):  # noqa: F811 — fixture dependency
     load_module = paths.load_lib_module
     native = source_package().native
     monkeypatch.setattr(paths, "load_lib_module", lambda directory, name:
-                        load_module(native if directory == release.native_path else directory, name))
+                        load_module(native if directory == release.native else directory, name))
     monkeypatch.setattr(brief, "load_dispatch_doors", lambda selected:
                         load_module(native, "dispatch-overdue.py"))
     monkeypatch.setattr(env_tiers, "resolve", lambda paths, bot_name=None, fleet_name=None: {})
@@ -105,7 +112,7 @@ def test_automation_public_commands_use_selected_runner_and_reject_worker_routin
         generated.setenv("CLAUDLOBBY_ROOT", str(root))
         generated.setenv("FLEET_NAME", "example")
         generated.setenv("BOT_ID", "worker")
-        generated.setenv("CLAUDLOBBY_RELEASE_ID", release.release_id)
+        generated.setenv("CLAUDLOBBY_INSTALLATION", str(release.directory))
         refused = _call(capsys, root, "bot", "automation", "pause", "manager",
                         "--reason", "Wrong role", "--request-id", str(uuid4()), expected=4)
         assert refused["error"]["code"] == "conflict"
@@ -170,7 +177,7 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
     # A worker session cannot record the fleet's check-in.
     with monkeypatch.context() as generated:
         for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example",
-                           "BOT_ID": "worker", "CLAUDLOBBY_RELEASE_ID": release.release_id}.items():
+                           "BOT_ID": "worker", "CLAUDLOBBY_INSTALLATION": str(release.directory)}.items():
             generated.setenv(key, value)
         assert _call(capsys, root, "checkin", "record", "--file", str(file), "--request-id",
                      str(uuid4()), expected=4)["error"]["code"] == "conflict"
@@ -182,7 +189,7 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
     recorded = _call(capsys, root, "checkin", "record", "--file", str(file),
                      "--request-id", request_id)
     checkin_id = recorded["data"]["checkin_id"]
-    assert recorded["request_id"] == request_id and recorded["release_id"] == release.release_id
+    assert recorded["request_id"] == request_id and recorded["release_id"] == None
     assert recorded["data"]["actor"].startswith("human:")
     assert recorded["data"]["recording"] == "committed"
     assert recorded["data"]["request_persisted"] is True
@@ -269,3 +276,125 @@ def test_record_list_show_and_assignment_link_keep_exact_selected_scope(active, 
         busy = _call(capsys, root, "checkin", "record", "--file", str(file),
                      "--request-id", request_id, expected=4)["error"]
     assert busy["retryable"] is True and "already being processed" in busy["message"]
+
+@pytest.fixture
+def git_current(active, monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from claudlobby import runtime_admission
+    from tests.test_task_read_cli import _use_git_current
+
+    root, _ = active
+    root, package, snapshot = _use_git_current(
+        (root, SimpleNamespace(package=context.get_resources())), monkeypatch)
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs.get("expected_release") is None
+        yield runtime_admission.GitCurrentRuntime(package.installation, snapshot["revision"],
+                                                 snapshot["fingerprint"], snapshot)
+    # Only native/executable admission is substituted. Scope, committed config,
+    # authority, SQL, request receipts and canonical operation stay real.
+    monkeypatch.setattr(runtime_admission, "mutation_admission", admitted)
+    return root, package, snapshot
+
+
+@pytest.mark.parametrize("kind", ["checkin", "workstream", "automation"])
+def test_git_coordination_read_write_and_replay_ignore_historical_selection(
+        git_current, kind, capsys, tmp_path):  # noqa: F811
+    root, package, snapshot = git_current
+    request_id = str(uuid4())
+    decision = tmp_path / "decision.json"
+    decision.write_text(json.dumps(_decision()))
+    writes = {
+        "checkin": ("checkin", "record", "--file", str(decision)),
+        "workstream": ("workstream", "open", "Git coordination"),
+        "automation": ("bot", "automation", "pause", "worker", "--reason", "Operator pause"),
+    }
+    reads = {"checkin": ("checkin", "list"), "workstream": ("workstream", "list"),
+             "automation": ("bot", "automation", "status", "worker")}
+    if kind == "automation":
+        (root / "state/fleet-state.json").write_text(json.dumps({
+            "bots": {"worker": {"fleet": "example", "status": "idle"}}}))
+    first = _call(capsys, root, *writes[kind], "--request-id", request_id)
+    after = _counts(root)
+    replay = _call(capsys, root, *writes[kind], "--request-id", request_id)
+    assert _counts(root) == after
+    assert replay["data"]["replayed"] is True
+    read = _call(capsys, root, *reads[kind])
+    for result in (first, replay, read):
+        assert result["release_id"] is None
+        assert result["data"]["source_revision"] == snapshot["revision"]
+        assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]
+
+
+@pytest.mark.parametrize("kind", ["checkin", "workstream", "automation", "compactions"])
+def test_git_coordination_admitted_epoch_mismatch_precedes_any_effect(
+        git_current, monkeypatch, capsys, tmp_path, kind):  # noqa: F811
+    from contextlib import contextmanager
+    from claudlobby import runtime_admission
+    root, package, snapshot = git_current
+    @contextmanager
+    def changed(*args, **kwargs):
+        yield runtime_admission.GitCurrentRuntime(package.installation, snapshot["revision"],
+                                                 "f" * 64, snapshot)
+    monkeypatch.setattr(runtime_admission, "mutation_admission", changed)
+    decision = tmp_path / "decision.json"
+    decision.write_text(json.dumps(_decision()))
+    actions = {
+        "checkin": ("checkin", "record", "--file", str(decision), "--request-id", str(uuid4())),
+        "workstream": ("workstream", "open", "Never written", "--request-id", str(uuid4())),
+        "automation": ("bot", "automation", "pause", "worker", "--reason", "Never written", "--request-id", str(uuid4())),
+        "compactions": ("fleet", "compactions", "record"),
+    }
+    before = _counts(root)
+    state = root / "state/fleet-state.json"
+    previous = state.read_bytes() if state.exists() else None
+    failure = _call(capsys, root, *actions[kind], expected=7)
+    assert failure["error"]["code"] == "release_mismatch"
+    assert _counts(root) == before
+    assert (state.read_bytes() if state.exists() else None) == previous
+
+
+def test_git_checkin_read_refuses_committed_epoch_change(git_current, monkeypatch, capsys):
+    from claudlobby import active_config
+    from claudlobby.commands import checkins
+    root, package, snapshot = git_current
+    original = checkins.collect_checkins
+    def raced(*args, **kwargs):
+        result = original(*args, **kwargs)
+        changed = deepcopy(snapshot)
+        changed["fleets"]["example"]["fleet"] += "\n# committed epoch changed\n"
+        changed["fingerprint"] = active_config._fingerprint(changed)
+        active_config.publish_current_config(changed, installation=package.installation,
+                                             expected_previous=snapshot["fingerprint"])
+        return result
+    monkeypatch.setattr(checkins, "collect_checkins", raced)
+    result = _call(capsys, root, "checkin", "list", expected=4)
+    assert result["error"]["retryable"] is True
+    assert result["data"]["source_revision"] == snapshot["revision"]
+
+
+def test_git_usage_and_compactions_keep_shared_stamp(git_current, capsys):
+    root, package, snapshot = git_current
+    transcripts = Path.home() / ".claude/projects" / transcript_slug(root / "runtime/bots/worker")
+    transcripts.mkdir(parents=True)
+    at = datetime.now(timezone.utc).isoformat()
+    (transcripts / "session.jsonl").write_text("\n".join(json.dumps(row) for row in [
+        {"type": "assistant", "sessionId": "git-session", "timestamp": at,
+         "message": {"id": "git-message", "model": "test-model", "usage": {
+             "input_tokens": 11, "output_tokens": 7, "cache_creation_input_tokens": 0,
+             "cache_read_input_tokens": 0}}},
+        {"parentUuid": None, "logicalParentUuid": "p0", "isSidechain": False,
+         "type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+         "level": "info", "compactMetadata": {"trigger": "manual", "preTokens": 20, "postTokens": 5},
+         "uuid": "u1", "timestamp": at, "sessionId": "git-session"},
+    ]) + "\n")
+    usage = _call(capsys, root, "bot", "usage", "worker", "--since", "24h")
+    recorded = _call(capsys, root, "fleet", "compactions", "record")
+    assert usage["data"]["usage"]["input_tokens"] == 11
+    assert recorded["data"]["recorded"] == 1
+    assert _call(capsys, root, "fleet", "compactions", "record")["data"]["recorded"] == 0
+    for result in (usage, recorded):
+        assert result["release_id"] is None
+        assert result["data"]["source_revision"] == snapshot["revision"]
+        assert result["data"]["config_fingerprint"] == snapshot["fingerprint"]

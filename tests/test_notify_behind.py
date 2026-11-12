@@ -33,6 +33,11 @@ GIT = [
     "user.name=test",
     "-c",
     "commit.gpgsign=false",
+    # Git 2.47 and later end a commit by detaching `git maintenance run --auto`, which still
+    # holds .git/objects/maintenance.lock after the commit returns. That races the test here
+    # that deletes origin (#2717).
+    "-c",
+    "maintenance.auto=false",
 ]
 
 CURL_STUB = (
@@ -55,15 +60,15 @@ def _commit(repo, name):
 
 
 def _seal_release(root, source_revision):
-    """Seal a release built from SOURCE_REVISION under ROOT; its ID.
+    """Author archived release evidence for SOURCE_REVISION under ROOT; its ID.
 
-    notify-behind reads only the selection and the sealed manifest, never the
-    release's files, so the tree tests/test_releases.py seals is enough.
+    notify-behind reads only the selection and the archived manifest, never the
+    release's files, so the tree tests/test_releases.py builds is enough.
     """
-    from tests.test_releases import r as releases, release_tree
+    from tests.test_releases import historical_release, release_tree
 
     inputs, paths, _, _ = release_tree(root, source_revision, "artifact-" + source_revision[:12])
-    return releases.seal_release(root, inputs, paths).release_id
+    return historical_release(root, inputs, paths).release_id
 
 
 def _select(root, release_id):
@@ -151,7 +156,7 @@ class Harness:
         return out.stdout.strip()
 
     def select(self, source_revision):
-        """Seal a release built from SOURCE_REVISION and select it; its ID."""
+        """Author an archived release for SOURCE_REVISION and select it; its ID."""
         release_id = _seal_release(self.root, source_revision)
         _select(self.root, release_id)
         return release_id
@@ -174,6 +179,21 @@ class Harness:
 
     def events(self):
         return read_fleet_events(self.root)
+
+
+def test_harness_commits_start_no_git_maintenance(tmp_path, monkeypatch):
+    """A detached `git maintenance` would race the test that deletes origin (#2717)."""
+    trace = tmp_path / "trace2.jsonl"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _commit(repo, "seed")
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [event for event in events if event.get("event") == "start" and "commit" in event["argv"]], \
+        "the trace must see the commit, or its silence below proves nothing"
+    maintenance = [event["argv"] for event in events if "maintenance" in event.get("argv", [])]
+    assert not maintenance, maintenance
 
 
 class TestNotifyBehind:

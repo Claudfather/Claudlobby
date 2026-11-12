@@ -10,7 +10,7 @@ So any change to how a bot behaves at runtime is validated by an empirical loop,
 |------|-------------|
 | **Deliver** | Make the code/library change (a claudlobby/_runtime_scripts/ script, hook, protocol, guardrail, principle, or composer field). |
 | **Add config** | Set the relevant field(s) in `fleet.yaml` (e.g. `observability.activity_stuck_threshold: 60`). |
-| **Recompose** | Stage the edited source with `claudlobby config plan --release RELEASE_ID`, review `claudlobby config diff PLAN_ID`, then run `claudlobby host activate PLAN_ID --install-directory INSTALL_DIR` from an operator shell. Confirm the change in the composed `bot.conf` / `.claude/settings.local.json` / `CLAUDE.md`. |
+| **Recompose** | Commit the reviewed source and apply it with `host update apply FULL_COMMIT` from an operator shell, using the stable installation CLI ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). `apply` is effectful, not a preview; inspect it with `host update status`. Confirm the change in the composed `bot.conf` / `.claude/settings.local.json` / `CLAUDE.md`. `config diff` reports drift of published output only; it does not preview edited authored source. |
 | **Observe** | Run it and watch the real behavior fire. |
 
 The first three are cheap and deterministic. The fourth is the one that matters and the one teams skip — so claudlobby ships a harness for it.
@@ -34,25 +34,27 @@ When you add a new pulse check or event type, extend the harness with an asserti
 
 ## When the behavior needs a live bot
 
-Some changes (a skill's actual output, a guardrail's enforcement, a protocol's workflow) can't be asserted by the headless harness. For those, run the loop by hand in an independent canary root, with the sealed CLI that `host setup` reported and an explicit `--root` on every command (`library/protocols/canary-rollout.md`). Staging and activation cover the whole host, so they take no `--fleet` or `--seed`:
+Some changes (a skill's actual output, a guardrail's enforcement, a protocol's workflow) can't be asserted by the headless harness. For those, run the loop by hand in a native canary: an independent installation with its own data root and native labels, never a production root or another fleet inside one (`library/protocols/canary-rollout.md`). Use that installation's stable CLI (`INSTALL/bin/claudlobby`) with an explicit `--root` on every command. Applying and inspecting follow [Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery); first-fleet preparation follows [Getting started](getting-started.md). Updates cover the whole installation, so they take no `--fleet` or `--seed`:
 
 ```bash
-<sealed-cli> --root <canary-root> config plan --release RELEASE_ID
-<sealed-cli> --root <canary-root> config diff PLAN_ID
-<sealed-cli> --root <canary-root> host activate PLAN_ID --install-directory INSTALL_DIR
-# Activation performs the required bot restarts; inspect its outcome.
+"$CLI" --root "$CANARY_DATA" host update apply FULL_COMMIT --json
+"$CLI" --root "$CANARY_DATA" host update status --json
+# After an interruption, continue the original operation:
+"$CLI" --root "$CANARY_DATA" host update continue --json
 # drive the affected path, then observe:
-<sealed-cli> --root <canary-root> event list --bot <bot> --limit 20   # the plane's rows for the bot
-<sealed-cli> --root <canary-root> fleet uptime --bot <bot>             # heartbeat history, from the plane
-<sealed-cli> --root <canary-root> fleet utilization                    # busy share of observed heartbeat time; no history is unknown
-<sealed-cli> --root <canary-root> --fleet <fleet> bot session BOT      # inspect the selected private session
+"$CLI" --root "$CANARY_DATA" event list --bot <bot> --limit 20   # the plane's rows for the bot
+"$CLI" --root "$CANARY_DATA" fleet uptime --bot <bot>             # heartbeat history, from the plane
+"$CLI" --root "$CANARY_DATA" fleet utilization                    # busy share of observed heartbeat time; no history is unknown
+"$CLI" --root "$CANARY_DATA" --fleet <fleet> bot session BOT      # inspect the selected private session
 ```
+
+Inspect the update's outcome, including any bot restarts it performs, before driving the path.
 
 Write down what you saw: *"composed `<fleet>`, restarted `<bot>`, invoked `/<skill>`, observed `<result>`."*
 
 ### Reaping a throwaway (guaranteed teardown)
 
-For a selected throwaway bot, first remove its declaration from authored `fleet.yaml`, stage and activate that change, then run `<sealed-cli> --root <canary-root> --fleet <fleet> bot remove BOT --purge` from an operator shell. Removal verifies native ownership and refuses uncommitted work. `bot stop BOT` only pauses a declared bot; it is not permanent teardown. This reviewed sequence cannot be replaced by a shell exit trap.
+The Git updater currently refuses removal of declared native consumers, and `bot remove` reports that limitation without deleting anything. Do not remove a declaration and assume its service disappeared. `bot stop BOT` pauses a declared bot; it is not permanent teardown. Retain the isolated canary root and its evidence until an operator has verified native teardown. This limitation must be resolved before treating disposable-canary cleanup as a supported product flow.
 
 ## In review
 
@@ -66,16 +68,16 @@ Any change that affects **how a bot behaves at runtime** (claudlobby/_runtime_sc
 
 1. **Deliver** — make the code/library change.
 2. **Add config** — set the relevant field(s) in the canary's authored `fleet.yaml`.
-3. **Stage in an independent canary root** — assemble the candidate with `host setup`, then `config plan --release RELEASE_ID` and `config diff PLAN_ID`. Use distinct fleet/bot labels, host `unit_prefix`, Plane state and throwaway channels. Confirm config, skills and permissions in the staged output. An operator activates with `host activate PLAN_ID --install-directory PATH`; this is a whole-host operation, so never use a production root to simulate a single-bot canary.
+3. **Apply in an independent canary** — a separate installation with its own data root and native labels (distinct fleet/bot labels, host `unit_prefix`, Plane state and throwaway channels). Prepare it per [Getting started](getting-started.md) and apply the reviewed commit with `host update apply FULL_COMMIT` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)); inspect with `host update status`. Confirm config, skills and permissions in the published output; `config diff` covers published-output drift only. An update is a whole-installation operation, so never use a production root to simulate a single-bot canary.
 4. **Observe** — run it and watch the real behavior:
    - For observability/trust-loop behaviors: `bash harness/validate-bot-change.sh` stands up a throwaway bot + tmux sessions and asserts the events fire end-to-end. Extend it when you add a new event/check.
-   - For other behavior: use the canary's sealed CLI to drive the affected path, then inspect `event list --bot BOT` and the receiving session. Keep existing production no-restart holds in force.
+   - For other behavior: use the canary's stable CLI to drive the affected path, then inspect `event list --bot BOT` and the receiving session. Keep existing production no-restart holds in force.
 
 **Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence.
 
 **When a change matches an externally produced shape** (a plugin's injection, a carrier's response, a tool's output), ground the canonical fixture in a **live capture** — a transcript or real response — never in reading the producer's source; and commit the capture's **shape, never its identifiers** (the repo is public). Four gauntlet rounds on the Telegram carrier (#1404/#1411) each found the same class: fixtures certifying a shape reality does not produce, the last one shipped and silently dropped the operator's first live message. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
 
-**This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* validate an independent canary root before coordinated production activation: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
+**This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* validate an independent canary root before coordinated production rollout: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
 
 ## Boundary: this is not Claudosseum
 

@@ -24,13 +24,21 @@ export function createWorkspaceReadTransport({ sources }) {
         savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
           || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
         !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, unsubscribe: null };
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, overviewPending: null, unsubscribe: null };
   });
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
   const admittedHosts = entries.map(e => e.reader.snapshot().read_profile?.host_uid).filter(Boolean);
   if (new Set(admittedHosts).size !== admittedHosts.length)
     throw new Error('Distinct independently admitted hosts are required.');
+  function sourceFailure(e) {
+    const note = e.reader.snapshot().remediation;
+    return failed(e.state, note || (e.state === 'not_connected'
+      ? 'Not connected. Rooms and Tasks need this computer’s connection. Open Computers & status and choose Connect; for first-time owner pairing, use Set up computer access. Teams have not been checked.'
+      : 'Open Computers & status and check this computer’s connection.'));
+  }
+  const blockers = (sources, values) => sources.map((e,i) =>
+    `${e.label}: ${values[i].remediation || sourceFailure(e).remediation}`).join(' ');
   function notify(change) { for (const stream of streams) stream.refresh(change); }
   function adopt(e, snapshot) {
     const host = snapshot.read_profile?.host_uid;
@@ -41,7 +49,10 @@ export function createWorkspaceReadTransport({ sources }) {
     if (state === 'ok' && (e.host && host !== e.host || entries.some(other => other !== e && other.host === host)))
       state = 'unavailable';
     if (state === 'ok') e.host = host; // Issued by the one authenticated owner admission routine.
-    if (e.readerEpoch !== snapshot.epoch || e.state !== state) { e.epoch++; e.readerEpoch = snapshot.epoch; e.state = state; notify(); }
+    if (e.readerEpoch !== snapshot.epoch || e.state !== state) {
+      e.epoch++; e.overviewSnapshot = null; e.readerEpoch = snapshot.epoch; e.state = state;
+      if (streams.size) notify({coverage_changed:true, overview:overviewSnapshot()});
+    }
   }
   for (const e of entries) { adopt(e, e.reader.snapshot()); e.unsubscribe = e.reader.subscribe(s => adopt(e, s)); }
   const qualified = (e, value) => value == null ? value : `${e.key}::${value}`;
@@ -94,13 +105,13 @@ export function createWorkspaceReadTransport({ sources }) {
       snapshot.read_profile.host_uid === e.host && !entries.some(other => other !== e && other.host === e.host);
   }
   async function read(e, url) {
-    if (!admitted(e)) return failed(e.state, e.reader.snapshot().remediation || 'This source is not currently readable. Check its owner session.');
+    if (!admitted(e)) return sourceFailure(e);
     const overview = url === '/api/overview';
     if (overview && e.overviewTimeout) return e.overviewTimeout;
     const epoch = e.epoch, revision = e.overviewRevision;
     let value;
     try { value = await e.reader.jget(url); } catch { value = null; }
-    if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return failed(e.state);
+    if (epoch !== e.epoch || !admitted(e) || overview && revision !== e.overviewRevision) return sourceFailure(e);
     const timedOut = e.readFailure?.(url) === 'timed_out'
       || value?.state === 'unreadable' && value.reason === 'query_timeout';
     if (!value || typeof value.state !== 'string' || value.state === 'ok' && (!value.data || typeof value.data !== 'object'))
@@ -135,16 +146,19 @@ export function createWorkspaceReadTransport({ sources }) {
     const identity = rows => JSON.stringify(rows.map(f => [f.alias, f.uid]).sort((a,b) => a[0].localeCompare(b[0])));
     const changed = identity(next) !== identity(e.fleets);
     const retired = e.fleets.some(old => !next.some(f => f.alias === old.alias && f.uid === old.uid));
-    if (changed) ++e.routingRevision;
+    const invalidatesOverview = changed && !!e.overviewSnapshot && path === '/api/fleets';
+    if (changed) { ++e.routingRevision; e.overviewSnapshot = null; }
     e.fleets = next;
     rooms.clear();
     for (const entry of entries) for (const f of entry.fleets) rooms.set(room(entry, f.alias), { e: entry, raw: f });
     // A channel leg may have combined before this newly learned ownership.
-    if (changed) notify({ routing_changed: true, routing_retired: retired });
+    if (changed) notify({ routing_changed: true, routing_retired: retired,
+      ...(invalidatesOverview ? {overview_invalidated:overviewSnapshot()} : {}) });
   }
   function fleetChoices(values) {
     return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
       uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state,
+      overview_retained: values[i].state === 'checking' && values[i].overview_retained === true,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       read_state: values[i].state })));
   }
@@ -156,11 +170,41 @@ export function createWorkspaceReadTransport({ sources }) {
     return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
-      ...(path === '/api/overview' ? { host: values[i].state === 'ok' ? values[i].data.host : null,
+      ...(path === '/api/overview' ? { host: values[i].state === 'ok' || values[i].overview_retained ? values[i].data.host : null,
+        overview_retained:values[i].overview_retained === true,
         overview_retry_paused:values[i].overview_retry_paused === true, overview_checked_at:values[i].overview_checked_at, overview_read_at:values[i].overview_read_at } : {}),
       ...(path === '/api/summary' ? { summary: values[i].state === 'ok' ? { daemon_serving: values[i].data.daemon_serving ?? null } : null } : {}),
       ...(path === '/api/presence' ? { sampler_available: values[i].state === 'ok' && values[i].data.sampler_available === true,
         recorded_unavailable: values[i].data?.recorded_unavailable === true } : {}) }));
+  }
+  // Only the last accepted summary of this admission may bridge a pending read.
+  // This is presentation data; it never admits routing or action authority.
+  function pendingOverview(e) {
+    const saved = e.overviewSnapshot;
+    return saved && saved.epoch === e.epoch && admitted(e)
+      ? {...saved.value, state:'checking', overview_retained:true}
+      : failed('checking', 'This source read is still in progress.');
+  }
+  function combineOverview(values) {
+    const good = entries.flatMap((e, i) => values[i].state === 'ok' || values[i].overview_retained
+      ? [{e, v:project(e, '/api/overview', values[i])}] : []);
+    const totals = good.map(x => x.v.data.totals);
+    const data = {sources:sourceFacts(values, '/api/overview'), coverage:coverage(values),
+      windows:entries.map((e,i) => ({source:e.key,state:values[i].state,
+        limit:values[i].data?.limit,truncated:values[i].data?.truncated,lineage:values[i].data?.lineage})),
+      fleet_choices:fleetChoices(values), default:null,
+      fleets:good.flatMap(x => x.v.data.fleets.map(f => ({...f,
+        overview_retained:x.v.overview_retained === true, overview_read_at:x.v.overview_read_at}))),
+      totals:Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k,sum(totals,k)]))};
+    data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
+    data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
+    data.totals.overview_retained = values.some(v => v.overview_retained);
+    return {state:good.length ? 'ok' : 'unavailable', provenance:null, data,
+      ...(!good.length ? {remediation:blockers(entries, values)} : {})};
+  }
+  function overviewSnapshot() {
+    return combineOverview(entries.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
+      ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : sourceFailure(e)));
   }
   // Optional accepted partial snapshots; the Promise still settles with the full read.
   async function jget(input, onUpdate) {
@@ -171,7 +215,7 @@ export function createWorkspaceReadTransport({ sources }) {
     const path = url.pathname, detail = /^\/api\/tasks\/([^/]+)$/.exec(path);
     const roster = ['/api/fleets', '/api/channel', '/api/tasks', '/api/identities', '/api/overview', '/api/summary', '/api/presence'];
     if (!detail && !roster.includes(path)) return failed();
-    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : detail || ['/api/tasks', '/api/identities', '/api/presence'].includes(path) ? ['fleet'] : [];
+    const allowed = path === '/api/channel' ? ['fleet', 'limit'] : path === '/api/tasks' ? ['fleet', 'cursor'] : detail || ['/api/identities', '/api/presence'].includes(path) ? ['fleet'] : [];
     if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return failed('invalid');
     if (path === '/api/channel' && url.searchParams.has('limit') && url.searchParams.get('limit') !== '120') return failed('invalid');
     const selected = url.searchParams.get('fleet');
@@ -189,28 +233,49 @@ export function createWorkspaceReadTransport({ sources }) {
       return { ...result, data: { ...result.data, task: task(owning.e, t) } };
     }
     const chosen = owning ? [owning.e] : entries;
-    const suffix = path === '/api/channel' ? '?limit=120' : '';
+    const taskCursor = path === '/api/tasks' ? url.searchParams.get('cursor') : null;
+    const taskWindow = () => JSON.stringify([selected, chosen.map(e => [e.key, e.host, e.epoch, e.routingRevision, e.state])]);
+    let continuation = null;
+    if (taskCursor !== null) {
+      try {
+        if (taskCursor.length > 65536 || !/^tasks1\.[A-Za-z0-9_-]+$/.test(taskCursor)) throw new Error();
+        const raw = taskCursor.slice(7).replace(/-/g, '+').replace(/_/g, '/');
+        continuation = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0))));
+        if (continuation.window !== taskWindow() || !Array.isArray(continuation.cursors)
+            || continuation.cursors.length !== chosen.length || !continuation.cursors.some(c => c !== null)
+            || continuation.cursors.some(c => c !== null && (typeof c !== 'string' || !c || c.length > 4096))
+            || !Array.isArray(continuation.states) || continuation.states.length !== chosen.length
+            || continuation.states.some(s => typeof s !== 'string' || s.length > 40)
+            || !Array.isArray(continuation.limited) || continuation.limited.length !== chosen.length
+            || continuation.limited.some(v => typeof v !== 'boolean')) throw new Error();
+      } catch { return failed('invalid', 'This task history window changed; refresh tasks.'); }
+    }
+    const requestedTaskWindow = taskWindow();
     const epochs = chosen.map(e => e.epoch), revisions = chosen.map(e => e.routingRevision);
     const rosterRead = path === '/api/fleets' || path === '/api/overview';
     const tickets = chosen.map(e => rosterRead ? ++e.rosterRequest : null);
-    const values = chosen.map(() => failed('checking', 'This source read is still in progress.'));
+    if (path === '/api/overview') chosen.forEach((e,i) => {e.overviewPending = tickets[i];});
+    const values = chosen.map(e => path === '/api/overview' ? pendingOverview(e)
+      : failed('checking', 'This source read is still in progress.'));
     const projected = new Map();
     function combine() {
       // A settled source can lose admission while a peer is still pending.
       chosen.forEach((e, i) => {
-        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision
+        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision
             || rosterRead && tickets[i] !== e.rosterRequest) {
-          values[i] = failed(e.state); projected.delete(e);
+          values[i] = sourceFailure(e); projected.delete(e);
         }
       });
-      if (owning) return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
-      const good = entries.flatMap((e, i) => {
+      if (owning && path !== '/api/tasks') return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
+      if (path === '/api/overview') return combineOverview(values);
+      const good = chosen.flatMap((e, i) => {
         if (!projected.has(e)) return [];
         try { return [{e, v:project(e, path, values[i])}]; }
         catch { values[i] = failed('unavailable'); return []; }
       });
-      const data = { sources: sourceFacts(values, path), coverage: coverage(values),
-        windows: entries.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
+      const data = { sources: owning ? [{key:owning.e.key,state:values[0].state}] : sourceFacts(values, path),
+        coverage: owning ? {total:1,reachable:values[0].state === 'ok' ? 1 : 0,partial:values[0].state !== 'ok'} : coverage(values),
+        windows: chosen.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
       if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
       if (path === '/api/fleets') data.fleets = data.fleet_choices;
       if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
@@ -221,17 +286,22 @@ export function createWorkspaceReadTransport({ sources }) {
         lineage: { unresolved_threads: sum(good.map(x => ({ unresolved_threads: x.v.data.lineage?.unresolved_threads || 0 })), 'unresolved_threads') } });
       if (path === '/api/identities') data.identities = good.flatMap(x => x.v.data.identities);
       if (path === '/api/presence') data.bots = good.flatMap(x => x.v.data.bots);
-      if (path === '/api/tasks') Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count') });
-      if (path === '/api/overview') {
-        data.fleets = good.flatMap(x => x.v.data.fleets);
-        const totals = good.map(x => x.v.data.totals);
-        data.totals = Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k, sum(totals, k)]));
-        data.totals.live_poll = totals.some(t => t.live_poll !== 'ok') ? 'unavailable' : 'ok';
-        data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
+      if (path === '/api/tasks') {
+        const cursors = chosen.map((e,i) => values[i].state === 'ok' ? values[i].data.task_page?.next_cursor || null : null);
+        const limited = values.map(v => v.state === 'ok' && !!v.data.truncated
+          && (v.data.task_page?.version !== 1 || v.data.task_page?.unavailable === true));
+        const token = cursors.some(c => c !== null) && requestedTaskWindow === taskWindow()
+          ? 'tasks1.' + btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({window:requestedTaskWindow,cursors,
+            states:values.map(v => v.state),limited}))))
+            .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'') : null;
+        Object.assign(data, { tasks: good.flatMap(x => x.v.data.tasks), issues: good.flatMap(x => x.v.data.issues || []), issue_count: sum(good.map(x => x.v.data), 'issue_count'), truncated: good.some(x => x.v.data.truncated), issues_truncated: good.some(x => x.v.data.issues_truncated), limit: 200, attention_count: sum(good.map(x => x.v.data), 'attention_count'),
+          task_page: {version:1,cursor:taskCursor,next_cursor:token,
+            window:taskWindow() + JSON.stringify(values.map(v => v.state)),
+            unavailable:limited.some(Boolean)} });
       }
       // Partial ok is deliberate and disclosed. With no readable source, do not show an empty board.
       return { state: good.length || path === '/api/fleets' ? 'ok' : 'unavailable', provenance: null, data,
-        ...(!good.length ? { remediation: 'No source is currently readable.' } : {}) };
+        ...(!good.length ? { remediation: blockers(chosen, values) } : {}) };
     }
     let progressTimer = null, complete = false;
     function progress() {
@@ -242,10 +312,28 @@ export function createWorkspaceReadTransport({ sources }) {
         if (!complete && !disposed) { try { onUpdate(combine()); } catch { /* presentation cannot fail a read */ } }
       }, 0);
     }
+    if (path === '/api/overview' && values.some(v => v.overview_retained)) progress();
     try {
       await Promise.all(chosen.map(async (e, i) => {
-        values[i] = await read(e, path + suffix + (owning ? `${suffix ? '&' : '?'}fleet=${encodeURIComponent(owning.raw.alias)}` : ''));
-        if (epochs[i] !== e.epoch || !admitted(e) || owning && revisions[i] !== e.routingRevision) values[i] = failed(e.state);
+        if (continuation && continuation.cursors[i] === null) {
+          values[i] = continuation.states[i] !== 'ok' ? failed(continuation.states[i])
+            : {state:'ok',data:{tasks:[],issues:[],issue_count:0,attention_count:0,truncated:continuation.limited[i],
+              task_page:{version:1,cursor:null,next_cursor:null,unavailable:continuation.limited[i]}}};
+        } else {
+          const query = new URLSearchParams();
+          if (path === '/api/channel') query.set('limit','120');
+          if (owning) query.set('fleet',owning.raw.alias);
+          if (continuation) query.set('cursor',continuation.cursors[i]);
+          values[i] = await read(e, path + (query.size ? '?' + query : ''));
+          if (path === '/api/tasks' && values[i].state === 'ok') {
+            const page = values[i].data?.task_page, expected = continuation?.cursors[i] || null;
+            if (expected !== null && (!page || page.version !== 1 || page.cursor !== expected)
+                || page && (page.version !== 1 || page.cursor !== expected || page.next_cursor !== null
+                  && (typeof page.next_cursor !== 'string' || !page.next_cursor || page.next_cursor.length > 4096)))
+              values[i] = failed('unavailable', 'Task history continuation is unsupported; refresh tasks.');
+          }
+        }
+        if (epochs[i] !== e.epoch || !admitted(e) || (owning || continuation) && revisions[i] !== e.routingRevision) values[i] = sourceFailure(e);
         if (values[i].state === 'ok') {
           try {
             const label = values[i].data.host?.display_name;
@@ -256,12 +344,16 @@ export function createWorkspaceReadTransport({ sources }) {
               // Retain only a projection whose roster publication was accepted.
               e.overviewReadAt = values[i].overview_checked_at;
               values[i] = {...values[i], overview_read_at:e.overviewReadAt};
+              e.overviewSnapshot = {epoch:e.epoch, value:values[i]};
             }
             projected.set(e, value);
           } catch {
             values[i] = failed('unavailable', 'This source returned an unsupported or superseded read projection.');
           }
         }
+        if (path === '/api/overview' && values[i].state !== 'ok' && epochs[i] === e.epoch && tickets[i] === e.rosterRequest)
+          e.overviewSnapshot = null;
+        if (path === '/api/overview' && e.overviewPending === tickets[i]) e.overviewPending = null;
         progress();
         // Discover routing independently of an unavailable summary. A slow
         // fallback must not hold an already accepted peer's display.
@@ -278,6 +370,9 @@ export function createWorkspaceReadTransport({ sources }) {
     } finally {
       complete = true;
       clearTimeout(progressTimer);
+      if (path === '/api/overview') chosen.forEach((e,i) => {
+        if (e.overviewPending === tickets[i]) e.overviewPending = null;
+      });
     }
   }
     catch { return failed('unavailable', 'This source returned an unsupported read projection.'); }
@@ -309,13 +404,13 @@ export function createWorkspaceReadTransport({ sources }) {
         if (!admitted(e)) return;
         try { const payload = JSON.parse(ev.data); facade.onmessage?.({ data: JSON.stringify({ ...payload, source: e.key, rows: payload.rows.map(r => ({ ...r, source: e.key })) }) }); } catch { /* next read refresh corrects malformed push */ }
       };
-      child.onopen = ev => { facade.onopen?.(ev); facade.refresh(); };
+      child.onopen = ev => { facade.onopen?.(ev); facade.refresh({stream_changed:true}); };
       child.onerror = () => {
         // A stream interruption is scoped; canonical reads decide coverage.
         facade.onerror?.({type:'error', source:e.key});
-        facade.refresh();
+        facade.refresh({stream_changed:true});
       };
-      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; notify(); } } catch { /* do not infer recovery */ } });
+      child.addEventListener('source', ev => { try { const state = JSON.parse(ev.data).state; if (['absent', 'unreadable'].includes(state)) { e.state = state; e.epoch++; e.overviewSnapshot = null; notify({coverage_changed:true, overview:overviewSnapshot()}); } } catch { /* do not infer recovery */ } });
     }
     streams.add(facade); return facade;
   }

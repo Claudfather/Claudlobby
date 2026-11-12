@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-const source = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const source = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
 const { createOwnerTransport } = await load(source);
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
@@ -896,36 +897,38 @@ const botIdentity = { uid: 'actor_' + '4'.repeat(32), alias: 'bot:team/with/slas
   fleet: 'team/with/slash', fleet_uid: 'fleet_' + '5'.repeat(32), provisional: false };
 const equipmentEnvelope = alias => ({ state: 'ok', data: { alias, short: 'Worker', equipment: {}, posture: {},
   changes: [], versions: 1, composed_hashes: {}, org: {} } });
-function inspectionHarness() {
+function inspectionHarness({room = false} = {}) {
   const reads = [], selections = [], buttons = new Map(), cards = [];
   const document = { activeElement: null, body: { isConnected: true } };
   let box;
-  function detail() {
+  function detail(registry = buttons) {
     return { hidden: true, content: '', scrolls: 0,
       set innerHTML(value) {
-        for (const button of buttons.values()) {
+        for (const button of registry.values()) {
           if (document.activeElement === button) document.activeElement = document.body;
           button.isConnected = false;
         }
-        buttons.clear(); this.content = value;
-        for (const name of ['ed-close', 'ed-message', 'ed-message-note']) if (value.includes(name)) {
-          buttons.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
+        registry.clear(); this.content = value;
+        for (const name of ['ed-close', 'ed-message', 'ed-message-note', 'rb-refresh', 'rb-conversation']) if (value.includes(name)) {
+          registry.set('.' + name, { isConnected: true, disabled: true, textContent: '', focusCalls: 0,
             focus() { this.focusCalls++; document.activeElement = this; },
             matches(selector) { return selector === '.' + name; },
             addEventListener(event, listener) { this[event] = listener; } });
         }
       }, get innerHTML() { return this.content; },
-      querySelector(selector) { return buttons.get(selector) || null; },
-      contains(node) { return !!node && [...buttons.values()].includes(node); },
+      querySelector(selector) { return registry.get(selector) || null; },
+      contains(node) { return !!node && [...registry.values()].includes(node); },
       scrollIntoView() { this.scrolls++; } };
   }
   box = detail();
-  const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: 'fleet',
+  const roomButtons=new Map(),roomBox=detail(roomButtons);roomBox.id='room-bot-inspection';
+  const state = { sessionPaused: false, sessionEpoch: 1, generation: 0, currentFleet: botIdentity.fleet, currentView: room?'channel':'fleet',
+    conversationSnapshot:null,conversationFocus:{bot:'',other:''},renderChannel(){},roomBotInspection:null,roomBotEpoch:0,interactionApi:room?{dispose(){}}:{},activeRoom:()=>state.currentFleet,
     inventoryGeneration: 1, rosterGeneration: 1, equipmentGeneration: 0, equipmentAlias: null, equipmentSelection: botIdentity, equipmentFocus: null,
     fleets: [{ alias: botIdentity.fleet, uid: botIdentity.fleet_uid }],
     inventoryAliases: new Set([botIdentity.alias]), rosterIdentities: new Map([[botIdentity.uid, botIdentity]]),
     EQUIP_ORDER: ['skills'], esc: value => String(value), ago: () => '',
-    document, $: id => id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {} },
+    document, $: id => id === 'room-bot-inspection'?roomBox:id === 'equip-detail' ? box : id === 'fleet-room' ? { querySelectorAll: () => cards } : { scrollIntoView() {},focus(){} },
     stateBlock: (state, provenance, text) => text || state,
     renderState(node) { node.innerHTML = 'loading'; },
     jget(url) { const pending = deferred(); reads.push({ url, ...pending }); return pending.promise; },
@@ -933,8 +936,110 @@ function inspectionHarness() {
       selectMessageRecipient(identity) { if (!this.canSelectMessageRecipient(identity)) return false; selections.push(identity); return true; } },
   };
   runInNewContext(inspectionHelpers, state);
-  return { state, reads, selections, buttons, cards, document, get box() { return box; }, replaceBox() { box = detail(); } };
+  runInNewContext(inspectionApp.slice(inspectionApp.indexOf('function botPresenceFacts('),inspectionApp.indexOf('function agentDirectoryCard(')),state);
+  state.PRESENCE_WORD={working:'working',idle:'idle',down:'down',stale:'stale',unknown:'unknown',sampling:'sampling…'};
+  return { state, reads, selections, buttons, cards, document, roomBox, roomButtons, get box() { return box; }, replaceBox() { box = detail(); } };
 }
+
+test('connected bot inspection from Tasks returns to Rooms presence without equipment reads',()=>{
+  const h=inspectionHarness();h.state.currentView='tasks';h.state.interactionApi={dispose(){}};
+  const inspected=[];h.state.setView=view=>{h.state.currentView=view;};h.state.openRoomBot=identity=>{inspected.push(identity);};
+  h.state.inspectBot(botIdentity);assert.equal(h.state.currentView,'channel');assert.equal(inspected[0],botIdentity);assert.equal(h.reads.length,0);
+});
+
+test('connected cross-team directory inspection selects that room and survives only an unchanged selected identity',async()=>{
+  const h=inspectionHarness({room:true});h.state.currentView='grid';h.state.currentFleet='other';
+  const picks=[];h.state.pickFleet=fleet=>{picks.push(fleet);h.state.currentFleet=fleet;};
+  h.state.setView=view=>{h.state.currentView=view;};
+  h.state.rosterIdentities.set('other',{...botIdentity,uid:'other',fleet:'other'});
+  h.state.inspectBot(botIdentity);assert.deepEqual(picks,[botIdentity.fleet]);assert.equal(h.state.currentView,'channel');
+  runInNewContext(rosterHelpers,h.state);h.state.adoptRoster(new Map([[botIdentity.uid,botIdentity]]));
+  assert.equal(h.roomBox.hidden,false,'narrowing the roster keeps the exact selected bot');
+  h.reads[0].resolve(roomPresence());await flush();assert.match(h.roomBox.innerHTML,/Recorded heartbeat/);
+  h.state.adoptRoster(new Map([[botIdentity.uid,{...botIdentity,alias:'replacement'}]]));
+  assert.equal(h.roomBox.hidden,true,'replaced identity erases the inspector');
+});
+
+const roomPresence=()=>({state:'ok',provenance:{checked_at:'2026-01-01T00:00:00Z'},data:{sampler_available:true,bots:[{alias:botIdentity.alias,live:'up',presence:'idle'}]}});
+test('room bot inspection reads scoped presence, keeps Rooms open and only prepares the existing message composer',async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot({...botIdentity,last_seen:'2026-01-01'});
+  assert.equal(h.state.currentView,'channel');assert.equal(h.reads.length,1);
+  assert.equal(h.reads[0].url,'/api/presence?fleet=team%2Fwith%2Fslash');
+  h.reads[0].resolve(roomPresence());await pending;
+  assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>up/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>idle/);
+  assert.match(h.roomBox.innerHTML,/Snapshot only/);assert.equal(h.roomButtons.get('.ed-message').disabled,false);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections.length,1);assert.equal(h.reads.length,1);
+  assert.equal(h.roomBox.hidden,true);assert.equal(h.roomBox.innerHTML,'');
+});
+test('room inspector keeps all-team context and matches presence only to the exact source-qualified bot',async()=>{
+  const h=inspectionHarness({room:true});h.state.currentFleet='all';
+  const actor={...botIdentity,uid:'one::uid',alias:'one::bot',fleet:'one::team',fleet_uid:'one::team-uid'};
+  h.state.rosterIdentities=new Map([[actor.uid,actor]]);h.state.fleets=[{alias:actor.fleet,uid:actor.fleet_uid}];
+  const pending=h.state.openRoomBot(actor);
+  assert.equal(h.reads[0].url,'/api/presence?fleet=one%3A%3Ateam');
+  h.reads[0].resolve({state:'ok',data:{sources:[{key:'one',state:'ok',sampler_available:true},{key:'two',state:'ok',sampler_available:true}],bots:[{alias:'two::bot',live:'up',presence:'idle'},{alias:'one::bot',live:'down',presence:'down'}]}});await pending;
+  assert.equal(h.state.currentFleet,'all');assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>down/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>down/);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections[0].uid,actor.uid);
+});
+for(const loss of ['room','session','roster','source','close'])
+test(`room bot inspection erases detail and refuses late responses after ${loss}`,async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot(botIdentity);
+  if(loss==='room') {h.state.currentFleet='other';h.state.refreshRoomBot();}
+  if(loss==='session') {h.state.sessionPaused=true;h.state.refreshRoomBot();}
+  if(loss==='roster') {runInNewContext(rosterHelpers,h.state);h.state.adoptRoster(new Map());}
+  if(loss==='source') {
+    Object.assign(h.state,{agentPresence:null,agentPresenceDue:0,agentDirectoryVisible:()=>false});
+    runInNewContext(inspectionApp.slice(inspectionApp.indexOf('function resetAgentPresence()'),inspectionApp.indexOf('function botPresenceFacts(')),h.state);h.state.resetAgentPresence();
+  }
+  if(loss==='close')h.roomButtons.get('.ed-close').onclick();
+  assert.equal(h.roomBox.hidden,true);assert.equal(h.roomBox.innerHTML,'');
+  h.reads[0].resolve(roomPresence());await pending;
+  assert.equal(h.roomBox.innerHTML,'');assert.equal(h.selections.length,0);
+});
+for(const searchState of ['visible','debounced','pending'])
+test(`inspector conversation shortcut uses exact admitted read identity and exits ${searchState} search without reads or message authority`,async()=>{
+  const h=inspectionHarness({room:true}),actor={...botIdentity,uid:'north::'+botIdentity.uid,alias:'north::lead',fleet:'north / team',fleet_uid:'north::'+botIdentity.fleet_uid};
+  h.state.currentFleet='all';h.state.rosterIdentities=new Map([[actor.uid,actor]]);h.state.fleets=[{alias:actor.fleet,uid:actor.fleet_uid}];
+  h.state.conversationSnapshot={state:'ok',data:{sources:[{key:'north',state:'ok'},{key:'south',state:'ok'}],threads:[]}};
+  const renders=[];h.state.renderChannel=value=>renders.push(value);h.state.workLoop.canSelectMessageRecipient=()=>false;
+  const pending=h.state.openRoomBot(actor);h.reads[0].resolve({state:'unavailable'});await pending;
+  assert.equal(h.roomButtons.get('.rb-conversation').disabled,false);assert.equal(h.roomButtons.get('.ed-message').disabled,true);
+  const search={value:'old query',addEventListener(type,handler){this[type]=handler;}},results={hidden:false},channel={hidden:true,scrollIntoView(){}};
+  const originalDollar=h.state.$,timers=new Map();h.state.$=id=>id==='search'?search:id==='search-results'?results:id==='channel'?channel:originalDollar(id);
+  Object.assign(h.state,{searchTimer:null,setTimeout(callback){timers.set(1,callback);return 1;},clearTimeout(id){timers.delete(id);},renderSearch(){throw Error('stale search must not paint');}});
+  runInNewContext(inspectionApp.slice(inspectionApp.indexOf('$("search").addEventListener("input"'),inspectionApp.indexOf('function resumeOwnerReads()')),h.state);
+  let searchPending;
+  if(searchState!=='visible') {search.input();if(searchState==='pending')searchPending=timers.get(1)();}
+  const readsBefore=h.reads.length;
+  const old=h.roomButtons.get('.rb-conversation');old.onclick();
+  assert.equal(search.value,'');assert.equal(results.hidden,true);assert.equal(channel.hidden,false);assert.equal(timers.size,0);
+  assert.equal(h.state.searchTimer,null);
+  if(searchPending) {h.reads[1].resolve({state:'ok',data:{results:[]}});await searchPending;assert.equal(results.hidden,true);assert.equal(channel.hidden,false);}
+  assert.equal(h.state.conversationFocus.bot,actor.alias);assert.equal(h.state.conversationFocus.other,'');
+  assert.equal(h.state.currentFleet,'all');assert.equal(h.roomBox.hidden,true);assert.equal(renders.length,1);
+  assert.equal(h.reads.length,readsBefore);assert.equal(h.selections.length,0);old.onclick();assert.equal(renders.length,1);
+  const second=h.state.openRoomBot(actor);h.reads.at(-1).resolve({state:'unavailable'});await second;
+  h.state.conversationSnapshot.data.sources[0].state='denied';h.state.refreshRoomBot();
+  assert.equal(h.roomButtons.get('.rb-conversation').disabled,true);h.roomButtons.get('.rb-conversation').onclick();assert.equal(renders.length,1);
+});
+
+test('room inspector preserves unknown evidence and revoked message access without inferring idle',async()=>{
+  const h=inspectionHarness({room:true}),pending=h.state.openRoomBot(botIdentity);
+  h.reads[0].resolve({state:'unavailable'});await pending;
+  assert.match(h.roomBox.innerHTML,/Live session at check<\/dt><dd>unknown/);
+  assert.match(h.roomBox.innerHTML,/Recorded heartbeat<\/dt><dd>unknown/);
+  h.state.workLoop.canSelectMessageRecipient=()=>false;h.state.refreshRoomBot();
+  assert.equal(h.roomButtons.get('.ed-message').disabled,true);
+  h.roomButtons.get('.ed-message').onclick();assert.equal(h.selections.length,0);
+});
+test('a replaced room inspection fences its old controls and cannot overwrite the new snapshot',async()=>{
+  const h=inspectionHarness({room:true}),first=h.state.openRoomBot(botIdentity),old=h.roomButtons.get('.ed-close');
+  const second=h.state.openRoomBot(botIdentity);old.onclick();assert.equal(h.roomBox.hidden,false);
+  h.reads[0].resolve(roomPresence());await first;assert.match(h.roomBox.innerHTML,/Checking/);
+  h.reads[1].resolve(roomPresence());await second;assert.match(h.roomBox.innerHTML,/Recorded heartbeat/);
+});
 
 test('bot roster names are native inspect buttons bound to full server fleet and UID, including twins', () => {
   const opens = [], nodes = [], document = { activeElement: null };
@@ -1387,4 +1492,20 @@ test('context refusal with expired or unknown read session is not an action-only
     assert.equal(h.calls.filter(c=>c.url.endsWith('/context')).length,1);
     h.controls.dispose();
   }
+});
+
+test('owner Git task action wire keeps exact provenance and rejects mixed target before fetch',async()=>{
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ const c={...nudgeContext,...runtime},metadata={...nudgeMetadata,target:{...nudgeMetadata.target,...runtime}};
+ const {semantic_sha256,...pre}=metadata,response={...metadata,status:'recorded'};
+ const h=harness([ready,ok(c),ok(metadata),ok(response),ok(response)]);await h.controls.ready;
+ assert.deepEqual(await h.api.nudgeContext('synthetic'),c);
+ assert.deepEqual(await h.api.prepareAction({...pre,body:'Reason'}),metadata);
+ await h.api.sendAction({...metadata,body:'Reason'});await h.api.actionReceipt(metadata);
+ const bodies=h.calls.slice(2).map(call=>JSON.parse(call.options.body));
+ assert.deepEqual(bodies,[{...pre,body:'Reason'},{...metadata,body:'Reason'},metadata]);
+ const before=h.calls.length;
+ for(const target of [{...metadata.target,release_id:nudgeContext.release_id},{...metadata.target,source_revision:undefined}])
+  await assert.rejects(h.api.prepareAction({...pre,target,body:'Reason'}),/Unsupported/);
+ assert.equal(h.calls.length,before);
 });

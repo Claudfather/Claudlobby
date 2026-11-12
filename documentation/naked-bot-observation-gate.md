@@ -10,7 +10,7 @@ shows up as a delta instead of being argued about in a review thread.
 ```bash
 harness/naked-bot-observe.py                                    # human-readable
 harness/naked-bot-observe.py --json                             # the record format
-harness/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-08-12.json
+harness/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-09-30.json
 ```
 
 The last form is the gate: exit 1 and a per-(arm, entity type) list of what
@@ -23,25 +23,25 @@ the delta is named in the PR body, not that it is absent.
 
 | file | what it is |
 |---|---|
-| `naked-bot-2026-08-11.json` | **The anchor** (`b196936`). Phase 1 merged, zero defaults admitted. Frozen — never overwritten. SCHEMA 2. |
-| `naked-bot-2026-08-12.json` | **Frozen as of the SCHEMA 3 bump** (PR4 chunk 4). Was "replaced in place by each admission" until then; now superseded as the diff target rather than overwritten, because a SCHEMA 3 record cannot replace it in place and stay diffable against what came before. SCHEMA 2. |
-| `naked-bot-2026-09-18.json` | **The current diff target**, and the first SCHEMA 3 record — adds the `shape:leaf-manager` arm (`Arm.teams` / `Arm.observed_bot`). Replaced in place by each admission from here on, exactly like `-08-12` was. |
+| `naked-bot-2026-09-18.json` | **The first SCHEMA 3 record** (`fa95ea6`) — adds the `shape:leaf-manager` arm (`Arm.teams` / `Arm.observed_bot`). Frozen — never overwritten. |
+| `naked-bot-2026-09-30.json` | **The current diff target** — the `manager` role's `status` skill default (#2010). Replaced in place by each admission; its `ref` field says which commit it describes. |
 
 Diff a new PR against the **current** file; a PR that diffed against the anchor
 would re-report every previously-argued admission as its own delta, and the
 reviewer would have to subtract history by hand to find the change under review.
 
-**A schema bump is the one thing that adds a THIRD file instead of replacing
-the current one in place.** `diff_reports` refuses to compare across schema
+**A schema bump is the one thing that adds a file instead of replacing the
+current one in place.** `diff_reports` refuses to compare across schema
 versions rather than half-comparing (a SCHEMA 3 record carries fields — e.g.
-`observed_bot` — a SCHEMA 2 record never had), so overwriting `-08-12` would
-have made the pre-role-overlay state unrecoverable for no reason. The anchor
-and `-08-12` are both SCHEMA 2 and both frozen now; `-09-18` is SCHEMA 3 and is
-the only file future admissions diff against.
+`observed_bot` — a SCHEMA 2 record never had), so a new schema starts a new
+file, and the records of the old schema leave the tree: nothing current can be
+diffed against them. Git history keeps them.
 
-**The anchor is kept** because it is the only recorded state in which the
-estate's pre-registry behaviour is legible as a whole, and a claim that has to
-be re-derived to be checked usually is not checked.
+**The pre-registry anchor is in git history.** It was recorded at `b196936`
+(Phase 1 merged, zero defaults admitted) in SCHEMA 2, and it is the one record
+in which the estate's pre-registry behaviour is legible as a whole. Read it
+with `git show 1117d40b:documentation/baselines/naked-bot-2026-08-11.json`; the
+last SCHEMA 2 diff target is `naked-bot-2026-08-12.json` at the same commit.
 
 **Intermediates are not kept, and this supersedes the "add a dated file per
 admission; never edit one in place" line written in #1174.** That rule was wrong
@@ -225,9 +225,9 @@ land fleet-wide with freshbox green throughout.
 > not visibility to a reader — it is validator coverage.** A `load_fleet`
 > default lands in `bot.<type>`, so `validator.py` checks that every named entry
 > exists in the library, and every `FleetConfig` consumer can see it. A composer
-> default never enters `BotConfig`: **`claudlobby validate` cannot see it**, so a
+> default never enters `BotConfig`: **`config validate` cannot see it**, so a
 > registry entry naming a missing library file passes validation and fails at
-> `generate`, on real fleets, only for the fleets that did not opt out.
+> composition, on real fleets, only for the fleets that did not opt out.
 >
 > `tests/test_defaults_registry.py::test_every_registered_entry_resolves_to_a_library_file`
 > covers the shared `library/` for all twelve types, which is the cheap half. It
@@ -383,14 +383,13 @@ which is why the field access is defensive as well.
 
 **`documentation/baselines/naked-bot-2026-09-18.json` is the first SCHEMA 3
 record** (PR4 chunk 4 — `Arm.teams` / `Arm.observed_bot`, the
-`shape:leaf-manager` arm). It cannot be diffed against either SCHEMA 2 file
-above: `--baseline naked-bot-2026-08-12.json` against it prints exactly one
-line, `schema changed 2 -> 3; baselines across schema versions are not
-comparable`, and exits 1. That refusal is correct and is not something to
-work around — comparing a report to one that lacks fields it has would
-silently under-report drift rather than name it. Diff future admissions
-against the `-09-18` file; the two SCHEMA 2 files stay readable as the
-pre-role-overlay historical record.
+`shape:leaf-manager` arm). It cannot be diffed against a SCHEMA 2 record:
+against one, the gate reports exactly one difference, `schema changed 2 -> 3;
+baselines across schema versions are not comparable`, and exits 1. That refusal
+is correct and is not something to work around — comparing a report to one
+that lacks fields it has would silently under-report drift rather than name it.
+That is why the two SCHEMA 2 records are in git history, not the tree (see "The
+baselines" above).
 
 **`documentation/baselines/naked-bot-2026-09-30.json` records the `manager` role's
 `status` skill default (#2010).** Against an observation of `main` just before

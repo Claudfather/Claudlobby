@@ -1,12 +1,12 @@
 ---
 name: add-bot
-description: "Use when the user wants to add a bot to a fleet. Conversational bot creation. Authors one bot, then stages and activates the reviewed fleet configuration."
+description: "Use when the user wants to add a bot to a fleet. Conversational bot creation. Authors one bot, then hands the reviewed configuration to the operator's host update."
 argument-hint: "[--fleet <name>] [--name <bot-name>]"
 ---
 
 # Add Bot
 
-Guide the user through adding a new bot to their fleet. Collect requirements conversationally, author the bot via `claudlobby bot create`, then stage and activate the reviewed fleet configuration.
+Guide the user through adding a new bot to their fleet. Collect requirements conversationally, author the bot via `claudlobby bot create`, then hand the reviewed fleet configuration to the operator's host update.
 
 ## Procedure
 
@@ -55,20 +55,15 @@ Guide the user through creating a Telegram bot:
 
 If the user does not have a Telegram token yet, that is fine. The bot can be started without Telegram and configured later.
 
-### Step 4: Stage and hand off activation
+### Step 4: Hand off the update
+
+Review the new stanza, then give the operator this exact command to run from an operator shell outside the generated bot session:
 
 ```bash
-claudlobby --root <data-root> config plan --release <release-id>
-claudlobby --root <data-root> config diff <plan-id>
+claudlobby --root <data-root> host update apply FULL_COMMIT
 ```
 
-Review the plan, then give the operator the plan ID and this exact command to run from an operator shell outside the generated bot session:
-
-```bash
-claudlobby --root <data-root> host activate <plan-id> --install-directory <user-unit-directory>
-```
-
-Activation owns composition and native enrollment; `bot create` only writes source. Verify the selected bot through `claudlobby --fleet <name> bot status <bot-name>` afterward.
+The update owns composition and native enrollment; `bot create` only writes source. Verify the selected bot through `claudlobby --fleet <name> bot status <bot-name>` afterward.
 
 ### Step 5: Verify
 
@@ -80,7 +75,7 @@ Activation owns composition and native enrollment; `bot create` only writes sour
 1. Guide conversationally. Ask one or two questions at a time, not all at once.
 2. Provide sensible defaults based on the described role.
 3. If the user does not have a Telegram token yet, skip Step 3 and note they can configure it later.
-4. After activation, check the bot's native enrollment and session readiness before reporting it as running.
+4. After the update, check the bot's native enrollment and session readiness before reporting it as running.
 5. Report success with the new bot's name, expertise, model, and directory path.
 
 $ARGUMENTS

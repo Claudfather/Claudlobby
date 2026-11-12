@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
-const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const ownerText = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { isOwnerReadHandle } = await import(ownerURL);
 const actionsURL = `data:text/javascript;base64,${Buffer.from((await readFile(new URL('../claudlobby/plane/ui/connected-actions.js', import.meta.url), 'utf8')).replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href))).toString('base64')}`;
@@ -291,6 +292,17 @@ test('finite route/query roster refuses actions, credential URLs and duplicate k
     assert.equal(await h.api.readHandle.jget(path), null);
   // Invalid local routes degrade the owner read controller but never reach a host.
   assert.equal(h.calls.length, 2); h.api.dispose();
+});
+
+test('task history cursor stays on the admitted direct host read with duplicate keys refused',async()=>{
+  const h=harness();await h.api.connect();
+  assert.equal((await h.api.readHandle.jget('/api/tasks?fleet=data&cursor=opaque-page')).state,'ok');
+  const url=new URL(h.calls.at(-1).url);
+  assert.equal(url.pathname,'/api/owner/connected/read/tasks');
+  assert.equal(url.search,'?fleet=data&cursor=opaque-page');
+  const count=h.calls.length;
+  assert.equal(await h.api.readHandle.jget('/api/tasks?cursor=a&cursor=b'),null);
+  assert.equal(h.calls.length,count);h.api.dispose();
 });
 
 test('read endpoint500 stays local;503 checks current authority without disturbing either admitted host', async () => {
@@ -671,21 +683,32 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
 
 test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
   const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
-    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+    setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
   h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
   h.overrides.set('status',()=>reply(200,setup()));
-  h.overrides.set('setup/context',()=>reply(200,{version:1,request:null}));
+  h.overrides.set('setup/context',()=>reply(200,{version:2,request:null}));
   assert.equal(await h.api.connect(),true); assert.equal(h.api.snapshot().state,'setup_only');
   assert.notEqual(h.api.readHandle.snapshot().state,'ready');
   assert.equal(await h.api.readHandle.jget('/api/tasks'),null);
   assert.equal(h.calls.filter(c=>c.url.includes('/read/')).length,0);
-  assert.equal((await h.api.setupContext()).version,1);
+  assert.equal((await h.api.setupContext()).version,2);
   assert.equal(h.calls.at(-1).init.credentials,'omit'); assert.equal(h.calls.at(-1).init.headers.Authorization,'Bearer '+TOKEN);
   await h.api.check(); assert.equal(h.api.snapshot().state,'setup_only');
   h.overrides.set('status',()=>reply(200,ready()));
   h.overrides.set('read/tasks',init=>{assert.equal(init.headers.Authorization,'Bearer '+TOKEN);return reply(200,{state:'ok',data:{path:'read/tasks'}});});
   await h.api.check(); assert.equal(h.api.snapshot().state,'ready');
   assert.deepEqual(await h.api.readHandle.jget('/api/tasks'),{state:'ok',data:{path:'read/tasks'}});
+  h.api.dispose();
+});
+
+test('legacy setup-only profile is visibly incompatible and admits no reads or setup actions',async()=>{
+  const h=harness();
+  h.overrides.set('issue',()=>reply(200,{version:1,state:'setup_only',expires_in:900,token:TOKEN,
+    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:HOST},session_context:{...sessionContext}}));
+  assert.equal(await h.api.connect(),false);
+  assert.notEqual(h.api.snapshot().state,'setup_only');
+  assert.match(h.api.snapshot().remediation,/incompatible setup profile/);
+  assert.equal(h.calls.filter(c=>c.url.includes('/read/')||c.url.includes('/setup/')).length,0);
   h.api.dispose();
 });
 

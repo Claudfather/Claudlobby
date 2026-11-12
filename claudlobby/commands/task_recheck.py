@@ -30,13 +30,15 @@ def _validate(args) -> None:
 
 
 def _dispatch(args) -> CommandOutput:
-    from ..activation_identity import read_selected_identity_bindings
-    from ..activation_state import read_selection
+    from ..activation_identity import read_current_identity_bindings
+    from ..active_config import runtime_read_stamp
     from ..message_context import resolve_message_route
     from ..operation_context import resolve_operation_scope, resolve_task_mutation_context
     from ..plane.db import connect_ro, db_file
     from ..plane.schema_state import require_current_schema
-    from ..runtime_admission import RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission, runtime_release_id,
+                                     runtime_provenance, runtime_route_matches)
+    from .message_write import _bound_release
     from ..task_recheck import digest, recheck, select
 
     _validate(args)
@@ -46,14 +48,14 @@ def _dispatch(args) -> CommandOutput:
     if selected.paths.seed:
         raise CommandFailure("conflict", "seed configuration has no task recheck")
     root = selected.paths.root
-    stamp = read_selection(root)
+    stamp = runtime_read_stamp(root, package=selected.paths.package)
     if stamp is None:
         raise CommandFailure("conflict", "active task selection is unavailable")
-    release_id = stamp["release_id"]
+    release_id = stamp.release_id
     if args.dry_run:
         # A preview cannot call the mutation binder: a cold local human would
         # register an identity before the dry-run returned.
-        bindings = read_selected_identity_bindings(root, selected.fleet.name,
+        bindings = read_current_identity_bindings(root, selected.fleet.name,
                                                    package=selected.paths.package)
         if bindings["manager"] != selected.fleet.manager or set(bindings["bots"]) != set(selected.fleet.bots):
             raise CommandFailure("conflict", "active task bindings differ from the selected fleet")
@@ -71,8 +73,8 @@ def _dispatch(args) -> CommandOutput:
                                now=datetime.now(timezone.utc), max_age_h=args.max_age_h,
                                repeat_h=args.repeat_h,
                                bot_uids=frozenset(bindings["bots"].values()))
-        if read_selection(root) != stamp:
-            raise CommandFailure("conflict", "active task selection changed during preview")
+        stamp.check(root, package=selected.paths.package,
+                    message="active task selection changed during preview")
         body = (digest(selection, fleet=selected.fleet.name, manager=selected.fleet.manager,
                        max_age_h=args.max_age_h, by=args.by or "current caller")
                 if selection.rows else None)
@@ -83,22 +85,27 @@ def _dispatch(args) -> CommandOutput:
                               "waiting": selection.waiting, "overflow": selection.overflow,
                               "standing_task_ids": list(selection.standing_task_ids),
                               "issues": [asdict(issue) for issue in selection.issues],
-                              "digest": body}, release_id=release_id,
-                             lines=(body or "recheck: no task is due",) + _standing(selection))
+                              "selection_notes": list(_selection_notes(selection, args.repeat_h)),
+                              "digest": body, **stamp.provenance}, release_id=release_id,
+                             lines=(body or ("recheck: no task is eligible for this sweep"
+                                    if selection.held or selection.uncertain or selection.waiting
+                                    else "recheck: no task is due"),)
+                             + _selection_notes(selection, args.repeat_h) + _standing(selection))
 
-    bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID") if origin is not None else None
-    if origin is not None and not bound_release:
-        raise CommandFailure("release_mismatch", "generated caller lacks a bound release")
+    bound_release = _bound_release(selected.paths.package, generated=origin is not None)
     with mutation_admission(root, identity=RuntimeIdentity.current(),
                             expected_release=bound_release) as release:
-        release_id = release.release_id
+        release_id = runtime_release_id(release)
+        provenance = runtime_provenance(release)
+        stamp.check(root, package=selected.paths.package,
+                    message="active task selection changed before recheck")
         ctx = resolve_task_mutation_context(root=root, fleet=selected.fleet.name,
                                             package=selected.paths.package)
         route = resolve_message_route(selected.fleet.manager, root=root,
                                       fleet=selected.fleet.name, package=selected.paths.package,
                                       caller_context=ctx if origin is None else None)
-        if (route.release_id != release_id or route.host_uid != ctx.host_uid
-                or route.selected_fleet_uid != ctx.fleet_uid
+        if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
+                or route.selected_fleet_uid != ctx.fleet_uid or route.peer_fleet_uid != ctx.fleet_uid
                 or route.caller != ctx.caller or route.caller_fleet_uid != ctx.caller_fleet_uid
                 or route.peer != ctx.bots[selected.fleet.manager] or route.manager != route.peer):
             raise CommandFailure("conflict", "manager route differs from frozen task identities",
@@ -110,7 +117,7 @@ def _dispatch(args) -> CommandOutput:
             from ..application_tasks import _committed_notification
             notification = _committed_notification(ctx, route, selected.paths.package, result,
                                                    result.body or "", send_on_replay=False)
-    data = {"fleet": selected.fleet.name, "manager": selected.fleet.manager,
+    data = {**provenance, "fleet": selected.fleet.name, "manager": selected.fleet.manager,
             "task_ids": list(result.task_ids),
             "bookkeeping_asks": len(result.task_ids),
             "bookkeeping_delivery": "no_individual_proof" if result.message_id else "not_sent",
@@ -121,6 +128,7 @@ def _dispatch(args) -> CommandOutput:
             "overflow": None if result.replayed else result.selection.overflow,
             "standing_task_ids": list(result.selection.standing_task_ids),
             "issues": [asdict(issue) for issue in result.selection.issues],
+            "selection_notes": None if result.replayed else list(_selection_notes(result.selection, args.repeat_h)),
             "replayed": result.replayed, "recording": "committed",
             "message_id": result.message_id, "recipient_uid": result.recipient_uid,
             "request_persisted": True,
@@ -131,13 +139,35 @@ def _dispatch(args) -> CommandOutput:
             raise CommandFailure("notification_failed",
                                  "recheck asks committed; manager digest is unverified; inspect request and receipt",
                                  data=data, release_id=release_id)
-    if result.selection.uncertain:
-        ids = ", ".join(result.selection.uncertain_request_ids)
-        lines = (f"recheck: {result.selection.uncertain} task(s) held for uncertain prior delivery;"
-                 f" inspect request {ids}",)
-    else:
+    if result.replayed:
+        lines = (f"recheck: original receipt names {len(result.task_ids)} task(s);"
+                 " no new selection or delivery was attempted",)
+    elif result.task_ids:
         lines = (f"recheck: {len(result.task_ids)} task(s) named in one manager digest",)
+        lines += _selection_notes(result.selection, args.repeat_h)
+    else:
+        lines = ("recheck: no task is eligible for this sweep"
+                 if result.selection.held or result.selection.uncertain or result.selection.waiting
+                 else "recheck: no task is due",)
+        lines += _selection_notes(result.selection, args.repeat_h)
     return CommandOutput(data, release_id=release_id, lines=lines + _standing(result.selection))
+
+
+def _selection_notes(selection, repeat_h: float) -> tuple[str, ...]:
+    """Explain the canonical selector's exclusions without making a new selection."""
+    notes = []
+    if selection.held:
+        notes.append(f"recheck: {selection.held} task(s) held by the {repeat_h:g}h repeat window;"
+                     " wait for that window to pass before another recheck")
+    if selection.uncertain:
+        ids = ", ".join(selection.uncertain_request_ids)
+        notes.append(f"recheck: {selection.uncertain} task(s) held for uncertain prior delivery;"
+                     f" inspect the original receipt with claudlobby request show REQUEST_ID: {ids};"
+                     " no replacement digest was sent for them")
+    if selection.waiting:
+        notes.append(f"recheck: {selection.waiting} escalated task(s) waiting on a human;"
+                     " inspect claudlobby task list and task show TASK_ID for the question")
+    return tuple(notes)
 
 
 def _standing(selection) -> tuple[str, ...]:
@@ -160,7 +190,6 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch
     from ..task_operations import TaskRecordingError
     from ..task_queries import TaskQueryError
     from ..task_recheck import RecheckUnresolved
@@ -178,9 +207,6 @@ def dispatch(args) -> CommandOutput:
                              data={"recording": exc.recording,
                                    "request_persisted": exc.request_persisted,
                                    "message_id": exc.message_id}) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint) from exc
     except (OperationContextUnavailableError, PendingMigrationError, DowngradeError,
             sqlite3.Error, OSError) as exc:
         raise CommandFailure("unavailable", "recheck identity or Plane storage is unavailable",

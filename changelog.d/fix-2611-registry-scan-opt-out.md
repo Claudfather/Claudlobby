@@ -1,3 +1,0 @@
-### Fixed — activation refuses an opted-out registry scan before it stops any bot (#2611)
-
-The switch tables offered `PLANE_EMIT_ENABLED=0` in a fleet's `.env` tiers as the registry scan's off switch. Activation needs that scan, because the plane's fleet and bot identities join to it, so the value made the next activation refuse in its bots start phase: after every running bot was paused, and with no reason shown. Activation now asks the scan's own refusal before it records or pauses anything, and names the value and the file. The same holds for an exported `PLANE_EMIT_ENABLED=0` or `PLANE_EMIT_DISABLED=1`. The switch tables and the variable reference no longer offer the value as an off switch.

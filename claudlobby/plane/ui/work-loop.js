@@ -1,4 +1,4 @@
-import { ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
+import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
 import { createPermissionPanel } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
 
@@ -31,7 +31,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const state = new ActionState(storage);
   const permissions = createPermissionPanel({api,storage});
   const contextsByKind = new Map(), checkingReceipts = new Set();
-  const actionRefreshEpochs = new Map(), deniedContexts = new Set();
+  const actionRefreshEpochs = new Map(), deniedContexts = new Set(), checkingTaskContexts = new Set();
   const deniedNote = 'Action access is not authorized for this team. Reading remains available. The host owner must approve action access.';
   const taskContextReader = action => action === "nudge" ? api.nudgeContext : action === "feedback" ? api.feedbackContext : null;
   const retainContext = value => Object.freeze({ ...value, scope: Object.freeze({ ...value.scope }),
@@ -44,10 +44,29 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let detailEpoch = 0, pendingDetail = null, compositionEpoch = 0, detailSnapshot = null, targetTitle = null, composerTask = null;
   let conversation = null;
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
+  let view = "channel";
   let notice = "Choose a team to see its available actions.";
-  root.innerHTML = `<div class="work-loop-head"><div><h2>Talk to your team</h2>
-    <p id="work-scope"></p></div><span id="work-mode" class="tag"></span></div>
+  root.innerHTML = `<details id="work-composer" open><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
+    <div class="work-loop-head"><p id="work-scope"></p><span id="work-mode" class="tag"></span></div>
+    <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
+    <button id="work-check-access" class="pill ghost" type="button" hidden>Check action access</button>
+    <details id="work-access-help" class="task-record-details" hidden><summary>Action access help</summary>
+      <p id="work-access-room" class="note"></p><p id="work-access-status" class="note"></p>
+      <p class="note">Reading this team and acting on it are separate permissions. Messages, task nudges and task feedback
+        need local approval by this computer’s owner for this team. Unavailable access does not prove that approval is missing.
+        Check action access only reads existing permissions; it does not approve access, reconnect, send anything or check saved receipts.</p>
+      <p class="note">On hosts that support <code>host owner allow-actions</code>, the owner can approve selected actions together
+        in a local operator terminal. Replace DATA_ROOT, TEAM and human:ALIAS with this computer’s installation, exact team name and local human actor.
+        Keep only the capabilities the owner intends to approve:</p>
+      <p><code>claudlobby --root DATA_ROOT host owner allow-actions --target-fleet TEAM --actor human:ALIAS --capabilities messages nudges feedback --register-actor</code></p>
+      <p class="note">The owner must review the local preview and explicitly confirm ALLOW-ACTIONS. If the actor is new,
+        --register-actor also requires a separate REGISTER confirmation. Permission decisions require their own local approval.
+        Older hosts can use their existing allow-messages, allow-nudges and allow-feedback doors individually.
+        After approval, reconnect in Computers &amp; status if needed, select this team and choose Check action access.</p>
+      <p class="note"><a href="https://github.com/Claudfather/Claudlobby/blob/main/documentation/first-team-setup.md#approve-team-actions-after-launch"
+        target="_blank" rel="noopener noreferrer">Local action approval guide</a></p>
+    </details>
     <form id="work-form" hidden>
       <div class="work-target"><label for="work-recipient">To</label>
         <select id="work-recipient"></select><span id="work-task"></span>
@@ -66,8 +85,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <p id="work-notice" role="status" aria-live="polite"></p>
     <div id="work-pending"></div>
     <div id="work-recoverable"></div>
-    <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button>`;
+    <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button></details>`;
   const $ = id => document.getElementById(id);
+  $("work-composer").open = true;
   const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
   const requestContext = request => {
     const value = contextsByKind.get(request.kind);
@@ -81,6 +101,44 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
   const readDraft = () => row() ? state.draft(row()) : "";
   const roomLabel = value => api.roomLabel?.(value) || value;
+  function paintComposer() {
+    $("work-composer-label").textContent = target?.task_id ? kind === "feedback" ? "Task feedback" : "Ask team lead" : "Message team";
+    const pending = state.pending.filter(visibleRequest).length;
+    $("work-composer-status").textContent = [sending ? "Sending…" : "",
+      $("work-body").value || retainedComposition?.text ? "Draft kept" : "",
+      pending ? `${pending} awaiting confirmation` : "",
+      state.corruptStorage ? "Saved requests need attention" : state.storageError ? "Sending disabled" : ""].filter(Boolean).join(" · ");
+  }
+  function setView(next) {
+    if (view === next) return;
+    view = next;
+    $("work-composer").open = view !== "tasks";
+    // Only presentation changes: the mounted form and its action selection stay
+    // intact. Do not leave keyboard focus inside a newly collapsed composer.
+    if (!$("work-composer").open && root.contains(document.activeElement)) $("work-composer-toggle").focus();
+    paintComposer();
+  }
+  const accessReaders = () => typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
+    ? [["message", api.interactionContext], ["nudge", typeof api.prepareAction === "function" ? api.nudgeContext : null],
+      ["feedback", typeof api.prepareAction === "function" ? api.feedbackContext : null]].filter(([, read]) => typeof read === "function") : [];
+  const missingAccess = () => accessReaders().filter(([action]) => !contextsByKind.has(action));
+  const readsUnavailable = () => (channel && channel.state !== "ok") || (board && board.state !== "ok");
+  const canCheckAccess = () => !!room && room !== "all" && !readsPaused && !readsUnavailable()
+    && !sending && !checkingReceipts.size && pendingDetail === null && !checkingTaskContexts.size && missingAccess().length > 0;
+  function paintAccess() {
+    const readers = accessReaders(), missing = missingAccess();
+    $("work-check-access").hidden = !missing.length && document.activeElement !== $("work-check-access");
+    $("work-check-access").disabled = !canCheckAccess();
+    $("work-check-access").textContent = checkingTaskContexts.size ? "Checking action access…" : "Check action access";
+    $("work-access-help").hidden = !room || room === "all";
+    $("work-access-room").textContent = `Current team: ${roomLabel(room || "All teams")}`;
+    $("work-access-status").textContent = !room || room === "all" ? "Choose one team to check its action access."
+      : readsPaused ? "Session access is paused. Check your session in Computers & status first."
+      : readsUnavailable() ? "Team reads are disconnected or unavailable. This does not prove local approval is missing. Check Computers & status first."
+      : !readers.length ? "This view does not support browser actions. Reading does not grant action access."
+      : [["message", "Messages"], ["nudge", "Nudges"], ["feedback", "Task feedback"]].map(([action, label]) =>
+        `${label}: ${contextsByKind.has(action) ? "available" : checkingTaskContexts.has(action) ? "checking" : deniedContexts.has(action) ? "not authorized" : readers.some(([key]) => key === action) ? "unavailable" : "not supported in this view"}.`).join(" ");
+  }
   const recipientLabel = request => requestContext(request)?.recipients.find(r => r.id === request.target.recipient)?.label || request.target.recipient;
   function saveDraft() {
     if (!row()) return;
@@ -115,12 +173,26 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function selectMessageRecipient(identity) {
     if (!canSelectMessageRecipient(identity)) return false;
+    return composeMessage(identity.uid);
+  }
+  function managerRecipient() {
+    const message = contextsByKind.get("message");
+    if (!message?.actions.includes("message")) return null;
+    const leads = [...new Set(["feedback","nudge"].flatMap(action => {
+      const value = contextsByKind.get(action);
+      return value?.version === 2 && ["workspace","host","fleet"].every(key => value.scope[key] === message.scope[key])
+        ? value.recipients.filter(r => r.lead === true).map(r => r.id) : [];
+    }))];
+    return leads.length === 1 && message.recipients.some(r => r.id === leads[0]) ? leads[0] : null;
+  }
+  function composeMessage(recipient) {
     saveDraft(); ++compositionEpoch;
     context = contextsByKind.get("message"); kind = "message"; targetTitle = null;
-    target = { recipient: identity.uid, task_id: null };
-    messageRecipients.set(scopeKey(context.scope), identity.uid);
+    target = { recipient, task_id: null };
+    messageRecipients.set(scopeKey(context.scope), recipient);
     opener = null; openerIdentity = null;
-    closeDetail(); notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
+    closeDetail(); notice = ""; $("work-composer").open = true;
+    paint({ restoreDraft: true }); $("work-body").focus();
     return true;
   }
   function pendingRows() {
@@ -141,14 +213,17 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     && (!channel || channel.state === "ok");
   function paint({ restoreDraft = false } = {}) {
     const usable = !!context && !!target;
+    paintAccess();
+    $("work-manager").hidden = !managerRecipient();
     $("work-form").hidden = !usable;
     $("work-open-task").hidden = !usable || !target.task_id;
     $("work-open-task").disabled = !canOpenComposerTask();
-    $("work-mode").textContent = context?.simulation ? "EXAMPLE · NO REAL BOT DELIVERY" : !contextsByKind.size && deniedContexts.size ? "ACTION NOT AUTHORIZED" : "";
+    $("work-mode").textContent = context?.simulation ? "EXAMPLE · NO REAL BOT DELIVERY" : !contextsByKind.size && checkingTaskContexts.size ? "CHECKING ACTION ACCESS" : !contextsByKind.size && deniedContexts.size ? "ACTION NOT AUTHORIZED" : "";
     $("work-scope").textContent = roomLabel(context ? context.scope.fleet : (room || "All teams"));
     $("work-unavailable").textContent = usable ? "" : contextsByKind.has("feedback")
       ? "Open a task to give feedback to the lead. This does not approve or change the task."
       : contextsByKind.has("nudge") ? "Open a task to ask its team lead about it. This does not approve or complete work."
+      : checkingTaskContexts.size ? "Checking task action access…"
       : deniedContexts.size ? deniedNote
       : "Browser actions are unavailable for this view. Check the task and activity panels for read status.";
     if (usable) {
@@ -183,11 +258,13 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : "";
     $("work-clear-saved").hidden = !state.corruptStorage;
     pendingRows();
+    paintComposer();
     onActionsChange();
   }
   function closeDetail() {
     permissions.close();
     ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null;
+    paintAccess();
     $("task-detail-content").innerHTML = "";
     if (dialog.open) dialog.close();
     selected = null;
@@ -216,9 +293,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         }
       }
       contextsByKind.delete(affectedKind); deniedContexts.delete(affectedKind);
+      const readContext = taskContextReader(affectedKind);
+      if (typeof readContext === "function") checkingTaskContexts.add(affectedKind);
       notice = affectedKind === "feedback" ? "Task feedback access is unavailable. Your comment is kept. Check the task panel for read status." : affectedKind === "nudge" ? "Task nudge access is unavailable. Your reason is kept. Check the task panel for read status." : message || "Message access is unavailable. Your draft is kept. Check the task panel for read status.";
       updateDetailActions(); paint();
-      const readContext = taskContextReader(affectedKind);
       if (typeof readContext === "function") {
         const token = epoch, retry = (actionRefreshEpochs.get(affectedKind) || 0) + 1, selectedRoom = room;
         actionRefreshEpochs.set(affectedKind, retry);
@@ -234,7 +312,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
           updateDetailActions();
           if (selected) $("task-detail-refresh").hidden = false;
           paint(); // Do not overwrite a message composed while recovery was pending.
-        }).catch(() => {});
+        }).catch(() => {}).finally(() => {
+          if (token !== epoch || retry !== actionRefreshEpochs.get(affectedKind)) return;
+          checkingTaskContexts.delete(affectedKind); updateDetailActions(); paint();
+        });
       }
       return;
     }
@@ -244,7 +325,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     ++epoch;
-    contextsByKind.clear(); deniedContexts.clear(); ++compositionEpoch;
+    contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); ++compositionEpoch;
     context = null; target = null; targetTitle = null;
     closeDetail();
     $("work-body").value = "";
@@ -255,6 +336,33 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     readsPaused = true;
     invalidate("Session access is paused. Actions are disabled until your session is checked again; your draft is kept.");
   }
+  function acceptContext(value, taskKind, error, token, selectedRoom) {
+    if (token !== epoch) return;
+    const action = taskKind || "message";
+    checkingTaskContexts.delete(action);
+    if (error?.code === "action_not_authorized") deniedContexts.add(action);
+    else deniedContexts.delete(action);
+    const valid = selectedRoom !== "all" && (taskKind ? validTaskActionContext(value, taskKind) : validContext(value))
+      && value.room === selectedRoom && value.scope.fleet === selectedRoom
+      && typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
+      && (!taskKind || typeof api.prepareAction === "function");
+    if (valid) {
+      value = retainContext(value);
+      retainedScopes.add(scopeKey(value.scope));
+      for (const action of value.actions) if (taskKind || value.simulation || action === "message") contextsByKind.set(action, value);
+      if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
+      if (kind === "message" && contextsByKind.has("message") && !target) {
+        context = contextsByKind.get("message");
+        const remembered = messageRecipients.get(scopeKey(context.scope));
+        target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+        paint({ restoreDraft: true });
+      }
+      notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
+    } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
+      : checkingTaskContexts.size ? "Checking available actions…" : deniedContexts.size ? "" : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
+    if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
+    paint(); // An unrelated context result must not replace an authored draft.
+  }
   function setRoom(fleet, {keepDetail = false} = {}) {
     saveDraft();
     if (room === (fleet || "all")) retainPresentation();
@@ -263,51 +371,29 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       messageRecipients.set(scopeKey(context.scope), target.recipient);
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
-    contextsByKind.clear(); deniedContexts.clear(); context = null; target = null; targetTitle = null; kind = "message";
+    contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); context = null; target = null; targetTitle = null; kind = "message";
+    if (typeof api.interactionContext === "function") checkingTaskContexts.add("message");
+    if (selectedRoom !== "all") for (const action of ["nudge", "feedback"])
+      if (typeof taskContextReader(action) === "function") checkingTaskContexts.add(action);
     if (!keepDetail) { board = null; channel = null; closeDetail(); }
     else if (pendingDetail) { ++detailEpoch; pendingDetail = null; detailSnapshot = null; conversation = null; showDetailUnavailable(null); } $("work-body").value = ""; $("work-recipient").innerHTML = ""; $("work-recipient").value = "";
     notice = "Checking available actions…"; paint();
     if (keepDetail && detailSnapshot) void permissions.show($("task-permissions"),detailSnapshot.task);
-    function accept(value, taskKind, error) {
-      if (token !== epoch) return;
-      const action = taskKind || "message";
-      if (error?.code === "action_not_authorized") deniedContexts.add(action);
-      else deniedContexts.delete(action);
-      const valid = selectedRoom !== "all" && (taskKind ? validTaskActionContext(value, taskKind) : validContext(value))
-        && value.room === selectedRoom && value.scope.fleet === selectedRoom
-        && typeof api.sendAction === "function" && typeof api.actionReceipt === "function"
-        && (!taskKind || typeof api.prepareAction === "function");
-      if (valid) {
-        value = retainContext(value);
-        retainedScopes.add(scopeKey(value.scope));
-        for (const action of value.actions) if (taskKind || value.simulation || action === "message") contextsByKind.set(action, value);
-        if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
-        if (kind === "message" && contextsByKind.has("message") && !target) {
-          context = contextsByKind.get("message");
-          const remembered = messageRecipients.get(scopeKey(context.scope));
-          target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
-          paint({ restoreDraft: true });
-        }
-        notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
-      } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
-        : deniedContexts.size ? "" : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
-      if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
-      paint(); // An unrelated context result must not replace an authored draft.
-    }
     Promise.resolve().then(() => token === epoch ? api.interactionContext?.(selectedRoom) : null)
-      .then(value => accept(value, null)).catch(error => accept(null, null, error));
+      .then(value => acceptContext(value, null, null, token, selectedRoom)).catch(error => acceptContext(null, null, error, token, selectedRoom));
     // Keep one task-context read in flight per room alongside the message read.
     Promise.resolve().then(async () => {
       for (const action of ["nudge", "feedback"]) {
         if (token !== epoch) return;
         const readContext = taskContextReader(action);
         if (typeof readContext !== "function") continue;
-        try { accept(await readContext(selectedRoom), action); }
-        catch (error) { accept(null, action, error); }
+        try { acceptContext(await readContext(selectedRoom), action, null, token, selectedRoom); }
+        catch (error) { acceptContext(null, action, error, token, selectedRoom); }
       }
     });
   }
   function showDetailUnavailable(...block) {
+    paintAccess();
     permissions.close();
     $("task-detail-content").innerHTML = '<h2 id="task-detail-title">Task details are unavailable</h2>' + stateBlock(...block);
   }
@@ -335,6 +421,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     content.innerHTML = '<h2 id="task-detail-title">Task details</h2>' + stateBlock("loading");
     const url = `/api/tasks/${encodeURIComponent(selection.id)}?fleet=${encodeURIComponent(selection.fleet)}`;
     pendingDetail = token;
+    paintAccess();
     Promise.resolve().then(() => token === detailEpoch && selected === selection ? api.jget(url) : null).then(envelope => {
       if (token !== detailEpoch || selected !== selection) return;
       pendingDetail = null;
@@ -414,6 +501,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
+    paintAccess();
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
@@ -548,7 +636,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (assignment === null ? !unassigned.includes(task.state) : !live.includes(task.state) || !assignment || assignment.task_id !== task.task_id
         || !live.includes(assignment.state) || assignment.terminal_event !== null) return null;
     const result = { recipient: leadId(value), task_id: task.task_id,
-      assignment_id: assignment === null ? null : assignment.assignment_id, release_id: value.release_id };
+      assignment_id: assignment === null ? null : assignment.assignment_id, ...runtimeFields(value) };
     return validTaskActionTarget(result) ? result : null;
   }
   function updateDetailActions() {
@@ -574,23 +662,24 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         opener = null; openerIdentity = null;
         closeDetail(); notice = context.simulation ? "Example task action. No real bot delivery."
           : kind === "feedback" ? "Send a comment about this task to the lead. This does not approve or change the task." : "This asks the team lead about the selected task. It does not approve or complete work. Refresh and select again if its assignment or release changes.";
-        paint({ restoreDraft: true }); $("work-body").focus();
+        $("work-composer").open = true; paint({ restoreDraft: true }); $("work-body").focus();
       };
     }
     const feedback = capability("feedback"), nudge = capability("nudge");
     const closed = ["completed", "failed", "cancelled"].includes(task.state);
-    const refused = ["feedback", "nudge"].filter(action => deniedContexts.has(action));
-    const denial = refused.length ? `${refused.map(action => action === "feedback" ? "Task feedback" : "Nudges").join(" and ")} ${refused.length === 1 && refused[0] === "feedback" ? "is" : "are"} not authorized for this team. Reading remains available. The host owner must approve action access.` : "";
+    const availability = (action, value) => {
+      const label = action === "feedback" ? "Task feedback" : "Nudges";
+      if (value) return action === "feedback" ? "Task feedback goes to this team’s lead." : "Task nudges go to this team’s lead.";
+      if (checkingTaskContexts.has(action)) return `Checking ${action === "feedback" ? "task feedback" : "nudge"} access…`;
+      if (deniedContexts.has(action)) return `${label} ${action === "feedback" ? "is" : "are"} not authorized for this team.`;
+      return `${label} ${action === "feedback" ? "is" : "are"} unavailable in this view.`;
+    };
     const taskActions = task.resolved === false ? "Task history is unresolved. Refresh and resolve its links before using task actions."
       : boardOnly ? "Full task detail is unavailable. Task actions require a fresh canonical task selection."
-      : denial ? denial
-      : closed ? `This task is ${task.state === "completed" ? "complete" : "closed"}; it cannot be nudged. ${feedback ? "Use feedback to comment to the team lead without reopening it." : "Feedback access is unavailable in this view."}`
-      : feedback && nudge ? "Task feedback and nudges go to this team’s lead."
-      : feedback ? "Task feedback goes to this team’s lead. Nudges are unavailable with this connection."
-      : nudge ? "Task nudges go to this team’s lead. Feedback is unavailable with this connection."
-      : "Task feedback and nudges are unavailable with this connection.";
+      : closed ? `This task is ${task.state === "completed" ? "complete" : "closed"}; it cannot be nudged. ${feedback ? "Use feedback to comment to the team lead without reopening it." : availability("feedback", feedback)}`
+      : `${availability("feedback", feedback)} ${availability("nudge", nudge)}`;
     $("task-action-note").textContent = taskActions + (feedback?.version === 2 ? " Feedback is a linked comment, not approval or a task change." : "") + (nudge?.version === 2 ? " A nudge asks about this task; it is not approval." : "")
-      + (capability("message") ? " Close this task and use Talk to your team to send an ordinary message." : "");
+      + (capability("message") ? " Close this task and use the composer to send an ordinary message." : "");
   }
   function update(tasks, messages) {
     board = tasks; updateChannel(messages);
@@ -598,6 +687,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // A channel-only read (stream source loss) leaves the board snapshot as read.
   function updateChannel(messages) {
     channel = messages;
+    paintAccess();
     $("work-open-task").disabled = !canOpenComposerTask();
     // Source loss also retires an unfinished detail read. Keep an already
     // displayed lifecycle snapshot, but never admit a held old response.
@@ -640,6 +730,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
     ++detailEpoch; pendingDetail = null;
+    paintAccess();
     $("task-detail-content").innerHTML = "";
     selected = null; detailSnapshot = null; conversation = null;
     if (!openerIdentity) return;
@@ -658,7 +749,29 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
-  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); });
+  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); paintComposer(); });
+  $("work-check-access").onclick = async () => {
+    if (!canCheckAccess()) return;
+    const token = epoch, selectedRoom = room, missing = missingAccess();
+    for (const [action] of missing) checkingTaskContexts.add(action);
+    paintAccess();
+    // Recheck only absent capabilities. Existing contexts, composition, task
+    // preconditions, drafts and saved request IDs are not refreshed or rebuilt.
+    for (const [action, read] of missing) {
+      if (token !== epoch || readsPaused || readsUnavailable()) break;
+      try {
+        const value = await read(selectedRoom);
+        if (!readsPaused && !readsUnavailable()) acceptContext(value, action === "message" ? null : action, null, token, selectedRoom);
+      } catch (error) {
+        if (!readsPaused && !readsUnavailable()) acceptContext(null, action === "message" ? null : action, error, token, selectedRoom);
+      }
+    }
+    if (token === epoch) {
+      for (const [action] of missing) checkingTaskContexts.delete(action);
+      paint();
+    }
+  };
+  $("work-manager").onclick = () => { const recipient = managerRecipient(); if (recipient) composeMessage(recipient); };
   $("work-recipient").onchange = () => {
     saveDraft(); ++compositionEpoch; target = { ...target, recipient: $("work-recipient").value };
     notice = ""; paint({ restoreDraft: true });
@@ -751,6 +864,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const token = epoch, simulation = requestContext(request).simulation, selection = selectionKey();
     const label = requestLabel(request);
     checkingReceipts.add(request.request_id); button.disabled = true;
+    paintAccess();
     try {
       const status = state.accept(request, await api.actionReceipt(request));
       if (status === "delivered" && retainedComposition && rowKey(request) === rowKey(retainedComposition.row)) retainedComposition = null;
@@ -761,7 +875,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     } finally { checkingReceipts.delete(request.request_id); if (token === epoch) paint({ restoreDraft: selection === selectionKey() }); }
   };
   paint();
-  return { setRoom,
+  return { setRoom, setView,
     refreshActions(source) { if (room.startsWith(source + " / ")) setRoom(room,{keepDetail:true}); },
     update, updateChannel, invalidate, pause, canSelectMessageRecipient, selectMessageRecipient };
 }

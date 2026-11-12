@@ -1,44 +1,28 @@
 ---
 title: Fleet Observability Protocol
 description: Manager protocol for consuming bot-local observability events and making routing/restart decisions
+requires:
+  skills: [fleet-pulse]
 ---
 
 # Fleet Observability Protocol
 
 Pull-based observability for fleet managers. Two writers produce events; managers consume them at natural decision points.
 
+This protocol's reference text (the event writers and their marker files, payload fields, detection mechanisms, history, reasons, and the critical-types table) is in `.claude/skills/fleet-pulse/fleet-observability-reference.md`, word for word under the same section names; it adds no rule.
+
 ## Event Sources
 
-| Writer | Script | Runs when | Source field |
-|--------|--------|-----------|--------------|
-| Bot vitals | `claudlobby/_runtime_scripts/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
-| Fleet pulse | `claudlobby fleet pulse` (private `claudlobby/_runtime_scripts/fleet-pulse.sh` sweep) | Cron (every 5 min) | `pulse` |
-| Keepalive | `claudlobby/_runtime_scripts/keepalive.sh` | Every keepalive run (60s timer) | `keepalive` — `bot.heartbeat` / `bot.session_up` samples and `keepalive_*` and `bridge_heal` events on the plane, plus the `data/.idle` and `data/.last-no-turn` markers, and `data/.limit` while a usage limit holds the bot (#996) |
-
-Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby event list`, regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes. keepalive also touches `data/.last-no-turn` on every tick that sees no turn running (IDLE, HELD or LIMIT) and never removes it, and `activity_stuck` times a stall from the later of `.last-no-turn` and `.last-tool-call`.
+Every writer lands on the plane through `emit_fleet_event`; managers read one door, `claudlobby event list`, regardless of writer.
 
 ## Where to Read
 
 Every bot's events are recorded on the plane — the host's flight recorder,
 `$CLAUDLOBBY_ROOT/state/plane/plane.db` — and nowhere else (F18 closure: the
 per-bot `data/events/*.jsonl` files are gone). Read them through
-`claudlobby --json event list --since 24h` with the fleet selected. Its single
-schema-1 result has bounded `data.items`, `data.next_cursor`, and `data.coverage`;
-each item names an `event_id`, `occurred_at`, `bot`, `type`, `source`, and `data`.
+`claudlobby --json event list --since 24h` with the fleet selected.
 Never open the database by hand from a session; `resolve_bots_dir` stays the
 right tool for cases that only need bot *names* (e.g. enumerating who exists).
-
-## Event Schema
-
-```json
-{"ts": "...", "bot": "...", "type": "...", "source": "vitals|pulse|audit", "data": {...}}
-```
-
-- **ts** — ISO 8601 timestamp
-- **bot** — bot identifier
-- **type** — event classification (open-ended, match on what you care about)
-- **source** — `vitals` (bot-emitted), `pulse` (external check), or `audit` (rolling code-audit sweep)
-- **data** — type-specific payload (open object)
 
 ## When to Read
 
@@ -55,21 +39,27 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold, counted from its last tool call or the last tick keepalive saw no turn running, whichever is later, AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. A bot whose input box holds text it never submitted gets `input_held` instead (below). |
-| `input_held` | pulse | The bot's **input box holds text that was never submitted** and no turn is running (keepalive's `HELD` verdict, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD`, default 300 s). It is not hung, and **do not restart it**: a restart discards the text. **Look at its pane first**: where a menu shows (numbered options, "Enter to confirm"), an Enter picks an option, so press nothing. Otherwise ask an operator to press **one Enter** in its pane, wait about 10 s, and press **one more** only if the text is still there. If it is still there after that, **stop and look**: a menu or a modal (a safeguards pause) may be taking the Enter. Never typed text, and do not message the bot first: a message typed into a held box joins the held text. |
-| `usage_limit_held` | pulse | A claude.ai **usage limit** stopped the bot and it is **still held after the limit's printed reset** (keepalive's `LIMIT` verdict: the bot's own `StopFailure` record, and the limit line still its last word on screen; #996). `reset` and `reset_epoch` name when it was due; `resume` says whether keepalive's one resume is `off`, `armed`, or already `tried`. If its limit menu is up (the usual case on a bot without `--remote-control`, every worker by default), first choose **"Stop and wait for limit to reset" by its label, never by position**: a server flag can put usage credits first, and **credits are never chosen**. While the menu is up, typed text goes to the menu, not the bot, so the framework's own sends refuse rather than type into it. Then send the bot **any prompt** once the reset has passed, or arm `KEEPALIVE_LIMIT_RESUME_ENABLED=1` in its `fleet.yaml` env so keepalive does both once per limit. No restart is needed. `resume: tried` means it was resumed once and stopped again: **look before sending more**. |
+| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold, counted from its last tool call or the last tick keepalive saw no turn running, whichever is later, AND keepalive has not classified it as idle (no recent `data/.idle` marker). Investigate; restart only if `safe-worker-restart` guards pass. A bot whose input box holds text it never submitted, with no turn running, gets `input_held` instead (below). |
+| `input_held` | pulse | The bot's **input box holds text that was never submitted**, held past `OBSERVABILITY_INPUT_HELD_THRESHOLD` (default 300 s; `0` turns this page off), whether or not a turn is running: no message sent to the bot lands until the box is clear (`turn` in the payload says which). A held box is not a hang, and **do not restart it**: a restart discards the text. **Look at its pane first**: where a menu shows (numbered options, "Enter to confirm"), an Enter picks an option, so press nothing. Otherwise ask an operator to press **one Enter** in its pane, wait about 10 s, and press **one more** only if the text is still there. Under a running turn that Enter queues the text behind the turn. If it is still there after that, **stop and look**: a menu or a modal (a safeguards pause) may be taking the Enter. Never typed text, and do not message the bot first: a message typed into a held box joins the held text. |
+| `usage_limit_held` | pulse | A claude.ai **usage limit** stopped the bot and it is **still held after the limit's printed reset** (keepalive's `LIMIT` verdict: the bot's own `StopFailure` record, and the limit line still its last word on screen; #996). If its limit menu is up (the usual case on a bot without `--remote-control`, every worker by default), first choose **"Stop and wait for limit to reset" by its label, never by position**: a server flag can put usage credits first, and **credits are never chosen**. Then send the bot **any prompt** once the reset has passed, or arm `KEEPALIVE_LIMIT_RESUME_ENABLED=1` in its `fleet.yaml` env so keepalive does both once per limit. No restart is needed. `resume: tried` means it was resumed once and stopped again: **look before sending more**. |
 | `pane_unknown` | pulse | keepalive **cannot read the bot's pane**: no running turn, no prompt, no held box and no usage limit (its `UNKNOWN` verdict), for longer than `OBSERVABILITY_PANE_UNKNOWN_THRESHOLD` (default 1800 s) with no tool call since. After an idle tick such a pane keeps its idle marker, so `activity_stuck` never fires for it (#997). **Look at its pane before sending it anything**: a menu or a dialog may be waiting for a key. Choose an option by its label, never by its position, and never usage credits. Do not restart it first: a restart discards what the pane holds. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal linked report. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it waits on something outside the bot, move its deadline with `assignment reschedule` (the bot keeps its assignment); if it needs a human, escalate. Don't silently wait. |
-| `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
-| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. Before #1769 this read as "boot in flight" indefinitely and paged no one. |
+| `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. |
+| `crash_loop` | pulse | The unit is **failing its start over and over** and systemd is already restarting it (`restarts` in the payload is how many times running). **Do NOT restart it** — another restart only zeroes the counter; the unit is enrolled, so `bot start` is not the fix either. The cause is in the bot's `logs/startup.log` (on 2026-09-23 it was a broken `claude` install, printed on every attempt). Fix the cause, or escalate to the human. |
 | `channel_refused` | alert | Claude Code is **dropping the bot's inbound Telegram messages**: it refused the channel plugin at connect, while the poller runs and the bot's replies still go out (#2423; the reason is Claude Code's own, in the alert). **Do NOT restart it**: the refusal comes from the login (its account, or its org's managed settings), and a restart on the same login is refused again. Reach the bot by tmux dispatch, and escalate to the human: the login's channel setting is theirs. |
 | `service_down` | pulse | The unit is installed and down. Its payload carries the session too (`session`: `up` or `missing`): a down unit is one alert, never a `session_missing` as well (#2243). If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `session_missing` | pulse | The tmux session is gone while the unit is active (keepalive restarts it within a minute), or on a bot with no supervised service configured. If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `unit_missing` | pulse | The bot names a service, its unit file is **not installed**, and **no stop was recorded**: nobody stopped it through `bot stop` (a botched disenroll, a broken activation, a deleted unit directory). It replaces `service_down` and `session_missing` for that bot and escalates like them (#2243). If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID`; if it was stopped on purpose, `claudlobby --json bot stop BOT_ID` (with `--reason TEXT`) records that, and the alert ends. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
-| `browser_outside_render` | pulse | A browser has run for **more than 15 minutes outside a heavy-slot render scope** (#2332). `owner` names the bot whose session started it (a login CLI, an Artifact preview, `claudlobby plane open`, a render run without the render profile); `owner: null` means no bot did (the desktop session, or a bot session that has since ended). The payload also carries `pid`, `age_s`, `processes`, `pss_mib` and its cgroup `unit`. **The pulse never stops it** and pushes it once. Find what opened it and close it there, through the bot that started it or the operator at the desktop; never kill a browser by name, because every bot shares the user. Bot sessions have had no display since #2332, so a browser one opened anyway took a path the cut does not cover: report it. |
-| `unit_failed` | pulse | An owned **unit is in the failed state** (#2532): one of the fleet's jobs, or an instance of its failure template, which means the alert a failed job sends did not go out. `data.surface` and `data.detail` say what was read: systemd's `ActiveState=failed` with its `Result`, or launchd's last exit status. The pulse records it once an episode and pages the fleet's escalation chat once. Read the unit's log (`journalctl --user -u <unit>`) and tell the operator what failed; fixing or restarting a unit is the operator's. |
+| `browser_outside_render` | pulse | A browser has run for **more than 15 minutes outside a heavy-slot render scope** (#2332). **The pulse never stops it** and pushes it once. Find what opened it and close it there, through the bot that started it or the operator at the desktop; never kill a browser by name, because every bot shares the user. Bot sessions have had no display since #2332, so a browser one opened anyway took a path the cut does not cover: report it. |
+| `unit_failed` | pulse | An owned **unit is in the failed state** (#2532): one of the fleet's jobs, or an instance of its failure template, which means the alert a failed job sends did not go out. The pulse records it once an episode and pages the fleet's escalation chat once. Read the unit's log (`journalctl --user -u <unit>`) and tell the operator what failed; fixing or restarting a unit is the operator's. |
+| `memory_thrash` | alert | The host is **swapping hard**: swap-out stayed over its line for its minutes in a row (once an episode). The alert names the largest bots by memory. **Read those bots first**, then act on the one that grew through your own doors: `bot compact`, `bot restart --fresh` or `bot stop`, once its work is committed. |
+| `memory_thrash_unarmed` | alert | The host's **swap thrash alert is off**: its line file was refused, and the alert says why (once a bad edit). The file is the operator's: tell the operator what the alert says. |
 | `compaction` | compactions | Informational — one of the bot's Claude Code compactions, recorded once by the pulse from its `compact_boundary` transcript row: `trigger` (`manual` or `auto`), `pre_tokens` to `post_tokens` (null until it ends). Verify a `bot compact` here instead of opening a transcript; `claudlobby --json fleet compactions record` records it at once. The bot's live context is `context` in `fleet status`. |
+| `compaction_sent` | keepalive | Informational — keepalive typed `/compact` for the bot's own compaction request (`bot compact` on itself) at an idle, empty prompt, every guard holding (#1053). `compaction_proven` follows. |
+| `compaction_proven` | keepalive | Informational — the bot's `compact_boundary` row newer than that `/compact`: `pre_tokens` to `post_tokens`. |
+| `compaction_not_proven` | keepalive | No `compact_boundary` row came within 10 minutes of the `/compact` keepalive typed. **Nothing resends and nothing restarts**: look at the bot's pane and its `compaction` events before anything else, since a PreCompact hook may have refused it or the session may have restarted. The request is over; the bot asks again for another. |
+| `compaction_skipped` | keepalive | Informational — a compaction request keepalive did not act on, once per `reason` per request. A bot skipped for `precompact_hook_refuses` is compacted by hand until its Claudron engine is 0.10.0 or later. |
 | `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
 | `audit_dispatched` | audit | Informational — the audit was dispatched into the owner bot's session. |
 | `audit_deferred` | audit | Owner was busy; the sweep skipped this tick and retries next run. No action. |
@@ -85,129 +75,59 @@ tokenless session readiness (`session_ready`). If the CLI refuses or readiness
 is unknown, report the failure and inspect the selected unit and private
 session. Do not fall back to a raw launcher.
 
-**A bot stopped through `bot stop` raises no alert (#2243).** The stop door
-removes the unit file and records the stop, who made it and an optional
-`--reason`, in the bot's `data/.stopped`. fleet-pulse reads that record and
-stays silent: no row, no push, no escalation. `fleet status`, `fleet reconcile`
-and the pulse summary show the bot as `stopped`, with who and since. Once it
-has been stopped `fleet_pulse.stopped_remind_days` days (default 3, `0` off),
-the manager gets one reminder push, then one every as many days: never a page.
-`bot start` removes the record. A record left beside an installed unit (the
-unit came back through another door, such as `spin-up-bot.sh` or a hand
-install, or a start or a stop failed partway) is from a stop that is over: the
-sweep removes it once it is 15 minutes old, so a later loss of that unit pages
-`unit_missing`, and one the sweep cannot remove is pushed to the manager as
-`stop_record_kept` until it is gone. The plane's `bot_stopped` and `bot_started`
-rows are the audit trail; the sweep never reads them, so a stop made while the
-plane is down stays quiet.
+**A bot stopped through `bot stop` raises no alert (#2243).** `fleet status`, `fleet reconcile`
+and the pulse summary show the bot as `stopped`, with who and since.
 
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `input_held`, `usage_limit_held`, `activity_stuck`, `pane_unknown`, `overdue_dispatch`, `browser_outside_render` once per browser, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
-
-```
-[FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
-```
-
 Treat a `[FLEET-PULSE]` line like a linked report: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
 
-**An alert about you, the fleet manager, also posts to the fleet's alert channel**, once an episode (#997). Its push lands in your own pane, and when your pane is the one that cannot act, nobody else in the fleet sees it. The post goes through the escalation's chat and sender. The reminder about a bot stopped on purpose posts nothing.
+Managers must use live checks for these until the hook schema exposes them:
 
-**Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
-
-- **`rate_limit`** — a limit that **trips** is recorded (#996). Claude Code ends
-  the turn with a `StopFailure` hook (`error: rate_limit`), `usage-limit-hook.sh`
-  records `usage_limit_hit` with the limit line and the reset it printed,
-  keepalive reads the held bot as `LIMIT` rather than `IDLE`, and fleet-pulse
-  pages `usage_limit_held` if it is still held after the reset. Before #996 a
-  tripped limit announced nothing: every bot then ran with `--remote-control`,
-  so Claude Code armed neither its own resume nor its limit menu, and the pane
-  sat at an empty prompt that read as idle. Only the fleet manager runs with it
-  by default now (#2325); a worker shows the limit menu, which keepalive answers
-  only on its wait label and no framework send types into. **Position against
-  the ceiling is still not reported**: no hook carries it, and `capture-pane` is not an instrument
+- **`rate_limit`** — **Position against the ceiling is still not reported**: no hook carries it, and `capture-pane` is not an instrument
   for it, whatever the TUI draws: Claude Code runs in the tmux **alternate
   screen**, which retains no scrollback, so a capture can only ever describe
-  the present frame. Measured on this host: `history_size` is **0** on every
-  bot pane while `history-limit` reads `2000`, and `capture-pane -S -` returns
-  exactly `pane_height` lines. `claudlobby --json fleet usage --since 24h` reads
+  the present frame. `claudlobby --json fleet usage --since 24h` reads
   covered transcript token counts, not position against a provider ceiling. A
   warning short of a trip is a *sighting*: label it as one, use it to raise a
   question, never as a measurement.
 - **`context_warning`** — not present in the payload. It is, however, **sometimes
-  visible in the pane**: above an undocumented threshold a `NN% context used`
-  figure is rendered, and below it the same slot renders empty. Measured across
-  all 21 bots on this host: one rendered `98% context used` while twenty
-  rendered nothing, panes structurally identical. Above the threshold it is a
-  **live gauge, not a one-time alarm** — the same bot read `97%` then `98%`
-  minutes later — and it is **not a latch**: a bot observed at `100%` rendered
-  nothing later in the same session, with no restart *(cause not established;
+  visible in the pane**: above an undocumented threshold a figure is rendered,
+  and below it the same slot renders empty. It reads `N% until auto-compact`,
+  the share left before Claude Code compacts, not the share used, wherever
+  Claude Code holds the conversation to an autocompact window, and
+  `NN% context used` where it holds it to none (the `context-management`
+  protocol says when each shows). In August 2026, when it read
+  `NN% context used`, it was a **live gauge, not a one-time alarm** — the same
+  bot read `97%` then `98%` minutes later — and it was **not a latch**: a bot
+  observed at `100%` rendered nothing later in the same session, with no
+  restart *(cause not established;
   do not assert one)*. **A rendered figure is real and worth acting on. A blank
   slot means nothing**, and specifically it has **two causes this instrument
   cannot separate** — never reached the threshold, or reached it and came back
-  down. A bot under no pressure and one that was at `100%` minutes ago present
-  identically. So the pane is a **positive detector only**: it can tell you to
+  down. So the pane is a **positive detector only**: it can tell you to
   act, never that all is well. See the sweep rule two paragraphs down, which
   already states the general form of this correctly. The standing signal remains
   the worker's own `context-degraded` report plus completed-work counts — see
   the `context-management` protocol.
-- **`mcp_error`** — a failing tool call (including an MCP server returning `isError`) fires the `PostToolUseFailure` hook event rather than `PostToolUse`, and only that event carries an error field. The `bot-vitals.sh` hook is wired to Pre/PostToolUse, so no `mcp_error` event is produced. Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
+- **`mcp_error`** — Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
 
 **Never sweep panes to establish absence — for `rate_limit` or `context_warning`.**
-A quiet pane is one instant for one bot, not a history, and "checked all N panes,
-nothing there" reads as authoritative when it is not. **Absence of a rendered
-warning is not evidence of headroom**, and the two fail for *independent* reasons,
-neither of which depends on what the TUI renders:
+**Absence of a rendered warning is not evidence of headroom**, and the two fail for
+*independent* reasons, neither of which depends on what the TUI renders:
 
 - `rate_limit` — the frame is momentary. A quiet pane is equally consistent with a
   warning that was drawn and has already been overwritten.
 - `context_warning` — a threshold warning is absent *below* the threshold too. Quiet
   means "not over the line", which is also what "nowhere near the line" looks like.
 
-So a clean sweep can never distinguish *fine* from *already past it*, and it is the
-reading that gets acted on, because absence looks like an all-clear. Act on a limit
-that trips; treat everything else as a sighting.
+Act on a limit that trips; treat everything else as a sighting.
 
 ## Reading Events
 
-Use `claudlobby event list` — never a hand-rolled loop over bot directories. This is **not** a fix
-for a live break: run verbatim on an armed bot, the loop below still works, including for denied
-siblings — confirmed directly, independently, by two different bots on two different sessions.
-The mechanism (otis, `shared/planning/active/2026-08-27-deny-bypass-probe.md`): the permission
-matcher resolves a variable **only if its value is assigned in the same command as a literal** —
-`b=ravi; cat .../$b/...` is denied correctly (and `b=otis; cat .../$b/...` allowed correctly, both
-resolved against the right bot). An expansion the matcher **cannot** statically resolve from the
-command text — a glob-bound loop variable, `${RANDOM}`, `${PIPESTATUS[0]}` — makes it fail open,
-regardless of where that expansion sits or whether the path beside it is literal. The loop below
-binds `"$bot_dir"` from `"$BOTS_DIR"/*/`, a glob expansion depending on filesystem state at
-runtime — unresolvable from the command text alone — which is why it evades where a same-command
-literal assignment would not.
+Use `claudlobby event list` — never a hand-rolled loop over bot directories.
 
-That is exactly the problem. **It works by accident**, on some permission-matcher blind spot, not
-by design — and the same evasion is why it's silent in the reassuring direction if the matcher
-is ever tightened: an event sweep that stops resolving would return no events, indistinguishable
-from a healthy fleet, with no warning that anything changed. Separately from permissions entirely,
-`claudlobby event list` is also just the better tool for this: it's the same door `brief.py`'s alerts
-section already consumes, and it adds type/critical filtering and coverage-honesty disclosure a
-hand-rolled loop doesn't have.
-
-Tail today's events across the fleet:
-
-```bash
-claudlobby --json event list --limit 50
-```
-
-Scope to one bot — e.g. before dispatch, or cross-referencing a linked report:
-
-```bash
-claudlobby --json event list --bot "$BOT_NAME" --limit 20
-```
-
-Filter for actionable events:
-
-```bash
-claudlobby --json event list --critical --limit 200
-```
+The event schema, the everyday read recipes, retention, configuration and why that loop misleads are in `.claude/skills/fleet-pulse/SKILL.md`: read that file; invoking `/fleet-pulse` starts a pulse run.
 
 **Always inspect `data.next_cursor` before claiming a complete sweep.** `--limit`
 defaults to 50; a nonempty cursor means more matching events remain. Continue
@@ -217,17 +137,7 @@ a large window.
 **`--critical` reads the severity the plane stamped from its registry** (`SYSTEM_EVENT_SEVERITY` in
 `claudlobby/plane/registries.py`), and these are the registry's critical types:
 
-| Critical type | Raised by | Recorded against |
-|---------------|-----------|------------------|
-| `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `usage_limit_held`, `pane_unknown`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
-| `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
-| `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
-| `bridge_down`, `channel_refused`, `reload_failed`, `restart_failed`, `keepalive_failed`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up or keepalive, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
-| `unit_failed` | fleet-pulse, once an episode, for an owned unit in the failed state (#2532) | the fleet for one of its own units (bot `fleet`); the host for a host unit |
-| `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |
-| `disk_high`, `memory_high`, `undervoltage`, `storage_stall`, `host_health`, `binary_update_failed`, `binary_unrunnable`, `vault_sync_failed` | a FLEET ALERT from a host job, which runs with no fleet | the host, as is any FLEET ALERT raised with no fleet in scope; no fleet's `event list` reads it |
-| `public_write_guard_unarmed` | the public-write guard (opt-in), on each GitHub write it checks while the host has no term list | the bot |
-| `shadow_parity_diverged` | nothing now (the plane cutover's shadow) | kept so its old rows classify |
+They are listed under Critical types in `.claude/skills/fleet-pulse/fleet-observability-reference.md`, with what raises each and where each is recorded.
 
 **Where an alert is recorded decides who can read it (#2109).** Fleet-pulse's escalation and a bot's
 `brief` read bot rows only, so neither shows a fleet- or host-recorded alert; this fleet's `event
@@ -245,9 +155,6 @@ for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
 done
 ```
 
-(That loop is over **type strings**, never bot paths — the command text names no bot directory,
-so it is unaffected by path-scoped deny rules regardless of arming.)
-
 ## Cross-Fleet Reads
 
 A cross-fleet event read requires an operator shell with an explicit `--fleet` selector;
@@ -258,26 +165,3 @@ than reading the sibling fleet's bot directories directly.
 # Operator shell: read events for a bot in a different fleet
 claudlobby --fleet "other-fleet" --json event list --bot "some-bot" --limit 20
 ```
-
-## Retention
-
-Event files older than 7 days are automatically reaped by both `bot-vitals.sh` (on each hook invocation) and `fleet-pulse.sh` (on each cron run). No archiving — build archive-to-claudron if trend analysis proves valuable later.
-
-## Configuration
-
-Opt-in per bot via fleet.yaml. Hooks go on all bots; this protocol goes on managers only.
-
-```yaml
-bots:
-  manager-bot:
-    protocols:
-      - fleet-observability    # manager reads event logs
-  worker-bot:
-    hooks:
-      PreToolUse:
-        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
-      PostToolUse:
-        - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
-```
-
-Workers emit events but never read them. Managers read events but hooks are optional on them (useful if the manager also does tool work).

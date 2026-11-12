@@ -15,6 +15,16 @@ from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable, Owner
 from claudlobby.plane.workspace_assertion import WorkspaceAttestation
 from tests.test_host_owner import terminal
 
+# Synthetic owner databases have no native operator ancestry. Keep the real PTY,
+# consent prompts and authority writes; only supply that external fixture fact.
+_LOCAL_OPERATOR_FIXTURE = """
+import sys
+from claudlobby.commands import operator_context
+operator_context.require_operator_context = lambda root=None: None
+from claudlobby.__main__ import main
+raise SystemExit(main(sys.argv[1:]))
+"""
+
 OWNER = PrincipalRef("tailscale:controlplane.tailscale.com", "1001")
 OTHER = PrincipalRef("tailscale:controlplane.tailscale.com", "1002")
 ISSUER = "https://accounts.example.test"
@@ -66,11 +76,19 @@ def test_initialization_requires_current_native_pairing(local):
     access, workspace, owner, _ = local
     with pytest.raises(AccessDenied):
         workspace.initialize(expected_owner=replace(owner, revision=0))
+    before = access.path.read_bytes()
+    with pytest.raises(AccessDenied):
+        access.connected().initialize(expected_owner=replace(owner, revision=0), prepare_workspace=True)
+    assert access.path.read_bytes() == before
     access.revoke_owner(expected_revision=owner.revision)
     p = access.begin_pairing(PrincipalRef("other-verifier", "human-001"))
     new = access.confirm_pairing(p.token, expected_principal=p.principal)
     with pytest.raises(AccessDenied, match="workspace_native_owner_required"):
         workspace.initialize(expected_owner=new)
+    before = access.path.read_bytes()
+    with pytest.raises(AccessDenied, match="workspace_native_owner_required"):
+        access.connected().initialize(expected_owner=new, prepare_workspace=True)
+    assert access.path.read_bytes() == before
     assert access.open_session(new.principal).grant == new  # legacy direct pairing unchanged
 
 
@@ -243,7 +261,7 @@ def test_real_terminal_confirms_and_refuses_without_issuing_authority(local):
         rc, output = _command(access.root, "confirm-workspace", [
             ("Paste the workspace approval code (hidden):", p.nonce),
             ("Type BIND-WORKSPACE", answer),
-        ])
+        ], bootstrap=_LOCAL_OPERATOR_FIXTURE)
         assert rc == expected_rc, output
         assert p.nonce not in output
         clock[0] = time.time()

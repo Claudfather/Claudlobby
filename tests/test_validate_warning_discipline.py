@@ -485,3 +485,16 @@ class TestClaudronMigrationWarningFold:
             assert len(rows) == 1 and "affects 6 bot(s)" in rows[0] and str(vault) in rows[0]
             assert category in WARNING_CATEGORIES
             assert not report.errors
+
+
+def test_validate_warns_when_fleet_alerts_reach_only_the_managers_pane(fleet_dir, monkeypatch):
+    """#2654: `validate` runs the alert-target check. The shared fixture's
+    manager is a channel bot; without a fleet chat it has no chat of its own."""
+    _env(monkeypatch)
+    assert _of(_validate(fleet_dir), "alert-pane-only") == []
+    path = fleet_dir / "fleet.yaml"
+    text = path.read_text()
+    assert text.count('  telegram_group_chat_id: "-100999"\n') == 1, "the fixture's fleet chat moved"
+    path.write_text(text.replace('  telegram_group_chat_id: "-100999"\n', ""))
+    found = _of(_validate(fleet_dir), "alert-pane-only")
+    assert len(found) == 1 and found[0].startswith("fleet manager 'lead' has no Telegram chat"), found

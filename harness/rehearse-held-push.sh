@@ -34,12 +34,15 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not available"; exit
 STUB="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
 
 ROOT="$(mktemp -d)"
+ROOT="$(cd "$ROOT" && pwd -P)"
 FLEET="rhp$$"
 MGR_SOCK="rhpm$$"
 MGR="mgr$$"
 BOTS="$ROOT/local/$FLEET/runtime/bots"
 export TMUX_TMPDIR="$ROOT/tmx"
 mkdir -p "$TMUX_TMPDIR" "$BOTS/w1" "$BOTS/w2"
+printf '%s\n' "$ROOT" > "$ROOT/.claudlobby-harness-root"
+mkdir -p "$ROOT/home"
 
 pass=0; fail=0
 check () { # <label> <expected> <actual>
@@ -49,6 +52,7 @@ check () { # <label> <expected> <actual>
 cleanup () {
     tmux -L "$MGR_SOCK" kill-server 2>/dev/null || true
     rm -rf "$ROOT"
+    rm -rf "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
 }
 trap cleanup EXIT
 
@@ -133,10 +137,11 @@ session_id ()    { tmux -L "$MGR_SOCK" display-message -p -t "$MGR" '#{session_i
 # can only stage in this root: PLANE_SOCKET is unset, so the socket is the root's
 # own, which nothing serves. Extra VAR=value arguments go into the sweep's env.
 run_pulse () {
-    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET CLAUDLOBBY_ROOT="$ROOT" TMUX_TMPDIR="$TMUX_TMPDIR" \
+    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET CLAUDLOBBY_ROOT="$ROOT" HOME="$ROOT/home" TMUX_TMPDIR="$TMUX_TMPDIR" \
         PANE_SEND_SHOWN_TICKS=5 FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" "$@" \
-        bash "$LIB_DIR/fleet-pulse.sh" "$FLEET" >"$ROOT/pulse.log" 2>&1 || true
+        python3 "$REPO/harness/compose.py" --root "$ROOT" --fleet "$FLEET" --record-plane --pulse \
+        >"$ROOT/pulse.log" 2>&1 || true
 }
 
 echo "=== #2120 rehearsal: no push types into a held box, and a box that takes no input is bounded ==="

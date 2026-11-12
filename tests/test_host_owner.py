@@ -89,7 +89,7 @@ def test_status_reports_pairing_then_revocation_without_secret(owner, capsys):
     assert json.loads(capsys.readouterr().out)["data"]["state"] == "revoked"
 
 
-@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source", "setup"])
 def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
     assert call(owner, action) == 4
@@ -97,7 +97,7 @@ def test_changes_require_terminal_and_reject_json(owner, monkeypatch, action):
     assert owner.current_grant() is None
 
 
-@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source"])
+@pytest.mark.parametrize("action", ["initialize", "confirm", "revoke", "bind-source", "setup"])
 def test_changes_read_unit_ancestry_before_the_terminal(owner, monkeypatch, capsys, action):
     # No selector variables and a terminal on stdin: unit ancestry refuses,
     # before the terminal opens.
@@ -113,6 +113,7 @@ def test_generated_selectors_refuse_before_access(owner, monkeypatch, marker):
     monkeypatch.setenv(marker, "")
     monkeypatch.setattr(OwnerAccess, "current_grant", lambda *a: pytest.fail("read attempted"))
     assert call(owner, "status") == 4
+    assert call(owner, "setup") == 4
 
 
 def test_explicit_host_scope_required(owner, monkeypatch):
@@ -210,7 +211,7 @@ def test_hidden_input_failure_is_not_allowed_to_echo(owner, monkeypatch):
 
 # Independent activation fixtures use the real frozen config/Plane and runtime
 # admission, with an explicitly synthetic release identity/native supervisor.
-from tests.test_activation import cold, tmp_path  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_releases import installed  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
@@ -220,7 +221,7 @@ from claudlobby.operation_context import resolve_task_mutation_context
 @pytest.fixture
 def message_owner(active, monkeypatch):
     root, host = active
-    _human(monkeypatch, host.release)
+    _human(monkeypatch, host.installation)
     for name in host_owner._GENERATED:
         monkeypatch.delenv(name, raising=False)
     store = OwnerAccess.initialize(root)
@@ -230,8 +231,140 @@ def message_owner(active, monkeypatch):
     return store, host, grant, ctx
 
 
+
+def test_owner_grant_preview_binds_git_configuration_without_a_fake_release(message_owner):
+    from dataclasses import replace
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.installation import Installation
+    from claudlobby.runtime_admission import GitCurrentRuntime
+
+    store, _host, owner, ctx = message_owner
+    # Reuse the real owner/Plane identity fixture. This isolates the preview's
+    # provenance binding; current Git identity loading is tested by its owner.
+    installation = Installation(store.root.parent / "installation", store.root)
+    current = GitCurrentRuntime(installation, "a" * 40, "b" * 64, {})
+    paths = ctx.context.paths
+    preview = host_owner._grant_preview(paths, store, "example", ctx.caller.alias, current)
+    assert "release" not in preview
+    assert (preview["revision"], preview["config_fingerprint"]) == (current.revision, current.config_fingerprint)
+    assert preview["owner"] == owner and preview["actor_uid"] == ctx.caller.uid
+    args = SimpleNamespace(target_fleet="example", actor=ctx.caller.alias)
+    assert host_owner._approved_action_context(args, paths, store, preview, current).caller == ctx.caller
+    changed = replace(current, config_fingerprint="c" * 64)
+    with pytest.raises(CommandFailure, match="changed"):
+        host_owner._approved_action_context(args, paths, store, preview, changed)
+    assert store.local_action_status().message_grants == ()
+
+
 def allow(store, *extra):
     return call(store, "allow-messages", "--target-fleet", "example", "--actor", "human:local-owner", *extra)
+
+
+def test_allow_actions_is_explicit_atomic_and_preserves_existing_grants(message_owner, monkeypatch):
+    store, _, owner, ctx = message_owner
+    original = store.allow_messages(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                    actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias,
+            "--capabilities", "messages", "nudges", "feedback")
+    output = terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    first = store.local_action_status()
+    assert first.message_grants == (original,)
+    assert len(first.nudge_grants) == len(first.feedback_grants) == 1
+    assert first.permission_grants == ()
+    assert all(value in output.getvalue() for value in
+               (owner.host_uid, ctx.fleet_uid, ctx.caller.uid, "messages", "nudges", "feedback"))
+    assert output.getvalue().count("Type ALLOW-ACTIONS") == 1
+    terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    assert store.local_action_status() == first
+
+
+def test_allow_actions_conflict_rolls_back_other_selected_capabilities(message_owner, monkeypatch, capsys):
+    store, _, owner, ctx = message_owner
+    retained = store.allow_feedback(expected_owner=owner, fleet_uid=ctx.fleet_uid,
+                                    actor_uid="actor_" + uuid4().hex, actor_alias="human:another")
+    terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", "--target-fleet", "example", "--actor", ctx.caller.alias,
+                "--capabilities", "messages", "nudges", "feedback") == 4
+    assert "feedback" in capsys.readouterr().err
+    status = store.local_action_status()
+    assert status.message_grants == status.nudge_grants == ()
+    assert status.feedback_grants == (retained,)
+
+
+def test_allow_actions_registers_once_then_requires_selected_action_confirmation(message_owner, monkeypatch):
+    store, _, _, _ = message_owner
+    args = ("--target-fleet", "example", "--actor", "human:new-actions", "--register-actor",
+            "--capabilities", "nudges", "feedback")
+    terminal(monkeypatch, iter([]))
+    assert call(store, "allow-actions", *(arg for arg in args if arg != "--register-actor")) == 4
+    terminal(monkeypatch, iter(["no\n"]))
+    assert call(store, "allow-actions", *args) == 4
+    with sqlite3.connect(db_file(store.root)) as conn:
+        assert not conn.execute("SELECT 1 FROM identity_registry WHERE alias='human:new-actions'").fetchone()
+    output = terminal(monkeypatch, iter(["REGISTER\n", "no\n"]))
+    assert call(store, "allow-actions", *args) == 4
+    assert store.local_action_status().nudge_grants == ()
+    with sqlite3.connect(db_file(store.root)) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='operator_first_seen' "
+                            "AND subject_alias='human:new-actions'").fetchone()[0] == 1
+    assert output.getvalue().count("Type REGISTER") == 1
+    output = terminal(monkeypatch, iter(["ALLOW-ACTIONS\n"]))
+    assert call(store, "allow-actions", *args) == 0
+    status = store.local_action_status()
+    assert status.message_grants == status.permission_grants == ()
+    assert status.nudge_grants[0].actor_alias == status.feedback_grants[0].actor_alias == "human:new-actions"
+    assert "Type REGISTER" not in output.getvalue()
+
+
+@pytest.mark.parametrize("capabilities", [(), ("--capabilities",), ("--capabilities", "permissions"),
+                                          ("--capabilities", "messages", "messages")])
+def test_allow_actions_requires_finite_explicit_unique_selection(message_owner, monkeypatch, capabilities):
+    store, _, _, ctx = message_owner
+    terminal(monkeypatch, iter([]))
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias, *capabilities)
+    if capabilities == ("--capabilities", "messages", "messages"):
+        assert call(store, "allow-actions", *args) == 2
+    else:
+        with pytest.raises(SystemExit) as exc:
+            call(store, "allow-actions", *args)
+        assert exc.value.code == 2
+    assert store.local_action_status().message_grants == ()
+
+
+@pytest.mark.parametrize("change", ["owner", "actor", "fleet", "configuration"])
+def test_allow_actions_rechecks_displayed_identity_before_batch(message_owner, monkeypatch, change):
+    store, _, owner, ctx = message_owner
+    terminal(monkeypatch, iter([]))
+    def race(*args):
+        if change == "owner":
+            store.revoke_owner(expected_revision=owner.revision)
+        elif change in {"actor", "fleet"}:
+            with sqlite3.connect(db_file(store.root)) as conn:
+                conn.execute("UPDATE identity_registry SET uid=? WHERE alias=?",
+                             (change + "_" + uuid4().hex, ctx.caller.alias if change == "actor" else "example"))
+        else:
+            (store.root / "state/config.json").unlink()
+    monkeypatch.setattr(host_owner, "_approve", race)
+    assert call(store, "allow-actions", "--target-fleet", "example", "--actor", ctx.caller.alias,
+                "--capabilities", "messages", "nudges") in (4, 7)
+    status = store.local_action_status()
+    assert status.message_grants == status.nudge_grants == ()
+
+
+def test_allow_actions_keeps_local_terminal_and_scope_fences(message_owner, monkeypatch):
+    store, _, _, ctx = message_owner
+    args = ("--target-fleet", "example", "--actor", ctx.caller.alias, "--capabilities", "messages")
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
+    assert call(store, "allow-actions", *args) == 4
+    assert call(store, "allow-actions", *args, "--json") == 2
+    assert main(["--root", str(store.root), "--fleet", "example", "host", "owner", "allow-actions", *args]) == 2
+    for marker in host_owner._GENERATED:
+        with monkeypatch.context() as patch:
+            patch.setenv(marker, "")
+            assert call(store, "allow-actions", *args) == 4
+    assert store.local_action_status().message_grants == ()
 
 
 def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config(message_owner, monkeypatch, capsys):
@@ -243,7 +376,7 @@ def test_allow_and_revoke_display_exact_binding_and_revoke_without_active_config
     assert all(value in output.getvalue() for value in (owner.principal.subject, owner.host_uid, ctx.fleet_uid, ctx.caller.uid, ctx.caller.alias))
     assert "ordinary messages only" in output.getvalue()
     # Revocation reads only retained authority; no active config or Plane needed.
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     before = store.path.read_bytes()
@@ -504,7 +637,7 @@ def test_nudge_console_registration_is_separate_and_status_revoke_need_no_active
     assert "selected-task nudges only" in output.getvalue() and grant.actor_alias == actor
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     assert call(store, "status", "--json") == 0
@@ -555,7 +688,7 @@ def test_feedback_console_registration_is_separate_and_status_revoke_need_no_act
     assert "task-linked comments" in output.getvalue() and grant.actor_alias == actor
     with pytest.raises(AccessDenied, match="messages_not_allowed"):
         store.current_message_grant(expected_owner=owner, fleet_uid=ctx.fleet_uid)
-    (store.root / "state/selected-release.json").unlink()
+    (store.root / "state/config.json").unlink()
     db_file(store.root).rename(store.root / "retained-plane")
     capsys.readouterr()
     assert call(store, "status", "--json") == 0
@@ -592,16 +725,16 @@ def test_feedback_console_refuses_owner_or_generation_replacement(message_owner,
         assert call(store, "allow-feedback", "--target-fleet", "example", "--actor", ctx.caller.alias) == 4
 
 
-def test_fresh_initialize_is_explicit_sealed_and_cancel_leaves_no_identity(tmp_path, monkeypatch):
-    from claudlobby.commands import releases
+def test_fresh_initialize_is_explicit_git_and_cancel_leaves_no_identity(tmp_path, monkeypatch):
+    from claudlobby import resources
+    from claudlobby.installation import Installation
     store = OwnerAccess(tmp_path)
     terminal(monkeypatch, iter(["INITIALIZE\n"]))
     assert call(store, "initialize") == 6  # Existing missing-identity behavior.
-    monkeypatch.setattr(releases, "_executing_release", lambda root: None)
     assert call(store, "initialize", "--before-first-fleet") == 7
     assert not (tmp_path / "state/host-uid").exists()
-    monkeypatch.setattr(releases, "_executing_release", lambda root: "synthetic-sealed")
-    monkeypatch.setattr(releases, "_release", lambda root, release: object())
+    package = SimpleNamespace(installation=Installation(tmp_path.parent / "managed",tmp_path),source_revision="a"*40)
+    monkeypatch.setattr(resources,"get_resources",lambda:package)
     terminal(monkeypatch, iter(["no\n"]))
     assert call(store, "initialize", "--before-first-fleet") == 4
     assert not (tmp_path / "state/host-uid").exists()

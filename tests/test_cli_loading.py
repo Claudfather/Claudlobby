@@ -64,7 +64,7 @@ def _run(code, *argv, tmp_path):
     (("bot", "create", "--help"), "--expertise"),
     (("bot", "handoff", "--help"), "BOT"),
     (("plane", "view", "--help"), "--host"),
-    (("host", "setup", "--help"), "--wheel"),
+    (("host", "setup", "--help"), "--installation"),
     (("fleet", "setup", "--help"), "--install-directory"),
     (("migration", "data", "--help"), "--source"),
     (("message", "show", "--help"), "MESSAGE_ID"),
@@ -183,6 +183,7 @@ def test_selected_import_failure_is_reported_by_common_result(tmp_path):
 @pytest.mark.parametrize(("argv", "module"), [
     (("workstream", "list"), "claudlobby.commands.workstream"),
     (("checkin", "list"), "claudlobby.commands.checkin"),
+    (("host", "spec"), "claudlobby.commands.host_spec"),
 ])
 def test_new_parser_modules_keep_domain_imports_lazy(argv, module, tmp_path):
     result = _run("""

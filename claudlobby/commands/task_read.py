@@ -2,20 +2,77 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from contextlib import closing
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import sqlite3
 
 from ..command_result import CommandFailure, CommandOutput
 from ..reference_hints import note_prefix
 
 
+def _own_fields(record, *nested) -> dict:
+    """`asdict(record)` without the named nested fields, which are never copied."""
+    own = asdict(replace(record, **dict.fromkeys(nested)))
+    for name in nested:
+        del own[name]
+    return own
+
+
+def _event_id(event) -> str | None:
+    return event.event_id if event else None
+
+
+def _assignment_record(assignment) -> dict:
+    """The assignment's own fields; its closing event is named by ID."""
+    record = _own_fields(assignment, "history", "terminal_event")
+    record["terminal_event_id"] = _event_id(assignment.terminal_event)
+    return record
+
+
+def _task_record(task) -> dict:
+    """The task's own fields and one `_assignment_record` per assignment; the
+    current assignment and the closing event are named by ID."""
+    record = _own_fields(task, "current_assignment", "assignments", "history", "terminal_event")
+    current = task.current_assignment
+    record.update(assignments=[_assignment_record(item) for item in task.assignments],
+                  current_assignment_id=current.assignment_id if current else None,
+                  terminal_event_id=_event_id(task.terminal_event))
+    return record
+
+
+def _event_ledger(*tasks) -> list[dict]:
+    """Every event the read carries, once, ordered by (ingest_seq, event_id): each
+    task's history, each assignment's history and every closing event, so each
+    `terminal_event_id` resolves in the ledger. An event two tasks hold, such as
+    one recorded under another task's assignment, appears once."""
+    events = {}
+    for task in tasks:
+        found = [*task.history, task.terminal_event]
+        for item in task.assignments:
+            found += [*item.history, item.terminal_event]
+        for event in found:
+            if event is not None:
+                events.setdefault(event.event_id, event)
+    return [asdict(event) for event in sorted(events.values(), key=lambda e: (e.ingest_seq, e.event_id))]
+
+
+def _task_page(tasks) -> dict:
+    """A page of tasks, as task list and the inbox's work print it: one `_task_record`
+    per task, plus `events`, where each event the page's tasks hold appears once."""
+    return {"items": [_task_record(task) for task in tasks], "events": _event_ledger(*tasks)}
+
+
+def _assignment_show_data(view) -> dict:
+    """Assignment show: the shown assignment and its task as records that name
+    events by ID, plus `events`, where each recorded event appears once."""
+    return {"assignment": _assignment_record(view.assignment), "task": _task_record(view.task),
+            "events": _event_ledger(view.task)}
+
+
 def _read(args) -> CommandOutput:
     from ..active_config import ActivationError
-    from ..activation_state import read_selection
-    from ..activation_identity import read_selected_identity_bindings
+    from ..activation_identity import read_current_identity_bindings
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..operation_context import (
@@ -36,13 +93,12 @@ def _read(args) -> CommandOutput:
         destination, _origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no task registry")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active task selection is unavailable")
-        bindings = read_selected_identity_bindings(destination.paths.root, destination.fleet.name,
+        bindings = read_current_identity_bindings(destination.paths.root, destination.fleet.name,
                                                    package=destination.paths.package)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active task selection changed during read')
+        selected.check(destination.paths.root, package=destination.paths.package, message='active task selection changed during read')
         if (bindings["manager"] != destination.fleet.manager
                 or set(bindings["bots"]) != set(destination.fleet.bots)):
             raise CommandFailure("conflict", "active task identity bindings differ from frozen fleet")
@@ -62,7 +118,7 @@ def _read(args) -> CommandOutput:
                 page = list_tasks(conn, fleet_uid=bindings["fleet_uid"], state=args.state,
                                   bot_uid=bot_uid, limit=args.limit, cursor=args.cursor)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "bot": args.bot, "items": [asdict(item) for item in page.items],
+                        "bot": args.bot, **_task_page(page.items),
                         "next_cursor": page.next_cursor, "issues": [asdict(issue) for issue in page.issues]}
                 lines = tuple(f"{item.task_id}\t{item.state or 'unresolved'}\t{item.title}"
                               for item in page.items)
@@ -71,7 +127,7 @@ def _read(args) -> CommandOutput:
             elif args.public_command == "task.show":
                 task = show_task(conn, args.task_id, fleet_uid=bindings["fleet_uid"], prefix=True)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "task": asdict(task)}
+                        "task": _task_record(task), "events": _event_ledger(task)}
                 lines = note_prefix(data, (f"{task.task_id}\t{task.state or 'unresolved'}\t{task.title}",),
                                     args.task_id, task.task_id)
             else:
@@ -79,7 +135,7 @@ def _read(args) -> CommandOutput:
                 # The delivery, from the rows `assignment deliver` recorded (#2379).
                 delivery = assignment_delivery(conn, view.assignment)
                 data = {"fleet": destination.fleet.name, "manager": bindings["manager"],
-                        "assignment": asdict(view.assignment), "task": asdict(view.task),
+                        **_assignment_show_data(view),
                         "delivery": asdict(delivery) if delivery else None}
                 lines = (f"{view.assignment.assignment_id}\t{view.assignment.state}\t"
                          f"{view.task.task_id}",)
@@ -87,7 +143,10 @@ def _read(args) -> CommandOutput:
                     lines += (f"delivery\t{delivery.message_id}\t{delivery.receipt_observation}\t"
                               f"{delivery.integrity_verdict}",)
                 lines = note_prefix(data, lines, args.assignment_id, view.assignment.assignment_id)
-        return CommandOutput(data, release_id=selected["release_id"], lines=lines)
+        selected.check(destination.paths.root, package=destination.paths.package,
+                       message="active task selection changed during read")
+        data.update(selected.provenance)
+        return CommandOutput(data, release_id=selected.release_id, lines=lines)
     except CommandFailure:
         raise
     except OperationContextUnavailableError as exc:

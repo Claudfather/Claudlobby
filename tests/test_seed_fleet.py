@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 from claudlobby.config import load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 
 
@@ -229,11 +229,11 @@ def _setup_seed_tree(tmp_path: Path) -> Paths:
         "---\nname: Vito Corleone\n---\n\nVoice stub.\n"
     )
 
+    data_root = tmp_path / "data"
     package = replace(
-        source_package(), library=root / "library", voices=root / "library" / "voices",
+        git_package(data_root), library=root / "library", voices=root / "library" / "voices",
         templates=root / "templates", seeds=root / "seeds",
     )
-    data_root = tmp_path / "data"
     (data_root / "runtime" / "seed" / "bots").mkdir(parents=True)
     return Paths(root=data_root, seed=True, package=package)
 

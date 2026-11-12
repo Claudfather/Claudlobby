@@ -3,7 +3,8 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, fleetStatusCounts, aggregateFleetStatusCopy, aggregateFleetStatusCounts, connectionLabel } from '../claudlobby/plane/ui/workspace-display.js';
 const load = text => import(`data:text/javascript;base64,${Buffer.from(text).toString('base64')}`);
-const ownerText = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const ownerText = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const ownerURL = `data:text/javascript;base64,${Buffer.from(ownerText).toString('base64')}`;
 const { createOwnerReadHandle } = await import(ownerURL);
 const adapterText = await readFile(new URL('../claudlobby/plane/ui/two-source-read.js', import.meta.url), 'utf8');
@@ -34,6 +35,47 @@ async function source(key, n) {
 }
 async function pair() { const a = await source('a', 'a'), b = await source('b', 'b'); const api = createTwoSourceReadTransport({ sources: [a, b] }); await api.jget('/api/fleets'); return { a, b, api }; }
 
+test('older task pages keep source cursors separate, qualify duplicate IDs and fence changed admission',async()=>{
+  const {api,a,b}=await pair();
+  const page=(cursor,next,title)=>ok({tasks:[{task_id:wi,fleet:'team',title}],issues:[],issue_count:0,attention_count:0,truncated:!!next,limit:200,task_page:{version:1,cursor,next_cursor:next}});
+  a.routes.set('/api/tasks',page(null,'older-a','A recent'));b.routes.set('/api/tasks',page(null,'older-b','B recent'));
+  a.routes.set('/api/tasks?cursor=older-a',page('older-a',null,'A older'));b.routes.set('/api/tasks?cursor=older-b',page('older-b',null,'B older'));
+  const first=await api.jget('/api/tasks');assert.equal(first.data.task_page.version,1);
+  assert.deepEqual(first.data.tasks.map(t=>t.task_id),['a::'+wi,'b::'+wi]);
+  const older=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  assert.deepEqual(older.data.tasks.map(t=>t.title),['A older','B older']);assert.equal(older.data.task_page.next_cursor,null);
+  assert.ok(a.calls.some(c=>c.url==='/api/tasks?cursor=older-a'));assert.ok(!a.calls.some(c=>c.url.includes('older-b')));
+  a.setStatus('sign_in_required');await a.reader.start();
+  const refused=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));assert.notEqual(refused.state,'ok');
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('old task hosts remain explicitly limited and an ignored cursor cannot replay the newest page',async()=>{
+  const {api,a,b}=await pair();
+  a.routes.set('/api/tasks',ok({tasks:[],truncated:true,limit:200,task_page:{version:1,cursor:null,next_cursor:'a-older'}}));
+  b.routes.set('/api/tasks',ok({tasks:[],truncated:true,limit:200}));
+  const first=await api.jget('/api/tasks');assert.equal(first.data.task_page.unavailable,true);
+  a.routes.set('/api/tasks?cursor=a-older',ok({tasks:[{task_id:wi,fleet:'team',title:'wrong newest replay'}],truncated:true,limit:200}));
+  const next=await api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  assert.deepEqual(next.data.tasks,[]);assert.equal(next.data.coverage.partial,true);
+  assert.equal(next.data.task_page.unavailable,true);assert.ok(!b.calls.some(c=>c.url.includes('cursor=')));
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('a held older task page cannot survive a changed source team registry',async()=>{
+  const {api,a,b}=await pair(),held=deferred();
+  a.routes.set('/api/tasks',ok({tasks:[],truncated:true,task_page:{version:1,cursor:null,next_cursor:'older-a'}}));
+  const first=await api.jget('/api/tasks');
+  a.routes.set('/api/tasks?cursor=older-a',held.promise);
+  const reading=api.jget('/api/tasks?cursor='+encodeURIComponent(first.data.task_page.next_cursor));
+  a.routes.set('/api/fleets',ok({fleets:[{alias:'team',uid:'fleet_'+'9'.repeat(32)}]}));await api.jget('/api/fleets');
+  held.resolve(ok({tasks:[{task_id:wi,fleet:'team',title:'retired owner'}],truncated:false,task_page:{version:1,cursor:'older-a',next_cursor:null}}));
+  const result=await reading;
+  assert.deepEqual(result.data.tasks,[]);assert.equal(result.data.coverage.partial,true);
+  assert.notEqual(result.data.task_page.window,first.data.task_page.window);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
 test('accepted source paints before a held peer and rechecks admission before final combination', async () => {
   const {api,a,b}=await pair(), held=deferred();
   b.routes.set('/api/channel?limit=120',held.promise);
@@ -51,6 +93,86 @@ test('accepted source paints before a held peer and rechecks admission before fi
   assert.equal(final.data.sources[0].state,'denied');
   assert.equal(final.data.threads.length,0,'the earlier accepted source cannot survive loss of admission');
   api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('overview refresh retains only same-admission pending summaries and removes a failed source without hiding its peer',async()=>{
+  const {api,a,b}=await pair();await api.jget('/api/overview');
+  const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const node={innerHTML:'',querySelectorAll:()=>[]},context={fleets:[],currentFleet:'all',hiddenTeams:()=>new Set(),showHiddenTeams:false,esc:String,$:()=>node,interactionApi:{dispose(){}}};
+  runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);
+  const tabs=value=>{context.fleets=value.data.fleet_choices;context.renderFleetTabs();return node.innerHTML;};
+  const held=deferred(),heldA=deferred();b.routes.set('/api/overview',held.promise);a.routes.set('/api/overview',heldA.promise);
+  let accept,acceptA;const progress=new Promise(resolve=>{accept=resolve;}),progressA=new Promise(resolve=>{acceptA=resolve;});
+  const reading=api.jget('/api/overview',value=>{accept(value);if(value.data.sources[0].state==='ok')acceptA(value);});
+  const checking=await progress;
+  assert.equal(checking.data.totals.bots,2);assert.equal(checking.data.coverage.reachable,0);
+  assert.ok(checking.data.sources.every(s=>s.state==='checking' && s.overview_retained));
+  heldA.resolve(roster('team'));const partial=await progressA;
+  assert.equal(partial.data.totals.bots,2);
+  assert.equal(partial.data.totals.overview_retained,true);
+  assert.deepEqual(partial.data.coverage,{total:2,reachable:1,partial:true});
+  assert.equal(partial.data.sources[1].state,'checking');
+  assert.equal(partial.data.sources[1].overview_retained,true);
+  assert.equal(partial.data.fleets.find(f=>f.alias==='b / team').overview_retained,true);
+  assert.equal(partial.data.fleet_choices[1].source_state,'checking');
+  assert.equal(partial.data.fleet_choices[1].read_state,'checking');
+  assert.equal(partial.data.fleet_choices[1].overview_retained,true);
+  assert.match(tabs(partial),/b \/ team <small>Refreshing<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/summary unavailable/);
+  assert.ok(partial.data.sources[1].overview_read_at);
+  held.resolve({state:'unreadable',provenance:null});const failed=await reading;
+  assert.deepEqual(failed.data.fleets.map(f=>f.alias),['a / team']);
+  assert.equal(failed.data.totals.bots,1);
+  assert.equal(failed.data.sources[1].host,null);
+  assert.equal(failed.data.totals.overview_retained,false);
+  assert.equal(failed.data.fleet_choices[1].overview_retained,false);
+  assert.match(tabs(failed),/b \/ team <small>summary unavailable<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/Refreshing/);
+  // A later admission cannot inherit even an earlier successful summary.
+  b.setStatus('sign_in_required');await b.reader.start();
+  b.setStatus('ready');await b.reader.start();
+  const next=deferred();b.routes.set('/api/overview',next.promise);
+  let update;const pending=new Promise(resolve=>{update=resolve;});
+  const refresh=api.jget('/api/overview',update),changed=await pending;
+  assert.deepEqual(changed.data.fleets.map(f=>f.alias),['a / team']);
+  assert.equal(changed.data.sources[1].overview_retained,false);
+  assert.match(tabs(changed),/b \/ team <small>summary unavailable<\/small>/);
+  assert.doesNotMatch(node.innerHTML,/Refreshing/);
+  next.resolve(roster('team'));await refresh;api.dispose();
+});
+
+test('ordinary stream opens preserve summaries and sibling admission loss keeps pending peer summaries labelled',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
+  const accepted=h.overviewPaints.at(-1),count=h.overviewPaints.length;
+  a.streams[0].onopen({});
+  assert.equal(h.overviewPaints.length,count);
+  assert.equal(h.overviewPaints.at(-1),accepted);
+  const held=deferred();b.routes.set('/api/overview',held.promise);
+  let accept;const progress=new Promise(resolve=>{accept=resolve;});
+  const reading=api.jget('/api/overview',accept);await progress;
+  a.setStatus('sign_in_required');await a.reader.start();
+  const invalidated=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(invalidated.data.fleets,f=>f.alias),['b / team']);
+  assert.equal(invalidated.data.sources[0].host,null);
+  assert.equal(invalidated.data.totals.bots,1);
+  assert.equal(invalidated.data.sources[1].state,'checking');
+  assert.equal(invalidated.data.sources[1].overview_retained,true);
+  assert.equal(invalidated.data.totals.overview_retained,true);
+  held.resolve(roster('team'));await reading;
+  api.dispose();
+});
+
+test('external roster retirement immediately removes only its overview while canonical overview publication still paints',async()=>{
+  const {api,a,b}=await pair(),h=await appHarness(api);h.c.openStream();await h.refresh();
+  a.routes.set('/api/fleets',ok({fleets:[],default:null}));await api.jget('/api/fleets');
+  const retired=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(retired.data.fleets,f=>f.alias),['b / team']);
+  assert.equal(retired.data.sources[0].host,null);assert.equal(retired.data.totals.bots,1);
+  const changed=roster('renamed');a.routes.set('/api/overview',changed);
+  b.routes.set('/api/overview',roster('team'));
+  await h.c.refreshOverview();await h.settle();const refreshed=h.overviewPaints.at(-1);
+  assert.deepEqual(Array.from(refreshed.data.fleets,f=>f.alias),['a / renamed','b / team']);
+  assert.equal(refreshed.data.totals.bots,2);api.dispose();
 });
 
 test('overview deadline pauses only its source leg until explicit retry, preserving other reads and timestamps',async()=>{
@@ -129,6 +251,23 @@ test('ordinary overview failures remain retryable automatically and stale timeou
   assert.equal(api.retryOverview('b'),true);b.failures.set('/api/overview','timed_out');held.resolve(null);await old;
   b.failures.clear();b.routes.set('/api/overview',roster('team'));
   assert.equal((await api.jget('/api/overview')).data.coverage.reachable,2);
+  api.dispose();a.reader.dispose();b.reader.dispose();
+});
+
+test('room presence facts accept actual scoped connected projection and reject a peer identity', async () => {
+  const {api,a,b}=await pair();
+  const value={...ok({bots:[{alias:'bot:team/lead',live:'up',presence:'idle'}],sampler_available:true}),provenance:{checked_at:'2026-01-01'}};
+  a.routes.set('/api/presence?fleet=team',value);
+  const scoped=await api.jget('/api/presence?fleet=a%20%2F%20team');
+  assert.equal(scoped.data.sources,undefined);
+  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
+  const {runInNewContext}=await import('node:vm'),context={PRESENCE_WORD:{idle:'idle'}};
+  runInNewContext(app.slice(app.indexOf('function botPresenceFacts('),app.indexOf('function agentDirectoryCard(')),context);
+  const identity={uid:'a::'+actor,alias:'a::bot:team/lead',fleet:'a / team',fleet_uid:'a::'+fleet};
+  const facts=context.botPresenceFacts(identity,scoped);
+  assert.equal(facts.live,'up');assert.equal(facts.heartbeat,'idle');assert.equal(facts.checked,'2026-01-01');
+  assert.equal(context.botPresenceFacts({...identity,uid:'b::'+actor},scoped).live,'unknown');
+  assert.equal(context.botPresenceFacts({...identity,alias:'b::bot:team/lead'},scoped).heartbeat,'unknown');
   api.dispose();a.reader.dispose();b.reader.dispose();
 });
 
@@ -232,15 +371,18 @@ test('source refusal fences held detail without clearing other source, keeps adm
 });
 test('independent native streams preserve local cursors and source errors become scoped refresh, not global source events', async () => {
   const { api, a, b } = await pair(); const events = []; let globalLoss = 0;
+  await api.jget('/api/overview');
   const stream = api.createEventSource('/api/stream'); stream.onmessage = e => events.push(JSON.parse(e.data)); stream.addEventListener('source', () => globalLoss++);
   a.streams[0].onmessage({ data: JSON.stringify({ cursor: 9, rows: [{ ingest_seq: 9 }] }) });
   b.streams[0].onmessage({ data: JSON.stringify({ cursor: 2, rows: [{ ingest_seq: 2 }] }) });
   assert.deepEqual(events.map(e => [e.source,e.cursor]), [['a',9],['b',2]]);
   a.streams[0].listeners.source({ data: JSON.stringify({ state: 'unreadable' }) });
   assert.equal(globalLoss, 0); assert.equal(events.at(-1).coverage_changed, true);
+  assert.deepEqual(events.at(-1).overview.data.fleets.map(f=>f.alias),['b / team']);
+  assert.equal(events.at(-1).overview.data.totals.bots,1);
   let error;stream.onerror=event=>{error=event;};
   a.streams[0].onerror({type:'error'});
-  assert.equal(error.source,'a');assert.equal(events.at(-1).coverage_changed,true);
+  assert.equal(error.source,'a');assert.ok(events.some(e=>e.stream_changed && !e.coverage_changed));
   assert.equal((await api.jget('/api/overview')).data.sources[1].state,'ok');
   stream.close(); assert.ok(a.streams[0].closed && b.streams[0].closed);
 });
@@ -279,7 +421,25 @@ test('renderer shows per-host availability and partial totals without inventing 
   context.renderOverview(env); context.renderHeader(env); context.renderHostFacts(env); context.renderSummary(env);
   assert.match(nodes.get('overview').innerHTML, /&lt;Host A&gt;/);
   assert.match(nodes.get('overview').innerHTML, /Sign in to this source/);
+  assert.match(nodes.get('overview').innerHTML,/12 rows/);
+  env.data.sources[1].host.rows=null;
+  context.renderOverview(env);context.renderHostFacts(env);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/null rows|unknown rows|0 rows/);
+  assert.doesNotMatch(nodes.get('host-facts').textContent,/rows (null|unknown|0)/);
+  env.data.sources[1].host.rows=12;
   assert.doesNotMatch(nodes.get('overview').innerHTML, /recorder DOWN/);
+  env.data.sources[1].state='checking';env.data.sources[1].overview_retained=true;
+  env.data.sources[1].overview_read_at='2026-01-01T00:00:00Z';env.data.totals.overview_retained=true;
+  env.data.fleets=[{alias:'b / team',bots:2,presence:{counts:{},live_poll:'ok'},overview_retained:true,overview_read_at:'2026-01-01T00:00:00Z'}];
+  context.renderOverview(env);context.renderHeader(env);context.renderHostFacts(env);
+  assert.match(nodes.get('overview').innerHTML,/Refreshing · last summary/);
+  assert.match(nodes.get('overview').innerHTML,/refreshing; showing the last read/);
+  assert.doesNotMatch(nodes.get('overview').innerHTML,/Team summary unavailable; activity/);
+  assert.match(nodes.get('fleet-totals').innerHTML,/totals include the last read for pending computers/);
+  assert.match(nodes.get('host-facts').textContent,/last summary, refreshing/);
+  env.data.sources[1].state='ok';env.data.sources[1].overview_retained=false;
+  env.data.totals.overview_retained=false;env.data.fleets=[];
+  context.renderHeader(env);context.renderHostFacts(env);
   env.data.sources[1].host.daemon_serving=null;context.renderOverview(env);
   assert.match(nodes.get('overview').innerHTML,/recorder unknown/);
   assert.doesNotMatch(nodes.get('overview').innerHTML,/recorder DOWN/);
@@ -287,7 +447,8 @@ test('renderer shows per-host availability and partial totals without inventing 
   assert.match(nodes.get('overview').innerHTML,/recorder DOWN/);
   env.data.sources[1].host.daemon_serving=true;
   assert.match(nodes.get('fleet-totals').innerHTML, /totals cover readable sources/);
-  assert.match(nodes.get('beat-label').textContent, /1\/2 sources readable/);
+  assert.match(nodes.get('fleet-totals').innerHTML, /Team summaries: 1\/2 readable/);
+  assert.match(nodes.get('beat-label').textContent, /Recorder status: 1\/2 readable/);
   assert.match(nodes.get('host-facts').textContent, /<Host A>: denied/);
   runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'), app.indexOf('// ONE pick path')), context);
   context.fleets=[{alias:'a / team',bots:99,source_state:'denied'},{alias:'b / team',bots:2,source_state:'ok'}];
@@ -391,7 +552,7 @@ async function appHarness(api) {
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const paints=[], timers=[], callbacks=[], overviewPaints=[], summaries=[], nodes=new Map();
   let now=Date.now();
-  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
+  const c={interactionApi:api,activityRecovery:null,agentDirectoryVisible:()=>false,resetAgentPresence(){},clearTaskHistory(){},acceptTaskPoll(v){c.renderTasks(v);return v;},Date:class extends Date {static now(){return now;}},esc:value=>String(value),
     $:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:''});return nodes.get(id);},
     fleets:[],fleetsSeen:false,currentFleet:null,loadPick:()=> 'all',jget:api.jget,hiddenTeams,showHiddenTeams:false,
     syncWorkRoom:()=>false,workLoop:{update(){},updateChannel(){}},setTimeout:(cb,ms)=>{timers.push(ms);callbacks.push({cb,ms});return timers.length;},clearTimeout(){},
@@ -477,7 +638,8 @@ test('visible directory coalesces identity pushes but refreshes presence only on
   assert.ok(a.calls.every(x=>!['/api/tasks','/api/overview','/api/summary','/api/grid'].includes(x.url)));
   h.advance(60000);await h.c.refreshBoards();
   assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2);
-  a.streams[0].onopen({});assert.equal(h.c.agentPresence,null);assert.equal(h.c.agentPresenceDue,0);
+  const presence=h.c.agentPresence,due=h.c.agentPresenceDue;
+  a.streams[0].onopen({});assert.equal(h.c.agentPresence,presence);assert.equal(h.c.agentPresenceDue,due);
   h.c.currentView='channel';await h.c.refreshBoards();await h.settle();
   assert.equal(a.calls.filter(x=>x.url==='/api/presence').length,2,'Activity never requests presence');
   h.c.currentView='grid';h.c.agentPresence=null;h.c.agentPresenceDue=h.c.Date.now()+60000;
@@ -510,14 +672,22 @@ for(const fallback of [false,true]) test(`first overview room discovery paints i
   assert.ok(h.callbacks.some(t=>t.ms===400),'routing discovery still coalesces a board refresh');
   api.dispose();
 });
-test('actual source loss still retires a held overview after routing discovery',async()=>{
+for(const painted of [false,true]) test(`actual source loss still retires a held overview after routing discovery (peer partial painted first: ${painted})`,async t=>{
   const {api,a,b}=await pair(),h=await appHarness(api);h.c.fleetsSeen=true;h.c.openStream();
+  t.mock.timers.enable({apis:['setTimeout']}); // The adapter's partial paint runs on a real timer; this test chooses when it fires.
   const held=deferred();a.routes.set('/api/overview',held.promise);
   const reading=h.c.refreshOverview();await h.settle();
+  if(painted){
+    t.mock.timers.tick(1);
+    assert.equal(h.overviewPaints.at(-1).state,'ok','a live peer paints before its held source');
+    assert.deepEqual(h.overviewPaints.at(-1).data.sources.map(s=>s.state),['checking','ok']);
+  }
+  const atLoss=h.overviewPaints.length;
   b.setStatus('sign_in_required');await b.reader.start();
+  if(!painted)t.mock.timers.tick(1);
   held.resolve(roster('team'));await reading;await h.settle();
   assert.equal(h.overviewPaints.at(-1).state,'unavailable');
-  assert.ok(h.overviewPaints.every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
+  assert.ok(h.overviewPaints.slice(atLoss).every(v=>v.state!=='ok'),'old private response cannot repaint after real access loss');
   api.dispose();
 });
 for(const retirement of ['replacement','removal']) test(`All teams board cannot repaint retired room tasks after ${retirement}`,async()=>{
@@ -669,16 +839,19 @@ test('source coverage change retires a completed held overview and selection upd
   h.c.fleetsSeen=true;h.c.currentFleet='all';h.c.openStream();
   await h.c.refreshBoards();await h.settle();
   a.setStatus('sign_in_required');await a.reader.start();
-  assert.equal(h.overviewPaints.at(-1).state,'unavailable');
+  assert.equal(h.overviewPaints.at(-1).state,'ok');
+  assert.deepEqual(Array.from(h.overviewPaints.at(-1).data.fleets,f=>f.alias),['b / team']);
   const before=h.overviewPaints.length;held.resolve();await h.settle();
   assert.equal(h.overviewPaints.length,before,'pre-disconnect aggregate cannot repaint Connected');
   const {runInNewContext}=await import('node:vm');
   const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const highlighted=new Map(),cards=['a / team','b / team'].map(fleet=>({dataset:{fleet},classList:{toggle:(name,on)=>highlighted.set(fleet,on)}}));
-  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:()=>cards}:{hidden:true}});
+  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',refreshBoards(){},$:id=>id==='overview'?{querySelectorAll:selector=>selector==='.ov-card.ov-team'?cards:[]}:{hidden:true}});
   runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('const STATUS_DOT')),h.c);
   const reads=a.calls.length;h.c.pickFleet('b / team');
   assert.equal(highlighted.get('b / team'),true);assert.equal(highlighted.get('a / team'),false);
+  h.c.pickFleet('a / team');
+  assert.equal(highlighted.get('a / team'),true);assert.equal(highlighted.get('b / team'),false);
   assert.equal(a.calls.length,reads,'selection highlight never triggers an expensive read');
   api.dispose();
 });
@@ -707,14 +880,37 @@ test('canonical paired nudge keeps exact wire body and plain reason after source
 test('summary preserves actual per-source recorder down, unknown and quiet evidence',async()=>{
   const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const nodes=new Map(['fleet-totals','beat','beat-label'].map(k=>[k,{innerHTML:'',className:'',textContent:''}]));
-  const c={$:id=>nodes.get(id),esc:String,ago:()=> 'now',interactionApi:{dispose(){}},stateBlock:()=>''};
+  const c={$:id=>nodes.get(id),esc:String,ago:()=> 'now',aggregateFleetStatusCopy,interactionApi:{dispose(){}},stateBlock:()=>''};
   runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),c);
-  const {api,a,b}=await pair();
+  const a=await source('a','a'),b=await source('b','b'),offline=await source('c','c');
+  offline.setStatus('sign_in_required');await offline.reader.start();
+  const api=createWorkspaceReadTransport({sources:[a,b,offline]});
   for(const source of [a,b])source.routes.set('/api/summary',{...ok({daemon_serving:source===b}),provenance:{last_ingest_at:new Date().toISOString()}});
   const env=await api.jget('/api/summary');
   c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/recorder DOWN/);assert.equal(nodes.get('beat').className,'dot warn');
   env.data.sources[0].summary.daemon_serving=null;c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/recorder unknown/);
   env.data.sources[0].summary.daemon_serving=true;env.data.sources[0].provenance.last_ingest_at='2020-01-01';c.renderSummary(env);assert.match(nodes.get('beat-label').textContent,/quiet/);assert.equal(nodes.get('beat').className,'dot warn');
+  const overview=await api.jget('/api/overview');c.renderHeader(overview);
+  a.routes.set('/api/summary',{state:'unreadable',provenance:null,remediation:'Recorder status timed out. Retry this read.'});
+  const failed=await api.jget('/api/summary');c.renderSummary(failed);
+  assert.match(nodes.get('fleet-totals').innerHTML,/Team summaries: 2\/3 readable/);
+  assert.match(nodes.get('beat-label').textContent,/Recorder status: 1\/3 readable/);
+  assert.match(nodes.get('beat-label').textContent,/a: recorder status unavailable · b: recording/);
+  assert.match(nodes.get('beat-label').textContent,/b: recording/);
+  assert.match(nodes.get('beat-label').textContent,/c: denied/);
+  assert.equal(a.reader.snapshot().state,'ready','a failed recorder read does not remove its connection');
+  const held=deferred();a.routes.set('/api/summary',held.promise);
+  let accept;const progress=new Promise(resolve=>{accept=resolve;});
+  const reading=api.jget('/api/summary',accept);
+  const pending=await progress;c.renderSummary(pending);
+  assert.match(nodes.get('beat-label').textContent,/Recorder status: 1\/3 readable/);
+  assert.match(nodes.get('beat-label').textContent,/a: checking recorder status/);
+  assert.doesNotMatch(nodes.get('beat-label').textContent,/a: (?:recording summary|recorder status) unavailable/);
+  assert.match(nodes.get('fleet-totals').innerHTML,/Team summaries: 2\/3 readable/);
+  held.resolve({...ok({daemon_serving:true}),provenance:{last_ingest_at:new Date().toISOString()}});
+  c.renderSummary(await reading);
+  assert.match(nodes.get('beat-label').textContent,/Recorder status: 2\/3 readable/);
+  assert.match(nodes.get('beat-label').textContent,/a: recording/);
   api.dispose();
 });
 test('direct-host empty-header wording remains unchanged',async()=>{
@@ -788,7 +984,7 @@ test('actual app supports one ready host, zero-of-one loss and recovery without 
   overview=await api.jget('/api/overview');
   assert.equal(overview.state,'unavailable');
   assert.deepEqual(overview.data.coverage,{total:1,reachable:0,partial:true});
-  assert.match(overview.remediation,/No source/);
+  assert.match(overview.remediation,/a: .*Computers & status/);
   assert.equal(h.c.currentFleet,null); // Canonical single-fleet auto selection is unchanged.
   assert.equal(h.c.fleets[0].source_state,'denied');
   assert.ok(h.paints.slice(-2).every(v=>v.state!=='ok'));
@@ -1014,10 +1210,10 @@ test('canonical module graph stays inside its release directory', async () => {
   }
 });
 
-test('overview and team tabs display escaped labels while clicks retain exact stable routing identity',async()=>{
+test('overview details survive refresh by team UID while explicit buttons retain exact routing identity',async()=>{
   const {runInNewContext}=await import('node:vm'),app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
   const key='c-abcdefghijklmnopqrstuvwxy / team',nodes=new Map(['overview','fleet-tabs'].map(k=>[k,{innerHTML:'',querySelectorAll:()=>[]}]));
-  const fleet={alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={hiddenTeams,setTeamHidden,fleetStatusCopy,connectionLabel,showHiddenTeams:false,$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
+  const fleet={uid:'a::'+('fleet_'+'1'.repeat(32)),alias:key,display_label:'Computer 1 / <team>',bots:1,presence:{counts:{},live_poll:'ok'}},context={hiddenTeams,setTeamHidden,fleetStatusCopy,connectionLabel,showHiddenTeams:false,$:id=>nodes.get(id),fleets:[fleet,{alias:'other'}],currentFleet:key,interactionApi:{dispose(){}},esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=>'',stateBlock:()=>''};
   runInNewContext(app.slice(app.indexOf('function renderHeader('),app.indexOf('function toggleMessageBody(')),context);
   context.renderOverview(ok({fleets:[fleet],sources:[]}));
   runInNewContext(app.slice(app.indexOf('function renderFleetTabs()'),app.indexOf('// ONE pick path')),context);context.renderFleetTabs();
@@ -1025,6 +1221,26 @@ test('overview and team tabs display escaped labels while clicks retain exact st
     assert.match(node.innerHTML,/Computer 1 \/ &lt;team&gt;/);assert.ok(node.innerHTML.includes(`data-fleet="${key}"`));
     assert.ok(!node.innerHTML.includes('>'+key));assert.doesNotMatch(node.innerHTML,/<team>/);
   }
+  const overview=nodes.get('overview'),details={dataset:{teamDetails:fleet.uid},open:true};
+  assert.match(overview.innerHTML,/<button[^>]*data-overview-fleet=/);
+  assert.doesNotMatch(overview.innerHTML,/role="button"|tabindex=/);
+  assert.ok(overview.innerHTML.indexOf('ov-status-counts')<overview.innerHTML.indexOf('<details'));
+  assert.ok(overview.innerHTML.indexOf('recorded bot')>overview.innerHTML.indexOf('<summary>Team details'));
+  overview.querySelectorAll=()=>[details];
+  context.renderOverview(ok({fleets:[{...fleet,alias:'renamed team'}],sources:[]}));
+  assert.ok(overview.innerHTML.includes(`data-team-details="${fleet.uid}" open`));
+  overview.querySelectorAll=()=>[];
+  context.renderOverview(ok({fleets:[{...fleet,uid:'b::'+('fleet_'+'1'.repeat(32))}],sources:[]}));
+  assert.doesNotMatch(overview.innerHTML,/<details[^>]* open/,'another source cannot inherit disclosure state');
+  overview.querySelectorAll=()=>[details];details.open=false;
+  context.renderOverview(ok({fleets:[fleet],sources:[]}));
+  assert.doesNotMatch(overview.innerHTML,/<details[^>]* open/);
+  const handlers=new Map(),picks=[];
+  overview.addEventListener=(name,handler)=>handlers.set(name,handler);context.pickFleet=key=>picks.push(key);
+  runInNewContext(app.slice(app.indexOf('$("overview").addEventListener("click"'),app.indexOf('// Debug rail:')),context);
+  handlers.get('click')({target:{closest:selector=>selector==='[data-overview-fleet]'?{dataset:{overviewFleet:key}}:null}});
+  handlers.get('click')({target:{closest:()=>null}}); // Native summary toggle never selects a team.
+  assert.deepEqual(picks,[key]);assert.equal(handlers.has('keydown'),false);
 });
 
 test('recorded actors are separate from sampled running, stopped and unconfirmed states',()=>{
@@ -1097,7 +1313,7 @@ test('hidden teams are an explicit local preference, with reveal and a safe visi
   c.currentFleet=null;c.loadPick=()=>null;setTeamHidden(second.uid,true,storage);c.adoptFleets(env);
   assert.equal(c.currentFleet,'all','all-hidden preferences never create a blank default');
   c.showHiddenTeams=true;c.renderFleetTabs();assert.match(node.innerHTML,/data-fleet="source \/ test"/);
-  assert.match(node.innerHTML,/Message a bot/,'team shortcut opens existing roster messaging');
+  assert.doesNotMatch(node.innerHTML,/Message a bot/,'room bot controls replace repetitive per-team message shortcuts');
   // Exercise the real explicit handlers; a background render must not steal focus.
   values.clear();c.showHiddenTeams=false;c.currentFleet=second.alias;c.renderFleetTabs();
   const hideFirst=buttons.find(b=>b.dataset.hideTeam===first.uid);hideFirst.focus();hideFirst.handlers.click();

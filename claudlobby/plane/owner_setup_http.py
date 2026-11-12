@@ -41,19 +41,21 @@ class SetupHTTP(ConnectedActionsHTTP):
         binding=await self._blocking(self.workspace.active_binding,principal)
         if binding.issuer!=self.config.issuer or binding.operational_origin!=self.config.operational_origin: raise AccessDenied("setup_denied")
         payload=await asyncio.wait_for(_json(receive,32768),5)
-        expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","plan_id","request_id"},"receipt":{"generation","plan_id","request_id"}}[operation]
+        expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","request_id","config_fingerprint","source_revision"},"receipt":{"generation","request_id","config_fingerprint","source_revision"}}[operation]
         if set(payload)!=expected: raise InvalidRequest
         if operation!="context" and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
         if operation=="preview" and (not isinstance(payload["goal"],str) or len(payload["goal"])>2000): raise InvalidRequest
         if operation in {"launch","receipt"}:
-            if (not isinstance(payload["plan_id"],str) or not re.fullmatch(r"p-[0-9a-f]{64}",payload["plan_id"]) or not _uuid(payload["request_id"])): raise InvalidRequest
+            if (not isinstance(payload["config_fingerprint"],str) or not re.fullmatch(r"[0-9a-f]{64}",payload["config_fingerprint"])
+                    or not isinstance(payload["source_revision"],str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",payload["source_revision"])
+                    or not _uuid(payload["request_id"])): raise InvalidRequest
         fn=getattr(self.engine,operation)
         progress[0]=True  # No refusal after engine entry implies no earlier effect.
         try:
             result=await self._blocking(fn,reader,**payload)
         except CommandFailure:
-            # Canonical refusal may retain a plan or activation. Inspect original
-            # journal; no generic exception claims rollback or safe resend.
+            # Canonical refusal may retain a original update operation. Inspect original
+            # operation; no generic exception claims rollback or safe resend.
             raise AccessUnavailable() from None
         current=await self._principal(scope,_DEADLINE.get())
         await self._blocking(source_host_uid,self.access.root)

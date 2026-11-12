@@ -59,35 +59,26 @@ def _context(args):
 
 
 def _release(context):
-    from ..activation_state import ActivationError, read_activation, read_selection
-    from .releases import _executing_release
-
-    executing = _executing_release(context.paths.root)
-    expected = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-    valid_expected = bool(expected and re.fullmatch(r"r-[0-9a-f]{64}", expected))
-    result = {"executing_release_id": executing,
-              "executing_artifact_id": context.paths.package.artifact_id,
-              "context_release_id": expected if valid_expected else None,
-              "context_release_state": "valid" if valid_expected else "invalid" if expected is not None else "absent",
-              "selected_release_id": None, "activation_status": None,
-              "selection_state": "absent", "context_matches_selection": None,
-              "executing_matches_selection": None, "running_release": "unknown",
-              "operational_admission": "not_checked", "diagnosis_command": "host releases"}
-    try:
-        selected = read_selection(context.paths.root)
-        if selected:
-            record = read_activation(context.paths.root, selected["activation_id"])
-            result.update(selected_release_id=selected["release_id"],
-                          activation_status=record.status, selection_state="recorded",
-                          executing_matches_selection=(executing == selected["release_id"]
-                                                        if executing else None))
-            if result["context_release_id"]:
-                result["context_matches_selection"] = result["context_release_id"] == selected["release_id"]
-            if any(record.body["intent"][key] != selected[key] for key in ("release_id", "plan_id")):
-                result["selection_state"] = "conflict"
-    except (ActivationError, KeyError, TypeError):
-        result["selection_state"] = "unavailable"
-    return result
+    if context.paths.package.installation is not None:
+        from ..active_config import runtime_read_stamp
+        stamp = runtime_read_stamp(context.paths.root, package=context.paths.package)
+        stamp.check(context.paths.root, package=context.paths.package)
+        return {"runtime_kind": "git", **stamp.provenance,
+                "executing_source_revision": context.paths.package.source_revision,
+                "running_source_revision": None,
+                "executing_release_id": None, "executing_artifact_id": None,
+                "context_release_id": None, "context_release_state": "not_applicable",
+                "selected_release_id": None, "activation_status": None,
+                "selection_state": "current_config", "context_matches_selection": None,
+                "executing_matches_selection": None, "running_release": "unknown",
+                "operational_admission": "not_checked", "diagnosis_command": "host update status"}
+    return {"runtime_kind": "unmanaged", "executing_source_revision": context.paths.package.source_revision,
+            "executing_release_id": None, "executing_artifact_id": None,
+            "context_release_id": None, "context_release_state": "not_applicable",
+            "selected_release_id": None, "activation_status": None,
+            "selection_state": "managed_installation_required", "context_matches_selection": None,
+            "executing_matches_selection": None, "running_release": "unknown",
+            "operational_admission": "unavailable", "diagnosis_command": "host setup"}
 
 
 def _composition(context):
@@ -208,6 +199,48 @@ def _permissions(context, bot, settings_path):
     return result
 
 
+def _precompact(bot, directory):
+    """Which PreCompact hooks the bot runs (#1053), as its compose decides them.
+
+    ``claudron_session_loop`` is the composer's own test, the one that adds the
+    engine's hooks, not a read of the settings file; ``claudna_precompact_reflect``
+    is the value the composer writes into ``bot.conf``. ``composed`` lists the
+    ``PreCompact`` commands in the composed settings file, each named by the
+    composer's own predicate and identified by SHA-256, never printed. A plugin's
+    hooks and the account's own settings are not in that file.
+    """
+    from ..composer import _is_claudron_hook_entry, claudron_session_loop_composed
+
+    loop = claudron_session_loop_composed(bot, directory)
+    result = {"claudron_session_loop": loop,
+              "claudna_precompact_reflect": bool(bot.claudna.precompact_reflect),
+              "composed": {"state": "absent"}}
+    settings_path = directory / ".claude/settings.local.json"
+    try:
+        if not settings_path.is_file():
+            result["composed"]["state"] = "unreadable" if settings_path.exists() else "absent"
+            return result
+        groups = json.loads(settings_path.read_text()).get("hooks", {}).get("PreCompact", [])
+        handlers = [handler for group in groups for handler in group.get("hooks", [])]
+        if not all(isinstance(handler, dict) for handler in handlers):
+            raise ValueError("invalid PreCompact hook")
+    except FileNotFoundError:
+        return result
+    except (OSError, ValueError, AttributeError, TypeError):
+        result["composed"] = {"state": "unreadable"}
+        return result
+    commands = [{"hook": "claudron" if _is_claudron_hook_entry({"hooks": [handler]}, "pre-compact") else "other",
+                 "sha256": hashlib.sha256(handler["command"].encode()).hexdigest()
+                 if isinstance(handler.get("command"), str) else None}
+                for handler in handlers]
+    # A composition older than its declaration: the file carries the engine's hook
+    # where the compose would not add it now, or lacks it where it would.
+    engine = any(item["hook"] == "claudron" for item in commands)
+    result["composed"] = {"state": "present", "source": str(settings_path), "commands": commands,
+                          "matches_declaration": engine == loop}
+    return result
+
+
 def _bot(context, bot_id, *, capabilities=False):
     from ..composer import _channel_plugins
     from ..plane.registry_emit import bot_payload
@@ -229,6 +262,7 @@ def _bot(context, bot_id, *, capabilities=False):
                            "fleet_plugins": list(context.fleet.plugins.required),
                            "channel_plugins": _channel_plugins(bot.channels)},
               "effective_configuration": {"equipment": equipment,
+                                          "precompact": _precompact(bot, directory),
                                           "source": "config loader and compositor resolvers"},
               "composed": {"directory": str(directory), "files": {
                   name: _file(directory / name) for name in (
@@ -291,6 +325,15 @@ def dispatch(args) -> CommandOutput:
                 if composed.get(key):
                     lines.append(f"Composed {key} tools: "
                                  + ", ".join(sorted({rule["tool"] for rule in composed[key]})))
+        precompact = data["bot"]["effective_configuration"]["precompact"]
+        hooks = precompact["composed"]
+        line = (f"PreCompact: Claudron session loop {'on' if precompact['claudron_session_loop'] else 'off'}; "
+                f"clauDNA prompt {'armed' if precompact['claudna_precompact_reflect'] else 'off'}; "
+                f"composed settings {hooks['state']}")
+        if hooks["state"] == "present":
+            line += (f", commands: {', '.join(item['hook'] for item in hooks['commands']) or 'none'}"
+                     + ("" if hooks["matches_declaration"] else "; they do not match the declaration"))
+        lines.append(line + ".")
     else:
         projects = fleet.projects
         if command == "project.show":

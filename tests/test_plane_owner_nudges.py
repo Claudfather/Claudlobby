@@ -1,4 +1,4 @@
-"""Owner nudges over private activation/Plane, with a synthetic native receiver.
+"""Owner nudges over private committed Git/Plane, with a synthetic native receiver.
 
 No installed CLI, browser authentication, real bot or native delivery is claimed.
 """
@@ -24,9 +24,7 @@ from claudlobby.request_receipts import ReceiptBusy, ReceiptConflict, RequestSto
 from claudlobby.runtime_admission import ReleaseMismatch
 from claudlobby.task_queries import TaskNotFoundError, TaskQueryError
 from claudlobby.task_state import TaskStateError
-from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_message_write_cli import _human
 
@@ -34,9 +32,9 @@ from tests.test_message_write_cli import _human
 @pytest.fixture
 def gateway(active, monkeypatch):  # noqa: F811
     root, host = active
-    _human(monkeypatch, host.release)
-    package = replace(source_package(), native=host.release.native_path,
-                      artifact_id=host.release.inputs.artifact_id)
+    _human(monkeypatch, host.installation)
+    package = host.package
+    monkeypatch.delenv("CLAUDLOBBY_INSTALLATION", raising=False)
     ctx = operation_context.resolve_task_mutation_context(
         root=root, fleet="example", operator_alias="human:paired-owner", package=package)
     access = OwnerAccess.initialize(root)
@@ -51,7 +49,9 @@ def gateway(active, monkeypatch):  # noqa: F811
     adapter = OwnerNudges(root, package=package)
     options = dict(fleet="example", fleet_uid=ctx.fleet_uid, task_id=task.task_id,
         manager_uid=ctx.bots[ctx.context.fleet.manager].uid, request_id=str(uuid4()), expected_grant=grant)
-    selection = dict(expected_assignment_id=None, expected_release_id=host.release.release_id)
+    selection = dict(expected_assignment_id=None, expected_release_id=None,
+                     expected_source_revision=host.snapshot["revision"],
+                     expected_config_fingerprint=host.snapshot["fingerprint"])
     monkeypatch.setattr(operation_context, "_local_operator_alias",
                         lambda: pytest.fail("owner nudge must not use the OS account"))
     return adapter, reader, ctx, options, selection
@@ -386,3 +386,49 @@ def test_source_changes_are_refused_at_read_and_response_boundaries(gateway, mon
             invoke(gateway)
     assert len(calls) == (0 if boundary == "task_read" else 1)
     assert len(repairs) == len(calls)
+
+
+@pytest.fixture
+def git_gateway(gateway, monkeypatch):
+    from tests.test_plane_owner_feedback import _git_gateway
+    return _git_gateway(gateway, monkeypatch)
+
+
+@pytest.mark.parametrize('received', [True, False])
+def test_git_nudge_retains_original_receipt_across_update(git_gateway, monkeypatch, received):
+    from claudlobby import active_config, activation_state
+    adapter, reader, ctx, options, selected = git_gateway
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('sealed selection read'))
+    calls, repairs = receiver(monkeypatch, received=received)
+    if received:
+        invoke(git_gateway)
+    else:
+        with pytest.raises(CommandFailure):
+            invoke(git_gateway)
+    # The initial nudge runs the existing held-box repair observer once. Reads
+    # must preserve those original effects, not require that none ever occurred.
+    initial_effects = len(calls), len(repairs)
+    assert initial_effects == (1, 1)
+    original = adapter.inspect(reader, **options).request
+    assert (len(calls), len(repairs)) == initial_effects
+    assert original.route.release_id is None
+    assert original.route.revision == selected['expected_source_revision']
+    snapshot = active_config.read_current_config(adapter.root, installation=adapter.package.installation)
+    updated = {**snapshot, 'revision': 'b' * 40}
+    updated['fingerprint'] = active_config._fingerprint(updated)
+    active_config.publish_current_config(updated, installation=adapter.package.installation,
+                                         expected_previous=snapshot['fingerprint'])
+    from claudlobby.runtime_admission import RuntimeIdentity
+    adapter.package = replace(adapter.package, source_revision=updated['revision'])
+    identity = RuntimeIdentity(adapter.package.installation.cli, adapter.package.native, '',
+                               adapter.package.installation, updated['revision'])
+    monkeypatch.setattr(RuntimeIdentity, 'current', lambda: identity)
+    assert adapter.inspect(reader, **options).request == original
+    assert (len(calls), len(repairs)) == initial_effects
+
+
+def test_git_nudge_rejects_wrong_selected_config_before_effect(git_gateway, monkeypatch):
+    calls, _ = receiver(monkeypatch)
+    with pytest.raises(AccessDenied):
+        invoke(git_gateway, expected_config_fingerprint='f' * 64)
+    assert not calls

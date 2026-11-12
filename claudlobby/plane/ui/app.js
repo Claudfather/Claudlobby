@@ -17,6 +17,54 @@ import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
 const $ = (id) => document.getElementById(id);
+let conversationFocus = {bot:"", other:""}, conversationSnapshot = null;
+function focusedThreads(threads) {
+  const {bot, other} = conversationFocus;
+  if (!bot) return threads;
+  return threads.filter(t => t.messages.some(m => other
+    ? m.sender_alias === bot && m.recipient_alias === other || m.sender_alias === other && m.recipient_alias === bot
+    : m.sender_alias === bot || m.recipient_alias === bot));
+}
+function resetConversationFocus() {
+  conversationFocus = {bot:"", other:""}; conversationSnapshot = null;
+  paintConversationFocus();
+}
+function updateRoomHeading() {
+  const heading = $("room-title");
+  if (heading?.id !== "room-title") return;
+  const selected = activeRoom(), team = fleets.find(f => f.alias === selected);
+  heading.textContent = team?.display_label || (selected === "all" ? "All teams" : selected);
+}
+function paintConversationFocus() {
+  const root = $("room-focus");
+  if (root?.id !== "room-focus") return;
+  const identities = typeof rosterIdentities === "undefined" ? [] : [...rosterIdentities.values()]
+    .filter(a => conversationIdentity(a.uid));
+  if (!identities.some(a => a.alias === conversationFocus.bot)) conversationFocus = {bot:"",other:""};
+  const participants = new Map();
+  for (const thread of conversationSnapshot?.data?.threads || []) for (const m of thread.messages)
+    for (const side of ["sender","recipient"]) if (m[side + "_alias"])
+      participants.set(m[side + "_alias"], m[side + "_short"] || m[side + "_alias"]);
+  if (!participants.has(conversationFocus.other)) conversationFocus.other = "";
+  const options = (rows, selected) => rows.map(([id,label]) => `<option value="${esc(id)}"${id === selected ? ' selected' : ''}>${esc(label)}</option>`).join("");
+  const focused = document.activeElement?.id;
+  root.innerHTML = `<label>Conversation <select id="room-bot"><option value="">Whole team</option>${options(identities.map(a=>[a.alias,a.short || participants.get(a.alias) || a.alias]),conversationFocus.bot)}</select></label>
+    <label>With <select id="room-participant"${conversationFocus.bot ? '' : ' disabled'}><option value="">Anyone</option>${options([...participants].filter(([id])=>id !== conversationFocus.bot),conversationFocus.other)}</select></label>
+    <button id="room-message-bot" class="pill ghost" type="button"${conversationFocus.bot ? '' : ' disabled'}>Message bot</button>
+    <small>Recent recorded threads, not complete message history. Whole threads may include other participants.</small>`;
+  const repaint = () => { if (conversationSnapshot) renderChannel(conversationSnapshot); };
+  $("room-bot").onchange = event => {conversationFocus = {bot:event.target.value,other:""};repaint();};
+  $("room-participant").onchange = event => {conversationFocus.other = event.target.value;repaint();};
+  const recipient = identities.find(a => a.alias === conversationFocus.bot);
+  const allowed = recipient && rosterMessageRecipient(recipient.uid);
+  $("room-message-bot").disabled = !allowed;
+  $("room-message-bot").onclick = () => {
+    const current = recipient && rosterMessageRecipient(recipient.uid);
+    if (current?.alias === recipient.alias && current.fleet === recipient.fleet
+        && $("room-message-bot").isConnected && workLoop.selectMessageRecipient(current)) $("work-loop").scrollIntoView({block:"nearest"});
+  };
+  if (["room-bot","room-participant"].includes(focused)) $(focused)?.focus();
+}
 
 // Plain-language transmission states — PRESENTATION ONLY (the ok/pend/bad
 // coloring of a tx rides its server-stamped `activated` + failed check).
@@ -152,7 +200,12 @@ function nudgeReason(m, thread) {
           || event.assignment_id !== m.assignment_id || event.ingest_seq !== m.ingest_seq - 1
           || typeof event.detail !== "string") return false;
       const detail = JSON.parse(event.detail);
-      return detail && Object.keys(detail).sort().join() === "by,reason"
+      // Since #1053 the row may also name the task's workstream, in any form a door minted
+      // (#2871): an imported or older registry can hold any string. The ID is never shown,
+      // so any non-empty string passes; the key set and the by and reason matches decide.
+      const keys = detail && Object.keys(detail).sort().join();
+      return detail && (keys === "by,reason" || (keys === "by,reason,workstream_id"
+          && typeof detail.workstream_id === "string" && detail.workstream_id !== ""))
         && detail.by === body.by && detail.reason === body.reason;
     });
     return matches.length === 1 ? body.reason : null;
@@ -226,7 +279,7 @@ function machineryBlock(m, prose = null) {
   const raw = m.body && (m.report && m.report.state !== "legacy"
     || m.body !== (prose ?? (m.body_words || "")))
     ? `<div class="machinery raw">${esc(m.body)}</div>` : "";
-  return `<details><summary>machinery</summary>`
+  return `<details><summary>Technical detail</summary>`
        + `<div class="machinery">${parts}</div>${raw}</details>`;
 }
 
@@ -402,6 +455,10 @@ function renderActivityRecovery(env, restoreFocus) {
   if (restoreFocus) activityRecovery.button.focus();
 }
 function renderChannel(env) {
+  if (env?.state === "ok") conversationSnapshot = env;
+  else {conversationSnapshot = null; conversationFocus = {bot:"",other:""};}
+  paintConversationFocus();
+  if (typeof refreshRoomBot === "function") refreshRoomBot();
   const el = $("channel");
   const retryFocused = !!activityRecovery && activityRecovery.button === document.activeElement;
   if (renderState(el, env, { idleWhenEmpty: (d) => !d.coverage?.partial && !d.threads.length && !d.checkins?.length && d.checkins_state !== 'unavailable' })) {
@@ -434,7 +491,8 @@ function renderChannel(env) {
     }
     frag.appendChild(article);
   }
-  for (const t of env.data.threads) {
+  const threads = focusedThreads(env.data.threads);
+  for (const t of threads) {
     const prev = existing.get(t.key);
     const reuse = prev && prev.dataset.seq === String(t.latest_seq)
       && prev.dataset.room === room && prev.dataset.receipts === channelReceiptKey(t);
@@ -448,6 +506,10 @@ function renderChannel(env) {
       }
     }
     frag.appendChild(article);
+  }
+  if (!threads.length && conversationFocus.bot) {
+    const empty = document.createElement("p"); empty.className = "dim";
+    empty.textContent = "No matching conversation in this recent window."; frag.appendChild(empty);
   }
   el.replaceChildren(frag);
   renderActivityRecovery(env, retryFocused);
@@ -565,8 +627,120 @@ function taskIssueNote(r) {
     + ` — inspect ${esc(r.task_id)}</div>`;
 }
 
+let taskFilters = {status:"",assignee:""}, taskSnapshot = null;
+let taskHistoryHeld = false, taskHistoryBusy = false, taskHistoryVersion = 0, taskHistoryNotice = "";
+function taskWindowIdentity(env) {
+  return JSON.stringify([env?.data?.task_page?.window || null, env?.data?.coverage || null]);
+}
+function clearTaskHistory(env = {state:"loading"}) {
+  taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
+  taskSnapshot = null;
+  renderTasks(env);
+}
+function refreshTaskHistory() {
+  clearTaskHistory();
+  void refreshBoards();
+}
+function acceptTaskPoll(env, settled = true) {
+  if (taskHistoryHeld) {
+    if (!settled) return taskSnapshot;
+    if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
+    taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
+  }
+  renderTasks(env);
+  return env;
+}
+function paintTaskHistory(env) {
+  const more = $("task-load-older"), refresh = $("task-refresh"), count = $("task-history-count");
+  const data = env?.state === "ok" ? env.data : null;
+  const unsupported = data?.task_page?.unavailable || data?.truncated && data?.task_page?.version !== 1;
+  if (more) {
+    more.hidden = data?.task_page?.version !== 1 || !data?.task_page?.next_cursor;
+    more.disabled = taskHistoryBusy;
+    more.textContent = taskHistoryBusy ? "Loading older work…" : "Load older work";
+    more.onclick = loadOlderTasks;
+  }
+  if (refresh) { refresh.disabled = taskHistoryBusy; refresh.onclick = refreshTaskHistory; }
+  if (count) {
+    count.hidden = !data;
+    count.textContent = data ? `${data.tasks.length} loaded task records. `
+      + (data.coverage?.partial || data.truncated || data.task_page?.unavailable ? "History coverage is incomplete. " : "Reached the oldest recorded work in the selected sources. ")
+      + (unsupported ? "A source needs an update to load older work. " : "")
+      + (taskHistoryHeld ? "Browsing loaded history; Refresh tasks returns to newest records. " : "") + taskHistoryNotice : "";
+  }
+}
+async function loadOlderTasks() {
+  const previous = taskSnapshot, token = previous?.data?.task_page?.next_cursor;
+  if (!token || previous.data.task_page.version !== 1 || taskHistoryBusy
+      || typeof sessionPaused !== "undefined" && sessionPaused) return;
+  taskHistoryHeld = taskHistoryBusy = true; taskHistoryNotice = "";
+  const version = ++taskHistoryVersion, room = currentFleet, session = sessionEpoch;
+  paintTaskHistory(previous);
+  try {
+    const q = fleetQuery();
+    const next = await jget(`/api/tasks${q}${q ? '&' : '?'}cursor=${encodeURIComponent(token)}`);
+    if (version !== taskHistoryVersion || sessionPaused || room !== currentFleet || session !== sessionEpoch) return;
+    if (next?.state !== "ok" || next.data?.task_page?.version !== 1 || next.data.task_page.cursor !== token
+        || taskWindowIdentity(next) !== taskWindowIdentity(previous)) {
+      clearTaskHistory({state:"unavailable",remediation:"Task history changed or could not be continued. Refresh tasks to read current records."});
+      return;
+    }
+    const rows = new Map(previous.data.tasks.map(t => [JSON.stringify([t.fleet,t.task_id]),t]));
+    for (const task of next.data.tasks) {
+      const key = JSON.stringify([task.fleet,task.task_id]);
+      if (!rows.has(key)) rows.set(key,task);
+    }
+    const tasks = [...rows.values()];
+    const issues = [...new Map([...(previous.data.issues || []),...(next.data.issues || [])].map(i => [JSON.stringify(i),i])).values()];
+    renderTasks({...next,data:{...next.data,tasks,issues,
+      issue_count:(previous.data.issue_count || 0) + (next.data.issue_count || 0),
+      issues_truncated:previous.data.issues_truncated || next.data.issues_truncated,
+      issue_scope:"loaded_tasks",attention_count:tasks.filter(t => t.attention).length}});
+  } catch { taskHistoryNotice = "Older work could not be read. Retry or refresh tasks."; }
+  finally { if (version === taskHistoryVersion) { taskHistoryBusy = false; paintTaskHistory(taskSnapshot); } }
+}
+function taskAssigneeKey(task) {
+  const assignment = task.current_assignment || task.assignment_history?.at(-1);
+  if (!assignment) return "unassigned";
+  const identity = assignment.assignee_uid || assignment.assignee_alias;
+  return identity ? JSON.stringify([task.fleet || "",identity]) : "unknown";
+}
+function resetTaskFilters() {
+  taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
+  taskFilters = {status:"",assignee:""}; taskSnapshot = null;
+  paintTaskFilters([],false);
+  paintTaskHistory(null);
+}
+function paintTaskFilters(rows, available) {
+  const status = $("task-filter-status"), assignee = $("task-filter-assignee"), reset = $("task-filter-reset");
+  if (!status || !assignee || !reset) return;
+  const count = $("task-filter-count");
+  if (count && (!available || !taskFilters.status && !taskFilters.assignee)) { count.hidden = true; count.textContent = ""; }
+  const choices = new Map();
+  for (const task of rows) {
+    const key = taskAssigneeKey(task), actor = task.current_assignment || task.assignment_history?.at(-1);
+    const team = typeof fleets !== "undefined" ? fleets.find(fleet => fleet.alias === task.fleet)?.display_label : null;
+    choices.set(key,key === "unassigned" ? "Unassigned" : key === "unknown" ? "Unknown assignee"
+      : `${actor.assignee_short || actor.assignee_alias || actor.assignee_uid} · ${team || task.fleet || "Team not recorded"}`);
+  }
+  if (taskFilters.assignee && !choices.has(taskFilters.assignee))
+    choices.set(taskFilters.assignee,"Selected assignee — not in this snapshot");
+  const options = '<option value="">All assignees</option>' + [...choices].sort((a,b)=>a[1].localeCompare(b[1]))
+    .map(([value,label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("");
+  if (assignee.innerHTML !== options) assignee.innerHTML = options;
+  status.value = taskFilters.status; assignee.value = taskFilters.assignee;
+  status.disabled = assignee.disabled = !available;
+  reset.disabled = !available || !taskFilters.status && !taskFilters.assignee;
+  const repaint = () => { if (taskSnapshot) renderTasks(taskSnapshot); };
+  status.onchange = () => { taskFilters.status = status.value; repaint(); };
+  assignee.onchange = () => { taskFilters.assignee = assignee.value; repaint(); };
+  reset.onclick = () => { taskFilters = {status:"",assignee:""}; repaint(); };
+}
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  taskSnapshot = env?.state === "ok" ? env : null;
+  paintTaskHistory(env);
+  paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
   const focused = document.activeElement;
   const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
   const identity = focusedRail && focused?.dataset?.taskOpen
@@ -585,18 +759,27 @@ function renderTasks(env) {
   const coverage = env?.state === "ok" ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
-                  { idleWhenEmpty: (d) => !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
+                  { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
     restoreFocus();
     return;
   }
   const rows = env.data.tasks;
+  const matches = row => (!taskFilters.status || row.state === taskFilters.status)
+    && (!taskFilters.assignee || taskAssigneeKey(row) === taskFilters.assignee);
+  const filtered = !!taskFilters.status || !!taskFilters.assignee;
   const attn = rows.filter((r) => r.attention);
+  const visible = rows.filter(matches);
+  const filterCount = $("task-filter-count");
+  if (filterCount) {
+    filterCount.hidden = !filtered;
+    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} loaded task records match. Attention count is unfiltered and covers loaded records.` : "";
+  }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
   badge.textContent = attn.length || "!";
-  badge.title = partial ? "Task attention covers readable sources only." : "";
+  badge.title = partial || env.data.truncated ? "Task attention covers loaded records in readable sources only." : "";
   const card = (r) => {
     const st = TASK_STATUS[r.state] || { label: "state unknown", cls: "s-bad" };
     const a = r.current_assignment;
@@ -619,15 +802,15 @@ function renderTasks(env) {
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || r.task_id)}</button>
-      <div class="sub">${esc(who)} · task ${esc(r.task_id)}`
+      <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
+      <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
+      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
-      + delivery + lastAct + prior + `</div>`;
+      + `</div>`;
   };
   const limited = env.data.truncated
-    ? `<div class="card attn"><div class="why">⚠ Showing the newest ${env.data.limit || 200}`
-      + ` tasks. Older work may still need attention.</div></div>` : "";
+    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${env.data.limit || 200} tasks`}. Older work may still need attention.</div></div>` : "";
   const issues = issueCount
     ? `<div class="card attn"><div class="why">⚠ ${issueCount} task-history issue(s)`
       + `${env.data.issues_truncated ? " (first 50 shown)" : ""}`
@@ -637,10 +820,11 @@ function renderTasks(env) {
   const coverageNote = partial
     ? `<div class="card attn"><div class="why">Task records are available from ${esc(coverage.reachable)}/${esc(coverage.total)} sources. Attention status is incomplete.</div></div>` : "";
   attEl.innerHTML = coverageNote + (attn.length || issues || limited
-    ? limited + issues + attn.map(card).join("")
-    : stateBlock("idle", null, null, { label: partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
-  taskEl.innerHTML = rows.filter((r) => !r.attention).map(card).join("")
-    || stateBlock("idle", null, null, { label: partial ? "no other tasks in readable sources" : "no other tasks" });
+    ? limited + issues + visible.filter(r => r.attention).map(card).join("")
+      + (filtered && !visible.some(r => r.attention) ? stateBlock("idle",null,null,{label:"no matching recorded tasks in this section"}) : "")
+    : stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
+  taskEl.innerHTML = visible.filter((r) => !r.attention).map(card).join("")
+    || stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no other tasks in readable sources" : "no other tasks" });
   restoreFocus();
 }
 
@@ -648,7 +832,7 @@ function railRow(a) {
   const live = a.last_seen && (Date.now() - Date.parse(a.last_seen)) < 36e5;
   return `<div class="actor" title="${esc(a.alias)}">
     <span class="dot ${live ? "live" : ""}"></span>
-    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
+    ${a.kind === "actor" && a.fleet ? `<button class="bot-inspect" type="button" data-bot-inspection="presence" data-bot-inspect="${esc(a.uid)}" aria-label="Inspect ${esc(a.short)} in ${esc(a.fleet)}">${esc(a.short)}</button>` : `<span>${esc(a.short)}</span>`}
     ${a.kind === "actor" && a.fleet ? `<button class="pill ghost" type="button" data-bot-message="${esc(a.uid)}" aria-label="Message ${esc(a.short)} in ${esc(a.fleet)}" disabled>Message ${esc(a.short)}</button>` : ""}
     ${a.provisional ? `<span class="prov-badge" title="provisional`
       + ` identity — unconfirmed by the registry">?</span>` : ""}
@@ -700,7 +884,7 @@ function renderFleet(env) {
   }
   const rows = env.data.identities;
   adoptRoster(new Map(rows.filter(a => a.kind === "actor" && a.fleet)
-    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, fleet: a.fleet,
+    .map(a => [a.uid, Object.freeze({ uid: a.uid, alias: a.alias, short: a.short, fleet: a.fleet,
       fleet_uid: fleets.find(f => f.alias === a.fleet)?.uid, provisional: !!a.provisional })])));
   const groups = new Set(rows.map((a) => a.fleet).filter(Boolean));
   el.innerHTML = groups.size < 2 ? rows.map(railRow).join("") : groupBy(rows, (a) => a.fleet || "")
@@ -720,7 +904,7 @@ function renderFleet(env) {
     const identity = rosterIdentities.get(button.dataset.botInspect), version = rosterGeneration, epoch = sessionEpoch;
     button.addEventListener("click", () => {
       if (!button.isConnected || sessionPaused || epoch !== sessionEpoch || version !== rosterGeneration) return;
-      inspectBot(identity);
+      inspectBot({...identity,last_seen:rows.find(a => a.uid === identity.uid)?.last_seen});
     });
   });
   el.querySelectorAll("[data-bot-message]").forEach(button => {
@@ -755,6 +939,13 @@ function adoptRoster(next) {
     return !!b && Object.keys(a).every(key => a[key] === b[key]);
   });
   if (!same) { rosterIdentities = next; ++rosterGeneration; }
+  if (!same && typeof roomBotInspection !== "undefined" && roomBotInspection) {
+    const selected = roomBotInspection.identity, replacement = next.get(selected.uid);
+    if (replacement && ["uid","alias","fleet","fleet_uid","provisional"].every(key => replacement[key] === selected[key]))
+      roomBotInspection.roster = rosterGeneration;
+    refreshRoomBot();
+  }
+  if (typeof paintConversationFocus === "function") paintConversationFocus();
   if (!same && equipmentAlias && currentView === "fleet") void openEquipment(equipmentAlias);
   else refreshEquipmentAction();
 }
@@ -774,9 +965,10 @@ function renderHeader(env) {
   }
   const t = env.data.totals;
   const coverage = env.data.coverage;
-  const coverageCopy = coverage?.partial ? ` · <small class="warn">${coverage.reachable}/${coverage.total} sources readable; totals cover readable sources</small>` : '';
+  const coverageCopy = t.overview_retained ? ' · <small class="warn">Refreshing summaries; totals include the last read for pending computers</small>'
+    : coverage?.partial ? ` · <small class="warn">Team summaries: ${coverage.reachable}/${coverage.total} readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
-    el.innerHTML = `<span class="dim">${coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
+    el.innerHTML = `<span class="dim">${t.overview_retained ? "no fleet recorded in last summaries" : coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   const status = env.data.fleets?.length
@@ -810,8 +1002,8 @@ function renderHostFacts(env) {
   const el = $("host-facts");
   if (!el) return;
   if (env?.data?.sources) {
-    el.textContent = env.data.sources.map(s => `${s.label}: ${s.state === 'ok' && s.host
-      ? `ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'} · rows ${s.host.rows} · spool ${s.host.spool_files}`
+    el.textContent = env.data.sources.map(s => `${s.label}: ${(s.state === 'ok' || s.overview_retained) && s.host
+      ? `${s.overview_retained ? 'last summary, refreshing · ' : ''}ingest ${s.host.last_ingest_at ? ago(s.host.last_ingest_at) : 'never'}${Number.isSafeInteger(s.host.rows) ? ` · rows ${s.host.rows}` : ''} · spool ${s.host.spool_files}`
       : s.connection_state === 'not_connected' ? 'not connected'
       : s.connection_state === 'ready' ? 'team summary unavailable' : s.state}`).join(' | ');
     return;
@@ -819,7 +1011,7 @@ function renderHostFacts(env) {
   const h = env && env.state === "ok" && env.data ? env.data.host : null;
   el.textContent = h
     ? `host ingest ${h.last_ingest_at ? ago(h.last_ingest_at) : "never"}`
-      + ` · rows ${h.rows} · spool ${h.spool_files}`
+      + `${Number.isSafeInteger(h.rows) ? ` · rows ${h.rows}` : ''} · spool ${h.spool_files}`
     : "host ingest — · rows — · spool —";
 }
 
@@ -828,16 +1020,17 @@ function renderSummary(env) {
   if (env?.data?.sources) {
     const c = env.data.coverage;
     const health = s => {
+      if (s.state === 'checking') return 'checking recorder status';
       if (s.state !== 'ok') return s.connection_state === 'not_connected' ? 'not connected'
         : s.connection_state === 'disconnected' ? 'disconnected'
-        : s.connection_state === 'ready' ? 'recording summary unavailable' : s.state;
+        : s.connection_state === 'ready' ? 'recorder status unavailable' : s.state;
       if (s.summary?.daemon_serving === false) return 'recorder DOWN';
       if (s.summary?.daemon_serving !== true) return 'recorder unknown';
       const at = Date.parse(s.provenance?.last_ingest_at);
       return Number.isFinite(at) && Date.now() - at < 12e4 ? 'recording' : 'recorder up, quiet';
     };
     beat.className = `dot ${!c.partial && env.data.sources.every(s => health(s) === 'recording') ? 'ok' : 'warn'}`;
-    label.textContent = `${c.reachable}/${c.total} sources readable · `
+    label.textContent = `Recorder status: ${c.reachable}/${c.total} readable · `
       + env.data.sources.map(s => `${s.label}: ${health(s)}`).join(' · ');
     return;
   }
@@ -865,6 +1058,7 @@ function renderSummary(env) {
 // switch when the host has a fleet dimension.
 const OV_PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
                            "down"];
+const overviewDetails = new Set(); // Tab-only presentation, keyed by canonical team UID.
 function ovPresence(p) {
   const c = p.counts || {};
   const parts = OV_PRESENCE_ORDER.filter((s) => c[s] > 0)
@@ -881,6 +1075,10 @@ function ovNum(n, word, bad = true) {
 function renderOverview(env) {
   const el = $("overview");
   if (!el) return;
+  for (const details of el.querySelectorAll('[data-team-details]')) {
+    if (details.open) overviewDetails.add(details.dataset.teamDetails);
+    else overviewDetails.delete(details.dataset.teamDetails);
+  }
   if (!env || (env.state !== "ok" && !env.data?.sources)) {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
                               env && env.provenance, env && env.remediation);
@@ -890,18 +1088,23 @@ function renderOverview(env) {
   const dimension = fleets.length >= 2;
   const hidden = hiddenTeams();
   const cards = d.fleets.map((f) => `
-    <div class="ov-card ${dimension ? "pick" : ""} ${
+    <div class="ov-card ov-team ${
         dimension && f.alias === currentFleet ? "on" : ""}"
-         data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''} ${dimension ? 'role="button" tabindex="0"' : ""}
-         title="${esc(f.display_label || f.alias)}${dimension ? " — open this room" : ""}">
+         data-fleet="${esc(f.alias)}" ${!showHiddenTeams && hidden.has(f.uid) && f.alias !== currentFleet && !(fleets.length === 1 && currentFleet === null) ? 'hidden' : ''}>
       <div class="ov-head"><b>${esc(f.display_label || f.alias)}</b>
+        ${dimension ? `<button type="button" class="pill ghost" data-overview-fleet="${esc(f.alias)}" aria-label="Open team ${esc(f.display_label || f.alias)}">Open team</button>` : ''}</div>
+      ${f.overview_retained ? `<div class="ov-line ov-warn">Refreshing · last summary ${esc(f.overview_read_at ? ago(f.overview_read_at) : 'at an unknown time')}</div>` : ''}
+      <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
+      <div class="ov-line">${ovNum(f.open, "open", false)} ·
+        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")}</div>
+      <details class="ov-team-details"${typeof f.uid === "string" && f.uid ? ` data-team-details="${esc(f.uid)}"${overviewDetails.has(f.uid) ? ' open' : ''}` : ''}>
+        <summary>Team details</summary>
+      <div class="ov-line">
         <span>${f.bots} recorded bot${f.bots === 1 ? "" : "s"}${
           f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed identities)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
-      <div class="ov-line ov-status-counts">${esc(fleetStatusCopy(f))}</div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
-      <div class="ov-line">${ovNum(f.open, "open", false)} ·
-        ${ovNum(f.attention, "need you")} · ${ovNum(f.overdue, "overdue")} ·
+      <div class="ov-line">
         <span title="${esc(f.orphaned_reason || "")}">${
           ovNum(f.orphaned, "orphaned")}</span></div>
       <div class="ov-line">
@@ -913,16 +1116,17 @@ function renderOverview(env) {
             : ` · ${ovNum(f.unacked, "unacked")} <small title="${esc(f.acked_at || "")}">acked by ${
                 esc(f.acked_by)} ${esc(ago(f.acked_at))}</small>`}</span> ·
         <span>active ${esc(ago(f.last_activity_at))}</span></div>
+      </details>
     </div>`).join("");
   if (d.sources) {
     el.innerHTML = cards + d.sources.map(s => `<div class="ov-card ov-host">
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
-      <div class="ov-line">Team summary: ${s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
-      <div class="ov-line">${s.state === 'ok' && s.host
-        ? `${s.host.rows} rows · ${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
+      <div class="ov-line">Team summary: ${s.overview_retained ? `refreshing; showing the last read ${esc(s.overview_read_at ? ago(s.overview_read_at) : 'at an unknown time')}` : s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
+      <div class="ov-line">${(s.state === 'ok' || s.overview_retained) && s.host
+        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
-      <div class="ov-line">${s.connection_state === 'ready' && s.state !== 'ok'
+      <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
         ? 'Team summary unavailable; activity and task records remain independent.' : 'Separate source snapshot; recent windows are per source.'}</div>
       ${s.overview_retry_paused ? `<div class="ov-line">Automatic summary retries paused. Timeout recorded ${esc(s.overview_checked_at || 'at an unknown time')}.${s.overview_read_at ? ` Last successful summary ${esc(s.overview_read_at)}.` : ' No successful summary recorded in this connection.'}</div>
         ${typeof interactionApi.retryOverview === 'function' && s.connection_state === 'ready' ? `<button type="button" class="pill ghost" data-overview-retry="${esc(s.key)}" aria-label="Retry summary for ${esc(s.label)}">Retry summary</button>` : ''}` : ''}
@@ -960,7 +1164,7 @@ function renderOverview(env) {
       <div class="ov-head"><b>host</b>
         <span class="${h.daemon_serving ? "ov-ok" : "ov-bad"}">${
           h.daemon_serving ? "recorder up" : "recorder DOWN"}</span>
-        <small>${h.rows} rows</small></div>
+        ${Number.isSafeInteger(h.rows) ? `<small>${h.rows} rows</small>` : ''}</div>
       <div class="ov-line">${spool} · ${lag}</div>
       <div class="ov-line">${facets}</div>
       ${d.capture_config === "malformed"
@@ -993,12 +1197,8 @@ $("task-detail").addEventListener("click", toggleMessageBody);
 $("overview").addEventListener("click", (e) => {
   const retry = e.target.closest("[data-overview-retry]");
   if (retry) { void retryOverviewSummary(retry); return; }
-  const c = e.target.closest(".ov-card.pick");
-  if (c) pickFleet(c.dataset.fleet);
-});
-$("overview").addEventListener("keydown", (e) => {
-  const c = e.target.closest(".ov-card.pick");
-  if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); pickFleet(c.dataset.fleet); }
+  const button = e.target.closest("[data-overview-fleet]");
+  if (button) pickFleet(button.dataset.overviewFleet);
 });
 
 // Debug rail: a ring buffer rendered ONLY while visible (the hidden rail
@@ -1030,11 +1230,11 @@ let overviewEpoch = 0;
 let overviewDueAt = 0;
 const OVERVIEW_INTERVAL = 60000;
 
-function invalidateOverview() {
+function invalidateOverview(snapshot = null) {
   ++overviewEpoch;
   overviewDueAt = 0;
   clearTimeout(overviewTimer); overviewTimer = null;
-  const env = {state: "unavailable", provenance: null, remediation: sessionPaused
+  const env = !sessionPaused && snapshot?.data?.sources ? snapshot : {state: "unavailable", provenance: null, remediation: sessionPaused
     ? "Team summary is paused until access resumes." : "Team summary is refreshing."};
   renderHeader(env); renderHostFacts(env); renderOverview(env);
 }
@@ -1155,7 +1355,10 @@ async function refreshBoards() {
   };
   const conversation = Promise.all([
     panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
-    panel("/api/tasks" + q, renderTasks),
+    (async () => {
+      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false); });
+      return current() ? acceptTaskPoll(value,true) : value;
+    })(),
   ]).then(([ch, tk]) => {
     // Partial paints never replace the work-loop's paired canonical snapshots.
     if (current()) workLoop.update(tk, ch);
@@ -1196,12 +1399,14 @@ function openStream() {
     try {
       const payload = JSON.parse(ev.data);
       for (const row of payload.rows) pushDebugRow(row);
-      if (payload.rows.length || payload.coverage_changed || payload.routing_changed) {
+      if (payload.rows.length || payload.coverage_changed || payload.routing_changed || payload.stream_changed) {
+        if (payload.coverage_changed || payload.routing_changed || payload.stream_changed) clearTaskHistory();
         // Learning rooms schedules another board read without retiring the
         // canonical overview that just supplied those same room identities.
         if (payload.coverage_changed || payload.routing_retired) ++generation;
         if (payload.coverage_changed || payload.routing_retired) resetAgentPresence();
-        if (payload.coverage_changed) invalidateOverview();
+        if (payload.coverage_changed || payload.overview_invalidated)
+          invalidateOverview(payload.overview || payload.overview_invalidated);
         scheduleRefresh();
       }
     } catch { /* malformed push — the next board refresh corrects */ }
@@ -1214,6 +1419,7 @@ function openStream() {
     // they hold came from a source that has stopped answering (§16).
     try {
       const env = JSON.parse(ev.data);
+      clearTaskHistory(env);
       // A refresh already in flight read the source BEFORE this loss: retire
       // it, or its older text repaints what is cleared below. The retired
       // read would have re-armed the safety timer, so the coalesced refetch
@@ -1286,6 +1492,7 @@ function ansiToHtml(text) {
 let currentView = "channel";
 let equipmentAlias = null;
 let equipmentGeneration = 0, equipmentSelection = null, equipmentFocus = null, inventoryAliases = new Set();
+let roomBotInspection = null, roomBotEpoch = 0;
 let rosterGeneration = 0, rosterIdentities = new Map();
 let inventoryGeneration = 0;
 let currentFleet = null;   // null = auto (single fleet, or no pick yet)
@@ -1314,6 +1521,7 @@ function savePick(f) {
 function adoptFleets(env) {
   if (!env || !env.data || (env.state !== "ok" && !Array.isArray(env.data.fleet_choices))) return;
   fleets = env.data.fleet_choices || env.data.fleets;   // the server's order (ORDER BY alias) is the tab order
+  if (typeof refreshRoomBot === "function") refreshRoomBot();
   // An empty unreadable first snapshot is not discovery. A later degraded
   // overview must not erase a dimension already learned from a readable reply.
   fleetsSeen ||= env.data.coverage?.reachable !== 0 || fleets.length > 0;
@@ -1336,6 +1544,7 @@ function channelUrl() {
 }
 
 function renderFleetTabs() {
+  if (typeof updateRoomHeading === "function") updateRoomHeading();
   const el = $("fleet-tabs");
   if (!fleets.length) { el.innerHTML = ""; return; }
   const hidden = hiddenTeams(), hiddenCount = fleets.filter(f => hidden.has(f.uid)).length;
@@ -1343,13 +1552,13 @@ function renderFleetTabs() {
   // selected; the merged host view is the explicit last resort.
   el.innerHTML = [...fleets.filter(f => showHiddenTeams || !hidden.has(f.uid) || f.alias === currentFleet || fleets.length === 1 && currentFleet === null).map((f) => f.alias), "all"].map((f) => {
     const meta = fleets.find((x) => x.alias === f);
-    const n = meta ? `<small>${esc(meta.source_state && meta.source_state !== "ok"
+    const refreshing = meta?.overview_retained && meta.source_state === 'checking' && meta.connection_state === 'ready';
+    const n = meta ? `<small>${esc(refreshing ? 'Refreshing' : meta.source_state && meta.source_state !== "ok"
       ? meta.connection_state === 'ready' ? 'summary unavailable'
       : meta.connection_state === 'not_connected' ? 'not connected' : meta.source_state : `${meta.bots} recorded`)}</small>`
       : `<small>${typeof interactionApi.dispose === "function" ? "sources" : "host"}</small>`;
     return `<span class="fleet-tab-choice"><button class="pill ghost ${f === currentFleet || currentFleet === null && fleets.length === 1 && meta ? "on" : ""}"`
       + ` data-fleet="${esc(f)}" type="button">${esc(meta?.display_label || f)} ${n}</button>`
-      + (meta ? `<button class="pill ghost fleet-message" data-message-team="${esc(f)}" type="button" title="Open this team’s bot list; sending still requires granted access" aria-label="Choose a bot to message in ${esc(meta.display_label || f)}">Message a bot</button>` : '')
       + (meta && typeof meta.uid === 'string' && meta.uid.trim() ? `<button class="pill ghost fleet-hide" data-hide-team="${esc(meta.uid)}" type="button" aria-label="${hidden.has(meta.uid) ? 'Show' : 'Hide'} ${esc(meta.display_label || f)} in my view">${hidden.has(meta.uid) ? 'Unhide' : 'Hide'}</button>` : '') + '</span>';
   }).join("") + (hiddenCount ? `<button class="pill ghost fleet-visibility" type="button" aria-pressed="${showHiddenTeams}">${showHiddenTeams ? 'Hide hidden teams' : 'Show hidden teams'} (${hiddenCount})</button><small class="fleet-visibility-note">Hidden only in this browser; the selected team stays visible. Combined activity and totals still include hidden teams.</small>` : '');
   el.querySelectorAll("[data-fleet]").forEach((b) =>
@@ -1358,10 +1567,6 @@ function renderFleetTabs() {
     setTeamHidden(b.dataset.hideTeam, !hidden.has(b.dataset.hideTeam));
     renderFleetTabs(); applyFleetVisibility();
     focusFleetControl(b.dataset.hideTeam);
-  }));
-  el.querySelectorAll("[data-message-team]").forEach(b => b.addEventListener("click", () => {
-    pickFleet(b.dataset.messageTeam);
-    $("fleet")?.scrollIntoView?.({ block: "nearest" });
   }));
   el.querySelector?.('.fleet-visibility')?.addEventListener('click', () => {
     showHiddenTeams = !showHiddenTeams; renderFleetTabs(); applyFleetVisibility();
@@ -1389,13 +1594,16 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
+  if (currentFleet !== f && typeof resetTaskFilters === "function") resetTaskFilters();
+  if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
+  if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
   if (currentFleet !== f) { ++generation; closeEquipment(); }
   currentFleet = f;
   syncWorkRoom();
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
-  for (const card of $("overview")?.querySelectorAll?.(".ov-card.pick") || []) {
+  for (const card of $("overview")?.querySelectorAll?.(".ov-card.ov-team") || []) {
     card.classList.toggle("on", card.dataset.fleet === currentFleet);
   }
   if (currentView === "fleet") pollFleet();   // the tab follows the pick
@@ -1414,22 +1622,34 @@ function agentDirectoryVisible() {
 }
 function resetAgentPresence() {
   agentPresence = null; agentPresenceDue = 0;
+  if (typeof closeRoomBot === "function") closeRoomBot();
   if (agentDirectoryVisible()) renderState($("grid"), { state: "loading" });
 }
-function agentDirectoryCard(actor, presence) {
-  const source = presence?.data?.sources?.find(s => actor.uid.startsWith(s.key + "::"));
+function botPresenceFacts(actor, presence) {
+  const sources = presence?.data?.sources;
   const observed = presence?.data?.bots?.find(b => b.alias === actor.alias);
+  const qualifier = actor.uid.match(/^([a-z][a-z0-9-]{0,31})::/)?.[1];
+  // Scoped connected reads omit sources; their exact bot alias is still projected.
+  const scoped = !actor.uid.includes("::") || qualifier && observed
+    && actor.alias.startsWith(qualifier + "::") && actor.fleet_uid?.startsWith(qualifier + "::")
+    && actor.fleet?.startsWith(qualifier + " / ");
+  const source = sources ? sources.find(s => actor.uid.startsWith(s.key + "::") && actor.alias.startsWith(s.key + "::"))
+    : scoped && presence?.data ? {...presence.data,state:presence.state,provenance:presence.provenance} : null;
   const live = source?.state === "ok" && source.sampler_available
     && ["up", "down"].includes(observed?.live) ? observed.live : "unknown";
   const heartbeat = source?.state === "ok" && !source.recorded_unavailable
     && observed ? PRESENCE_WORD[observed.presence] || "unknown" : "unknown";
+  return {live,heartbeat,checked:source?.state === "ok" ? source.provenance?.checked_at : null};
+}
+function agentDirectoryCard(actor, presence) {
+  const {live,heartbeat,checked} = botPresenceFacts(actor,presence);
   const team = fleets.find(f => f.alias === actor.fleet);
   return `<article class="agent-card"><h3>${esc(actor.short || actor.alias)}</h3>`
     + `<p>${esc(team?.display_label || actor.fleet)}</p>`
     + `<dl><dt>Recorded activity</dt><dd>${esc(ago(actor.last_seen))}</dd>`
     + `<dt>Live session</dt><dd>${esc(live)}</dd>`
     + `<dt>Recorded heartbeat</dt><dd>${esc(heartbeat)}</dd></dl>`
-    + (source?.provenance?.checked_at ? `<small>Presence checked ${esc(ago(source.provenance.checked_at))}</small>` : "")
+    + (checked ? `<small>Presence checked ${esc(ago(checked))}</small>` : "")
     + (actor.provisional ? `<p class="dim">Unconfirmed identity; messaging is unavailable.</p>` : "")
     + `<button class="pill ghost" type="button" data-agent-team="${esc(actor.uid)}"`
     + ` ${!team || actor.provisional ? "disabled" : ""}>Open team</button></article>`;
@@ -1625,11 +1845,16 @@ function renderPresenceStrip(counts, recordedDown) {
 }
 
 function setView(view) {
+  if (view !== "channel" && typeof closeRoomBot === "function") closeRoomBot();
   const wasDirectory = agentDirectoryVisible();
   if (view !== "fleet") closeEquipment();
   currentView = view;
+  if (workLoop) workLoop.setView(view);
   document.body.classList.toggle("agent-directory-view", agentDirectoryVisible());
   $("channel").hidden = view !== "channel";
+  $("rail-right").hidden = view !== "tasks";
+  $("room-focus").hidden = view !== "channel";
+  $("search").hidden = view !== "channel";
   $("search-results").hidden = true;   // any view switch closes results
   if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
@@ -1820,10 +2045,12 @@ function renderTrust(env) {
       ${fleets}
     </div>
     <div class="trust-block"><h3>identities</h3>
-      <div class="trust-row">${trustNum(d.provisional_identities, "trust-warn")}
-        <b>provisional identities</b>
-        <small>lazily minted, unconfirmed by the registry — Phase 2b
-        confirms these</small></div>
+      <div class="trust-row">${trustNum(d.provisional_actor_suspects, "trust-warn")}
+        <b>unconfirmed bot actors</b>
+        <small>not confirmed by the registry — excludes external humans</small></div>
+      <div class="trust-row"><span class="trust-num">${d.provisional_identities}</span>
+        <b>provisional identities in total</b>
+        <small>external humans can remain provisional</small></div>
     </div>`;
 }
 
@@ -1910,7 +2137,7 @@ function showLoading() {
 }
 showLoading();
 let workLoop = null;
-workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); } });
+workLoop = mountWorkLoop({ api: interactionApi, renderThread: thread => threadArticle(thread, false), refresh: scheduleRefresh, onActionsChange() { refreshEquipmentAction(); refreshRosterActions(); paintConversationFocus(); refreshRoomBot(); } });
 let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
@@ -1925,8 +2152,11 @@ function activeRoom() {
 }
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
+      onConnectionAttention() { const details = $("computers-details"); if (details) details.open = true; },
       onPause() {
         sessionPaused = true;
+        if (typeof resetConversationFocus === "function") resetConversationFocus();
+        if (typeof resetTaskFilters === "function") resetTaskFilters();
         activityRecovery?.paint();
         ++sessionEpoch;
         ++generation; ++trustGen;
@@ -2095,6 +2325,11 @@ function closeEquipment() {
 }
 function inspectBot(identity) {
   if (!identity || sessionPaused) return;
+  if (currentView === "channel" || typeof interactionApi.dispose === "function") {
+    if (activeRoom() !== "all" && activeRoom() !== identity.fleet) pickFleet(identity.fleet);
+    if (currentView !== "channel") setView("channel");
+    void openRoomBot(identity); return;
+  }
   const origin = document.activeElement;
   const roomChanged = activeRoom() !== identity.fleet, teamOpen = currentView === "fleet";
   if (roomChanged) pickFleet(identity.fleet);
@@ -2226,4 +2461,114 @@ async function openEquipment(alias) {
     }
     box.scrollIntoView({ block: "nearest" });
   }
+}
+
+// Room inspection is a read-only presence snapshot, separate from equipment.
+function roomBotPanel(create = false) {
+  let panel = $("room-bot-inspection");
+  if (panel?.id === "room-bot-inspection") return panel;
+  const anchor = $("room-focus");
+  if (!create || !anchor) return null;
+  panel = document.createElement("section"); panel.id = "room-bot-inspection";
+  panel.className = "room-bot-inspector"; panel.hidden = true;
+  panel.setAttribute("aria-label", "Bot inspection"); anchor.after(panel);
+  return panel;
+}
+function closeRoomBot() {
+  ++roomBotEpoch; roomBotInspection = null;
+  const panel = roomBotPanel();
+  if (panel) { panel.innerHTML = ""; panel.hidden = true; }
+}
+function currentRoomBot(snapshot = roomBotInspection) {
+  if (!snapshot || sessionPaused || snapshot.session !== sessionEpoch || snapshot.roster !== rosterGeneration
+      || currentView !== "channel" || activeRoom() !== snapshot.room
+      || snapshot.room !== "all" && snapshot.room !== snapshot.identity.fleet) return false;
+  const current = rosterIdentities.get(snapshot.identity.uid);
+  return !!current && !current.provisional
+    && ["uid","alias","fleet","fleet_uid"].every(key => current[key] === snapshot.identity[key])
+    && fleets.some(f => f.alias === current.fleet && f.uid === current.fleet_uid);
+}
+function conversationIdentity(uid) {
+  if (sessionPaused || conversationSnapshot?.state !== "ok") return null;
+  const actor = rosterIdentities.get(uid), sources = conversationSnapshot.data.sources;
+  return actor && !actor.provisional && (activeRoom() === "all" || actor.fleet === activeRoom())
+    && (!sources || sources.some(source => source.state === "ok" && actor.uid.startsWith(source.key + "::")
+      && actor.alias.startsWith(source.key + "::"))) ? actor : null;
+}
+function roomBotRecipient() {
+  return currentRoomBot() ? {...rosterIdentities.get(roomBotInspection.identity.uid),current:true} : null;
+}
+function refreshRoomBot() {
+  if (!roomBotInspection) return;
+  if (!currentRoomBot()) { closeRoomBot(); return; }
+  const conversation = roomBotPanel()?.querySelector(".rb-conversation");
+  if (conversation) conversation.disabled = !conversationIdentity(roomBotInspection.identity.uid);
+  const button = roomBotPanel()?.querySelector(".ed-message");
+  if (button) button.disabled = !workLoop?.canSelectMessageRecipient(roomBotRecipient());
+}
+async function openRoomBot(identity) {
+  const current = identity && rosterIdentities.get(identity.uid);
+  if (!current || current.provisional || ["alias","fleet","fleet_uid"].some(key => current[key] !== identity[key])) return;
+  const snapshot = {identity:Object.freeze({...current,last_seen:identity.last_seen}),session:sessionEpoch,roster:rosterGeneration,room:activeRoom()};
+  if (!currentRoomBot(snapshot)) return;
+  const panel = roomBotPanel(true); if (!panel) return;
+  const ticket = ++roomBotEpoch; roomBotInspection = snapshot;
+  panel.hidden = false;
+  const heading = `<div class="ed-head"><b>${esc(current.short || current.alias)}</b><button type="button" class="pill ghost ed-close">Close inspection</button></div>`;
+  const connectClose = () => {
+    const close = panel.querySelector(".ed-close");
+    close.onclick = () => {
+      if (!close.isConnected || ticket !== roomBotEpoch || roomBotInspection !== snapshot) return;
+      closeRoomBot();
+      [...($("fleet")?.querySelectorAll?.('[data-bot-inspect]') || [])]
+        .find(button => button.dataset.botInspect === current.uid)?.focus();
+    };
+  };
+  panel.innerHTML = heading + '<p class="note">Checking recorded heartbeat and live session…</p>';
+  connectClose(); panel.querySelector(".ed-close").focus(); panel.scrollIntoView({block:"nearest"});
+  let value;
+  try { value = await jget(`/api/presence?fleet=${encodeURIComponent(current.fleet)}`); }
+  catch { value = {state:"unavailable"}; }
+  if (ticket !== roomBotEpoch || roomBotInspection !== snapshot) return;
+  if (!currentRoomBot(snapshot)) { closeRoomBot(); return; }
+  const focused = panel.contains(document.activeElement);
+  const facts = botPresenceFacts(current,value);
+  panel.innerHTML = heading + `<dl><dt>Recorded activity</dt><dd>${esc(snapshot.identity.last_seen ? ago(snapshot.identity.last_seen) : "unknown")}</dd>
+    <dt>Live session at check</dt><dd>${esc(facts.live)}</dd>
+    <dt>Recorded heartbeat</dt><dd>${esc(facts.heartbeat)}</dd>
+    <dt>Presence checked</dt><dd>${esc(facts.checked ? ago(facts.checked) : "unconfirmed")}</dd></dl>
+    <p class="note">Snapshot only. Refresh to check again; recorded activity alone does not mean idle.</p>
+    ${value?.state !== "ok" ? '<p class="note">Presence is unavailable. No running or idle state is inferred.</p>' : ''}
+    <div class="room-bot-actions"><button type="button" class="pill ghost rb-refresh">Refresh status</button>
+    <button type="button" class="pill ghost rb-conversation" disabled>View conversation</button>
+    <button type="button" class="pill ghost ed-message" disabled>Message this bot</button>
+    ${typeof interactionApi.dispose !== "function" ? '<button type="button" class="pill ghost rb-equipment">Equipment details</button>' : ''}</div>`;
+  connectClose();
+  panel.querySelector(".rb-refresh").onclick = () => {
+    if (ticket === roomBotEpoch && currentRoomBot(snapshot)) void openRoomBot(snapshot.identity);
+  };
+  const conversation = panel.querySelector(".rb-conversation");
+  conversation.onclick = () => {
+    if (!conversation.isConnected || ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    const actor = conversationIdentity(snapshot.identity.uid);
+    if (!actor) { refreshRoomBot(); return; }
+    conversationFocus = {bot:actor.alias,other:""};
+    clearTimeout(searchTimer); searchTimer = null;
+    $("search").value = ""; $("search-results").hidden = true; $("channel").hidden = false;
+    closeRoomBot(); renderChannel(conversationSnapshot);
+    $("room-bot")?.focus(); $("channel").scrollIntoView({block:"nearest"});
+  };
+  const message = panel.querySelector(".ed-message");
+  message.onclick = () => {
+    if (!message.isConnected || ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    if (workLoop.selectMessageRecipient(roomBotRecipient())) { closeRoomBot(); $("work-loop").scrollIntoView({block:"nearest"}); }
+    else refreshRoomBot();
+  };
+  const equipment = panel.querySelector(".rb-equipment");
+  if (equipment) equipment.onclick = () => {
+    if (ticket !== roomBotEpoch || !currentRoomBot(snapshot)) return;
+    setView("fleet"); inspectBot(snapshot.identity);
+  };
+  refreshRoomBot();
+  if (focused) panel.querySelector(".ed-close").focus();
 }

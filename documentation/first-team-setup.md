@@ -1,116 +1,79 @@
 # First-team setup
 
-Use this route to create a lead, engineer and reviewer for a bounded goal in an existing approved repository, through your [Claudfather.ai](https://claudfather.ai) workspace. It joins release assembly, local computer approval, browser preview, one explicit launch and the original activation receipt. No Telegram channel is required. The [Telegram seed/direct-CLI walkthrough](getting-started.md#3-author-the-first-fleet) remains an optional operator path.
+The package's `revenue-web-app` template creates a lead, engineer and reviewer for a human-approved goal in an existing repository. No Telegram channel is required. This page describes the operator CLI route; newcomer browser setup on the managed Git runtime has not completed cold-host acceptance. Do not substitute the old browser launch or guided installer for these commands.
 
-A supervised trial has completed native launch, an implementation with independent review, and browser task feedback. That does not establish unattended installation or automatic native consent. **The revised newcomer instructions still require a fresh cold run.** Candidate qualification and public availability are separate: a trusted exact release can be assembled before website setup is enabled. If **Create the first team** is unavailable, stop before browser launch at that publication gate rather than substituting seed activation.
+Complete [Getting started](getting-started.md) through managed installation preparation and its credential gate. Keep the stable `CLI`, explicit `DATA`, and native directory returned by `host setup`. Provider sign-in, Git/CLI and MCP repository access must be verified for this OS user; a repository name or website login proves none of those.
 
-## Prepare the installation and access
+## Prepare one exact team
 
-Use a fresh, dedicated data root with no selected release, activation history, fleet runtime or existing recorder. Do not use this first-team route to repair or replace an existing installation. Keep an interrupted activation's original identifiers and inspect its existing recovery state instead.
-
-Before release assembly, check the noncredential host prerequisites and select trusted inputs:
-
-- The [getting-started prerequisites](getting-started.md#prerequisites), including CPython 3.11 for the release-bundle path, a working native user manager, `tmux`, `jq` and Claude Code. Choose the OS user with its actual permissions in mind.
-- A trusted matching release that includes the `revenue-web-app` template, `host owner allow-setup` and the `[plane-ui]` dependencies. Choose either the [trusted local installer](getting-started.md#trusted-local-release-bundle-no-checkout-required), explicitly built with `plane-ui`, or the [source-build alternative](getting-started.md#1-prepare-the-release-inputs-source-build-alternative) with `[plane-ui]` in its wheelhouse. No current hosted installer, latest-release download or compatible artifact is promised by this guide.
-
-For the operator source-build alternative, use a committed revision that includes this setup capability, record its full revision and retain its wheel/lock checksums. These features are merged; a source build still needs qualification with the matching browser publication before it is offered as a tested setup release. Building and assembling a candidate is allowed while website setup publication is gated; it does not qualify or publish that candidate.
-
-Assemble the release with the chosen getting-started path, retaining `WORK/host-setup.json`, `DATA` and its exact returned `RELEASE_CLI`. Source-build users complete sections 1–2 only; **do not copy/activate the seed fleet** for this browser trial. Assembly starts no bots. Read its unsuccessful result before proceeding; do not guess a CLI, release or native directory.
-
-## Continue after release assembly
-
-From the successful assembly result, retain the exact release and native directory:
+Use the exact approved repository and a bounded goal, replacing the example values. This stages the same retained update operation used by authored `--config` setup. Choose this command or the authored-config command, not both.
 
 ```bash
-RELEASE_ID=$(jq -er \
-  'select(.ok == true) | .data.release_id | select(type == "string" and length > 0)' \
-  "$WORK/host-setup.json") &&
-USER_UNIT_DIR=$(jq -er \
-  'select(.ok == true) | .data.install_directories | select(type == "array" and length > 0) | .[0] | select(type == "string" and length > 0)' \
-  "$WORK/host-setup.json")
+"$CLI" --root "$DATA" --fleet example fleet setup \
+  --template revenue-web-app --repository example-org/example-repo \
+  --goal "Implement the approved issue with review and the repository's required checks" \
+  --install-directory "$NATIVE_DIRECTORY" --plan-only --json
 ```
 
-## Before connecting: access and publication gates
-
-Assembly is complete; it has not selected a release or started a team. Before owner pairing, workspace approval or browser launch, establish:
-
-- Native Tailscale identity and private HTTPS ingress configured to forward to this host's **private Unix owner socket**, using the [owner-server boundary](architecture/observable-plane.md#private-socket-owner-server-and-source-binding). The ordinary localhost `plane view` forwarding recipe is not this owner server. Provisioning Tailscale/Serve remains a host prerequisite; the commands below do not configure it.
-- A signed-in website workspace and a matching operational browser publication containing the same release's first-team setup capability. Saving a computer's exact HTTPS address supplies navigation only. The website issuer and operational browser origin must be the deployed, configured HTTPS origins; do not substitute demo or preview aliases. Browser local-network permission and actual device connectivity need separate verification.
-- Human-approved `OWNER/REPO` scope and goal, native provider authentication for the OS user, and separately provisioned host Git/CLI and GitHub MCP access to that repository. A GitHub website login, template name or repository string proves none of that access. This route does not install a GitHub App, create repository credentials or prepare a repository automatically.
-
-**Credential gate:** stop here if provider/repository access, website membership or native Tailscale identity is missing or unverified. Do not borrow a running fleet's credentials, start the owner server or launch a team to discover whether access works. A cold-host validation stops at this gate and records its exploration events; the continuation below is for an operator who has separately established the prerequisites. This route uses no Telegram channel.
-
-Use operator terminals on this computer, outside generated bot or managed-service contexts. Keep the same `DATA`, sealed `RELEASE_CLI` and native user domain throughout. Set `HOST_ORIGIN` to the exact private HTTPS owner-server origin, `TAILSCALE` to the absolute native executable, `WORKSPACE_ISSUER` to the configured website issuer and `WORKSPACE_ORIGIN` to the configured operational browser origin. These are existing deployment values, not URLs generated by setup.
-
-## Pair the owner before the first fleet
-
-In the first terminal:
+Review the original request ID, target revision, configuration fingerprint, team, repository, goal and native consumers. Preparation starts no agents and grants no owner/browser access. Stop before continuing until credentials, repository access and the exact native scope are approved. Starting agents can consume provider usage.
 
 ```bash
-"$RELEASE_CLI" --root "$DATA" host owner initialize --before-first-fleet &&
-"$RELEASE_CLI" --root "$DATA" host owner serve \
-  --origin "$HOST_ORIGIN" --tailscale "$TAILSCALE"
+"$CLI" --root "$DATA" host update status --json
+"$CLI" --root "$DATA" host update continue --json
 ```
 
-Initialization asks for its existing `INITIALIZE` confirmation. With no explicit socket, the fresh-host server creates the private directory and socket at `DATA/state/owner/owner.sock`, outside recorder storage. Configure the private Serve route to that exact socket before accessing it; if its path exceeds the native socket limit, use an explicitly chosen shorter socket in an existing private 0700 directory and retain that same path for both server invocations and Serve. If the native daemon uses a separate control socket, use the existing `--tailscale-socket` option consistently. Never substitute a public Funnel or unprotected TCP backend.
+If a response is lost, inspect and continue the original operation. Do not rerun fleet setup, invent replacement identifiers, or resend an unknown action. Separately observe `host doctor`, `host status` and a bounded reviewed task; a committed configuration or launch receipt is not proof of useful work or restart durability.
 
-Open `/owner` at `HOST_ORIGIN`, choose **Start pairing**, and compare the displayed native identity with the local confirmation. In a second operator terminal:
+## Browser connection remains a separate gate
+
+The existing workspace/owner boundary requires native identity and private ingress, explicit pairing, workspace binding and exact local launch/action grants. Managed Git preparation grants none of those. Browser reading does not grant messages, task feedback or permission decisions, and those grants do not authorize repository merges or deployments.
+
+The previous supervised first-team trial is historical evidence, not acceptance of this new installation path. The managed Git guide is available for a bounded operator trial below; independent Mac/Linux cold acceptance remains open. Do not follow old sealed-release commands or fabricate approval values. The [observable-plane reference](architecture/observable-plane.md) describes the owner boundary. The optional Telegram `fleet.yaml.seed` remains an explicit operator choice, not a requirement for this team.
+
+
+## Managed Git browser trial
+
+This trial reuses the existing managed installation, owner pairing, workspace
+binding and first-team update operation. It is not an accepted newcomer path.
+Complete the native checks and credential gate in Getting started first. The
+website sign-in does not configure private ingress, provider credentials or Git
+and MCP access on this computer.
+
+In an interactive local operator terminal, keep the same `CLI` and `DATA` from
+preparation and run:
 
 ```bash
-"$RELEASE_CLI" --root "$DATA" host owner confirm
-"$RELEASE_CLI" --root "$DATA" host owner status --json
+"$CLI" --root "$DATA" host owner setup
 ```
 
-Paste the short-lived code at the hidden prompt and inspect its identity before the existing `PAIR` confirmation. Do not put codes in arguments or URLs. Owner pairing establishes identity; before activation, private fleet reads are still unavailable because no recorder exists. Do not initialize a recorder or run `bind-source` to force this fresh route.
+The guide asks for this computer's exact private HTTPS origin, the absolute native
+Tailscale executable, the website issuer, and the operational browser origin.
+Use the exact issuer and browser origin displayed by the deployed website's
+**Local approval values**. They are distinct from this computer's private HTTPS
+origin. Tailscale and Serve must already route that private origin to the guide's
+private Unix socket; the guide neither configures ingress nor changes OS policy.
+If these prerequisites are missing, stop before approving anything and complete
+that native configuration separately.
 
-Stop the foreground server with Ctrl-C. Prepare its optional workspace/session storage:
+Choose the approved existing `OWNER/REPO`, a team name and an observed native
+installation directory. The default is the persistent user directory only when
+the native catalog observes it. Review the displayed configuration. Keep this
+terminal open: owner serving stays in the foreground and does not enroll a
+persistent owner service.
 
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner initialize-workspace &&
-"$RELEASE_CLI" --root "$DATA" host owner initialize-connected &&
-"$RELEASE_CLI" --root "$DATA" host owner serve \
-  --origin "$HOST_ORIGIN" --tailscale "$TAILSCALE" \
-  --socket "$DATA/state/owner/owner.sock" \
-  --workspace-issuer "$WORKSPACE_ISSUER" --workspace-origin "$WORKSPACE_ORIGIN"
-```
+Follow the terminal prompts to pair the browser locally, prepare connected
+storage, confirm the signed-in workspace proposal and approve the exact first-team
+scope. Each approval is separate. In the browser, save the private computer
+address under **Your computers**, open the workspace, provide the approved goal,
+review the exact prepared plan and launch once. Reading or downloading instructions
+has not performed these steps. Local setup approval does not grant ordinary
+messages, task feedback or permission decisions.
 
-Keep this server running for setup and activation. It remains a foreground operator process; this guide enrolls no second owner server. Preserve its explicit socket path after activation too.
-
-## Approve this workspace and one setup
-
-From the signed-in workspace, open its connected operational browser, using the saved computer address that exactly matches `HOST_ORIGIN`. Under that computer's **Connection options and first-time setup** disclosure, choose **Prepare local approval**. Inspect the displayed workspace, issuer and host. In the second terminal:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host owner confirm-workspace
-"$RELEASE_CLI" --root "$DATA" host owner workspace-status --json
-```
-
-Paste the retained workspace code at the hidden prompt and review the local preview before its existing `BIND-WORKSPACE` confirmation. If staging was uncertain, inspect the original code locally instead of repeating it. Continue only with an effective active binding for the intended workspace.
-
-Replace `example-org/web-app` below with the approved existing repository and `web-app` with the intended first fleet name. Create only the native directory reported by assembly, then approve the exact release/repository/directory tuple:
-
-```bash
-mkdir -p "$USER_UNIT_DIR" &&
-"$RELEASE_CLI" --root "$DATA" host owner allow-setup \
-  --template revenue-web-app --target-fleet web-app \
-  --repository example-org/web-app --release "$RELEASE_ID" \
-  --install-directory "$USER_UNIT_DIR"
-"$RELEASE_CLI" --root "$DATA" host owner setup-status --json
-```
-
-Read the local preview before its existing `ALLOW-SETUP` confirmation. This permits one browser setup and can start native services and consume agreed provider usage. The grant lasts at most 24 hours and supplies no repository credentials or message/task-action grants. `host owner revoke-setup` withdraws retained setup approval; it does not undo already-started activation.
-
-## Preview once, launch once, inspect the original receipt
-
-In that computer's connected panel choose **Connect** explicitly. A fresh computer may be connected for setup only; that is not a ready dashboard. Open **Create the first team**, choose **Check setup approval**, enter the approved repository goal, and choose **Preview team**. Review the team, repository, goal and **Plan changes and recovery identifiers**. Preview authors/stages a canonical plan but starts no bots; it expires after ten minutes or earlier when local approval expires.
-
-Only when ready to start this team, choose **Launch this exact plan** once. The browser saves the original generation, plan ID and request UUID before sending. On a lost response or reload, choose **Check original activation receipt** for those identifiers; never launch again, replan or resume merely because a reply was lost. Keep conflicting identifiers if the UI reports them. After approval expires or is revoked, retain the original IDs and inspect locally:
-
-```bash
-"$RELEASE_CLI" --root "$DATA" host status --json
-"$RELEASE_CLI" --root "$DATA" config diff PLAN_ID
-```
-
-Replace `PLAN_ID` with the original retained value. The corresponding read-only journal is `DATA/state/activations/REQUEST_UUID/activation.json`, using that same original UUID. An unknown receipt is not proof that activation did nothing. Use the [existing activation/refusal guidance](getting-started.md#4-activate-and-diagnose) before deciding any repair; a new setup approval does not recover the previous grant's browser journal authority.
-
-An `active` receipt establishes the canonical activation state only. Check the connection for its dashboard and independently inspect `host doctor`, `host status`, actual bot/provider/repository behavior and the [team's task permission policy](../examples/teams/revenue-web-app/README.md). The lead's recurring check-ins can consume provider usage and continue with the browser closed. A recorded launch does not demonstrate useful work, permission enforcement, restart durability or a business result. The completed supervised trial is evidence for that bounded journey; a new installation still needs its own readiness checks, and the revised onboarding route needs cold-host acceptance. Native trust or tool approvals may require you at this computer. Reading the dashboard does not grant messages, task feedback or permission decisions: those use separate local owner approvals.
+If interrupted before launch, rerun the same guide with the same choices; it
+retains matching approvals and refuses changed bindings. If any launch or update
+request exists, inspect its original receipt and use the returned stable-CLI
+`host update status` / `host update continue` recovery. The guide refuses to
+replace a retained pending operation. Do not start another setup or replay an
+unknown response. After successful launch, observe native readiness and useful
+provider behavior separately. Closing the foreground guide disconnects browser
+access; it does not stop bots or revoke approvals.

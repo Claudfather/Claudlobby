@@ -132,6 +132,29 @@ def test_public_config_explain_resolves_undeclared_key_and_refuses_unknown_bot(w
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_found"
 
 
+def test_config_parse_refusals_locate_selected_yaml_without_scalar_or_exception_text(world, capsys, monkeypatch):
+    _fleet, paths, fleet_dir, _home = world
+    monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)
+    manifest = fleet_dir / "fleet.yaml"
+    content = "fleet:\n  secret: SECRET-gate-scalar\n  bots: [\n"
+    manifest.write_text(content)
+    for route in (("config", "validate"), ("config", "explain", "GITHUB_PAT")):
+        assert main(["--root", str(paths.root), "--fleet", "acme", "--json", *route]) == 4
+        captured = capsys.readouterr()
+        error = json.loads(captured.out)["error"]
+        assert "SECRET-gate-scalar" not in captured.out + captured.err
+        assert str(manifest) in error["hint"]
+        assert "line 4, column 1" in error["hint"]
+        assert "config validate" in error["hint"]
+        assert manifest.read_text() == content
+    manifest.write_text("fleet:\n  secret: SECRET-gate-model\n")
+    for route in (("config", "validate"), ("config", "explain", "GITHUB_PAT")):
+        assert main(["--root", str(paths.root), "--fleet", "acme", "--json", *route]) == 4
+        captured = capsys.readouterr()
+        assert "SECRET-gate-model" not in captured.out + captured.err
+        assert str(manifest) in json.loads(captured.out)["error"]["hint"]
+
+
 def test_config_explain_scalar_sources_follow_loader_without_values(world, capsys, monkeypatch):
     _fleet, paths, fleet_dir, _home = world
     monkeypatch.setattr("claudlobby.context.resolve_paths", lambda **_kwargs: paths)

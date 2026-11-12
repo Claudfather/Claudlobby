@@ -54,11 +54,12 @@ def _script_host(tmp_path: Path):
         (directory / "bot.conf").write_text(f'export BOT_SERVICE="demo-{bot}"\n')
     env = {**os.environ, "HOME": str(tmp_path / "home"), "PATH": f'{tools}:{os.environ["PATH"]}',
            "CLAUDLOBBY_ROOT": str(root), "CLAUDLOBBY_NATIVE_DIR": str(native),
-           "CLAUDLOBBY_CLI": str(tools / "claudlobby"), "CLAUDLOBBY_RELEASE_ID": "release-one",
+           "CLAUDLOBBY_CLI": str(tools / "claudlobby"), "CLAUDLOBBY_INSTALLATION": str(tmp_path / "installation"),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
            "CLAUDLOBBY_FLEET": "demo", "CLAUDE_BIN": str(tools / "claude"),
            "CLAUDLOBBY_NATIVE_PYTHON": str(Path(os.sys.executable)),
            "PLANE_EMIT_DISABLED": "1", "TMUX_TMPDIR": str(tmp_path / "tmux")}
-    args = (str(native / "reload-fleet.sh"), "--selected-release", "release-one", "--fleet", "demo",
+    args = (str(native / "reload-fleet.sh"), "--admitted-runtime", "--fleet", "demo",
             "--bots-dir", str(bots), "--plugin", "claudna@Claudfather", "--bot", "lead",
             "--bot", "worker")
     return root, bots, calls, env, args
@@ -197,3 +198,16 @@ def test_session_cleanup_kills_a_live_group_and_tolerates_a_gone_one(monkeypatch
 
     monkeypatch.setattr(os, "killpg", eperm)
     _kill_session(live)  # what the macOS runner answered for an already-killed group
+
+
+@pytest.mark.parametrize("marker", [None, "0"])
+def test_git_reload_requires_boolean_recursion_marker_before_effect(tmp_path, marker):
+    root, bots, calls, env, args = _script_host(tmp_path)
+    if marker is None:
+        env.pop("CLAUDLOBBY_NATIVE_ADMITTED")
+    else:
+        env["CLAUDLOBBY_NATIVE_ADMITTED"] = marker
+    result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 2
+    assert not calls.exists() and not (root / "state/reload-fleet.log").exists()
+    assert not (bots / "lead/data/.reload-pending").exists()

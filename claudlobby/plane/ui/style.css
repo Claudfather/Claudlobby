@@ -196,8 +196,9 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .ov-card { background: var(--panel); border: 1px solid var(--edge);
            border-radius: 8px; padding: 6px 10px; font-size: 12px;
            color: var(--dim); min-width: 200px; flex: 1 1 200px; }
-.ov-card.pick { cursor: pointer; }
-.ov-card.pick:hover { border-color: var(--accent); }
+.ov-team .ov-head { justify-content: space-between; }
+.ov-team-details { margin-top: 6px; }
+.ov-team-details > summary { cursor: pointer; color: var(--ink); }
 .ov-card.on { border-color: var(--accent); }
 .ov-card .ov-head { display: flex; gap: 8px; align-items: baseline; }
 .ov-card .ov-head b { color: var(--ink); font-size: 13px; }

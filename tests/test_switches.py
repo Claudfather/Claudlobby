@@ -20,7 +20,8 @@ import pytest
 
 from claudlobby import switches as sw
 from claudlobby.config import load_fleet
-from tests.package_fixtures import source_package
+from tests.package_fixtures import source_package, git_package
+from tests.fixtures.current_runtime import current_runtime, tmp_path  # noqa: F401 — committed configuration for CLI doors
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -229,10 +230,10 @@ def test_every_switch_carries_both_directions():
 
 
 def test_the_registry_scan_row_offers_no_off_value():
-    """#2611: activation refuses PLANE_EMIT_ENABLED=0, because its identity
+    """#2611: first-fleet initialization refuses PLANE_EMIT_ENABLED=0, because its identity
     bindings join to the scan, so the row names that refusal instead."""
     row = sw.by_key("registry-scan")
-    assert not row.disarm.startswith(f"{row.env}=0") and "activation refuses" in row.disarm
+    assert not row.disarm.startswith(f"{row.env}=0") and "initialization refuses" in row.disarm
 
 
 def test_the_target_workflow_doors_are_the_reaction_chain():
@@ -377,6 +378,10 @@ def test_an_armed_opt_in_names_what_armed_it(tmp_path):
     rows = _resolve(tmp_path, "OBSERVABILITY_UNASSIGNED_CHECK=1\n")
     st = _state(rows, "worker-unassigned")
     assert st.on is True and ".env" in st.source
+    text = sw.format_table([st])
+    assert "ships off because" in text and "stays off" not in text
+    for rendered in (text, sw.summary_line([st])):
+        assert "1 opt-in (1 on, 0 off, 0 unknown)" in rendered
 
 
 def test_an_unreachable_resolver_says_so_rather_than_guessing(tmp_path,
@@ -395,8 +400,12 @@ def test_an_unreachable_resolver_says_so_rather_than_guessing(tmp_path,
     assert st.unknown and st.label == "unknown"
     assert "resolver unreachable" in st.detail
     assert "resolver unreachable" in sw.summary_line(rows)
-    # ...and an UNKNOWN state never reaches status's header: naming a door as
-    # off when we could not read it is the fabrication this rule exists to stop.
+    opt_ins = [row for row in rows if row.switch.polarity == sw.OPT_IN]
+    on = sum(row.on and not row.unknown for row in opt_ins)
+    off = sum(not row.on and not row.unknown for row in opt_ins)
+    unknown = sum(row.unknown for row in opt_ins)
+    assert f"{len(opt_ins)} opt-in ({on} on, {off} off, {unknown} unknown)" in sw.summary_line(rows)
+    # An UNKNOWN state must never reach the known-off subset: unread is not off.
     assert st not in sw.target_workflow_off(rows)
 
 
@@ -423,8 +432,26 @@ def _cli(root: Path, *argv):
         capture_output=True, text=True, timeout=180, cwd=str(REPO))
 
 
-def test_doctor_switches_prints_the_table_alone(tmp_path):
-    r = _cli(_root(tmp_path, "TASK_RECHECK_ENABLED=0\n"), "host", "doctor", "--switches")
+def _cli_current(capsys, root: Path, *argv):
+    """The public CLI, in-process, against the committed current configuration.
+
+    Current doctor doors read the activated configuration and run under the
+    fixture's admission identity, which a child interpreter would not share.
+    """
+    from types import SimpleNamespace
+
+    from claudlobby.__main__ import main
+
+    capsys.readouterr()
+    code = main(["--root", str(root), *argv])
+    out = capsys.readouterr()
+    return SimpleNamespace(returncode=code, stdout=out.out, stderr=out.err)
+
+
+def test_doctor_switches_prints_the_table_alone(current_runtime, capsys, tmp_path):
+    root, _, _, _ = current_runtime
+    (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
+    r = _cli_current(capsys, root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "=== switches ===" in r.stdout
     assert "task-recheck" in r.stdout and "off" in r.stdout
@@ -442,6 +469,14 @@ def test_doctor_switches_prints_the_table_alone(tmp_path):
     # The npx-cache RUNG is the probe this guards against. Its name, not the
     # word: the table itself now names npx (mcp-direct-launch, #1604).
     assert "npx-cache" not in r.stdout and "=== claudlobby host doctor ===" not in r.stdout
+    import json
+    structured = _cli_current(capsys, root, "host", "doctor", "--switches", "--json")
+    assert structured.returncode == 0, structured.stderr
+    rows = json.loads(structured.stdout)["data"]["fleets"][0]["switches"]
+    expected = {row.switch.key: row for row in _resolve(tmp_path / "expected", "TASK_RECHECK_ENABLED=0\n")}
+    for row in rows:
+        resolved = expected[row["switch"]["key"]]
+        assert (row["arm"], row["disarm"], row["label"]) == (resolved.arm, resolved.disarm, resolved.label)
 
 
 def test_the_doctor_rung_exists_and_never_fails(tmp_path):
@@ -492,7 +527,7 @@ def test_host_timer_dormancy_is_COMPOSE_TIME_now(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     names = {p.name for p in out.iterdir()}
     assert not [n for n in names if n.startswith("claudlobby-update-siblings")]
     assert "DORMANT" not in names, "a manifest for units nobody composed"
@@ -508,11 +543,11 @@ def test_an_armed_to_unarmed_host_timer_is_PRUNED(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     stale = out / "claudlobby-update-siblings.timer"
     stale.write_text("[Unit]\n")
     (out / "DORMANT").write_text("claudlobby-update-siblings\n")
-    compose_host_timers(Paths(root=root, package=source_package()))
+    compose_host_timers(Paths(root=root, package=git_package(root)))
     assert not stale.exists()
     assert not (out / "DORMANT").exists()
 
@@ -597,7 +632,7 @@ def test_the_plane_services_compose_by_default(tmp_path):
 
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     names = {p.name for p in out.iterdir()}
     for job in ("plane-daemon", "plane-view"):
         assert f"claudlobby-{job}.service" in names
@@ -623,7 +658,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
     root = tmp_path / "h"
     root.mkdir(parents=True)
-    out = compose_host_timers(Paths(root=root, package=source_package()))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     names = {p.name for p in out.iterdir()}
     assert "claudlobby-plane-view.service" not in names
     assert "claudlobby-plane-view.plist" not in names
@@ -632,7 +667,7 @@ def test_the_view_is_NOT_composed_without_its_extra(tmp_path, monkeypatch):
     # ...and a unit composed before the extra was removed is pruned, or the
     # next setup run enrols the crash loop from stale files.
     (out / "claudlobby-plane-view.service").write_text("[Unit]\n")
-    compose_host_timers(Paths(root=root, package=source_package()))
+    compose_host_timers(Paths(root=root, package=git_package(root)))
     assert not (out / "claudlobby-plane-view.service").exists()
 
 
@@ -661,7 +696,7 @@ def test_the_table_names_the_release_extra_when_it_is_missing(
         tmp_path, monkeypatch):
     """The other half of F1: the switch table stops saying "on". A row that
     claims a service is running when no unit exists sends a reader to debug
-    supervision instead of assembling a release with the required extra."""
+    supervision instead of preparing the runtime lock with the required dependencies."""
     from claudlobby import switches as _sw
 
     monkeypatch.setattr(_sw, "extra_available", lambda extra: False)
@@ -669,8 +704,10 @@ def test_the_table_names_the_release_extra_when_it_is_missing(
     st = _state(rows, "plane-view")
     assert st.on is False and st.unknown is False
     assert "plane-ui" in st.source
-    assert "[plane-ui] extra in its offline wheelhouse" in st.arm
-    assert "[plane-ui] extra in its offline wheelhouse" in _sw.format_table(rows)
+    assert "[plane-ui] dependencies" in st.arm and "runtime lock" in st.arm
+    assert "[plane-ui] dependencies" in _sw.format_table(rows)
+    assert st.as_dict()["arm"] == st.arm
+    assert st.as_dict()["label"] == "off"
 
 
 def test_the_composer_arming_tables_are_derived_not_listed():
@@ -718,18 +755,31 @@ def test_the_validator_namespaces_come_from_the_registry():
     }
     assert "PLANE_SHADOW_ENABLED" not in sw.env_names()
     assert "PLANE_SHADOW_ENABLED" in sw.RETIRED
+    assert "STARTUP_BOOTSTRAP_ENABLED" not in sw.env_names()
+    assert "STARTUP_BOOTSTRAP_ENABLED" in sw.RETIRED
+    assert "STARTUP_BOOTSTRAP_ENABLED" not in (REPO / "claudlobby/_runtime_scripts/lib-common.sh").read_text()
 
 
-def test_doctor_switches_works_with_NO_fleet_at_all(tmp_path):
-    """lib/setup-system runs once per HOST, and a host with overlay fleets has
-    no root `fleet.yaml` — so requiring one here would have made the host door
-    print nothing, which is the exact silence this chunk exists to remove. The
-    host rows are still true without a fleet; the fleet-scoped ones fall back
-    to their shipped defaults."""
-    root = tmp_path / "hostonly"
-    root.mkdir()
-    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
-    r = _cli(root, "host", "doctor", "--switches")
+def test_doctor_switches_requires_current_configuration_and_prints_host_rows(current_runtime, capsys, tmp_path):
+    """The host door prints host rows without needing a fleet-scoped answer.
+
+    Current `host doctor` reads the ACTIVATED configuration, so a host with no
+    active configuration is refused explicitly (never an empty table at rc 0:
+    that silence is what this door exists to remove), and an active host prints
+    its host rows. The resolver-level "no fleet named" behaviour stays pinned
+    by test_a_host_run_says_UNKNOWN_for_a_fleet_it_never_read."""
+    root, _, _, _ = current_runtime
+    current = root / "state/config.json"
+    saved = current.read_bytes()
+    current.unlink()
+    try:
+        refused = _cli_current(capsys, root, "host", "doctor", "--switches")
+        assert refused.returncode == 4
+        assert "current doctor configuration cannot be read" in refused.stderr
+        assert "=== switches ===" not in refused.stdout
+    finally:
+        current.write_bytes(saved)
+    r = _cli_current(capsys, root, "host", "doctor", "--switches")
     assert r.returncode == 0, r.stderr
     assert "plane-daemon" in r.stdout and "update-siblings" in r.stdout
     if sys.platform == "darwin":
@@ -750,6 +800,8 @@ def test_every_switch_declares_a_carrier_and_derives_its_two_lines():
         assert s.carrier, s.key
         assert s.arm == sw._carrier_lines(s)[0]
         assert s.disarm == sw._carrier_lines(s)[1]
+        if s.carrier == sw.ENROLL_HOST and s.config_extra:
+            assert s.config_extra in s.arm
         if s.carrier in (sw.ENV_FLEET, sw.ENV_HOST, sw.BOT_CONF):
             assert s.env, f"{s.key}: an env carrier with no variable"
             assert s.env in s.arm and s.env in s.disarm
@@ -789,7 +841,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
 
     root = _root(tmp_path, "PLANE_EMIT_DISABLED=1\n")
     fleet, merged = load_fleet(root / "fleet.yaml")
-    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    paths = Paths(root=root, fleet_dir=root, package=git_package(root))
     conf = compose_bot_conf(fleet.bots["kev"], fleet, paths)
     assert [ln for ln in conf.splitlines()
             if ln.startswith("export PLANE_EMIT_DISABLED=")
@@ -801,7 +853,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     # stays the ONE place the answer lives.
     quiet = _root(tmp_path / "q")
     qfleet, qmerged = load_fleet(quiet / "fleet.yaml")
-    qpaths = Paths(root=quiet, fleet_dir=quiet, package=source_package())
+    qpaths = Paths(root=quiet, fleet_dir=quiet, package=git_package(quiet))
     assert "PLANE_EMIT_DISABLED" not in compose_bot_conf(
         qfleet.bots["kev"], qfleet, qpaths)
 
@@ -907,13 +959,14 @@ def test_an_unknown_row_prints_BOTH_directions(tmp_path):
     assert "turn off: TASK_RECHECK_ENABLED=0" in block
 
 
-def test_plane_doctor_and_doctor_switches_agree_on_one_fleet(tmp_path):
+def test_plane_doctor_and_doctor_switches_agree_on_one_fleet(current_runtime, capsys):
     """The plane subset discarded the --fleet it was given, so the two doors
     answered differently about the same fleet — one read the fleet tier, the
     other reported the shipped defaults."""
-    root = _root(tmp_path, "PLANE_EMIT_ENABLED=0\n")
-    doc = _cli(root, "host", "doctor", "--switches")
-    pln = _cli(root, "plane", "doctor")
+    root, _, _, _ = current_runtime
+    (root / ".env").write_text("PLANE_EMIT_ENABLED=0\n")
+    doc = _cli_current(capsys, root, "host", "doctor", "--switches")
+    pln = _cli_current(capsys, root, "plane", "doctor")
     import re
 
     assert doc.returncode == 0, doc.stderr

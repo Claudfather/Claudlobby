@@ -1,4 +1,4 @@
-import { scopeKey, validContext, validTaskActionContext, validTaskActionTarget, samePreparation, sameReceipt, validPermissionContext, validPermissionTarget, samePermissionReceipt } from "./action-state.js";
+import { sameRuntime, scopeKey, validContext, validTaskActionContext, validTaskActionTarget, samePreparation, sameReceipt, validPermissionContext, validPermissionTarget, samePermissionReceipt } from "./action-state.js";
 
 const unknown = () => new Error('Action outcome unknown. Check the original receipt.');
 const uid = (value, prefix) => typeof value === 'string' && value.length === prefix.length + 33
@@ -75,7 +75,7 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
     if (value.kind === 'permission') {
       if (!validPermissionTarget(value.target)) throw unknown();
       const rawTarget = {...value.target,permission_id:bare(value.target.permission_id,'perm'),task_id:bare(value.target.task_id,'wi')};
-      if (rawTarget.task_id !== capability.raw.task_id || !receipt && (rawTarget.release_id !== capability.raw.release_id
+      if (rawTarget.task_id !== capability.raw.task_id || !receipt && (!sameRuntime(rawTarget, capability.raw)
           || !capability.raw.permissions.some(p => p.permission_id === rawTarget.permission_id && p.scope_sha256 === rawTarget.scope_sha256))) throw unknown();
       return {...value,scope:{...capability.raw.scope},target:rawTarget};
     }
@@ -85,7 +85,7 @@ export function createSourceActionInterface({key, owner, snapshot, stamp, onPaus
       task_id:value.target.task_id === null ? null : bare(value.target.task_id,'wi'),
       ...(v2 ? {assignment_id:value.target.assignment_id === null ? null : bare(value.target.assignment_id,'asg')} : {})};
     if (!capability.raw.recipients.some(r => r.id === rawTarget.recipient)
-        || v2 && !receipt && rawTarget.release_id !== capability.raw.release_id) throw unknown();
+        || v2 && !receipt && !sameRuntime(rawTarget, capability.raw)) throw unknown();
     return {...value,scope:{...capability.raw.scope},target:rawTarget};
   }
   async function operation(name, value) {

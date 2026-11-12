@@ -1,4 +1,4 @@
-"""Release seal boundary checks; no package imports or service operations."""
+"""Historical release evidence boundary checks; no package imports or service operations."""
 
 from dataclasses import replace
 import hashlib
@@ -64,6 +64,18 @@ def release_tree(root, source_revision="a" * 40, artifact_id="artifact-source-a"
     return inputs, paths, compatibility, directory
 
 
+def historical_release(root, inputs, paths):
+    """Write archived fixture evidence directly; no deployment writer is exercised."""
+    directory = r.release_path(root, inputs.release_id)
+    compatibility = r.Compatibility.from_dict(json.loads((directory / paths.artifact).read_bytes())['compatibility'])
+    inventory = r.inventory_release(directory)
+    manifest = r.ReleaseManifest(directory, inputs, paths, compatibility, inventory,
+                                 r._inventory_digest(inventory))
+    payload = {**manifest._payload(), 'seal_sha256': manifest.seal_sha256}
+    (directory / r.MANIFEST).write_bytes(r._json(payload) + b'\n')
+    return manifest
+
+
 @pytest.fixture
 def installed(tmp_path):
     root = tmp_path / "data"
@@ -90,7 +102,7 @@ def test_identity_is_stable_and_binds_assembly_inputs(installed):
     first = r.inventory_release(directory)
     (directory / paths.cli).touch()
     assert r.inventory_release(directory) == first  # mtimes are not identity
-    sealed = r.seal_release(root, inputs, paths)
+    sealed = historical_release(root, inputs, paths)
     assert r.read_release(root, inputs.release_id) == sealed
     assert sealed.cli_path == directory / paths.cli
     assert sealed.native_path == directory / paths.native
@@ -107,13 +119,12 @@ def test_identity_is_stable_and_binds_assembly_inputs(installed):
     assert sealed.seal_sha256 == json.loads(
         (directory / r.MANIFEST).read_text()
     )["seal_sha256"]
-    with pytest.raises(r.ReleaseError, match="cannot be resealed"):
-        r.seal_release(root, inputs, paths)
+    assert not hasattr(r, "seal_release")
 
 
 def test_wrong_directory_and_manifest_tamper_refuse(installed):
     root, inputs, paths, compatibility, directory = installed
-    r.seal_release(root, inputs, paths)
+    historical_release(root, inputs, paths)
     other_id = replace(inputs, source_revision="d" * 40).release_id
     shutil.copytree(directory, r.release_path(root, other_id))
     with pytest.raises(r.ReleaseError, match="identity mismatch"):
@@ -140,7 +151,7 @@ def test_wrong_directory_and_manifest_tamper_refuse(installed):
 @pytest.mark.parametrize("change", ["bytes", "mode", "added", "missing"])
 def test_runtime_tamper_refuses(installed, change):
     root, inputs, paths, compatibility, directory = installed
-    r.seal_release(root, inputs, paths)
+    historical_release(root, inputs, paths)
     script = directory / paths.native / "keepalive.sh"
     if change == "bytes":
         script.write_text("changed")
@@ -156,7 +167,7 @@ def test_runtime_tamper_refuses(installed, change):
 
 def test_runtime_bytecode_cache_is_derived_but_other_entries_refuse(installed):
     root, inputs, paths, _, directory = installed
-    sealed = r.seal_release(root, inputs, paths)
+    sealed = historical_release(root, inputs, paths)
     cache = directory / paths.native / "__pycache__"
     cache.mkdir()
     bytecode = cache / "plane-readers.cpython-312.pyc"
@@ -181,8 +192,9 @@ def test_runtime_bytecode_cache_is_derived_but_other_entries_refuse(installed):
 
 
 @pytest.mark.parametrize("change", ["lock", "artifact", "interpreter", "native", "cli", "bytecode"])
-def test_incomplete_or_mismatched_install_never_seals(installed, change):
+def test_historical_install_drift_is_refused_on_read(installed, change):
     root, inputs, paths, compatibility, directory = installed
+    historical_release(root, inputs, paths)
     if change == "lock":
         with (directory / paths.dependency_lock).open("ab") as output:
             output.write(b"\n")  # exact bytes matter, including blank lines
@@ -195,13 +207,9 @@ def test_incomplete_or_mismatched_install_never_seals(installed, change):
     elif change == "cli":
         (directory / paths.cli).chmod(0o644)
     else:
-        cache = directory / "package" / "__pycache__"
-        cache.mkdir()
-        (cache / "module.pyc").write_bytes(b"bytecode")
+        (directory / "package/module.pyc").write_bytes(b"authored bytecode outside derived cache")
     with pytest.raises(r.ReleaseError):
-        r.seal_release(root, inputs, paths)
-    assert not (directory / r.MANIFEST).exists()
-    assert not list(directory.glob(".release-*"))
+        r.read_release(root, inputs.release_id)
 
 
 def test_escaped_selection_and_symlink_refuse(installed, tmp_path):
@@ -210,13 +218,13 @@ def test_escaped_selection_and_symlink_refuse(installed, tmp_path):
         replace(paths, cli="../../outside")
     outside = tmp_path / "outside"
     outside.write_text("external")
+    historical_release(root, inputs, paths)
     (directory / "escape").symlink_to(outside)
     with pytest.raises(r.ReleaseError, match="symlink escapes"):
-        r.seal_release(root, inputs, paths)
-    assert not (directory / r.MANIFEST).exists()
+        r.read_release(root, inputs.release_id)
     (directory / "escape").unlink()
     (directory / "venv/bin/python3").symlink_to("python")
-    r.seal_release(root, inputs, paths)
+    historical_release(root, inputs, paths)
     assert r.read_release(root, inputs.release_id).release_id == inputs.release_id
 
 
@@ -232,14 +240,18 @@ def test_redirected_store_and_incomplete_manifest_refuse(installed, tmp_path):
         r.read_release(root, inputs.release_id)
 
 
-def test_failed_publication_leaves_no_seal(installed, monkeypatch):
-    root, inputs, paths, compatibility, directory = installed
-
-    def fail_publish(*args):
-        raise OSError("publication failed")
-
-    monkeypatch.setattr(r.os, "link", fail_publish)
-    with pytest.raises(OSError, match="publication failed"):
-        r.seal_release(root, inputs, paths)
-    assert not (directory / r.MANIFEST).exists()
-    assert not list(directory.glob(".release-*"))
+def test_missing_or_corrupt_historical_manifest_is_read_only(installed):
+    root, inputs, paths, _, directory = installed
+    before = r.inventory_release(directory)
+    with pytest.raises(r.ReleaseError, match='no regular sealed manifest'):
+        r.read_release(root, inputs.release_id)
+    assert r.inventory_release(directory) == before
+    historical_release(root, inputs, paths)
+    path = directory / r.MANIFEST
+    content = json.loads(path.read_bytes())
+    content['seal_sha256'] = '0' * 64
+    path.write_text(json.dumps(content))
+    corrupted = path.read_bytes()
+    with pytest.raises(r.ReleaseError, match='manifest digest mismatch'):
+        r.read_release(root, inputs.release_id)
+    assert path.read_bytes() == corrupted

@@ -4,7 +4,7 @@ import {ActionState} from '../claudlobby/plane/ui/action-state.js';
 import {readFile} from 'node:fs/promises';
 const read = name => readFile(new URL('../claudlobby/plane/ui/'+name,import.meta.url),'utf8');
 const uri = text => `data:text/javascript;base64,${Buffer.from(text).toString('base64')}`;
-const ownerURL = uri(await read('owner-api-client.js'));
+const ownerURL = uri((await read('owner-api-client.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
 const actionsURL = uri((await read('connected-actions.js')).replace('"./action-state.js"',JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js',import.meta.url).href)));
 const carrierURL = uri((await read('connected-read-client.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
 const adapterURL = uri((await read('two-source-read.js')).replace('"./owner-api-client.js"',JSON.stringify(ownerURL)));
@@ -50,7 +50,8 @@ function dom() {
     click(){if(!this.disabled)this.handlers.click?.();}
   }
   for(const id of ['owner-session','main','fleet','channel','fleet-totals','presence-strip','task-detail-content','focus-pane','task-detail','focus-overlay','focus-title','debug-toggle','search'])elements.set(id,new Element());
-  const nav=['channel','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
+  const tools=new Element('details'),viewNav=new Element('nav');viewNav.querySelector=q=>q==='details'?tools:null;elements.set('view-nav',viewNav);viewNav.append(tools);
+  const nav=['channel','tasks','grid','fleet','trust'].map(view=>{const e=new Element('button');e.dataset.view=view;return e;});
   class Observer {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
   return {document,Element,nav,observers,listeners,get:id=>elements.get(id),MutationObserver:Observer};
 }
@@ -177,6 +178,36 @@ test('known expiry offers explicit Connect without reconnecting or disturbing an
   assert.equal(h.api.snapshot().computers[1].state,'ready');h.api.dispose();
 });
 
+test('unconnected Rooms and Tasks explain owner pairing without claiming it is disabled',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  for(const path of ['/api/tasks','/api/channel?limit=120']) {
+    const value=await h.api.jget(path);
+    assert.equal(value.state,'unavailable');
+    assert.match(value.remediation,/Not connected.*Rooms and Tasks.*Connect.*first-time owner pairing.*Set up computer access/);
+    assert.doesNotMatch(value.remediation,/pairing (?:is )?(?:disabled|off)|no tasks|nothing here/i);
+  }
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);
+  h.api.dispose();
+});
+
+test('unreadable Rooms and Tasks retain known expiry guidance without hiding readable peers',async()=>{
+  const h=harness();h.mount();await h.api.checkAccount();await flush();
+  assert.match(h.ui.get('view-nav').children[0].children[0].textContent,/Recorder and activity search are unavailable/);
+  await h.api.act(0,'connect');h.time=1000;await h.api.act(1,'connect');
+  h.time=900000;h.timer(900000);await flush();
+  const partial=await h.api.jget('/api/tasks');
+  assert.equal(partial.state,'ok');
+  assert.match(partial.data.sources[0].remediation,/expired.*Connect again/);
+  h.time=901000;h.timer(900000);await flush();
+  for(const path of ['/api/tasks','/api/channel?limit=120']) {
+    const value=await h.api.jget(path);
+    assert.equal(value.state,'unavailable');
+    assert.match(value.remediation,/expired.*Connect again/);
+  }
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,2);
+  h.api.dispose();
+});
+
 for(const stage of ['challenge','assertion','issue'])
  test(`failed ${stage} keeps explicit Connect available without expiry, automatic retry or peer disruption`,async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
@@ -189,7 +220,8 @@ for(const stage of ['challenge','assertion','issue'])
   const primary=rows[0].children[1].children[0];
   assert.equal(h.api.snapshot().computers[0].state,'unavailable');
   assert.doesNotMatch(rows[0].children[0].textContent,/expired/i);
-  assert.match(rows[0].children[2].textContent,/outcome is unknown/);
+  assert.match(rows[0].children[2].textContent,stage === 'issue' ? /outcome is unknown/ : /No session issue was sent/);
+  if(stage !== 'issue') assert.doesNotMatch(rows[0].children[2].textContent,/outcome is unknown/);
   assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
   assert.equal(rows[1].children[1].children[0].textContent,'Disconnect');
   const calls=h.calls.length;
@@ -282,15 +314,26 @@ test('incremental reads use the same account and transport fence as final reads'
 });
 
 test('observed account refusal retires clients, fences held private reads and clears all private regions even if callback throws',async()=>{
-  const h=harness();h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])h.ui.get(name).append(h.ui.document.createElement('b'));
+  for(const refusal of [401,403,409,'generation']) {
+  const h=harness();h.ui.get('main').append(h.ui.get('owner-session'));
+  h.mount({onPause(){throw new Error('callback');},onResume(){throw new Error('callback');}});await h.api.checkAccount();await flush();await h.api.act(0,'connect');
+  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane']) {
+    const privateNode=h.ui.document.createElement('b');privateNode.textContent='private stale content';h.ui.get(name).append(privateNode);
+  }
   const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/read/tasks',()=>held.promise);
-  const old=h.api.jget('/api/tasks');await flush();h.metadataStatus=401;await h.api.checkAccount();
+  const old=h.api.jget('/api/tasks');await flush();
+  if(refusal==='generation')h.metadata={...h.metadata,context_generation:id(99)};else h.metadataStatus=refusal;
+  await h.api.checkAccount();
   held.resolve(reply(200,ok({tasks:[{task_id:wi,title:'late private'}]})));const result=await old;
   assert.equal(result.state,'denied');assert.equal(result.data,undefined);assert.equal(h.api.snapshot().phase,'denied');
-  for(const name of ['main','fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  for(const name of ['fleet-totals','presence-strip','task-detail-content','focus-pane'])assert.equal(h.ui.get(name).children.length,0);
+  assert.deepEqual(h.ui.get('main').children,[h.ui.get('owner-session')],'only the safe recovery scaffold remains in the rendered main');
+  const recovery=descendants(h.ui.get('main')).map(node=>node.textContent).join(' ');
+  assert.match(recovery,/Your account or saved computers changed.*open your workspace again/);
+  assert.doesNotMatch(recovery,/private stale content|late private|[ab]\.example\.test/);
   assert.equal(h.ui.get('task-detail').closed,true);assert.equal(h.ui.get('focus-overlay').hidden,true);
   h.metadataStatus=200;assert.equal(await h.api.checkAccount(),false);assert.equal(await h.api.act(0,'connect'),false);h.api.dispose();
+  }
 });
 
 test('metadata total body deadline and disposal reject late responses without issuing hosts',async()=>{
@@ -318,13 +361,22 @@ test('stable stream facade rejects stale callbacks; adding/removing listeners do
 
 test('controls retain focus across state updates and disable unsupported navigation/inspection honestly',async()=>{
   const h=harness();h.mount();await h.api.checkAccount();await flush();
-  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
+  for(const n of h.ui.nav)assert.equal(n.disabled,!['channel','tasks','grid'].includes(n.dataset.view));assert.equal(h.ui.get('search').disabled,true);
   const root=h.ui.get('owner-session'),row=root.children[1],check=root.children[0].children[1];check.focus();await h.api.checkAccount();assert.equal(h.ui.document.activeElement,check);assert.equal(root.children[0].children[1],check);
   const connect=row.children[1].children[0];assert.equal(connect.disabled,false);connect.click();await flush();assert.equal(h.api.snapshot().computers[0].state,'ready');assert.equal(row.children[1].children[0],connect);
   for(const id of ['fleet','channel']){
     const target=h.ui.get(id);assert.ok(h.ui.observers[0].targets.includes(target));
     const inspect=new h.ui.Element('button');inspect.dataset.botInspect='actor';target.append(inspect);h.ui.observers[0].fn();assert.equal(inspect.disabled,true);assert.match(inspect.title,/Activity and task records/);
+    const presence=new h.ui.Element('button');presence.dataset.botInspect='actor';presence.dataset.botInspection='presence';target.append(presence);
+    let inspections=0;presence.addEventListener('click',()=>{inspections++;});h.ui.observers[0].fn();
+    assert.equal(presence.disabled,false);assert.equal(presence.title,'');presence.click();assert.equal(inspections,1);
   }
+  const tasks=h.ui.nav.find(button=>button.dataset.view==='tasks');assert.equal(tasks.disabled,false);
+  h.metadataStatus=503;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,false,'an account-service outage preserves task navigation over retained reads');
+  h.metadataStatus=403;await h.api.checkAccount();h.ui.observers[0].fn();
+  assert.equal(tasks.disabled,true,'account refusal retires task navigation');
+  for(const id of ['fleet','channel'])for(const button of h.ui.get(id).children)assert.equal(button.disabled,true,'account refusal retires presence inspection too');
   h.api.dispose();assert.equal(h.ui.observers[0].closed,true);assert.equal(h.ui.listeners.has('visibilitychange'),false);assert.equal(h.calls.filter(c=>c.url.endsWith('/logout')).length,0);
 });
 
@@ -349,7 +401,8 @@ test('account recheck preserves the same focused control rather than replacing i
 
 
 test('computer cards offer one primary action and keep first-use setup and diagnostics in a native disclosure',async()=>{
- const h=harness();h.mount();await h.api.checkAccount();await flush();
+ const h=harness(),attention=[];h.mount({onConnectionAttention:event=>attention.push(event)});await h.api.checkAccount();await flush();
+ assert.deepEqual(attention,[{source:sourceA,state:'not_connected'},{source:sourceB,state:'not_connected'}]);
  const row=h.ui.get('owner-session').children[1],actions=row.children[1],primary=actions.children[0],help=row.children.at(-1);
  assert.equal(actions.children.length,1);assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
  assert.equal(help.tagName,'DETAILS');assert.ok(!help.open);
@@ -393,8 +446,10 @@ test('first-use approval uses enrollment purpose only, preserves peer reads and 
 
 test('account loss during host staging erases approval code and fences late staged result',async()=>{
  const h=harness();h.mount();await h.api.checkAccount();await flush();const held=deferred();h.overrides.set(refs[0].endpoint_origin+'/api/owner/workspace/stage',()=>held.promise);
+ const panel=proposalOf(h.ui.get('owner-session').children[1]);
  const enroll=h.api.act(0,'enroll');await flush();h.metadataStatus=403;await h.api.checkAccount();held.resolve(reply(202,{version:1,state:'awaiting_local_approval',expires_at:1800000120}));
- assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');const panel=proposalOf(h.ui.get('owner-session').children[1]);assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.equal(await enroll,false);assert.equal(h.api.snapshot().phase,'denied');assert.ok(!panel.children.some(c=>c.textContent.includes('Approval code:')));
+ assert.ok(!descendants(h.ui.get('owner-session')).includes(panel),'retired source controls are absent from recovery guidance');
  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,0);h.api.dispose();
 });
 
@@ -448,8 +503,8 @@ test('retirement selectors are pinned to actual canonical HTML',async()=>{
   const html=await read('index.html');
   for(const id of ['view-nav','debug-toggle','fleet-totals','presence-strip','task-detail-content','focus-pane','focus-title','task-detail','focus-overlay','search','fleet'])
     assert.match(html,new RegExp('id="'+id+'"'));
-  const nav=html.match(/<nav id="view-nav">([\s\S]*?)<\/nav>/)[1];
-  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','grid','fleet','trust']);
+  const nav=html.match(/<nav id="view-nav"[^>]*>([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...nav.matchAll(/data-view="([^"]+)"/g)].map(m=>m[1]),['channel','tasks','grid','fleet','trust']);
   assert.match(workspaceText,/#view-nav button, #debug-toggle, \[data-bot-inspect\]/);
   assert.match(workspaceText,/'focus-title'/);
 });
@@ -751,16 +806,35 @@ test('actual host rejection is distinct from a missing computer session',async()
 });
 
 test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
-  const h=harness(),a=refs[0].endpoint_origin;h.mount();
+  const h=harness(),a=refs[0].endpoint_origin,attention=[];
+  let computersOpen=false;
+  h.mount({onConnectionAttention:event=>{attention.push(event);computersOpen=true;}});
   h.overrides.set(a+'/api/owner/connected/issue',()=>reply(200,{version:1,state:'setup_only',token:'A'.repeat(43),expires_in:900,
-    setup_profile:{version:1,profile:'first-team-setup-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+    setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
       subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
-  await h.api.checkAccount(); await h.api.act(0,'connect'); await h.api.act(1,'connect');
+  await h.api.checkAccount();
+  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0],help=card.children.at(-1);
+  const summary=help.children[0];summary.focus();
+  await h.api.act(0,'connect');
+  assert.equal(computersOpen,true);
+  assert.equal(attention.filter(event=>event.source===sourceA&&event.state==='setup_only').length,1);
+  assert.equal(help.open,true,'setup-only admission reveals the next setup step');
+  assert.match(card.children[2].textContent,/Check setup approval/);
+  assert.equal(h.ui.document.activeElement,summary,'revealing setup never moves focus');
+  help.open=false;
+  await h.api.act(1,'connect');
+  const attentionCount=attention.length;computersOpen=false;
+  await h.api.checkAccount();
+  assert.equal(attention.length,attentionCount,'unchanged source state never repeats attention');
+  assert.equal(computersOpen,false,'manual collapse of the outer computer disclosure survives refresh');
+  assert.equal(help.open,false,'later connection and account paints preserve manual collapse');
+  assert.ok(!h.ui.get('owner-session').children[2].children.at(-1).open,'another computer is not expanded');
+  assert.equal(h.ui.document.activeElement,summary);
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0,'revealing guidance never checks approval or launches setup');
   assert.equal(h.api.snapshot().computers[0].state,'setup_only');
   const fleets=await h.api.jget('/api/fleets');
   assert.equal(fleets.data.fleets.length,1); assert.ok(fleets.data.fleets[0].alias.includes(sourceB));
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
-  const card=h.ui.get('owner-session').children[1],primary=card.children[1].children[0];
   assert.equal(primary.textContent,'Disconnect');assert.equal(primary.disabled,false);
   h.overrides.set(a+'/api/owner/connected/logout',init=>{assert.equal(init.headers.Authorization,'Bearer '+'A'.repeat(43));return reply(200,{version:1,state:'signed_out'});});
   assert.equal(await h.api.act(0,'logout'),true);
@@ -768,37 +842,58 @@ test('setup-only computer stays visible without blocking the other admitted dash
   assert.equal(h.api.snapshot().computers[0].state,'signed_out');
   assert.equal(h.api.snapshot().computers[1].state,'ready');
   assert.equal(h.calls.filter(c=>c.url.startsWith(a+'/api/owner/connected/read/')).length,0);
+  await h.api.act(0,'connect');
+  assert.equal(help.open,true,'a new explicit setup-only connection reveals the next step again');
+  assert.equal(h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')).length,0);
+  const b=refs[1].endpoint_origin;
+  const unavailable=()=>attention.filter(event=>event.source===sourceB&&event.state==='unavailable').length;
+  const beforeUnavailable=unavailable();
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));
+  await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+1);computersOpen=false;
+  await h.api.checkAccount();assert.equal(computersOpen,false);assert.equal(unavailable(),beforeUnavailable+1);
+  h.overrides.delete(b+'/api/owner/connected/status');await h.api.act(1,'check');
+  assert.equal(h.api.snapshot().computers[1].state,'ready');
+  h.overrides.set(b+'/api/owner/connected/status',()=>reply(503,{}));await h.api.act(1,'check');
+  assert.equal(unavailable(),beforeUnavailable+2,'ready resets attention so a later unavailable transition reveals once');
+  assert.equal(computersOpen,true);
   h.api.dispose();
 });
 
 const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
 function setupHarness(options={}) {
   const calls=[],listeners=new Set(),saved=new Map(); let state={state:'setup_only',epoch:1};
-  const pending={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
-  const context={version:1,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',release_id:'r-'+'b'.repeat(64),release_seal:'c'.repeat(64),generation:id(9),expires_at:1800003600,request:null};
-  const preview={...context,plan_id:pending.plan_id,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},activation:'not_requested',expires_at:1800000600};
+  const pending={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+  const context={version:2,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',source_revision:pending.source_revision,
+    generation:id(9),expires_at:1800003600,request:null,launch_reserved:false};
+  const preview={...pending,version:2,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},
+    dispatch:'prepared',phase:'quiesce',expires_at:1800000600};
   const client={snapshot:()=>state,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},
     async setupContext(){calls.push(['context']);return context;},
     async setupPreview(input){calls.push(['preview',input]);return preview;},
-    async setupLaunch(input){assert.equal(saved.has('test'),true);calls.push(['launch',input]);throw new Error('lost');},
-    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:1,state:'active',recorded_activation:{}};},...options.client};
+    async setupLaunch(input){assert.deepEqual(JSON.parse(saved.get('test')).pending,pending);calls.push(['launch',input]);throw new Error('lost');},
+    async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:2,state:'done',launch_reserved:true,config_committed:true,health_errors:{}};},...options.client};
   const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
-  const api=createGuidedSetup({client,storage,storageKey:'test',newUUID:()=>id(10),now:()=>1800000000});
+  const api=createGuidedSetup({client,storage,storageKey:'test',now:()=>1800000000});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
-test('goal preview and explicit exact-plan launch retain UUID before lost response; reload only inspects',async()=>{
+test('preview owns original Git request before one explicit launch; lost response and reload only inspect',async()=>{
   const h=setupHarness();assert.equal(h.calls.length,0);
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
-  h.api.setGoal('Changed goal');assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,2);
-  h.api.setGoal('Improve checkout tests');assert.equal(await h.api.run('launch'),false);
-  assert.deepEqual(h.api.snapshot().pending,h.pending);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.deepEqual(JSON.parse(h.saved.get('test')).pending,h.pending);
+  h.api.setGoal('Changed goal');assert.equal(h.api.snapshot().goal,'Improve checkout tests','a real preview freezes its goal');
+  assert.equal(await h.api.run('preview'),false);
+  assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
   await h.api.run('launch');assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
   h.api.dispose();
   const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
-  assert.deepEqual(resumed.snapshot().pending,h.pending);assert.equal(h.calls.length,3);
+  assert.deepEqual(resumed.snapshot().pending,h.pending);
+  assert.equal(await resumed.run('launch'),false);
   await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');
-  assert.equal(resumed.snapshot().note,'Launch recorded. Check connection to view your team. Bots may still be starting or waiting for local approval.');
+  assert.match(resumed.snapshot().note,/Configuration committed.*native health separately/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
 });
 test('changed connection fences held preview, preserves goal and never launches',async()=>{
@@ -808,79 +903,117 @@ test('changed connection fences held preview, preserves goal and never launches'
   assert.equal(h.api.snapshot().plan,null);assert.equal(h.api.snapshot().goal,'Improve checkout tests');
   assert.equal(await h.api.run('launch'),false);h.api.dispose();
 });
-test('setup panel retains disclosure/focus and refuses launch without durable identifiers',async()=>{
+test('lost preview requires context recovery and offers local continuation without another preview or launch',async()=>{
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);throw new Error('lost preview');}}});
+  await h.api.run('context');h.api.setGoal('Improve tests');assert.equal(await h.api.run('preview'),false);
+  assert.equal(h.api.snapshot().context,null);assert.equal(await h.api.run('preview'),false);
+  h.context.request={...h.pending};h.context.continuation="'/example/managed cli' --root '/example/data root' host update continue";await h.api.run('context');
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.ok(h.api.snapshot().note.includes(h.context.continuation));
+  assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  h.api.dispose();
+});
+test('setup panel retains disclosure/focus and refuses launch without durable original identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
-  const detail=panel.children.find(e=>e.tagName==='DETAILS'); detail.open=true;detail.focus();
+  const detail=panel.children.find(e=>e.tagName==='DETAILS');detail.open=true;detail.focus();
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
-  assert.ok(panel.children.some(e=>e.textContent.includes('Team shop for example-org/shop')));
   const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
-  assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.release_id));
+  assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
   assert.match(authority.textContent,/starts native services.*configured provider accounts/);
   assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
   assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
   assert.ok(panel.children.some(e=>e.textContent.includes('Goal: Improve checkout tests.')));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  assert.match(h.api.snapshot().note,/could not retain the original update identifiers.*No launch was sent/);
+  h.api.dispose();
 });
-
-test('canonical reserved request wins two-tab storage conflict, preserving both IDs through reload',async()=>{
+test('canonical request wins two-tab storage conflict, preserving both original bindings through reload',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
-  const losing={...h.pending,request_id:id(11)};
-  h.saved.set('test',JSON.stringify(losing));
+  const losing={...h.pending,request_id:id(11)};h.saved.set('test',JSON.stringify(losing));
   const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
-  h.context.request={...h.pending};
+  h.context.request={...h.pending};h.context.launch_reserved=true;
   assert.equal(await restored.run('context'),true);
   assert.deepEqual(restored.snapshot().pending,h.pending);assert.deepEqual(restored.snapshot().conflicts,[losing]);
   await restored.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);
   const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
   assert.deepEqual(reloaded.snapshot().pending,h.pending);assert.deepEqual(reloaded.snapshot().conflicts,[losing]);
+  assert.equal(await reloaded.run('launch'),false);
   restored.dispose();reloaded.dispose();h.api.dispose();
 });
-
-test('only a new grant generation clears blocking pending; same-generation null never permits retry',async()=>{
+test('null context or a new grant never clears the original request or permits another preview',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
-  assert.equal(await h.api.run('context'),true);assert.deepEqual(h.api.snapshot().pending,h.pending);
+  await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  h.context.generation=id(12);await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
-  h.context.generation=id(12);
-  assert.equal(await h.api.run('context'),true);assert.equal(h.api.snapshot().pending,null);
-  assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
-  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,generation:id(12)};};
-  assert.equal(await h.api.run('preview'),true);assert.equal(h.api.snapshot().goal,'Improve tests');
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
-
-test('expired or revoked browser receipt retains original identifiers with local inspection guidance',async()=>{
+test('historical sealed identifiers remain visible and block a replacement Git request',async()=>{
+  const h=setupHarness(),legacy={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
+  h.saved.set('test',JSON.stringify(legacy));
+  const restored=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const ui=dom(),panel=new ui.Element();restored.mountPanel({document:ui.document,element:panel});
+  assert.deepEqual(restored.snapshot().legacy,[legacy]);assert.equal(restored.snapshot().pending,null);
+  await restored.run('context');restored.setGoal('Improve tests');assert.equal(await restored.run('preview'),false);
+  assert.ok(panel.children.some(e=>/Incompatible historical setup identifiers/.test(e.textContent)));
+  assert.equal(h.saved.get('test'),JSON.stringify(legacy));assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
+  restored.dispose();h.api.dispose();
+});
+test('mixed legacy or changed-source previews are refused without dispatch',async()=>{
+  for(const defect of ['legacy','source']) {
+    const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');
+    h.client.setupPreview=async()=>({...h.preview,...(defect==='legacy'?{release_id:'r-'+'a'.repeat(64)}:{source_revision:'c'.repeat(40)})});
+    assert.equal(await h.api.run('preview'),false);assert.equal(h.api.snapshot().pending,null);
+    assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+  }
+});
+test('unknown receipt after fresh preview retires launch permission without a launch POST',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const launch=panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent==='Launch this exact configuration');
+  assert.equal(launch.disabled,false);
+  h.client.setupReceipt=async input=>({...input,version:2,state:'unknown',launch_reserved:false,
+    config_committed:false,health_errors:{}});
+  assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/do not launch again/);
+  assert.equal(launch.disabled,true);assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+test('prepared receipt shows exact server continuation and never launches or treats restoration errors as healthy',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  h.change({epoch:2,state:'setup_only'});
+  const command="'/example/managed cli' --root '/example/data root' host update continue";
+  h.client.setupReceipt=async input=>({...input,version:2,state:'quiesce',launch_reserved:false,
+    config_committed:false,health_errors:{},continuation:command});
+  assert.equal(await h.api.run('receipt'),true);assert.ok(h.api.snapshot().note.includes(command));
+  assert.equal(await h.api.run('launch'),false);
+  h.client.setupReceipt=async input=>({...input,version:2,state:'done',launch_reserved:true,
+    config_committed:true,health_errors:{'example.service':'unknown start'}});
+  assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/needs attention/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+test('expired or revoked receipt preserves original identifiers and local inspection guidance',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
   h.client.setupReceipt=async()=>{throw new Error('approval expired');};
   assert.equal(await h.api.run('receipt'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
   assert.match(h.api.snapshot().note,/locally after expiry\/revocation/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
-
-test('failed setup approval refresh disables new work but keeps the goal and original recovery identifiers',async()=>{
+test('failed approval refresh retires new-work permission while retaining original request and goal',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const button=title=>panel.children.find(e=>e.tagName==='BUTTON'&&e.textContent===title);
   await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
-  const plan=h.api.snapshot().plan,check=h.client.setupContext;
-  const authority=panel.children.find(e=>e.textContent.includes('Local approval covers'));
-  assert.equal(button('Launch this exact plan').disabled,false);
+  const plan=h.api.snapshot().plan;
+  assert.equal(button('Launch this exact configuration').disabled,false);
   h.client.setupContext=async()=>{throw new Error('approval revoked');};
-  assert.equal(await h.api.run('context'),false);
-  assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
-  assert.equal(authority.textContent,'');
-  assert.equal(h.api.snapshot().goal,'Improve tests');
-  assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact plan').disabled,true);
-  const before=h.calls.length;
-  assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.length,before);
-  h.client.setupContext=check;await h.api.run('context');await h.api.run('preview');await h.api.run('launch');
-  const saved=h.saved.get('test');assert.deepEqual(h.api.snapshot().pending,h.pending);
-  h.client.setupContext=async()=>{throw new Error('approval revoked');};
-  assert.equal(await h.api.run('context'),false);assert.deepEqual(h.api.snapshot().pending,h.pending);
-  assert.equal(h.saved.get('test'),saved);assert.equal(button('Check original activation receipt').disabled,false);
+  assert.equal(await h.api.run('context'),false);assert.equal(h.api.snapshot().context,null);assert.equal(h.api.snapshot().plan,plan);
+  assert.equal(h.api.snapshot().goal,'Improve tests');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(button('Preview team').disabled,true);assert.equal(button('Launch this exact configuration').disabled,true);
+  assert.equal(await h.api.run('launch'),false);
   await h.api.run('receipt');assert.deepEqual(h.calls.at(-1),['receipt',h.pending]);
-  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
 
 test('explicit connected summary retry forwards only its source key and successful reconnect clears its latch',async()=>{
@@ -910,4 +1043,29 @@ test('workspace document permits eight exact saved computers and refuses a ninth
     const rejected=harness({references:bad});rejected.mount();await rejected.api.checkAccount();await flush();
     assert.notEqual(rejected.api.snapshot().phase,'ready');rejected.api.dispose();
   }
+});
+
+test('connected Git provenance survives qualification and old receipt inspection after source update',async()=>{
+ const h=harness({count:1});await h.api.checkAccount();await h.api.act(0,'connect');await h.api.jget('/api/overview');
+ const runtime={release_id:null,source_revision:'1'.repeat(40),config_fingerprint:'2'.repeat(64)};
+ let current={...runtime};
+ const door=refs[0].endpoint_origin+'/api/owner/connected/actions/';
+ h.overrides.set(door+'context',init=>{const input=JSON.parse(init.body);return reply(200,{
+  version:2,room:input.room,simulation:false,scope:{workspace:'connected-test',host:'host_'+'a'.repeat(32),fleet:input.room,viewer:'a-nudge-grant1'},
+  recipients:[{id:'actor_'+'c'.repeat(32),label:'Lead',lead:true}],actions:['nudge'],...current});});
+ const room=sourceA+' / team',c=await h.api.nudgeContext(room),state=new ActionState({getItem:()=>null,setItem(){}});
+ assert.deepEqual({release_id:c.release_id,source_revision:c.source_revision,config_fingerprint:c.config_fingerprint},runtime);
+ const target={recipient:c.recipients[0].id,task_id:sourceA+'::'+wi,assignment_id:null,...runtime};
+ const request=state.prepare(c,target,'Reason',id(90));
+ const sending=state.beginPrepared(c,request,await h.api.prepareAction(request));
+ assert.equal(state.accept(sending,await h.api.sendAction(sending)),'recorded');
+ current={...runtime,source_revision:'3'.repeat(40),config_fingerprint:'4'.repeat(64)};
+ await h.api.nudgeContext(room);
+ const before=h.calls.length;
+ await assert.rejects(h.api.prepareAction(request),/unknown/);assert.equal(h.calls.length,before);
+ const original=state.pending[0],result=await h.api.actionReceipt(original);
+ assert.deepEqual(result.target,target);assert.equal(state.accept(original,result),'delivered');
+ const receiptCall=h.calls.filter(c=>c.url===door+'receipt').at(-1),raw=JSON.parse(receiptCall.init.body);
+ assert.deepEqual(raw.target,{...target,recipient:'actor_'+'c'.repeat(32),task_id:wi});
+ assert.equal(state.pending.length,0);h.api.dispose();
 });

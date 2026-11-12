@@ -8,16 +8,24 @@ append what they are given to files). A stand-in CLI answers the sweep's
 `host supervision failed` read with the test's own result, so the rows here are
 the read's output, not native state: tests/test_failed_units.py covers the read,
 and tests/test_supervisor_adapter.sh the native calls under it. The launchd rows
-are a test double; no Mac ran this.
+are a test double; no native manager is read.
 """
 
 from __future__ import annotations
 
 import json
+import platform
+import shlex
+import shutil
+import subprocess
 
 import pytest
 
-from tests.test_fleet_pulse_browsers import Host, pytestmark  # noqa: F401 (pytestmark: its skips apply here)
+from tests.test_fleet_pulse_browsers import Host
+from tests.conftest import constructed_env
+
+# These are normalized read rows, independent of the native manager/browser leg.
+pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
 
 SYSTEMD = "ActiveState=failed SubState=failed Result=exit-code ExecMainStatus=4"
 
@@ -30,6 +38,16 @@ class UnitsHost(Host):
         self.cli = tmp / "claudlobby"
         self.fleet("F", "com.t", ["b1", "b2"])
         self.reads([])
+        # Observe only the read this scene replaces; all other CLI doors stay real.
+        common = self.lib / "lib-common.sh"
+        source = common.read_text()
+        common.unlink()
+        common.write_text(source + '\nclaudlobby_cli() {\n  case "$*" in\n'
+            '    *"host supervision failed") ' + shlex.quote(str(self.cli)) + ' "$@" ;;\n'
+            '    *) "$CLAUDLOBBY_CLI" "$@" ;;\n  esac\n}\n')
+        self.native_calls = tmp / "systemctl.calls"
+        (self.bin / "systemctl").write_text('#!/bin/sh\nprintf "%s\n" "$*" >> '
+                                           + shlex.quote(str(self.native_calls)) + '\nexit 3\n')
 
     def reads(self, units, *, refused=None):
         body = ({"ok": False, "error": {"code": "unavailable", "message": refused}} if refused
@@ -39,12 +57,14 @@ class UnitsHost(Host):
                             "esac\nexit 0\n")
         self.cli.chmod(0o755)
 
-    def sweep(self, fleet, cli=True, bound=False):
-        extra = {"CLAUDLOBBY_CLI": str(self.cli)} if cli else {}
-        if bound:  # as `claudlobby fleet pulse` runs it for a selected release
-            extra |= {"CLAUDLOBBY_RELEASE_ID": "r-test", "CLAUDLOBBY_PRIVATE_PULSE_RELEASE": "r-test"}
+    def sweep(self, fleet):
         return super().sweep(fleet, FLEET_PULSE_ESCALATION_CHAT_ID="-1001234567890",
-                             FLEET_PULSE_ESCALATION_STATE_DIR=str(self.tmp / "sender"), **extra)
+                             FLEET_PULSE_ESCALATION_STATE_DIR=str(self.tmp / "sender"))
+
+    def close(self):
+        super().close()
+        if platform.system() != "Linux":
+            assert not self.native_calls.exists(), "normalized-row tests invoked systemctl"
 
     def recorded(self, kind="unit_failed"):
         rows = []
@@ -172,17 +192,17 @@ def test_a_page_that_did_not_go_out_is_tried_again_with_no_second_record(host):
 
 def test_a_refused_read_touches_no_key_and_a_bound_sweep_pages_its_guard_once(host):
     host.reads([unit("com.t.creds-check.service")])
-    host.sweep("F", bound=True)
+    host.sweep("F")
     host.reads([], refused="failed units cannot be read: no user manager")
-    result = host.sweep("F", bound=True)
-    host.sweep("F", bound=True)
+    result = host.sweep("F")
+    host.sweep("F")
     assert "failed-units read refused (rc=6): failed units cannot be read: no user manager" in result.stderr
     assert host.keys("F.units_failed") == ["com.t.creds-check.service"]
     assert host.pages() == [page("com.t.creds-check.service"),
                             "FLEET ALERT: the failed-units read for F is refused - a failed job unit cannot "
                             "be seen until it reads again. (failed units cannot be read: no user manager)"]
     host.reads([unit("com.t.creds-check.service")])
-    host.sweep("F", bound=True)
+    host.sweep("F")
     assert len(host.recorded()) == 1 and len(host.pages()) == 2
 
 
@@ -198,12 +218,11 @@ def test_a_failure_template_instance_and_a_launchd_job_say_what_failed(host):
     assert [data["template"] for _, data in host.recorded()] == ["com.t.job-failed@.service", None]
 
 
-def test_an_unbound_sweep_says_why_it_read_nothing_and_pages_no_guard(host):
+def test_an_unbound_sweep_refuses_before_any_read_or_effect(host):
     host.reads([unit("com.t.creds-check.service")])
-    result = host.sweep("F", cli=False)
-    assert ("failed-units read refused (rc=127): claudlobby: CLAUDLOBBY_CLI must name the composed absolute"
-            in result.stderr)
-    host.reads([], refused="failed units cannot be read: no release is selected on this host")
-    result = host.sweep("F")
-    assert "failed-units read refused (rc=6)" in result.stderr
+    result = subprocess.run(["bash", str(host.lib / "fleet-pulse.sh"), "F"],
+        env=constructed_env(HOME=host.root / "home", CLAUDLOBBY_ROOT=host.root),
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 3
+    assert "use claudlobby fleet pulse for the current runtime" in result.stderr
     assert host.recorded() == [] and host.pages() == [] and host.keys("F.units_failed") == []

@@ -26,7 +26,32 @@ runs a headless render through its render profile:
     holder reports it: a different boot id means the job was running when the
     host reset, the evidence #1644 lacks. A call that cannot take a slot,
     because every slot is held or a free one is another caller's turn, takes
-    a ticket in the queue (#2124) and exits 75.
+    a ticket in the queue (#2124) and exits 75. The job runs in a session of
+    its own, and this process reads the host's free memory every ``poll_s``
+    (MemAvailable where there is a meminfo, else vm_stat) and the job's PSS
+    (its processes, by parent link, where /proc gives it); once
+    ``debounce_reads`` readings in a row are under
+    ``stop_mib`` it sends SIGTERM to the job's process group and to every process
+    it found to have left that group (by parent link), SIGKILL after ``grace_s``,
+    then releases the slot and exits 79 with a ``heavy_slot_stopped`` event. A
+    reading that fails never stops the job. Every plain run is read, and the
+    stop acts unless the host turns it off: the line is on by default at 3800 MiB
+    (RUN_LINES names the lines and holds this host's numbers, which stand in
+    where no file is). ``state/heavy-slot/run-lines`` sets the host's own values
+    and the bounds they keep: ``stop_mib`` at or over ``stop_mib_floor``,
+    ``debounce_reads`` x ``poll_s`` at most ``notice_within_s``, and that plus
+    ``grace_s`` at most ``stopped_within_s``. Its one off is the line
+    ``stop = off``, and then nothing stops the run, which is still read. A file
+    it cannot read, or whose values break its bounds, refuses every plain run at
+    exit 2 (#2221, #2790).
+
+    Every run's ``heavy_slot_released`` row, a render's too, says what it drew
+    and how long it waited (#1645): ``waited_s``, from its ticket's issue to its
+    take (0 for a take with no ticket, absent when the queue was off or could
+    not be read), and ``peak``, with MemAvailable at the start
+    (``mem_available_mib_start``) and at its lowest (``mem_available_mib_low``)
+    and the job's largest PSS (``job_pss_mib_high``). A figure none of whose
+    readings succeeded is left out, never 0.
 
 ``run --profile render -- ARGV``
     A headless browser render, which plain ``run`` refuses: a render is a
@@ -74,13 +99,19 @@ Knobs, all host-wide: ``state/heavy-slot/slots`` holds the slot count (default
 call through at once, without a restart; ``state/heavy-slot/no-queue`` makes
 every caller decide on the slots alone, as before the queue;
 ``state/heavy-slot/render-lines`` sets the render profile's lines (``name =
-value``; RENDER_LINES names them and holds the defaults), and a file it cannot
-read refuses every render. ``state/heavy-slot/render-record`` is the render
+value``; RENDER_LINES names them and holds this host's numbers), and a file it
+cannot read, or whose ``stop_mib`` or ``poll_s`` breaks its bounds, refuses every
+render. ``state/heavy-slot/run-lines`` sets the values and bounds of the stop line
+every plain ``run`` is watched by, on by default at 3800 MiB and off only by the
+line ``stop = off`` (``name = value``; RUN_LINES), and a file it cannot read, or
+whose values break its bounds, refuses every plain run.
+``state/heavy-slot/render-record`` is the render
 profile's record of kills and hold lifts, one JSON object per line; a file it
 cannot read refuses every render too. The environment's HEAVY_SLOT_TICKET_IDLE_S overrides
 TICKET_IDLE_S for the process that reads it. Test seams: HEAVY_SLOT_DIR,
-HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID, and HEAVY_SLOT_PROC (a directory
-standing in for /proc's meminfo and loadavg).
+HEAVY_SLOT_EVENTS_FILE, HEAVY_SLOT_BOOT_ID, HEAVY_SLOT_PROC (a directory
+standing in for /proc's meminfo and loadavg), and HEAVY_SLOT_VM_STAT (a command
+run in place of vm_stat where that directory holds no meminfo).
 
 Stdlib only, Python 3.9 (the system python3 on the estate's macOS hosts).
 """
@@ -105,7 +136,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 EX_TEMPFAIL = 75  # every slot is taken, or a render's start line does not hold: retry later
-EX_STOPPED = 79  # the render profile killed its render at a stop line or its time limit
+EX_STOPPED = 79  # the wrapper stopped its job at a stop line (or a render at its time limit)
 COMMAND_CAP = 200  # characters of a command kept in a record or event
 
 
@@ -1531,12 +1562,13 @@ def settle(q: dict, order: List[dict], mine: dict, queued: bool, ahead: bool,
 
 def _decide(d: Path, n: int, tool: str, take: bool):
     """One door's decision, under the queue's lock, the same for the hook and
-    the wrapper: (got, slots, mine, order, why). `got` is the (slot, fd) the
-    wrapper took (`take`), True when the hook may let the call through, else
+    the wrapper: (got, slots, mine, order, why, read). `got` is the (slot, fd)
+    the wrapper took (`take`), True when the hook may let the call through, else
     None; `slots` is the snapshot decided on. `mine` is the ticket the caller
     holds now, or the one it waited on; it and `order` are None and [] when
     there is no such ticket or the slots alone decided, and `why` then says why,
-    unless the queue is switched off."""
+    unless the queue is switched off. `read` says the queue was read and written
+    back, so a caller it holds no ticket for has not waited in it (#1645)."""
     idle, now = ticket_idle_s(), time.time()
     qfd, why = _open_queue(d)
     dropped: list = []
@@ -1557,9 +1589,10 @@ def _decide(d: Path, n: int, tool: str, take: bool):
         if qfd is not None:
             os.close(qfd)
     _emit_dropped(dropped if qfd is not None else [], idle)
+    read = qfd is not None and not why
     if qfd is None or (got is not None and not queued):
-        return got, slots, None, [], why
-    return got, slots, mine, order, why
+        return got, slots, None, [], why, read
+    return got, slots, mine, order, why, read
 
 
 def _refuse(d: Path, where: str, shape: str, n: int, slots, mine, order, why,
@@ -1594,6 +1627,16 @@ def _ticket_summary(t: dict, order: List[dict], idle: int, now: Optional[float] 
     if now is not None:
         out["waited_s"] = int(now - t["since"])
     return out
+
+
+def _waited_s(mine: Optional[dict], read: bool, now: float) -> Optional[int]:
+    """A run's wait in the queue, in whole seconds to `now` (#1645): from its
+    ticket's issue; 0 for a take with no ticket in a queue that was read; None
+    when the queue was not read (switched off, or its lock or file failed),
+    since a caller refused then held no ticket to time it by."""
+    if mine is not None:
+        return int(now - mine["since"])
+    return 0 if read else None
 
 
 def _emit_dropped(dropped, idle: int) -> None:
@@ -1640,10 +1683,13 @@ def _emit(event: str, data: dict, wait: bool = False) -> None:
 # --- the render profile ----------------------------------------------------------
 # A headless browser render (#2039) runs only inside the host's render lines
 # (#2221, #2043), in a systemd user scope of its own, watched by the process
-# that started it. The lines are host knobs; these defaults are the primary
-# host's ruled lines (2026-10-19). A start line holds AT its number; a stop line
-# is crossed only PAST it, and one reading past it is enough: the ruled lines
-# name no debounce.
+# that started it. The lines are host config (state/heavy-slot/render-lines).
+# RENDER_LINES holds this host's numbers, the primary host's ruled lines and
+# bounds, and stands in for a host with no file until a design sizes them from
+# each host's own spec. A start line holds AT its number; a stop line is crossed
+# only PAST it, and one reading past it is enough: the ruled lines name no
+# debounce, so a render notices a crossing within one poll_s. Where the render
+# shares a line with the plain run (stop_mib, poll_s), it keeps the run's bounds.
 
 RENDER_LINES = {
     "start_mib": 4820.0,   # start only while MemAvailable is at least this
@@ -1653,6 +1699,8 @@ RENDER_LINES = {
     "stop_load1": 40.0,    # ... or the 1-minute load is over this
     "poll_s": 2.0,         # seconds between two readings
     "max_minutes": 45.0,   # a render still running after this is killed too
+    "stop_mib_floor": 3000.0,  # a bound: stop_mib may not go under this
+    "notice_within_s": 6.0,    # a bound: poll_s may not go over this
 }
 RENDER_LINES_FILE = "render-lines"
 # The job's session bus. A Chromium that reaches it asks systemd for a scope of
@@ -1671,18 +1719,37 @@ class LinesError(Exception):
     """The host's render-lines file cannot be read as lines: every render refuses."""
 
 
-def render_lines(d: Path) -> Tuple[dict, str]:
-    """(the render lines, where they came from): RENDER_LINES with the host's own
-    numbers from state/heavy-slot/render-lines over them, read on every use. The
-    file holds `name = value` lines, and `#` starts a comment. A name it does not
-    know, a value that is not a positive number, or a file it cannot read raises
-    LinesError: a typo must never stand in for a line someone set."""
-    lines = dict(RENDER_LINES)
-    f = d / RENDER_LINES_FILE
+# The plain run's stop line (state/heavy-slot/run-lines, same format as the render
+# lines). stop_mib: stop the job while the host's free memory stays under this many
+# MiB; on by default at the host's ruled stop line, the render profile's stop_mib.
+# debounce_reads: how many readings in a row must be under it (a whole number).
+# poll_s: seconds between two readings (at most 60). grace_s: seconds between
+# SIGTERM and SIGKILL. A stop line is crossed only UNDER its number, as the
+# render's is: a reading equal to it does not stop the job. The bounds are host
+# config too: stop_mib may not go under stop_mib_floor, the stop must notice a
+# crossing within notice_within_s (debounce_reads x poll_s), and the job must have
+# had SIGTERM and, if still running, SIGKILL within stopped_within_s (that notice
+# plus grace_s). RUN_LINES holds this host's numbers and stands in for a host
+# with no file until a design sizes them from each host's own spec. The one off
+# is the line `stop = off`: no number turns the stop off.
+RUN_LINES = {"stop_mib": 3800.0, "debounce_reads": 2.0, "poll_s": 2.0, "grace_s": 10.0,
+             "stop_mib_floor": 3000.0, "notice_within_s": 6.0, "stopped_within_s": 21.0,
+             "stop": "on"}
+RUN_LINES_FILE = "run-lines"
+
+
+def _read_lines(f: Path, defaults: dict, kind: str) -> Optional[dict]:
+    """The lines in file f over a copy of defaults, or None when f does not exist.
+    The file holds `name = value` lines, and `#` starts a comment. A name it does
+    not know, a value that is not a positive number, a file it cannot read, or
+    values that break the bounds they keep (_bounds_broken) raise LinesError: a
+    typo must never stand in for a line someone set. A `stop` line, where the
+    defaults name one (the plain run's), takes the one value `off`."""
+    lines = dict(defaults)
     try:
         text = f.read_text()
     except FileNotFoundError:
-        return lines, "default"
+        return None
     except (OSError, UnicodeDecodeError) as e:
         raise LinesError(f"{f} is unreadable: {getattr(e, 'strerror', None) or e}")
     for number, raw in enumerate(text.splitlines(), 1):
@@ -1690,9 +1757,15 @@ def render_lines(d: Path) -> Tuple[dict, str]:
         if not line:
             continue
         name, eq, value = (part.strip() for part in line.partition("="))
-        if not eq or name not in RENDER_LINES:
-            raise LinesError(f"{f} line {number} names no render line (the names: "
-                             f"{', '.join(RENDER_LINES)})")
+        if not eq or name not in defaults:
+            raise LinesError(f"{f} line {number} names no {kind} line (the names: "
+                             f"{', '.join(defaults)})")
+        if name == "stop":
+            if value != "off":
+                raise LinesError(f"{f} line {number}: stop takes one value, off; the stop is "
+                                 "on while no line says so (#2790)")
+            lines[name] = value
+            continue
         try:
             number_value = float(value)
         except ValueError:
@@ -1701,7 +1774,63 @@ def render_lines(d: Path) -> Tuple[dict, str]:
             raise LinesError(f"{f} line {number}: {name} needs a positive number"
                              + (" of at most 60" if name == "poll_s" else ""))
         lines[name] = number_value
-    return lines, str(f)
+    broken = _bounds_broken(lines)
+    if broken:
+        raise LinesError(f"{f} breaks its bounds: {broken} (#2790)")
+    return lines
+
+
+def _bounds_broken(lines: dict) -> Optional[str]:
+    """Why lines break the bounds they carry, or None: stop_mib under
+    stop_mib_floor, a crossing noticed later than notice_within_s (debounce_reads
+    readings poll_s apart; a render has no debounce and stops on one reading),
+    or, where the lines carry stopped_within_s, the job stopped later than that
+    (the notice plus grace_s)."""
+    if lines["stop_mib"] < lines["stop_mib_floor"]:
+        return (f"stop_mib {lines['stop_mib']:g} is under stop_mib_floor "
+                f"{lines['stop_mib_floor']:g}")
+    reads = lines.get("debounce_reads", 1)
+    notice = round(reads * lines["poll_s"], 6)
+    if notice > lines["notice_within_s"]:
+        how = (f"{reads:g} readings {lines['poll_s']:g} s apart" if reads != 1 else
+               f"one reading every {lines['poll_s']:g} s")
+        return (f"a crossing would be noticed {notice:g} s after it ({how}), over "
+                f"notice_within_s {lines['notice_within_s']:g}")
+    if "stopped_within_s" in lines:
+        stopped = round(notice + lines["grace_s"], 6)
+        if stopped > lines["stopped_within_s"]:
+            return (f"the job would be stopped {stopped:g} s after a crossing (that notice and "
+                    f"grace_s {lines['grace_s']:g}), over stopped_within_s "
+                    f"{lines['stopped_within_s']:g}")
+    return None
+
+
+def render_lines(d: Path) -> Tuple[dict, str]:
+    """(the render lines, where they came from): RENDER_LINES with the host's own
+    numbers from state/heavy-slot/render-lines over them, read on every use.
+    LinesError when the file cannot be read as lines, or breaks its bounds: every
+    render refuses."""
+    f = d / RENDER_LINES_FILE
+    lines = _read_lines(f, RENDER_LINES, "render")
+    return (dict(RENDER_LINES), "default") if lines is None else (lines, str(f))
+
+
+def run_lines(d: Path) -> Tuple[dict, str]:
+    """(the plain run's lines, where they came from): RUN_LINES with the host's own
+    numbers from state/heavy-slot/run-lines over them, read on every use. LinesError
+    when the file cannot be read as lines, breaks its bounds or gives debounce_reads
+    a number that is not whole: every plain heavy run refuses. lines["stop"] is
+    "off" only when the file says `stop = off`."""
+    f = d / RUN_LINES_FILE
+    lines = _read_lines(f, RUN_LINES, "run")
+    if lines is None:
+        lines, source = dict(RUN_LINES), "default"
+    else:
+        source = str(f)
+    if lines["debounce_reads"] != int(lines["debounce_reads"]):
+        raise LinesError(f"{f}: debounce_reads needs a whole number")
+    lines["debounce_reads"] = int(lines["debounce_reads"])
+    return lines, source
 
 
 # The retry rule (the host's render rule; its owner ruled 2026-10-19 that the
@@ -1898,6 +2027,57 @@ def _proc_dir() -> Path:
     return Path(os.environ.get("HEAVY_SLOT_PROC") or "/proc")
 
 
+def _meminfo_mib(path: Path) -> int:
+    """MemAvailable of a meminfo file, in MiB. ValueError when it has no such line."""
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    raise ValueError(f"no MemAvailable in {path}")
+
+
+def _vm_stat_mib(text: str) -> int:
+    """Available MiB from vm_stat's text: the pages free, inactive and speculative
+    times the page size in vm_stat's own header. One definition with lib-common's
+    `avail_ram_mb` on macOS, which fleet-memory-check and the plane host probe
+    read. ValueError when the header or any of the three counters is missing."""
+    header = re.search(r"page size of (\d+) bytes", text)
+    if header is None:
+        raise ValueError("vm_stat names no page size")
+    pages = 0
+    for label in ("free", "inactive", "speculative"):
+        counter = re.search(rf"^Pages {label}:\s+(\d+)\.?\s*$", text, re.M)
+        if counter is None:
+            raise ValueError(f"vm_stat has no `Pages {label}` line")
+        pages += int(counter.group(1))
+    return pages * int(header.group(1)) // 1048576
+
+
+def _mem_available_mib() -> int:
+    """The host's available memory in MiB: the meminfo under _proc_dir() when it
+    exists, else vm_stat (HEAVY_SLOT_VM_STAT names a command to run instead).
+    Chosen by what exists, never by the platform, so a test drives either reader
+    on either OS. OSError when vm_stat fails, ValueError when a reading is
+    malformed."""
+    meminfo = _proc_dir() / "meminfo"
+    if meminfo.exists():
+        return _meminfo_mib(meminfo)
+    return _vm_stat_mib(_c_output([os.environ.get("HEAVY_SLOT_VM_STAT") or "vm_stat"]))
+
+
+def _c_output(argv: List[str]) -> str:
+    """What a command prints, run with LC_ALL=C and no input, within 10 s. OSError
+    when it cannot run, does not answer in time or exits non-zero."""
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=10, env={**os.environ, "LC_ALL": "C"})
+    except subprocess.TimeoutExpired:
+        raise OSError(f"{argv[0]} did not answer in 10 s")
+    if done.returncode != 0:
+        raise OSError(f"{argv[0]} exited {done.returncode}")
+    return done.stdout
+
+
 def host_readings() -> dict:
     """MemAvailable (MiB) and the 1- and 5-minute load, read now. OSError or
     ValueError when the host cannot be read: a gate or a watchdog that cannot
@@ -1905,12 +2085,7 @@ def host_readings() -> dict:
     proc = _proc_dir()
     with open(proc / "loadavg") as fh:
         load1, load5 = (float(x) for x in fh.read().split()[:2])
-    with open(proc / "meminfo") as fh:
-        for line in fh:
-            if line.startswith("MemAvailable:"):
-                return {"mem_available_mib": int(line.split()[1]) // 1024,
-                        "load1": load1, "load5": load5}
-    raise ValueError(f"no MemAvailable in {proc / 'meminfo'}")
+    return {"mem_available_mib": _meminfo_mib(proc / "meminfo"), "load1": load1, "load5": load5}
 
 
 def _breach(r: dict, lines: dict) -> Optional[Tuple[str, str]]:
@@ -1969,16 +2144,65 @@ def _arm_parent_death(signum: int) -> bool:
         return False
 
 
-def _stat(pid: int) -> Optional[Tuple[int, int]]:
-    """(parent pid, start time) of a live process; None once it is gone or a zombie."""
+def _stat_fields(pid: int) -> Optional[Tuple[int, int, int]]:
+    """(parent pid, process group, start time) of a live process; None once it is
+    gone or a zombie."""
     try:
         data = Path(f"/proc/{pid}/stat").read_bytes()
         rest = data[data.rindex(b")") + 2:].split()  # the name can hold spaces and parentheses
         if len(rest) < 20 or rest[0] in (b"Z", b"X"):
             return None
-        return int(rest[1]), int(rest[19])
+        return int(rest[1]), int(rest[2]), int(rest[19])
     except (OSError, ValueError):
         return None
+
+
+def _stat(pid: int) -> Optional[Tuple[int, int]]:
+    """(parent pid, start time) of a live process; None once it is gone or a zombie."""
+    fields = _stat_fields(pid)
+    return None if fields is None else (fields[0], fields[2])
+
+
+def _parse_ps(text: str) -> dict:
+    """{pid: (ppid, pgid, start)} from `ps -A -o pid=,ppid=,pgid=,stat=,lstart=`;
+    a zombie and a row that is not one are skipped. The start identity is the
+    lstart text with runs of spaces collapsed."""
+    table = {}
+    for row in text.splitlines():
+        parts = row.split(None, 4)
+        if len(parts) < 5 or parts[3].startswith("Z"):
+            continue
+        try:
+            table[int(parts[0])] = (int(parts[1]), int(parts[2]), " ".join(parts[4].split()))
+        except ValueError:
+            continue
+    return table
+
+
+def _ps_table() -> Optional[dict]:
+    """The process table from ps, where there is no /proc; None when ps fails."""
+    try:
+        return _parse_ps(_c_output(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="]))
+    except (OSError, ValueError):
+        return None
+
+
+def _proc_table() -> Optional[dict]:
+    """{pid: (ppid, pgid, start)} of every live process: from /proc where there is
+    one, else from ps. None when the host cannot be read."""
+    if not Path("/proc/self/stat").exists():
+        return _ps_table()
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    table = {}
+    for name in names:
+        if name.isdigit():
+            fields = _stat_fields(int(name))
+            if fields is not None:
+                table[int(name)] = fields
+    return table
 
 
 def _cgroup_of(pid) -> Optional[str]:
@@ -2005,9 +2229,12 @@ def _scope_procs(cgroup: str) -> Optional[List[int]]:
         return None
 
 
-def _pss_mib(pids: List[int]) -> int:
-    """The summed PSS of these processes: shared pages split between them."""
-    total = 0
+def _pss_mib(pids: List[int]) -> Optional[int]:
+    """The summed PSS of these processes, shared pages split between them, or
+    None for a reading that failed: none of them read (none left, or no
+    smaps_rollup here, as on macOS), or one that could not be read. A process
+    that ended before it was read adds nothing (#1645)."""
+    total = read = 0
     for pid in pids:
         try:
             with open(f"/proc/{pid}/smaps_rollup", "rb") as fh:
@@ -2015,9 +2242,18 @@ def _pss_mib(pids: List[int]) -> int:
                     if line.startswith(b"Pss:"):
                         total += int(line.split()[1])
                         break
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # it ended, or there is no smaps_rollup here
         except (OSError, ValueError, IndexError):
-            pass
-    return total // 1024
+            return None
+        read += 1
+    return total // 1024 if read else None
+
+
+def _note_pss(peak: dict, mib: Optional[int]) -> None:
+    """Keep the job's largest PSS reading in peak; a failed one changes nothing."""
+    if mib is not None:
+        peak["job_pss_mib_high"] = max(mib, peak.get("job_pss_mib_high", mib))
 
 
 def _duration(seconds: float) -> str:
@@ -2109,6 +2345,125 @@ class _Scope:
             time.sleep(0.1)
 
 
+class _Group:
+    """A plain run's session, and every process found to have left it."""
+
+    def __init__(self, pgid: int):
+        self.pgid = pgid
+        self.escapees: dict = {}  # pid -> start, so one is found after it is reparented
+
+    def walk(self) -> Tuple[List[int], List[int]]:
+        """(the live pids in the job's process group; the live escapees). An
+        escapee is a descendant, by parent link, of a member or of a live escapee,
+        whose group is not the job's: a process that called setsid, or setpgid."""
+        table = _proc_table()
+        if table is None:
+            return [], []
+        live = {pid for pid, start in self.escapees.items()
+                if pid in table and table[pid][2] == start}
+        members = sorted(pid for pid, row in table.items() if row[1] == self.pgid)
+        children: dict = {}
+        for pid, row in table.items():
+            children.setdefault(row[0], []).append(pid)
+        seen = set(members) | live
+        stack = list(seen)
+        while stack:
+            for child in children.get(stack.pop(), ()):
+                if child in seen:
+                    continue
+                seen.add(child)
+                stack.append(child)
+                if table[child][1] != self.pgid:
+                    self.escapees[child] = table[child][2]
+                    live.add(child)
+        return members, sorted(live)
+
+    def signal(self, signum: int) -> None:
+        _, live = self.walk()  # escapees are found while their parents live
+        try:
+            os.killpg(self.pgid, signum)
+        except OSError:
+            pass
+        for pid in live:
+            try:
+                os.kill(pid, signum)
+            except OSError:
+                pass
+
+    def alive(self) -> List[int]:
+        members, live = self.walk()
+        return sorted(set(members) | set(live))
+
+
+class _StopWatch:
+    """The debounce of the plain run's stop line, and what it measured. With the
+    stop off it still measures, and never stops (#1645)."""
+
+    def __init__(self, lines: dict):
+        self.stop = lines["stop_mib"]
+        self.need = lines["debounce_reads"]
+        self.poll = lines["poll_s"]
+        self.off = lines.get("stop") == "off"
+        self.run = 0
+        self.last: Optional[int] = None
+        # a figure enters with its first reading that succeeds: absent, never 0 (#1645)
+        self.peak = {"readings": 0, "unreadable": 0}
+
+    def take(self, mib: Optional[int]) -> bool:
+        """True once `debounce_reads` readings in a row were under the line, unless
+        the stop is off. A reading that failed (None) resets the run and never
+        stops."""
+        peak = self.peak
+        if mib is None:
+            peak["unreadable"] += 1
+            self.run = 0
+            return False
+        peak["readings"] += 1
+        peak.setdefault("mem_available_mib_start", mib)
+        peak["mem_available_mib_low"] = min(mib, peak.get("mem_available_mib_low", mib))
+        self.last = mib
+        self.run = self.run + 1 if mib < self.stop else 0
+        return not self.off and self.run >= self.need
+
+    def reading(self) -> str:
+        return (f"free memory {self.last} MiB, under {self.stop:g} MiB for {self.need} "
+                f"readings {self.poll:g} s apart")
+
+
+def _stop(child, group: _Group, grace_s: float) -> Tuple[bool, List[int]]:
+    """Stop a plain run: SIGTERM to its group and the processes that left it, then
+    SIGKILL after grace_s to what is left. (whether SIGKILL was needed, the pids
+    still alive after KILL_WAIT_S, the job's own among them if it never reaped)."""
+    def pause() -> None:
+        if child.returncode is None:
+            try:
+                child.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(0.25)
+
+    group.signal(signal.SIGTERM)
+    deadline = time.monotonic() + grace_s
+    while True:
+        pause()
+        if child.returncode is not None and not group.alive():
+            return False, []
+        if time.monotonic() >= deadline:
+            break
+    deadline = time.monotonic() + KILL_WAIT_S
+    while True:
+        group.signal(signal.SIGKILL)
+        pause()
+        left = group.alive()
+        if child.returncode is None and child.pid not in left:
+            left = sorted(left + [child.pid])
+        if not left:
+            return True, []
+        if time.monotonic() >= deadline:
+            return True, left
+
+
 class _Render:
     """One render after its slot is taken: its record, its scope and keeper,
     what the keeper reported, the readings, and why it stopped, if it did."""
@@ -2125,7 +2480,7 @@ class _Render:
         self.peak = {"mem_available_mib_start": start["mem_available_mib"],
                      "mem_available_mib_low": start["mem_available_mib"],
                      "load1_high": start["load1"], "load5_high": start["load5"],
-                     "job_pss_mib_high": 0, "readings": 1}
+                     "readings": 1}  # job_pss_mib_high comes with a PSS reading (#1645)
 
     def take(self, chunk: bytes) -> None:
         """Read the keeper's complete report lines."""
@@ -2214,7 +2569,7 @@ class _Render:
                 self.read(r)
                 scoped, live = scope.members()
                 job = [pid for pid in (scoped or []) if pid != self.keeper.pid] + live
-                self.peak["job_pss_mib_high"] = max(self.peak["job_pss_mib_high"], _pss_mib(job))
+                _note_pss(self.peak, _pss_mib(job))
                 self.stop = _breach(r, lines)
                 if self.stop is None and now - began > lines["max_minutes"] * 60:
                     self.stop = ("max_minutes",
@@ -2274,11 +2629,13 @@ def _render_line(ended: str, status: int, rec: dict) -> str:
     if ended == "not-started":
         return f"heavy-slot: NOT RUN: the render could not start: {rec['stop']['reading']}"
     p = rec["peak"]
+    pss = (f"the job's PSS at most {p['job_pss_mib_high']} MiB" if "job_pss_mib_high" in p
+           else "the job's PSS not read")
     measured = (f"MemAvailable {p['mem_available_mib_start']} MiB at the start and "
                 f"{p['mem_available_mib_low']} MiB at its lowest "
                 f"({p['mem_available_mib_start'] - p['mem_available_mib_low']} MiB down), "
                 f"load1 at most {p['load1_high']:.2f}, load5 at most {p['load5_high']:.2f}, "
-                f"the job's PSS at most {p['job_pss_mib_high']} MiB")
+                + pss)
     if p["readings"] < 2:
         measured += " (it ended before the first reading after the start)"
     if rec.get("escapees"):
@@ -2310,8 +2667,8 @@ def _render_admission(shape: str):
     try:
         lines, _ = render_lines(d)
     except LinesError as e:
-        print(f"heavy-slot: NOT RUN: {e}. No render starts until the file reads.",
-              file=sys.stderr)
+        print(f"heavy-slot: NOT RUN: {e}. No render starts until the file reads, inside "
+              "its bounds.", file=sys.stderr)
         return 2
     refused = _rule_refusal(d, slot_count(d)[0], shape)
     if refused is not None:
@@ -2334,7 +2691,7 @@ def _render_admission(shape: str):
     return EX_TEMPFAIL
 
 
-def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
+def _render_run(slot: int, fd: int, n: int, mine, why, read: bool, shape: str, tool: str,
                 argv: List[str], lines: dict, start: dict) -> int:
     """A render, from its slot taken to its release: the record, the scope and
     its watch, and the end, recorded in the slot's file and on the plane."""
@@ -2355,7 +2712,7 @@ def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
     boot = boot_id()
     _report_unreleased(fd, slot, boot)
     started = time.time()
-    record = _held_record(slot, n, shape, tool, boot, started)
+    record = _held_record(slot, n, shape, tool, boot, started, _waited_s(mine, read, started))
     record.update(profile="render", unit=_scope_unit(record["fleet"], record["bot"], started),
                   cgroup=None, lines=lines, start=start)
     _write(fd, record)
@@ -2405,8 +2762,9 @@ def _render_run(slot: int, fd: int, n: int, mine, why, shape: str, tool: str,
     released = {"slot": slot, "shape": shape, "exit": status, "started_at": record["started_at"],
                 "duration_s": record["duration_s"], "profile": "render", "unit": record["unit"],
                 "ended": ended, "peak": render.peak}
-    if "stop" in record:
-        released["stop"] = record["stop"]
+    for key in ("stop", "waited_s"):
+        if key in record:
+            released[key] = record[key]
     _emit("heavy_slot_released", released)
     line = _render_line(ended, status, record)
     if ended == "killed":
@@ -2506,8 +2864,14 @@ def cmd_keep(args: List[str]) -> int:
                   "duration_s": rec.get("duration_s"), "by": "keeper"}
         _emit("heavy_slot_stopped", dict(common, line="runner", reading=stop["reading"],
                                          hold=hold is not None), wait=True)
-        _emit("heavy_slot_released", dict(common, exit=EX_STOPPED, ended="killed", stop=stop),
-              wait=True)
+        released = dict(common, exit=EX_STOPPED, ended="killed", stop=stop)
+        start = rec.get("start")
+        if isinstance(start, dict) and isinstance(start.get("mem_available_mib"), int):
+            # the runner held its readings after the start; the record keeps the start (#1645)
+            released["peak"] = {"mem_available_mib_start": start["mem_available_mib"]}
+        if isinstance(rec.get("waited_s"), int):
+            released["waited_s"] = rec["waited_s"]
+        _emit("heavy_slot_released", released, wait=True)
 
     def on_signal(signum, _frame):
         name = signal.Signals(signum).name
@@ -2579,7 +2943,7 @@ def cmd_hook() -> int:
     if rewritten is None:
         return 0
     n, _ = slot_count(d)
-    got, slots, mine, order, why = _decide(d, n, labels[0], take=False)
+    got, slots, mine, order, why, _ = _decide(d, n, labels[0], take=False)
     if got is None:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2608,15 +2972,19 @@ def _report_unreleased(fd: int, slot: int, boot: str) -> None:
                                         "across_reset": previous.get("boot_id") != boot})
 
 
-def _held_record(slot: int, n: int, shape: str, tool: str, boot: str, started: float) -> dict:
+def _held_record(slot: int, n: int, shape: str, tool: str, boot: str, started: float,
+                 waited: Optional[int]) -> dict:
     fleet, bot = _identity()
-    return {
+    record = {
         "v": 1, "slot": slot, "slots": n, "state": "held", "fleet": fleet, "bot": bot,
         "shape": shape, "tool": tool, "cwd": os.getcwd(), "pid": os.getpid(),
         "host": socket.gethostname(),
         "boot_id": boot, "started_at": _now_iso(started), "started_epoch": int(started),
         "released_at": None, "exit": None,
     }
+    if waited is not None:  # its wait in the queue, which its release row carries (#1645)
+        record["waited_s"] = waited
+    return record
 
 
 def _acquired(slot: int, n: int, shape: str, record: dict, mine, why, started: float) -> dict:
@@ -2626,6 +2994,44 @@ def _acquired(slot: int, n: int, shape: str, record: dict, mine, why, started: f
     if why:
         acquired["queue"] = why
     return acquired
+
+
+def _parent_death_hook(signum: int):
+    """A preexec_fn that arms the job's parent-death signal through
+    _arm_parent_death, on Linux; None elsewhere. ctypes is imported here, before
+    the fork, so the job only calls into it."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes  # noqa: F401  (imported before the fork)
+    except ImportError:
+        return None
+    return lambda: _arm_parent_death(signum)
+
+
+def _watch(child, group: _Group, watch: _StopWatch, lines: dict):
+    """Wait for a plain run's job, reading the host's free memory every poll_s
+    (the first reading at once), and the job's PSS once the stop has decided on
+    that reading, so a slow PSS read never delays a stop. (its exit status,
+    None) when it ended on its own; (its exit status, or -1 if it never reaped,
+    and (whether SIGKILL was needed, the pids still alive)) when the stop line
+    held and stopped it."""
+    next_read = time.monotonic()
+    while True:
+        try:
+            return child.wait(timeout=max(0.0, next_read - time.monotonic())), None
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            mib = _mem_available_mib()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            mib = None
+        members, live = group.walk()
+        next_read = time.monotonic() + lines["poll_s"]
+        if watch.take(mib):
+            stop = _stop(child, group, lines["grace_s"])
+            return (-1 if child.returncode is None else child.returncode), stop
+        _note_pss(watch.peak, _pss_mib(members + live))  # after the decision (#1645)
 
 
 def cmd_run(args: List[str]) -> int:
@@ -2654,15 +3060,24 @@ def cmd_run(args: List[str]) -> int:
               "directly (#1686)", file=sys.stderr)
         return 2
     d = slot_dir()
+    stop_lines = lines_from = None
+    if profile is None:
+        try:
+            stop_lines, lines_from = run_lines(d)
+        except LinesError as e:
+            print(f"heavy-slot: NOT RUN: {e}. No plain heavy run starts until the file reads, "
+                  "inside its bounds (#2221).", file=sys.stderr)
+            _emit("heavy_slot_refused", {"where": "lines", "shape": shape, "why": str(e)})
+            return 2
     n, _ = slot_count(d)
     tool = _tool(argv)
-    got, slots, mine, order, why = _decide(d, n, tool, take=True)
+    got, slots, mine, order, why, read = _decide(d, n, tool, take=True)
     if got is None:
         print(_refuse(d, "wrapper", shape, n, slots, mine, order, why, profile), file=sys.stderr)
         return EX_TEMPFAIL
     slot, fd = got
     if profile == "render":
-        return _render_run(slot, fd, n, mine, why, shape, tool, argv, lines, start)
+        return _render_run(slot, fd, n, mine, why, read, shape, tool, argv, lines, start)
     # From here the wrapper holds the slot, so a signal must reach the job and
     # the release must still be written. The handler goes in NOW: installed
     # after the job started, it left a window in which a TERM killed the
@@ -2672,31 +3087,46 @@ def cmd_run(args: List[str]) -> int:
     child = None
     pending: List[int] = []
 
+    def send(signum):
+        try:
+            try:
+                os.killpg(child.pid, signum)  # the job leads a session of its own
+            except OSError:
+                child.send_signal(signum)
+        except OSError:
+            pass
+
     def forward(signum, _frame):
         if child is None:
             pending.append(signum)
             return
-        try:
-            child.send_signal(signum)
-        except OSError:
-            pass
+        send(signum)
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, forward)
     boot = boot_id()
     _report_unreleased(fd, slot, boot)
     started = time.time()
-    record = _held_record(slot, n, shape, tool, boot, started)
+    record = _held_record(slot, n, shape, tool, boot, started, _waited_s(mine, read, started))
+    record.update(lines=stop_lines, lines_from=lines_from)
     _write(fd, record)
-    _emit("heavy_slot_acquired", _acquired(slot, n, shape, record, mine, why, started))
+    acquired = _acquired(slot, n, shape, record, mine, why, started)
+    off = stop_lines["stop"] == "off"
+    if off:  # said on every run: nothing stops this one, which is still read (#1645)
+        acquired["stop"] = "off"
+        print(f"heavy-slot: the memory stop is OFF ({lines_from} says stop = off): nothing "
+              "stops this run if the host runs short of memory (#2790)", file=sys.stderr)
+    _emit("heavy_slot_acquired", acquired)
     delay = os.environ.get("HEAVY_SLOT_START_DELAY_S")  # test seam: hold the pre-start window open
     if delay:
         try:
             time.sleep(float(delay))
         except ValueError:
             pass
+    watch = group = outcome = None  # outcome: how the stop line ended the job, if it did
     try:
-        child = subprocess.Popen(argv)
+        child = subprocess.Popen(argv, start_new_session=True,
+                                 preexec_fn=_parent_death_hook(signal.SIGTERM))
     except FileNotFoundError:
         print(f"heavy-slot: {argv[0]}: command not found", file=sys.stderr)
         rc = 127
@@ -2705,20 +3135,48 @@ def cmd_run(args: List[str]) -> int:
         rc = 126
     if child is not None:
         for signum in pending:
-            try:
-                child.send_signal(signum)
-            except OSError:
-                pass
-        rc = child.wait()
-    status = rc if rc >= 0 else 128 - rc
+            send(signum)
+        group, watch = _Group(child.pid), _StopWatch(stop_lines)
+        rc, outcome = _watch(child, group, watch, stop_lines)
+    stopped = outcome is not None
+    status = EX_STOPPED if stopped else rc if rc >= 0 else 128 - rc
     ended = time.time()
     record.update(state="released", released_at=_now_iso(ended), released_epoch=round(ended, 3),
                   exit=status, duration_s=round(ended - started, 1))
+    released = {"slot": slot, "shape": shape, "exit": status,
+                "started_at": record["started_at"], "duration_s": record["duration_s"]}
+    if "waited_s" in record:
+        released["waited_s"] = record["waited_s"]
+    record["ended"] = "stopped" if stopped else "done"
+    if watch is not None:  # every run that started: what it drew (#1645)
+        record.update(peak=watch.peak, escapees=len(group.escapees))
+        released["peak"] = watch.peak
+    if stopped:
+        stop = {"line": "stop_mib", "reading": watch.reading()}
+        sigkill, still = outcome
+        record.update(stop=stop, sigkill=sigkill)
+        if still:
+            record["still_running"] = still
+        released.update(ended="stopped", stop=stop)
     _write(fd, record)
     os.close(fd)
-    _emit("heavy_slot_released", {"slot": slot, "shape": shape, "exit": status,
-                                  "started_at": record["started_at"],
-                                  "duration_s": record["duration_s"]})
+    if stopped:
+        _emit("heavy_slot_stopped", {
+            "slot": slot, "shape": shape, "line": "stop_mib", "reading": stop["reading"],
+            "peak": watch.peak, "escapees": len(group.escapees), "sigkill": sigkill,
+            "still_running": still, "exit": EX_STOPPED, "started_at": record["started_at"],
+            "duration_s": record["duration_s"], "grace_s": stop_lines["grace_s"]})
+    _emit("heavy_slot_released", released)
+    if stopped:
+        left = len(group.escapees)
+        print(f"heavy-slot: run STOPPED after {_duration(ended - started)} (stop_mib): "
+              f"{stop['reading']}. SIGTERM went to its process group"
+              + (f" and {left} process(es) that left it" if left else "")
+              + (f"; SIGKILL followed after {stop_lines['grace_s']:g} s" if sigkill
+                 else "; none needed SIGKILL")
+              + (f"; STILL RUNNING: {', '.join(str(x) for x in still)}" if still else "")
+              + ". Exit 79 (#2221).", file=sys.stderr)
+        return EX_STOPPED
     if rc < 0:  # killed by a signal: end the same way, as a shell would report it
         signal.signal(-rc, signal.SIG_DFL)
         os.kill(os.getpid(), -rc)
@@ -2834,13 +3292,29 @@ def cmd_status(args: List[str]) -> int:
     except RecordError as e:
         render = {"hold": None, "retry_at": None, "error": str(e)}
         render_line = f"renders: NOT RUN, the render record cannot be read: {e}"
+    try:
+        armed, armed_from = run_lines(d)
+        run_info = dict(armed, file=armed_from)
+        if armed["stop"] == "off":
+            run_line = (f"run line: OFF ({armed_from} says stop = off), so nothing stops a "
+                        "plain heavy run when the host runs short of memory")
+        else:
+            run_line = (
+                f"run line: stop under {armed['stop_mib']:g} MiB for {armed['debounce_reads']} "
+                f"readings, {armed['poll_s']:g} s apart, KILL {armed['grace_s']:g} s after "
+                f"TERM; bounds: floor {armed['stop_mib_floor']:g} MiB, notice within "
+                f"{armed['notice_within_s']:g} s, stopped within "
+                f"{armed['stopped_within_s']:g} s ({armed_from})")
+    except LinesError as e:
+        run_info = {"error": str(e)}
+        run_line = f"run line: NOT ARMED: {e}, so every plain heavy run refuses"
     if "--json" in args:
         print(json.dumps({"dir": str(d), "slots_configured": n, "source": source,
                           "disabled": disabled, "queue_off": queue_off,
                           "queue_lock_held": lock_held, "ticket_idle_s": idle,
                           "slots": [{"slot": s, "held": h, "record": _public(r)} for s, h, r in slots],
                           "queue": [_ticket_summary(t, order, idle, now) for t in order],
-                          "render": render},
+                          "render": render, "run_lines": run_info},
                          sort_keys=True))
         return 0
     boot = boot_id()
@@ -2859,6 +3333,8 @@ def cmd_status(args: List[str]) -> int:
         print(_status_line(slot, held, rec, boot, now))
     if render_line:
         print(render_line)
+    if run_line:
+        print(run_line)
     if not queue_off:
         print(f"queue: {len(order)} waiting, in the order they are served" if order
               else "queue: empty")

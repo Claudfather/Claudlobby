@@ -1,4 +1,5 @@
 """Selected task reads over disposable Plane roots, including protected admission."""
+import base64
 import hashlib
 import json
 from uuid import uuid4
@@ -31,7 +32,7 @@ def test_selected_detail_retains_full_body_and_history_outside_board_cap(tmp_pat
         conn.execute("UPDATE work_items SET body=? WHERE work_item_id=?", ("Full <task>\nSecond line", TASK))
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                    "created_by": "bot:engineering/mgr"}} for i in range(205)])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(205)])
     c = client(tmp_path)
     assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}
     before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
@@ -47,11 +48,53 @@ def test_selected_detail_retains_full_body_and_history_outside_board_cap(tmp_pat
     assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
 
 
+def test_older_task_pages_discover_work_without_reducing_the_whole_fleet(tmp_path, monkeypatch):
+    _seed(tmp_path)
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
+        "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(405)])
+    original = view.read_tasks
+    projected = []
+    def selected_only(conn, *, fleet_uid, task_ids=None):
+        assert task_ids is not None, "a task page must not reduce all fleet history"
+        projected.append(len(task_ids))
+        return original(conn, fleet_uid=fleet_uid, task_ids=task_ids)
+    monkeypatch.setattr(view, "read_tasks", selected_only)
+    c = client(tmp_path)
+    first = c.get("/api/tasks?fleet=engineering").json()["data"]
+    assert first["task_page"]["version"] == 1
+    assert first["task_page"]["cursor"] is None
+    cursor = first["task_page"]["next_cursor"]
+    newest = "wi_" + "f" * 32
+    emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
+        "payload": {"work_item_id": newest, "title": "Admitted between pages",
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}}])
+    before = hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest()
+    payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    payload["after"][0] = 2 ** 63
+    oversized = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    assert c.get("/api/tasks", params={"fleet": "engineering", "cursor": oversized}).json()["state"] == "invalid"
+    seen = {t["task_id"] for t in first["tasks"]}
+    while cursor:
+        page = c.get("/api/tasks", params={"fleet": "engineering", "cursor": cursor}).json()["data"]
+        assert page["task_page"]["cursor"] == cursor
+        ids = {t["task_id"] for t in page["tasks"]}
+        assert not ids & seen
+        seen.update(ids)
+        cursor = page["task_page"]["next_cursor"]
+    assert TASK in seen and len(seen) == 406
+    assert newest not in seen  # continuation follows admission keys across fresh snapshots
+    assert max(projected) <= 200
+    assert c.get("/api/tasks", params={"fleet": "data", "cursor": first["task_page"]["next_cursor"]}).json()["state"] == "invalid"
+    assert c.get("/api/tasks?fleet=engineering&cursor=bad").json()["state"] == "invalid"
+    assert hashlib.sha256(db_file(tmp_path).read_bytes()).hexdigest() == before
+
+
 def test_channel_links_old_cross_fleet_task_to_recorded_owner_not_emitter_or_room(tmp_path):
     _seed(tmp_path)
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
         "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                    "created_by": "bot:engineering/mgr"}} for i in range(205)])
+                    "created_by": "bot:engineering/mgr", "workstream_id": "ws-test"}} for i in range(205)])
     emit_batch(tmp_path, [{"event_type": "communication", "emitter": "t", "fleet": "data",
         "payload": {"msg_id": "msg_" + "c" * 32, "sender": "bot:data/one",
                     "recipient": "bot:engineering/one", "message_class": "answer",
@@ -198,7 +241,8 @@ def test_detail_attention_uses_full_snapshot_before_caps_and_board_window(tmp_pa
         *[task_event("nudged", reason="Still waiting", by="synthetic-owner") for _ in range(4)],
         *[{"event_type": "work_item", "emitter": "t", "fleet": "engineering",
            "payload": {"work_item_id": "wi_" + f"{i:032x}", "title": f"newer {i}",
-                       "created_by": "bot:engineering/mgr"}} for i in range(205)]])
+                       "created_by": "bot:engineering/mgr",
+                       "workstream_id": "ws-test"}} for i in range(205)]])
     monkeypatch.setattr(view, "_TASK_DETAIL_HISTORY", 1)
     c = client(tmp_path)
     assert TASK not in {t["task_id"] for t in c.get("/api/tasks?fleet=engineering").json()["data"]["tasks"]}

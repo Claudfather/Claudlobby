@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import re
 import sqlite3
 from types import SimpleNamespace
 
@@ -40,31 +38,31 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
+    from ..request_ids import canonical_request_id
     from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
-    from ..runtime_admission import ReleaseMismatch, RuntimeIdentity, mutation_admission
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_provenance, runtime_route_matches)
     from ..task_operations import TaskRecordingError, _reader
     from ..task_queries import TaskQueryError, show_assignment
     from ..task_state import TaskStateError
-    from .message_write import _body, _request_id
+    from .message_write import _body, _bound_release
     from ..application_messages import _effect_failure
 
     release_id = None
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no assignment delivery")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         if not isinstance(args.assignment_id, str) or not args.assignment_id.strip() or "\0" in args.assignment_id:
             raise CommandFailure("invalid_argument", "ASSIGNMENT_ID requires a task assignment reference")
         body = _body(SimpleNamespace(text=None, file=args.file))
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if selected.paths.seed or origin is None or origin.bot_id != selected.fleet.manager:
             raise CommandFailure("conflict", "assignment delivery requires a generated fleet manager")
-        bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
-        if not bound_release or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release):
-            raise CommandFailure("release_mismatch", "generated manager lacks a bound release")
+        bound_release = _bound_release(selected.paths.package, generated=True)
         with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=bound_release) as release:
-            release_id = release.release_id
+            release_id = runtime_release_id(release)
             ctx = bind_task_context(selected, origin=origin)
             if (ctx.caller != ctx.bots.get(selected.fleet.manager)
                     or ctx.caller_fleet_uid != ctx.fleet_uid):
@@ -80,7 +78,7 @@ def dispatch(args) -> CommandOutput:
             route = resolve_message_route(workers[0], root=selected.paths.root,
                                           fleet=selected.fleet.name,
                                           package=selected.paths.package)
-            if (route.release_id != release_id or route.host_uid != ctx.host_uid
+            if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
                     or route.selected_fleet_uid != ctx.fleet_uid
                     or route.caller_fleet_uid != ctx.caller_fleet_uid
                     or route.caller != ctx.caller or route.peer != ctx.bots[workers[0]]
@@ -91,7 +89,7 @@ def dispatch(args) -> CommandOutput:
             box_before = read_recipient_box(route, selected.paths.package)
             result = deliver(ctx, route, selected.paths.package, request_id,
                              args.assignment_id, body, retry_uncertain=args.retry_uncertain)
-            data = _data(route, result)
+            data = {**_data(route, result), **runtime_provenance(release)}
             # rc 3 (#1236): the box never showed the payload and the transport
             # withheld its Enter; the receipt wait and held-box repair decide (#2105).
             withheld = result.delivery == "unknown" and result.native_returncode == 3
@@ -162,9 +160,6 @@ def dispatch(args) -> CommandOutput:
                    if exc.recording == "committed" else
                    "assignment recording is unconfirmed; inspect the request")
         raise _effect_failure(code, message, data=data, request_id=request_id, release_id=release_id) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "selected release differs from this caller",
-                             hint=exc.hint, release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",
                              hint=f"Retry the same request UUID {request_id} after it exits.",

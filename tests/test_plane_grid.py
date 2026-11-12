@@ -306,7 +306,7 @@ def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross", "created_by":
-                     "bot:engineering/lead"}},
+                     "bot:engineering/lead", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "engineering",
          "payload": {"msg_id": "msg_" + "e" * 32, "sender":
                      "bot:engineering/lead", "recipient": "bot:data/worker",

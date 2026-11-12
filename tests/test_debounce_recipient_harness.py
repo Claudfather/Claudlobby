@@ -1,7 +1,7 @@
 """#831 real-tmux gate — pytest wrapper for harness/rehearse-debounce-recipient.sh.
 
 Unit tests prove the marker re-fires; only this proves the *notification*
-arrives. It drives the real `fleet-pulse.sh` against a throwaway bot with a real
+arrives. It drives public `fleet pulse` against a throwaway bot with a real
 unresolved condition, restarts a real manager tmux session, and counts what that
 session was submitted — the property the 2026-07-27 outage turned on.
 

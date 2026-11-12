@@ -31,6 +31,8 @@ from .config import (
     FleetConfig,
     is_pos_int,
     load_projects,
+    manager_alert_target,
+    telegram_handle,
 )
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -213,6 +215,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "job-unarmed": "manager-checkin is not armed on a fleet with a check-in-equipped leaf manager",
     "job-inert": "manager-checkin is armed on a fleet with no leaf manager, so nothing composes",
     "alert-unpaired": "an alert chat has no sender that can post to it",
+    "alert-pane-only": "fleet alerts have no Telegram target, so they reach the manager's pane only",
     "ignition-unarmed": "no ignition door is armed, so nothing gives an idle bot a turn",
     # goal binding
     "projects-missing": "a check-in-equipped leaf manager has no Projects table to dispatch against",
@@ -2332,6 +2335,40 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_alert_target(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Warn where a fleet that uses Telegram leaves its alerts no Telegram target (#2654).
+
+    `fleet notify`, a failed job's alert and a failed message write's alert go to
+    the declared ``fleet_pulse`` pair, else to the manager's own chat as the
+    manager's own bot (``manager_alert_target``). With neither they reach the
+    manager's pane only, which nobody reads when the manager's session is what is
+    down (#997). A chat declared without its sender is ``alert-unpaired``'s. A
+    fleet that configures no Telegram (no fleet chat, and no bot declares a
+    handle, a chat or a token) is not warned: its bots take the Telegram channel
+    by default, so the channel alone says nothing about whether Telegram is set
+    up, and a warning on every minimal manifest would be noise."""
+    fp = fleet.fleet_pulse
+    if (fp is not None and fp.escalation_chat_id) or manager_alert_target(fleet) is not None:
+        return
+    if not fleet.telegram_group_chat_id and not any(
+            bot.telegram.handle or bot.telegram.chat_id or bot.telegram.token_env
+            for bot in fleet.bots.values()):
+        return
+    if telegram_handle(fleet.bots[fleet.manager]) is None:
+        why, fix = "is not a Telegram channel bot", ""
+    else:
+        why = "has no Telegram chat (its telegram.chat_id or the fleet's telegram_group_chat_id)"
+        fix = "set one of those, or "
+    report.warn(
+        "alert-pane-only",
+        f"fleet manager '{fleet.manager}' {why} and the fleet declares no fleet_pulse "
+        "escalation pair, so `fleet notify`, a failed job and a failed message write "
+        "alert its pane only, unless its .env tiers set TELEGRAM_GROUP_CHAT_ID and "
+        f"TELEGRAM_STATE_DIR. To reach Telegram, {fix}declare "
+        "fleet_pulse.escalation_chat_id and escalation_state_dir (#2654)"
+    )
+
+
 def _validate_fleet_pulse_cap(fleet: FleetConfig, report: ValidationReport) -> None:
     """fleet_pulse.timeout_s caps the pulse sweep; the sweep clamps it to the same range."""
     from .config import FLEET_PULSE_TIMEOUT_RANGE
@@ -2729,6 +2766,7 @@ def validate(
     _validate_fleet(fleet, report)
     _validate_timers(fleet, report)
     _validate_alert_pair(fleet, report)
+    _validate_alert_target(fleet, report)
     _validate_fleet_pulse_cap(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming

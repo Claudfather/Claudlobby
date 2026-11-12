@@ -4,8 +4,8 @@ from __future__ import annotations
 from contextlib import closing
 from pathlib import Path
 
-from ..activation_identity import read_selected_identity_bindings
-from ..active_config import resolve_active_context
+from ..activation_identity import read_current_identity_bindings
+from ..active_config import resolve_active_context, runtime_read_stamp
 from ..message_context import resolve_message_route
 from ..operation_context import bind_task_context, OperationContextError
 from ..request_receipts import ReceiptConflict
@@ -17,7 +17,7 @@ from .owner_action_authorization import action_authorization, scope_binding, sco
 from .owner_access import AccessDenied, AccessUnavailable
 from .owner_actions import ActionNotStarted, _exact, _opaque, _text
 from .owner_nudges import OwnerNudges
-from .owner_task_action_protocol import metadata
+from .owner_task_action_protocol import metadata, runtime_fields, same_runtime
 from .owner_action_binding import check_owner_binding
 from .owner_source import admit_source, inspect_source, source_host_uid
 
@@ -32,7 +32,8 @@ class OwnerNudgeActions:
         host = inspect_source(self.root)
         access = self.authorization
         access.authorize_read(reader.token, reader.principal, host_uid=host)
-        bindings = read_selected_identity_bindings(self.root, room, package=self.package)
+        stamp = runtime_read_stamp(self.root, package=self.package)
+        bindings = read_current_identity_bindings(self.root, room, package=self.package)
         grant = access.authorize_nudge(reader.token, reader.principal,
                                       host_uid=host, fleet_uid=bindings["fleet_uid"])
         selected = resolve_active_context(root=self.root, fleet=room, package=self.package)
@@ -49,6 +50,9 @@ class OwnerNudgeActions:
                 or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
                 or route.peer != manager or route.manager != manager):
             raise AccessDenied("nudge_binding_changed")
+        if (not same_runtime(stamp, route)
+                or runtime_read_stamp(self.root, package=self.package) != stamp):
+            raise AccessDenied("nudge_binding_changed")
         binding = scope_binding(access, reader, host)
         scope = {"workspace": _opaque(scope_inputs([str(self.root), host], binding)), "host": host, "fleet": room,
             "viewer": _opaque(scope_inputs(["task.nudge", grant.fleet_uid, reader.principal.namespace,
@@ -56,7 +60,7 @@ class OwnerNudgeActions:
                 grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 2, "room": room, "scope": scope, "simulation": False,
             "recipients": [{"id": manager.uid, "label": manager_name, "lead": True}],
-            "actions": ["nudge"], "release_id": route.release_id}, grant
+            "actions": ["nudge"], **runtime_fields(route)}, grant
 
     def _recheck(self, reader, context, grant, *, preview=False):
         fresh, current = self._context(reader, context["room"])
@@ -77,7 +81,7 @@ class OwnerNudgeActions:
         context, grant = self._context(reader, payload["scope"]["fleet"])
         if payload["scope"] != context["scope"] or payload["target"]["recipient"] != context["recipients"][0]["id"]:
             raise AccessDenied("action_scope_mismatch")
-        if preview and payload["target"]["release_id"] != context["release_id"]:
+        if preview and not same_runtime(payload["target"], context):
             raise AccessDenied("nudge_selection_changed")
         return context, grant
 
@@ -121,7 +125,7 @@ class OwnerNudgeActions:
         if result["scope"] != context["scope"] or result["target"]["recipient"] != context["recipients"][0]["id"]:
             raise AccessDenied("nudge_binding_changed")
         if action == "prepare":
-            if result["target"]["release_id"] != context["release_id"]:
+            if not same_runtime(result["target"], context):
                 raise AccessDenied("nudge_selection_changed")
             self._selected_task(result, grant)
 
@@ -146,7 +150,10 @@ class OwnerNudgeActions:
             try:
                 adapter.nudge(reader, **options, reason=payload["body"],
                     expected_assignment_id=payload["target"]["assignment_id"],
-                    expected_release_id=payload["target"]["release_id"])
+                    expected_release_id=payload["target"]["release_id"],
+                    **({"expected_source_revision": payload["target"]["source_revision"],
+                        "expected_config_fingerprint": payload["target"]["config_fingerprint"]}
+                       if payload["target"]["release_id"] is None else {}))
             except (AccessDenied, AccessUnavailable):
                 raise
             except ReceiptConflict:
@@ -163,7 +170,7 @@ class OwnerNudgeActions:
                         or retained.task_id != payload["target"]["task_id"]
                         or retained.recipient_uid != payload["target"]["recipient"]
                         or retained.assignment_id != payload["target"]["assignment_id"]
-                        or retained.route is None or retained.route.release_id != payload["target"]["release_id"]
+                        or retained.route is None or not same_runtime(retained.route, payload["target"])
                         or retained.semantic_sha256 != payload["semantic_sha256"]):
                     raise ReceiptConflict("retained nudge differs from submitted intent")
                 committed = any(stage.kind == "recording" and len(stage.expected_facts) == 2

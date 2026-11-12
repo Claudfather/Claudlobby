@@ -42,7 +42,7 @@ def _seed_conversation(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": f"wi_{H}", "title": "Review PR #7768",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": "f",
          "payload": {"assignment_id": f"asg_{H}", "work_item_id": f"wi_{H}",
                      "assignee": worker, "assigned_by": mgr,
@@ -324,7 +324,7 @@ def test_channel_grouped_histories_use_key_indexes_and_keep_chronology(tmp_path,
         rows.extend([
             {"event_type": "work_item", "emitter": "t", "fleet": "f",
              "payload": {"work_item_id": f"wi_{key}", "title": "Recorded task",
-                         "created_by": "bot:f/mgr"}},
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
             {"event_type": "communication", "emitter": "t", "fleet": "f",
              "payload": {"msg_id": f"msg_{key}", "sender": "bot:f/mgr",
                          "recipient": "bot:f/worker", "message_class": "chat",
@@ -518,7 +518,7 @@ def _seed_one_sided(root, tagged_side):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f",
          "payload": {"work_item_id": wi, "title": "One-sided tag",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "f",
          "payload": {"msg_id": "msg_" + "e" * 32, "sender": "bot:f/mgr",
                      "recipient": "bot:f/w1", "message_class": "task_request",
@@ -555,7 +555,7 @@ def _seed_reply_lineage(root, *, depth=1, padding=120):
     task = _lineage_id("wi", 1)
     rows = [{"event_type": "work_item", "emitter": "t", "fleet": "f",
              "payload": {"work_item_id": task, "title": "Recorded task",
-                         "created_by": "bot:f/mgr"}}]
+                         "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}]
     for number in range(depth):
         rows.append({"event_type": "communication", "emitter": "t", "fleet": "f",
             "payload": {"msg_id": _lineage_id("msg", number + 1),
@@ -615,7 +615,8 @@ def test_unresolved_reply_lineage_never_assigns_task(tmp_path, fault):
         emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t",
             "fleet": "g" if fault == "wrong_fleet" else "f",
             "payload": {"work_item_id": _lineage_id("wi", 2),
-                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr"}}],
+                        "title": "Must not inherit this unrelated task", "created_by": "bot:g/mgr",
+                        "workstream_id": "ws-test"}}],
             require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         if fault == "missing":
@@ -655,7 +656,7 @@ def test_incomplete_lineage_keeps_only_a_messages_own_valid_task(tmp_path, sibli
     if sibling_task:
         rows.insert(0, {"event_type": "work_item", "emitter": "t", "fleet": "f",
             "payload": {"work_item_id": _lineage_id("wi", sibling_task),
-                        "title": "Other task", "created_by": "bot:f/mgr"}})
+                        "title": "Other task", "created_by": "bot:f/mgr", "workstream_id": "ws-test"}})
     emit_batch(tmp_path, rows, require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         conn.execute("UPDATE communications SET reply_to_msg_id=?,work_item_id=? WHERE msg_id=?",
@@ -685,7 +686,7 @@ def test_reply_lineage_emitting_fleet_cannot_authorize_task(tmp_path, incomplete
     task = _lineage_id("wi", 2)
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
         "payload": {"work_item_id": task, "title": "Unrelated emitting-fleet task",
-                    "created_by": "bot:g/mgr"}}], require_commit=True)
+                    "created_by": "bot:g/mgr", "workstream_id": "ws-test"}}], require_commit=True)
     with sqlite3.connect(db_file(tmp_path)) as conn:
         # Both recorded parties remain in f. Only the emitting fleet matches g.
         conn.execute("UPDATE communications SET fleet_uid=(SELECT fleet_uid FROM work_items WHERE work_item_id=?)",
@@ -878,11 +879,25 @@ def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
     assert body["data"]["daemon_serving"] is False  # probe, not presence
 
 
-def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
+def test_healthz_ok_is_one_envelope_with_summary(tmp_path, monkeypatch):
     _seed_conversation(tmp_path)
-    r = TestClient(create_app(tmp_path, package=source_package())).get("/healthz")
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    r = client.get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
+    assert data["counts"] is None and data["counts_state"] == "not_counted"
+    summary = client.get("/api/summary").json()
+    assert summary["state"] == "ok"
+    assert summary["data"]["counts"] is None and summary["data"]["counts_state"] == "not_counted"
+    assert not any("COUNT(" in query.upper() for query in queries)
     from claudlobby.plane.migrations import SCHEMA_USER_VERSION
     assert data["schema_user_version"] == SCHEMA_USER_VERSION
     assert "counts" in data and "spool_files" in data
@@ -1032,7 +1047,7 @@ def _seed_twins(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "t", "fleet": fleet,
              "payload": {"assignment_id": "asg_" + h * 32,
                          "work_item_id": "wi_" + h * 32,
@@ -1169,7 +1184,7 @@ def _seed_cross_fleet(root: Path) -> None:
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross",
-                     "created_by": "bot:engineering/lead"}},
+                     "created_by": "bot:engineering/lead", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "engineering",
          "payload": {"msg_id": "msg_" + "e" * 32,
                      "sender": "bot:engineering/lead",
@@ -1253,7 +1268,7 @@ def _seed_twins_with_deadlines(root: Path) -> None:
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             asg,
             {"event_type": "communication", "emitter": "t", "fleet": fleet,
              "payload": {"msg_id": "msg_" + h * 32, "sender": mgr,
@@ -1328,7 +1343,7 @@ class _TwinSampler:
         pass
 
 
-def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
+def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path, monkeypatch):
     """U3: every figure on a fleet card is a plane fact through the door
     that defines it — presence scoped like the panel, the open set through
     OPEN_ASSIGNMENTS_AT_SQL, attention/overdue through ATTENTION_SQL with
@@ -1336,8 +1351,18 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     the ONE rule — and a figure whose source is missing is None with a
     reason, never a zero (orphan-ness needs the bot's directory)."""
     _seed_twins_with_deadlines(tmp_path)
+    from claudlobby.plane import view
+    queries = []
+    original_connect = view._ro_conn
+    def traced_connect(db):
+        conn = original_connect(db)
+        conn.set_trace_callback(queries.append)
+        return conn
+    monkeypatch.setattr(view, "_ro_conn", traced_connect)
     client = TestClient(create_app(tmp_path, sampler=_TwinSampler(), package=source_package()))
     ov = client.get("/api/overview").json()
+    assert not any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+                   for query in queries)
     assert ov["state"] == "ok", ov
     rows = {r["alias"]: r for r in ov["data"]["fleets"]}
     assert sorted(rows) == ["data", "engineering"]
@@ -1359,7 +1384,14 @@ def test_overview_is_one_row_per_fleet_plus_the_host(tmp_path):
     h = ov["data"]["host"]
     assert h["daemon_serving"] is False
     assert (h["spool_files"], h["spool_state"]) == (0, "ok")
-    assert isinstance(h["ingest_lag_s"], float) and h["rows"] > 0
+    assert isinstance(h["ingest_lag_s"], float)
+    assert h["rows"] is None and h["rows_reason"] == "not_counted"
+    # Exact counts remain available when the operator requests diagnostics.
+    summary = client.get("/api/summary?counts=true").json()
+    assert summary["state"] == "ok" and summary["data"]["counts"]["ingest_ledger"] > 0
+    assert summary["data"]["counts_state"] == "counted"
+    assert any("COUNT(" in query.upper() and "INGEST_LEDGER" in query.upper()
+               for query in queries)
     assert h["last_ingest_at"] == ov["provenance"]["last_ingest_at"]
 
     # the orphan split once the bots' directories exist: engineering's
@@ -1425,7 +1457,7 @@ def test_ui_carries_the_overview_strip_and_the_cross_fleet_mark():
     assert "function renderOverview" in js
     assert js.count("function pickFleet") == 1
     assert "pickFleet(b.dataset.fleet)" in js       # the tab row
-    assert "pickFleet(c.dataset.fleet)" in js       # the strip's cards
+    assert "pickFleet(button.dataset.overviewFleet)" in js  # explicit strip button
     assert "t.cross_fleet" in js and "xfleet" in js
     css = ui.joinpath("style.css").read_text()
     assert ".tag.xfleet" in css and ".ov-card" in css
@@ -1469,7 +1501,7 @@ def _dispatch(root: Path, h: str, *, expected_by: str | None,
     emit_batch(root, ([] if title is None else [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": title,
-                     "created_by": mgr}}]) + [
+                     "created_by": mgr, "workstream_id": "ws-test"}}]) + [
         assignment,
         {"event_type": "communication", "emitter": "t", "fleet": fleet,
          "payload": {"msg_id": "msg_" + stem, "sender": mgr,
@@ -1519,10 +1551,12 @@ def test_tasks_payload_stamps_the_terminal_instant_and_the_attention_reason(tmp_
 
 def test_ui_reads_in_the_operators_language():
     """Structural (chunk L, #1479 + its fold): the page's RULES, not its
-    identifiers. The header and the machinery rail read the overview envelope
-    and are BLANKED when its source fails (§16); the page keeps no copy of a
+    identifiers. The header and the machinery rail read the overview envelope;
+    scoped invalidation may retain safe sibling snapshots, while an unscoped
+    source failure or paused session clears them (§16). The page keeps no copy of a
     server vocabulary and re-derives no magnitude of its own; the clamp height
     is derived from the one constant that decides a body is long."""
+    import re
     from importlib.resources import files
     ui = files("claudlobby.plane").joinpath("ui")
     html = ui.joinpath("index.html").read_text()
@@ -1530,13 +1564,20 @@ def test_ui_reads_in_the_operators_language():
     assert 'id="age"' not in html and 'id="total"' not in html and 'id="spool"' not in html
     js = ui.joinpath("app.js").read_text()
     # one door for both: the header's totals and the rail's host line come
-    # from the overview envelope, and both clear on a source failure
+    # from the overview envelope. Only an active session may retain a scoped
+    # snapshot; unscoped source failures still clear all three panels.
     assert "renderHeader(ov)" in js and "renderHostFacts(ov)" in js
-    invalidation = js.split("function invalidateOverview() {", 1)[1].split("\n}", 1)[0]
+    invalidator = re.search(r"function invalidateOverview\([^)]*\) \{([\s\S]*?)\n\}", js)
+    assert invalidator is not None
+    invalidation = invalidator.group(1)
+    assert re.search(r"!sessionPaused\s*&&\s*snapshot\?\.data\?\.sources\s*\?\s*snapshot\s*:", invalidation)
     assert 'state: "unavailable"' in invalidation and "provenance: null" in invalidation
     assert all(f"render{panel}(env)" in invalidation for panel in ("Header", "HostFacts", "Overview"))
     source_failure = js.split('es.addEventListener("source", (ev) => {', 1)[1].split("es.onerror", 1)[0]
     assert "invalidateOverview();" in source_failure
+    scoped_failure = js.split('function openStream()', 1)[1].split('es.addEventListener("source"', 1)[0]
+    assert "payload.coverage_changed || payload.overview_invalidated" in scoped_failure
+    assert "invalidateOverview(payload.overview || payload.overview_invalidated)" in scoped_failure
     assert "hostFacts" not in js              # the dead module state is gone
     # no copied vocabulary, no client-side re-derivation (folds F4 + F7)
     assert "TERMINAL_STATUSES" not in js
@@ -1626,7 +1667,7 @@ def _canonical_delivery(root: Path, h: str, *, tx_state: str | None,
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": fleet,
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
-                     "created_by": mgr}},
+                     "created_by": mgr, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": fleet,
          "payload": {"assignment_id": "asg_" + stem, "work_item_id": "wi_" + stem,
                      "assignee": worker, "assigned_by": mgr,
@@ -1718,6 +1759,12 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
 
     initialize_plane(tmp_path)
     _full_capture(tmp_path)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    empty = view._ro_conn(db)
+    try:
+        assert view._host_samples(empty) is None
+    finally:
+        empty.close()
     emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "probe",
         "payload": {"subject_kind": "host", "subject": host,
                     "metric": "host.load", "value": value}}
@@ -1733,6 +1780,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
         "VALUES (?,?,'1','2020-01-01','2026-01-01',?,'probe','host',?,'host.load',?)",
         [(1_000_000 + n, f"sample_{n}", host, subject,
           "null" if n == 19_999 else "3") for n in range(20_000)])
+    # Retained samples still count after their subject leaves the registry.
+    conn.execute("DELETE FROM identity_registry WHERE uid=?", (subject,))
     conn.commit()
     conn.close()
     conn = view._ro_conn(db)
@@ -1740,7 +1789,8 @@ def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path
     def bounded_work():
         nonlocal steps
         steps += 1
-        return int(steps > 200)
+        # Index seeks stay below 10,000 VM steps; DISTINCT walks this history.
+        return int(steps > 10)
     conn.set_progress_handler(bounded_work, 1000)
     try:
         samples = view._host_samples(conn)
@@ -1870,10 +1920,10 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": queued, "title": "Unassigned intake",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": moved, "title": "Move this task",
-                     "created_by": "bot:f/mgr"}},
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"assignment_id": first, "work_item_id": moved,
                      "assignee": "bot:g/worker", "assigned_by": "bot:f/mgr"}},
@@ -1926,7 +1976,7 @@ def test_board_keeps_queued_and_reassigned_work_under_its_owning_fleet(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
          "payload": {"work_item_id": f"wi_{i:032x}", "title": f"Later {i}",
-                     "created_by": "bot:f/mgr"}}
+                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}}
         for i in range(201)], require_commit=True)
     capped = client.get("/api/tasks?fleet=f").json()["data"]
     assert len(capped["tasks"]) == 200 and capped["truncated"] is True
@@ -1948,10 +1998,10 @@ def test_board_discloses_unknown_task_history_without_an_all_clear(tmp_path):
     emit_batch(tmp_path, [{"event_type": "work_item", "emitter": "claudlobby.tasks.v999",
                           "fleet": "f", "payload": {"work_item_id": task_id,
                                                      "title": "Unknown producer",
-                                                     "created_by": "bot:f/mgr"}},
+                                                     "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          {"event_type": "work_item", "emitter": TASK_EMITTER, "fleet": "f",
                           "payload": {"work_item_id": ambiguous, "title": "Ambiguous workers",
-                                      "created_by": "bot:f/mgr"}},
+                                      "created_by": "bot:f/mgr", "workstream_id": "ws-test"}},
                          *({"event_type": "assignment", "emitter": TASK_EMITTER, "fleet": "f",
                             "payload": {"assignment_id": "asg_" + stem * 32,
                                         "work_item_id": ambiguous,

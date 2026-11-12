@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 
 from claudlobby import task_permissions
-from tests.test_activation import cold, tmp_path  # noqa: F401
-from tests.test_releases import installed  # noqa: F401
+from claudlobby.plane.owner_task_action_protocol import runtime_fields
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_task_read_cli import active  # noqa: F401
 from tests.test_plane_owner_feedback import gateway  # noqa: F401
 from tests.test_plane_owner_feedback_http import feedback_http, post, counts  # noqa: F401
@@ -41,7 +41,7 @@ def proposal(fixture, decision='approve'):
     return {'version': 2, 'kind': 'permission', 'scope': context['scope'], 'request_id': str(uuid4()),
         'decision': decision, 'target': {'permission_id': permission.permission_id,
             'task_id': permission.task_id, 'scope_sha256': permission.scope.digest,
-            'release_id': context['release_id']}}
+            **runtime_fields(context)}}
 
 
 def prepare(fixture, decision='approve'):
@@ -96,8 +96,10 @@ def test_scope_or_grant_change_cannot_decide_and_receipt_never_claims_other_inte
     assert counts(adapter) == before
     assert post(client, 'send', {**row, 'body': 'Reviewed these exact terms'}).json()['status'] == 'recorded'
     assert post(client, 'receipt', {**row, 'decision': 'decline'}).json()['status'] == 'unknown'
-    forged_release = {**row, 'target': {**row['target'], 'release_id': 'r-' + 'f' * 64}}
-    assert post(client, 'receipt', forged_release).json()['status'] == 'unknown'
+    forged_runtime = {**row, 'target': {**row['target'], 'source_revision': 'f' * 40}}
+    assert post(client, 'receipt', forged_runtime).json()['status'] == 'unknown'
+    mixed = {**row, 'target': {**row['target'], 'release_id': 'r-' + 'f' * 64}}
+    assert post(client, 'receipt', mixed).status_code == 403
     adapter.access.revoke_permissions(expected_owner=grant.owner, fleet_uid=ctx.fleet_uid, expected_grant=grant)
     assert post(client, 'receipt', row).status_code == 403
     replacement = adapter.access.allow_permissions(expected_owner=grant.owner, fleet_uid=ctx.fleet_uid,
@@ -274,3 +276,74 @@ def test_native_owner_permission_proof_does_not_admit_bot_or_timer_selectors(nat
     monkeypatch.setenv(carrier, '')
     denied = post(client, 'context', {'kind':'permission', 'room':'example', 'task_id':permission.task_id})
     assert denied.status_code == 403 and counts(adapter) == before
+
+
+@pytest.fixture
+def git_permissions(permissions_http):
+    """Reuse the committed runtime, canonical admission, and private grants."""
+    from claudlobby.plane.owner_permission_actions import OwnerPermissionActions
+    _, gateway, reader, ctx, permission, grant, _ = permissions_http
+    owner = OwnerPermissionActions(gateway.root, package=gateway.package)
+    return owner, reader, ctx, permission, grant
+
+
+def _git_proposal(fixture):
+    from claudlobby.plane.owner_task_action_protocol import runtime_fields
+    owner, reader, _, permission, _ = fixture
+    context = owner.context(reader, {'kind':'permission', 'room':'example', 'task_id':permission.task_id})
+    assert context['actions'] == ['permission'] and context['release_id'] is None
+    return {'version':2, 'kind':'permission', 'scope':context['scope'], 'request_id':str(uuid4()),
+        'decision':'approve', 'target':{'permission_id':permission.permission_id,
+            'task_id':permission.task_id, 'scope_sha256':permission.scope.digest, **runtime_fields(context)}}
+
+
+def test_git_permission_receipt_keeps_original_runtime_across_update_without_notification_replay(git_permissions, monkeypatch):
+    import json
+    from claudlobby import active_config
+    owner, reader, ctx, permission, grant = git_permissions
+    calls = native_receiver(monkeypatch)
+    proposal = _git_proposal(git_permissions)
+    row = owner.prepare(reader, {**proposal, 'body':'Reviewed exact Git scope'})
+    sent = owner.operation('send', reader, {**row, 'body':'Reviewed exact Git scope'})
+    assert sent['status'] == 'recorded' and sent['permission']['state'] == 'approved'
+    assert sent['permission']['decided_by']['uid'] == grant.actor_uid
+    assert sent['execution'] == 'not_requested' and sent['notification'] == 'received'
+    assert len(calls) == 1
+    assert owner.operation('send', reader, {**row, 'body':'Reviewed exact Git scope'}) == sent
+    current = active_config.read_current_config(owner.root, installation=owner.package.installation)
+    changed = json.loads(json.dumps(current))
+    changed['revision'] = 'b' * 40
+    changed['fingerprint'] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=owner.package.installation,
+                                         expected_previous=current['fingerprint'])
+    owner.package = replace(owner.package, source_revision=changed['revision'])
+    before = counts(owner)
+    recovered = owner.operation('receipt', reader, row)
+    assert recovered['status'] == 'recorded' and recovered['target'] == row['target']
+    assert recovered['permission']['state'] == 'approved'
+    assert counts(owner) == before and len(calls) == 1
+    forged = {**row, 'target':{**row['target'], 'source_revision':changed['revision'],
+                              'config_fingerprint':changed['fingerprint']}}
+    assert owner.operation('receipt', reader, forged)['status'] == 'unknown'
+    assert counts(owner) == before and len(calls) == 1
+
+
+@pytest.mark.parametrize('defect', ['revision', 'fingerprint', 'mixed', 'partial'])
+def test_git_permission_runtime_mismatch_refuses_before_decision(git_permissions, monkeypatch, defect):
+    from claudlobby.plane.owner_access import AccessDenied
+    owner, reader, _, _, _ = git_permissions
+    calls = native_receiver(monkeypatch)
+    proposal = _git_proposal(git_permissions)
+    target = dict(proposal['target'])
+    if defect == 'revision':
+        target['source_revision'] = 'c' * 40
+    elif defect == 'fingerprint':
+        target['config_fingerprint'] = 'd' * 64
+    elif defect == 'mixed':
+        target['release_id'] = 'r-' + 'e' * 64
+    else:
+        target.pop('config_fingerprint')
+    before = counts(owner)
+    with pytest.raises(AccessDenied):
+        owner.prepare(reader, {**proposal, 'target':target, 'body':'Not recorded'})
+    assert counts(owner) == before and calls == []

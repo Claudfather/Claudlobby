@@ -15,6 +15,8 @@ from unittest.mock import patch  # noqa: F401 — used in generate tests
 
 from claudlobby.__main__ import main
 from claudlobby.commands.core import cmd_generate
+from claudlobby.paths import Paths
+from tests.package_fixtures import git_package
 from claudlobby.commands.memory_migrate import cmd_memory_migrate
 
 
@@ -121,6 +123,8 @@ class TestGenerateCommandLogging:
     def test_generate_logs_composed_message(self, fleet_dir, monkeypatch, caplog):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+        monkeypatch.setattr("claudlobby.commands.core._resolve_paths", lambda _args: paths)
         args = _args(root=str(fleet_dir))
         fake_out = {"lead": fleet_dir / "runtime/bots/lead"}
         with (
@@ -146,6 +150,8 @@ class TestGenerateCommandLogging:
     def test_generate_single_bot_logs_composed(self, fleet_dir, monkeypatch, caplog):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+        monkeypatch.setattr("claudlobby.commands.core._resolve_paths", lambda _args: paths)
         args = _args(root=str(fleet_dir), bot="lead")
         with (
             caplog.at_level(logging.INFO, logger="claudlobby"),
@@ -186,6 +192,8 @@ class TestNoPrintInMainCommands:
     def test_no_print_in_cmd_generate_path(self, fleet_dir, monkeypatch, capsys):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+        monkeypatch.setattr("claudlobby.commands.core._resolve_paths", lambda _args: paths)
         args = _args(root=str(fleet_dir))
         with patch("claudlobby.commands.core.compose_fleet", return_value={}):
             cmd_generate(args)

@@ -5,6 +5,37 @@ import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 
+test('room focus keeps whole threads for exact source-qualified participants and clears to the full room',()=>{
+  const c={$:()=>null};
+  runInNewContext(source.slice(source.indexOf('let conversationFocus ='),source.indexOf('// Plain-language transmission'))+'\nthis.focus=(bot,other="")=>{conversationFocus={bot,other};};',c);
+  const bot='north::bot:team/worker',lead='north::bot:team/lead';
+  const related={key:'task',messages:[{sender_alias:bot,recipient_alias:lead},{sender_alias:lead,recipient_alias:'north::bot:team/reviewer'}]};
+  const twin={key:'other-host',messages:[{sender_alias:'south::bot:team/worker',recipient_alias:'south::bot:team/lead'}]};
+  const unrelated={key:'other-bot',messages:[{sender_alias:lead,recipient_alias:'north::bot:team/reviewer'}]};
+  const threads=[related,twin,unrelated];
+  c.focus(bot);assert.deepEqual(Array.from(c.focusedThreads(threads)),[related]);
+  c.focus(bot,lead);assert.deepEqual(Array.from(c.focusedThreads(threads)),[related]);
+  assert.equal(c.focusedThreads(threads)[0].messages.length,2,'thread context stays intact');
+  c.focus(bot,'south::bot:team/lead');assert.equal(c.focusedThreads(threads).length,0);
+  c.resetConversationFocus();assert.equal(c.focusedThreads(threads),threads);
+});
+
+test('Rooms and Tasks switch existing main panels while keeping the composer mounted and secondary views accessible',async()=>{
+  const html=await readFile(new URL('../claudlobby/plane/ui/index.html',import.meta.url),'utf8');
+  assert.match(html,/data-view="channel"[^>]*>Rooms/);assert.match(html,/data-view="tasks"[^>]*>Tasks/);
+  for(const id of ['fleet-tabs','attention','tasks','work-loop','channel'])assert.equal((html.match(new RegExp('id="'+id+'"','g'))||[]).length,1);
+  assert.ok(html.indexOf('id="fleet-tabs"')>html.indexOf('id="rail-fleet"'));
+  assert.ok(html.indexOf('id="fleet-tabs"')<html.indexOf('id="rail-channel"'));
+  assert.match(html,/<details id="computers-details"/);assert.doesNotMatch(html,/workspace-intro/);
+  const nodes=new Map(),c={currentView:'channel',workLoop:null,agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
+    $:id=>{if(!nodes.has(id))nodes.set(id,{hidden:false,value:''});return nodes.get(id);},document:{body:{classList:{toggle(){}}},querySelectorAll:()=>[]}};
+  runInNewContext(source.slice(source.indexOf('function setView('),source.indexOf('let trustTimer =')),c);
+  c.setView('tasks');assert.equal(nodes.get('channel').hidden,true);assert.equal(nodes.get('rail-right').hidden,false);
+  assert.equal(nodes.get('room-focus').hidden,true);c.$('work-loop');assert.equal(nodes.get('work-loop').hidden,false);
+  c.setView('channel');assert.equal(nodes.get('channel').hidden,false);assert.equal(nodes.get('rail-right').hidden,true);
+  assert.equal(nodes.get('work-loop').hidden,false);
+});
+
 test('roster message entry names the exact bot and remains disabled until existing grant admission',()=>{
   const c={Date,esc:v=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),ago:()=> 'recently'};
   runInNewContext(source.slice(source.indexOf('function railRow('),source.indexOf('// Selection uses only')),c);
@@ -115,7 +146,7 @@ test(`explicit activity recovery reuses guarded reads and preserves keyboard foc
     syncWorkRoom(){},fleetQuery:()=>'?fleet='+encodeURIComponent(state.currentFleet),channelUrl(){return '/api/channel?limit=120';},refreshOverview(){},
     agentDirectoryVisible:()=>false,
     jget(url){reads.push(url);return url.startsWith('/api/channel')?held:Promise.resolve({state:'ok',data:{}});},
-    renderFleet(){},renderTasks(){},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
+    renderFleet(){},renderTasks(){},acceptTaskPoll(v){return v;},renderSummary(){},renderFleetTabs(){},restartSafety(){},scheduleRefresh(){queued.push('refresh');},workLoop:{update(){},updateChannel(){}}};
   const retry=source.slice(source.indexOf('async function retryActivity()'),source.indexOf('async function refreshBoards()'));
   const refresh=source.slice(source.indexOf('async function refreshBoards()'),source.indexOf('function scheduleRefresh()'));
   const view=runInNewContext(`${rendering}\n${retry}\n${refresh}\n({renderChannel,retryActivity,refreshBoards,control:()=>activityRecovery})`,state);
@@ -221,7 +252,7 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(visible(rendered), /task update request/);
   assert.match(visible(rendered), /  Please check\nthis task — thanks\.  /);
   assert.doesNotMatch(visible(rendered), /task_nudge|dispatched|working…|delivered|approved/);
-  assert.match(rendered, /<details><summary>machinery/);
+  assert.match(rendered, /<details><summary>Technical detail/);
   assert.ok(rendered.includes(panel.esc(t.messages[0].body)));
   assert.match(rendered, new RegExp(msg));
 });
@@ -328,6 +359,59 @@ test('missing, malformed, ambiguous and wrong linked task facts fall back to lit
     const body = t.messages[0].body_words || t.messages[0].body;
     assert.ok(visible(html(t)).includes(panel.esc(body)));
   }
+});
+
+test('a nudged row that also names its workstream pairs for any non-empty ID, in every form a door minted', () => {
+  const ws = `ws_${'4'.repeat(32)}`;
+  // A task's own workstream (task admit); workstream open's title slug and its next free number;
+  // an explicit --id in the CLI's ws- form (a slug never doubles a hyphen); and keys an imported or
+  // older registry can hold, which may be any string (#2871).
+  const minted = [ws, 'ws-release-review', 'ws-release-review-2', 'ws-q4--plan', 'legacy-ws', 'Q4 Plan'];
+  // The ID is never shown, so shapes refused before #2871 only for their form pair too.
+  const odd = [`ws_${'4'.repeat(31)}`, `ws_${'4'.repeat(33)}`, ws.toUpperCase(), `ws_${'g'.repeat(32)}`,
+    ` ${ws}`, `${ws} `, `${ws}\n`, `${ws}\u0000`];
+  for (const workstream_id of [...minted, ...odd]) {
+    for (const detail of [{ reason: 'Any update?', by: 'human:reviewer', workstream_id },
+      { workstream_id, by: 'human:reviewer', reason: 'Any update?' }]) {
+      const t = thread();
+      t.task_events[0].detail = JSON.stringify(detail);
+      assert.equal(api.nudgeReason(t.messages[0], t), 'Any update?', JSON.stringify(detail));
+    }
+  }
+  // Only a non-empty string names a workstream: any other value, or an empty one, still refuses.
+  for (const workstream_id of [4, true, null, [ws], { id: ws }, '']) {
+    const t = thread();
+    t.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', workstream_id });
+    assert.equal(api.nudgeReason(t.messages[0], t), null, JSON.stringify(workstream_id));
+  }
+  for (const workstream_id of ['ws-release-review', 'legacy-ws']) {
+    const t = thread();
+    t.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', workstream_id });
+    const shown = visible(html(t));
+    assert.match(shown, /task update request/);
+    assert.ok(!shown.includes(panel.esc(t.messages[0].body)), workstream_id);
+  }
+});
+
+test('a nudged row naming a workstream still pairs only with exactly its keys, its by and reason, and one match', () => {
+  const ws = 'ws-release-review', named = { reason: 'Any update?', by: 'human:reviewer' };
+  const shapes = [{ ...named, workstream: ws }, { ...named, workstream_id: ws, other: 1 },
+    { reason: 'Any update?', workstream_id: ws }, { by: 'human:reviewer', workstream_id: ws },
+    { ...named, by: 'human:other', workstream_id: ws }, { ...named, reason: 'Other', workstream_id: ws },
+    // Key names built to collide in the sorted, comma-joined key list.
+    { 'by,reason,workstream_id': ws }, { by: 'human:reviewer', 'reason,workstream_id': ws },
+    { 'by,reason': 'Any update?', workstream_id: ws }];
+  const notObjects = ['null', '7', '"by,reason"', '["by","reason"]'];
+  for (const detail of [...shapes.map(shape => JSON.stringify(shape)), ...notObjects]) {
+    const t = thread();
+    t.task_events[0].detail = detail;
+    assert.equal(api.nudgeReason(t.messages[0], t), null, detail);
+    assert.ok(visible(html(t)).includes(panel.esc(t.messages[0].body)), detail);
+  }
+  const twice = thread();
+  twice.task_events[0].detail = JSON.stringify({ ...named, workstream_id: ws });
+  twice.task_events.push({ ...twice.task_events[0] });
+  assert.equal(api.nudgeReason(twice.messages[0], twice), null);
 });
 
 test('unsafe authored text is escaped in prose, title fallback and raw evidence', () => {
@@ -560,6 +644,61 @@ test('task-specific partial coverage cannot become a clear empty board and prese
   board.renderTasks({state:'unavailable',remediation:'Task records could not be read.'});
   assert.equal(nodes['attn-count'].hidden,true);
   assert.doesNotMatch(nodes.tasks.innerHTML,/st-idle|no other tasks/);
+});
+
+test('older task browsing survives polls, deduplicates qualified rows and refreshes explicitly',async()=>{
+  const nodes=Object.fromEntries(['attention','tasks','attn-count','task-load-older','task-refresh','task-history-count'].map(id=>[id,{innerHTML:'',hidden:false,disabled:false}]));
+  const document={activeElement:null,getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const row=(id,title)=>({task_id:id,fleet:'north / web',title,state:'queued',attention:false,current_assignment:null,assignment_count:0});
+  const env=(tasks,cursor,next,window='same')=>({state:'ok',data:{tasks,issue_count:0,truncated:!!next,task_page:{version:1,cursor,next_cursor:next,window}}});
+  const recent=env([row('north::'+wi,'Recent')],null,'older');let calls=0,refreshes=0;
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,loadOlderTasks,acceptTaskPoll,refreshTaskHistory})`,{...panel,document,
+    sessionPaused:false,sessionEpoch:1,currentFleet:'all',fleetQuery:()=>'',refreshBoards(){refreshes++;},
+    async jget(url){calls++;assert.equal(url,'/api/tasks?cursor=older');return env([row('north::'+wi,'Repeated'),row('south::'+wi,'Older peer')],'older',null);}});
+  board.renderTasks(recent);assert.equal(nodes['task-load-older'].hidden,false);
+  await board.loadOlderTasks();assert.equal(calls,1);
+  assert.match(nodes.tasks.innerHTML,/Recent/);assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Repeated/);
+  board.acceptTaskPoll(env([row('north::new','Polled')],null,'newer'),true);
+  assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Polled/);
+  assert.match(nodes['task-history-count'].textContent,/Browsing loaded history/);
+  board.refreshTaskHistory();assert.equal(refreshes,1);assert.doesNotMatch(nodes.tasks.innerHTML,/Older peer/);
+  board.renderTasks(recent);await board.loadOlderTasks();board.acceptTaskPoll(env([row('north::new','New admission')],null,null,'changed'),true);
+  assert.doesNotMatch(nodes.tasks.innerHTML,/Older peer/);assert.match(nodes.tasks.innerHTML,/New admission/);
+});
+
+test('task filters use exact assignees locally, preserve warning/count truth and keep missing selections explicit',()=>{
+  const nodes=Object.fromEntries(['attention','tasks','attn-count','task-filter-status','task-filter-assignee','task-filter-reset','task-filter-count'].map(id=>[id,{innerHTML:'',value:'',hidden:false,disabled:false}]));
+  const document={activeElement:nodes['task-filter-assignee'],getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}}};
+  const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,taskAssigneeKey,resetTaskFilters})`,{...panel,document,fleets:[{alias:'north / web',display_label:'Workshop / Web app'}]});
+  const row={task_id:'north::'+wi,fleet:'north / web',title:'North active',state:'active',attention:true,current_assignment:{assignee_uid:'north::actor_1',assignee_short:'Engineer'}};
+  const peer={...row,task_id:'south::'+wi,fleet:'south / web',title:'South active',current_assignment:{assignee_uid:'south::actor_1',assignee_short:'Engineer'}};
+  const complete={...row,task_id:'north::done',title:'North result',state:'completed',attention:false,current_assignment:null,assignment_history:[row.current_assignment]};
+  const env={state:'ok',data:{tasks:[row,peer,complete],issue_count:1,truncated:true,limit:200,coverage:{total:3,reachable:2,partial:true}}};
+  board.renderTasks(env);
+  const assignee=nodes['task-filter-assignee'],status=nodes['task-filter-status'];
+  assert.match(assignee.innerHTML,/Engineer · Workshop \/ Web app/);assert.doesNotMatch(assignee.innerHTML,/>Engineer · north \/ web</);
+  assignee.value=board.taskAssigneeKey(row);assignee.onchange();
+  assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
+  assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
+  status.value='blocked';status.onchange();
+  assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
+  assert.doesNotMatch(nodes.attention.innerHTML,/no tasks need attention/);
+  const selected=assignee.value;env.data.tasks=[peer];board.renderTasks(env);
+  assert.equal(assignee.value,selected);assert.match(assignee.innerHTML,/Selected assignee — not in this snapshot/);
+  assert.equal(status.value,'blocked');assert.equal(document.activeElement,assignee);
+  env.data.tasks=[];board.renderTasks(env);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
+  nodes['task-filter-reset'].onclick();assert.equal(nodes['task-filter-count'].hidden,true);
+  env.data.tasks=[peer];board.renderTasks(env);
+  nodes['task-filter-reset'].onclick();assert.equal(assignee.value,'');assert.equal(status.value,'');assert.match(nodes.attention.innerHTML,/South active/);
+  board.renderTasks({state:'unavailable',remediation:'Task records unavailable'});
+  assert.equal(assignee.disabled,true);assert.equal(status.disabled,true);assert.match(nodes.tasks.innerHTML,/Task records unavailable/);
+  assert.doesNotMatch(nodes.tasks.innerHTML,/no matching recorded tasks|no other tasks/);
+  board.renderTasks(env);assignee.value=board.taskAssigneeKey(peer);assignee.onchange();board.resetTaskFilters();
+  assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
 for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])

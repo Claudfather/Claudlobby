@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..command_result import selection_read_conflict
-
 from dataclasses import asdict
 import sqlite3
 
@@ -20,7 +18,8 @@ def _receipt_data(observation) -> dict:
 
 
 def _read(args) -> CommandOutput:
-    from ..activation_state import ActivationError, read_selection
+    from ..activation_state import ActivationError
+    from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
     from ..message_queries import (MessageQueryError, receipt, resolve_message_reference, show_message,
@@ -41,10 +40,10 @@ def _read(args) -> CommandOutput:
         destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if destination.paths.seed:
             raise CommandFailure("conflict", "seed configuration has no operational message history")
-        selected = read_selection(destination.paths.root)
+        selected = runtime_read_stamp(destination.paths.root, package=destination.paths.package)
         if selected is None:
             raise CommandFailure("conflict", "active message selection is unavailable")
-        release_id = selected["release_id"]
+        release_id = selected.release_id
         caller_alias = None if origin is not None else _local_operator_alias()
         ctx = bind_task_context(destination, origin=origin, operator_alias=caller_alias)
         failure = None
@@ -80,8 +79,8 @@ def _read(args) -> CommandOutput:
             lines = note_prefix(data, ((f"{observation.message_id}\t{observation.reply.message_id}",)
                                        if observation.reply else ()),
                                 args.message_id, observation.message_id)
-        if read_selection(destination.paths.root) != selected:
-            raise selection_read_conflict('active message selection changed during read', release_id=release_id)
+        selected.check(destination.paths.root, package=destination.paths.package, message='active message selection changed during read')
+        data.update(selected.provenance)
         if failure is not None:
             raise CommandFailure(*failure, data=data, release_id=release_id,
                                  retryable=failure[0] in {"unavailable", "timeout"})

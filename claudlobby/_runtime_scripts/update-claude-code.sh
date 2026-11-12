@@ -36,26 +36,23 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 # A selected timer enters the same public operation as an operator request.
-# The operation admits the selected release, then re-enters this exact native
-# owner with a private release marker. No download happens before that check.
-if [ -n "${CLAUDLOBBY_RELEASE_ID:-}" ]; then
-    if [ "${1:-}" = "--selected-release" ]; then
-        [ "$#" -eq 2 ] && [ "$2" = "$CLAUDLOBBY_RELEASE_ID" ] \
-            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
-            echo "update-claude-code: selected release context differs" >&2
-            exit 2
-        }
-        shift 2
-    else
-        [ "$#" -eq 0 ] && [ -n "${CLAUDLOBBY_CLI:-}" ] \
-            && [ -n "${CLAUDLOBBY_ROOT:-}" ] \
-            && [ "$LIB_DIR" = "${CLAUDLOBBY_NATIVE_DIR:-}" ] || {
-            echo "update-claude-code: selected timer context is incomplete" >&2
-            exit 2
-        }
-        exec env CLAUDLOBBY_UPDATE_SCHEDULED=1 "$CLAUDLOBBY_CLI" \
-            --root "$CLAUDLOBBY_ROOT" host update runtime
-    fi
+# The operation admits the current runtime, then re-enters this exact native
+# owner with a private recursion marker. No download happens before that check.
+# shellcheck source=cli-context.sh
+. "$LIB_DIR/cli-context.sh"
+if [ "${1:-}" = "--selected-release" ]; then
+    echo "legacy release execution is retired; use the managed Git CLI" >&2
+    exit 2
+fi
+if [ "${1:-}" = "--admitted-runtime" ]; then
+    _claudlobby_parse_runtime_scope runtime "$LIB_DIR" "$@" || exit $?
+    set --
+    if [ "$_CL_RUNTIME_DRY_RUN" -eq 1 ]; then set -- --dry-run; fi
+elif _claudlobby_runtime_bound; then
+    [ "$#" -eq 0 ] || { echo "update-claude-code: unexpected timer argument" >&2; exit 2; }
+    _claudlobby_require_native "$LIB_DIR" || exit $?
+    exec env CLAUDLOBBY_UPDATE_SCHEDULED=1 "$CLAUDLOBBY_CLI" \
+        --root "$CLAUDLOBBY_ROOT" host update runtime
 fi
 
 # Timer environments carry a minimal PATH; own tool resolution here so npm /

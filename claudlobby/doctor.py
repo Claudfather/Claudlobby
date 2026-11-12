@@ -371,6 +371,29 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     """Check systemd/launchd enrollment and tmux session presence per bot."""
     import platform
 
+    if paths.package.installation is not None:
+        from .status import _current_service_observations, _check_tmux_sessions, _SVC_UNDETERMINED
+        bots = list(fleet.bots)
+        observed = _current_service_observations(fleet, paths, bots)
+        live = _check_tmux_sessions(fleet, paths, bots)
+        unknown = [bot for bot, (_, state, enrolled) in observed.items()
+                   if state == _SVC_UNDETERMINED or enrolled is None]
+        absent = [bot for bot, (_, _, enrolled) in observed.items() if enrolled is False]
+        # launchd's launcher may exit while its private bot session survives;
+        # the lifecycle owner's _confirm_running accepts this same native case.
+        down = [bot for bot, (active, state, enrolled) in observed.items()
+                if enrolled and (bot not in live or not active and not (
+                    platform.system() == "Darwin" and state == "inactive"))]
+        if unknown:
+            report.add("services", "warn", "native binding/state unverified: " + ", ".join(unknown))
+        if absent:
+            report.add("services", "warn", "bot(s) not enrolled: " + ", ".join(absent))
+        if down:
+            report.add("services", "fail", "bot(s) enrolled but not running: " + ", ".join(down))
+        if not unknown and not absent and not down:
+            report.add("services", "pass", f"{len(bots)} bot(s) observed enrolled and running; process source revision unobserved")
+        return
+
     is_linux = platform.system() == "Linux"
     is_mac = platform.system() == "Darwin"
     down = []

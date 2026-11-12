@@ -5,7 +5,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HOST = /^host_[0-9a-f]{32}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
 const READS = { summary: [], overview: [], fleets: [], trust: [],
-  channel: ['fleet', 'limit'], tasks: ['fleet'], identities: ['fleet'],
+  channel: ['fleet', 'limit'], tasks: ['fleet', 'cursor'], identities: ['fleet'],
   inventory: ['fleet'], org: ['fleet'], utilization: ['fleet'], presence: ['fleet'],
   equipment: ['alias'], search: ['q', 'fleet', 'limit'], grid: ['fleet', 'focus'],
   stream: ['cursor', 'once'] };
@@ -264,9 +264,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         || c.issuer !== doc.issuer || c.subject !== doc.subject || c.workspace_id !== doc.workspace_id
         || c.operational_origin !== doc.operational_origin || c.binding_revision !== binding?.binding_revision
         || c.binding_generation !== binding?.binding_generation
-        || (setup ? (!keys(data.setup_profile,['version','profile','host_uid']) || data.setup_profile.version !== 1 || data.setup_profile.profile !== 'first-team-setup-v1' || data.setup_profile.host_uid !== hostUID) : data.read_profile?.host_uid !== hostUID)
+        || (!setup && data.read_profile?.host_uid !== hostUID)
         || (needsToken && !secret(data.token)) || !valid() || start + data.expires_in * 1000 <= now()) {
       stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true);
+      throw new Error();
+    }
+    if (setup && (!keys(data.setup_profile,['version','profile','host_uid']) || data.setup_profile.version !== 2
+        || data.setup_profile.profile !== 'first-team-setup-v2' || data.setup_profile.host_uid !== hostUID)) {
+      stop('This computer has an incompatible setup profile. Update local setup before connecting again.', true);
       throw new Error();
     }
     // The single canonical owner checker still validates and pins read_profile.
@@ -442,6 +447,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     accessRejected = false; connectIncomplete = false;
     stop('Signing in to the selected computer…');
     const gen = epoch;
+    let stage = 'challenge';
     try {
       const result = await http(ref.endpoint_origin + '/api/owner/connected/challenge', { method: 'POST', body: {}, bearer: null });
       const c = result.data;
@@ -453,6 +459,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           || (binding && (binding.binding_revision !== c.binding_revision || binding.binding_generation !== c.binding_generation))) throw new Error();
       hostUID = c.host_uid;
       binding = { binding_revision: c.binding_revision, binding_generation: c.binding_generation };
+      stage = 'assertion';
       const signing = new AbortController(); requests.add(signing);
       const timer = setTimeout(() => signing.abort(), 15000);
       let evidence;
@@ -468,6 +475,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           || evidence.version !== 1 || typeof evidence.assertion !== 'string' || evidence.assertion.length > 8192
           || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(evidence.assertion)
           || !positive(evidence.expires_at)) throw new Error();
+      stage = 'issue';
       const issued = await http(ref.endpoint_origin + '/api/owner/connected/issue', { method: 'POST',
         body: { nonce: c.nonce, assertion: evidence.assertion }, bearer: null, timeout: 35000 });
       if (issued.status !== 200 || disposed || gen !== epoch) throw new Error();
@@ -478,7 +486,11 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch {
       if (!disposed && gen === epoch) {
         connectIncomplete = !ended && !accessRejected;
-        stop('Sign-in did not complete. Its host outcome is unknown; sign in again explicitly.');
+        stop(stage === 'challenge'
+          ? 'Computer connection challenge failed or was refused. No session issue was sent. Check Tailscale and Set up computer access for local owner approval, then choose Connect explicitly.'
+          : stage === 'assertion'
+          ? 'Website access check did not complete. No session issue was sent. Check your account, then choose Connect explicitly.'
+          : 'Sign-in did not complete after requesting a session. Its host outcome is unknown; choose Connect again explicitly.');
       }
       return false;
     } finally { busy = false; scheduleContinuity(); }
@@ -541,7 +553,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     finally { busy = false; }
   }
   async function setupRequest(operation, input) {
-    if (!valid(true)) throw new Error('Setup outcome unknown. Check the original activation receipt.');
+    if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
     const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
       {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : 15000,limit:131072});
     if (result.status !== 200) throw new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');

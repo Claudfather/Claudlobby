@@ -243,6 +243,15 @@ Your settings deny {{ privilege_runners | map('quote_backtick') | join(', ') }};
 {% endfor -%}
 {% endif -%}
 
+{#- Managers only: the fleet's manager files its follow-ups (#1053). Always
+    loaded, so it stays two sentences; the doors are in /fleet-ops. #}
+{%- if bot.bot_id == fleet.manager %}
+
+## Workstreams
+
+Every task belongs to a workstream: `task admit` opens the task's own, or `--workstream ID` files it into an open one. File a task's related follow-up into its workstream before that task closes; once every task in a workstream has ended, it is closed.
+{% endif -%}
+
 {%- if projects %}
 
 ## Projects

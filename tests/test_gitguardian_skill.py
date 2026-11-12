@@ -39,6 +39,8 @@ import pytest
 
 from claudlobby.composer import compose_bot
 from claudlobby.config import load_fleet
+from claudlobby.paths import Paths
+from tests.package_fixtures import git_package
 from claudlobby.loader import frontmatter_error, parse_frontmatter
 from claudlobby.validator import validate
 from tests.conftest import make_paths
@@ -445,7 +447,7 @@ def _equip(fleet_dir: Path) -> None:
 def _compose_lead(fleet_dir: Path) -> tuple[Path, dict, str]:
     """Compose the lead from the shipped library and template."""
     fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    paths = make_paths(fleet_dir)
+    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
     compose_bot(fleet.bots["lead"], fleet, paths, log=lambda m: None)
     bot_dir = paths.bot_runtime("lead")
     settings = json.loads((bot_dir / ".claude" / "settings.local.json").read_text())

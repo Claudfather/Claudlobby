@@ -20,6 +20,7 @@ import time
 from typing import Literal, Mapping
 from uuid import UUID
 
+from .config import manager_alert_target
 from .context import Context
 from .message_transport import TransportDestination, _StartedFailure, _run
 from .resources import PackageResources
@@ -86,7 +87,9 @@ if [ "$channel" = manager ]; then
     fi
 else
     # Only explicit complete pairs reach the resolver.  Its fallback scans
-    # mutable bot.conf/fleet.yaml, which is not an active Context input.
+    # mutable bot.conf/fleet.yaml, which is not an active Context input.  A
+    # fleet that declares no pair is handed its manager's own, which Python
+    # takes from the active Context (#2654).
     if { [ -n "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ] &&
          [ -n "${FLEET_PULSE_ESCALATION_STATE_DIR:-}" ]; } ||
        { [ -z "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ] &&
@@ -176,6 +179,17 @@ def _environment(context: Context, manager: TransportDestination,
     env.update(trusted_tiers)
     pulse = context.fleet.fleet_pulse.env() if context.fleet.fleet_pulse is not None else {}
     env.update({key: pulse[key] for key in _FLEET_PULSE_KEYS if key in pulse})
+    if not env.get("FLEET_PULSE_ESCALATION_CHAT_ID") and not (
+            env.get("TELEGRAM_GROUP_CHAT_ID") and env.get("TELEGRAM_STATE_DIR")):
+        # No pair is declared, in fleet.yaml or the tiers: the manager's own chat
+        # and sender, from the active Context (#2654). The pair replaces a partial
+        # tier pair whole, and no tier token rides it, so tg-post reads the
+        # manager's own token and nothing splits the pair (#1771). A chat declared
+        # without its sender is still refused, as the pulse refuses it.
+        target = manager_alert_target(context.fleet)
+        if target is not None:
+            env["TELEGRAM_GROUP_CHAT_ID"], env["TELEGRAM_STATE_DIR"] = target
+            env.pop("TELEGRAM_BOT_TOKEN", None)
     return env
 
 

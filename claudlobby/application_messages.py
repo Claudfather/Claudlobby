@@ -17,7 +17,8 @@ _RECEIPT_WAIT_S = 10
 
 def _data(route, outcome, *, parent_message_id=None) -> dict:
     alert = asdict(outcome.alert) if is_dataclass(outcome.alert) else None
-    data = {"fleet": route.selected.fleet.name, "message_id": outcome.message_id,
+    from .runtime_admission import runtime_provenance
+    data = {**runtime_provenance(route), "fleet": route.selected.fleet.name, "message_id": outcome.message_id,
             "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
             "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
             "recording": outcome.recording, "request_persisted": outcome.request_persisted,

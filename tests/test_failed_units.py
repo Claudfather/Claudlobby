@@ -14,11 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby import activation_state, config_plan, config_units
+from claudlobby import activation_state, active_config, config_plan, config_units
+from claudlobby.installation import Installation
+import os
 from claudlobby.failed_units import read_failed_units
 from claudlobby.supervision_inventory import InventoryError, UnitDeclaration
 
-PLAN, RELEASE = "p-" + "a" * 64, "r-test"
+RELEASE = ""
 
 
 def _declared(name, scope, fleet=None, bot=None):
@@ -45,17 +47,36 @@ class FakeAdapter:
 
 @pytest.fixture
 def selected(monkeypatch):
-    scene = {"selection": {"plan_id": PLAN, "release_id": RELEASE, "activation_id": "a-1"},
-             "plan_release": RELEASE, "platforms": []}
-    monkeypatch.setattr(activation_state, "read_selection", lambda root: scene["selection"])
-    monkeypatch.setattr(config_plan, "read_plan",
-                        lambda root, plan_id: SimpleNamespace(release_id=scene["plan_release"]))
-
-    def planned(plan, platform):
-        scene["platforms"].append(platform)
-        return tuple((declaration, {}) for declaration in (LINUX if platform == "Linux" else DARWIN))
-
-    monkeypatch.setattr(config_units, "planned_units", planned)
+    installation = Installation(Path("/installation"),Path("/root"))
+    scene = {"platforms": [],"managed":True,"drift":False}
+    def read_current(root,**_):
+        if scene["drift"]:raise InventoryError("committed installation differs")
+        return scene["snapshot"]
+    monkeypatch.setattr(active_config,"read_current_config",read_current)
+    original=FakeAdapter.__init__
+    def initialize(self,text="",error=None):
+        original(self,text,error)
+        manager = "Darwin" if text.startswith("manager\tDarwin") else "Linux"
+        domain=f"user/{os.getuid()}" if manager=="Darwin" else ""
+        self.package=SimpleNamespace(installation=installation if scene["managed"] else None,
+            native=installation.native,source_revision="a"*40)
+        scene["snapshot"]={"revision":"a"*40,"fingerprint":"b"*64,
+            "supervision":{"manager":manager,"domain":domain,"directory":"/units"},
+            "units":[{"source":str(d.source),"scope":d.scope,"working_directory":str(d.working_directory),
+                "environment":dict(d.environment),"fleet":d.fleet,"bot":d.bot,"service":d.service,"platform":manager}
+                for d in (DARWIN if manager=="Darwin" else LINUX)]}
+    monkeypatch.setattr(FakeAdapter,"__init__",initialize)
+    original_read=FakeAdapter.read
+    def read(self,function,*args):
+        if function=="svc_inventory_catalog":
+            self.calls.append((function,*args))
+            manager=scene["snapshot"]["supervision"]["manager"]
+            scene["platforms"].append(manager)
+            domain=scene["snapshot"]["supervision"]["domain"]
+            return (f"manager\t{manager}\n" + (f"domain\t{domain}\n" if domain else "")
+                    + "directory\t/units\n" + ("PID\tStatus\tLabel\n" if manager == "Darwin" else ""))
+        return original_read(self,function,*args)
+    monkeypatch.setattr(FakeAdapter,"read",read)
     return scene
 
 
@@ -76,7 +97,7 @@ def _read(text):
 def test_owned_host_and_fleet_units_failed_now_are_listed_with_what_decided_it(selected):
     data = _read(_systemd(_unit("com.t.creds-check.service", "failed", "failed", "exit-code", 4),
                           _unit("claudlobby-disk-monitor.service", "failed", "failed", "exit-code", 1)))
-    assert data == {"release_id": RELEASE, "platform": "Linux", "declared": 5, "units": [
+    assert data == {"release_id": None, "source_revision":"a"*40,"config_fingerprint":"b"*64,"platform": "Linux", "declared": 5, "units": [
         {"unit": "com.t.creds-check.service", "scope": "fleet", "fleet": "F", "bot": None, "surface": "systemd",
          "state": "failed", "detail": "ActiveState=failed SubState=failed Result=exit-code ExecMainStatus=4",
          "template": None},
@@ -154,17 +175,17 @@ def test_output_it_cannot_read_refuses_rather_than_reading_as_nothing_failed(sel
         _read(text)
 
 
-def test_a_host_with_no_selected_release_owns_no_unit_yet(selected):
-    selected["selection"] = None
+def test_an_unmanaged_host_has_no_current_unit_authority(selected):
+    selected["managed"] = False
     adapter = FakeAdapter(_systemd())
-    with pytest.raises(InventoryError, match="no release is selected"):
+    with pytest.raises(InventoryError, match="managed Git installation"):
         read_failed_units(Path("/root"), adapter=adapter)
     assert adapter.calls == []
 
 
-def test_a_plan_of_another_release_refuses(selected):
-    selected["plan_release"] = "r-other"
-    with pytest.raises(InventoryError, match="differs from the selected release"):
+def test_a_changed_committed_installation_refuses(selected):
+    selected["drift"] = True
+    with pytest.raises(InventoryError, match="installation differs"):
         _read(_systemd())
 
 
@@ -172,4 +193,57 @@ def test_an_adapter_that_cannot_read_refuses(selected):
     adapter = FakeAdapter(error=InventoryError("svc_inventory_failed failed (3): no user manager"))
     with pytest.raises(InventoryError, match="no user manager"):
         read_failed_units(Path("/root"), adapter=adapter)
-    assert adapter.calls == [("svc_inventory_failed",)]
+    assert adapter.calls == [("svc_inventory_catalog",),("svc_inventory_failed",)]
+
+
+from tests.test_git_composition import candidate  # noqa: F401
+from tests.test_bot_operations import git_bot_binding  # noqa: F401
+
+
+class _GitFailedNative(FakeAdapter):
+    def __init__(self, case, text):
+        super().__init__(text)
+        self.package, self.directory = case.adapter.package, case.directory
+
+    def read(self, function, *args):
+        self.calls.append((function, *args))
+        if function == 'svc_inventory_catalog':
+            return f'manager\tLinux\ndirectory\t{self.directory}\n'
+        assert function == 'svc_inventory_failed'
+        return self.text
+
+
+def test_git_failed_units_use_committed_ownership_and_do_not_silence_alerts_for_drift(git_bot_binding, monkeypatch):
+    case = git_bot_binding
+    (case.root / 'state/selected-release.json').write_text('malformed obsolete selection\n')
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('historical selection read'))
+    monkeypatch.setattr(config_plan, 'read_plan', lambda *_: pytest.fail('historical plan read'))
+    monkeypatch.setattr(config_units, 'current_git_declarations', lambda *_: pytest.fail('global generated drift veto'))
+    source = next(Path(item['source']) for item in case.snapshot['units'] if item['platform'] == 'Linux')
+    source.write_text('drift must not suppress another failed-unit alert\n')
+    native = _GitFailedNative(case, _systemd(_unit('com.example.lead.service', 'failed', 'failed', 'exit-code', 2),
+                                            _unit('com.example.foreign.service', 'failed', 'failed', 'exit-code', 1)))
+    result = read_failed_units(case.root, adapter=native)
+    assert result['release_id'] is None and result['source_revision'] == case.current.revision
+    assert result['config_fingerprint'] == case.current.config_fingerprint
+    assert [(row['unit'], row['scope'], row['fleet'], row['bot']) for row in result['units']] == [
+        ('com.example.lead.service', 'bot', 'example', 'lead')]
+    assert result['declared'] == 1
+    assert native.calls == [('svc_inventory_catalog',), ('svc_inventory_failed',)]
+
+
+@pytest.mark.parametrize('drift', ['native', 'directory', 'manager'])
+def test_git_failed_unit_observation_refuses_wrong_adapter_or_placement(git_bot_binding, monkeypatch, drift):
+    from dataclasses import replace
+    case = git_bot_binding
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('historical selection read'))
+    native = _GitFailedNative(case, _systemd())
+    if drift == 'native':
+        native.package = replace(native.package, native=case.directory)
+    elif drift == 'directory':
+        case.snapshot['supervision']['directory'] = str(case.directory.parent / 'other-native')
+    else:
+        case.snapshot['supervision']['manager'] = 'Darwin'
+    with pytest.raises(InventoryError, match='differs'):
+        read_failed_units(case.root, adapter=native)
+    assert ('svc_inventory_failed',) not in native.calls

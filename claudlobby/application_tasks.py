@@ -5,10 +5,9 @@ Success results contain data only; the CLI chooses its display lines.
 """
 from __future__ import annotations
 
-from uuid import UUID
-
 from .application_result import ApplicationOutcome
 from .command_result import CommandFailure
+from .request_ids import canonical_request_id
 from .task_operations import UNSPECIFIED_ASSIGNMENT
 
 
@@ -18,15 +17,6 @@ def _reference(value: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise CommandFailure("invalid_argument", f"{field} requires a task or assignment reference")
     return value
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
 
 
 def _text(value: str, field: str) -> str:
@@ -158,8 +148,9 @@ def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=Non
     original notification; it never repairs or fills a gap with a native send.
     """
     from .task_operations import TaskRecordingError, nudge
+    from .runtime_admission import runtime_provenance
 
-    _request_id(request_id)
+    canonical_request_id(request_id)
     _reference(task_id, "TASK_ID")
     _text(reason, "reason")
     if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
@@ -179,16 +170,18 @@ def nudge_bound_task(ctx, route, package, *, request_id, task_id, reason, by=Non
     notification = _committed_notification(ctx, route, package, result,
         _nudge_envelope(result, route, by or ctx.caller.alias, reason), send_on_replay=False)
     return task_outcome(result, fleet_name=ctx.context.fleet.name,
-                        release_id=route.release_id, notification_data=notification)
+                        release_id=route.release_id, notification_data=notification,
+                        provenance=runtime_provenance(route))
 
 
 def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
                         expected_assignment_id, admit_read=None):
     """One linked comment and strict first notification; never a repair/retry."""
     import json
+    from .runtime_admission import runtime_provenance
     from .task_operations import TaskRecordingError, feedback
 
-    _request_id(request_id)
+    canonical_request_id(request_id)
     if (route.host_uid != ctx.host_uid or route.selected_fleet_uid != ctx.fleet_uid
             or route.peer_fleet_uid != ctx.fleet_uid or route.caller != ctx.caller
             or route.caller_fleet_uid is not None or ctx.caller_fleet_uid is not None
@@ -223,7 +216,7 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
     data = {"request_id": request_id, "fleet": ctx.context.fleet.name, "task_id": result.task_id,
             "assignment_id": result.assignment_id, "current_task_state": result.task.state,
             "recording": result.recording, "outcome": "unchanged" if result.replayed else "committed",
-            "replayed": result.replayed, **notification}
+            "replayed": result.replayed, **notification, **runtime_provenance(route)}
     if data["notification"] != "received" or data["request_persisted"] is not True:
         raise CommandFailure("notification_failed",
             "feedback recording committed; lead notification is unverified; inspect the original request",
@@ -231,14 +224,15 @@ def feedback_bound_task(ctx, route, package, *, request_id, task_id, body,
     return ApplicationOutcome(data, release_id=route.release_id)
 
 
-def task_outcome(result, *, fleet_name, release_id, notification_data=None):
+def task_outcome(result, *, fleet_name, release_id, notification_data=None, provenance=None):
     outcome = "unchanged" if result.replayed else "committed"
     recording = "unchanged" if result.replayed else result.recording
     data = {"fleet": fleet_name, "task_id": result.task_id,
             "assignment_id": result.assignment_id, "state": result.task.state,
+            "workstream_id": result.task.workstream_id,
             "outcome": outcome, "recording": recording,
             "delivery": result.delivery, "notification": result.notification,
-            "replayed": result.replayed}
+            "replayed": result.replayed, **(provenance or {})}
     if notification_data is not None:
         data.update(notification_data)
         if data["notification"] != "received" or data["request_persisted"] is not True:

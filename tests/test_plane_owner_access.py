@@ -51,6 +51,57 @@ def allow_messages(store, owner):
                                 actor_uid=ACTOR, actor_alias=ALIAS)
 
 
+def test_action_batch_preserves_matching_grants_and_excludes_permissions(access):
+    store, _ = access
+    owner = pair(store)
+    original = allow_messages(store, owner)
+    binding = dict(expected_owner=owner, fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    grants = store.allow_actions(actions=("message", "nudge", "feedback"), **binding)
+    assert grants[0] == original
+    assert store.allow_actions(actions=("message", "nudge", "feedback"), **binding) == grants
+    assert store.local_action_status().permission_grants == ()
+
+
+def test_action_batch_conflicting_actor_rolls_back_entire_selection(access):
+    store, _ = access
+    owner = pair(store)
+    retained = store.allow_feedback(expected_owner=owner, fleet_uid=FLEET,
+                                    actor_uid=OTHER_ACTOR, actor_alias="human:other")
+    with pytest.raises(AccessDenied, match="feedback_binding_changed"):
+        store.allow_actions(actions=("message", "nudge", "feedback"), expected_owner=owner,
+                            fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    status = store.local_action_status()
+    assert status.message_grants == status.nudge_grants == ()
+    assert status.feedback_grants == (retained,)
+
+
+def test_action_batch_storage_failure_rolls_back_new_and_retains_existing_grants(access):
+    store, _ = access
+    owner = pair(store)
+    original = allow_messages(store, owner)
+    with sqlite3.connect(store.path) as conn:
+        conn.executescript("CREATE TABLE feedback_grants (owner_revision INTEGER, fleet_uid TEXT, "
+                          "actor_uid TEXT, actor_alias TEXT, generation TEXT); "
+                          "CREATE TRIGGER unavailable_feedback BEFORE INSERT ON feedback_grants "
+                          "BEGIN SELECT RAISE(ABORT, 'synthetic disk failure'); END;")
+    with pytest.raises(AccessUnavailable):
+        store.allow_actions(actions=("message", "nudge", "feedback"), expected_owner=owner,
+                            fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    status = store.local_action_status()
+    assert status.message_grants == (original,)
+    assert status.nudge_grants == status.feedback_grants == ()
+
+
+@pytest.mark.parametrize("actions", [(), ("permission",), ("message", "message"), ("all",)])
+def test_action_batch_rejects_missing_duplicate_or_nonordinary_selection(access, actions):
+    store, _ = access
+    owner = pair(store)
+    with pytest.raises(AccessDenied, match="invalid_actions_binding"):
+        store.allow_actions(actions=actions, expected_owner=owner,
+                            fleet_uid=FLEET, actor_uid=ACTOR, actor_alias=ALIAS)
+    assert store.local_action_status().message_grants == ()
+
+
 def test_unprepared_reads_and_initialization_do_not_mint_host_identity(tmp_path):
     store = OwnerAccess(tmp_path)
     with pytest.raises(AccessUnavailable):

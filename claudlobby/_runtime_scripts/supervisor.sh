@@ -307,6 +307,93 @@ svc_host_job_run_exact() {
     printf 'run-requested\n'
 }
 
+# Fixed independent updater only. The Python owner verifies exact installed
+# bytes and native overrides first. Neither verb enables, replaces or bounces
+# a service; the updater must live outside the owner service process group.
+_svc_update_job_exact() {
+    local file="$1" target="$2" label="${2##*/}"
+    case "$file" in /*) ;; *) return 3 ;; esac
+    [ -f "$file" ] && [ ! -L "$file" ] || return 3
+    case "$_OS" in
+        Linux)
+            [[ "$target" =~ ^com\.claudlobby\.update\.[0-9a-f]{16}\.service$ ]] || return 3
+            [ "${file##*/}" = "$target" ] || return 3
+            ;;
+        Darwin)
+            [[ "$label" =~ ^com\.claudlobby\.update\.[0-9a-f]{16}$ ]] || return 3
+            [ "${file##*/}" = "$label.plist" ] || return 3
+            _svc_inventory_domain "${target%/*}" || return 3
+            ;;
+        *) return 3 ;;
+    esac
+}
+
+# Typed argv is required: systemctl show flattens the argument array with
+# spaces, so its human-readable ExecStart cannot prove argument boundaries.
+svc_update_job_exec() {
+    local file="$1" target="$2" object
+    [ "$_OS" = Linux ] || return 3
+    _svc_update_job_exact "$file" "$target" || return 3
+    object="/org/freedesktop/systemd1/unit/${target//./_2e}"
+    busctl --user --json=short --auto-start=no --allow-interactive-authorization=no --timeout=20 \
+        get-property org.freedesktop.systemd1 "$object" org.freedesktop.systemd1.Service ExecStart
+}
+
+svc_update_job_enroll_exact() {
+    local file="$1" target="$2"
+    _svc_update_job_exact "$file" "$target" || return 3
+    case "$_OS" in
+        Linux)
+            systemctl --user daemon-reload || return $?
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD" = loaded ] || return 3
+            case "$SVC_ACT_ACTIVE" in
+                active|activating) printf 'already-running\n'; return 0 ;;
+                inactive|failed) printf 'enrolled\n'; return 0 ;;
+                *) return 3 ;;
+            esac
+            ;;
+        Darwin)
+            _svc_activation_read "$file" "$target" || return 3
+            if [ "$SVC_ACT_LOAD" = loaded ]; then
+                case "$SVC_ACT_ACTIVE" in
+                    active) printf 'already-running\n' ;;
+                    inactive) printf 'already-enrolled\n' ;;
+                    *) return 3 ;;
+                esac
+                return 0
+            fi
+            [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = unloaded:inactive ] || return 3
+            launchctl bootstrap "${target%/*}" "$file" || return $?
+            _svc_activation_read "$file" "$target" || return 3
+            [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE" = loaded:inactive ] || return 3
+            printf 'enrolled\n'
+            ;;
+    esac
+}
+
+svc_update_job_run_exact() {
+    local file="$1" target="$2"
+    _svc_update_job_exact "$file" "$target" || return 3
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || return 3
+    case "$SVC_ACT_ACTIVE" in
+        active|activating) printf 'already-running\n'; return 0 ;;
+        inactive) ;;
+        failed)
+            [ "$_OS" = Linux ] || return 3
+            systemctl --user reset-failed "$target" || return $?
+            ;;
+        *) return 3 ;;
+    esac
+    case "$_OS" in
+        Linux) systemctl --user start --no-block "$target" || return $? ;;
+        Darwin) launchctl kickstart "$target" || return $? ;;
+        *) return 3 ;;
+    esac
+    printf 'run-requested\n'
+}
+
 # svc_enroll <bot_dir>
 # In THIS PR, a thin dispatcher onto the two existing installer scripts —
 # install-bot-systemd.sh's sequence (stale-unit cleanup, copy the composed
@@ -665,6 +752,68 @@ svc_bot_session_observe() (
     case "$state" in up|no_handle|no_token) printf 'ready\n' ;; *) printf 'unknown\n' ;; esac
 )
 
+# Exact native-session generation; hooks additionally prove their nearest
+# Claude ancestor is this pane, so headless/subagent hooks cannot replace it.
+svc_bot_native_session() (
+    local bot_dir="$1" expected="$2" tmpdir="$3" caller="${4:-}" inspect="${5:-}" session pane created text region idle=unready actual started
+    export TMUX_TMPDIR="$tmpdir"
+    . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    [ "$(tmux_socket_for_bot "$bot_dir")" = "$expected" ] || return 3
+    [ "$(bot_conf_get_path "$bot_dir" TMUX_TMPDIR "")" = "$tmpdir" ] || return 3
+    session=$(tmux_session_name "$bot_dir") || return 3
+    pane=$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}') || return 3
+    created=$(bot_tmux "$expected" display-message -p -t "$session" '#{session_created}') || return 3
+    case "$pane:$created" in *[!0-9:]*|:*|*:) return 3 ;; esac
+    if [ -n "$caller" ]; then
+        actual=$("$_SUPERVISOR_LIB_DIR/claude-session-pid.sh" --from "$caller") || return 3
+        [ "$actual" = "$pane" ] || return 3
+    fi
+    text=$(bot_tmux "$expected" capture-pane -t "$session" -p -S -80) || return 3
+    region=$(pane_input_region "$text")
+    if [ -n "$region" ] && ! pane_is_busy "$text" && ! pane_is_menu "$text" \
+            && pane_is_idle "$text" && ! pane_is_held "$text" \
+            && [[ "$text" != *'Press up to edit queued messages'* ]]; then
+        idle=idle
+    fi
+    [ "$(bot_tmux "$expected" list-panes -t "$session" -F '#{pane_pid}')" = "$pane" ] || return 3
+    case "$inspect" in
+        '') printf '%s\t%s\t%s\n' "$pane" "$created" "$idle" ;;
+        start)
+            case "$_OS" in
+                Darwin)
+                    started=$(LC_ALL=C TZ=UTC ps -p "$pane" -o lstart=) || return 3
+                    started="${started#"${started%%[! ]*}"}" ;;
+                Linux)
+                    started=$("${CLAUDLOBBY_NATIVE_PYTHON-python3}" -I -B - "$pane" <<'PY'
+import os
+from pathlib import Path
+import re
+import sys
+try:
+    process = Path("/proc") / sys.argv[1]
+    if process.stat().st_uid != os.getuid():
+        raise ValueError()
+    raw = (process / "stat").read_text()
+    ticks = raw.rsplit(")", 1)[1].split()[19]
+    machine = Path("/etc/machine-id").read_text().strip()
+    namespace = os.readlink(process / "ns/pid")
+    if (not ticks.isdigit() or not re.fullmatch(r"[0-9a-f]{32}", machine)
+            or not re.fullmatch(r"pid:\[[0-9]+\]", namespace)
+            or (process / "stat").read_text().rsplit(")", 1)[1].split()[19] != ticks):
+        raise ValueError()
+    print(ticks + ":linux:" + machine + ":" + namespace)
+except (OSError, ValueError, IndexError):
+    sys.exit(3)
+PY
+                    ) || return 3 ;;
+                *) return 3 ;;
+            esac
+            [ -n "$started" ] || return 3
+            printf '%s\t%s\t%s\t%s:%s\n' "$pane" "$created" "$idle" "$_OS" "$started" ;;
+        *) return 3 ;;
+    esac
+)
+
 # Submit exactly one explicit control to the selected bot's private session.
 # The public owner has already proved the frozen bot.conf and native unit. Check
 # that binding again here before touching tmux; never discover a pane by name.
@@ -876,22 +1025,50 @@ svc_activation_stop_private_server() (
     case "$tmpdir" in *$'\n'*|*$'\t'*) return 3 ;; esac
     export TMUX_TMPDIR="$tmpdir"
     . "$_SUPERVISOR_LIB_DIR/lib-common.sh" || return 3
+    [ "$(tmux_socket_for_bot "$bot_dir")" = "$expected" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
     if ! sessions=$(LC_ALL=C bot_tmux "$expected" list-sessions -F '#{session_name}' 2>&1); then
-        # tmux leaves its socket file after a clean server exit, but a full
-        # live-server backlog can print the same no-server text. Ordinary
-        # retired cleanup may leave the directory; purge must refuse it.
-        # Permission/connection/other failures remain unknown.
+        # Diagnostics classify the exact endpoint; they do not prove absence.
+        # A full live-server backlog can also print no-server text.
         case "$absent" in retired|retired-purge) ;; *) return 3 ;; esac
-        physical_tmpdir=$(cd "$tmpdir" && pwd -P) || return 3
+        physical_tmpdir=$(cd "$tmpdir" 2>/dev/null && pwd -P) || physical_tmpdir="$tmpdir"
         case "$sessions" in
             "no server running on $tmpdir/tmux-$(id -u)/$expected"|\
-            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected")
+            "no server running on $physical_tmpdir/tmux-$(id -u)/$expected"|\
+            "error connecting to $tmpdir/tmux-$(id -u)/$expected (No such file or directory)"|\
+            "error connecting to $physical_tmpdir/tmux-$(id -u)/$expected (No such file or directory)")
                 if [ "$absent" = retired-purge ]; then
                     echo 'retired private server liveness is unverified; inspect the retained socket and bot session, then clean up manually before purge' >&2
                     return 3
                 fi
-                return 0 ;;
+                # Same named-socket proof as activation quiescence: lstat must
+                # prove absence, or an owned socket must refuse a bounded
+                # connection. Never unlink it or infer a host-wide quiet state.
+                "${CLAUDLOBBY_NATIVE_PYTHON-python3}" - "$tmpdir/tmux-$(id -u)/$expected" <<'PY'
+import os
+import socket
+import stat
+import sys
+
+try:
+    path = sys.argv[1]
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        sys.exit(0)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        sys.exit(3)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            sys.exit(0)
+except OSError:
+    pass
+sys.exit(3)
+PY
+                return $? ;;
             *) return 3 ;;
         esac
     fi
@@ -955,11 +1132,20 @@ EOF
 }
 
 svc_activation_pause() {
-    local file="$1" target="$2" saved="$3" remaining=20 reset=0 timer_owned="${5:-}"
-    case "$timer_owned" in ""|timer-owned) ;; *) return 3 ;; esac
-    [ -z "$timer_owned" ] || { [ "$_OS" = Linux ] && [ "${target##*.}" = service ]; } || return 3
+    local file="$1" target="$2" saved="$3" remaining=20 reset=0 owner="${5:-}" bot_group="" members
+    case "$owner" in ""|timer-owned|bot-owned) ;; *) return 3 ;; esac
+    case "$owner:$_OS" in
+        timer-owned:Linux) [ "${target##*.}" = service ] || return 3 ;;
+        bot-owned:Linux)
+            [ "$#" = 8 ] && [ "$target" = "${7}.service" ] && [ "${file##*/}" = "$target" ] || return 3 ;;
+        bot-owned:Darwin)
+            [ "$#" = 8 ] && [ "${target##*/}" = "$7" ] && [ "${file##*/}" = "$7.plist" ] || return 3 ;;
+        :*) ;;
+        *) return 3 ;;
+    esac
     _svc_activation_saved "$saved" || return 3
     svc_activation_assert_external "$file" "$target" "${4:-$$}" || return $?
+    bot_group="$SVC_ACT_GROUP"
     case "$_OS" in
         Linux)
             # The enrollment owner parks higher-priority installed bytes first.
@@ -969,6 +1155,12 @@ svc_activation_pause() {
             esac
             _svc_activation_read "$file" "$target" || return 3
             [ "$SVC_ACT_LOAD" = masked ] || { _svc_activation_unknown "$target mask did not take precedence"; return 3; }
+            if [ "$owner" = bot-owned ]; then
+                # The owner has already bound a fresh capture/stop intent. Keep
+                # the verified mask in place while the subreaper loses its last
+                # child; TERM alone cannot make that reaper exit.
+                svc_activation_stop_private_server "$6" "$7" "$8" retired || return $?
+            fi
             systemctl --user stop "$target" || return $?
             # systemctl may acknowledge a timer stop while the exact unit is
             # still deactivating. Observe its final state before publication.
@@ -987,10 +1179,20 @@ svc_activation_pause() {
                     continue
                 fi
                 # The owner supplies this capability only from frozen timer
-                # membership. Preserve native failure history; never run the job.
-                if [ "$reset" = 0 ] && [ "$timer_owned" = timer-owned ] \
+                # or admitted bot membership. Preserve the raw native failure.
+                if [ "$reset" = 0 ] && { [ "$owner" = timer-owned ] || [ "$owner" = bot-owned ]; } \
                         && [ "$SVC_ACT_LOAD:$SVC_ACT_ACTIVE:$SVC_ACT_MAIN_PID:$SVC_ACT_CONTROL_PID" = masked:failed:0:0 ]; then
                     printf 'activation parking: %s raw state masked failed MainPID=0 ControlPID=0\n' "$target" >&2
+                    if [ "$owner" = bot-owned ]; then
+                        # Retain the pre-stop group even after systemd collects
+                        # it. Unknown or remaining children cannot be reset.
+                        [ -z "$SVC_ACT_GROUP" ] || [ -z "$bot_group" ] || [ "$bot_group" = "$SVC_ACT_GROUP" ] || return 3
+                        [ -n "$bot_group" ] || bot_group="$SVC_ACT_GROUP"
+                        if [ -n "$bot_group" ]; then
+                            members=$(_svc_cgroup_members "$bot_group") || return 3
+                            [ -z "$members" ] || { _svc_activation_unknown "$target failed unit has remaining cgroup members"; return 3; }
+                        fi
+                    fi
                     systemctl --user reset-failed "$target" || return $?
                     reset=1
                     continue
@@ -1022,6 +1224,11 @@ svc_activation_pause() {
                         _svc_activation_unknown "$target post-bootout wait interrupted"; return 3;
                     }
                 done
+            fi
+            if [ "$owner" = bot-owned ]; then
+                # The exited launch wrapper can leave its private tmux server
+                # alive. Stop only the frozen bot endpoint after native unload.
+                svc_activation_stop_private_server "$6" "$7" "$8" retired || return $?
             fi
             ;;
     esac
@@ -1199,10 +1406,15 @@ svc_activation_bot_fence() (
 
 svc_activation_bot_ready() (
     export CLAUDLOBBY_ROOT="$1"
-    local bot_dir="$2" ceiling="$3" token="$4" socket session outcome=channel handle
+    local bot_dir="$2" ceiling="$3" token="$4" tmpdir="${5:-}" declared_tmpdir socket session outcome=channel handle
+    local started="$SECONDS" confirmation cli
+    case "$bot_dir:$tmpdir" in /*:/*) ;; *) return 3 ;; esac
     case "$ceiling" in ''|*[!0-9]*) return 3 ;; esac
     [ -n "$token" ] || return 3
     . "$_SUPERVISOR_LIB_DIR/rolling-restart.sh" || return 3
+    declared_tmpdir=$(bot_conf_get_path "$bot_dir" TMUX_TMPDIR "") || return 3
+    [ -n "$declared_tmpdir" ] && [ "$declared_tmpdir" = "$tmpdir" ] || return 3
+    export TMUX_TMPDIR="$tmpdir"
     handle=$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "") || return 3
     if [ -z "$handle" ]; then
         outcome=no_handle
@@ -1213,7 +1425,20 @@ svc_activation_bot_ready() (
     socket=$(tmux_socket_for_bot "$bot_dir") || return 3
     [ -n "$socket" ] || return 3
     session=$(tmux_session_name "$bot_dir") || return 3
-    check_tmux_session "$session" "$socket" || return 3
+    cli=$(bot_conf_get_path "$bot_dir" CLAUDLOBBY_CLI "") || return 3
+    while :; do
+        check_tmux_session "$session" "$socket" || return 3
+        confirmation=0
+        "$cli" --root "$CLAUDLOBBY_ROOT" _native-session confirm "$bot_dir" "$socket" "$tmpdir" || confirmation=$?
+        case "$confirmation" in
+            0) break ;;
+            75) ;; # Only a retained launch waiting for its SessionStart hook.
+            *) return 3 ;;
+        esac
+        # Share the original readiness ceiling, including the bridge wait.
+        [ "$((SECONDS - started))" -lt "$ceiling" ] || return 3
+        sleep 0.5
+    done
     case "$WAIT_BRIDGE_READY_OUTCOME" in
         bridge) printf 'bridge-ready\n' ;;
         session) printf 'session-ready\n' ;;
@@ -1277,13 +1502,7 @@ svc_inventory_properties() {
             # launchctl list in an Aqua session also reports same-UID user
             # services. This read-only inventory query may inspect either
             # domain; activation controls still require the manager domain.
-            if ! _svc_inventory_domain "${1%/*}"; then
-                local uid manager
-                uid=$(launchctl manageruid) || return 3
-                manager=$(launchctl managername) || return 3
-                case "$uid" in ''|*[!0-9]*) return 3 ;; esac
-                [ "$manager" = Aqua ] && [ "${1%/*}" = "user/$uid" ] || return 3
-            fi
+            _svc_inventory_read_domain "${1%/*}" || return 3
             case "${1##*/}" in ''|*[!a-zA-Z0-9_.@:-]*) return 3 ;; esac
             launchctl print "$1"
             ;;
@@ -1291,7 +1510,7 @@ svc_inventory_properties() {
     esac
 }
 
-# Exact caller-domain proof is required for both observations. print output is
+# Native controls require exact caller-domain proof. Read-only print output is
 # not an Apple API: the inventory owner validates the observed macOS grammar and
 # refuses unknown shapes. These queries neither load nor alter a launchd job.
 _svc_inventory_domain() {
@@ -1303,8 +1522,21 @@ _svc_inventory_domain() {
     case "$1:$manager" in "gui/$uid:Aqua"|"user/$uid:Background") return 0 ;; *) return 3 ;; esac
 }
 
+# Read-only inventory may also inspect user services visible from Aqua. Keep
+# control-domain proof separate: this helper never permits a native mutation.
+_svc_inventory_read_domain() {
+    [ "$_OS" = Darwin ] || return 3
+    if ! _svc_inventory_domain "$1"; then
+        local uid manager
+        uid=$(launchctl manageruid) || return 3
+        manager=$(launchctl managername) || return 3
+        case "$uid" in ''|*[!0-9]*) return 3 ;; esac
+        [ "$manager" = Aqua ] && [ "$1" = "user/$uid" ] || return 3
+    fi
+}
+
 svc_inventory_disabled() {
-    _svc_inventory_domain "$1" || return 3
+    _svc_inventory_read_domain "$1" || return 3
     launchctl print-disabled "$1"
 }
 

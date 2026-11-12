@@ -91,14 +91,18 @@ class OwnerWorkspace:
 
     def initialize(self, *, expected_owner):
         with self.access._connection(write=True) as conn:
-            self.access._expected_owner(conn, expected_owner)
-            self._owner(conn, expected_owner.principal)
-            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            names = {"workspace_metadata", "workspace_challenges", "workspace_bindings"}
-            if not tables & names:
-                for statement in _SCHEMA:
-                    conn.execute(statement)
-            self._schema(conn)  # partial/unsupported schemas refuse; no repair
+            self._initialize(conn, expected_owner=expected_owner)
+
+    def _initialize(self, conn, *, expected_owner):
+        """Explicit preparation in the caller's canonical authority transaction."""
+        self.access._expected_owner(conn, expected_owner)
+        self._owner(conn, expected_owner.principal)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        names = {"workspace_metadata", "workspace_challenges", "workspace_bindings"}
+        if not tables & names:
+            for statement in _SCHEMA:
+                conn.execute(statement)
+        self._schema(conn)  # partial/unsupported schemas refuse; no repair
 
     def _binding(self, conn):
         row = conn.execute("SELECT * FROM workspace_bindings ORDER BY revision DESC LIMIT 1").fetchone()

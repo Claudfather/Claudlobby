@@ -21,7 +21,7 @@ from claudlobby.path_audit import (
     audit_bot_paths,
     improper_fleet_paths,
 )
-from tests.package_fixtures import source_package
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 
@@ -30,7 +30,7 @@ def _paths(tmp_path):
     fleet_dir = root / "local" / "home" / "tl"
     (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
     (root / "lib").mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
+    return Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
 
 
 def _bot(**overrides):
@@ -318,7 +318,7 @@ class TestComposeBotFiresPathGuard:
         root = fleet_dir
         flat = f"{root}/local/tl/data/x"  # flat husk: local/tl not local/home/tl
         nested = _write_nested_fleet(root, flat)
-        paths = Paths(root=root, fleet_dir=nested, package=source_package())
+        paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         # L1 denies the unanchored absolute at the source, before emission.
         with pytest.raises(ValueError, match="absolute path"):
@@ -333,7 +333,7 @@ class TestComposeBotFiresPathGuard:
         # and the emitted (resolved) path resolves in-fleet so L2 passes too.
         good = "${FLEET_ROOT}/data/x"
         nested = _write_nested_fleet(root, good)
-        paths = Paths(root=root, fleet_dir=nested, package=source_package())
+        paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         assert bot_dir.is_dir()
@@ -350,7 +350,7 @@ class TestComposeBotFiresPathGuard:
             "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
         )
         nested = _write_nested_fleet(root, foreign)
-        paths = Paths(root=root, fleet_dir=nested, package=source_package())
+        paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
@@ -388,7 +388,7 @@ class TestComposeBotFiresPathGuard:
             "        token_env: T\n"
         )
         paths = Paths(
-            root=root, fleet_dir=nested, vault_root=vault_root if bridged else None, package=source_package()
+            root=root, fleet_dir=nested, vault_root=vault_root if bridged else None, package=git_package(root)
         )
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
@@ -423,7 +423,7 @@ class TestComposeBotFiresPathGuard:
             "        handle: kev_bot\n"
             "        token_env: T\n"
         )
-        paths = Paths(root=root, fleet_dir=nested, package=source_package())
+        paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         settings = (bot_dir / ".claude" / "settings.local.json").read_text()
@@ -447,7 +447,7 @@ class TestVaultModePathAudit:
         )
         (root / "library").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
-        return Paths(root=root, fleet_dir=fleet_dir, vault_root=vault, package=source_package())
+        return Paths(root=root, fleet_dir=fleet_dir, vault_root=vault, package=git_package(root))
 
     def test_own_vault_fleet_path_is_ok(self, tmp_path):
         paths = self._vault_paths(tmp_path)

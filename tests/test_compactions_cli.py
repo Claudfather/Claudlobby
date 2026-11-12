@@ -13,7 +13,7 @@ from pathlib import Path
 from claudlobby.__main__ import main
 from claudlobby.isolation import transcript_slug
 from tests.conftest import read_fleet_events, write_jsonl
-from tests.test_activation import cold, tmp_path  # noqa: F401 — selected activation and short paths
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — selected activation and short paths
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_task_write_cli import active  # noqa: F401 — real selected activation fixture
 

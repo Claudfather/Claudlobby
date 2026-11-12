@@ -50,18 +50,10 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -e '.[dev]'
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-      - name: Rehearse real offline release assembly
-        # Network access only obtains the inputs. Assembly itself uses the
-        # generated hash lock with --no-index, then invokes its installed CLI.
+      - name: Rehearse managed Git installation
         run: |
-          release_work="$RUNNER_TEMP/claudlobby-release-assembly"
-          mkdir -p "$release_work/dist" "$release_work/wheelhouse"
-          .venv/bin/python -m build --wheel --no-isolation --outdir "$release_work/dist"
-          .venv/bin/python -m pip download --only-binary=:all: \
-            --dest "$release_work/wheelhouse" "$release_work/dist/"*.whl
-          .venv/bin/python tests/release_assembly_smoke.py \
-            --wheel "$release_work/dist/"*.whl --wheelhouse "$release_work/wheelhouse" \
-            --disposable-root "$release_work/rehearsal"
+          .venv/bin/python tests/git_installation_smoke.py \
+            --disposable-root "$RUNNER_TEMP/claudlobby-git-installation"
       - name: Prepare installed resources for editable test imports
         # This runner checkout is disposable. Build from indexed source in a
         # separate temporary tree, then stage only wheel resource/native assets.
@@ -94,9 +86,8 @@ jobs:
             pytest.rc
             pytest.status
             pytest-results.xml
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/result.json
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/dependency.lock
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/*.log
+            ${{ runner.temp }}/claudlobby-git-installation/result.json
+            ${{ runner.temp }}/claudlobby-git-installation/*.log
           if-no-files-found: error
 
   # One share of the Linux 3.10 suite per shard. pytest-split hands out the
@@ -142,19 +133,12 @@ jobs:
           jq --version
           node --version
           /bin/bash --version
-      - name: Rehearse real offline release assembly
-        # In one shard. On a pull request this is the rehearsal's only run:
-        # pytest, which runs it on Python 3.11, runs on push to main only.
+      - name: Rehearse managed Git installation
+        # One shard covers pull requests; the Python 3.11 lane also runs on push.
         if: matrix.group == 1
         run: |
-          release_work="$RUNNER_TEMP/claudlobby-release-assembly"
-          mkdir -p "$release_work/dist" "$release_work/wheelhouse"
-          .venv/bin/python -m build --wheel --no-isolation --outdir "$release_work/dist"
-          .venv/bin/python -m pip download --only-binary=:all: \
-            --dest "$release_work/wheelhouse" "$release_work/dist/"*.whl
-          .venv/bin/python tests/release_assembly_smoke.py \
-            --wheel "$release_work/dist/"*.whl --wheelhouse "$release_work/wheelhouse" \
-            --disposable-root "$release_work/rehearsal"
+          .venv/bin/python tests/git_installation_smoke.py \
+            --disposable-root "$RUNNER_TEMP/claudlobby-git-installation"
       - name: Prepare installed resources for editable test imports
         # This runner checkout is disposable. Build from indexed source in a
         # separate temporary tree, then stage only wheel resource/native assets.
@@ -218,11 +202,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && matrix.group == 1
         with:
-          name: release-assembly-ubuntu-latest-py3.10
+          name: git-installation-ubuntu-latest-py3.10
           path: |
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/result.json
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/dependency.lock
-            ${{ runner.temp }}/claudlobby-release-assembly/rehearsal/*.log
+            ${{ runner.temp }}/claudlobby-git-installation/result.json
+            ${{ runner.temp }}/claudlobby-git-installation/*.log
           if-no-files-found: error
           overwrite: true
 

@@ -1,21 +1,19 @@
-"""Stable paths and artifact identity for an installed, unpacked package.
+"""Explicit source resources, with installed-artifact support during cutover.
 
-Generated units must keep these real paths after composition exits. Zip imports
-and unbuilt source checkouts are deliberately unsupported; there is no temporary
-resource extraction or fallback to a nearby checkout. P2 switches runtime users
-to this seam together with the writable data/source boundary.
-
-The artifact ID binds source and resource contents only. P2's release assembler
-owns the dependency-lock digest and exact installed package/runtime assembly
-identity; this module does not claim to identify a complete host release.
+Git resources require a recorded installation, never cwd discovery. Candidate
+reads may use a temporary checkout while runtime destinations stay stable.
+Neither source provenance nor a resource path grants operational authority.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import sys
+
+from .installation import Installation, InstallationError, checkout_revision, read_installation
 
 
 @dataclass(frozen=True)
@@ -29,22 +27,61 @@ class PackageResources:
     artifact_id: str
     source_revision: str | None
     content_sha256: str
+    installation: Installation | None = None
+
+    @property
+    def runtime_native(self) -> Path:
+        """Final generated-unit destination, even during candidate rendering."""
+        return self.installation.native if self.installation is not None else self.native
+
+    @property
+    def runtime_library(self) -> Path:
+        """Final library reference; library itself is the selected read tree."""
+        return self.installation.source / "library" if self.installation is not None else self.library
 
 
-def selected_cli() -> Path:
-    """Console entrypoint in this interpreter's release, never ambient PATH.
+def _installation(explicit: Installation | None) -> Installation | None:
+    if explicit is not None:
+        return explicit
+    selected = os.environ.get("CLAUDLOBBY_INSTALLATION")
+    return read_installation(Path(selected)) if selected is not None else None
+
+
+def selected_cli(*, installation: Installation | None = None) -> Path:
+    """Stable installation CLI or transitional interpreter CLI, never PATH.
 
     Keep the venv spelling of sys.executable: resolving its interpreter symlink
     would select the base Python installation instead of the active release.
     """
-    executable = Path(sys.executable).absolute().parent / "claudlobby"
+    installation = _installation(installation)
+    executable = installation.cli if installation is not None else Path(sys.executable).absolute().parent / "claudlobby"
     if not executable.is_file():
         raise RuntimeError(f"Selected release has no CLI entrypoint: {executable}")
     return executable
 
 
-def get_resources() -> PackageResources:
-    """Read the installed build identity without importing compositor deps."""
+def get_resources(*, installation: Installation | None = None,
+                  checkout: Path | None = None) -> PackageResources:
+    """Resolve explicit source or transitional installed resources using stdlib.
+
+    Ordinary reads do not scan working files. The update owner calls installation
+    preflight before effects; Git HEAD is provenance, not a seal over dirty code.
+    """
+    installation = _installation(installation)
+    if installation is not None:
+        source = installation.source if checkout is None else Path(checkout)
+        revision = checkout_revision(source)
+        paths = [source / name for name in ("library", "library/voices", "templates")]
+        paths.extend((source, source / "claudlobby/_runtime_scripts", source / "claudlobby/system.yaml"))
+        seeds = [source / name for name in ("fleet.yaml.seed", "projects.yaml.seed", ".env.seed.example")]
+        if (any(not path.is_dir() for path in paths[:-1]) or not paths[-1].is_file()
+                or any(not path.is_file() for path in seeds)
+                or any(not path.resolve().is_relative_to(source) for path in [*paths, *seeds])):
+            raise InstallationError("Git checkout runtime resources are incomplete")
+        return PackageResources(*paths, artifact_id="", source_revision=revision,
+                                content_sha256="", installation=installation)
+    if checkout is not None:
+        raise InstallationError("candidate checkout requires an explicit installation")
     package = Path(__file__).resolve().parent
     try:
         metadata = json.loads((package / "_artifact.json").read_text())

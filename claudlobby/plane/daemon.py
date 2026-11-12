@@ -133,21 +133,17 @@ class ReplayReport:
 def _serving_identity(root: Path) -> dict:
     """Capture the executing install once; a changed selector cannot relabel it."""
     from ..runtime_versions import runtime_declaration
-    from ..runtime_admission import RuntimeIdentity, _match_identity
-    from ..commands.releases import _executing_release
-    from ..releases import read_release
+    from ..runtime_admission import RuntimeIdentity
 
     result = {"probe_version": 1, "root": str(root.resolve()), "pid": os.getpid(),
               "release_id": None, "seal_sha256": None, "artifact_id": None,
-              "cli": None, "runtime": runtime_declaration()}
+              "cli": None, "source_revision": None, "installation": None, "runtime": runtime_declaration()}
     try:
         identity = RuntimeIdentity.current()
-        result.update(artifact_id=identity.artifact_id, cli=str(identity.cli))
-        release_id = _executing_release(root)
-        if release_id is not None:
-            release = read_release(root, release_id, verify_files=False)
-            _match_identity(root, release, identity)
-            result.update(release_id=release_id, seal_sha256=release.seal_sha256)
+        if identity.installation is None or identity.installation.data_root != root.resolve():
+            raise ValueError("daemon runtime belongs to another installation")
+        result.update(cli=str(identity.cli), source_revision=identity.source_revision,
+                      installation=str(identity.installation.directory))
     except (OSError, ValueError, RuntimeError):
         pass  # An unverified install may be diagnosed, never admitted for drain.
     return result
@@ -387,7 +383,7 @@ def probe_daemon_info(path: Path, timeout: float = 2.0) -> dict | None:
     return info if (reply and reply.get("ok") is False and reply.get("code") == "bad_request"
                     and isinstance(info, dict) and info.get("probe_version") == 1
                     and set(info) == {"probe_version", "root", "pid", "release_id", "seal_sha256",
-                                     "artifact_id", "cli", "runtime", "sql_schema", "schema_state"}) else None
+                                     "artifact_id", "cli", "source_revision", "installation", "runtime", "sql_schema", "schema_state"}) else None
 
 
 def drain_daemon(path: Path, *, expected: dict, approved: dict,
@@ -471,15 +467,16 @@ class PlaneDaemon:
 
     def drain_pending(self, *, expected: dict, approved: dict,
                       max_batches: int = 100, timeout: float = 5.0) -> dict:
-        """Caller MUST hold activation EX and have quiesced producers/sessions.
+        """Caller MUST hold runtime EX and have quiesced producers/sessions.
         Restart admission must be fenced before entering this per-process mode.
         Limits stop starting batches, not an in-flight atomic commit/fsync.
         Remaining/quarantined names need the coordinator's existing conditional
         classification and reviewed decision; this is not a cutover-safe verdict.
         """
         serving = self.serving_info()
-        if (not serving["release_id"] or expected != serving
-                or serving["sql_schema"] != SCHEMA_USER_VERSION):
+        if (not serving["source_revision"] or not serving["installation"]
+                or serving["release_id"] is not None or serving["seal_sha256"] is not None
+                or expected != serving or serving["sql_schema"] != SCHEMA_USER_VERSION):
             return {"ok": False, "code": "release_mismatch", "serving": serving}
         if (type(max_batches) is not int or not 1 <= max_batches <= 1000
                 or type(timeout) not in (int, float) or not 0 < timeout <= 30

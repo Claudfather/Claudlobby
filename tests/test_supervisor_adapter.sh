@@ -616,11 +616,13 @@ echo "=== selected bot stop cleans a stale private socket only after retirement 
 as_os Darwin
 BOTX="$T/bots/xray"
 write_bot_conf "$BOTX" "svc-xray" "xray"
-XTMP="$T/xray-tmux"
+# This fixture exercises a real absolute Unix-socket probe. Pytest's nested
+# TMPDIR can exceed sun_path; use an owned short root just as real tmux needs.
+XTMP="$(mktemp -d /tmp/cl-supervisor.XXXXXX)"
+trap 'rm -rf "$T" "$XTMP"' EXIT
 xsocket="$XTMP/tmux-$(id -u)/svc-xray"
 mkdir -p "$XTMP/tmux-$(id -u)" "$T/generated"
-# Bind relative to the directory: sun_path is short and TMPDIR may be long.
-(cd "$XTMP/tmux-$(id -u)" && python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("svc-xray")')
+python3 -c 'import socket,sys; server = socket.socket(socket.AF_UNIX); server.bind(sys.argv[1]); server.close()' "$xsocket"
 xsource="$T/generated/svc-xray.plist"
 xinstalled="$HOME/Library/LaunchAgents/svc-xray.plist"
 printf '%s\n' 'selected release plist' > "$xsource"

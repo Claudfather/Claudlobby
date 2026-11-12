@@ -13,7 +13,38 @@ import yaml
 from claudlobby import composer, context
 from claudlobby.__main__ import main
 from claudlobby.command_result import empty_fleet_conflict
-from tests.test_config_staging import staging_case, _fleet, _tree, _write
+from tests.test_config_staging import staging_case as source_staging_case, _fleet, _tree, _write
+
+
+def _commit(case):
+    """Publish real frozen inputs without native effects or a registry scan."""
+    from claudlobby.active_config import publish_current_config, snapshot_from_plan
+    from claudlobby.config import load_fleet
+    from claudlobby.config_plan import ConfigPlanBuilder
+
+    manifests = [case.root / "fleet.yaml", *sorted((case.root / "local").rglob("fleet.yaml"))]
+    selected = {load_fleet(path)[0].name: path for path in manifests}
+    builder = ConfigPlanBuilder(case.root, tuple(selected),
+                                effects={"fleet_manifests": {}, "fleet_sources": {}, "units": []})
+    for fleet, manifest in selected.items():
+        projects = manifest.parent / "projects.yaml"
+        builder.effects["fleet_manifests"][fleet] = str(manifest)
+        builder.effects["fleet_sources"][fleet] = {
+            "fleet": {"path": str(manifest), "sha256": builder.input_content(manifest)},
+            "projects": {"path": str(projects), "sha256": builder.input_content(projects)}}
+    rendered = builder.freeze(case.package.source_revision)
+    path = case.root / "state/config.json"
+    previous = json.loads(path.read_text())["fingerprint"] if path.exists() else None
+    snapshot = snapshot_from_plan(rendered, case.package.installation, case.package.source_revision)
+    publish_current_config(snapshot, installation=case.package.installation, expected_previous=previous)
+    import shutil
+    shutil.rmtree(rendered.directory)
+
+
+@pytest.fixture
+def staging_case(source_staging_case):
+    _commit(source_staging_case)
+    return source_staging_case
 
 
 def _call(capsys, root, *operation, expected=0):
@@ -53,6 +84,7 @@ def test_composed_manager_worker_project_orientation_never_claims_running_permis
     composer.write_manifest_provenance(loaded.fleet, case.paths)
     worker_dir = case.paths.bot_runtime("primary-worker")
     _write(worker_dir / ".mcp.json", '{"mcpServers":{"private":{"env":{"TOKEN":"SECRET-orientation-mcp"}}}}')
+    _commit(case)
     before = _tree(case.root)
 
     shown = _call(capsys, case.root, "context", "show", "--bot", "primary-worker")["context"]
@@ -128,6 +160,7 @@ def _worker_composed(case, capsys):
                                          boot_delay_s=0, cascade={})
     _write(case.paths.bot_runtime("primary-worker") / ".claude/settings.local.json",
            rendered[".claude/settings.local.json"].content)
+    _commit(case)
     return _call(capsys, case.root, "bot", "capabilities",
                  "primary-worker")["bot"]["permissions"]["composed"]
 
@@ -199,6 +232,7 @@ def test_generated_context_defaults_are_explicit_and_never_replace_bad_identity(
     assert json.loads(captured.out)["error"]["code"] == "invalid_argument"
     assert "SECRET-orientation" not in captured.out + captured.err
     paths = _fleet(case.root, case.root / "local/system/local-fleet", "local-fleet", case.package)
+    _commit(case)
     monkeypatch.setenv("CLAUDLOBBY_ROOT", str(case.root))
     monkeypatch.setenv("FLEET_NAME", "local-fleet")
     monkeypatch.setenv("BOT_ID", "local-fleet-worker")
@@ -301,7 +335,7 @@ def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_cas
     assert unknown["entity_count"] is None and unknown["entity_counts_by_type"] is None
 
 
-_REFUSING = (("config", "validate"), ("fleet", "status"),
+_REFUSING = (("config", "validate"),
              ("context", "show", "--bot", "secondary-manager"))
 
 
@@ -316,6 +350,7 @@ def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, m
     monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
     manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
                       staging_case.package).fleet_yaml
+    _commit(staging_case)
     manifest.write_bytes(content)
     for operation in _REFUSING:
         assert main(["--root", str(staging_case.root), "--json", "--fleet", "secondary", *operation]) == 4
@@ -328,6 +363,8 @@ def test_empty_fleet_manifest_is_named_by_every_refusing_command(staging_case, m
         assert (f"git -C {shlex.quote(str(manifest.parent))} log -- fleet.yaml"
                 in error["hint"])
     assert manifest.read_bytes() == content
+    status = _call(capsys, staging_case.root, "--fleet", "secondary", "fleet", "status")
+    assert {row["name"] for row in status["bots"]} == {"secondary-manager", "secondary-worker"}
     # A root with a space stays one argument in the suggested command.
     spaced = Path("/tmp/data team/local/secondary/fleet.yaml")
     assert "git -C '/tmp/data team/local/secondary' log -- fleet.yaml" in str(
@@ -345,6 +382,7 @@ def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monk
     monkeypatch.setattr(context, "get_resources", lambda: staging_case.package)
     manifest = _fleet(staging_case.root, staging_case.root / "local/secondary", "secondary",
                       staging_case.package).fleet_yaml
+    _commit(staging_case)
     manifest.write_bytes(content)
     generic = {"config": "selected fleet configuration is invalid",
                "fleet": "context selectors or fleet configuration are invalid",
@@ -357,3 +395,5 @@ def test_non_empty_invalid_manifest_keeps_the_generic_refusal(staging_case, monk
         assert error["code"] == "conflict" and error["message"] == generic[operation[0]]
         assert "last good copy" not in str(error["hint"])
     assert manifest.read_bytes() == content
+    status = _call(capsys, staging_case.root, "--fleet", "secondary", "fleet", "status")
+    assert {row["name"] for row in status["bots"]} == {"secondary-manager", "secondary-worker"}

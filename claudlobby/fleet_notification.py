@@ -9,8 +9,7 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
-from .activation_state import read_selection
-from .context import resolve_paths
+from .context import resolve_paths, native_environment
 from .env_tiers import resolve as resolve_tiers
 from .message_context import _transport
 from .operation_context import resolve_operation_scope
@@ -19,7 +18,7 @@ from .plane.fleet_events import fleet_event_request
 from .plane.ids import mint_event_id
 from .recording_alerts import (_TIER_KEYS, ChannelOutcome, RecordingAlertOutcome,
                                send_fleet_notification)
-from .runtime_admission import RuntimeIdentity, mutation_admission
+from .runtime_admission import RuntimeIdentity, mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class FleetNotificationError(ValueError):
@@ -33,7 +32,7 @@ class FleetNotificationInputError(FleetNotificationError):
 @dataclass(frozen=True)
 class FleetNotificationResult:
     fleet: str
-    release_id: str
+    release_id: str | None
     event_id: str
     request_id: str
     level: str
@@ -41,9 +40,14 @@ class FleetNotificationResult:
     recording: str
     manager: ChannelOutcome
     telegram: ChannelOutcome
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
 
     def data(self) -> dict:
         result = asdict(self)
+        if self.source_revision is None:
+            result.pop("source_revision")
+            result.pop("config_fingerprint")
         result["notification"] = ("submitted" if self.manager.status == "submitted"
                                   or self.telegram.status == "carrier_accepted" else
                                   "suppressed" if "suppressed" in (self.manager.status,
@@ -69,13 +73,8 @@ def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
         if origin is not None and (origin.fleet.name != selected.fleet.name
                                    or origin.bot_id != selected.fleet.manager):
             raise FleetNotificationError("only the selected fleet manager may notify its fleet")
-        if origin is not None and (not bound_release
-                                   or not re.fullmatch(r"r-[0-9a-f]{64}", bound_release)):
-            raise FleetNotificationError("generated manager lacks a bound selected release")
-        selection = read_selection(selected.paths.root)
-        if (selection is None or selection["release_id"] != release.release_id
-                or selected.paths.package.native != release.native_path):
-            raise FleetNotificationError("notification scope differs from selected release")
+        bound_runtime_release(selected.paths.package, generated=origin is not None)
+        native_environment(selected.paths, current=release)
         destination = _transport(selected, selected.fleet.manager)
         try:
             tiers = resolve_tiers(selected.paths, bot_name=selected.fleet.manager,
@@ -111,7 +110,7 @@ def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
         if not tiers_available and channels.telegram.status == "unconfigured":
             channels = RecordingAlertOutcome(channels.manager,
                                              ChannelOutcome("failed", None, "tier_unavailable"))
-        return FleetNotificationResult(selected.fleet.name, release.release_id, event_id,
+        return FleetNotificationResult(selected.fleet.name, runtime_release_id(release), event_id,
                                        request_id,
                                        level, event, recording,
-                                       channels.manager, channels.telegram)
+                                       channels.manager, channels.telegram, **runtime_provenance(release))

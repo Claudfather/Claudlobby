@@ -464,6 +464,9 @@ class _StubRoot:
     def __str__(self) -> str:
         return "/var/x/export"
 
+    parent = Path("/var/x")
+    name = "export"
+
     def resolve(self) -> Path:
         return Path("/private/var/x/export")
 
@@ -728,7 +731,10 @@ def leaf_manager_compose(tmp_path_factory):
             selected, = [shlex.split(line.removeprefix("export "))[0].partition("=")[2]
                          for line in bot_conf.read_text().splitlines()
                          if line.removeprefix("export ").startswith("CLAUDLOBBY_CLI=")]
-            assert selected == str(candidate.cli)
+            # The verified wheel supplies composition inputs; native output
+            # binds the helper's private Git installation through its one CLI.
+            expected = root.resolve().parent / (".harness-installation-" + root.name) / "bin/claudlobby"
+            assert selected == str(expected)
     return baseline, leaf
 
 
@@ -773,6 +779,6 @@ def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
     _, leaf = leaf_manager_compose
     leaf_skills = leaf.types["skills"].composed_artifacts
     checkin_entry = next(s for s in leaf_skills if s.startswith(".claude/skills/checkin"))
-    assert checkin_entry == ".claude/skills/checkin -> $PACKAGE/_resources/library/skills/checkin", (
+    assert checkin_entry == ".claude/skills/checkin -> $INSTALLATION/src/library/skills/checkin", (
         f"symlink target was not scrubbed: {checkin_entry!r}"
     )

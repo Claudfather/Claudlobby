@@ -1,5 +1,7 @@
 """Scoped reads against actual SQL and the shared reducer's storage fixtures."""
 
+import base64
+import json
 import re
 import sqlite3
 
@@ -8,7 +10,6 @@ import pytest
 from claudlobby.plane.migrations import migrate
 from claudlobby.plane.queries import ASSIGNMENT_DELIVERY_MSG_SQL
 from claudlobby import task_queries
-from claudlobby.task_audit import audit_tasks
 from claudlobby.task_queries import (
     AmbiguousTaskReferenceError,
     InvalidTaskCursorError,
@@ -82,6 +83,12 @@ def test_cursor_continues_admission_order_without_duplicates_or_scope_drift(conn
             list_tasks(conn, **kwargs)
     with pytest.raises(InvalidTaskCursorError):
         list_tasks(conn, fleet_uid="fleet_a", cursor="not a cursor")
+    payload = json.loads(base64.urlsafe_b64decode(first.next_cursor + "=" * (-len(first.next_cursor) % 4)))
+    for oversized in (2 ** 63, 10 ** 100):
+        payload["after"][0] = oversized
+        forged = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        with pytest.raises(InvalidTaskCursorError):
+            list_tasks(conn, fleet_uid="fleet_a", limit=2, cursor=forged)
 
 
 def test_canonical_reads_refuse_wrong_kind_and_display_alias_with_scoped_recovery(conn):
@@ -95,8 +102,7 @@ def test_canonical_reads_refuse_wrong_kind_and_display_alias_with_scoped_recover
         hint = raised.value.hint
         assert hint.next_command == ("task", "show", "wi_local")
         assert (hint.candidates[0].task_id, hint.candidates[0].assignment_id) == ("wi_local", "asg_local")
-        mapping = audit_tasks(conn).preview(reference, fleet_uid="fleet_a").mapping
-        assert (mapping.task_id, mapping.assignment_id) == ("wi_local", "asg_local")
+        assert hint.total_matches == 1
     with pytest.raises(WrongTaskReferenceError) as raised:
         show_assignment(conn, "wi_local", fleet_uid="fleet_a")
     assert raised.value.hint.next_command == ("assignment", "show", "asg_local")
@@ -127,9 +133,8 @@ def test_ambiguous_reference_keeps_closed_candidates_and_bounds_hints(conn):
     _event(conn, "wi_retry", "asg_retry", "returned_blocked")
     with pytest.raises(AmbiguousTaskReferenceError) as raised:
         show_assignment(conn, "wi_retry", fleet_uid="fleet_a")
-    expected = audit_tasks(conn).preview("wi_retry", fleet_uid="fleet_a")
     assert {(r.task_id, r.assignment_id) for r in raised.value.hint.candidates} == {
-        (r.task_id, r.assignment_id) for r in expected.candidates}
+        ("wi_retry", None), ("wi_retry", "asg_retry")}
 
 
 def test_escalations_follow_current_work_and_expose_broken_history(conn):

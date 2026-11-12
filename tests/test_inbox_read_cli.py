@@ -5,15 +5,16 @@ import sqlite3
 
 from claudlobby import brief
 from claudlobby.__main__ import main
-from claudlobby.activation_identity import read_selected_identity_bindings
+from claudlobby.activation_identity import read_current_identity_bindings
 from claudlobby.paths import load_lib_module
 from claudlobby.plane.db import db_file
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.report_payload import ReportPayload, encode_report_facts
 from tests.package_fixtures import source_package
-from tests.test_activation import cold, tmp_path  # noqa: F401 — short private socket root
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private socket root
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_task_read_cli import active  # noqa: F401 — selected private release
+from tests.test_task_read_cli import TASK_HEX, _check_page, _event_plane, _events_printed
 from tests.test_task_state import _assignment, _event, _task
 
 
@@ -23,7 +24,7 @@ def test_inbox_keeps_fleet_work_and_viewer_reports_separate(active, monkeypatch,
     # real installed reader through brief's existing import seam.
     monkeypatch.setattr(brief, "load_dispatch_doors",
                         lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
-    bindings = read_selected_identity_bindings(root, "example", package=host.package)
+    bindings = read_current_identity_bindings(root, "example", package=host.package)
     with sqlite3.connect(db_file(root)) as conn:
         _task(conn, "wi_inbox", fleet_uid=bindings["fleet_uid"])
         conn.execute("UPDATE work_items SET project_key=NULL, workstream_id=NULL "
@@ -60,7 +61,7 @@ def test_inbox_keeps_fleet_work_and_viewer_reports_separate(active, monkeypatch,
         result = json.loads(capsys.readouterr().out)
         assert result["schema_version"] == 1 and result["request_id"] is None
         assert result["command"] == "fleet.inbox" and result["ok"] is (expected == 0)
-        assert result["release_id"] == host.release.release_id
+        assert result["release_id"] == None
         return result
 
     for key, value in {"CLAUDLOBBY_ROOT": str(root), "FLEET_NAME": "example",
@@ -115,3 +116,54 @@ def test_inbox_keeps_fleet_work_and_viewer_reports_separate(active, monkeypatch,
     assert operator["viewer_selection"] == "manager_default"
     assert [item["task_id"] for item in operator["work"]["items"]] == ["wi_inbox"]
     assert counts() == before  # reads never register a human or ACK a report
+
+
+def test_git_inbox_cursor_binds_committed_config_not_null_release(active, monkeypatch, capsys):
+    from tests.test_task_read_cli import _use_git_current
+    from claudlobby import active_config
+    root, host = active
+    bindings = read_current_identity_bindings(root, "example", package=host.package)
+    with sqlite3.connect(db_file(root)) as conn:
+        _task(conn, "wi_git_inbox_one", fleet_uid=bindings["fleet_uid"])
+        _task(conn, "wi_git_inbox_two", fleet_uid=bindings["fleet_uid"])
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    def read(*args, expected=0):
+        assert main(["--root", str(root), "--json", "fleet", "inbox", "--limit", "1", *args]) == expected
+        return json.loads(capsys.readouterr().out)
+    first = read()
+    assert first["release_id"] is None
+    assert first["data"]["source_revision"] == package.source_revision
+    assert first["data"]["config_fingerprint"] == snapshot["fingerprint"]
+    cursor = first["data"]["next_cursor"]
+    assert cursor
+    changed = json.loads(json.dumps(snapshot))
+    changed["fleets"]["example"]["fleet"] += "\n# next config epoch\n"
+    changed["fingerprint"] = active_config._fingerprint(changed)
+    active_config.publish_current_config(changed, installation=package.installation,
+                                         expected_previous=snapshot["fingerprint"])
+    assert read("--cursor", cursor, expected=2)["error"]["code"] == "invalid_argument"
+
+
+def test_inbox_work_prints_each_event_once_and_keeps_every_fact(active, monkeypatch, capsys):  # noqa: F811
+    from claudlobby.task_queries import list_tasks
+    root, host = active
+    fleet = _event_plane(root, host)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    assert main(["--root", str(root), "--json", "fleet", "inbox"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    with sqlite3.connect(db_file(root)) as conn:
+        page = list_tasks(conn, fleet_uid=fleet, state="open")
+    old = _check_page(data, data["work"], page.items)  # the whole inbox is walked for copies
+    work = data["work"]
+    assert [item["task_id"] for item in work["items"]] == ["wi_other", "wi_one", TASK_HEX]
+    # Main printed TASK_HEX's one event three times: in the task's history, in its
+    # assignment's and under its current assignment.
+    (hexed,) = [e["event_id"] for e in work["events"] if e["task_id"] == TASK_HEX]
+    assert _events_printed(old).count(hexed) == 3
+    # The open work is the page task list prints, in the same shape.
+    assert main(["--root", str(root), "--json", "task", "list"]) == 0
+    listed = json.loads(capsys.readouterr().out)["data"]
+    assert work == {key: listed[key] for key in ("items", "events", "issues")}

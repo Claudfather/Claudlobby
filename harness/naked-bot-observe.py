@@ -583,6 +583,11 @@ def scrub(text: str, root: Path, package: Path | None = None) -> str:
     which host recorded them, not only within one.
     """
     candidates = {str(root): "$EXPORT", str(root.resolve()): "$EXPORT"}
+    # Native output binds the helper's sibling Git installation, whose path
+    # varies with the export just as the installed candidate's path does.
+    for export in (root, root.resolve()):
+        installation = export.parent / (".harness-installation-" + export.name)
+        candidates[str(installation)] = "$INSTALLATION"
     if package is not None:
         candidates.update({str(package): "$PACKAGE", str(package.resolve()): "$PACKAGE"})
     for candidate in sorted(candidates, key=len, reverse=True):

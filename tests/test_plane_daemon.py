@@ -725,7 +725,7 @@ def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
     emit(fresh, {"event_type": "work_item", "emitter": "t9",
                  "fleet": "f", "payload": {
                      "work_item_id": "wi_" + "9" * 32, "title": "t",
-                     "created_by": "bot:f/a"}})
+                     "created_by": "bot:f/a", "workstream_id": "ws-test"}})
     # An initialized plane with no daemon records no hook or timer emit, so
     # "never armed" is ATTENTION, and so is anything staged meanwhile (S5a-02).
     r2 = _doctor(fresh)
@@ -1472,10 +1472,10 @@ def test_a_spooled_proof_is_not_tried_again_once_a_controlled_drain_has_begun(tm
     _fill_the_disk_for_batches(monkeypatch)  # the spool's own drain commits: the disk has room again
     advance = _move_the_daemon_clock(monkeypatch)
     initialize_plane(tmp_path)
-    # A controlled drain binds a sealed release. As in the test below, only the
-    # observation of the release is substituted; the drain and ingest are real.
+    # A controlled drain binds the executing Git installation. As in the test below, only the
+    # observation of the Git identity is substituted; the drain and ingest are real.
     identity = dm._serving_identity(tmp_path)
-    identity.update(release_id="r-" + "a" * 64, seal_sha256="b" * 64)
+    identity.update(source_revision="a" * 40, installation=str(tmp_path / "installation"))
     monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
     proof = "msg_" + "7" * 32
     with _serving(tmp_path) as sock:
@@ -1493,21 +1493,21 @@ def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_
     from claudlobby.plane.emit_api import _finalize
 
     initialize_plane(tmp_path)
-    # Identity binding is the existing sealed-release owner. This fixture only
+    # Identity binding is the existing managed Git runtime owner. This fixture only
     # substitutes its observation; queue replay/validation/ingest are real.
     identity = dm._serving_identity(tmp_path)
-    identity.update(release_id="r-" + "a" * 64, seal_sha256="b" * 64)
+    identity.update(source_revision="a" * 40, installation=str(tmp_path / "installation"))
     monkeypatch.setattr(dm, "_serving_identity", lambda _: identity)
     daemon = PlaneDaemon(tmp_path)
     expected = daemon.serving_info()
-    monkeypatch.setattr(dm, "_serving_identity", lambda _: {**identity, "release_id": "r-" + "c" * 64})
+    monkeypatch.setattr(dm, "_serving_identity", lambda _: {**identity, "source_revision": "c" * 40})
     assert daemon.serving_info() == expected  # selection changes cannot relabel a serving process
     staged = tmp_path / "state/plane/staged"
 
     def work(suffix):
         return _finalize({"event_type": "work_item", "emitter": "old-task-writer", "fleet": "example-fleet",
                           "payload": {"work_item_id": "wi_" + suffix * 32, "title": "old conditional work",
-                                      "created_by": "bot:example-fleet/alpha"}})
+                                      "created_by": "bot:example-fleet/alpha", "workstream_id": "ws-test"}})
 
     spool = spool_write(tmp_path, [work("1")], "previous outage")
     _stage(staged, "approved.batch", [work("2")])
@@ -1516,7 +1516,7 @@ def test_controlled_drain_binds_old_identity_and_reviewed_batches_with_retained_
     approved = {"spool": {spool.name: hashlib.sha256(spool.read_bytes()).hexdigest()},
                 "staged": {"approved.batch": hashlib.sha256((staged / "approved.batch").read_bytes()).hexdigest()}}
     try:
-        refused = daemon.drain_pending(expected={**expected, "release_id": "r-" + "d" * 64}, approved=approved)
+        refused = daemon.drain_pending(expected={**expected, "source_revision": "d" * 40}, approved=approved)
         assert refused["code"] == "release_mismatch" and not daemon._controlled_drain
         frozen = daemon.drain_pending(expected=expected, approved={"spool": {}, "staged": {}})
         assert frozen["ok"] and daemon._controlled_drain and spool.exists()

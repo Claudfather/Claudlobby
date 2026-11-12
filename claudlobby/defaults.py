@@ -451,7 +451,7 @@ class Facts:
     #: (#2010 follow-up). Default empty so a Facts built without it gates every
     #: skill default OFF (fail closed); the composer always supplies the set.
     available_skills: frozenset[str] = frozenset()
-    #: The bot loads a Telegram channel: the composer's `_has_telegram_channel`,
+    #: The bot loads a Telegram channel: config's `_has_telegram_channel`,
     #: the same predicate that grants the Telegram plugin tools, so a bot is told
     #: how to use Telegram exactly when it can. Default False so a Facts built
     #: without it gates the Telegram protocol defaults OFF (fail closed); the

@@ -1,3 +1,5 @@
+import { runtimeFields, validTaskActionTarget, validPermissionTarget } from "./action-state.js";
+
 // Shared finite navigation metadata limits; never host action authority.
 export const MAX_SAVED_COMPUTERS = 8;
 // Max canonical context22300bytes; round up for a readable finite wire budget.
@@ -286,7 +288,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
       if (context?.version !== 2 || context.simulation !== false || context.room !== room || context.scope?.fleet !== room
           || !Array.isArray(context.actions) || context.actions.length !== 1 || context.actions[0] !== kind
           || !Array.isArray(context.recipients) || context.recipients.length !== 1 || context.recipients[0].lead !== true
-          || !/^r-[0-9a-f]{64}$/.test(context.release_id)) return null;
+          || !runtimeFields(context)) return null;
       return context; // Shared controller validates the complete capability.
     } catch (error) { if (error?.code === 'action_not_authorized') throw error; return null; }
   }
@@ -297,7 +299,7 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     try {
       const context = await ownerAction('context', {room, kind:'permission', task_id});
       return context?.version === 2 && context.simulation === false && context.room === room && context.scope?.fleet === room
-        && context.task_id === task_id && context.actions?.length === 1 && context.actions[0] === 'permission' ? context : null;
+        && !!runtimeFields(context) && context.task_id === task_id && context.actions?.length === 1 && context.actions[0] === 'permission' ? context : null;
     } catch (error) { if (error?.code === 'action_not_authorized') throw error; return null; }
   }
   function actionMetadata(value, preparing = false) {
@@ -306,21 +308,21 @@ export function createOwnerTransport({ fetch = globalThis.fetch.bind(globalThis)
     if (value?.version === 2 && value.kind === 'permission') {
       const target = value.target;
       if (!/^perm_[0-9a-f]{32}$/.test(target?.permission_id) || !/^wi_[0-9a-f]{32}$/.test(target?.task_id)
-          || !/^[0-9a-f]{64}$/.test(target?.scope_sha256) || !/^r-[0-9a-f]{64}$/.test(target?.release_id)
+          || !/^[0-9a-f]{64}$/.test(target?.scope_sha256) || !validPermissionTarget(target)
           || !['approve','decline','revoke'].includes(value.decision)
           || !preparing && !/^[0-9a-f]{64}$/.test(value.semantic_sha256)) throw new Error('Unsupported permission decision.');
       return {version:2, request_id:value.request_id, kind:'permission', scope, decision:value.decision,
-        target:{permission_id:target.permission_id, task_id:target.task_id, scope_sha256:target.scope_sha256, release_id:target.release_id},
+        target:{permission_id:target.permission_id, task_id:target.task_id, scope_sha256:target.scope_sha256, ...runtimeFields(target)},
         ...(!preparing ? {semantic_sha256:value.semantic_sha256} : {})};
     }
     if (value?.version === 2 && ['nudge', 'feedback'].includes(value.kind)) {
       const target = value.target;
       if (!/^actor_[0-9a-f]{32}$/.test(target?.recipient) || !/^wi_[0-9a-f]{32}$/.test(target?.task_id)
           || !Object.hasOwn(target, 'assignment_id') || !(target.assignment_id === null || /^asg_[0-9a-f]{32}$/.test(target.assignment_id))
-          || !/^r-[0-9a-f]{64}$/.test(target.release_id)
+          || !validTaskActionTarget(target)
           || (!preparing && !/^[0-9a-f]{64}$/.test(value.semantic_sha256))) throw new Error('Unsupported task action.');
       return { version: 2, request_id: value.request_id, kind: value.kind, scope,
-        target: { recipient: target.recipient, task_id: target.task_id, assignment_id: target.assignment_id, release_id: target.release_id },
+        target: { recipient: target.recipient, task_id: target.task_id, assignment_id: target.assignment_id, ...runtimeFields(target) },
         submitted_at: value.submitted_at, ...(!preparing ? { semantic_sha256: value.semantic_sha256 } : {}) };
     }
     if (preparing || value?.kind !== 'message' || value.target?.task_id !== null || value.version !== undefined)

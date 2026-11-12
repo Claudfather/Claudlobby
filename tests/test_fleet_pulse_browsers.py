@@ -15,6 +15,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -82,7 +83,9 @@ class Host:
                "LANG": "C.UTF-8", "CLAUDLOBBY_ROOT": str(self.root), "FLEET_NAME": fleet,
                "PLANE_EMIT_DISABLED": "0", "EMIT_CAPTURE": str(self.capture), "TG_CAPTURE": str(self.tg),
                "TMUX_TMPDIR": str(self.tmux), "BROWSER_SCAN_PROC": str(self.proc.root), **extra}
-        result = subprocess.run(["bash", str(self.lib / "fleet-pulse.sh"), fleet], env=env,
+        (self.root / ".claudlobby-harness-root").write_text(str(self.root.resolve()))
+        result = subprocess.run([sys.executable, str(REPO / "harness/compose.py"), "--root", str(self.root),
+             "--fleet", fleet, "--pulse", "--native-dir", str(self.lib), "--record-plane"], env=env,
                                 capture_output=True, text=True, errors="replace", timeout=300)
         assert result.returncode == 0, result.stderr[-3000:]
         return result

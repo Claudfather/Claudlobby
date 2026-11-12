@@ -121,8 +121,8 @@ revoked key vs clock skew) with a key-fingerprint recipe.
 3. **MCP** — the App-token GitHub server: add `github-app` to a bot's `mcp:` list
    (`mcp: [github-app]`). See [`../../library/integrations/github-app.md`](../../library/integrations/github-app.md).
 
-4. stage `config plan --release RELEASE_ID`, inspect `config diff PLAN_ID`, then have the operator run `host activate PLAN_ID --install-directory PATH` (composed `.gitconfig`,
-   `bot.conf`, and the `tools/gh` shim reach a running bot only at its next restart).
+4. Apply the reviewed commit with `host update apply FULL_COMMIT` from an operator shell, using the stable installation CLI, and inspect it with `host update status` ([Managed Git delivery](../fleet-update-lifecycle.md#managed-git-delivery)). The composed `.gitconfig`,
+   `bot.conf`, and the `tools/gh` shim reach a running bot only at its next restart.
 
 ## Choosing the identity: App, operator, or both
 
@@ -232,7 +232,7 @@ leak). GitHub supports **overlapping keys**, so there is no downtime:
 1. Generate a NEW private key in App settings (both are now valid).
 2. Copy it to the host, `chmod 600`, and point `GITHUB_APP_PRIVATE_KEY_PATH` (fleet `.env`
    and the setup config file) at it; re-run `claudlobby host github-app setup` to validate.
-3. `generate` + restart the fleet.
+3. Apply the reviewed configuration with `host update apply FULL_COMMIT`; the updater owns the required restarts.
 4. **Delete the OLD key** in App settings once every bot is on the new one.
 
 To revoke access entirely, uninstall the App from the org (immediate) or delete the App.
@@ -245,7 +245,7 @@ To revoke access entirely, uninstall the App from the org (immediate) or delete 
   tree with a fingerprint-compare recipe.
 - **Commits attributed to you, not `<slug>[bot]`** — `github_app.slug` and `bot_user_id` must
   BOTH be set for the composed identity to arm; the validator warns when only one is. Confirm
-  the bot restarted after `generate`.
+  the bot restarted after the update was applied.
 - **`creds-check` records the App token as 403** — the installation lacks repository scope
   (or a secondary rate-limit). Check the App's repository permissions (Step 1).
 - **The bot can push to `main`** — the ruleset added the App to the bypass list, or targets

@@ -158,7 +158,7 @@ In the [Tailscale admin console](https://login.tailscale.com), rename the device
 
 ## Phase 5: Install Node + Claude Code
 
-`jq` is also required here — several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, report-back, creds-check, etc.) depend on it for JSON parsing.
+`jq` is also required here — several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, creds-check, etc.) depend on it for JSON parsing.
 
 ```bash
 brew install node jq
@@ -321,7 +321,7 @@ If all of those work, you're set.
 
 ## Next Steps
 
-Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to assemble a sealed host release and activate the first fleet with `fleet setup`. That activation composes the bots, enrolls declared jobs and starts supervised sessions. Run `host cache warm` through the sealed CLI when the fleet needs MCP package caches; later source changes go through `config plan`, `config diff PLAN_ID` and `host activate PLAN_ID`.
+Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to prepare one managed Git installation (with its data root kept separate) and an explicitly approved first fleet. Later source and configuration changes go through `host update status` and `host update apply`, described in the [update guide](../fleet-update-lifecycle.md#managed-git-delivery). A Mac already installed through the earlier sealed-release model needs a reviewed conversion that is not yet implemented; do not run the walkthrough over its data root.
 
 - Every bot runs as the account you set up here, and inherits its `sudo` rules and groups. Read the README's [Safety model](../../README.md#safety-model) before the fleet starts.
 - For details on launchd vs systemd vs cron install patterns, see [install-patterns.md](../install-patterns.md).

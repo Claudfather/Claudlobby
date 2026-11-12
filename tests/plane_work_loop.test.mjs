@@ -12,7 +12,8 @@ const controller = source.replaceAll('from "./action-state.js"', `from "${new UR
   .replaceAll('from "./permission-panel.js"', `from "${new URL('../claudlobby/plane/ui/permission-panel.js', import.meta.url)}"`)
   .replaceAll('from "./panel-state.js"', `from "${new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url)}"`);
 const { mountWorkLoop, conversationTaskLink } = await import(`data:text/javascript;base64,${Buffer.from(controller).toString('base64')}`);
-const transportSource = await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8');
+const transportSource = (await readFile(new URL('../claudlobby/plane/ui/owner-api-client.js', import.meta.url), 'utf8'))
+  .replace('"./action-state.js"', JSON.stringify(new URL('../claudlobby/plane/ui/action-state.js', import.meta.url).href));
 const { createOwnerTransport } = await import(`data:text/javascript;base64,${Buffer.from(transportSource).toString('base64')}`);
 const context = { version: 1, room: 'web', simulation: true,
   scope: { workspace: 'example', host: 'workshop', fleet: 'web', viewer: 'owner' },
@@ -724,10 +725,8 @@ test(`task action note describes actual capabilities only: ${actions.join(',') |
   const buttons = h.get('task-detail-content').querySelectorAll('[data-kind]');
   for(const button of buttons) assert.equal(button.disabled,!actions.includes(button.dataset.kind));
   assert.equal(note.includes('send an ordinary message'),actions.includes('message'));
-  if(!actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback and nudges are unavailable/);
-  if(actions.includes('feedback') && !actions.includes('nudge')) assert.match(note,/feedback goes.*Nudges are unavailable/);
-  if(actions.includes('nudge') && !actions.includes('feedback')) assert.match(note,/nudges go.*Feedback is unavailable/);
-  if(actions.includes('feedback') && actions.includes('nudge')) assert.match(note,/feedback and nudges go/);
+  assert.match(note,actions.includes('feedback') ? /Task feedback goes to this team’s lead/ : /Task feedback is unavailable/);
+  assert.match(note,actions.includes('nudge') ? /Task nudges go to this team’s lead/ : /Nudges are unavailable/);
 });
 
 
@@ -1010,6 +1009,26 @@ test('capability recovery does not overwrite a message edited while its nudge co
 
 
 const ownerFeedback = {...ownerNudge,scope:{...ownerNudge.scope,viewer:'feedback-grant'},actions:['feedback']};
+for(const authority of ['matching','no-lead','other-host','ungranted-recipient'])
+test(`manager shortcut composes only an explicit matching granted lead and never sends: ${authority}`,async()=>{
+  const lead=ownerNudge.recipients[0],first={id:'first-recipient',label:'First recipient'};
+  const message={...context,simulation:false,actions:['message'],recipients:authority==='ungranted-recipient'?[first]:[first,{id:lead.id,label:lead.label}]};
+  const nudge=authority==='other-host'?{...ownerNudge,scope:{...ownerNudge.scope,host:'another-host'}}:ownerNudge;
+  const h=harness({interactionContext:()=>message,...(authority==='no-lead'?{}:{nudgeContext:()=>nudge})});
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-manager').hidden,authority!=='matching');
+  h.loop.setView('tasks');
+  h.get('work-body').value='First recipient draft';h.get('work-body').emit('input');
+  h.get('work-manager').onclick();await settle();
+  assert.equal(h.get('work-composer').open,authority==='matching');
+  if(authority==='matching') {
+    assert.equal(h.get('work-recipient').value,lead.id);assert.equal(h.get('work-form').hidden,false);
+    h.get('work-recipient').value=first.id;h.get('work-recipient').onchange();
+    assert.equal(h.get('work-body').value,'First recipient draft');
+    h.loop.invalidate(undefined,message.scope,'message');assert.equal(h.get('work-manager').hidden,true);
+  } else assert.equal(h.get('work-recipient').value,first.id);
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
 const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
   crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});
 for(const transition of ['none','room','session'])
@@ -1020,6 +1039,13 @@ test(`feedback context waits for nudge and fences the originating epoch: ${trans
     feedbackContext:room=>{reads.push(['feedback',room]);return room==='web'?ownerFeedback:null;}}));
   h.loop.setRoom('web');await settle();
   assert.deepEqual(reads,[['message','web'],['nudge','web']]);
+  if(transition==='none') {
+    h.open(nudgeTaskId);await settle();
+    assert.match(h.get('task-action-note').textContent,/Checking task feedback access/);
+    assert.doesNotMatch(h.get('task-action-note').textContent,/feedback.*unavailable/);
+    assert.equal(h.get('work-mode').textContent,'CHECKING ACTION ACCESS');
+    assert.match(h.get('work-unavailable').textContent,/Checking task action access/);
+  }
   if(transition==='room')h.loop.setRoom('other');
   if(transition==='session')h.loop.pause();
   await settle();held.resolve(ownerNudge);await settle();
@@ -1129,8 +1155,10 @@ test('nudge and feedback capability refreshes have independent generations and n
   assert.equal(feedbackReads,2);assert.equal(nudgeReads,2);nudge.resolve(ownerNudge);await settle();h.open(nudgeTaskId);await settle();
   let buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
   assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,true);assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,false);
+  assert.match(h.get('task-action-note').textContent,/Checking task feedback access/);
   feedback.resolve(ownerFeedback);await settle();buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
   assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,false);assert.equal(h.get('work-body').value,'Independent message draft');
+  assert.doesNotMatch(h.get('task-action-note').textContent,/Checking task feedback access/);
   assert.equal(h.preparations.length,0);assert.equal(h.sends.length,0);
 });
 for(const loss of ['room','pause'])
@@ -1155,9 +1183,11 @@ test('bot selection uses the exact admitted UID and room, keeps recipient drafts
   let contextReads = 0;
   const h = harness({ interactionContext: () => { contextReads++; return inspectionContext; } });
   h.loop.setRoom(inspectedWorker.fleet); await settle();
+  h.loop.setView('tasks');
   const lead = { ...inspectedWorker, uid: inspectionContext.recipients[0].id, alias: 'bot:web/subteam/lead' };
   h.get('work-body').value = 'Draft for the lead'; h.get('work-body').emit('input');
   assert.equal(h.loop.selectMessageRecipient(inspectedWorker), true);
+  assert.equal(h.get('work-composer').open, true);
   assert.equal(h.get('work-recipient').value, inspectedWorker.uid);
   assert.equal(h.get('work-body').value, '');
   h.get('work-body').value = 'Draft for this worker'; h.get('work-body').emit('input');
@@ -1366,7 +1396,7 @@ test('the real stream source callback clears an open conversation through the ch
   const listeners = new Map(), cleared = [];
   const bindings = { createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
     workLoop: h.loop, $: id => h.get(id), renderSummary() {}, renderHeader: value => cleared.push(value),
-    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
+    renderHostFacts: value => cleared.push(value), invalidateOverview() {cleared.push(null,null);}, resetAgentPresence(){}, clearTaskHistory(){}, sessionPaused:false, renderState() {}, pushDebugRow() {}, scheduleRefresh() {}, generation: 0 };
   runInNewContext(appSlice('function openStream() {', '$("debug-toggle")'), bindings); bindings.openStream();
   listeners.get('source')({ data: JSON.stringify({state:'unreadable',remediation:'Source access unavailable'}) });
   assert.deepEqual(cleared, [null, null]);
@@ -1385,7 +1415,7 @@ test('a refresh started before stream source loss cannot restore the cleared con
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }, clearTimeout() {},
       createEventSource: () => ({ addEventListener: (name, listener) => listeners.set(name, listener) }),
       channelUrl: () => '/api/channel', fleetQuery: () => '', syncWorkRoom: () => false, adoptFleets() {},
-      renderChannel: value => painted.push(value), renderTasks() {}, renderFleet() {}, renderSummary() {}, renderHeader() {},
+      renderChannel: value => painted.push(value), renderTasks() {}, acceptTaskPoll(v){return v;}, clearTaskHistory(){}, renderFleet() {}, renderSummary() {}, renderHeader() {},
       renderHostFacts() {}, renderFleetTabs() {}, renderOverview() {}, renderState() {}, pushDebugRow() {} };
     runInNewContext(appSlice('let refreshTimer = null;', '$("debug-toggle")'), bindings); bindings.openStream();
     const board = {state:'ok',data:{tasks:[{task_id:'task-a',fleet:'web',title:'task-a'}]}};
@@ -1842,14 +1872,23 @@ test(`composer context close restores visible rail focus after ${loss} loss (rem
 });
 
 const actionDenied = () => Object.assign(new Error('Refused'),{code:'action_not_authorized'});
-test('explicit team action denials explain authority while task history stays readable and controls stay disabled',async()=>{
+for(const feedback of [false,true])
+test(`explicit team action denials describe each action independently: feedback=${feedback}`,async()=>{
   const refuse=()=>{throw actionDenied();};
-  const h=harness(nudgeOptions({interactionContext:refuse,nudgeContext:refuse,feedbackContext:refuse}));
+  const h=harness(nudgeOptions({interactionContext:refuse,nudgeContext:refuse,feedbackContext:feedback?()=>ownerFeedback:refuse}));
   h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();
-  assert.match(h.get('work-unavailable').textContent,/not authorized.*Reading remains available.*host owner/);
-  assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
-  assert.match(h.get('task-action-note').textContent,/Task feedback and Nudges are not authorized/);
-  assert.ok(h.get('task-detail-content').querySelectorAll('[data-kind]').every(b=>b.disabled));
+  if(!feedback) {
+    assert.match(h.get('work-unavailable').textContent,/not authorized.*Reading remains available.*host owner/);
+    assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
+    assert.match(h.get('task-action-note').textContent,/Task feedback is not authorized/);
+  } else {
+    assert.match(h.get('task-action-note').textContent,/Task feedback goes to this team’s lead/);
+    assert.doesNotMatch(h.get('task-action-note').textContent,/host owner must approve action access/);
+  }
+  assert.match(h.get('task-action-note').textContent,/Nudges are not authorized/);
+  const buttons=h.get('task-detail-content').querySelectorAll('[data-kind]');
+  assert.equal(buttons.find(b=>b.dataset.kind==='feedback').disabled,!feedback);
+  assert.equal(buttons.find(b=>b.dataset.kind==='nudge').disabled,true);
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 
@@ -1881,4 +1920,151 @@ test('message denial preserves the useful authorized feedback-only path',async()
   h.open(nudgeTaskId);await settle();
   const feedback=h.get('task-detail-content').querySelectorAll('[data-kind]').find(b=>b.dataset.kind==='feedback');
   assert.equal(feedback.disabled,false);assert.equal(h.sends.length,0);
+});
+
+test('explicit action access check reads only missing capabilities once and preserves the message draft and receipt',async()=>{
+  let allowed=false;const held=deferred(),reads=[],storage=store(),original=saved(storage);
+  const h=harness(nudgeOptions({storage,roomLabel:()=>'<Current computer> / Team',
+    interactionContext:room=>{reads.push(['message',room]);return {...context,simulation:false,actions:['message']};},
+    nudgeContext:room=>{reads.push(['nudge',room]);if(!allowed)throw actionDenied();return held.promise;}}));
+  h.loop.setRoom('web');await settle();h.update();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Keep the worker draft';h.get('work-body').emit('input');h.get('work-body').focus();
+  const pending=storage.getItem('plane.pending-actions.v1'),check=h.get('work-check-access');
+  assert.equal(check.hidden,false);assert.equal(check.disabled,false);
+  assert.equal(h.get('work-access-help').open,false);
+  assert.match(h.get('work-access-room').textContent,/<Current computer> \/ Team/);
+  assert.match(h.get('work-access-status').textContent,/Nudges: not authorized/);
+  allowed=true;check.focus();check.onclick();check.onclick();await settle();
+  assert.equal(check.disabled,true);assert.deepEqual(reads,[['message','web'],['nudge','web'],['nudge','web']]);
+  held.resolve(ownerNudge);await settle();
+  assert.equal(check.hidden,false);assert.equal(check.disabled,true);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-access-help').hidden,false); // Allowed actions remain inspectable independently of connection.
+  assert.match(h.get('work-access-status').textContent,/Messages: available.*Nudges: available/);
+  assert.equal(h.get('work-recipient').value,'worker');assert.equal(h.document.activeElement,check);
+  assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
+  assert.match(h.get('work-pending').innerHTML,new RegExp(original.request_id));
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+for(const mode of ['task composer','selected detail'])
+test(`action access check preserves the ${mode} and its exact task target`,async()=>{
+  let allowed=false,feedbackReads=0,detailReads=0;
+  const h=harness(feedbackOptions({feedbackContext:()=>{feedbackReads++;return ownerFeedback;},
+    interactionContext:()=>{if(!allowed)throw actionDenied();return {...context,simulation:false,actions:['message']};},
+    jget:()=>{detailReads++;return ownerDetail();}}));
+  await chooseFeedback(h);h.get('work-body').value='Keep this linked comment';h.get('work-body').emit('input');
+  if(mode==='selected detail'){h.get('work-open-task').onclick();await settle();}
+  const detail=h.get('task-detail-content').innerHTML,focus=h.document.activeElement;
+  allowed=true;h.get('work-check-access').onclick();await settle();
+  assert.equal(h.get('work-body').value,'Keep this linked comment');
+  assert.equal(h.get('work-send').textContent,'Send feedback');assert.equal(h.get('work-task').textContent,'Task: Review the selected task');
+  assert.equal(h.get('task-detail-content').innerHTML,detail);assert.equal(h.get('task-detail').open,mode==='selected detail');
+  assert.equal(detailReads,mode==='selected detail'?2:1);assert.equal(feedbackReads,1);assert.equal(h.document.activeElement,focus);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+  await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.preparations.length,1);assert.equal(h.preparations[0].kind,'feedback');
+  assert.equal(h.preparations[0].target.task_id,nudgeTaskId);assert.equal(h.preparations[0].target.release_id,ownerFeedback.release_id);
+  assert.equal(h.preparations[0].target.assignment_id,null);
+});
+
+test('action access help distinguishes authorization, unavailable transport and disconnected reads',async()=>{
+  const h=harness(nudgeOptions({interactionContext:()=>null,nudgeContext:()=>{throw actionDenied();}}));
+  h.loop.setRoom('web');await settle();h.update();
+  assert.match(h.get('work-access-status').textContent,/Messages: unavailable.*Nudges: not authorized/);
+  const help=h.get('work-loop').innerHTML;
+  assert.match(help,/Reading this team and acting on it are separate permissions/i);
+  assert.match(help,/--root DATA_ROOT host owner allow-actions --target-fleet TEAM --actor human:ALIAS/);
+  assert.match(help,/hosts that support.*allow-actions/i);
+  assert.match(help,/first-team-setup\.md#approve-team-actions-after-launch/);
+  assert.doesNotMatch(h.get('work-access-status').textContent,/Messages: not authorized/);
+  h.update({state:'disconnected'});assert.equal(h.get('work-check-access').disabled,true);
+  assert.match(h.get('work-access-status').textContent,/disconnected.*does not prove.*approval/i);
+  const readonly=harness({transport:{interactionContext:undefined,nudgeContext:undefined,feedbackContext:undefined,sendAction:undefined,actionReceipt:undefined}});
+  readonly.loop.setRoom('web');await settle();
+  assert.equal(readonly.get('work-check-access').hidden,true);
+  assert.match(readonly.get('work-access-status').textContent,/does not support browser actions/i);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+for(const loss of ['room','pause','disconnected'])
+test(`late access checks are fenced after ${loss} and cannot grant or overwrite drafts`,async()=>{
+  const held=deferred();let checking=false,reads=0;
+  const h=harness({interactionContext:room=>{reads++;if(room==='other')return {...context,room,scope:{...context.scope,fleet:room}};if(checking)return held.promise;throw actionDenied();}});
+  h.loop.setRoom('web');await settle();h.update();checking=true;h.get('work-check-access').onclick();await settle();
+  if(loss==='room'){h.loop.setRoom('other');await settle();h.get('work-body').value='Other team draft';h.get('work-body').emit('input');}
+  else if(loss==='pause')h.loop.pause();
+  else h.update({state:'disconnected'});
+  held.resolve(context);await settle();
+  if(loss==='room')assert.equal(h.get('work-body').value,'Other team draft');
+  else {assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-check-access').disabled,true);}
+  assert.equal(reads,loss==='room'?3:2);assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+test('action access check is disabled during context reads, task reads, writes, receipt reads and all teams',async()=>{
+  const contextRead=deferred(),taskRead=deferred(),write=deferred(),lookup=deferred();let initial=true,reads=0;
+  const storage=store();saved(storage);
+  const h=harness(nudgeOptions({storage,interactionContext:()=>{reads++;return initial?contextRead.promise:{...context,simulation:false,actions:['message']};},
+    nudgeContext:()=>null,jget:()=>taskRead.promise,sendAction:()=>write.promise,actionReceipt:()=>lookup.promise}));
+  h.loop.setRoom('web');h.update();assert.equal(h.get('work-check-access').disabled,true);
+  h.get('work-check-access').onclick();await settle();assert.equal(reads,1);
+  initial=false;contextRead.resolve({...context,simulation:false,actions:['message']});await settle();
+  h.open(nudgeTaskId);await settle();assert.equal(h.get('work-check-access').disabled,true);
+  taskRead.resolve(ownerDetail());await settle();assert.equal(h.get('work-check-access').disabled,false);
+  h.get('task-detail-close').onclick();await settle();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  const sending=h.submit();await settle();assert.equal(h.get('work-check-access').disabled,true);
+  write.resolve(receipt(h.sends[0],'recorded'));await sending;
+  const checking=h.pendingClick('saved-request');await settle();assert.equal(h.get('work-check-access').disabled,true);
+  lookup.resolve(receipt(new ActionState(storage).pending.find(p=>p.request_id==='saved-request')));await checking;
+  h.loop.setRoom('all');await settle();assert.equal(h.get('work-check-access').disabled,true);
+  const count=reads;h.get('work-check-access').onclick();await settle();assert.equal(reads,count);
+});
+
+test('Tasks view keeps one collapsed composer, its draft and receipt IDs across refresh and manual reopening',async()=>{
+  const storage=store();saved(storage);const h=harness({storage});h.loop.setRoom('web');await settle();h.update();
+  h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
+  h.get('work-body').value='Keep the worker draft';h.get('work-body').emit('input');h.get('work-body').focus();
+  const pending=storage.getItem('plane.pending-actions.v1'),form=h.get('work-form'),composer=h.get('work-composer');
+  const c={currentView:'channel',workLoop:h.loop,agentDirectoryVisible:()=>false,closeEquipment(){},clearInterval(){},gridTimer:null,trustTimer:null,
+    $:id=>h.get(id)||new h.Element(id),document:Object.assign(h.document,{body:{classList:{toggle(){}}},querySelectorAll:()=>[]})};
+  runInNewContext(appSlice('function setView(', 'let trustTimer ='),c);
+  c.setView('tasks');assert.equal(composer.open,false);assert.equal(h.document.activeElement,h.get('work-composer-toggle'));
+  assert.match(h.get('work-composer-label').textContent,/Message/);
+  assert.match(h.get('work-composer-status').textContent,/Draft kept.*1 awaiting confirmation/);
+  h.update();assert.equal(composer.open,false);
+  composer.open=true;h.update();c.setView('tasks');assert.equal(composer.open,true);
+  c.setView('channel');assert.equal(composer.open,true);c.setView('tasks');assert.equal(composer.open,false);
+  assert.equal(h.get('work-form'),form);assert.equal(h.get('work-body').value,'Keep the worker draft');
+  assert.equal(h.get('work-recipient').value,'worker');assert.equal(storage.getItem('plane.pending-actions.v1'),pending);
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+for(const action of ['feedback','nudge'])
+test(`task ${action} deliberately reveals the same composer and keeps its frozen selection while collapsed`,async()=>{
+  const h=harness((action==='feedback'?feedbackOptions:nudgeOptions)());h.loop.setView('tasks');
+  await (action==='feedback'?chooseFeedback:chooseNudge)(h);
+  const composer=h.get('work-composer');assert.equal(composer.open,true);assert.equal(h.document.activeElement,h.get('work-body'));
+  h.get('work-body').value='Keep this task draft';h.get('work-body').emit('input');
+  assert.match(h.get('work-composer-label').textContent,action==='feedback'?/Task feedback/:/Ask team lead/);
+  assert.match(h.get('work-composer-status').textContent,/Draft kept/);
+  composer.open=false;h.update();assert.equal(composer.open,false);
+  assert.equal(h.get('work-body').value,'Keep this task draft');assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+  composer.open=true;await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.preparations.length,1);assert.equal(h.sends.length,1);assert.equal(h.lookups.length,0);
+  assert.equal(h.sends[0].kind,action);assert.equal(h.sends[0].target.task_id,nudgeTaskId);
+  assert.equal(h.sends[0].target.assignment_id,null);assert.equal(h.sends[0].target.release_id,ownerNudge.release_id);
+});
+
+test('collapsing during a send preserves one request and exposes its unconfirmed outcome without replay',async()=>{
+  const sent=deferred(),h=harness({sendAction:()=>sent.promise});h.loop.setRoom('web');await settle();
+  const submitting=h.submit();await settle();const request=h.sends[0],pending=h.storage.getItem('plane.pending-actions.v1');
+  h.loop.setView('tasks');assert.equal(h.get('work-composer').open,false);
+  assert.match(h.get('work-composer-status').textContent,/Sending.*1 awaiting confirmation/);
+  h.loop.setView('channel');h.get('work-composer').open=false;await h.get('work-form').onsubmit({preventDefault(){}});
+  assert.equal(h.sends.length,1);assert.equal(h.storage.getItem('plane.pending-actions.v1'),pending);
+  sent.resolve(receipt(request,'recorded'));await submitting;
+  assert.equal(h.get('work-composer').open,false);assert.match(h.get('work-composer-status').textContent,/1 awaiting confirmation/);
+  assert.equal(new ActionState(h.storage).pending[0].request_id,request.request_id);
+  assert.equal(h.get('work-body').value,'Hello');assert.equal(h.lookups.length,0);
 });

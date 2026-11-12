@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from ..command_result import CommandFailure, CommandOutput
+from ..runtime_admission import runtime_provenance
 
 
 def dispatch(args) -> CommandOutput:
@@ -14,7 +15,6 @@ def dispatch(args) -> CommandOutput:
     from ..paths import InvalidPathSelector
     from ..repo_pull_operations import RepositoryPullError, pull_repositories
     from ..releases import ReleaseError
-    from ..runtime_admission import ReleaseMismatch
 
     if args.seed or not args.fleet:
         raise CommandFailure("invalid_argument", "select one declared fleet with --fleet")
@@ -38,12 +38,10 @@ def dispatch(args) -> CommandOutput:
         raise CommandFailure("not_found", "selected fleet declaration is missing", data=data) from exc
     except BotNotFoundError as exc:
         raise CommandFailure("not_found", "bot is not declared in the selected fleet", data=data) from exc
-    except ReleaseMismatch as exc:
-        raise CommandFailure("release_mismatch", "repository pull requires the selected executable",
-                             data=data) from exc
     except (ActivationError, ReleaseError, ValueError) as exc:
         raise CommandFailure("conflict", "selected repository scope cannot be verified",
                              data=data) from exc
+    data.update(runtime_provenance(result))
     rows = [{"repository": name, "status": status} for name, status in result.repositories]
     data.update(release_id=result.release_id, repositories=rows,
                 native_outcome="partial" if any(row["status"] in

@@ -143,6 +143,26 @@ def inspect_source(root: Path) -> str:
             conn.close()
 
 
+def complete_first_fleet_source(root: Path, *, writers_started: bool = False) -> None:
+    """Complete existing owner preparation for a caller-proven newly migrated DB.
+
+    Only the fresh-recorder coordinator may call this before registry/native
+    writers. Missing authority stays absent. Retired preparation is observed,
+    never used to re-attest an unbound or foreign recorder.
+    """
+    from .owner_access import OwnerAccess
+    access = OwnerAccess(root)
+    if not access.path.exists():
+        return
+    if access.first_fleet_pending():
+        if writers_started:
+            raise SourceUnavailable("owner preparation was not retired before recorder writers")
+        bind_source(root)
+        access.retire_first_fleet()
+    else:
+        inspect_source(root)
+
+
 def bind_source(root: Path, *, expected_host_uid: str | None = None) -> str:
     """Operator-only explicit attestation, existing DB only, never foreign rebind.
 
@@ -229,20 +249,20 @@ def authority_only_plane(root: Path, *, allow_absent: bool = False) -> None:
 
 
 def fresh_owner_setup(root: Path, *, allow_absent: bool = False) -> None:
-    """No selection, activation or runtime; owner preparation grants no launch."""
-    from ..activation_state import ActivationError, read_selection
+    """No committed configuration or prior runtime; preparation grants no launch."""
     from ..paths import _iter_fleet_dirs
 
     root = Path(root).absolute()
     try:
-        if not root.is_dir() or read_selection(root) is not None:
+        if not root.is_dir() or any(os.path.lexists(root / "state" / name) for name in (
+                "config.json", "selected-release.json", "restored-backup.json", "restored-backup", "migrations")):
             raise SourceUnavailable("fresh owner setup unavailable")
         runtimes = [root / "runtime", *(overlay / "runtime" for overlay in _iter_fleet_dirs(root / "local"))]
         for path in (*runtimes, root / "state/activations"):
             if path.resolve() != path or path.exists() and (not path.is_dir() or next(path.iterdir(), None) is not None):
                 raise SourceUnavailable("fresh owner setup unavailable")
         authority_only_plane(root, allow_absent=allow_absent)
-    except (OSError, ValueError, ActivationError) as exc:
+    except (OSError, ValueError) as exc:
         raise SourceUnavailable("fresh owner setup unavailable") from exc
 
 
