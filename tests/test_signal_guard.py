@@ -284,6 +284,14 @@ def test_a_typed_pid_of_an_ancestor_is_refused_however_it_is_held():
         assert [kind for kind, _ in found] == ["ancestor"], (command, found)
 
 
+def test_an_ancestor_refusal_names_the_bots_subreaper():
+    # A typed ancestor pid may be the bot's own subreaper (#2158), which sits
+    # between its tmux server and the user manager; the refusal says so.
+    found = D.decide(f"kill -9 {os.getpid()}")
+    assert [kind for kind, _ in found] == ["ancestor"], found
+    assert "its subreaper" in found[0][1], found
+
+
 def test_a_typed_pid_that_is_not_an_ancestor_is_allowed():
     # A typed number shows no provenance; only its target can condemn it. This
     # is the stated bound: another bot's pid, typed, passes (#2158 backstops it).
