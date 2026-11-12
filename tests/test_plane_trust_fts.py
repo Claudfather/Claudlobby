@@ -170,7 +170,7 @@ def test_trust_and_doctor_share_provisional_suspects(tmp_path, mixed):
             resolve(conn, "bot_instance", "bot:f/unscanned", now=at)
         before = [tuple(r) for r in conn.execute("SELECT * FROM identity_registry")]
         suspects = provisional_actors(conn)  # the same reader used by doctor
-        body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
         assert body["state"] == "ok"
         assert body["data"]["provisional_identities"] == (3 if mixed else 1)
         assert body["data"]["provisional_actor_suspects"] == len(suspects) == int(mixed)
