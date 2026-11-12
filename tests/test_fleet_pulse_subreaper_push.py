@@ -3,11 +3,13 @@
 Since #2226 the pulse records bot_subreaper_missing on every sweep that reads a live
 session's tmux server outside its bot-subreaper, and nothing read the record: it was
 not pushed, not critical and not in the brief. Now the bot's manager also gets one
-push an episode, through the debounce every alert uses, with one instruction: restart
-the bot at its next safe point. Recording is unchanged. A sweep that reads the session
-under its subreaper again ends the episode. The re-notify window (#831) applies, as it
-does to every other alert. OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's bot.conf stops
-the push, says so on stderr, and leaves the record. The push about the manager itself
+push an episode, through the debounce every alert uses: read the start's
+bot_subreaper_unavailable first, then restart the bot at its next safe point.
+Recording is unchanged. A sweep that reads the session under its subreaper again ends
+the episode, and one with no live session leaves it open. The re-notify window (#831)
+applies, as it does to every other alert. OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's
+bot.conf stops the push, says so on stderr, leaves the record and ends the episode.
+The push about the manager itself
 posts nothing to the fleet's channel: unlike the alerts #997 posts there, this one
 leaves the manager's own pane able to act on it.
 
@@ -269,7 +271,9 @@ def test_a_session_without_its_subreaper_is_pushed_once_an_episode_and_recorded_
     pushed = fleet.pushes("w1")
     assert len(pushed) == 1, fleet.log.read_text()
     assert "runs under plain-tmux, not its bot-subreaper" in pushed[0], pushed
-    assert "Restart it at its next safe point, after the safe-worker-restart checks" in pushed[0], pushed
+    assert ("Read its start's bot_subreaper_unavailable first (claudlobby --json event list"
+            " --bot w1 --type bot_subreaper_unavailable)") in pushed[0], pushed
+    assert "If not, restart it at its next safe point, after the safe-worker-restart checks" in pushed[0], pushed
     assert fleet.recorded("w1") == 1
     assert marker.exists()
     fleet.sweep()
@@ -286,6 +290,26 @@ def test_a_session_without_its_subreaper_is_pushed_once_an_episode_and_recorded_
     fleet.sweep()
     assert len(fleet.pushes("w1")) == 2, fleet.log.read_text()
     assert fleet.recorded("w1") == 3
+
+
+def test_a_worker_restart_that_brings_no_subreaper_back_is_not_pushed_again(fleet):
+    """A sweep with no live session leaves w1's episode open, so the session its restart
+    brings back, outside a subreaper again, is recorded and not pushed again before the
+    re-notify window: the push's recipient, the manager's session, is unchanged."""
+    fleet.start_box()
+    fleet.idle("mgr")
+    fleet.idle("w1")
+    fleet.start_worker(subreaper=False)
+    fleet.sweep()
+    marker = fleet.state / "w1.subreaper_alerted"
+    assert len(fleet.pushes("w1")) == 1 and marker.exists(), fleet.log.read_text()
+    fleet.stop_worker()
+    fleet.sweep()
+    assert marker.exists(), "a sweep with no live session ended the episode"
+    fleet.start_worker(subreaper=False)
+    fleet.sweep()
+    assert len(fleet.pushes("w1")) == 1, fleet.log.read_text()
+    assert fleet.recorded("w1") == 2
 
 
 def test_the_off_switch_stops_the_push_and_not_the_record(fleet):
@@ -309,6 +333,27 @@ def test_the_off_switch_stops_the_push_and_not_the_record(fleet):
     assert len(fleet.pushes("w1")) == 1, fleet.log.read_text()
     assert fleet.recorded("w1") == 2
     assert OFF_LINE not in result.stderr
+
+
+def test_turning_the_push_off_ends_an_open_episode(fleet):
+    """w1's episode is open, pushed once, when OBSERVABILITY_SUBREAPER_PUSH=0 goes into
+    its bot.conf: that sweep records w1, pushes nothing and ends the episode. With the
+    line gone, the next sweep pushes w1 at once, inside the re-notify window."""
+    fleet.start_box()
+    fleet.idle("mgr")
+    fleet.idle("w1")
+    fleet.start_worker(subreaper=False)
+    fleet.sweep()
+    marker = fleet.state / "w1.subreaper_alerted"
+    assert len(fleet.pushes("w1")) == 1 and marker.exists(), fleet.log.read_text()
+    fleet.conf("w1", "export OBSERVABILITY_SUBREAPER_PUSH=0\n")
+    fleet.sweep()
+    assert not marker.exists(), "a sweep with the push off left the episode open"
+    assert len(fleet.pushes("w1")) == 1, fleet.log.read_text()
+    fleet.conf("w1")
+    fleet.sweep()
+    assert len(fleet.pushes("w1")) == 2, fleet.log.read_text()
+    assert fleet.recorded("w1") == 3
 
 
 def test_the_re_notify_window_applies_as_it_does_to_every_alert(fleet):
@@ -342,7 +387,9 @@ def test_the_push_about_the_manager_itself_posts_nothing_to_the_channel(fleet):
     fleet.sweep()
     pushed = fleet.pushes("mgr")
     assert len(pushed) == 1, fleet.log.read_text()
-    assert "This is you: restart yourself with /restart" in pushed[0], pushed
+    assert ("This is you. Read your start's bot_subreaper_unavailable first (claudlobby --json"
+            " event list --bot mgr --type bot_subreaper_unavailable)") in pushed[0], pushed
+    assert "If not, restart yourself with /restart" in pushed[0], pushed
     posts = fleet.posts()
     assert [p for p in posts if "mgr activity_stuck" in p], posts
     assert [p for p in posts if "bot_subreaper_missing" in p] == [], posts

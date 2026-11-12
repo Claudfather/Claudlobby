@@ -175,10 +175,13 @@ DECISION = {
     ),
     "bot_subreaper_missing": (
         "Linux: the bot's live session **runs without its own subreaper**, so a process the session orphans goes to the user manager that runs every bot, where a kill aimed at the orphan's parent can stop them all.",
-        "**Restart it at its next safe point, after the `safe-worker-restart` checks**: the new session gets a subreaper.",
+        "**Read its start's `bot_subreaper_unavailable` first** (`claudlobby --json event list --bot BOT_ID --type bot_subreaper_unavailable`, newest first): a session that started without its subreaper reads the same as one that lost it, and if its start recorded one, with the reason, a restart may fail as its start did.",
+        "**If it recorded none, restart it at its next safe point, after the `safe-worker-restart` checks**: the new session gets a subreaper.",
         "When it is about you, restart yourself with `/restart` at a safe point.",
-        "A restart that brings no subreaper back is not pushed again before the re-notify window: its start recorded `bot_subreaper_unavailable` with the reason, so read that before you restart it again.",
+        "A worker whose restart brings no subreaper back is not pushed again before the re-notify window.",
+        "Your own restart changes where the push goes, so if it brings no subreaper back you are told again at the next sweep, and after that at most once every half hour: read your start's `bot_subreaper_unavailable` before you restart yourself again.",
         "`OBSERVABILITY_SUBREAPER_PUSH=0` in the bot's `fleet.yaml` env turns this push off, and every sweep still records the event.",
+        "A sweep that reads the loss with the push off ends the episode, so turning it back on pushes at the next sweep.",
     ),
     "browser_outside_render": (
         "A browser has run for **more than 15 minutes outside a heavy-slot render scope** (#2332).",
