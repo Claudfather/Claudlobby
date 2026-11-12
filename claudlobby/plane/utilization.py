@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..utilization import compute_busy_pct, find_state_transition
 from .queries import fleet_alias_range
+from .time import instant_key, register_instant_key
 
 # Fleet scope is applied IN SQL (an alias range) — the lens measured
 # 730 ms at 21 bots × 7 d when every fleet's rows were fetched and parsed
@@ -36,13 +37,19 @@ HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
     " FROM identity_registry i CROSS JOIN metric_samples m"
     "  ON m.subject_uid = i.uid AND m.metric = 'bot.heartbeat'"
-    " WHERE m.occurred_at >= ?"
+    # The text bound only narrows the rows the instant key reads: it sits a day
+    # below the window in UTC, and ingest writes every occurred_at as an aware
+    # isoformat, whose offset is under a day. The instant key alone decides the
+    # window (#1599).
+    " WHERE m.occurred_at >= ? AND claudlobby_instant_key(m.occurred_at) >= ?"
     f" AND (? IS NULL OR {fleet_alias_range('i.alias')})"
     # optional one bot: the alias's tail after its last '/', case-folded
     # (substr, not LIKE, so a '_' in a name is literal)
     " AND (? IS NULL OR lower(substr(i.alias, length(i.alias) - length(?)))"
     "  = '/' || lower(?))"
-    " ORDER BY i.alias, m.occurred_at, m.ingest_seq"
+    # Ingest order here: heartbeat_series sorts each bot's samples by instant,
+    # a stable sort, so samples at one instant keep it.
+    " ORDER BY i.alias, m.ingest_seq"
 )
 
 
@@ -64,12 +71,17 @@ def heartbeat_series(conn, *, now: datetime | None = None,
     so no two surfaces can disagree about what was recorded."""
     if now is None:
         now = datetime.now(timezone.utc)
-    since = (now - timedelta(days=days)).isoformat()
+    register_instant_key(conn)
+    start = now - timedelta(days=days)
+    since = instant_key(start.isoformat())
+    if since is None:
+        raise ValueError("heartbeat now must be a timezone-aware instant")
+    floor = (start - timedelta(days=1)).astimezone(timezone.utc).isoformat()
     like = None if fleet is None else fleet
     series: dict[str, list] = {}
     # Fetched whole before parsing: over the live cursor, the snapshot would be
     # held while every one of tens of thousands of rows is parsed (#1905).
-    params = (since, like, like, like, bot, bot, bot)
+    params = (floor, since, like, like, like, bot, bot, bot)
     for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, params).fetchall():
         ts = _parse(occ)
         try:
@@ -81,6 +93,8 @@ def heartbeat_series(conn, *, now: datetime | None = None,
         if ts > now + timedelta(seconds=60):
             continue                      # a future stamp is a clock error, not data
         series.setdefault(alias, []).append((ts, state))
+    for entries in series.values():
+        entries.sort(key=lambda entry: entry[0])   # by instant; stable, so ties keep ingest order
     return series
 
 
