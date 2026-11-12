@@ -31,6 +31,7 @@ import pytest
 from claudlobby.composer import compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig, ScopeConfig
 from claudlobby.loader import parse_expertise_file
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REVIEWER_EXPERTISE = "code-review"
@@ -39,10 +40,13 @@ CODE_REVIEW_MD = REPO / "library" / "expertise" / "code-review.md"
 
 
 def _fleet(*bots: BotConfig) -> FleetConfig:
+    # The reviewer remains a worker even in a single-subject assertion.
+    lead = _bot("lead", ["orchestration"])
     return FleetConfig(
         name="test-fleet",
         service_prefix="com.test",
-        bots={b.bot_id: b for b in bots},
+        manager="lead",
+        bots={"lead": lead, **{b.bot_id: b for b in bots}},
         mission="Ship.",
     )
 
@@ -70,7 +74,7 @@ def paths() -> Paths:
     today; asserting the lookup resolved is what stops a future path change from
     silently restoring the decoy, since the failure mode reads as a pass.
     """
-    p = Paths(root=REPO, fleet_dir=None)
+    p = Paths(root=REPO, fleet_dir=None, package=source_package())
     assert p.find_library_file("expertise", REVIEWER_EXPERTISE, ".md") is not None, (
         "fixture cannot resolve the expertise file, so composition would silently "
         "skip it and these tests would assert nothing"

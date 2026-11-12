@@ -68,7 +68,7 @@ class TestFragmentContract:
         server = mcp["mcpServers"]["github-app"]
         assert server["command"] == "/bin/sh"
         joined = " ".join(server["args"])
-        assert "${CLAUDLOBBY_ROOT}/lib/github-app-mcp-wrapper.py" in joined
+        assert "${CLAUDLOBBY_NATIVE_DIR}/github-app-mcp-wrapper.py" in joined
         assert str(REPO_ROOT) not in joined, "anchor must not be baked at compose time"
 
     def test_composed_server_name_is_the_entry_name(self):
@@ -79,7 +79,7 @@ class TestFragmentContract:
 
     def test_permission_grants_use_the_github_app_prefix(self):
         bot = _bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         mcp = compose_mcp_json(bot, _paths())
         settings = compose_settings_local(
             bot, fleet, _paths(), list(mcp["mcpServers"].keys())
@@ -93,7 +93,7 @@ class TestFragmentContract:
         # the two fragments must move together.
         github = json.loads((REPO_ROOT / "library" / "mcp" / "github.json").read_text())
         pinned = [a for a in github["github"]["args"] if a.startswith("@modelcontextprotocol")]
-        wrapper_src = (REPO_ROOT / "lib" / "github-app-mcp-wrapper.py").read_text()
+        wrapper_src = (REPO_ROOT / "claudlobby/_runtime_scripts" / "github-app-mcp-wrapper.py").read_text()
         assert len(pinned) == 1
         assert pinned[0] in wrapper_src
 
@@ -118,7 +118,7 @@ class TestFragmentContract:
         from claudlobby import path_audit
 
         bot = _bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot})
         findings = path_audit.audit_bot_sources(bot, fleet, paths=_paths())
         assert findings == [], [str(f) for f in findings]
 

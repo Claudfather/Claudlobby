@@ -1,4 +1,4 @@
-"""App-auth P2 (#1272): lib/github-app-mcp-wrapper.py behavioral battery.
+"""App-auth P2 (#1272): claudlobby/_runtime_scripts/github-app-mcp-wrapper.py behavioral battery.
 
 Real wrapper under subprocess; the mint CLI and the npx child are stubs on a
 private PATH (Lane-A). The child stub appends the token it received per
@@ -25,7 +25,7 @@ from pathlib import Path
 from tests.conftest import _write_exec, booby_trap_git, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = REPO_ROOT / "lib" / "github-app-mcp-wrapper.py"
+WRAPPER = REPO_ROOT / "claudlobby/_runtime_scripts" / "github-app-mcp-wrapper.py"
 
 
 def _stub_mint(bindir: Path) -> Path:
@@ -33,6 +33,7 @@ def _stub_mint(bindir: Path) -> Path:
 
     FAIL_FIRST=<k>: calls 1..k fail (rc 1, empty stdout — the D9 shape).
     FAIL_AFTER=<k>: every call AFTER the k-th fails.
+    FAIL_UNTIL=<path>: every call fails until <path> is a non-empty file.
     """
     mint = bindir / "mint-stub"
     _write_exec(
@@ -41,12 +42,16 @@ def _stub_mint(bindir: Path) -> Path:
 n=0
 [ -f "$STUB_DIR/mint-count" ] && n=$(cat "$STUB_DIR/mint-count")
 n=$((n + 1))
-printf '%s' "$n" > "$STUB_DIR/mint-count"
+printf '%s' "$n" > "$STUB_DIR/mint-count.tmp.$$" && mv -f "$STUB_DIR/mint-count.tmp.$$" "$STUB_DIR/mint-count"
 if [ "$n" -le "${FAIL_FIRST:-0}" ]; then
   printf 'mint-stub: simulated failure %s\\n' "$n" >&2
   exit 1
 fi
 if [ "${FAIL_AFTER:-0}" -gt 0 ] && [ "$n" -gt "${FAIL_AFTER}" ]; then
+  printf 'mint-stub: simulated failure %s\\n' "$n" >&2
+  exit 1
+fi
+if [ -n "${FAIL_UNTIL:-}" ] && [ ! -s "$FAIL_UNTIL" ]; then
   printf 'mint-stub: simulated failure %s\\n' "$n" >&2
   exit 1
 fi
@@ -89,6 +94,14 @@ def _env(bindir: Path, mint: Path, **overrides):
 def _spawns(bindir: Path):
     log = bindir / "spawns.log"
     return log.read_text().splitlines() if log.exists() else []
+
+
+def _pids(bindir: Path):
+    """The child pids the npx stub logged. Its `>>` creates the file before it
+    writes the pid, so a file that exists can still be empty: wait on this,
+    never on the file (the int('') race _mints had)."""
+    log = bindir / "pids.log"
+    return [int(x) for x in log.read_text().split()] if log.exists() else []
 
 
 def _mints(bindir: Path) -> int:
@@ -265,21 +278,27 @@ class TestRefreshLoop:
     def test_pat_bridge_upgrades_to_app_when_minting_heals(self, tmp_path):
         # Boot inside the Pi clock window with a PAT: serve the bridge NOW,
         # then rotate up to App identity at the short cadence — not 50min of
-        # wrong attribution.
+        # wrong attribution. Minting heals once the bridge has logged its
+        # token: a heal on a retry count can land before the bridge child
+        # runs, and the upgrade then stops a child that never logs its spawn.
         mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
         env = _env(
             tmp_path,
             mint,
-            FAIL_FIRST="1",
+            FAIL_UNTIL=str(tmp_path / "spawns.log"),
             GITHUB_PAT="ghp_FALLBACKPAT",
             GITHUB_MCP_REFRESH_SECONDS="600",
             GITHUB_MCP_REFRESH_RETRY_SECONDS="0.2",
         )
         proc = _start(env)
         try:
-            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15)
-            assert _spawns(tmp_path) == ["ghp_FALLBACKPAT", "ghs_MINT2"]
+            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15), (
+                f"no App child after the bridge: spawns {_spawns(tmp_path)}, "
+                f"{_mints(tmp_path)} mints, wrapper exit {proc.poll()}"
+            )
+            # The healed mint is the last one: the App child refreshes in 600s.
+            assert _spawns(tmp_path) == ["ghp_FALLBACKPAT", f"ghs_MINT{_mints(tmp_path)}"]
         finally:
             _stop(proc)
 
@@ -324,8 +343,8 @@ class TestRefreshLoop:
         env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
         proc = _start(env)
         try:
-            assert _wait_for(lambda: (tmp_path / "pids.log").exists(), timeout=15)
-            child_pid = int((tmp_path / "pids.log").read_text().splitlines()[0])
+            assert _wait_for(lambda: _pids(tmp_path), timeout=15)
+            child_pid = _pids(tmp_path)[0]
             _stop(proc)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:

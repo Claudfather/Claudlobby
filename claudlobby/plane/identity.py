@@ -16,6 +16,10 @@ import sqlite3
 from .ids import mint_uid
 
 
+class IdentityConflict(ValueError):
+    """An alias is already bound to another parent; never silently re-parent."""
+
+
 def resolve(
     conn: sqlite3.Connection,
     kind: str,
@@ -37,18 +41,47 @@ def resolve(
         (candidate, kind, alias, parent_uid, now, now),
     )
     row = conn.execute(
-        "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        "SELECT uid, parent_uid FROM identity_registry WHERE kind = ? AND alias = ?",
         (kind, alias),
     ).fetchone()
+    if (parent_uid is not None and row["parent_uid"] is not None
+            and row["parent_uid"] != parent_uid):
+        raise IdentityConflict(f"conflicting parent for {kind} identity {alias!r}")
+    # Earlier alias sightings may have minted this row without a parent.
+    # Attach an authoritative parent without changing an existing binding.
     conn.execute(
-        "UPDATE identity_registry SET last_seen = ? WHERE uid = ?",
-        (now, row["uid"]),
+        "UPDATE identity_registry SET last_seen = ?,"
+        " parent_uid = COALESCE(parent_uid, ?) WHERE uid = ?",
+        (now, parent_uid, row["uid"]),
     )
     return row["uid"]
 
 
-def resolve_fleet(conn: sqlite3.Connection, fleet_alias: str, now: str) -> str:
-    return resolve(conn, "fleet", fleet_alias, now=now)
+def lookup(conn: sqlite3.Connection, kind: str, alias: str) -> str | None:
+    """The uid an alias already has, or None. The read doors' half of
+    resolve(): it never mints, because a read must not create an identity."""
+    row = conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        (kind, alias),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def aliases_of_kind(conn: sqlite3.Connection, kind: str) -> list[str]:
+    """Every alias recorded for one kind, sorted: what a read door offers
+    when its caller names no subject, or one the plane does not hold."""
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT alias FROM identity_registry WHERE kind = ? ORDER BY alias", (kind,)
+        ).fetchall()
+    ]
+
+
+def resolve_fleet(
+    conn: sqlite3.Connection, fleet_alias: str, now: str, host_uid: str,
+) -> str:
+    return resolve(conn, "fleet", fleet_alias, now=now, parent_uid=host_uid)
 
 
 def resolve_party(

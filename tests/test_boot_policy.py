@@ -33,7 +33,7 @@ from claudlobby.config import BotConfig, FleetConfig, TeamConfig, load_host_boot
 
 def _lead_worker_fleet() -> FleetConfig:
     """A minimal fleet with one leaf manager and one worker."""
-    return FleetConfig(
+    return FleetConfig(manager="lead",
         name="test-fleet",
         service_prefix="com.test",
         bots={

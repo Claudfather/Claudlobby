@@ -1,0 +1,1061 @@
+#!/bin/bash
+# Bot keepalive — restart dead sessions, log idle state.
+# Usage: keepalive.sh /path/to/bot/dir
+#
+# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for two gated
+# paths below, the reload and the compaction. Pressing Enter at an empty prompt
+# submits any "ghost" text — including Claude Code's greyed-out auto-completion
+# suggestions — which causes the bot to act on input the user never typed. Both
+# paths are safe because each types a FIXED slash command as the first input,
+# then Enter (so Enter submits that command, never ghost text). The reload path
+# fires ONLY when a fleet reload is pending (data/.reload-pending) and the pane
+# is confirmed IDLE: the single activation point for Mechanism 1 of the fleet
+# update lifecycle (reload-fleet.sh marks bots; keepalive performs the /reload at
+# the next idle tick). The compaction path (compact_tick, #1053) types /compact
+# ONLY for a pending request (data/.compact-request), once its guards hold.
+
+set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANE_EMIT_CLASS=background   # nothing reads its plane record's result: its socket deadline (#1693, claudlobby/_runtime_scripts/plane-emit.sh)
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
+load_bot_conf "$BOT_DIR"
+# Refuse the whole tick before receipts, markers, reloads or restart work.
+# shellcheck source=runtime-admission.sh
+. "$LIB_DIR/runtime-admission.sh"
+native_admission keepalive
+install_error_trap "$BOT_DIR"
+TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
+# Per-bot tmux server socket (see start-bot.sh) — same SSOT resolver so the
+# watchdog checks the bot on its OWN server, not the shared default socket.
+# Fail fast (like start-bot.sh) on an unresolvable socket rather than aborting
+# silently on errexit.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
+    echo "keepalive.sh: cannot resolve tmux socket for $BOT_DIR (check BOT_SERVICE in bot.conf)" >&2
+    exit 1
+}
+
+LOG="$BOT_DIR/keepalive.log"
+
+# Emit a keepalive event: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP, RELOAD) is
+# a FLEET EVENT on the plane through the one door (emit_fleet_event:
+# provenance, alias-anchored), so `claudlobby event list` and `uptime` see it; the
+# per-tick verdicts BUSY / IDLE / HELD / UNKNOWN ride the heartbeat sample the same
+# tick emits (plane_presence_samples) and are not fleet events. (The
+# keepalive-<day>.jsonl file this once wrote had no reader in the estate —
+# measured, 867 rows/bot/day — and went with the F18 closure.)
+emit_keepalive_event() {
+    local ev_state="$1"
+    local ev_detail="${2:-}"
+    case "$ev_state" in
+        RESTART)     emit_fleet_event keepalive_restart keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        BRIDGE_HEAL) emit_fleet_event bridge_heal keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        SKIP)        emit_fleet_event keepalive_skip keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        RELOAD)      emit_fleet_event keepalive_reload keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+    esac
+}
+
+# ---- plane door: presence's RECORDED half (#1361, harvest item 1) ----------
+# The verdict this tick ALREADY computed, emitted as ONE metric_sample per
+# tick through the shim — the table, contract and metric names shipped in
+# migration 0006 with no emitter until now. Subject is the INSTANCE alias
+# (bot:<fleet>/<name>): identity resolution at ingest lands on the SAME uid
+# the registry keyframes use, so heartbeat samples join equipment/history
+# with no glue. Arming reaches this script as an Environment= line stamped
+# on the keepalive job unit from the fleet tier cascade (the #1383
+# mechanism — a scheduler env is closed, so the fleet-tier .env alone
+# never arrives here). NON-BLOCKING rc-wise AND clock-wise (background
+# emit, pid-guarded); the view sampler keeps rendering pixels and
+# classifies NOTHING — the recorded half lives here, the sibling's
+# two-truths split stays forsworn. The live tick emits bot.heartbeat only
+# (session-up-ness is derivable from heartbeat presence); the dead-session
+# path emits the one fact heartbeat cannot carry, bot.session_up=false,
+# and NO heartbeat — no pane was classified, and a fabricated verdict is
+# the lie this lane exists to kill. The SKIP paths (boot in flight,
+# restart race) deliberately emit nothing — transitional, the next tick
+# records (unpinned, disclosed).
+plane_presence_samples() {
+    local verdict="$1"   # BUSY|IDLE|HELD|UNKNOWN, or DOWN (the dead-session fact)
+    # THE arming predicate (lib-common) — a hand-rolled copy here re-forked
+    # what #1384 consolidated, with silent identity skips the ruling calls
+    # drift (r2 gauntlet). plane_armed is if-safe under set -e.
+    if ! plane_armed keepalive --require-fleet --require-bot; then
+        return 0
+    fi
+    # No pileup on a wedged rung (r2 gauntlet, probed): the cold-CLI rung
+    # has no wall-clock bound and keepalive-all sweeps ticks SEQUENTIALLY —
+    # one D-state stall must never wedge the whole fleet's watchdog. The
+    # emit runs in a BACKGROUND subshell, and a tick whose previous emit is
+    # still in flight SKIPS: presence tolerates a gap, the reader types
+    # staleness. rc-wise the tick never depends on the record; disclosures
+    # land in keepalive.log, not the journal.
+    # The claim is honored only while FRESH (2 ticks): kill -0 alone let a
+    # RE-USED pid block a bot indefinitely — proven live within minutes of
+    # deploy (takahashi: pidfile held 1543, occupied by an unrelated
+    # long-lived process; zero heartbeats across every sweep while eight
+    # siblings recorded). A stale claim means wedge-or-reuse and both want
+    # one new emit; pileup stays bounded at ~one background proc per 120s.
+    local pidf="$BOT_DIR/data/.plane-presence.pid" prev
+    prev="$(cat "$pidf" 2>/dev/null || true)"
+    if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null \
+       && marker_age_within "$pidf" $(( ${KEEPALIVE_EMIT_TIMEOUT_S:-110} + 10 )); then
+        return 0
+    fi
+    local fleet_esc subj payload
+    fleet_esc="$(json_escape "$FLEET_NAME")"
+    subj="$(json_escape "bot:$FLEET_NAME/$BOT_NAME")"
+    if [ "$verdict" = "DOWN" ]; then
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.session_up","value":false}'
+    else
+        # Session-up-ness is DERIVABLE from heartbeat presence (r2 volume
+        # fold: a per-tick session_up=true row doubled the lane for a fact
+        # the heartbeat already carries; only the dead path keeps the
+        # explicit false). marker_age_s clamps at 0: an RTC-skewed future
+        # mtime (this estate boots with a stale clock) otherwise records a
+        # huge negative age readers would mis-sort — age has floor
+        # semantics, not signed-delta semantics.
+        local agefrag="" m_epoch age
+        # `|| true` INSIDE the substitution (the #1460 rule): stat_mtime returns
+        # 1 for a bot that has made no tool call yet, and on bash 3.2 that fires
+        # the inherited ERR trap even under an `if` — a phantom script_error per
+        # tick, now a fleet event on the plane (B2 made it visible).
+        m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true)
+        if [ -n "$m_epoch" ]; then
+            age=$(( $(date +%s) - m_epoch ))
+            if [ "$age" -lt 0 ]; then age=0; fi
+            agefrag=',"marker_age_s":'"$age"
+        fi
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$verdict"'"'"$agefrag"'}}'
+    fi
+    # The background emit is WALL-CLOCK BOUNDED (retro round): under a
+    # permanently wedged rung (the estate's documented D-state SD stall)
+    # an unbounded emit made "bounded pileup" a RATE, not a ceiling —
+    # ~720 stuck processes/day. The outer subshell reaps its emit at
+    # KEEPALIVE_EMIT_TIMEOUT_S (portable — macOS has no timeout(1)), so
+    # the in-flight claim self-expires and concurrency ceilings at ~1.
+    # The staleness window derives from the SAME knob (+10s), keeping the
+    # guard and the reaper coupled by construction rather than by twin
+    # constants.
+    local _eto="${KEEPALIVE_EMIT_TIMEOUT_S:-110}"
+    (
+        printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
+            | PLANE_EMIT_COOLDOWN_STAGE=1 plane_emit_events keepalive >>"$LOG" 2>&1 &   # #1657: fire-and-forget
+        _w=$!
+        _i=0
+        while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$_eto" ]; do
+            sleep 1
+            _i=$((_i + 1))
+        done
+        # kill the TREE, not the pipeline leader: $_w is the backgrounded
+        # FUNCTION subshell, whose real work is grandchildren (plane-emit.sh
+        # -> the cold CLI). A bare kill -9 "$_w" reaped the leader and
+        # ORPHANED the wedged CLI alive — the whole point defeated (found by
+        # observing five survivors after the pin "passed"; the recursive
+        # form is portable where macOS bash 3.2 has no pkill -g / setsid).
+        _kill_tree() {
+            local _p="$1" _c
+            # `|| true` INSIDE the substitution: pgrep exits 1 at every leaf of
+            # every reap (a process with no children is the terminating case,
+            # not a failure), and on bash 3.2 that rc fires the inherited ERR
+            # trap from a for-word substitution even though set -e does NOT
+            # exit there — so every tick of every armed bot logged a phantom
+            # `script_error` ("non-zero exit at line 155", the funcdef line
+            # bash 3.2 reports for in-function failures) while nothing failed.
+            # 87/day fleet-wide, measured 2026-09-02; the alphabetical skew
+            # (damodaran 77) was launchd killing later bots' reapers at sweep
+            # teardown before they could log — suppression, not health.
+            for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _kill_tree "$_c"; done
+            kill -9 "$_p" 2>/dev/null || true
+        }
+        _kill_tree "$_w"
+    ) >/dev/null 2>&1 &
+    printf '%d' $! > "$pidf" 2>/dev/null || true
+}
+
+# send_reload_command <slash-command>
+# Verbatim send via pane_send_verified — NOT bot_tmux_send, which sanitizes (see
+# that helper for why a slash command must reach the pane untouched). Caller
+# guarantees the pane is IDLE (see the IDLE branch).
+send_reload_command() {
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$1"
+}
+
+# restart_bot_service <reason>
+# The ONE restart ladder — reused by the dead-session watchdog below AND the
+# bridge-heal path (Fork F1=b: consolidate, do not fork a second ladder). Picks the
+# platform control plane, logs + emits a RESTART event tagged with <reason>, and
+# falls back to start-bot.sh. Does NOT exit — callers own their control flow.
+# NOTE: every branch re-runs start-bot.sh (directly, or as the systemd/launchd
+# ExecStart), which re-touches data/.spawn. The bridge-heal path leans on that —
+# bridge_down_state graces from .spawn, so the touch is what SPACES heal retries.
+# Keep it true for any new restart branch, or retries collapse to once-per-tick.
+_keepalive_before_restart() {
+    local desc="$1"
+    # The callback runs in restart_bot_service's dynamic scope. Its uniquely
+    # named local keeps a reason out of shared/global adapter state.
+    echo "$(ts_iso) RESTART — $_keepalive_restart_reason, $desc" >> "$LOG" || return $?
+    # Keep receipt diagnostics on the caller streams, just as before adoption;
+    # only supervisor output belongs in keepalive.log. The group below saves
+    # those streams in scoped descriptors before redirecting the action.
+    emit_keepalive_event "RESTART" "$_keepalive_restart_reason, $desc" >&3 2>&4
+}
+
+restart_bot_service() {
+    local _keepalive_restart_reason="$1" rc=0 output_rc=0
+    # A concurrent explicit bot stop removes supervision. Even if this tick
+    # began while its unit still existed, it may never convert that absence
+    # into a direct session start on a supervised host.
+    if [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; then
+        if ! svc_is_registered "$BOT_DIR" "${BOT_SERVICE:-}"; then
+            echo "$(ts_iso) SKIP — bot is de-enrolled; explicit bot start required" >> "$LOG"
+            return 0
+        fi
+    fi
+    # Distinguish a failed output redirect from the selected action status:
+    # if the log cannot open, svc_kick never ran and must not license fallback.
+    {
+        svc_kick "$BOT_DIR" _keepalive_before_restart "${BOT_SERVICE:-}" "$BOT_NAME" || rc=$?
+    } 3>&1 4>&2 >>"$LOG" 2>&1 || output_rc=$?
+    if [ "$output_rc" -ne 0 ]; then return "$output_rc"; fi
+    if [ "$SVC_KICK_SELECTED" -eq 0 ]; then
+        if [ "$_OS" = Linux ] || [ "$_OS" = Darwin ]; then
+            echo "$(ts_iso) SKIP — bot de-enrolled before restart; explicit bot start required" >> "$LOG"
+            return 0
+        fi
+        echo "$(ts_iso) RESTART — $_keepalive_restart_reason, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
+        emit_keepalive_event "RESTART" "$_keepalive_restart_reason, falling back to start-bot.sh"
+        "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
+    else
+        # Unguarded return restores the caller's errexit/ERR-trap boundary
+        # after the status capture above; a failed restart remains script_error.
+        return "$rc"
+    fi
+}
+
+# _bridge_heal
+# Tier-2 auto-heal for a dark Telegram inbound bridge (Fork F6b). GATED OFF unless
+# OBSERVABILITY_BRIDGE_HEAL=1 — enabling the bounce fleet-wide waits on the
+# production bounce-to-recovery telemetry that clears the F6b gate. The bun
+# server.ts poller is an MCP stdio CHILD of claude, so nothing but a claude restart
+# respawns it: the heal action is a full bot bounce (there is no claude-mcp-restart,
+# and a standalone bun would 409 on Telegram's single-consumer slot). Called ONLY
+# from the IDLE branch, so the BUSY-gate is implicit — a working bot is never
+# bounced for an inbound-only outage it may not need this minute.
+_bridge_heal() {
+    [ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ] || return 0
+
+    local grace down
+    grace="${OBSERVABILITY_BRIDGE_DOWN_GRACE:-300}"
+    # bridge_down_state graces from data/.spawn, so a freshly (re)started bot —
+    # including one we just bounced — is not re-bounced while its poller spins up.
+    # That grace is what SPACES retries (the Fork F4 backoff intent); the persisted
+    # attempt counter is what CAPS them. Reuses the SAME grace fleet-pulse alerts on,
+    # so detection and heal never disagree about whether a bot is down.
+    down="$(bridge_down_state "$BOT_DIR" "$grace" 2>/dev/null || true)"
+    case "$down" in
+        no_bridge)
+            # Actionably dark past grace. Bounce under a per-bot lock so two
+            # overlapping ticks cannot double-fire (M3) — belt-and-suspenders atop
+            # the persisted counter + spawn grace.
+            with_lock "$BOT_DIR/data/.bridge-heal.lock" _bridge_heal_bounce
+            ;;
+        no_token)
+            : # A bounce cannot conjure a missing token — never heal (Fork F2/5e);
+              # bring-up verify + fleet-pulse already escalate the misconfig.
+            ;;
+        *)
+            # up / within-grace / no_handle / unknown — nothing to bounce. If a heal
+            # ladder was in flight and the poller is genuinely back, reset it so a
+            # future outage starts clean (unconditional marker clear on up, m3).
+            if [ -f "$BOT_DIR/data/.bridge-heal" ] && [ "$(bridge_state "$BOT_DIR" 2>/dev/null || true)" = "up" ]; then
+                rm -f "$BOT_DIR/data/.bridge-heal" "$BOT_DIR/data/.bridge-heal-escalated" "$BOT_DIR/data/.bridge-down" 2>/dev/null || true
+                echo "$(ts_iso) BRIDGE_HEAL — poller recovered, ladder reset" >> "$LOG"
+                emit_keepalive_event "BRIDGE_HEAL" "poller recovered, ladder reset"
+            fi
+            ;;
+    esac
+}
+
+# _bridge_heal_bounce
+# The capped bounce, run under the per-bot heal lock. keepalive is stateless across
+# ticks, so the attempt budget is persisted on disk (data/.bridge-heal) — a plain
+# in-memory counter would reset every tick and bounce forever.
+_bridge_heal_bounce() {
+    local statef="$BOT_DIR/data/.bridge-heal" max attempt
+    max="${BRIDGE_HEAL_MAX_ATTEMPTS:-3}"
+    attempt=0
+    [ -f "$statef" ] && attempt="$(tr -cd '0-9' < "$statef" 2>/dev/null)"
+    [ -n "$attempt" ] || attempt=0
+
+    if [ "$attempt" -ge "$max" ]; then
+        # Budget exhausted — escalate ONCE (Fork F3 escalate-only) and stop churning.
+        # The bot still serves tmux dispatch; a human/manager takes it from here.
+        if [ ! -f "$BOT_DIR/data/.bridge-heal-escalated" ]; then
+            emit_failure_alert "$(dirname "$BOT_DIR")" "bridge_down" \
+                "$BOT_NAME Telegram bridge still dark after $attempt heal bounces — escalate-only; manual attention needed" || true
+            : > "$BOT_DIR/data/.bridge-heal-escalated" 2>/dev/null || true
+            echo "$(ts_iso) BRIDGE_HEAL — budget exhausted ($attempt/$max), escalated" >> "$LOG"
+            emit_keepalive_event "BRIDGE_HEAL" "budget exhausted ($attempt/$max), escalated"
+        fi
+        return 0
+    fi
+
+    # Record BEFORE the bounce so a crash mid-restart still advances the cap — never
+    # an unbounded bounce loop.
+    attempt=$((attempt + 1))
+    printf '%s' "$attempt" > "$statef" 2>/dev/null || true
+    echo "$(ts_iso) BRIDGE_HEAL — poller dark, bounce attempt $attempt/$max" >> "$LOG"
+    emit_keepalive_event "BRIDGE_HEAL" "poller dark, bounce attempt $attempt/$max"
+    restart_bot_service "bridge poller dark (heal $attempt/$max)"
+}
+
+# _channel_check
+# Whether Claude Code still delivers this bot's Telegram channel (#2423): the
+# channel decision in the plugin's MCP log (lib-common.sh), which no process check
+# can see, since a refused channel leaves the poller up. Bring-up reads it once;
+# a session decides again at every reconnect (the /reload-plugins this script
+# sends among them), so this reads it on every live tick. It reads one file and
+# types nothing, so it runs whatever the pane shows. A session younger than the
+# bridge grace is bring-up's to judge, and no log or no decision changes nothing.
+_channel_check() {
+    [ -n "${TELEGRAM_BOT_HANDLE:-}" ] || return 0
+    local grace="${OBSERVABILITY_BRIDGE_DOWN_GRACE:-300}" log kind detail
+    if [ "$grace" -gt 0 ] 2>/dev/null && marker_age_within "$BOT_DIR/data/.spawn" "$grace"; then
+        return 0
+    fi
+    log="$(channel_mcp_log "$BOT_DIR" || true)"
+    case "$log" in /*) ;; *) return 0 ;; esac
+    IFS=$'\t' read -r kind detail <<<"$(channel_decision "$log")"
+    case "$kind" in
+        refused)
+            if channel_refused_report "$BOT_DIR" "$log" "$detail" keepalive; then
+                echo "$(ts_iso) CHANNEL_REFUSED — Claude Code refused the Telegram channel (\"$detail\"): inbound is dark while the poller is up; a restart on the same login comes up refused again" >> "$LOG"
+            fi
+            ;;
+        registered)
+            if channel_refused_clear "$BOT_DIR"; then
+                echo "$(ts_iso) CHANNEL — Claude Code registered the Telegram channel again; refusal cleared" >> "$LOG"
+            fi
+            ;;
+    esac
+}
+
+# Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
+# reach the user bus, otherwise it fails silently with "Failed to connect to
+# bus" while we still log a "RESTART" line — so the bot looks supervised
+# but isn't. Set it here if missing. Requires `loginctl enable-linger $USER`
+# (recommended by install-bot-systemd.sh) so /run/user/<uid> exists at boot.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# If session is dead, restart the bot's service.
+# Pick the right control plane:
+#   Linux  → systemctl --user restart $BOT_NAME.service (user units, no sudo)
+#   macOS  → launchctl kickstart -k gui/<uid>/<label>   (LaunchAgent)
+#   else   → fall back to start-bot.sh directly (cron+tmux pattern)
+if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
+    # Reduce (not eliminate) race with start-bot.sh
+    sleep 1
+    if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
+        echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
+        emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
+        exit 0
+    fi
+    # A boot in flight has no session YET — restarting it kills the very start
+    # that would have created one, and the replacement boot loses the same race.
+    # The sleep 1 above is no defence: it is a fixed second against a window
+    # measured at 35-178s under load. Evidence (#1002): rajan restarted 3x at
+    # 17:24:34 / 17:25:32 / 17:26:19 on 2026-08-04, each landing on a start-bot.sh
+    # that was still installing plugins, each resetting that work. The loop broke
+    # only when host load fell enough for a boot to finish inside 60s.
+    #
+    # service_is_starting is the unit's own state, so unlike a session-age test
+    # (there is no session to age) or data/.spawn (touched AFTER session creation
+    # at start-bot.sh:273, so stale through exactly this window) it cannot be
+    # fooled by the absence it is guarding. It is bounded by KEEPALIVE_BOOT_GRACE_S
+    # so a wedged start-bot eventually gets restarted rather than suppressing the
+    # watchdog forever.
+    #
+    # A CRASH LOOP is judged first, because it is not a boot in flight and
+    # this watchdog must say so (#1769): the boot gate above ages only the
+    # current phase and every attempt of a Restart= loop is a fresh phase, so
+    # it reported "boot in flight" 1,380 times for one bot whose start failed
+    # 2,086 times running. The ACTION is unchanged, deliberately: systemd is
+    # already restarting the unit, and a restart stacked on top only zeroes
+    # its counter. Paging the loop is fleet-pulse's job, from the same fact.
+    if [ -n "${BOT_SERVICE:-}" ] && service_is_crash_looping "$BOT_SERVICE"; then
+        echo "$(ts_iso) SKIP — crash loop ($CRASH_LOOP_RESTARTS automatic restarts, unit $CRASH_LOOP_STATE): systemd is retrying, not stacking a restart" >> "$LOG"
+        emit_keepalive_event "SKIP" "crash loop ($CRASH_LOOP_RESTARTS automatic restarts), systemd is retrying, not restarting"
+        exit 0
+    fi
+    if [ -n "${BOT_SERVICE:-}" ] && service_is_starting "$BOT_SERVICE"; then
+        echo "$(ts_iso) SKIP — boot in flight (unit mid-start), not restarting" >> "$LOG"
+        emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
+        exit 0
+    fi
+    plane_presence_samples DOWN
+    restart_bot_service "session dead"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Compaction for a pending request (#1053, build PR 4)
+# ---------------------------------------------------------------------------
+# A bot asks for its own compaction with `bot compact <its own ID>` (PR 2): the
+# request is data/.compact-request. On every tick with one pending, compact_tick
+# types the one fixed command /compact once every guard holds:
+#   - the request's own (compact-guard.py check): under 2 hours old by its
+#     requested_epoch; no assignment delivered to the bot since it; no
+#     compaction, and no new session, since it; for a request made at a close,
+#     a context still at or over the floor; and no composed PreCompact hook that
+#     would refuse the first compaction;
+#   - the turn markers (PR 1): the last turn ended COMPACT_TURN_SETTLE_S (10 s)
+#     ago or more, after the last input and the last tool call;
+#   - the whole screen (pane_compact_ready): no running turn, no menu or dialog,
+#     no text in the box, and a prompt;
+#   - the host's compaction slot (compaction-slot.py): free, and taken.
+# Then, holding the pane's send lock, it reads the request, the markers and the
+# screen again: a screen that changed since the tick's read, or any other fact
+# that moved, vetoes and frees the slot. It types through pane_send_verified's
+# locked send with its repairs off, as `bot compact` does, takes the request
+# away and writes compaction_sent. Nothing from the request is ever typed.
+#
+# Each later tick looks for the proof, the compaction's compact_boundary row
+# newer than the send (compact-guard.py proof): compaction_proven with its
+# sizes, and the slot is released. None within the lease's 10 minutes is
+# compaction_not_proven (critical), and nothing resends. While a send waits for
+# its proof (data/.compact-sent), no request is acted on. A guard that says
+# "not now" writes compaction_skipped once per reason per request
+# (data/.compact-skipped); one that ends a request writes it once. A typed
+# /compact runs no UserPromptSubmit hook and no Stop (measured on 2.1.319), so
+# the executor's own send moves neither turn marker.
+_COMPACT_SENT="$BOT_DIR/data/.compact-sent"
+_COMPACT_SKIPPED="$BOT_DIR/data/.compact-skipped"
+_COMPACT_PROOF_S=600   # compaction-slot.py's LEASE_S: the proof's deadline
+
+# _compact_transcripts: the bot's transcript directory, as transcript_usage's
+# transcript_source finds it: its account's config dir (bot.conf, else the
+# environment, else ~/.claude), projects/, the bot dir's slug.
+_compact_transcripts() {
+    local cfg slug
+    cfg="$(bot_conf_get_path "$BOT_DIR" CLAUDE_CONFIG_DIR "" 2>/dev/null || true)"
+    [ -n "$cfg" ] || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    case "$cfg" in \~/*) cfg="$HOME/${cfg#\~/}" ;; esac
+    slug="$(claude_cwd_slug "$BOT_DIR")"
+    printf '%s/projects/%s' "$cfg" "$slug"
+}
+
+# _compact_guard <verb> <args...>: compact-guard.py, stdlib, stderr to the log.
+_compact_guard() {
+    python3 -S -E "$LIB_DIR/compact-guard.py" "$@" 2>>"$LOG"
+}
+
+# _compact_markers_idle: prints why the turn markers do not say idle, or
+# nothing (rc 0) when the last turn ended long enough ago, after the last input
+# and the last tool call.
+_compact_markers_idle() {
+    local ended="$BOT_DIR/data/.turn-ended" e now
+    e=$(stat_mtime "$ended" 2>/dev/null) || { printf 'no_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.turn-input" || { printf 'input_after_turn_end'; return 1; }
+    marker_is_newer "$ended" "$BOT_DIR/data/.last-tool-call" || { printf 'tool_call_after_turn_end'; return 1; }
+    now=$(date +%s)
+    if [ "$(( now - e ))" -lt "${COMPACT_TURN_SETTLE_S:-10}" ]; then
+        printf 'turn_ended_%ss_ago' "$(( now - e ))"
+        return 1
+    fi
+    return 0
+}
+
+# _compact_once <request_id> <reason> <data_json>: one compaction_skipped row
+# per reason per request.
+_compact_once() {
+    local key
+    key="$1"$'\t'"$2"
+    if [ -f "$_COMPACT_SKIPPED" ] && grep -qxF "$key" "$_COMPACT_SKIPPED" 2>/dev/null; then
+        return 0
+    fi
+    emit_fleet_event compaction_skipped keepalive "$3" "$BOT_DIR" "$BOT_NAME" || true
+    printf '%s\n' "$key" >> "$_COMPACT_SKIPPED" 2>/dev/null || true
+}
+
+# _compact_request_over: a request ended; its once-per-reason marks and the
+# guard's cached engine reading go with it.
+_compact_request_over() {
+    rm -f "$_COMPACT_SKIPPED" "$BOT_DIR/data/.compact-guard-cache"
+}
+
+# _compact_release <lease>: free the slot; a lease already over changes nothing.
+_compact_release() {
+    [ -n "$1" ] && [ "$1" != "-" ] || return 0
+    python3 -S -E "$LIB_DIR/compaction-slot.py" release --fleet "$FLEET_NAME" \
+        --bot "$BOT_NAME" --lease "$1" >>"$LOG" 2>&1 || true
+}
+
+# _compact_num <value>: a JSON number, or null.
+_compact_num() {
+    case "$1" in ''|*[!0-9]*) printf 'null' ;; *) printf '%s' "$1" ;; esac
+}
+
+# _compact_send_locked <request_id> <frame>: run under the pane's send lock.
+# Reads the request, the markers and the screen again, then types /compact.
+# Prints "veto <why>" and returns 5 when a fact moved since the tick's read.
+_compact_send_locked() {
+    local rid="$1" before="$2" now_frame why
+    if ! grep -qF "\"request_id\": \"$rid\"" "$BOT_DIR/data/.compact-request" 2>/dev/null; then
+        printf 'veto request_gone'; return 5
+    fi
+    why=$(_compact_markers_idle) || { printf 'veto markers:%s' "$why"; return 5; }
+    now_frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) \
+        || { printf 'veto capture_failed'; return 5; }
+    [ "$now_frame" = "$before" ] || { printf 'veto frame_changed'; return 5; }
+    why=$(pane_compact_ready "$now_frame") || { printf 'veto screen:%s' "$why"; return 5; }
+    PANE_SEND_VERIFY_TICKS=0 _pane_send_verified_locked "$TMUX_SOCKET" "$TMUX_SESSION" /compact
+}
+
+# _compact_proof <transcripts>: a send in flight: proven, not proven, or wait.
+_compact_proof() {
+    local t0="" lease="" rid="" by="" req_at="" out state at trig pre post now row
+    IFS=$'\t' read -r t0 lease rid by req_at < "$_COMPACT_SENT" 2>/dev/null || true
+    case "$t0" in
+        ''|*[!0-9]*)
+            echo "$(ts_iso) COMPACT — $_COMPACT_SENT unreadable; removed" >> "$LOG"
+            rm -f "$_COMPACT_SENT"; return 0 ;;
+    esac
+    out=$(_compact_guard proof --transcripts "$1" --since "$t0") || out="unknown	guard_failed"
+    IFS=$'\t' read -r state at trig pre post <<< "${out%%$'\n'*}" || true
+    now=$(date +%s)
+    if [ "$state" = proven ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","at":"%s","trigger":"%s","pre_tokens":%s,"post_tokens":%s,"lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(json_escape "$at")" "$(json_escape "$trig")" \
+            "$(_compact_num "$pre")" "$(_compact_num "$post")" "$(json_escape "$lease")"
+        emit_fleet_event compaction_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — proven: boundary at $at, $pre to $post tokens" >> "$LOG"
+    elif [ "$(( now - t0 ))" -ge "$_COMPACT_PROOF_S" ]; then
+        _compact_release "$lease"
+        printf -v row '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","waited_s":%s,"proof":"%s","lease":"%s"}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(epoch_to_iso_utc "$t0")" "$(( now - t0 ))" "$(json_escape "${state:-unknown} ${at:-}")" \
+            "$(json_escape "$lease")"
+        emit_fleet_event compaction_not_proven keepalive "$row" "$BOT_DIR" "$BOT_NAME" || true
+        rm -f "$_COMPACT_SENT"
+        echo "$(ts_iso) COMPACT — NOT proven: no compact_boundary row in $(( now - t0 ))s since the send (${state:-unknown} ${at:-}); nothing resent" >> "$LOG"
+    else
+        echo "$(ts_iso) COMPACT — sent $(( now - t0 ))s ago, waiting for its boundary row (${state:-unknown})" >> "$LOG"
+    fi
+}
+
+compact_tick() {
+    local transcripts out verdict reason hook rid by req_at req_epoch data why frame
+    local slot srsn lease ends rc t0 sent
+    transcripts=$(_compact_transcripts)
+    if [ -f "$_COMPACT_SENT" ]; then
+        _compact_proof "$transcripts"
+        return 0
+    fi
+    [ -f "$BOT_DIR/data/.compact-request" ] || return 0
+    out=$(_compact_guard check --bot-dir "$BOT_DIR" --root "${CLAUDLOBBY_ROOT:-}" \
+        --fleet "${FLEET_NAME:-}" --bot "$BOT_NAME" --transcripts "$transcripts" \
+        --loop "$(bot_conf_get "$BOT_DIR" CLAUDRON_SESSION_LOOP "")" \
+        --reflect "$(bot_conf_get "$BOT_DIR" CLAUDNA_PRECOMPACT_REFLECT "")") || {
+        echo "$(ts_iso) COMPACT — compact-guard.py failed; the request stays" >> "$LOG"
+        return 0
+    }
+    IFS=$'\t' read -r verdict reason hook rid by req_at req_epoch <<< "${out%%$'\n'*}" || true
+    [ "$hook" != - ] || hook=""
+    data="${out#*$'\n'}"
+    case "$data" in '{'*'}') ;; *) data='{}' ;; esac
+    case "$verdict" in
+        none) return 0 ;;
+        drop)
+            emit_fleet_event compaction_skipped keepalive "$data" "$BOT_DIR" "$BOT_NAME" || true
+            _compact_request_over
+            echo "$(ts_iso) COMPACT — request $rid dropped unsent: $reason" >> "$LOG"
+            return 0 ;;
+        skip)
+            _compact_once "$rid" "$reason" "$data"
+            echo "$(ts_iso) COMPACT — request $rid kept, not now: $reason${hook:+ ($hook)}" >> "$LOG"
+            return 0 ;;
+        go) ;;
+        *)
+            echo "$(ts_iso) COMPACT — compact-guard.py gave no verdict; the request stays" >> "$LOG"
+            return 0 ;;
+    esac
+    why=$(_compact_markers_idle) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: $why" >> "$LOG"; return 0; }
+    frame=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || {
+        echo "$(ts_iso) COMPACT — request $rid waits: the pane could not be read" >> "$LOG"; return 0; }
+    why=$(pane_compact_ready "$frame") || {
+        echo "$(ts_iso) COMPACT — request $rid waits: screen $why" >> "$LOG"; return 0; }
+    rc=0
+    slot=$(python3 -S -E "$LIB_DIR/compaction-slot.py" take --fleet "${FLEET_NAME:-}" \
+        --bot "$BOT_NAME" --json 2>>"$LOG") || rc=$?
+    case "$slot" in '{'*'}') ;; *) slot='{}' ;; esac
+    if [ "$rc" -ne 0 ]; then
+        srsn=$(printf '%s' "$slot" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')
+        _compact_once "$rid" "slot_${srsn:-refused}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"slot_%s","request":"kept","slot":%s,"guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "${srsn:-refused}" "$slot" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept: the compaction slot refused (${srsn:-rc $rc})" >> "$LOG"
+        return 0
+    fi
+    lease=$(printf '%s' "$slot" | sed -n 's/.*"lease": "\([0-9a-f]*\)".*/\1/p')
+    ends=$(printf '%s' "$slot" | sed -n 's/.*"ends_at": "\([^"]*\)".*/\1/p')
+    t0=$(date +%s)
+    rc=0
+    sent=$(_pane_with_send_lock compact "${COMPACT_LOCK_WAIT_S:-10}" "$TMUX_SOCKET" "$TMUX_SESSION" \
+        _compact_send_locked "$rid" "$frame") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _compact_release "$lease"
+        case "$rc" in
+            5) why="${sent#veto }" ;;
+            75) why="send_lock_busy" ;;
+            3) why="send_not_submitted" ;;
+            4) why="send_refused_held_or_menu" ;;
+            *) why="send_failed_rc_$rc" ;;
+        esac
+        _compact_once "$rid" "${why%%:*}" "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","reason":"%s","request":"kept","guard":%s}' \
+            "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+            "$(json_escape "$why")" "$data")"
+        echo "$(ts_iso) COMPACT — request $rid kept, no keys: $why" >> "$LOG"
+        return 0
+    fi
+    _compact_guard take --bot-dir "$BOT_DIR" >/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t0" "${lease:--}" "$rid" "$by" "$req_at" > "$_COMPACT_SENT"
+    _compact_request_over
+    emit_fleet_event compaction_sent keepalive "$(printf '{"request_id":"%s","by":"%s","requested_at":"%s","sent_at":"%s","lease":"%s","lease_ends_at":"%s","guard":%s}' \
+        "$(json_escape "$rid")" "$(json_escape "$by")" "$(json_escape "$req_at")" \
+        "$(epoch_to_iso_utc "$t0")" "$(json_escape "$lease")" "$(json_escape "$ends")" "$data")" \
+        "$BOT_DIR" "$BOT_NAME" || true
+    echo "$(ts_iso) COMPACT — sent /compact for request $rid (lease $lease until $ends)" >> "$LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Pane-state classification
+# ---------------------------------------------------------------------------
+# Detection strategy (ordered by reliability):
+#
+# Liveness errs toward BUSY — a false idle reloads a working bot, far worse than
+# a skipped reload — so a bot is BUSY if EITHER signal fires:
+#
+#   BUSY (primary) — A recent data/.last-tool-call marker (bot-vitals.sh touches
+#           it on every tool call). A fresh marker means the bot is active —
+#           rendering-immune, so it survives Claude Code verb/spinner churn and
+#           prefersReducedMotion, which pane parsing cannot. Window:
+#           KEEPALIVE_ACTIVE_WINDOW_S (default 180s ≈ 3 keepalive cycles).
+#           Same marker fleet-pulse trusts (lib-common.sh).
+#
+#   BUSY (fallback) — classify_pane matches the "esc to interrupt" active-turn
+#           affordance, catching a long think or long single tool call that
+#           emits no marker for minutes (stable across releases, unlike the
+#           spinner/verb list).
+#
+#   HELD  — No active turn, AND the input box holds text that was never
+#           submitted (pane_is_held, #2070): a send whose Enter was swallowed.
+#           An operator Enter submits it (one more if the text is still there
+#           after about 10 s; if it stays, stop and look: a menu or a modal may
+#           be taking the Enter); a restart would discard
+#           it. Asked BEFORE IDLE: the idle patterns can match a held frame
+#           (a word in the held text, or the box border's bytes when no UTF-8
+#           locale is set), and IDLE is the arm that types into the pane.
+#
+#   IDLE  — No recent tool-call marker, AND classify_pane matches a prompt glyph
+#           (>, ❯) or a known waiting-for-input marker (no active affordance).
+#
+#   UNKNOWN — Neither signal matched.  Consecutive UNKNOWNs are tracked in
+#             a counter file; crossing a threshold logs a warning so fleet
+#             dashboards can surface stuck bots. data/.unknown holds the
+#             epoch of the run's first UNKNOWN tick, which fleet-pulse
+#             pages pane_unknown from (#997).
+#
+# Operators can extend patterns without editing this script:
+#   KEEPALIVE_BUSY_PATTERNS  — extra ERE appended to the spinner check
+#   KEEPALIVE_IDLE_PATTERNS  — extra ERE appended to the idle check
+# ---------------------------------------------------------------------------
+
+# classify_pane <pane_text>
+# Prints BUSY, HELD, IDLE, or UNKNOWN to stdout. Pattern definitions and operator
+# extension (KEEPALIVE_*_PATTERNS) live in lib-common.sh — pane_is_busy /
+# pane_is_idle are the single source of truth; this adds only the three-way
+# verdict keepalive needs (IDLE drives reload activation, UNKNOWN drives the
+# consecutive-counter warning).
+classify_pane() {
+    local text="$1"
+    if pane_is_busy "$text"; then
+        echo "BUSY"
+    elif pane_is_held "$text"; then
+        echo "HELD"
+    elif pane_is_idle "$text"; then
+        echo "IDLE"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Usage limit (#996)
+# ---------------------------------------------------------------------------
+# A claude.ai usage limit stops a turn with one line in the transcript. On a
+# bot with --remote-control (by default only the fleet manager) nothing resumes
+# it: while that bridge is up Claude Code arms neither its own automatic
+# continue nor its limit menu (2.1.291 and 2.1.292 check the bridge first). The
+# pane is left at an empty prompt, which read as IDLE: data/.idle kept
+# activity_stuck quiet, and the bot sat until someone noticed (#996: 75 and 85
+# minutes). A bot without the bridge, every worker by default, shows the menu
+# instead, its options in no fixed order: _limit_resume presses Enter only on
+# the wait label, and no framework send types into a menu (pane_is_menu).
+#
+# LIMIT names that frame. It takes two facts, never one:
+#   - data/.usage-limit, written by usage-limit-hook.sh when Claude Code ends
+#     a turn with StopFailure error=rate_limit, and no older than the last tool
+#     call: the bot's own record of the stop, which a limit line quoted in a
+#     bot's own message never writes;
+#   - usage-limit.py over the WHOLE pane (the line sits above tail -10): the
+#     limit line is still the bot's last word, with no newer prompt drawn under
+#     it (#2348: what else Claude Code draws there changes between releases),
+#     and it says what holds the screen now (the input box, the usage-limit
+#     menu, or another dialog).
+# A record the pane does not confirm leaves the tick IDLE, and the IDLE line
+# says so (_ul_note), so a stop read wrong names itself in keepalive.log.
+# LIMIT writes data/.limit (fleet-pulse pages usage_limit_held from it once the
+# reset has passed), never data/.idle, and sends no reload and no bridge heal.
+#
+# The resume is opt-in per bot (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its
+# bot.conf; claudlobby/switches.py says why). Once the printed reset minute,
+# plus 60 s (the print drops the seconds), plus KEEPALIVE_LIMIT_RESUME_GRACE_S
+# (default 120) has passed, it takes ONE action for that reset: if the
+# usage-limit menu is up with its pointer on the exact label "Stop and wait for
+# limit to reset", one Enter (by label, never by position: a server flag can put
+# credits first, and a pointer anywhere else gets no keys); then the resume
+# prompt, through pane_send_verified. Any other menu or dialog, a box holding
+# text, a running turn, or a frame the reader does not know gets no keys. The
+# action is recorded in data/.limit-resumed before its first key and emitted
+# as keepalive_limit_resume, so no later tick acts on the same reset again.
+_LIMIT_RESUME_PROMPT="Your usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete. (keepalive, #996)"
+_ul_verdict=""
+_ul_note=""
+_ul_hit=""
+# fleet-pulse's _HELD_FRESH_S: a data/.limit older than this is no hold.
+_LIMIT_HOLD_FRESH_S=300
+
+# usage_limit_read <pane> <anchor>
+# usage-limit.py's one-line verdict for a whole pane capture: screen, reset
+# epoch, menu pointer, Claude Code's own continue, limit name, reset text
+# (tab-separated). Empty when the reader cannot run, which reads as no limit.
+usage_limit_read() {
+    printf '%s' "$1" | python3 -S -E "$LIB_DIR/usage-limit.py" read --anchor "$2" --tz "${TZ:-}" 2>/dev/null || true
+}
+
+# usage_limit_keep_anchor <pane>
+# A hit that prints the same limit and the same reset text as the hold it lands
+# in is that hold's limit, still up: the resumed turn, or a message, met it again
+# after the reset. Its hook record moves the anchor past the reset, and a reset
+# with no date read from there is tomorrow's: no resume and no page for a day.
+# So while data/.limit is fresh (re-stamped every LIMIT tick) and names this
+# limit and this reset text, the reset is read from the hit the hold first read
+# it from. Any other text is a new reset, read from its own hit: read from the
+# hold's first hit, a reset nearly 24 hours after the new one reads a day early.
+usage_limit_keep_anchor() {
+    local a0="" name="" text="" vname="" vtext=""
+    marker_age_within "$BOT_DIR/data/.limit" "$_LIMIT_HOLD_FRESH_S" || return 0
+    { read -r _ _ _ _ a0 _; read -r name; read -r text; } 2>/dev/null < "$BOT_DIR/data/.limit" || return 0
+    case "$a0" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$a0" != "$_ul_hit" ] || return 0
+    IFS=$'\t' read -r _ _ _ _ vname vtext <<< "$_ul_verdict"
+    [ -n "$vtext" ] && [ "$vname" = "$name" ] && [ "$vtext" = "$text" ] || return 0
+    _ul_hit=$a0
+    _ul_verdict=$(usage_limit_read "$1" "$_ul_hit")
+}
+
+# _limit_resumed_record <reset> <stage>: the one action for <reset>, recorded.
+_limit_resumed_record() {
+    local tmp
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s\n' "$1" "$(date +%s)" "$2" > "$tmp" && mv "$tmp" "$BOT_DIR/data/.limit-resumed"
+}
+
+# _limit_resumed_for <reset>: whether the one action for <reset> was taken.
+_limit_resumed_for() {
+    local done_reset=""
+    read -r done_reset _ 2>/dev/null < "$BOT_DIR/data/.limit-resumed" || true
+    [ -n "$done_reset" ] && [ "$done_reset" = "$1" ]
+}
+
+# _limit_resume_event <reset> <text> <name> <menu> <outcome>
+_limit_resume_event() {
+    echo "$(ts_iso) LIMIT RESUME — reset $2 ($1), menu $4, outcome $5" >> "$LOG"
+    emit_fleet_event keepalive_limit_resume keepalive \
+        "{\"reset_epoch\":$1,\"reset\":\"$(json_escape "$2")\",\"limit\":\"$(json_escape "$3")\",\"menu\":\"$4\",\"outcome\":\"$5\"}" \
+        "$BOT_DIR" "$BOT_NAME" || true
+}
+
+# _limit_resume <reset> <name> <text>
+# The ONE action for a reset. The pane is read again now, and must still show
+# this reset:
+#   the usage-limit menu, pointer on the wait label  one Enter, then the box
+#   the input box, empty, no turn running            the resume prompt
+#   anything else                                     no keys, logged
+_limit_resume() {
+    local reset="$1" name="$2" text="$3" pane v ustate vreset pointer menu=none rc=0
+    pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+    v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+    IFS=$'\t' read -r ustate vreset pointer _ <<< "$v"
+    # Busy and held are read where classify_pane reads them, the last 10 lines:
+    # an answer higher up that ends in an ellipsis is not a running turn.
+    if [ "$vreset" != "$reset" ] || pane_is_busy "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — the pane changed before the resume (now: ${ustate:-unread}); no keys this tick" >> "$LOG"
+        return 0
+    fi
+    case "$ustate" in
+        menu)
+            if [ "$pointer" != wait ]; then
+                echo "$(ts_iso) LIMIT — reset passed, but the usage-limit menu's pointer is not on \"Stop and wait for limit to reset\"; no keys (an operator chooses that option)" >> "$LOG"
+                return 0
+            fi
+            _limit_resumed_record "$reset" menu
+            if ! pane_send_key "$TMUX_SOCKET" "$TMUX_SESSION" Enter limit-menu; then
+                _limit_resume_event "$reset" "$text" "$name" none menu-key-not-sent
+                return 0
+            fi
+            menu=confirmed
+            sleep "${KEEPALIVE_LIMIT_MENU_SETTLE_S:-2}"
+            pane=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || pane=""
+            v=$(usage_limit_read "$pane" "${_ul_hit:-$reset}")
+            IFS=$'\t' read -r ustate _ <<< "$v"
+            if [ "$ustate" != limit ]; then
+                _limit_resume_event "$reset" "$text" "$name" "$menu" "no-box-after-menu"
+                return 0
+            fi
+            ;;
+        limit) ;;
+        *)
+            echo "$(ts_iso) LIMIT — reset passed, but a dialog other than the usage-limit menu holds the screen ($ustate); no keys (an operator looks)" >> "$LOG"
+            return 0
+            ;;
+    esac
+    if pane_is_held "$(printf '%s\n' "$pane" | tail -10)"; then
+        echo "$(ts_iso) LIMIT — reset passed, but the input box holds text; no keys (an operator Enter submits it)" >> "$LOG"
+        [ "$menu" = none ] || _limit_resume_event "$reset" "$text" "$name" "$menu" box-held
+        return 0
+    fi
+    _limit_resumed_record "$reset" prompt
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_LIMIT_RESUME_PROMPT" || rc=$?
+    case "$rc" in
+        0) _limit_resume_event "$reset" "$text" "$name" "$menu" submitted ;;
+        3) _limit_resume_event "$reset" "$text" "$name" "$menu" unsubmitted ;;
+        *) _limit_resume_event "$reset" "$text" "$name" "$menu" send-failed ;;
+    esac
+}
+
+# usage_limit_tick <verdict>
+# One LIMIT tick: stamp data/.limit (first seen, reset epoch, screen, Claude
+# Code's own continue, the hit the reset was read from; then the limit name and
+# the reset text), log the state with its reset time, and resume once the reset
+# has passed, when armed.
+usage_limit_tick() {
+    local ustate reset pointer native name text now first="" prev_reset="" tmp grace due plan
+    IFS=$'\t' read -r ustate reset pointer native name text <<< "$1"
+    now=$(date +%s)
+    read -r first prev_reset _ 2>/dev/null < "$BOT_DIR/data/.limit" || true
+    [ "$prev_reset" = "$reset" ] || first=""
+    case "$first" in ''|*[!0-9]*) first=$now ;; esac
+    tmp="$(safe_mktemp)"
+    printf '%s %s %s %s %s\n%s\n%s\n' "$first" "$reset" "$ustate" "$native" "$_ul_hit" "$name" "$text" > "$tmp" \
+        && mv "$tmp" "$BOT_DIR/data/.limit"
+    grace="${KEEPALIVE_LIMIT_RESUME_GRACE_S:-120}"
+    case "$grace" in ''|*[!0-9]*) grace=120 ;; esac
+    if [ "$reset" = "-" ]; then
+        plan="no reset time it can read, so no resume: an operator sends a prompt once the limit has reset"
+    else
+        due=$(( reset + 60 + grace ))
+        if [ "$now" -lt "$due" ]; then
+            plan="resume due $(epoch_to_iso_utc "$due")"
+            [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" = 1 ] || plan="no resume here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it)"
+        elif [ "${KEEPALIVE_LIMIT_RESUME_ENABLED:-0}" != 1 ]; then
+            plan="reset passed; resume OFF here (KEEPALIVE_LIMIT_RESUME_ENABLED=1 in its fleet.yaml env arms it), so an operator sends a prompt"
+        elif _limit_resumed_for "$reset"; then
+            plan="reset passed; already resumed once for this reset, so no more keys: an operator looks"
+        else
+            echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets $text [$(epoch_to_iso_utc "$reset")]; reset passed, resuming" >> "$LOG"
+            _limit_resume "$reset" "$name" "$text"
+            return 0
+        fi
+    fi
+    if [ "$native" = armed ]; then plan="$plan; Claude Code's own continue is armed"; fi
+    local when=""
+    [ "$reset" = "-" ] || when=" [$(epoch_to_iso_utc "$reset")]"
+    echo "$(ts_iso) LIMIT — held by a usage limit ($name), resets ${text:-unknown}$when; screen: $ustate; $plan" >> "$LOG"
+}
+
+# Liveness = active recently OR active now (err toward BUSY; see header). Primary:
+# a data/.last-tool-call marker within the recency window — rendering-immune, and
+# it decides BUSY without reading the pane. Fallback: the pane's "esc to
+# interrupt" affordance, for a long think/long single call that left no recent
+# marker. The pane is captured on every tick all the same, a busy one included,
+# because the input box is read on every tick (#2854, "The input box" below).
+_pane_read=0
+if pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null); then
+    _pane_read=1
+else
+    pane_content=""
+fi
+if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
+    state=BUSY
+else
+    last_lines=$(echo "$pane_content" | tail -10)
+    state=$(classify_pane "$last_lines")
+    # #996: an IDLE or UNKNOWN pane is LIMIT when the bot's own hook recorded a
+    # usage-limit stop with no tool call since, and the whole pane still shows
+    # that limit as its last word (see "Usage limit" above).
+    if [ "$state" = IDLE ] || [ "$state" = UNKNOWN ]; then
+        if [ -f "$BOT_DIR/data/.usage-limit" ] \
+            && marker_is_newer "$BOT_DIR/data/.usage-limit" "$BOT_DIR/data/.last-tool-call"; then
+            _ul_hit=$(head -n 1 "$BOT_DIR/data/.usage-limit" 2>/dev/null | tr -cd '0-9' || true)
+            [ -n "$_ul_hit" ] || _ul_hit=$(date +%s)
+            _ul_verdict=$(usage_limit_read "$pane_content" "$_ul_hit")
+            usage_limit_keep_anchor "$pane_content"
+            case "${_ul_verdict%%$'\t'*}" in
+                limit|menu|modal) state=LIMIT ;;
+                none) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but the pane shows no limit as its last word" ;;
+                *) _ul_note="; a usage-limit record from $(epoch_to_iso_utc "$_ul_hit") is newer than the last tool call, but usage-limit.py gave no answer" ;;
+            esac
+        fi
+    fi
+fi
+UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
+UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
+
+# #2391: a tick with no turn running (IDLE, HELD or LIMIT) stamps
+# data/.last-no-turn, and no verdict removes it. Once the BUSY tick of a new
+# turn removes .idle or .limit, it still says when keepalive last saw no
+# turn running, which is where fleet-pulse starts that turn's stall clock. A
+# HELD tick whose whole screen shows a running turn stamps nothing: text typed
+# into a busy bot's box, a message on its way in, reads HELD on the last ten
+# lines alone (#2082), and a message must not restart a hung turn's clock.
+case "$state" in
+    IDLE|LIMIT) touch "$BOT_DIR/data/.last-no-turn" ;;
+    HELD) pane_is_busy "$pane_content" || touch "$BOT_DIR/data/.last-no-turn" ;;
+esac
+
+# The input box (#2854): data/.held follows the box itself on every tick,
+# whatever the verdict. The box holds text that was never submitted when the
+# send path's own test says so (pane_send_verified refuses on pane_is_held or
+# pane_box_end_held, on the whole capture), so the page and the refusals read
+# the box the same way. The marker holds the epoch the box was first seen
+# holding text, is re-stamped on each tick it still does, and is removed once a
+# capture shows the box empty. A box held under a running turn counts: no
+# message typed into it lands, and a bot that keeps working never reaches the
+# HELD verdict. data/.held-turn, written before data/.held, says a turn was
+# running at that tick; fleet-pulse names it in the page and leaves a running
+# turn to activity_stuck. A capture that failed says nothing about the box, so
+# it changes neither marker.
+if [ "$_pane_read" = 1 ]; then
+    if pane_is_held "$pane_content" || pane_box_end_held "$pane_content"; then
+        if pane_is_busy "$pane_content"; then
+            touch "$BOT_DIR/data/.held-turn"
+        else
+            rm -f "$BOT_DIR/data/.held-turn"
+        fi
+        if [ -f "$BOT_DIR/data/.held" ]; then
+            touch "$BOT_DIR/data/.held"
+        else
+            date +%s > "$BOT_DIR/data/.held"
+        fi
+    elif [ -e "$BOT_DIR/data/.held" ] || [ -e "$BOT_DIR/data/.held-turn" ]; then
+        rm -f "$BOT_DIR/data/.held" "$BOT_DIR/data/.held-turn"
+    fi
+fi
+
+case "$state" in
+    BUSY)
+        echo "$(ts_iso) BUSY — active processing" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER"
+        # Clear idle marker — bot is actively working
+        rm -f "$BOT_DIR/data/.idle" "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
+        ;;
+    LIMIT)
+        # #996: held by a usage limit. Named, never IDLE: no data/.idle (so
+        # fleet-pulse pages usage_limit_held instead of staying quiet), no
+        # reload and no bridge heal into the pane. The one key path is
+        # usage_limit_tick's resume, once per reset, when armed.
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
+        usage_limit_tick "$_ul_verdict"
+        ;;
+    HELD)
+        # #2070: text sits in the input box and no turn runs. Name it, so the
+        # page says what an operator does; send NOTHING into the box (no reload,
+        # no bridge heal). data/.held is the box reading's, above.
+        echo "$(ts_iso) HELD — input box holds text that was never submitted, no turn running (an operator Enter, one more if the text is still there after about 10 s, then stop and look: a menu or modal may be taking the Enter; do not restart)" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER" "$BOT_DIR/data/.idle" "$BOT_DIR/data/.unknown"
+        ;;
+    IDLE)
+        echo "$(ts_iso) IDLE — at prompt${_ul_note}" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER"
+        # Touch idle marker — fleet-pulse reads this instead of parsing panes
+        touch "$BOT_DIR/data/.idle"
+        rm -f "$BOT_DIR/data/.limit" "$BOT_DIR/data/.unknown"
+        # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
+        # plugin/skill update pending, perform it now that the pane is IDLE, then
+        # clear the marker. This is the one place keepalive presses Enter on an
+        # idle pane — safe because it sends fixed slash commands, not ghost text.
+        # A send that did not submit (its box never showed the command, so the
+        # Enter was withheld, or still held it after the last Enter, #1236; or a
+        # keystroke failed) leaves the marker for the next IDLE tick. A command
+        # that later lands in the box makes the pane read HELD (#2070) or
+        # UNKNOWN, never IDLE, so it is never typed twice.
+        if [ -f "$BOT_DIR/data/.reload-pending" ]; then
+            # #1053: a tick that tries the reload types no /compact, whatever the
+            # send returns: a command that did not submit can sit in the box, or
+            # arrive there, under the /compact.
+            _reload_tried=1
+            if send_reload_command "/reload-plugins" && send_reload_command "/reload-skills"; then
+                rm -f "$BOT_DIR/data/.reload-pending"
+                echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
+                emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
+            else
+                echo "$(ts_iso) RELOAD — not submitted; left pending for the next idle tick" >> "$LOG"
+            fi
+        fi
+        # Tier-2 Telegram-bridge self-heal — gated OFF by default (F6b). Runs here, on
+        # a confirmed-IDLE pane, so a heal bounce never interrupts in-flight work.
+        _bridge_heal
+        ;;
+    *)
+        # Track consecutive UNKNOWN runs
+        rm -f "$BOT_DIR/data/.limit"
+        # #997: data/.unknown holds the epoch of the run's first UNKNOWN tick
+        # and is re-stamped every UNKNOWN tick, as data/.held is, so fleet-pulse
+        # can page pane_unknown once a pane stays unreadable past its
+        # threshold. This arm keeps data/.idle, so activity_stuck cannot see
+        # such a pane after an IDLE tick; every other verdict removes the
+        # marker, and start-bot.sh removes it when a session starts.
+        if [ -f "$BOT_DIR/data/.unknown" ]; then
+            touch "$BOT_DIR/data/.unknown"
+        else
+            date +%s > "$BOT_DIR/data/.unknown"
+        fi
+        prev=0
+        [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
+        count=$((prev + 1))
+        _tmp_counter="$(safe_mktemp)"
+        printf '%d' "$count" > "$_tmp_counter" && mv "$_tmp_counter" "$UNKNOWN_COUNTER"
+        if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
+            echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"
+            emit_keepalive_event "UNKNOWN" "unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD)"
+        else
+            echo "$(ts_iso) UNKNOWN — pane state did not match known patterns ($count consecutive)" >> "$LOG"
+            emit_keepalive_event "UNKNOWN" "pane state did not match known patterns ($count consecutive)"
+        fi
+        ;;
+esac
+# #1053: a pending compaction request (see compact_tick), on any tick but a
+# usage limit's or one that tried to type a reload, whatever that send returned.
+if [ "$state" != LIMIT ] && [ -z "${_reload_tried:-}" ]; then
+    compact_tick
+fi
+_channel_check
+plane_presence_samples "$state"

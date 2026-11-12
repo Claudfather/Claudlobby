@@ -1,6 +1,6 @@
 """Tests for the source-currency predicates in lib-common.sh (#1009).
 
-`lib/validate-bot-change.sh` drives these end to end against real repos and is
+`harness/validate-bot-change.sh` drives these end to end against real repos and is
 the mandatory pre-merge gate — but CI runs pytest and does NOT run that harness,
 so without this file every predicate the #1009 fix rests on is CI-invisible.
 This covers the pure logic (URL parsing, tag selection, track resolution, the
@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 # A private HOME for every git subprocess this module starts, and a CLOSED env.
 #
@@ -256,7 +256,7 @@ class TestDiscoverFrameworkCheckouts:
         out = _sh(
             "_editable_project_locations() { printf '%s\\n' \"$_LOCS\"; }; "
             "discover_framework_checkouts",
-            env={"CLAUDLOBBY_ROOT": str(root), "_LOCS": locs},
+            env={"PLANE_EMIT_DISABLED": "1", "CLAUDLOBBY_ROOT": str(root), "_LOCS": locs},
         )
         return [line for line in out.splitlines() if line]
 

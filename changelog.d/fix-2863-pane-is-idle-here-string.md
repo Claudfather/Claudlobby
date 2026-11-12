@@ -1,0 +1,3 @@
+### Fixed — an idle prompt no longer reads as not idle when the host is busy (#2863)
+
+`pane_is_idle` piped the screen into `grep -q` under `pipefail`. `grep -q` stops at its first match, so when the host held up the writer between two of the screen's lines, the next line met a closed pipe and the match read as a miss: an idle screen read as not idle. keepalive's compact path then waited a tick instead of sending `/compact`, keepalive's own tick could read an idle pane as `UNKNOWN`, and `supervisor.sh` could read an idle bot as not idle. `pane_is_idle` now reads its text from a here-string, as `pane_is_busy` has since #2428.

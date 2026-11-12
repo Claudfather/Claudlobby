@@ -1,0 +1,3 @@
+### Docs — `dispatch_deadline` is the default deadline for `task assign` and `task reassign` (#2613)
+
+Three reference pages misdescribed `observability.dispatch_deadline`. It is the default deadline for work routed without `--expected-by`: `task assign` and `task reassign` freeze now plus the fleet manager's resolved value, 86400 seconds when no tier sets one, once per request. `0` makes those assignments open-ended, so setting it removes the deadline from all of them, not only from older rows. `OBSERVABILITY_DISPATCH_DEADLINE` is still composed into each `bot.conf`, but nothing reads it, and there is no `--deadline-min` flag. `system-yaml-schema.md` now gives the shipped floor, 86400, instead of 1800.

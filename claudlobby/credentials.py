@@ -39,7 +39,7 @@ THE VISIBILITY TRAP, which this module used to have and now reports on. It read
 `Paths.env_file` — the FLEET `.env` when one exists, else the ROOT one, never
 both — and called that "the tier this fleet reads". The runtime reads FOUR, so
 a credential in `~/.env` was reported "absent from every tier" while the bot
-resolved it fine at boot. `lib/creds-check.sh` had the mirror bug (it read root
+resolved it fine at boot. `claudlobby/_runtime_scripts/creds-check.sh` had the mirror bug (it read root
 while being invoked per-fleet).
 
 Resolution now goes through `Paths.env_resolved`, the same door the runtime
@@ -227,7 +227,7 @@ def resolved_view(paths) -> tuple[str, dict, dict]:
     cannot disagree, which is the property the whole workstream exists to
     establish. NOTE the bot tier is not included: reconciliation is fleet-scoped
     and there is no single bot to name, so a var overridden only inside one bot
-    is deliberately out of view here and ``claudlobby env-register --bot`` is
+    is deliberately out of view here and ``claudlobby config explain --bot`` is
     the door that answers per-bot.
     """
     resolutions = paths.env_resolved()
@@ -247,7 +247,7 @@ def reconcile(
     paths, fleet, library_dir: Path | None = None
 ) -> tuple[list[Finding], dict]:
     """(findings, scope). Shapes 1 and 2 decided; shape 3 reported UNKNOWN."""
-    library_dir = Path(library_dir or (paths.root / "library"))
+    library_dir = Path(library_dir or paths.base_library)
     declarations, integrations = declared_for_fleet(fleet, paths)
 
     label, visible, resolutions = resolved_view(paths)

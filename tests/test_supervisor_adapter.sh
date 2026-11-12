@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/test_supervisor_adapter.sh — contract tests for lib/supervisor.sh, the
+# tests/test_supervisor_adapter.sh — contract tests for claudlobby/_runtime_scripts/supervisor.sh, the
 # five-verb systemctl/launchctl adapter (#1573 boot admission, task 6).
 #
 # Standalone bash (not pytest-collected on its own); discovered by
@@ -23,7 +23,7 @@
 # never touch the real host. svc_enroll's own contract test additionally
 # points $_SUPERVISOR_LIB_DIR (supervisor.sh's own sibling-script lookup,
 # deliberately NOT $CLAUDLOBBY_ROOT -- see the comment beside it in
-# lib/supervisor.sh) at a scratch tree holding FAKE install-bot-systemd.sh /
+# claudlobby/_runtime_scripts/supervisor.sh) at a scratch tree holding FAKE install-bot-systemd.sh /
 # install-bot.sh stand-ins, never the real ones: the real install-bot.sh
 # shells out to the absolute, un-fakeable /bin/launchctl bootstrap, and
 # actually bootstrapping a LaunchAgent on the machine running this suite is
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -62,7 +62,22 @@ EOF
 cat > "$T/bin/systemctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
+# svc_inventory_failed: FAKE_LISTED is list-units' rows (printf %b), and each
+# unit shown by name prints a failed block.
+if [ "$1" = "--user" ] && [ "$2" = "list-units" ]; then
+    printf '%b' "${FAKE_LISTED:-}"
+    exit "${FAKE_LISTED_EXIT:-0}"
+fi
+if [ "$1" = "--user" ] && [ "$2" = "show" ] && [ "$3" = "--property=Id,ActiveState,SubState,Result,ExecMainStatus" ]; then
+    shift 4
+    for _u in "$@"; do printf 'Result=exit-code\nId=%s\nActiveState=failed\nSubState=failed\n\n' "$_u"; done
+    exit 0
+fi
 if [ "$1" = "--user" ] && [ "$2" = "show" ]; then
+    if [ "${6:-}" = "SubState" ]; then
+        printf 'ActiveState=active\nSubState=%s\n' "${FAKE_SUBSTATE:-exited}"
+        exit 0
+    fi
     case "${FAKE_STATE:-active}" in
         active)   printf 'ActiveState=active\nLoadState=loaded\n' ;;
         inactive) printf 'ActiveState=inactive\nLoadState=loaded\n' ;;
@@ -72,12 +87,27 @@ fi
 exit "${FAKE_EXIT:-0}"
 EOF
 
+# FAKE_PIDS: the pid lines a running job's `print` carries, one per entry
+# (svc_job_hosts_caller compares every one) -- unset, a running job prints none.
 cat > "$T/bin/launchctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+    manageruid) id -u; exit 0 ;;
+    managername) printf 'Aqua\n'; exit 0 ;;
+    list)
+        [ "${FAKE_LIST_EXIT:-0}" = 0 ] || exit "$FAKE_LIST_EXIT"
+        printf 'PID\tStatus\tLabel\n'
+        if [ "${FAKE_STATE:-active}" = active ]; then
+            printf '123\t0\tsvc-alpha\n'
+        fi
+        exit 0 ;;
+esac
 if [ "$1" = "print" ]; then
     case "${FAKE_STATE:-active}" in
-        active)   printf 'state = running\n'; exit 0 ;;
+        active)   printf 'state = running\n'
+                  for _p in ${FAKE_PIDS:-}; do printf '\tpid = %s\n' "$_p"; done
+                  exit 0 ;;
         inactive) printf 'state = not running\n'; exit 0 ;;
         *)        exit 1 ;;
     esac
@@ -94,16 +124,22 @@ EOF
 cat > "$T/bin/tmux" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
+if [ "${3:-}" = list-sessions ]; then
+    if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then
+        printf 'no server running on %s\n' "$FAKE_TMUX_NO_SERVER" >&2; exit 1
+    fi
+    [ -z "${FAKE_TMUX_SESSIONS:-}" ] || printf '%s\n' "$FAKE_TMUX_SESSIONS"
+fi
 exit 0
 EOF
 chmod +x "$T/bin/uname" "$T/bin/systemctl" "$T/bin/launchctl" "$T/bin/tmux"
 export PATH="$T/bin:$PATH"
 export TMUX_BIN="$T/bin/tmux"
 
-# shellcheck source=../lib/lib-common.sh
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-# A syntax error inside the sourced lib/supervisor.sh DOES abort this whole
+# A syntax error inside the sourced claudlobby/_runtime_scripts/supervisor.sh DOES abort this whole
 # suite under `set -euo pipefail` above (MEASURED: bash 3.2.57 on macOS) --
 # but this suite's own `trap '...rm -rf "$T"...' EXIT` then runs, and its
 # last command's exit status becomes the process's FINAL reported exit code,
@@ -135,7 +171,7 @@ write_bot_conf() {  # write_bot_conf <bot_dir> <bot_service> <bot_name>
 reset_fakes() {
     : > "$FAKE_LOG"
     : > "$TMUX_LOG"
-    unset FAKE_STATE FAKE_EXIT || true
+    unset FAKE_STATE FAKE_EXIT FAKE_PIDS FAKE_SUBSTATE FAKE_TMUX_NO_SERVER FAKE_TMUX_SESSIONS || true
     rm -f "$HOME/.config/systemd/user"/*.service "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null || true
 }
 
@@ -299,6 +335,44 @@ set -e
 assert_eq "Other OS: svc_kick rc 2" "2" "$rc"
 assert_eq "Other OS: fake untouched" "" "$(cat "$FAKE_LOG")"
 
+echo "=== supervisor.sh contract -- selected actions and loaded identity ==="
+reset_fakes
+as_os Linux
+: > "$HOME/.config/systemd/user/svc-charlie.service"
+rc=0
+FAKE_EXIT=2 svc_kick "$BOT3" > "$T/kick-description" || rc=$?
+assert_eq "native rc 2 is retained" "2" "$rc"
+assert_eq "native rc 2 still selected an action" "1" "$SVC_KICK_SELECTED"
+reset_fakes
+rc=0
+svc_kick "$BOT3" > "$T/kick-description" || rc=$?
+assert_eq "missing target returns rc 2" "2" "$rc"
+assert_eq "missing target resets same-shell selection" "0" "$SVC_KICK_SELECTED"
+
+before_kick() { printf 'callback:%s\n' "$1" >> "$FAKE_LOG"; }
+reset_fakes
+: > "$HOME/.config/systemd/user/loaded.service"
+svc_kick "$BOT3" before_kick loaded charlie > "$T/kick-description"
+assert_eq "loaded identity overrides a different bot.conf"     "callback:systemctl --user restart loaded
+--user restart loaded.service" "$(cat "$FAKE_LOG")"
+assert_eq "callback owns description output" "" "$(cat "$T/kick-description")"
+
+before_kick_fails() { return 17; }
+reset_fakes
+: > "$HOME/.config/systemd/user/loaded.service"
+rc=0
+svc_kick "$BOT3" before_kick_fails loaded charlie || rc=$?
+assert_eq "callback failure is retained" "17" "$rc"
+assert_eq "callback failure is selected, never fallback" "1" "$SVC_KICK_SELECTED"
+assert_eq "callback failure prevents native command" "" "$(cat "$FAKE_LOG")"
+
+reset_fakes
+: > "$HOME/.config/systemd/user/svc-charlie.service"
+rc=0
+svc_kick "$BOT3" before_kick "" "" || rc=$?
+assert_eq "explicit empty identity never re-reads bot.conf" "0" "$SVC_KICK_SELECTED"
+assert_eq "explicit empty identity leaves native command untouched" "" "$(cat "$FAKE_LOG")"
+
 echo "=== supervisor.sh contract -- svc_enroll (dispatch only, stubbed installers) ==="
 
 # The REAL install-bot-systemd.sh / install-bot.sh are deliberately never
@@ -383,7 +457,236 @@ assert_eq "Other OS: no systemctl/launchctl call (supervision leg skipped)" "" "
 assert_contains "Other OS: tmux teardown still runs (OS-independent leg)" "-L svc-echo kill-server" "$(cat "$TMUX_LOG")"
 assert_eq "Other OS: .tmux-env still removed" "false" "$([ -f "$BOT5/.tmux-env" ] && echo true || echo false)"
 
+echo "=== supervisor.sh contract -- reaper callbacks and command ownership ==="
+reset_fakes
+as_os Darwin
+: > "$HOME/Library/LaunchAgents/loaded.plist"
+reaper_log() { printf 'callback:%s\n' "$*" >> "$FAKE_LOG"; }
+svc_disenroll "$BOT5" reaper_log loaded "$T/bin/launchctl" > "$T/reaper-output"
+assert_eq "reaper callback owns output" "" "$(cat "$T/reaper-output")"
+assert_contains "explicit command and loaded label used" "bootout gui/$(id -u)/loaded" "$(cat "$FAKE_LOG")"
+assert_contains "supervision log retains caller text" "callback:launchd agent loaded booted out + plist removed" "$(cat "$FAKE_LOG")"
+assert_contains "tmux callback is present" "callback:tmux server -L svc-echo killed" "$(cat "$FAKE_LOG")"
+reset_fakes
+as_os SunOS
+svc_disenroll "$BOT5" reaper_log "" "$T/bin/launchctl"
+assert_contains "empty label wins before unsupported OS" "callback:BOT_SERVICE unset — no supervised unit to remove" "$(cat "$FAKE_LOG")"
+assert_eq "unsupported empty label invokes no supervision action" "2" "$(wc -l < "$FAKE_LOG" | tr -d ' ')"
+echo "=== supervisor.sh contract -- svc_job_hosts_caller (#1924) ==="
+# The caller is this very shell: its own pid ($$) and its parent ($PPID) are
+# ancestors of every call below, while a background sleep is a live process
+# that is NOT one -- the shapes launchd can report for a running job.
+sleep 300 & SIBLING=$!
+hosts() { if svc_job_hosts_caller "$1"; then echo yes; else echo no; fi; }
+logged() { grep -c -- "$1" "$FAKE_LOG" || true; }
+
+reset_fakes
+as_os Darwin
+export FAKE_STATE=gone
+assert_eq "not loaded: does not host the caller" "no" "$(hosts job.alpha)"
+export FAKE_STATE=inactive
+assert_eq "loaded, not running: does not host the caller" "no" "$(hosts job.alpha)"
+export FAKE_STATE=active FAKE_PIDS="$$"
+assert_eq "running as this shell: hosts the caller" "yes" "$(hosts job.alpha)"
+assert_contains "the answer is launchd's own, for that label" "print gui/$(id -u)/job.alpha" "$(cat "$FAKE_LOG")"
+export FAKE_PIDS="$PPID"
+assert_eq "running as an ancestor further up: hosts the caller" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING"
+assert_eq "running as a live process that is not an ancestor: does not host" "no" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING $$"
+assert_eq "every pid line is compared, not only the first" "yes" "$(hosts job.alpha)"
+unset FAKE_PIDS
+assert_eq "running with no pid line: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="abc"
+assert_eq "running with an unparseable pid: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+export FAKE_PIDS="$SIBLING"
+printf '#!/bin/bash\nexit 1\n' > "$T/bin/ps"; chmod +x "$T/bin/ps"
+assert_eq "ancestry walk that breaks off: fails closed (hosts)" "yes" "$(hosts job.alpha)"
+rm -f "$T/bin/ps"
+assert_eq "positive control: the same pid with a working walk does not host" "no" "$(hosts job.alpha)"
+
+reset_fakes
+as_os Linux
+export FAKE_STATE=active FAKE_PIDS="$$"
+assert_eq "Linux: never hosts -- a systemd re-enroll stops no service" "no" "$(hosts job.alpha)"
+assert_eq "Linux: nothing invoked" "" "$(cat "$FAKE_LOG")"
+
+echo "=== supervisor.sh contract -- svc_enroll_agent (#1924) ==="
+SRC="$T/composed/job.alpha.plist"
+DEST="$HOME/Library/LaunchAgents/job.alpha.plist"
+mkdir -p "$T/composed"
+printf 'new\n' > "$SRC"
+UID_NOW="$(id -u)"
+
+reset_fakes
+as_os Darwin
+export FAKE_STATE=gone
+set +e; out="$(svc_enroll_agent job.alpha "$SRC")"; rc=$?; set -e
+assert_eq "not loaded: rc 0" "0" "$rc"
+assert_eq "not loaded: the composed plist is installed" "new" "$(cat "$DEST")"
+assert_contains "not loaded: bootout of the label" "bootout gui/$UID_NOW/job.alpha" "$(cat "$FAKE_LOG")"
+assert_contains "not loaded: bootstrap of the installed plist" "bootstrap gui/$UID_NOW $DEST" "$(cat "$FAKE_LOG")"
+assert_contains "not loaded: says what it did" "installed + loaded: job.alpha" "$out"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$SIBLING"
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null; rc=$?; set -e
+assert_eq "running, not the caller: rc 0" "0" "$rc"
+assert_eq "running, not the caller: still re-enrolled (bootout)" "1" "$(logged bootout)"
+assert_eq "running, not the caller: still re-enrolled (bootstrap)" "1" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+printf 'new\n' > "$DEST"
+set +e; out="$(svc_enroll_agent job.alpha "$SRC")"; rc=$?; set -e
+assert_eq "running the caller, plist unchanged: rc 0" "0" "$rc"
+assert_contains "running the caller, plist unchanged: says it left it loaded" "current: job.alpha" "$out"
+assert_eq "running the caller: never booted out" "0" "$(logged bootout)"
+assert_eq "running the caller: never re-bootstrapped" "0" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+printf 'old\n' > "$DEST"
+set +e; err="$(svc_enroll_agent job.alpha "$SRC" 2>&1 >/dev/null)"; rc=$?; set -e
+assert_eq "running the caller, plist changed: rc 4 (deferred)" "4" "$rc"
+assert_contains "running the caller, plist changed: says DEFERRED" "DEFERRED: job.alpha" "$err"
+assert_eq "deferred: the installed plist is untouched" "old" "$(cat "$DEST")"
+assert_eq "deferred: never booted out" "0" "$(logged bootout)"
+assert_eq "deferred: never re-bootstrapped" "0" "$(logged bootstrap)"
+
+reset_fakes
+export FAKE_STATE=active FAKE_PIDS="$$"
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null 2>&1; rc=$?; set -e
+assert_eq "running the caller, nothing installed: rc 4 (deferred)" "4" "$rc"
+assert_eq "deferred: still nothing installed" "false" "$([ -f "$DEST" ] && echo true || echo false)"
+
+reset_fakes
+export FAKE_STATE=gone FAKE_EXIT=5
+set +e; err="$(svc_enroll_agent job.alpha "$SRC" 2>&1 >/dev/null)"; rc=$?; set -e
+assert_eq "bootstrap refused: rc 1, never the launchctl status" "1" "$rc"
+assert_contains "bootstrap refused: names launchctl's own status" "rc 5" "$err"
+
+reset_fakes
+as_os Linux
+set +e; svc_enroll_agent job.alpha "$SRC" >/dev/null 2>&1; rc=$?; set -e
+assert_eq "Linux: rc 2" "2" "$rc"
+assert_eq "Linux: nothing invoked" "" "$(cat "$FAKE_LOG")"
+
+kill "$SIBLING" 2>/dev/null || true
+wait "$SIBLING" 2>/dev/null || true
+
 echo ""
+echo "=== selected bot lifecycle refuses a foreign installed definition ==="
+reset_fakes
+as_os Linux
+source_unit="$T/generated/svc-owned.service"
+installed_unit="$HOME/.config/systemd/user/svc-owned.service"
+mkdir -p "${source_unit%/*}"
+printf '%s\n' 'selected release unit' > "$source_unit"
+printf '%s\n' 'foreign unit' > "$installed_unit"
+set +e
+svc_bot_enroll_exact "$source_unit" "$installed_unit" svc-owned.service; enroll_rc=$?
+svc_bot_disenroll_exact "$source_unit" "$installed_unit" svc-owned.service "$BOT" svc-owned "$T"; stop_rc=$?
+set -e
+assert_eq "start refuses to replace a foreign unit" "3" "$enroll_rc"
+assert_eq "stop refuses to remove a foreign unit" "3" "$stop_rc"
+assert_eq "foreign installed bytes survive both requests" "foreign unit" "$(cat "$installed_unit")"
+assert_eq "refused lifecycle invoked no native manager action" "" "$(cat "$FAKE_LOG")"
+
+echo "=== selected bot start observes the current private session first ==="
+reset_fakes
+as_os Linux
+assert_eq "steady Linux unit with no socket is recoverably absent" "absent" \
+    "$(FAKE_SUBSTATE=exited svc_bot_session_observe "$BOT" svc-alpha "$T")"
+assert_eq "Linux unit still starting is indeterminate, not dead" "unknown" \
+    "$(FAKE_SUBSTATE=running svc_bot_session_observe "$BOT" svc-alpha "$T")"
+as_os Darwin
+assert_eq "launchd active with no socket needs explicit inspection" "unknown" \
+    "$(svc_bot_session_observe "$BOT" svc-alpha "$T")"
+target="gui/$(id -u)/svc-alpha"
+installed="$HOME/Library/LaunchAgents/svc-alpha.plist"
+assert_eq "exact inactive launchd job with no private socket is absent" "absent" \
+    "$(FAKE_STATE=inactive svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+assert_eq "exact active launchd job without a socket stays unknown" "unknown" \
+    "$(FAKE_STATE=active svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+assert_eq "failed exact native read without a socket stays unknown" "unknown" \
+    "$(FAKE_LIST_EXIT=3 svc_bot_session_observe "$BOT" svc-alpha "$T" "$installed" "$target")"
+
+echo "=== selected bot stop cleans a stale private socket only after retirement ==="
+as_os Darwin
+BOTX="$T/bots/xray"
+write_bot_conf "$BOTX" "svc-xray" "xray"
+# This fixture exercises a real absolute Unix-socket probe. Pytest's nested
+# TMPDIR can exceed sun_path; use an owned short root just as real tmux needs.
+XTMP="$(mktemp -d /tmp/cl-supervisor.XXXXXX)"
+trap 'rm -rf "$T" "$XTMP"' EXIT
+xsocket="$XTMP/tmux-$(id -u)/svc-xray"
+mkdir -p "$XTMP/tmux-$(id -u)" "$T/generated"
+python3 -c 'import socket,sys; server = socket.socket(socket.AF_UNIX); server.bind(sys.argv[1]); server.close()' "$xsocket"
+xsource="$T/generated/svc-xray.plist"
+xinstalled="$HOME/Library/LaunchAgents/svc-xray.plist"
+printf '%s\n' 'selected release plist' > "$xsource"
+stop_xray() {  # stop_xray [VAR=value...] -- exact inactive launchd job, stale or live socket
+    reset_fakes
+    cp "$xsource" "$xinstalled"
+    printf 'TMUX_SOCKET=svc-xray\n' > "$BOTX/.tmux-env"
+    set +e
+    xout=$(export "$@" FAKE_STATE=inactive
+           svc_bot_disenroll_exact "$xsource" "$xinstalled" "gui/$(id -u)/svc-xray" \
+               "$BOTX" svc-xray "$XTMP" 2>/dev/null); xrc=$?
+    set -e
+}
+stop_xray FAKE_TMUX_NO_SERVER="$xsocket"
+assert_eq "stale socket after bootout: stop succeeds" "0" "$xrc"
+assert_contains "stale socket after bootout: effect reported" "effect-attempted" "$xout"
+assert_eq "stale socket after bootout: .tmux-env removed" "false" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+assert_eq "stale socket after bootout: no kill-server" "0" "$(grep -c kill-server "$TMUX_LOG" || true)"
+stop_xray FAKE_TMUX_SESSIONS=xray
+assert_eq "live exact private server after bootout: stop succeeds" "0" "$xrc"
+assert_contains "live exact private server after bootout: server killed" "-L svc-xray kill-server" "$(cat "$TMUX_LOG")"
+stop_xray FAKE_TMUX_SESSIONS=xray-and-another
+assert_eq "live private server with another session: stop refuses" "3" "$xrc"
+assert_eq "live private server with another session: .tmux-env kept" "true" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+stop_xray FAKE_TMUX_NO_SERVER="$T/elsewhere/svc-xray"
+assert_eq "no-server text for another socket: stop refuses" "3" "$xrc"
+assert_eq "no-server text for another socket: .tmux-env kept" "true" "$([ -f "$BOTX/.tmux-env" ] && echo true || echo false)"
+reset_fakes
+
+# svc_inventory_failed (#2532): the failed-units read. Linux lists the units
+# failed or between states and shows each by name; Darwin prints the catalog's
+# launchctl list. Each starts with the catalog's manager line and reads only.
+reset_fakes
+as_os Linux
+rc=0; out=$(export FAKE_LISTED='a.service loaded failed failed A\nb.timer loaded activating start start B\n'; svc_inventory_failed) || rc=$?
+assert_eq "Linux failed read: rc 0" "0" "$rc"
+assert_eq "Linux failed read: the manager line, then a block per listed unit" \
+    "$(printf 'manager\tLinux\nResult=exit-code\nId=a.service\nActiveState=failed\nSubState=failed\n\nResult=exit-code\nId=b.timer\nActiveState=failed\nSubState=failed')" "$out"
+assert_contains "Linux failed read: lists the units failed or between states" \
+    "--user list-units --all --no-legend --no-pager --plain --full --state=failed,activating,deactivating,reloading" "$(cat "$FAKE_LOG")"
+assert_contains "Linux failed read: shows the listed units by name" \
+    "--user show --property=Id,ActiveState,SubState,Result,ExecMainStatus -- a.service b.timer" "$(cat "$FAKE_LOG")"
+reset_fakes
+rc=0; out=$(svc_inventory_failed) || rc=$?
+assert_eq "Linux failed read, nothing listed: rc 0" "0" "$rc"
+assert_eq "Linux failed read, nothing listed: the manager line alone" "$(printf 'manager\tLinux')" "$out"
+assert_eq "Linux failed read, nothing listed: shows nothing" "0" "$(grep -c -- '--user show' "$FAKE_LOG" || true)"
+reset_fakes
+rc=0; (export FAKE_LISTED_EXIT=1; svc_inventory_failed) >/dev/null || rc=$?
+assert_eq "Linux failed read: a list that fails refuses (rc 3)" "3" "$rc"
+reset_fakes
+as_os Darwin
+rc=0; out=$(svc_inventory_failed) || rc=$?
+assert_eq "Darwin failed read: rc 0" "0" "$rc"
+assert_eq "Darwin failed read: the manager line, then launchctl list" \
+    "$(printf 'manager\tDarwin\nPID\tStatus\tLabel\n123\t0\tsvc-alpha')" "$out"
+reset_fakes
+rc=0; (export FAKE_LIST_EXIT=1; svc_inventory_failed) >/dev/null || rc=$?
+assert_eq "Darwin failed read: a list that fails refuses (rc 3)" "3" "$rc"
+as_os SunOS
+rc=0; svc_inventory_failed >/dev/null || rc=$?
+assert_eq "Other OS: svc_inventory_failed rc 3" "3" "$rc"
+reset_fakes
+
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 # A suite that ran zero assertions and never touched FAIL would otherwise
 # read as a clean pass below (final wave item 8) -- the exact shape a

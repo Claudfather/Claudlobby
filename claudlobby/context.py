@@ -1,0 +1,149 @@
+"""Resolve package, data and requested fleet/bot scope through existing owners."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .paths import Paths
+from .resources import PackageResources, get_resources, selected_cli
+
+if TYPE_CHECKING:
+    from .config import FleetConfig
+
+
+class BotNotFoundError(ValueError):
+    """The selected fleet has no declaration for the requested bot."""
+
+
+@dataclass(frozen=True)
+class Context:
+    paths: Paths
+    fleet: FleetConfig
+    merged_defaults: dict
+    bot_id: str | None = None
+
+
+def generated_selectors(*, fleet: str | None = None, bot: str | None = None,
+                        include_bot: bool = False, seed: bool = False) -> tuple[str | None, str | None]:
+    """Explicit selectors precede generated session defaults for scoped reads.
+
+    Host-wide preparation deliberately does not call this helper. A present
+    empty generated selector refuses; it must not quietly select the root fleet
+    or another identity. BOT_ID is authoritative when present, including when
+    malformed; BOT_NAME serves only older generated contexts that lack BOT_ID.
+    The existing path resolver and config loader validate the selected names.
+    """
+    def first(*names):
+        for name in names:
+            if name in os.environ:
+                value = os.environ[name]
+                if not value.strip() or Path(value).name != value or value in (".", ".."):
+                    raise ValueError(f"invalid generated selector {name}; supply an explicit selector")
+                return value
+        return None
+
+    if not seed:
+        if fleet is None:
+            fleet = first("FLEET_NAME", "CLAUDLOBBY_FLEET")
+        if include_bot and bot is None:
+            bot = first("BOT_ID", "BOT_NAME")
+    return fleet, bot
+
+
+def native_environment(paths: Paths, *, current=None) -> dict[str, str]:
+    """Resolved locations passed to native children and generated supervision.
+
+    Native hot paths consume this context without starting Python or guessing
+    mutable storage from their installed script directory. Supplying the caller
+    held admission validates full current provenance and marks private re-entry;
+    that marker is routing, never authority.
+    """
+    if current is not None:
+        from .active_config import runtime_read_stamp
+        from .activation_state import ActivationError
+        from .runtime_admission import GitCurrentRuntime, runtime_route_matches
+        stamp = runtime_read_stamp(paths.root, package=paths.package)
+        if not isinstance(current, GitCurrentRuntime):
+            raise ActivationError("native execution requires a managed Git current runtime")
+        native = current.installation.native
+        if (stamp is None or not runtime_route_matches(current, stamp, package=paths.package)
+                or native != paths.package.runtime_native
+                or isinstance(current, GitCurrentRuntime) and current.installation.data_root != paths.root):
+            raise ActivationError("native child differs from the admitted current runtime")
+    installation = paths.package.installation
+    cli = selected_cli(installation=installation) if installation is not None else selected_cli()
+    result = {
+        "CLAUDLOBBY_ROOT": str(paths.root),
+        "FLEET_ROOT": str(paths.fleet_config_dir),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.package.runtime_native),
+        "CLAUDLOBBY_LIBRARY_DIR": str(paths.package.runtime_library),
+        "CLAUDLOBBY_CLI": str(cli),
+    }
+    if installation is not None:
+        result["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
+    else:
+        result["CLAUDLOBBY_ARTIFACT_ID"] = paths.package.artifact_id
+    if current is not None:
+        import sys
+        result.update(CLAUDLOBBY_NATIVE_ADMITTED="1", CLAUDLOBBY_NATIVE_PYTHON=sys.executable)
+    return result
+
+
+def resolve_paths(
+    *, root: Path | None = None, fleet: str | None = None, seed: bool = False,
+    package: PackageResources | None = None,
+) -> Paths:
+    """Resolve host/fleet paths without requiring a fleet for host commands.
+
+    Resources come from the explicit installation or installed package.
+    The working directory is never a resource discovery fallback.
+    """
+    return Paths.detect(root, fleet, seed=seed,
+                        package=package if package is not None else get_resources())
+
+
+def load_context(
+    paths: Paths, *, fleet: str | None = None, bot: str | None = None,
+) -> Context:
+    """Load with the config owner and refuse a requested identity mismatch."""
+    from .config import load_fleet
+
+    config, merged_defaults = load_fleet(paths.fleet_yaml, projects_yaml=paths.projects_yaml)
+    requested = fleet if fleet is not None else paths.fleet_name
+    if requested is not None and config.name != requested:
+        raise ValueError(
+            f"requested fleet {requested!r}, but {paths.fleet_yaml} declares "
+            f"{config.name!r}; select the correct --root and --fleet"
+        )
+    if bot is not None and bot not in config.bots:
+        raise BotNotFoundError(f"bot {bot!r} is not declared in fleet {config.name!r}")
+    return Context(paths, config, merged_defaults, bot)
+
+
+def declared_paths(root: Path, package: PackageResources, *, external=()) -> list[Paths]:
+    """The host's authored fleets, including explicitly retained external sources."""
+    from .paths import _iter_fleet_dirs
+
+    directories = ([root] if (root / "fleet.yaml").is_file() else [])
+    directories.extend(path for path in _iter_fleet_dirs(root / "local")
+                       if (path / "fleet.yaml").is_file())
+    for selected in external:
+        path = Path(selected).expanduser().resolve()
+        directory = path.parent if path.name == "fleet.yaml" else path
+        if not (directory / "fleet.yaml").is_file():
+            raise FileNotFoundError(f"fleet declaration not found: {directory / 'fleet.yaml'}")
+        directories.append(directory)
+    return [Paths(root, package=package, fleet_dir=None if path == root else path)
+            for path in dict.fromkeys(directories)]
+
+
+def resolve_context(
+    *, root: Path | None = None, fleet: str | None = None, bot: str | None = None,
+    seed: bool = False, package: PackageResources | None = None,
+) -> Context:
+    """Resolve and validate one requested fleet/bot scope."""
+    paths = resolve_paths(root=root, fleet=fleet, seed=seed, package=package)
+    return load_context(paths, fleet=fleet, bot=bot)

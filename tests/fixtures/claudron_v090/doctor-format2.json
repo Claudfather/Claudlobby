@@ -1,0 +1,63 @@
+{
+  "ok": false,
+  "command": "doctor",
+  "data": {
+    "vault_format": 2,
+    "engine_format": 3,
+    "pending": [
+      {
+        "id": "m003",
+        "version": 3,
+        "title": "mark pre-`session` harvested drafts source_type: session (#200 \u00a71)"
+      }
+    ],
+    "fixable": [
+      "m003"
+    ],
+    "schema": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "index": {
+      "missing": 0,
+      "ghost": 0,
+      "index_present": true,
+      "corrupt": false
+    },
+    "git": {
+      "check": true,
+      "state": "clean",
+      "branch": "main",
+      "default_branch": "main",
+      "upstream": "origin/main",
+      "ahead": 0,
+      "behind": 0,
+      "uncommitted": 0,
+      "uncommitted_oldest_age_s": null,
+      "lock_age_s": null,
+      "interrupted": null,
+      "last_sync_ok_at": null,
+      "detail": ""
+    },
+    "hooks": [
+      {
+        "path": "/example/home/.claude/settings.json",
+        "declared": false,
+        "state": "absent",
+        "entries": []
+      }
+    ],
+    "fixed": false
+  },
+  "warnings": [],
+  "errors": [
+    {
+      "code": "D001",
+      "severity": "error",
+      "path": ".",
+      "field": null,
+      "line": null,
+      "message": "migration m003 pending (format 3): mark pre-`session` harvested drafts source_type: session (#200 \u00a71) \u2014 run: claudron doctor --fix"
+    }
+  ]
+}

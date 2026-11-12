@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "command": "doctor",
+  "data": {
+    "vault_format": 3,
+    "engine_format": 3,
+    "pending": [],
+    "fixable": [],
+    "schema": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "index": {
+      "missing": 0,
+      "ghost": 0,
+      "index_present": true,
+      "corrupt": false
+    },
+    "git": {
+      "check": true,
+      "state": "ahead",
+      "branch": "main",
+      "default_branch": "main",
+      "upstream": "origin/main",
+      "ahead": 1,
+      "behind": 0,
+      "uncommitted": 0,
+      "uncommitted_oldest_age_s": null,
+      "lock_age_s": null,
+      "interrupted": null,
+      "last_sync_ok_at": null,
+      "detail": ""
+    },
+    "hooks": [
+      {
+        "path": "/example/home/.claude/settings.json",
+        "declared": false,
+        "state": "absent",
+        "entries": []
+      }
+    ],
+    "fixed": false
+  },
+  "warnings": [],
+  "errors": []
+}

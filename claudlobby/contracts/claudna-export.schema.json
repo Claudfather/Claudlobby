@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claudna.export/1",
+  "title": "The export envelope (spec section 8); item keys are additive",
+  "type": "object",
+  "required": ["schema", "consumer", "items", "next"],
+  "properties": {
+    "schema": {"const": "claudna.export/1"},
+    "consumer": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}},
+    "next": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+  },
+  "$defs": {
+    "ts_or_null": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "item": {
+      "type": "object",
+      "required": ["sid", "seg", "session", "summary", "segment"],
+      "properties": {
+        "sid": {"type": "string", "minLength": 1},
+        "seg": {"type": "integer", "minimum": 1},
+        "session": {
+          "type": "object",
+          "required": ["sid", "status", "opened_at", "closed_at", "close_reason", "chain_id", "parent_sid", "actor", "origin", "agent_cli"],
+          "properties": {
+            "sid": {"type": "string", "minLength": 1},
+            "status": {"enum": ["open", "closed", "unknown"]},
+            "opened_at": {"$ref": "#/$defs/ts_or_null"},
+            "closed_at": {"$ref": "#/$defs/ts_or_null"},
+            "close_reason": {"type": ["string", "null"]},
+            "chain_id": {"type": ["string", "null"]},
+            "parent_sid": {"type": ["string", "null"]},
+            "actor": {"type": ["object", "null"]},
+            "origin": {"type": ["object", "null"]},
+            "agent_cli": {"enum": ["claude", "codex"]}
+          }
+        },
+        "summary": {"type": ["object", "null"]},
+        "segment": {
+          "type": "object",
+          "required": ["sealed_at", "sealed_by", "counts"],
+          "properties": {
+            "sealed_at": {"$ref": "#/$defs/ts_or_null"},
+            "sealed_by": {"type": ["string", "null"]},
+            "counts": {
+              "type": ["object", "null"],
+              "required": ["prompts", "skills", "failures", "interrupts"],
+              "properties": {
+                "prompts": {"type": "integer", "minimum": 0},
+                "skills": {"type": "integer", "minimum": 0},
+                "failures": {"type": "integer", "minimum": 0},
+                "interrupts": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "skipped": {
+          "type": "object",
+          "required": ["reason"],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Known reasons: disabled, trivial, headless, no_transcript, gave_up, retired. Consumers treat an unknown reason as a skip."
+            }
+          }
+        }
+      }
+    }
+  }
+}

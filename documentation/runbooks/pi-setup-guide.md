@@ -113,7 +113,7 @@ sudo apt install -y tmux
 
 ### jq
 
-Required by several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
+Required by several `claudlobby/_runtime_scripts/` scripts (dispatch, reconcile-fleet, creds-check, keepalive helpers, etc.) for JSON parsing.
 
 ```bash
 sudo apt install -y jq
@@ -224,8 +224,10 @@ Most MCP servers install on-demand via `npx` or `uvx`. Some need pre-installatio
 
 ### Home Assistant MCP
 
-This is an HTTP-type MCP entry (`library/mcp/homeassistant.json`) that connects straight to HA's
-own `/api/mcp/` endpoint — there's no server package to install or keep warm in the npx cache.
+`library/mcp/homeassistant.json` runs the community server hass-mcp, pinned to one release, over
+stdio through `uvx`; HA's built-in MCP server is not used. The host needs `uv`, which fetches a
+Python 3.13 on first run if the system has none, and `claudlobby host cache warm` pre-fetches the
+package so the first session start does not download it.
 
 ```bash
 # Needs:
@@ -251,8 +253,8 @@ rm -rf ~/.npm/_npx/        # instant fleet-wide cold start regression
 **Health check:**
 
 ```bash
-lib/check-npx-cache.sh --fleet <name>   # verify all MCP packages are cached
-claudlobby warm-cache                    # pre-download any missing packages
+claudlobby --fleet <name> host cache warm --dry-run  # inspect missing packages
+claudlobby --fleet <name> host cache warm            # download missing packages
 ```
 
 **Recovery if cache is cleared:**
@@ -266,7 +268,7 @@ systemctl --user stop <service_prefix>.keepalive.timer
 systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
 
 # Re-warm the cache serially (not in parallel)
-claudlobby --fleet <name> warm-cache
+claudlobby --fleet <name> host cache warm
 
 # Restart fleet, then re-arm keepalive
 systemctl --user start bot1 bot2 bot3 ...  # same list
@@ -325,6 +327,26 @@ sudo systemctl enable --now fail2ban
 # Disable unnecessary services
 sudo systemctl disable --now cups cups-browsed ModemManager
 ```
+
+### The `sudo` defaults every bot inherits
+
+Every bot runs as your user and inherits its `sudo` rules (the README's [Safety model](../../README.md#safety-model)). Raspberry Pi OS ships two rules that matter here, both from its `raspberrypi-sys-mods` package:
+
+- `/etc/sudoers.d/010_pi-nopasswd` gives the first user `sudo` with no password, and first-boot setup writes the name of the user you create into it. On a stock install `sudo -n true` succeeds, so every bot has root.
+- `/etc/sudoers.d/010_global-tty` sets `Defaults timestamp_type=global`: once you type your password for `sudo` in any terminal, every process of your user, every bot included, can use `sudo` without one until that ticket times out.
+
+What bounds a bot against these defaults is in the [Safety model](../../README.md#safety-model). The guard rail is the worker `sudo` deny (#2464): a worker's composed permissions deny `sudo`, and the fleet manager's do not. The wall is a separate OS user for the fleet, one with no `sudo` rules (#1606).
+
+### Ask polkit what a bot may do
+
+polkit is a second gate beside `sudo`. It decides who may reboot the host, change its network or manage its services, and on a host where you are logged in at the desktop it can answer for a bot as it does for that session. Ask it from a user service, which is where bots run:
+
+```bash
+systemd-run --user --wait --pipe --quiet sh -c \
+  'pkcheck --action-id org.freedesktop.login1.reboot --process $$$$ && echo allowed'
+```
+
+`allowed` means every bot can reboot the host with no password. `systemd-run` reads `$$` as one `$`, so the shell gets `$$`, its own process ID. Ask the same of `org.freedesktop.login1.power-off`, and of `org.freedesktop.NetworkManager.settings.modify.system` for the host's network connections; `pkaction` lists every action. On a Raspberry Pi OS desktop all three print `allowed`, while managing services and installing packages still ask for a password. Only a separate account keeps these rights from the bots and leaves them with you at the desktop.
 
 ## Swap (Recommended for 4+ Bots)
 
@@ -406,84 +428,24 @@ journalctl -b 0 | grep -i 'hardware watchdog'  # "Watchdog running with a hardwa
 `RebootWatchdogSec` is separate: it guards the *shutdown* path so a reboot that
 wedges still completes. 10min is the sensible default.
 
-## Host jobs — enrolling is a separate step from declaring
+## Host jobs
 
-`system.yaml` `host.jobs` *declares* the host-level timers (`claude-update`,
-`notify-behind`, `disk-monitor`, `fleet-memory-check`, `orphan-browser-reaper`,
-`host-health-check`). `claudlobby host-timers` *composes* the units into
-`runtime/_host/timers/`. Neither step enrolls them — `lib/setup-system` does.
+`system.yaml` declares the host-level jobs. They are prepared and published with the fleet through the managed Git updater: first-time `fleet setup --plan-only` prepares them, `host update continue` applies the original operation, and later changes use `host update apply`. Follow the [cold-host walkthrough](../getting-started.md) and the [update guide](../fleet-update-lifecycle.md#managed-git-delivery) before enabling jobs; inspect their resulting state with `host doctor` and the systemd user journal.
 
-A host that was set up before a job was added keeps running happily with that job
-composed-but-never-enrolled, and nothing surfaces it. Audit periodically:
+## Installing the fleet
 
-```bash
-ls runtime/_host/timers/*.timer | xargs -n1 basename | sed 's/.timer//' | sort > /tmp/composed
-systemctl --user list-timers --all | grep -oE 'claudlobby-[a-z-]+' | sort -u > /tmp/enrolled
-comm -23 /tmp/composed /tmp/enrolled     # composed but NOT enrolled
-```
+One supported pattern on Linux — systemd user services; the cron + tmux pattern was retired. Full reference: [install-patterns.md](../install-patterns.md).
 
-Then enroll a specific one:
+### systemd user services (self-restarting)
 
-```bash
-TIMER_DIR=$CLAUDLOBBY_ROOT/runtime/_host/timers \
-UNIT_NAME=claudlobby-<job> \
-  lib/install_fleet_timer.sh <job>
-```
-
-**Always start the service once by hand after enrolling.** A timer can enroll
-cleanly and still fail every fire — a non-executable `ExecStart` gives
-`status=203/EXEC` and only shows up in the journal:
-
-```bash
-systemctl --user start claudlobby-<job>.service
-systemctl --user show claudlobby-<job>.service -p Result -p ExecMainStatus
-journalctl --user -u claudlobby-<job>.service -n 20
-```
-
-## Installing the fleet (pick one pattern)
-
-Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](../install-patterns.md).
-
-### Pattern A — cron + tmux (simplest, what most Pi setups use)
-
-```bash
-# Compose the fleet first
-claudlobby --fleet <name> generate
-
-# Install cron entries (per-bot keepalive staggered, log rotation, fleet pulse, daily creds-check)
-lib/install-cron.sh --fleet <name>
-
-# Inspect without writing
-lib/install-cron.sh --fleet <name> --dry-run
-```
-
-`install-cron.sh` writes a managed block bracketed by `# BEGIN claudlobby:<fleet>` / `# END claudlobby:<fleet>` markers. Re-run it to update; lines outside the markers are preserved.
-
-Bots themselves are still tmux sessions; bring them up at boot with one `@reboot` entry per bot:
-
-```crontab
-@reboot sleep 60 && /path/to/claudlobby/lib/start-bot.sh /path/to/runtime/bots/<bot>
-```
-
-### Pattern B — systemd user services (modern, self-restarting)
-
-```bash
-loginctl enable-linger $USER     # one-time, so user services persist past logout
-claudlobby --fleet <name> generate
-
-# Per bot
-lib/install-bot-systemd.sh local/<name>/runtime/bots/<bot>
-
-# Fleet-wide timers
-lib/install-keepalive-systemd.sh <name>
-lib/install-creds-check-systemd.sh
-```
+Enable user lingering through your host administrator for persistence past
+logout. Then follow the [cold-host walkthrough](../getting-started.md) to prepare the managed installation and first fleet, passing `$HOME/.config/systemd/user` as the native install directory when it asks. A Pi already installed through the earlier sealed-release model needs a reviewed conversion that is not yet implemented; do not run the walkthrough over its data root.
 
 Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
 
-### Generic helpers used by both patterns
+### Selected operations
 
-- `lib/keepalive.sh <bot-dir>` — restart a dead session, nudge idle panes
-- `lib/log-rotate.sh [--keep N] <log>...` — tail each log to last N lines
-- `lib/disk-monitor.sh [--threshold N]` — warn if disk usage > threshold
-- `lib/bot-sweep-cron.sh <bot> <trigger>` — periodic dispatch (e.g. `bot-sweep-cron.sh assistant "briefing morning"`)
+- `claudlobby --fleet FLEET bot restart BOT` — supervised bot restart
+- `claudlobby --fleet FLEET fleet logs` — bounded bot log tails
+- `claudlobby host job run disk-monitor` — request the selected, enabled disk check
+- Declare periodic bot prompts in fleet configuration and apply the reviewed change through `host update apply`; the private scheduled dispatcher is not a public command.

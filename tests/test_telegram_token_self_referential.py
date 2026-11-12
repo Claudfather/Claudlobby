@@ -22,12 +22,14 @@ from textwrap import dedent
 
 from claudlobby.composer import collect_env_contracts, scaffold_env_files
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 # selfref uses the plugin's own read var (self-referential); distinct uses its own name.
 _FLEET = """\
 fleet:
+  manager: distinct
   name: test-fleet
   service_prefix: com.test
   bots:
@@ -52,7 +54,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Paths]:
     (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
     for b in ("selfref", "distinct"):
         (root / "runtime" / "bots" / b).mkdir(parents=True)
-    return root, Paths(root=root, fleet_dir=root)
+    return root, Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def test_self_referential_token_env_not_collected(tmp_path):

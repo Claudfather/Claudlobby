@@ -3,7 +3,8 @@
 Failure taxonomy is the contract:
   ContractViolation  -> caller bug: propagate, write NOTHING (not even spool)
   DowngradeError     -> db newer than code: propagate LOUDLY, never spooled
-  OperationalError accepted by is_retryable() -> spool + report spooled;
+  OperationalError accepted by is_retryable() -> spool + report spooled,
+    or propagate when require_commit=True (never queued for replay)
   all other database errors -> propagate loudly
   spool also failed  -> SpoolWriteError (CLI exit 3)
 
@@ -16,7 +17,6 @@ the body is dropped at the door with its proof triple retained.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -25,16 +25,18 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from . import PLANE_SCHEMA_VERSION
+from . import capture_policy
+from .capture_policy import DEFAULT_CAPTURE, CaptureConfigInvalid
 from .contracts import (
     CONTENT_FIELDS,
     ContractViolation,
-    cap_body,
     validate_request,
 )
-from .db import connect, db_path
+from .db import connect, db_file
 from .ids import ensure_host_uid, mint_event_id
 from .ingest import ingest_many
-from .migrations import DowngradeError, migrate
+from .migrations import DowngradeError
+from .schema_state import preflight_schema, require_current_schema
 from .spool import SpoolWriteError, is_retryable, is_transient_lock, spool_write
 
 
@@ -45,7 +47,7 @@ class EmitOutcome:
     detail: Optional[str] = None
 
 
-class CaptureConfigError(ContractViolation):
+class CaptureConfigError(CaptureConfigInvalid, ContractViolation):
     """state/plane/capture.json exists but cannot be trusted — unreadable,
     invalid JSON, or an unknown mode value. An ABSENT file is the documented
     default (:data:`DEFAULT_CAPTURE`); a BROKEN file must fail visibly rather
@@ -53,35 +55,18 @@ class CaptureConfigError(ContractViolation):
     (2026-09-20): under `metadata` a silent fallback stripped content an
     operator opted INTO keeping; under `full` it would STORE content an
     operator opted OUT of keeping (F23 + the no-silent-switch rule). Routes
-    like ContractViolation: loud, never spooled, CLI exit 2."""
+    like ContractViolation: loud, never spooled, CLI exit 2. It is an
+    environment fault, not a batch fault: staged replay keeps the batch
+    (S5a-04) rather than quarantining it."""
 
 
 def _load_capture_config(root: Path) -> dict:
-    cfg = Path(root) / "state" / "plane" / "capture.json"
+    # One reader and one rule (capture_policy), shared with the stdlib
+    # socket client that applies it before staging.
     try:
-        text = cfg.read_text()
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",), "msg": f"unreadable: {exc}"}]
-        ) from exc
-    try:
-        modes = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",), "msg": f"invalid JSON: {exc}"}]
-        ) from exc
-    # The WHOLE file must be valid, not just the looked-up key: a typo'd mode
-    # on any fleet is a policy error someone believes is in force.
-    if not isinstance(modes, dict) or not all(
-        isinstance(k, str) and v in ("full", "metadata") for k, v in modes.items()
-    ):
-        raise CaptureConfigError(
-            [{"loc": ("capture.json",),
-              "msg": "must map fleet (or '*') to 'full' | 'metadata'"}]
-        )
-    return modes
+        return capture_policy.load_capture_config(root)
+    except CaptureConfigInvalid as exc:
+        raise CaptureConfigError(exc.errors) from exc
 
 
 #: The shipped capture policy when nothing is configured. `full` since
@@ -103,14 +88,10 @@ def _load_capture_config(root: Path) -> dict:
 #: fails LOUD rather than resolving to either mode (CaptureConfigError) — that
 #: refusal matters more under a `full` default, not less, because a silent
 #: fallback would now STORE content an operator opted out of keeping.
-DEFAULT_CAPTURE = "full"
+#: DEFAULT_CAPTURE itself is owned by capture_policy and re-exported here.
 
-
-def _capture_mode(modes: dict, fleet: str | None) -> str:
-    """Fleet-keyed capture mode from the loaded plane config; default
-    :data:`DEFAULT_CAPTURE` (F7/F23, re-ruled 2026-09-20). The caller's
-    request never decides this."""
-    return modes.get(fleet or "", modes.get("*", DEFAULT_CAPTURE))
+#: Fleet-keyed capture mode (F7/F23, re-ruled 2026-09-20); capture_policy owns it.
+_capture_mode = capture_policy.capture_mode
 
 
 # Public aliases: the trust surface (view.py) is a second consumer of the
@@ -121,44 +102,10 @@ load_capture_config = _load_capture_config
 capture_mode = _capture_mode
 
 
-def _apply_capture(raw: dict, modes: dict) -> dict:
-    """Round-3 F8: the policy transforms EVERY content-bearing family
-    (contracts.CONTENT_FIELDS is the registry's code form), not
-    communications alone. Communications keep the proof triple on drop.
-
-    IDENTITY CONTRACT (T8): returns the INPUT OBJECT ITSELF when the policy
-    changed nothing — the caller uses `is` to skip the second validation pass
-    for untransformed requests, which is the safe half of the #1345-review
-    disclosure (warm emit 62->106ms from validating twice)."""
-    fields = CONTENT_FIELDS.get(raw.get("event_type"))
-    if not fields:
-        return raw
-    mode = _capture_mode(modes, raw.get("fleet"))
-    if raw.get("event_type") == "communication":
-        payload = dict(raw.get("payload") or {})
-        if mode == "full":
-            payload["privacy"] = "full"
-        else:
-            body = payload.get("body")
-            payload["privacy"] = "metadata"
-            if body is not None:
-                proof = cap_body(body)
-                payload["body"] = None      # dropped AT THE DOOR (F23)
-                payload["body_bytes"] = proof.body_bytes
-                payload["body_sha256"] = proof.body_sha256
-                payload["truncated"] = proof.truncated
-        return {**raw, "payload": payload}
-    if mode == "full":
-        return raw                          # nothing to transform — identity
-    payload = dict(raw.get("payload") or {})
-    dropped = False
-    for field in fields:
-        if field in payload:
-            payload.pop(field)              # dropped, no proof triple owed
-            dropped = True
-    if not dropped:
-        return raw                          # metadata mode, no content present
-    return {**raw, "payload": payload}
+#: Round-3 F8: the policy transforms EVERY content-bearing family, with the
+#: T8 identity contract (the caller uses `is` to skip the second validation
+#: pass). One owner, capture_policy, which the socket client also applies.
+_apply_capture = capture_policy.apply_capture
 
 
 def _finalize(raw: dict) -> dict:
@@ -200,7 +147,9 @@ LOCK_RETRY_BACKOFF_S = 0.15
 
 
 def emit_batch(root: Path, raw_requests: list[dict], *,
-               conn_factory: "Callable[[], sqlite3.Connection] | None" = None
+               conn_factory: "Callable[[], sqlite3.Connection] | None" = None,
+               require_commit: bool = False,
+               precondition: "Callable[[sqlite3.Connection], None] | None" = None,
                ) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
@@ -216,7 +165,18 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     family — the T8 comms skip let capture launder malformed wire into valid
     shape. The second (transformed-form) pass runs only when capture actually
     changed the request (_apply_capture's identity contract); communications
-    always change under capture, so they pay both passes."""
+    always change under capture, so they pay both passes.
+
+    ``require_commit`` is for conditional mutations whose preconditions must
+    not be replayed later. It preserves in-process lock retries but never
+    writes a spool or staging entry. Storage failures propagate unchanged;
+    an exception does not prove that a commit did not occur. Callers must
+    reconcile their durable event IDs before deciding whether to retry.
+    ``precondition`` runs read-only under ingest_many's BEGIN IMMEDIATE lock,
+    before any row in the batch is written. It requires ``require_commit``:
+    a spool cannot retain the in-process condition for a later replay."""
+    if precondition is not None and not require_commit:
+        raise ValueError("precondition requires require_commit=True")
     captured: list = []
     items = []
     # Capture config loads AT MOST ONCE per batch (gauntlet round): a report
@@ -233,7 +193,7 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
         items.append(item)
     # A caller-supplied connection is USED AND NOT CLOSED: its owner holds the
     # lifecycle and the checkpoint cadence (#1693 arm D). Without one this is
-    # byte-for-byte today's behaviour -- connect, migrate, ingest, close -- which
+    # byte-for-byte today's behaviour -- check schema, connect, ingest, close -- which
     # is what the cold CLI needs, being a fresh process per batch whose close is
     # necessarily the last-connection close.
     #
@@ -277,12 +237,18 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             # send-size-probe.sh lesson). The cold path already fsyncs at its
             # close-checkpoint, so the commit-time fsync buys durability
             # without adding a syscall the rung was not already paying.
-            own = conn_factory() if borrowed else connect(db_path(root),
+            if not borrowed:
+                preflight_schema(root)
+            own = conn_factory() if borrowed else connect(db_file(root),
                                                           synchronous="FULL")
             try:
-                migrate(own)                                # DowngradeError propagates
+                require_current_schema(own)
                 host = ensure_host_uid(Path(root) / "state")
-                results = ingest_many(own, items, host_uid=host)
+                if precondition is None:
+                    results = ingest_many(own, items, host_uid=host)
+                else:
+                    results = ingest_many(own, items, host_uid=host,
+                                          precondition=precondition)
             finally:
                 if not borrowed:
                     try:
@@ -326,6 +292,8 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
             if is_transient_lock(exc) and attempt < LOCK_RETRY_ATTEMPTS:
                 time.sleep(LOCK_RETRY_BACKOFF_S * attempt)
                 continue
+            if require_commit:
+                raise
             # The spool stores the policy-applied envelope, never a fuller body (§11).
             path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
             return [
@@ -338,5 +306,5 @@ def emit_batch(root: Path, raw_requests: list[dict], *,
     ]
 
 
-def emit(root: Path, raw_request: dict) -> EmitOutcome:
-    return emit_batch(root, [raw_request])[0]
+def emit(root: Path, raw_request: dict, *, require_commit: bool = False) -> EmitOutcome:
+    return emit_batch(root, [raw_request], require_commit=require_commit)[0]

@@ -116,7 +116,11 @@ assert_query_only() {
   local doc="$1" stripped head
   stripped="$(printf '%s' "$doc" | sed -e 's/"[^"]*"/""/g' -e 's/#[^\n]*//g')"
 
-  if printf '%s' "$stripped" | grep -qiE '(^|[^A-Za-z0-9_])(mutation|subscription)([^A-Za-z0-9_]|$)'; then
+  # A here-string, never a pipe into grep (#2428). grep -q exits at its first
+  # match; a writer with more of the document to send then meets a closed pipe,
+  # and under pipefail its failure read the match as a miss, so the guard
+  # admitted the mutation it had found.
+  if grep -qiE '(^|[^A-Za-z0-9_])(mutation|subscription)([^A-Za-z0-9_]|$)' <<<"$stripped"; then
     die "refusing a GraphQL document containing a mutation or subscription. This actuator is read-only." "$GUARD_RC"
   fi
 

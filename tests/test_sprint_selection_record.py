@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parent.parent / "lib" / "sprint-selection-record.py"
+_SRC = Path(__file__).resolve().parent.parent / "claudlobby" / "checkin_selection.py"
 _spec = importlib.util.spec_from_file_location("sprint_selection_record", _SRC)
 ssr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ssr)
@@ -49,6 +49,16 @@ def _record(**over):
     )
     kw.update(over)
     return ssr.build_record(**kw)
+
+
+def test_external_selection_record_refuses_impossible_cut_and_malformed_structure():
+    good = _record()
+    assert ssr.verify_record(good)[0] == ssr.OK
+    impossible = json.loads(json.dumps(good))
+    impossible["cut"]["selected_ids"] = [999]
+    assert ssr.verify_record(impossible)[0] == ssr.INVALID
+    malformed = {**good, "cut": None}
+    assert ssr.verify_record(malformed)[0] == ssr.INVALID
 
 
 # --- what it refuses to write ------------------------------------------------
@@ -105,9 +115,12 @@ def test_broken_filter_is_a_DEFECT_not_an_empty_backlog():
 def test_genuinely_empty_backlog_is_distinguishable_from_a_broken_filter():
     """The whole point: these two must not produce the same row."""
     rec = _record(queries=_queries(filtered=0, unfiltered=0), candidates=[], selected_ids=[])
-    _, findings = ssr.verify(rec)
+    verdict, findings = ssr.verify_record(rec)
+    assert verdict == ssr.OK, findings
     assert any("genuinely empty" in f for f in findings)
     assert not any("broken filter" in f for f in findings)
+    failed = _record(queries=_queries(filtered=0, unfiltered=0, rc=1), candidates=[], selected_ids=[])
+    assert ssr.verify_record(failed)[0] == ssr.DEFECT
 
 
 def test_scoring_out_everything_is_a_legitimate_result_not_a_defect():
@@ -178,22 +191,6 @@ def test_focus_ref_parser_matches_hash_refs_only():
 
 def test_focus_ref_parser_returns_empty_when_section_absent():
     assert ssr.parse_focus_refs("# M\n\n## Other\n\n#123\n") == []
-
-
-# --- CLI ---------------------------------------------------------------------
-
-def test_cli_exit_codes_separate_ok_defect_invalid(tmp_path, capsys):
-    good = tmp_path / "g.json"
-    good.write_text(json.dumps(_record()))
-    assert ssr.main(["verify", "--file", str(good)]) == 0
-
-    bad = tmp_path / "b.json"
-    bad.write_text(json.dumps(_record(queries=_queries(rc=1))))
-    assert ssr.main(["verify", "--file", str(bad)]) == 1
-
-    broken = tmp_path / "x.json"
-    broken.write_text(json.dumps({"schema": 99}))
-    assert ssr.main(["verify", "--file", str(broken)]) == 2
 
 
 # --- parser shapes found by running against the REAL document ---------------

@@ -7,6 +7,7 @@ import pytest
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, migrate
+from tests.plane_setup import initialize_plane
 
 
 @pytest.fixture()
@@ -56,6 +57,75 @@ def test_migration_failure_is_atomic(tmp_path, monkeypatch):
 def test_migrate_sets_user_version_and_is_idempotent(conn):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_USER_VERSION
     assert migrate(conn) == SCHEMA_USER_VERSION  # second run: no-op
+
+
+def test_permission_index_upgrade_keeps_untrusted_details_and_exact_candidates(tmp_path):
+    initialize_plane(tmp_path, schema_version=13)
+    c = connect(db_path(tmp_path))
+    c.executemany(
+        "INSERT INTO ingest_ledger (ingest_seq,event_id,family,ingested_at) "
+        "VALUES (?,?,'system_event','t')",
+        [(n, f"ev_{n:032x}") for n in range(1, 5)])
+    c.executemany(
+        "INSERT INTO events (ingest_seq,event_id,schema_version,occurred_at,"
+        "ingested_at,host_uid,fleet_uid,emitter,kind,event,detail,detail_truncated) "
+        "VALUES (?,?,1,'t','t','host','fleet','emitter','system',?,?,?)",
+        [(n, f"ev_{n:032x}", event, detail, truncated)
+         for n, event, detail, truncated in [
+             (1, "permission_requested", '{"task_id":"task"}', 0),
+             (2, "permission_requested", "malformed JSON", 0),
+             (3, "permission_requested", '{"task_id":"task"}', 1),
+             (4, "heartbeat", '{"task_id":"task"}', 0)]])
+    c.commit()
+    before = c.execute("SELECT * FROM events ORDER BY ingest_seq").fetchall()
+    assert migrate(c) == SCHEMA_USER_VERSION
+    assert c.execute("SELECT * FROM events ORDER BY ingest_seq").fetchall() == before
+    query = ("SELECT ingest_seq FROM events INDEXED BY idx_events_permission_requests "
+             "WHERE kind='system' AND event='permission_requested' AND detail_truncated=0 "
+             "AND fleet_uid=? AND emitter=? AND CASE WHEN json_valid(detail) "
+             "THEN json_extract(detail, '$.task_id') END IN (?)")
+    assert [row[0] for row in c.execute(query, ("fleet", "emitter", "task"))] == [1]
+    assert any("idx_events_permission_requests" in row[3] for row in
+               c.execute("EXPLAIN QUERY PLAN " + query, ("fleet", "emitter", "task")))
+    assert migrate(c) == SCHEMA_USER_VERSION
+    c.close()
+
+
+def test_newest_ack_seeks_readable_cursor_without_scanning_system_history(conn):
+    from claudlobby.plane.queries import NEWEST_ACK_SQL
+
+    rows = [
+        (1, "reports_acked", "viewer", "newer-clock", '{"acked_through_seq":7}'),
+        (2, "reports_acked", "viewer", "older-clock", '{"acked_through_seq":11}'),
+        (3, "reports_acked", "viewer", "t", '{"acked_through_seq":"99"}'),
+        (4, "reports_acked", "other", "t", '{"acked_through_seq":900}'),
+    ] + [(n, "heartbeat", "viewer", "t", "{}") for n in range(5, 12_005)]
+    conn.executemany(
+        "INSERT INTO ingest_ledger (ingest_seq,event_id,family,ingested_at) "
+        "VALUES (?,?,'system_event','t')",
+        [(n, f"ev_{n:032x}") for n, *_ in rows])
+    conn.executemany(
+        "INSERT INTO events (ingest_seq,event_id,schema_version,occurred_at,"
+        "ingested_at,host_uid,fleet_uid,emitter,kind,event,subject_kind,subject_uid,subject_alias,detail) "
+        "VALUES (?,?,1,?,'t','host','fleet','emitter','system',?,'actor',?,'alias',?)",
+        [(n, f"ev_{n:032x}", timestamp, event, subject, detail)
+         for n, event, subject, timestamp, detail in rows])
+    conn.commit()
+    sql = NEWEST_ACK_SQL.format(ph="?")
+    assert any("idx_events_reports_acked" in row[3] for row in
+               conn.execute("EXPLAIN QUERY PLAN " + sql, ("viewer", "viewer")))
+    steps = 0
+    def bounded_work():
+        nonlocal steps
+        steps += 1
+        return int(steps > 100)
+    conn.set_progress_handler(bounded_work, 1000)
+    try:
+        assert tuple(conn.execute(sql, ("viewer", "viewer")).fetchone()) == (
+            11, None, None, "older-clock", "alias", 2)
+        assert conn.execute(sql, ("absent", "absent")).fetchone() is None
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
 def test_expected_tables(conn):
@@ -252,13 +322,30 @@ def test_duplicate_event_id_rejected_by_ledger(conn):
         )
 
 
+def test_registry_bootstrap_never_mistakes_retained_history_for_new_storage(conn):
+    from claudlobby.plane.registry_emit import _has_ingest_history
+
+    assert not _has_ingest_history(conn)
+    # Retention can leave every family empty but NEVER deletes its ledger.
+    conn.execute(
+        "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+        " VALUES ('ev_' || printf('%032x', 1), 'metric_sample', 't')"
+    )
+    assert _has_ingest_history(conn)
+    # Even outside the supported retention contract, a cleared ledger must
+    # not authorize a new identity over its persistent sequence watermark.
+    conn.execute("DELETE FROM ingest_ledger")
+    assert _has_ingest_history(conn)
+
+
 def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_path):
     """Two or three cold CLIs racing the very first write of a plane used to
     lose one batch to the spool ("database is locked" — the fresh-file case
     SQLite refuses to wait on, busy_timeout or not; measured 3 of 10 pairs).
     Phase B makes the pair routine: a door's detached fleet event lands
     beside the door's own emission. A retryable lock is retried in-process;
-    the spool stays the last resort."""
+    the spool stays the last resort. SQL is initialized explicitly before
+    the first concurrent writers; ordinary emitters never migrate it."""
     import json
     import subprocess
     import sys
@@ -267,8 +354,9 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
     for trial in range(4):
         root = tmp_path / f"t{trial}" / "root"
         (root / "state" / "plane").mkdir(parents=True)
+        initialize_plane(root)
         (root / "local" / "f").mkdir(parents=True)
-        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    w1:\n")
+        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  manager: w1\n  name: f\n  bots:\n    w1:\n")
         files = []
         for i in range(3):
             batch = {"events": [{"event_type": "system", "emitter": "t", "fleet": "f",
@@ -276,7 +364,7 @@ def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_pa
             f = root / f"batch{i}.json"
             f.write_text(json.dumps(batch))
             files.append(f)
-        procs = [subprocess.Popen([str(cli), "--root", str(root), "emit-batch", "--json", str(f)],
+        procs = [subprocess.Popen([str(cli), "--root", str(root), "plane", "emit-batch", "--file", str(f)],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for f in files]
         errs = [p.communicate()[1] for p in procs]
         assert all(p.returncode == 0 for p in procs), errs

@@ -21,6 +21,7 @@ Two independent conditions must both hold for a Gmail tool to return data headle
 ## Common ops
 
 - **Search:** `mcp__claude_ai_Gmail__search_threads`
+- **Search and drafts:** Google's reference for `search_threads` documents `query`: "Drafts are explicitly excluded by default by the tool." It also lists "`in:draft` — Search in drafts. -in:draft means exclude drafts from the search results." and "`in:sent` — Search in sent messages." The self-hosted `gws` search returns drafts unless its query excludes them (`library/integrations/gws.md`), so by the two references a query with `in:sent` returns no drafts on either backend.
 - **Read:** `mcp__claude_ai_Gmail__get_message`, `mcp__claude_ai_Gmail__get_thread`
 - **Draft:** `mcp__claude_ai_Gmail__create_draft`
 - **Label / triage:** `mcp__claude_ai_Gmail__label_message`, `mcp__claude_ai_Gmail__apply_sensitive_message_label`

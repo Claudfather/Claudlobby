@@ -197,7 +197,7 @@ def cmd_cron_migrate(args) -> int:
     result = rewrite_crontab(current_crontab, bot_ctxs, str(source_dir))
 
     # Plan output
-    log.info("=== cron-migrate plan ===")
+    log.info("=== migration cron plan ===")
     log.info("source: %s", source_dir)
     log.info("fleet:  %s", fleet.name)
     if rename_map:

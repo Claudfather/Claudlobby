@@ -11,8 +11,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/lib-common.sh
-. "$REPO_DIR/lib/lib-common.sh"
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
+. "$REPO_DIR/claudlobby/_runtime_scripts/lib-common.sh"
 
 passed=0
 failed=0
@@ -47,6 +47,18 @@ assert_idle "arbitrary output (busy)"    busy "$(printf 'line one\nline two\nlin
 
 # Operator-extended idle pattern
 KEEPALIVE_IDLE_PATTERNS='WAITING_FOR_REVIEW' assert_idle "custom idle pattern" idle "WAITING_FOR_REVIEW"
+
+# A long screen (#2863). pane_is_idle piped the screen into grep -q, which exits
+# at its first match; the lines still to be written then met a closed pipe, and
+# pipefail (which lib-common.sh sets) read an idle screen as busy (rc 141). A
+# real screen fits in a pipe, so that happened only when the host held the
+# writer up between two of its line writes; 100k lines after the prompt outlast
+# a pipe on every host.
+_filler='BEGIN { for (i = 0; i < 100000; i++) printf "filler%06d\n", i }'
+assert_idle "prompt before 100k lines"   idle "$(printf '> \n'; awk "$_filler")"
+# Control: grep reads every line before its match, so the pipe never closed
+# early; this passed before the fix too.
+assert_idle "prompt after 100k lines"    idle "$(awk "$_filler"; printf '> ')"
 
 echo ""
 echo "=== $passed/$total passed, $failed failed ==="
