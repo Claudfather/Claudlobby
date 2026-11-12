@@ -8,8 +8,7 @@ import yaml
 
 from claudlobby import composer, validator
 from claudlobby.config import McpEntry, load_fleet
-from claudlobby.paths import Paths
-from tests.conftest import load_test_fleet
+from tests.conftest import load_test_fleet, make_paths
 
 
 @pytest.fixture
@@ -35,7 +34,7 @@ def scene(fleet_dir, tmp_path, monkeypatch):
     for bot in fleet.bots.values():
         bot.telegram.handle = ""
     bot = fleet.bots["lead"]
-    paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    paths = make_paths(fleet_dir)
     return fleet, bot, paths
 
 
