@@ -19,7 +19,7 @@ def _load(tmp_path, bot_value, default_value, *, vault=False):
         bot["claudron_vault_path"] = str(tmp_path / "vault")
     path = tmp_path / "fleet.yaml"
     path.write_text(yaml.safe_dump({"fleet": {
-        "name": "test", "system_defaults": False,
+        "name": "test", "manager": "worker", "system_defaults": False,
         "defaults": defaults, "bots": {"worker": bot},
     }}))
     return load_fleet(path)[0]
