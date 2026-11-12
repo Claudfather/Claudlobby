@@ -1069,3 +1069,19 @@ test('connected Git provenance survives qualification and old receipt inspection
  assert.deepEqual(raw.target,{...target,recipient:'actor_'+'c'.repeat(32),task_id:wi});
  assert.equal(state.pending.length,0);h.api.dispose();
 });
+
+for (const [operation, route, heading] of [['connect','challenge','Connecting'],['check','status','Checking connection']])
+test(`computer heading describes pending ${operation} and restores the actual result`,async()=>{
+  const h=harness({count:1});h.mount();await h.api.checkAccount();await flush();
+  if(operation==='check')await h.api.act(0,'connect');
+  const wait=deferred();
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/'+route,()=>wait.promise);
+  const action=h.api.act(0,operation);await flush();
+  const card=h.ui.get('owner-session').children.find(e=>e.className==='connection-card');
+  assert.match(card.children[0].textContent,new RegExp(heading+'$'));
+  assert.doesNotMatch(card.children[0].textContent,/Connection unavailable/);
+  assert.ok(card.children[1].children.filter(e=>e.tagName==='BUTTON').every(e=>e.disabled));
+  wait.resolve(reply(503,{state:'unavailable'}));await action;await flush();
+  assert.match(card.children[0].textContent,/Connection unavailable$/);
+  h.api.dispose();
+});
