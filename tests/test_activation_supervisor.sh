@@ -15,6 +15,10 @@ old_enabled=enabled; launched=1
 systemctl() {
     [ "$1" = --user ]; shift
     if [ "$1" = show ]; then
+        if [ "$2" = --property=KillMode,KillSignal,SendSIGKILL ]; then
+            printf 'KillMode=%s\nKillSignal=15\nSendSIGKILL=yes\n' "${JOB_KILL_MODE:-control-group}"
+            return
+        fi
         [ "$QUERY_FAIL" = 0 ] || return 7
         local fragment="$file"
         [ "$load" != masked ] || fragment="${MASK_FRAGMENT:-/dev/null}"
@@ -48,6 +52,7 @@ launchctl() {
     case "$1" in
         manageruid) printf '501\n' ;;
         managername) printf '%s\n' "$TEST_MANAGER" ;;
+        print) printf '%s = {\n\tproperties = runatload | inferred program\n}\n' "$2" ;;
         list)
             [ "$QUERY_FAIL" = 0 ] || return 7
             printf 'PID\tStatus\tLabel\n799\t0\tcom.apple.Terminal\n'
@@ -385,3 +390,38 @@ with patch.object(module, 'ancestry', return_value=[100, 600]):
         assert module.main('cgroup', '100', '/user.slice/worker.service') == 3
 print('PASS: activation ordering, refusal, restoration and membership contracts')
 PY
+
+# Exact job stop keeps generated/installed bytes for the Python owner to
+# remove only after process/cgroup/socket witnesses are proved quiet.
+python3() { return "$CALLER_RC"; }
+_OS=Linux; CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0
+file="$T/scoped-job.service"; target=scoped-job.service
+source="$T/generated/scoped-job.service"; mkdir -p "${source%/*}"
+printf 'owned\n' > "$file"; cp "$file" "$source"
+enabled=enabled; load=loaded; active=active; group=/user.slice/scoped-job.service
+main_pid=0; control_pid=0; sub=running
+: > "$TRACE"
+output=$(svc_job_stop_exact "$source" "$file" "$target" 0)
+[ "$output" = $'effect-attempted\nstopped' ]
+[ "$(cat "$TRACE")" = 'disable --now scoped-job.service' ]
+[ -f "$file" ] && [ -f "$source" ]
+: > "$TRACE"; printf 'foreign\n' > "$source"
+expect 3 svc_job_stop_exact "$source" "$file" "$target" 0
+[ ! -s "$TRACE" ]
+cp "$file" "$source"; JOB_KILL_MODE=process
+expect 3 svc_job_stop_exact "$source" "$file" "$target" 0
+[ ! -s "$TRACE" ]; JOB_KILL_MODE=control-group
+CALLER_RC=1
+expect 3 svc_job_stop_exact "$source" "$file" "$target" 0
+[ ! -s "$TRACE" ]; CALLER_RC=0
+
+_OS=Darwin; TEST_MANAGER=Aqua; launched=1; JOB_PID=600
+file="$T/scoped-job.plist"; source="$T/generated/scoped-job.plist"; target=gui/501/scoped-job
+printf 'owned\n' > "$file"; cp "$file" "$source"; : > "$TRACE"
+expect 3 svc_job_stop_exact "$source" "$file" "$target" 601
+[ ! -s "$TRACE" ]
+output=$(svc_job_stop_exact "$source" "$file" "$target" 600)
+[ "$output" = $'effect-attempted\nstopped' ]
+[ "$(cat "$TRACE")" = 'bootout gui/501/scoped-job' ]
+[ -f "$file" ] && [ -f "$source" ]
+printf 'scoped job stop adapter: passed\n'

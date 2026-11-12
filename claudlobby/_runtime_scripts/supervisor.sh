@@ -1582,3 +1582,89 @@ EOF
         *) return 3 ;;
     esac
 }
+
+
+# Job lifecycle reads/effects: the Python owner binds the complete committed
+# family and retains process witnesses before calling these exact-unit doors.
+_svc_job_child_policy() {
+    local target="$1" output key value seen=" " mode="" sig="" send=""
+    case "$_OS" in
+        Linux)
+            case "$target" in *.timer) return 0 ;; *.service) ;; *) return 3 ;; esac
+            output=$(systemctl --user show --property=KillMode,KillSignal,SendSIGKILL "$target") || return 3
+            while IFS='=' read -r key value; do
+                case "$seen" in *" $key "*) return 3 ;; esac
+                seen="$seen$key "
+                case "$key" in
+                    KillMode) mode="$value" ;; KillSignal) sig="$value" ;; SendSIGKILL) send="$value" ;;
+                    *) return 3 ;;
+                esac
+            done <<EOF
+$output
+EOF
+            [ "$mode:$sig:$send" = control-group:15:yes ] || return 3 ;;
+        Darwin)
+            local python="${CLAUDLOBBY_NATIVE_PYTHON-python3}"
+            output=$(launchctl print "$target") || return 3
+            printf '%s\n' "$output" | "$python" -I -c '
+import sys
+from claudlobby.job_operations import darwin_native_children_owned
+try:
+    allowed = darwin_native_children_owned(sys.stdin.read(), sys.argv[1])
+except Exception:
+    allowed = False
+raise SystemExit(0 if allowed else 3)
+' "$target" || return 3 ;;
+        *) return 3 ;;
+    esac
+}
+
+svc_job_witness() {
+    _svc_activation_read "$1" "$2" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || return 3
+    _svc_job_child_policy "$2" || return 3
+    case "$_OS" in
+        Darwin)
+            case "$SVC_ACT_PID" in -) printf 'pid\t0\ngroup\t\n' ;;
+                *) printf 'pid\t%s\ngroup\t\n' "$SVC_ACT_PID" ;; esac ;;
+        Linux) printf 'pid\t%s\ngroup\t%s\n' "${SVC_ACT_MAIN_PID:-0}" "$SVC_ACT_GROUP" ;;
+        *) return 3 ;;
+    esac
+}
+
+svc_job_stop_exact() {
+    local source="$1" installed="$2" target="$3" expected="$4" pid
+    case "$source:$installed" in /*:/*) ;; *) return 3 ;; esac
+    [ "${source##*/}" = "${installed##*/}" ] || return 3
+    [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$installed" ] && [ ! -L "$installed" ] || return 3
+    [ -d "${installed%/*}" ] && [ ! -L "${installed%/*}" ] && cmp -s "$source" "$installed" || return 3
+    case "$expected" in ''|*[!0-9]*) return 3 ;; esac
+    _svc_activation_read "$installed" "$target" || return 3
+    [ "$SVC_ACT_LOAD" = loaded ] || return 3
+    _svc_job_child_policy "$target" || return 3
+    case "$_OS" in
+        Darwin)
+            pid="$SVC_ACT_PID"; [ "$pid" != - ] || pid=0
+            [ "$pid" = "$expected" ] || return 3
+            if [ "$pid" != 0 ]; then
+                svc_activation_assert_external "$installed" "$target" || return 3
+            fi
+            printf 'effect-attempted\n'
+            launchctl bootout "$target" || return $? ;;
+        Linux)
+            case "$target" in *.service|*.timer) ;; *) return 3 ;; esac
+            svc_activation_assert_external "$installed" "$target" || return 3
+            printf 'effect-attempted\n'
+            # Timer first is a caller-owned complete-family invariant. Disable
+            # also removes the exact enablement link; generated files remain.
+            systemctl --user disable --now "$target" || return $? ;;
+        *) return 3 ;;
+    esac
+    printf 'stopped\n'
+}
+
+svc_job_reload() {
+    [ "$_OS" = Linux ] || return 3
+    systemctl --user daemon-reload || return $?
+    printf 'reloaded\n'
+}

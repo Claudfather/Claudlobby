@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import fcntl
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 
@@ -35,10 +38,12 @@ class HostJobRun:
     config_fingerprint: str | None = None
 
 
-def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None = None):
+def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None = None, *,
+                  stop: bool = False, fleet: str | None = None):
     """Read one committed, enrolled job binding without starting it."""
     root, installation = current.installation.data_root, current.installation
-    packaged_jobs = (_load_system_defaults().get("host") or {}).get("jobs") or {}
+    scope = "fleet" if fleet is not None else "host"
+    packaged_jobs = (_load_system_defaults().get("defaults" if fleet is not None else "host") or {}).get("jobs") or {}
     if name not in packaged_jobs:
         raise HostJobError("host job is not packaged in the current installation")
     adapter = adapter or Adapter()
@@ -58,23 +63,27 @@ def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None
     families = []
     for declaration in declarations:
         stem = declaration.source.stem
-        if declaration.scope != "host" or not stem.endswith("-" + name):
+        separator = "." if fleet is not None else "-"
+        if (declaration.scope != scope or declaration.fleet != fleet or declaration.bot is not None
+                or not stem.endswith(separator + name)):
             continue
-        suffixes = [key for key in packaged_jobs if stem.endswith("-" + key)]
+        suffixes = [key for key in packaged_jobs if stem.endswith(separator + key)]
         if (suffixes == [name]
-                and host_unit_name(name, prefix=stem[:-len(name) - 1]) == stem):
+                and (fleet is not None or host_unit_name(name, prefix=stem[:-len(name) - 1]) == stem)):
             families.append(stem)
     if len(set(families)) != 1:
         raise HostJobError("host job has no unique committed native family")
     stem = families[0]
-    wanted = {stem + ".plist"} if manager == "Darwin" else {stem + ".service", stem + ".timer"}
+    resident = stop and scope == "host" and name == "plane-daemon"
+    wanted = ({stem + ".plist"} if manager == "Darwin" else
+              {stem + ".service"} if resident else {stem + ".service", stem + ".timer"})
     selected = [declaration for declaration in declarations if declaration.source.name in wanted]
-    if (len(selected) != len(wanted) or any(metadata[str(declaration.source)]["phase"] != "producers"
+    if (len(selected) != len(wanted) or any(metadata[str(declaration.source)]["phase"] != ("ingest" if resident else "producers")
             or not metadata[str(declaration.source)]["enroll"] for declaration in selected)):
         raise HostJobError("host job is disabled or lacks a complete committed timer family")
     service = next(declaration for declaration in selected if declaration.service is None)
     admission = metadata[str(service.source)]["admission"]
-    if admission is None or admission["mode"] != "oneshot":
+    if admission is None or not stop and admission["mode"] != "oneshot":
         raise HostJobError("host job run requires a scheduled oneshot job")
     if (manager == "Darwin" and placement["domain"] == f"gui/{os.getuid()}"
             and domain == f"user/{os.getuid()}"):
@@ -90,6 +99,8 @@ def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None
                                    only_names=frozenset(wanted)).require_complete()
     if len(inventory.units) != len(wanted):
         raise HostJobError("host job inventory is incomplete", unavailable=True)
+    if stop:
+        return adapter, manager, domain, directories, inventory.units, metadata
     target = installed = None
     for unit in inventory.units:
         if (len(unit.installed) != 1 or dict(unit.properties).get("LoadState") != "loaded"
@@ -127,4 +138,27 @@ def run_host_job(root: Path, name: str, *, adapter: Adapter | None = None) -> Ho
     if name == "pull-root":
         raise HostJobError("pull-root is retired; use host update apply for Git changes")
     with mutation_admission(root, identity=RuntimeIdentity.current()) as current:
-        return _run_git_job(current, name, adapter)
+        with job_effect_lock(root):
+            return _run_git_job(current, name, adapter)
+
+
+@contextmanager
+def job_effect_lock(root: Path):
+    """Serialize run/stop inside runtime admission, never across an update."""
+    path = root / "state/job-effects.lock"
+    if path.parent.resolve() != path.parent:
+        raise HostJobError("job effect lock directory is redirected")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info, linked = os.fstat(fd), path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
+            raise HostJobError("job effect lock is not private or changed")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise HostJobError("another job effect is running") from exc
+        yield
+    finally:
+        os.close(fd)

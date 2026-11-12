@@ -1,0 +1,8 @@
+{
+  "provenance": "Read-only native top-level properties captured 2026-11-12; GUI false/omitted and system-domain OS-delivered Apple true. No native enrollment. Domains differ; native teardown is a separate gate.",
+  "false_gui": [
+    "runatload | inferred program",
+    "inferred program"
+  ],
+  "true_system": "low priority i/o | supports transactions | supports pressured exit | abandon process group | inferred program | system service | exponential throttling | tle system"
+}

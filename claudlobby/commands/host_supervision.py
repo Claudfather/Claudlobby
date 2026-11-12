@@ -6,6 +6,8 @@ from ..command_result import CommandFailure, CommandOutput
 
 
 def dispatch(args) -> CommandOutput:
+    if args.public_command == "host.supervision.stop":
+        return _stop(args)
     if args.public_command == "host.supervision.failed":
         return _failed(args)
     from ..activation_state import ActivationError
@@ -65,3 +67,30 @@ def _failed(args) -> CommandOutput:
                   + f"), {unit['surface']} {unit['detail']}" for unit in data["units"])
     return CommandOutput(data, release_id=data["release_id"],
                          lines=lines or (f"no owned unit is failed ({data['declared']} declared)",))
+
+
+def _stop(args) -> CommandOutput:
+    from dataclasses import asdict
+    from ..job_operations import JobStopError, stop_job
+    from ..host_job_operations import HostJobError
+    from ..activation_state import ActivationError
+    from ..config_plan import PlanError
+    from ..releases import ReleaseError
+    from ..supervision_inventory import InventoryError
+    from .host import _operator_shell
+    from .releases import _host_root
+
+    root = _host_root(args)
+    _operator_shell(root)
+    if args.fleet_job and not args.fleet:
+        raise CommandFailure("invalid_argument", "--fleet-job requires an explicit --fleet selector")
+    name = args.host_job or args.fleet_job
+    try:
+        result = stop_job(root, name, fleet=args.fleet if args.fleet_job else None)
+    except JobStopError as exc:
+        raise CommandFailure("unavailable" if exc.attempted else "conflict", str(exc),
+                             data=exc.data, hint="inspect retained exact member outcomes; do not replay uncertain effects") from exc
+    except (HostJobError, ActivationError, PlanError, ReleaseError, InventoryError, OSError, RuntimeError) as exc:
+        raise CommandFailure("conflict", "job stop admission or native ownership is unavailable",
+                             data={"name": name, "native_outcome": "unattempted"}) from exc
+    return CommandOutput(asdict(result), lines=(f"{name}: stopped and de-enrolled; generated declarations retained.",))

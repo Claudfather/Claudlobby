@@ -671,3 +671,55 @@ PR #399 added `claudlobby/_runtime_scripts/update-claude-code.sh` with a daily *
 | `claudlobby/_runtime_scripts/pre-stop-handoff.sh` | Optional explicit model handoff delivery; not used by routine continuation |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.
+
+### Stop one supported job without a rollout
+
+From an operator shell, `host supervision stop --host-job plane-daemon --json`
+stops and de-enrolls this installation's committed recorder. For a selected
+fleet, use `--fleet FLEET host supervision stop --fleet-job NAME --json`, where
+NAME is `keepalive`, `fleet-pulse` or `log-rotation`. Include the stable
+installation CLI and explicit `--root DATA` as for other lifecycle commands.
+The command resolves a complete family from committed configuration; it accepts
+no native label, path, wildcard or arbitrary job. It does not change authored
+configuration, delete generated definitions or retire task/registry history.
+
+Only native-owned child lifetimes are supported. A job with
+`AbandonProcessGroup=true` or `KillMode=process` refuses before effects. The
+shipped keepalive job intentionally abandons its background emitters and is
+therefore **not supported** by this stop command. A separately reviewed finite
+canary may explicitly set `fleet.defaults.jobs.keepalive.abandon_children: false`
+using the existing authored override; that can terminate a background heartbeat
+at sweep exit. Do not change production defaults to make teardown pass.
+Custom recorder socket/command overrides, template families, absent or partial
+families, ambiguous ownership and unsupported native policy also refuse.
+
+Darwin also checks the loaded top-level native properties, rather than
+inferring child ownership from the installed plist. Only the captured
+non-abandoning GUI flag vocabulary is supported; missing, malformed, duplicate
+or unknown policy refuses. The true-policy token was captured from an
+OS-delivered system-domain job and the false policy from GUI jobs; this source
+check is not a native Mac teardown acceptance claim.
+
+The stop captures process/native witnesses before effects. Linux stops the
+schedule before its service; Darwin stops the exact selected domain's job.
+Installed nodes are removed only after native/process quiescence; the recorder
+also requires its admitted endpoint identity, quiet socket and released lifetime
+lock. Remaining or unknown witnesses report an incomplete stop, retaining the
+installed definition where possible. Read the exact member outcomes after any
+failure; a timeout may already have stopped a member. There is no automatic
+repair/replay or promise to discover arbitrary detached processes. A missing
+family is not silently adopted as a completed stop.
+
+Installed absence persists across an ordinary update even when authored
+`enroll` remains true. `host job run` requires installed placement and cannot
+re-enroll the job. Run and stop share a fail-fast effect lock inside the runtime
+admission/update fence. This command adds no start/re-enrollment or durable
+intent registry. Preserve its JSON outcome with the operator's evidence.
+
+For a disposable fleet, stop its supported health jobs first, use whole
+`fleet stop` (without `--workers`) to stop all bots, and stop the recorder last.
+A completed stop must prove all selected families absent and owned writer
+witnesses quiet. The independent updater is not a packaged job: observe it
+naturally exited after its operation finishes; never pass its label to this
+command. Source checks alone do not establish native Mac/Linux teardown or
+permission to activate a fleet on a protected host.
