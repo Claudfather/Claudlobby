@@ -51,7 +51,9 @@ EOF
 chmod +x "$T/bin/uname"
 cat > "$T/bin/systemctl" <<'EOF'
 #!/bin/bash
-if [ "${1:-}" = --user ] && [ "${2:-}" = list-unit-files ] && [ "${NATIVE_OCCUPIED:-0}" = 1 ]; then
+if [ "$*" = '--user show --property=UnitPath --value' ]; then
+    printf '%s/.config/systemd/user\n' "$HOME"
+elif [ "${1:-}" = --user ] && [ "${2:-}" = list-unit-files ] && [ "${NATIVE_OCCUPIED:-0}" = 1 ]; then
     printf '%s enabled\n' "${NATIVE_UNIT:?}"
 fi
 exit 0
