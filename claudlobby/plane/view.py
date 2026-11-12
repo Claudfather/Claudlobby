@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -256,7 +257,99 @@ _QUERY_SECONDS = 10.0
 _QUERY_PROGRESS_STEPS = 10_000
 
 
-def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
+# Overview-only, request-local labels. Helpers may contain several statements;
+# a null statement is deliberately not an attribution to their internal SQL.
+_OVERVIEW_QUERY_PHASES = {
+    "query_start": None, "overview": None, "capture_config": None,
+    "heartbeat": None, "bot_directories": None, "fleet_actors": None,
+    "reader_module": None, "fleets": None, "presence": None,
+    "open_assignments": "OPEN_ASSIGNMENTS_AT_SQL", "task_summary": None,
+    "newest_report": "_NEWEST_REPORT_SQL", "reports_since": "_REPORTS_SINCE_SQL",
+    "newest_ack": None, "post_ack_report_rows": None, "post_ack_reduce": None,
+    "provenance": None, "host_samples": None, "recorder_state": None,
+}
+_QUERY_DIAGNOSTIC_MS_MAX = 86_400_000
+_QUERY_DIAGNOSTIC_WORK_MAX = 1_000_000
+
+
+def _safe_query_diagnostic(value):
+    """Copy only finite, static timeout metadata through owner sanitization."""
+    keys = {"version", "phase", "statement", "elapsed_ms", "phase_elapsed_ms",
+            "progress_callbacks"}
+    if type(value) is not dict or set(value) != keys:
+        return None
+    if type(value["version"]) is not int or value["version"] != 1:
+        return None
+    phase = value["phase"]
+    if type(phase) is not str or phase not in _OVERVIEW_QUERY_PHASES:
+        return None
+    statement = value["statement"]
+    expected = _OVERVIEW_QUERY_PHASES[phase]
+    if expected is None:
+        if statement is not None:
+            return None
+    elif type(statement) is not str or statement != expected:
+        return None
+    for key, maximum in (("elapsed_ms", _QUERY_DIAGNOSTIC_MS_MAX),
+                         ("phase_elapsed_ms", _QUERY_DIAGNOSTIC_MS_MAX),
+                         ("progress_callbacks", _QUERY_DIAGNOSTIC_WORK_MAX)):
+        if type(value[key]) is not int or not 0 <= value[key] <= maximum:
+            return None
+    if value["phase_elapsed_ms"] > value["elapsed_ms"]:
+        return None
+    return {key: value[key] for key in keys}
+
+
+class _OverviewQueryDiagnostic:
+    """One overview's active phase, not SQL tracing or accumulated history."""
+
+    def start(self, started):
+        self.started = self.phase_started = started
+        self.phase = "query_start"
+        self.progress_callbacks = 0
+        self.expiration = None
+
+    def run(self, phase, fn):
+        if type(phase) is not str or phase not in _OVERVIEW_QUERY_PHASES:
+            raise ValueError("unsupported overview query phase")
+        previous = self.phase
+        self.phase, self.phase_started = phase, time.monotonic()
+        try:
+            return fn()
+        finally:
+            # Freeze at the first budget check, before exception unwinding.
+            # A handled non-timeout error must not leave a stale helper label.
+            if self.expiration is None:
+                self.phase, self.phase_started = previous, time.monotonic()
+
+    def expire(self, now):
+        if self.expiration is None:
+            self.expiration = (self.phase, self.phase_started, now)
+
+    def progress(self):
+        self.progress_callbacks = min(self.progress_callbacks + 1,
+                                      _QUERY_DIAGNOSTIC_WORK_MAX)
+
+    def snapshot(self):
+        phase, phase_started, now = (self.expiration if self.expiration is not None
+                                     else (self.phase, self.phase_started, time.monotonic()))
+        def milliseconds(start):
+            seconds = now - start
+            if not math.isfinite(seconds):
+                return _QUERY_DIAGNOSTIC_MS_MAX
+            return int(min(_QUERY_DIAGNOSTIC_MS_MAX / 1000, max(0, seconds)) * 1000)
+        elapsed = milliseconds(self.started)
+        return _safe_query_diagnostic({
+            "version": 1, "phase": phase,
+            "statement": _OVERVIEW_QUERY_PHASES[phase],
+            "elapsed_ms": elapsed,
+            "phase_elapsed_ms": min(elapsed, milliseconds(phase_started)),
+            "progress_callbacks": self.progress_callbacks,
+        })
+
+
+def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False,
+              diagnostic=None):
     """Run `fn(conn)` -> data under the panel-state contract. Classification
     of the pre-connect shape comes from source_state.probe_source — the
     decided-once rule — then sqlite/OS errors classify UNREADABLE. EMPTY
@@ -279,21 +372,37 @@ def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
         return fail(SOURCE_UNREADABLE,
                     "db exists but cannot be opened — check permissions;"
                     " `claudlobby plane doctor`")
-    deadline = time.monotonic() + _QUERY_SECONDS
+    started = time.monotonic()
+    deadline = started + _QUERY_SECONDS
+    if diagnostic is not None:
+        diagnostic.start(started)
     expired = False
 
     def progress():
         nonlocal expired
-        expired = expired or time.monotonic() >= deadline
+        if not expired:
+            now = time.monotonic()
+            expired = now >= deadline
+            if expired and diagnostic is not None:
+                diagnostic.expire(now)
         return int(expired)
 
-    def provenance():
+    def sqlite_progress():
+        if diagnostic is not None:
+            diagnostic.progress()
+        return progress()
+
+    def read_provenance():
         if progress():
             raise sqlite3.OperationalError("interrupted")
         result = _provenance(root, conn)
         if progress():
             raise sqlite3.OperationalError("interrupted")
         return result
+
+    def provenance():
+        return (diagnostic.run("provenance", read_provenance)
+                if diagnostic is not None else read_provenance())
 
     try:
         conn = _ro_conn(db)
@@ -308,11 +417,12 @@ def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
                 admit_connection(conn)
         # Admission owns and clears its own progress handler. Install ours
         # afterward, retaining one deadline for the body and provenance SQL.
-        conn.set_progress_handler(progress, _QUERY_PROGRESS_STEPS)
+        conn.set_progress_handler(sqlite_progress, _QUERY_PROGRESS_STEPS)
         if progress():
             raise sqlite3.OperationalError("interrupted")
         try:
-            data = fn(conn)
+            data = (diagnostic.run("overview", lambda: fn(conn))
+                    if diagnostic is not None else fn(conn))
             return {"state": SOURCE_OK, "provenance": provenance(),
                     "data": data}
         except TaskDetailError as exc:
@@ -323,9 +433,12 @@ def _envelope(root: Path, fn, *, admit_connection=None, snapshot=False):
                     "remediation": str(exc)}
     except (sqlite3.Error, OSError, TaskStateError) as exc:
         if expired:
-            return {**fail(SOURCE_UNREADABLE,
-                           "query timed out — retry this read"),
-                    "reason": "query_timeout"}
+            result = {**fail(SOURCE_UNREADABLE,
+                            "query timed out — retry this read"),
+                      "reason": "query_timeout"}
+            if diagnostic is not None:
+                result["query_diagnostic"] = diagnostic.snapshot()
+            return result
         return fail(SOURCE_UNREADABLE,
                     f"query failed: {exc} — schema drift? run"
                     " `claudlobby plane doctor`")
@@ -1604,7 +1717,7 @@ def _epoch(iso: str | None) -> float | None:
 
 
 def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
-                    live_poll: str) -> dict:
+                    live_poll: str, *, diagnostic=None) -> dict:
     """The strip's rows. Every figure is a PLANE fact through the doors
     that already define it — never a bare zero where a source is absent:
 
@@ -1644,21 +1757,23 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     those rows summed once for the header — with the disclosures a sum
     swallows (`_totals`)."""
     from datetime import datetime, timedelta, timezone
+    phase = diagnostic.run if diagnostic is not None else lambda _name, fn: fn()
     root = paths.root
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     day_ago = (now_dt - timedelta(hours=24)).isoformat()
     try:
-        capture = load_capture_config(root)
+        capture = phase("capture_config", lambda: load_capture_config(root))
         capture_state = "ok"
     except CaptureConfigError:
         capture, capture_state = {}, "malformed"
-    recorded = _heartbeat_rows(conn)
+    recorded = phase("heartbeat", lambda: _heartbeat_rows(conn))
     stale_after = _stale_after_s()
-    bot_dirs = {(fl, b): d for fl, b, d in discover_bot_dirs(root)}
-    actors = _fleet_actors(conn)
-    pr = _plane_readers(paths)
-    fl = _fetch_fleets(conn, actors)
+    bot_dirs = phase("bot_directories", lambda: {
+        (fl, b): d for fl, b, d in discover_bot_dirs(root)})
+    actors = phase("fleet_actors", lambda: _fleet_actors(conn))
+    pr = phase("reader_module", lambda: _plane_readers(paths))
+    fl = phase("fleets", lambda: _fetch_fleets(conn, actors))
     rows = []
     for f in fl["fleets"]:
         alias = f["alias"]
@@ -1666,15 +1781,17 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         uids = [r["uid"] for r in mine]
         alias_of = {r["uid"]: r["alias"] for r in mine}
         rec, lv = _scope_presence(recorded, live, alias)
-        verdicts = derive_presence(rec, lv, now=now_dt, stale_after_s=stale_after)
+        verdicts = phase("presence", lambda: derive_presence(
+            rec, lv, now=now_dt, stale_after_s=stale_after))
         # open rows: (uid, occurred_at, source_ref, assignment_id, expected_by,
         # deadline_set_at), the deadline in force (#2469)
-        open_rows = [(uid, *r) for uid in uids for r in conn.execute(
-            OPEN_ASSIGNMENTS_AT_SQL, (uid,) + (None,) * 10)]
+        open_rows = phase("open_assignments", lambda: [
+            (uid, *r) for uid in uids for r in conn.execute(
+                OPEN_ASSIGNMENTS_AT_SQL, (uid,) + (None,) * 10)])
         open_n = len(open_rows)
         # Ownership-axis summary shares the board's bounded canonical task and
         # permission reduction, without constructing its cards/evidence.
-        task_summary = _fetch_task_summary(conn, alias, root=root)
+        task_summary = phase("task_summary", lambda: _fetch_task_summary(conn, alias, root=root))
         attention = task_summary["attention_count"]
         overdue = task_summary["overdue_count"]
         orphaned: int | None = 0
@@ -1700,9 +1817,10 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
                 if idd and spawn is not None and da is not None \
                         and spawn > int(da):
                     orphaned += 1
-        newest = conn.execute(_NEWEST_REPORT_SQL, (f["uid"], alias)).fetchone()
-        reports_24h = conn.execute(
-            _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0]
+        newest = phase("newest_report", lambda: conn.execute(
+            _NEWEST_REPORT_SQL, (f["uid"], alias)).fetchone())
+        reports_24h = phase("reports_since", lambda: conn.execute(
+            _REPORTS_SINCE_SQL, (f["uid"], day_ago, alias, day_ago)).fetchone()[0])
         unacked, unacked_reason, acked_by, acked_at = None, None, None, None
         if pr is None:
             unacked_reason = ("the install's claudlobby/_runtime_scripts/plane-readers.py is unreadable — the card"
@@ -1713,7 +1831,7 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             # the fleet's newest readable ack by ANY of its actors (the manager
             # is whoever acks; the card is a glance), then the rows past it
             # through the SAME rule brief's list applies (unacked_rows)
-            ack = pr.newest_ack(conn, uids)
+            ack = phase("newest_ack", lambda: pr.newest_ack(conn, uids))
             if ack is None:
                 unacked_reason = (
                     "no ack recorded — `claudlobby fleet reports ack` has never run for this fleet; "
@@ -1722,8 +1840,9 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
                     "--request-id UUID`"
                 )
             else:
-                past = pr.report_rows(conn, alias, since_seq=ack["seq"])
-                unacked = len(pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES))
+                past = phase("post_ack_report_rows", lambda: pr.report_rows(conn, alias, since_seq=ack["seq"]))
+                unacked = phase("post_ack_reduce", lambda: len(
+                    pr.unacked_rows(past, ack["seq"], pr.TERMINAL_STATUSES)))
                 acked_by, acked_at = _short(ack["by"]), ack["acked_at"]
         rows.append({
             "alias": alias, "uid": f["uid"], "bots": f["bots"], "provisional": f["provisional"],
@@ -1742,13 +1861,13 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
             "last_comm_at": f["last_comm_at"],
             "capture": capture_mode(capture, alias),
         })
-    prov = _provenance(root, conn)
+    prov = phase("provenance", lambda: _provenance(root, conn))
     last_in = _epoch(prov.get("last_ingest_at"))
     lag = (round(max(0.0, now_dt.timestamp() - last_in), 1)
            if last_in is not None else None)
-    samples = _host_samples(conn)
+    samples = phase("host_samples", lambda: _host_samples(conn))
     host = {
-        **_recorder_state(root),
+        **phase("recorder_state", lambda: _recorder_state(root)),
         # Exact ledger size is an explicit /api/summary?counts=true diagnostic; counting
         # all history on every overview refresh can exhaust the read budget.
         "rows": None, "rows_reason": "not_counted",
@@ -1998,9 +2117,10 @@ def create_app(
     app.add_middleware(FiniteReadMiddleware, owner=finite_reads)
     started_at = _now_iso()
 
-    def envelope(fn, *, snapshot=False):
+    def envelope(fn, *, snapshot=False, diagnostic=None):
         try:
-            result = _envelope(root, fn, admit_connection=admit_connection, snapshot=snapshot)
+            result = _envelope(root, fn, admit_connection=admit_connection,
+                               snapshot=snapshot, diagnostic=diagnostic)
         except OSError as exc:
             if admit_connection is None:
                 raise
@@ -2009,8 +2129,12 @@ def create_app(
             if result["state"] == SOURCE_UNREADABLE and result.get("reason") == "query_timeout":
                 # The closing owner gate still re-admits this response. Expose
                 # only the retry signal, never source paths or partial data.
-                return {"state": SOURCE_UNREADABLE, "reason": "query_timeout",
-                        "remediation": "query timed out — retry this read"}
+                sanitized = {"state": SOURCE_UNREADABLE, "reason": "query_timeout",
+                             "remediation": "query timed out — retry this read"}
+                detail = _safe_query_diagnostic(result.get("query_diagnostic"))
+                if diagnostic is not None and detail is not None:
+                    sanitized["query_diagnostic"] = detail
+                return sanitized
             raise AccessUnavailable("owner source unavailable")
         return result
 
@@ -2155,8 +2279,10 @@ def create_app(
         live, degraded = _live_panes(sampler)
         live_poll = ("unavailable" if not sampler.available
                      else "degraded" if degraded else "ok")
+        diagnostic = _OverviewQueryDiagnostic()
         return JSONResponse(envelope(
-            lambda c: _fetch_overview(c, paths, live, live_poll)))
+            lambda c: _fetch_overview(c, paths, live, live_poll, diagnostic=diagnostic),
+            diagnostic=diagnostic))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):
