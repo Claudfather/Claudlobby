@@ -1,14 +1,8 @@
 """Small registration surface for the operator's selected repo pull."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".host_repos", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".host_repos")
 
 
 def register_host_repos(hosts):

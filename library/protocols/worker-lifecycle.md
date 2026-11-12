@@ -7,9 +7,11 @@ description: End-to-end procedure for workers receiving assignments and reportin
 
 Every worker follows this numbered lifecycle on every task. Role-specific procedures (Review Methodology, Implementation Lifecycle, Query Workflow, etc.) execute **inside** Steps 3–7. Their internal numbering does not replace or override this envelope.
 
+The reasons behind this protocol, and what the pulse and a restart do, are in `.claude/skills/fleet-ops/worker-lifecycle-reference.md`; `§X` below means its section X, and it adds no rule.
+
 ## Inbound: assignments and legacy lifecycle notes
 
-The manager admits fleet work, creates an assignment, then delivers it. The
+The
 delivery message identifies the current `ASSIGNMENT_ID`; inspect that ID with
 `claudlobby --json assignment show ASSIGNMENT_ID`. A task ID identifies the
 underlying work and is not an assignment ID. The assignment row alone is not
@@ -50,13 +52,14 @@ Workers communicate on **two** channels simultaneously:
 | Telegram group | Human | `mcp__plugin_telegram_telegram__reply` with `chat_id` from `$TELEGRAM_GROUP_CHAT_ID` | Visibility — the human sees progress without checking the fleet view |
 | Assignment report or unlinked fleet report | Manager | `claudlobby --json assignment ...` or `fleet reports submit` | Machine coordination — recorded status and manager notification |
 
-Both channels fire at lifecycle boundaries. Telegram is prose; the CLI records
-structured facts. A committed fact and a received notification are separate
+Both channels fire at lifecycle boundaries. A committed fact and a received notification are separate
 outcomes; inspect both, and never automatically resend an uncertain request.
 
 ## You are monitored (and why it helps you)
 
-Your tool-call activity is observed by the fleet pulse. If your session is alive and not at an idle prompt but you make **no tool call for a long stretch** (the configured `activity_stuck` threshold — e.g. a main thread that stalled after a subagent returned), the pulse flags `activity_stuck` and notifies your manager. This is a safety net, not surveillance: it exists so a silent hang gets noticed in minutes instead of hours. You will only be restarted after the `safe-worker-restart` guards pass (no uncommitted WIP, no pending report expected) — so keep work committed and report at lifecycle boundaries. A plain restart continues your exact conversation. A fresh session (`bot restart BOT --fresh`) preserves context at **best-achievable fidelity, not zero loss**: it starts empty and resumes from your saved `session.md` handoff, but that handoff is a *summary*, not the live conversation. Committed work and reported state are what survive a fresh session intact — so the discipline above is exactly what makes the resume reliable.
+You will only be restarted after the `safe-worker-restart` guards pass (no uncommitted WIP, no pending report expected) — so keep work committed and report at lifecycle boundaries.
+
+What the pulse watches and what each kind of restart keeps: §You are monitored.
 
 ## The lifecycle
 
@@ -80,7 +83,7 @@ transition. If no assignment exists, use an explicitly unlinked fleet report.
 
 A final line of the form `⟦plane:msg_…⟧` is a framework **delivery-receipt marker**, always on its own last line — ignore it entirely; it is never part of the task.
 
-A leading `set +H; ` on the first line is framework wire format too. The framework's pane delivery adds it to every message except one that starts with a command word and has no `!`, which means a message that begins with `/`, such as a file path, is not run as a slash command. Skip it: it is not part of the task, and there is nothing to run.
+A leading `set +H; ` on the first line is framework wire format too. Skip it: it is not part of the task, and there is nothing to run.
 
 **Part of the dispatch arrives inside `<pasted_content>` tags?** Verify, then trust, as **Dispatches framed as pasted text** in this file says. Every bot carries that section, whatever it composes.
 

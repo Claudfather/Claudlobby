@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.conftest import write_jsonl
@@ -275,12 +276,6 @@ class TestSelectedCoverage:
         paths = SimpleNamespace(root=tmp_path, bot_runtime=lambda b: tmp_path / "runtime" / b)
         return fleet, paths
 
-    def _window(self):
-        from datetime import datetime, timedelta, timezone
-
-        end = datetime.now(timezone.utc)
-        return end - timedelta(hours=24), end
-
     def test_idle_directory_is_observed_zero_and_missing_is_unavailable(self, tmp_path):
         import os
         from claudlobby.isolation import transcript_slug
@@ -291,7 +286,7 @@ class TestSelectedCoverage:
         directory.mkdir(parents=True)
         old = _write(directory, [_ROW1], "old.jsonl")
         os.utime(old, (0, 0))
-        since, until = self._window()
+        since, until = _last_day()
         idle = tu.collect_bot_usage(paths, fleet, "idle", since, until)
         assert idle["coverage"]["status"] == "observed"
         assert idle["coverage"]["issues"] == []
@@ -732,3 +727,161 @@ class TestCompactionRow:
         undated = _boundary("2026-10-06T20:33:29Z", 1, 2)
         del undated["timestamp"]
         assert tu.compaction_row(undated) is None
+
+
+# --- the usage read runs back from each transcript's end (#717) -------------
+
+
+def _last_day():
+    """The window `bot usage --since 24h` reads: the 24 hours to now."""
+    end = datetime.now(timezone.utc)
+    return end - timedelta(hours=24), end
+
+
+def _at(hours):
+    """A row time ``hours`` from now, as Claude Code writes it."""
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+
+
+def _call(ts, mid, inp, cr, out=9, *, text="ok", sidechain=False):
+    """One identified assistant call: ``_usage`` with a message id."""
+    row = _usage(ts, inp, 0, cr, out, sidechain=sidechain)
+    row["message"]["id"] = mid
+    row["message"]["content"] = [{"type": "text", "text": text}]
+    return row
+
+
+class TestWindowRead:
+    """`bot usage` reads each transcript from its end back to the window's
+    start, so a transcript past the byte limit costs what its window costs,
+    and the coverage says what was read and what was not (#717)."""
+
+    def test_a_transcript_past_the_byte_limit_is_read_back_to_the_window_start(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tu, "MAX_BYTES", 128 * 1024)
+        fleet, paths, d = _one_bot(tmp_path)
+        d.mkdir(parents=True)
+        path = d / "s1.jsonl"
+        old = [_call(_at(-72), f"old{i}", 1, 1, text="x" * 10_000) for i in range(30)]
+        with open(path, "w") as fh:
+            fh.write('{"type": "assistant", "cut off mid-row\n')  # never read: older than the window
+            for row in old + [_call(_at(-3), "m1", 100, 1000), _said(_at(-2)),
+                              _call(_at(-2), "m2", 20, 2000), _call(_at(-1), "m3", 3, 3000)]:
+                fh.write(json.dumps(row) + "\n")
+        size = path.stat().st_size
+        assert size > tu.MAX_BYTES
+        since, until = _last_day()
+        row = tu.collect_bot_usage(paths, fleet, "b", since, until)
+        coverage = row["coverage"]
+        assert coverage["status"] == "observed" and coverage["issues"] == []
+        assert row["usage"]["turns"] == 3
+        assert row["usage"]["input_tokens"] == 123  # 100 + 20 + 3
+        assert row["usage"]["cache_read_input_tokens"] == 6000  # 1000 + 2000 + 3000
+        # One 64 KiB block holds the three calls and the newest older row.
+        assert coverage["bytes_read"] == 64 * 1024
+        assert coverage["bytes_before_window"] == size - coverage["bytes_read"]
+        assert coverage["bytes_unread_at_limit"] == 0
+        assert coverage["diagnostics"]["malformed_lines"] == 0
+        assert coverage["limits"]["bytes"] == 128 * 1024
+
+    def test_the_window_read_counts_what_a_whole_file_read_counts(self, tmp_path):
+        rows = [_call(_at(-72), f"old{i}", 1, 1, text="x" * 20_000) for i in range(10)]
+        rows += [_said(_at(-5)),
+                 _call(_at(-5), "m1", 10, 100),
+                 _call(_at(-5), "m1", 10, 100),  # a second content-block line of m1
+                 _call(_at(-4), "m2", 7, 70, out=5),
+                 _call(_at(-4), "m2", 7, 70, out=50),  # same message, other usage: the first counts
+                 _call(_at(-4), "s1", 2, 20, sidechain=True),
+                 _call(_at(-3), "m3", 1, 10, text="y" * 150_000)]  # one row across three blocks
+        tg = _call(_at(-3), "m4", 4, 40)
+        tg["message"]["content"] = [{"type": "tool_use", "name": "mcp__plugin_telegram_telegram__reply",
+                                     "input": {"chat_id": "x", "text": TG_TEXT}}]
+        bash = _call(_at(-3), "m4", 4, 40)  # m4's second line carries a canonical report
+        bash["message"]["content"] = [{"type": "tool_use", "name": "Bash", "input": {
+            "command": "claudlobby --json assignment progress asg_1 --summary go --request-id u"}}]
+        no_usage = _call(_at(-2), "m5", 1, 1)
+        no_usage["message"].pop("usage")
+        unkeyed = _call(_at(-2), "m6", 5, 50)
+        unkeyed["message"].pop("id")
+        untimed = _call(_at(-2), "m7", 6, 60)
+        untimed.pop("timestamp")
+        rows += [tg, bash, no_usage, unkeyed, untimed, _call(_at(1), "later", 9, 90)]
+        path = tmp_path / "t.jsonl"
+        with open(path, "w") as fh:
+            for row in rows[:-1]:
+                fh.write(json.dumps(row) + "\n")
+            fh.write('{"type": "assistant", "cut off mid-row\n')
+            fh.write(json.dumps(rows[-1]) + "\n")
+        since, until = _last_day()
+        whole = tu.parse_file(str(path), since=since, until=until)
+        size = path.stat().st_size
+        window, taken, ended = tu.parse_window(str(path), size, since, until, tu.MAX_BYTES)
+        assert ended == "window_start" and taken < size
+        for bucket in ("main", "sidechain"):
+            assert (getattr(window, bucket).to_dict(include_comms=True)
+                    == getattr(whole, bucket).to_dict(include_comms=True))
+        for name in ("malformed_lines", "missing_timestamps", "missing_usage", "unkeyed_turns",
+                     "duplicate_messages", "conflicting_duplicates"):
+            assert getattr(window, name) == getattr(whole, name), name
+        # The arithmetic both reads agree on: m1, m2 (its first line), m3, m4 and
+        # the unkeyed call; m5 has no usage and m7 no time.
+        assert window.main.turns == 5 and window.main.output_tokens == 9 + 5 + 9 + 9 + 9
+        assert window.main.input_tokens == 10 + 7 + 1 + 4 + 5
+        assert window.sidechain.turns == 1 and window.main.comms_blocks == 2
+        assert (window.duplicate_messages, window.conflicting_duplicates) == (3, 1)
+        assert (window.malformed_lines, window.missing_usage, window.missing_timestamps,
+                window.unkeyed_turns) == (1, 1, 1, 1)
+
+    def test_the_byte_limit_leaves_a_partial_count_that_says_what_went_unread(
+            self, tmp_path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(tu, "MAX_BYTES", 128 * 1024)
+        fleet, paths, d = _one_bot(tmp_path)
+        sizes = {}
+        # Named against their write order: the most recently written is read first.
+        for name, count, age in (("a", 5, 300), ("b", 10, 200), ("c", 10, 100)):
+            path = _session(d, f"{name}.jsonl", [
+                _call(_at(-2), f"{name}{i}", 1, 10, text="z" * 10_000) for i in range(count)],
+                mtime=time.time() - age)
+            sizes[name] = path.stat().st_size
+        since, until = _last_day()
+        row = tu.collect_bot_usage(paths, fleet, "b", since, until)
+        coverage = row["coverage"]
+        assert coverage["status"] == "partial"
+        assert coverage["issues"] == ["byte_limit_reached"]
+        # c is read whole, b from its end until the limit, a, the oldest, not at all.
+        assert coverage["files_read"] == 2 and coverage["files_skipped_at_least"] == 1
+        assert coverage["bytes_read"] == 128 * 1024
+        assert coverage["bytes_unread_at_limit"] == sum(sizes.values()) - 128 * 1024
+        assert coverage["additional_files_after_limit"] == 0  # every file was listed
+        assert 10 < row["usage"]["turns"] < 20  # all of a and the newest of b
+
+    def test_bytes_written_after_the_listing_are_not_read(self, tmp_path, monkeypatch):
+        fleet, paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", [_call(_at(-2), "m1", 1, 10), _call(_at(-1), "m2", 2, 20)])
+        listed = path.stat().st_size
+        real = tu._bounded_files
+
+        def listed_then_written(directory, since):
+            found = real(directory, since)
+            with open(path, "a") as fh:  # the bot writes on after the listing
+                fh.write(json.dumps(_call(_at(1), "m3", 3, 30)) + "\n")
+            return found
+
+        monkeypatch.setattr(tu, "_bounded_files", listed_then_written)
+        since, until = _last_day()
+        row = tu.collect_bot_usage(paths, fleet, "b", since, until)
+        assert row["coverage"]["status"] == "observed" and row["coverage"]["issues"] == []
+        assert row["coverage"]["bytes_read"] == listed
+        assert row["usage"]["turns"] == 2
+
+    def test_the_file_limit_is_named_apart_from_the_byte_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tu, "MAX_FILES", 1)
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "a.jsonl", [_call(_at(-2), "a1", 1, 10)])
+        _session(d, "b.jsonl", [_call(_at(-2), "b1", 1, 10)])
+        since, until = _last_day()
+        coverage = tu.collect_bot_usage(paths, fleet, "b", since, until)["coverage"]
+        assert coverage["issues"] == ["file_limit_reached"]
+        assert coverage["files_read"] == 1 and coverage["additional_files_after_limit"] == "unknown"

@@ -1,20 +1,9 @@
 """Dependency-light registration for canonical task and assignment reads."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".task_read", __package__).dispatch(args),
-                   json_output=args.json)
-
-
-def _review_dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".task_reviews", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".task_read")
+_review_dispatch = lazy(".task_reviews")
 
 
 def _route(children, verb, command, help, description=None):
@@ -25,13 +14,17 @@ def _route(children, verb, command, help, description=None):
 
 
 def register_task_read_subparsers(sub, task_children):
-    listing = _route(task_children, "list", "task.list", "List canonical tasks in the active fleet")
+    listing = _route(task_children, "list", "task.list", "List canonical tasks in the active fleet",
+                     description="List canonical tasks in the active fleet: each task's state and "
+                                 "assignments, and each recorded event of the page once (data.events).")
     listing.add_argument("--state", default="open", choices=(
         "open", "queued", "assigned", "active", "blocked", "completed", "failed", "cancelled", "all"))
     listing.add_argument("--bot", metavar="BOT", help="Only assignments for this active bot")
     listing.add_argument("--limit", type=int, default=100, metavar="N", help="Page size, 1 to 1000")
     listing.add_argument("--cursor", metavar="TOKEN", help="Continue the same scope and filters")
-    showing = _route(task_children, "show", "task.show", "Show one canonical task ID")
+    showing = _route(task_children, "show", "task.show", "Show one canonical task ID",
+                     description="Show one canonical task ID: its state, each of its assignments and "
+                                 "each recorded event once (data.events).")
     showing.add_argument("task_id", metavar="TASK_ID",
                          help="A task ID, or wi_ and at least 8 of its hex digits")
 
@@ -45,9 +38,10 @@ def register_task_read_subparsers(sub, task_children):
     assignment = sub.add_parser("assignment", help="Read canonical assignment records")
     children = assignment.add_subparsers(dest="assignment_command", required=True)
     showing = _route(children, "show", "assignment.show", "Show one canonical assignment ID",
-                     description="Show one canonical assignment ID: its state, history, task and recorded "
-                                 "delivery. The deadline watch (not_due, overdue, orphaned, past_due) is not "
-                                 "part of this record; claudlobby brief reports it.")
+                     description="Show one canonical assignment ID: its state, its task, each recorded "
+                                 "event once (data.events) and the recorded delivery. The deadline watch "
+                                 "(not_due, overdue, orphaned, past_due) is not part of this record; "
+                                 "claudlobby brief reports it.")
     showing.add_argument("assignment_id", metavar="ASSIGNMENT_ID",
                          help="An assignment ID, or asg_ and at least 8 of its hex digits")
     return children

@@ -22,19 +22,22 @@ def lease_days_env() -> int:
         return 14
 
 
-def plane_workstreams(paths: Paths, plane=None, *, lease_days: int | None = None):
+def plane_workstreams(paths: Paths, plane=None, *, lease_days: int | None = None, tasks=None):
     """(entries, None) — the ``{id: entry}`` map from the plane — or (None, note)
     when the plane cannot answer: unreachable, no stdlib readers, no fleet, or a
     fleet the plane holds no bot of. Never an empty map for a plane that could
     not be read (the caller omits with the note, or refuses). *plane* is a
-    caller's open session (``brief.plane_session``); else one is opened here."""
+    caller's open session (``brief.plane_session``); else one is opened here.
+    *tasks* is the fleet's reducer read the caller already holds in that
+    session's snapshot; None lets the registry read its own."""
     from .brief import plane_session
     session, note = (plane, None) if plane is not None else plane_session(paths)
     if session is None:
         return None, note
     try:
         reg = session.pr.workstream_registry(session.conn, session.fleet,
-                                             lease_days=lease_days if lease_days is not None else lease_days_env())
+                                             lease_days=lease_days if lease_days is not None else lease_days_env(),
+                                             tasks=tasks)
     except Exception as exc:
         return None, f"the plane cannot answer: {exc}"
     finally:
@@ -106,6 +109,10 @@ def format_show(w: dict) -> str:
     task_ids = w.get("task_ids") or []
     if task_ids:
         lines.append(f"  tasks:    {', '.join(task_ids)}")
+        lines.append(f"  open:     {', '.join(w.get('open_task_ids') or []) or 'none'}")
+    if w.get("closed_ts"):
+        closer = f" by {w['closed_by']}" if w.get("closed_by") else ""
+        lines.append(f"  closed:   {w['closed_ts']}{closer}")
     refs = w.get("refs") or {}
     if refs.get("issues") or refs.get("prs"):
         lines.append(

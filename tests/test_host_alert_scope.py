@@ -50,12 +50,15 @@ SCRIPTS_REACHING_DOOR = {
     "fleet-pulse", "creds-check",
     # #1826: a missed briefing slot is raised through emit_fleet_notice.
     "briefing-trigger",
+    # #1645: swap thrash, once an episode, through emit_failure_alert.
+    "plane-host-probe",
 }
 
 # Of those, the ones systemd runs with NO fleet TODAY -- the retrofit half.
 ACTIVE_MISROUTING = {
     "disk-monitor", "fleet-memory-check", "host-health-check",
     "notify-behind", "orphan-browser-reaper", "update-claude-code",
+    "plane-host-probe",
 }
 
 # A third category, not a tiebreak. update-siblings is host-scoped BY DESIGN

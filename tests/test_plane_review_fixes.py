@@ -212,6 +212,7 @@ def test_f3_overcap_work_item_body_rejects(tmp_path: Path):
             "title": "t",
             "created_by": "bot:example-fleet/alpha",
             "body": "y" * (cap + 1),
+            "workstream_id": "ws-test",
         },
     }
     with pytest.raises(ContractViolation):
@@ -324,7 +325,7 @@ def _seed_assignment(root: Path, *, dispatch_msg, tx_events=()) -> str:
     batch = [
         {"event_type": "work_item", "emitter": "fx", "fleet": "example-fleet",
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": "bot:example-fleet/mgr"}},
+                     "created_by": "bot:example-fleet/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "fx", "fleet": "example-fleet",
          "payload": {"assignment_id": aid, "work_item_id": wi,
                      "assignee": "bot:example-fleet/w1",

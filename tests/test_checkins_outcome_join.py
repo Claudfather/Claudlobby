@@ -49,7 +49,7 @@ def _dispatched(root, ck: str, *, task_id, terminal: str | None = None,  # noqa:
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"work_item_id": wi, "title": "fix the feed",
-                     "created_by": f"bot:{F}/mgr"}},
+                     "created_by": f"bot:{F}/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,
@@ -96,7 +96,7 @@ def test_canonical_assign_checkin_link_has_no_historical_alias_or_delivery_claim
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "claudlobby.tasks.v1", "fleet": F,
          "payload": {"work_item_id": wi, "title": "fix the feed",
-                     "created_by": f"bot:{F}/mgr"}},
+                     "created_by": f"bot:{F}/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "claudlobby.tasks.v1", "fleet": F,
          "payload": {"assignment_id": asg, "work_item_id": wi,
                      "assignee": f"bot:{F}/w1", "assigned_by": f"bot:{F}/mgr"}},

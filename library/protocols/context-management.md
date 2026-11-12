@@ -8,24 +8,33 @@ title: Context Management
 - **Switching repos / projects** → `/clear`
 - **Stuck > 3 min** → stop and record `claudlobby --json assignment block ASSIGNMENT_ID --reason "<reason>" --request-id BLOCK_UUID`; with no current assignment, use an unlinked `fleet reports submit` (see `/fleet-ops`). Don't spin.
 
+The measurements and reasons behind this protocol's rules are in `.claude/skills/fleet-ops/context-reference.md`; it adds no rule.
+
 ## Never state a context percentage you have not seen
 
 **Report only a figure you actually observed. Never produce one you did not.**
 That rule is absolute and everything below is how to tell the two apart.
 
 **A percentage is sometimes rendered, and when it is, it is real.** Above some
-threshold the pane carries a `NN% context used` figure; below it, the same slot
-renders empty. Measured across all 21 bots on this host: one rendered `98%
-context used` while twenty rendered nothing, and the panes were structurally
-identical — a fixed slot whose *content* is conditional, not an element that
-appears.
+threshold the pane carries a figure; below it, the same slot renders empty.
+While autocompact is on (Claude Code's default), the figure has two forms, and
+they count in opposite directions:
 
-**Above the threshold it is a live gauge, not a one-time alarm.** It moves with
-use: the same bot read `97%` and then `98%` minutes later. It is also not a
-latch — a bot observed at `100%` rendered nothing later in the **same** session,
-with no restart. So the figure can both appear and disappear while a bot runs.
+- `N% until auto-compact` is the share left before Claude Code compacts the
+  conversation, not the share used: it falls as the context grows. Claude Code
+  shows it whenever it holds the conversation to an autocompact window: one set
+  for the bot, or, with none set (as under `auto_compact_window: auto`), one it
+  picks for the model, as it does by default for a model with a native 1M window.
+- `NN% context used` is the share used: it rises as the context grows. Claude
+  Code shows it only where it holds the conversation to no window.
+
+**In August 2026, when the figure read `NN% context used`, it was a live gauge,
+not a one-time alarm.** It was also not a latch — a bot observed at `100%`
+rendered nothing later in the **same** session, with no restart. So that form
+could both appear and disappear while a bot ran.
 *(Why it fell is not established. Do not assert a cause you have not measured.
 Whether it renders intermediate decreasing values is likewise unobserved.)*
+Nothing is recorded yet about how `N% until auto-compact` behaves in a pane.
 
 **The threshold is undocumented and cannot be located from outside.** A bot
 below it renders nothing, so no sweep can find where the line sits — the
@@ -35,7 +44,7 @@ threshold, and do not repeat one you were told.
 **So it is a gauge with a floor: absence proves nothing, presence is real.**
 A blank slot has **two causes the pane cannot tell apart** — the bot never
 reached the threshold, or it reached it and came back down. A bot under no
-pressure at all and one that was at `100%` minutes ago look identical. That is
+pressure at all and one that was at `100% context used` minutes ago look identical. That is
 why a blank pane can never certify headroom, for yourself or anyone else.
 
 What this means in practice:
@@ -64,8 +73,7 @@ check for the symptoms below, not as a threshold in itself.
 
 **Lean on subagents early.** Once you have finished a couple of units, route
 further reading through Explore/Plan subagents rather than pulling files into
-your own context. This rung used to be keyed to "above 50%"; the action never
-needed the number, and doing it early is close to free.
+your own context.
 
 **Name the symptoms.** Any **one** of these is enough — they do not accumulate
 into a score:
@@ -88,8 +96,7 @@ claudlobby --json assignment progress ASSIGNMENT_ID --summary "context-degraded 
 ```
 
 Then state whether a fresh session is safe **right now**: is your work committed,
-is a report pending, is a PR half-open? That is the part only you know, and it is
-what decides whether the manager acts immediately or waits. The manager relieves
+is a report pending, is a PR half-open? The manager relieves
 your context with a compaction (`bot compact`) or a fresh session (`bot restart
 BOT --fresh`, which resumes from your saved handoff); a plain restart continues
 this same conversation and relieves nothing.

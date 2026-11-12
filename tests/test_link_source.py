@@ -20,36 +20,13 @@ boolean: `NOT json_extract(detail,'$.auto_resolved')` is true for NULL and for
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from pathlib import Path
-
 import pytest
 
 from claudlobby.plane.contracts import LINK_SOURCES, TaskEvent
-from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import _apply_capture
 from claudlobby.plane.registries import CONTENT_FIELDS, FIELD_POLICY
 
-REPO = Path(__file__).resolve().parent.parent
 WI = "wi_" + "a" * 32
-
-
-def _task_details(tmp_path):
-    if not db_path(tmp_path).exists():
-        return []
-    conn = connect(db_path(tmp_path))
-    try:
-        rows = conn.execute(
-            "SELECT detail FROM events WHERE kind='task' AND detail IS NOT NULL"
-            " ORDER BY ingest_seq").fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc):
-            raise
-        return []
-    finally:
-        conn.close()
-    return [json.loads(r[0]) for r in rows]
 
 
 class TestTheContract:

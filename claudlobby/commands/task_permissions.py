@@ -38,7 +38,7 @@ def dispatch(args):
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
     from .host_owner import _GENERATED, _approve, _terminal
-    from ..application_tasks import _request_id
+    from ..request_ids import canonical_request_id
 
     release_id = None
     provenance = {}
@@ -47,7 +47,7 @@ def dispatch(args):
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no task permissions")
         if verb not in {"show", "check"}:
-            _request_id(args.request_id)
+            canonical_request_id(args.request_id)
         scope = _scope(args.scope_file) if verb in {"request", "check"} else None
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         root = selected.paths.root

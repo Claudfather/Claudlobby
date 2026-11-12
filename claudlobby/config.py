@@ -698,6 +698,12 @@ class ClaudnaConfig:
     precompact_reflect: bool | None = None
 
 
+# The autocompact window a bot composes when neither its entry nor the fleet's
+# defaults set one, in tokens: a bound on how far one conversation grows before
+# Claude Code compacts it, the same on any host (#1053). "auto" turns it off.
+DEFAULT_AUTO_COMPACT_WINDOW = 700_000
+
+
 @dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
@@ -775,10 +781,12 @@ class BotConfig:
     skill_overrides: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_SKILL_OVERRIDES)
     )
-    # settings.local.json autocompact window: "auto" keeps Claude Code's own
-    # window and blocks its end-of-turn autocompact offer (#1388); a whole
-    # number of tokens sets the window for every model.
-    auto_compact_window: str | int = "auto"
+    # settings.local.json autocompact window: a whole number of tokens sets the
+    # window for every model, capped at each model's own; the default bounds how
+    # far a conversation grows before Claude Code compacts it (#1053). "auto"
+    # keeps Claude Code's own window instead. Either blocks Claude Code's
+    # end-of-turn autocompact offer (#1388).
+    auto_compact_window: str | int = DEFAULT_AUTO_COMPACT_WINDOW
     extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -1943,7 +1951,7 @@ def _parse_auto_compact_window(raw: dict, defaults: dict, name: str) -> str | in
     """``auto_compact_window``: "auto", or a whole number of tokens Claude Code
     accepts (100000 to 1000000). Claude Code drops any other value without a word,
     which would bring back the offer the default blocks (#1388)."""
-    value, source = _select_bot_scalar(raw, defaults, "auto_compact_window", "auto")
+    value, source = _select_bot_scalar(raw, defaults, "auto_compact_window", DEFAULT_AUTO_COMPACT_WINDOW)
     if value == "auto":
         return "auto"
     if (isinstance(value, bool) or not isinstance(value, int)

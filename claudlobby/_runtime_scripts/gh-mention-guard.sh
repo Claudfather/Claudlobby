@@ -124,7 +124,7 @@ REWRITER="$LIB_DIR/mention-rewrite.py"
 HOST_DIR="${CLAUDLOBBY_ROOT:-}/runtime/_host"
 BOTS_FILE="${GH_MENTION_HANDLES_FILE:-$HOST_DIR/bot-handles}"
 ALLOW_FILE="${GH_MENTION_ALLOWLIST_FILE:-$HOST_DIR/mention-allowlist}"
-[ -r "$BOTS_FILE" ] || _bail "no bot-handles manifest at $BOTS_FILE (run: claudlobby --root <data-root> config plan --release <sealed-release-id>; then: claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>)"
+[ -r "$BOTS_FILE" ] || _bail "no bot-handles manifest at $BOTS_FILE (run: claudlobby --root <data-root> host update apply FULL_COMMIT_SHA)"
 
 # --- step 2: is this tool call GitHub-bound? --------------------------------
 # ONE jq on the common path. The Bash branch does not verify tool_name first:

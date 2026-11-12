@@ -2,7 +2,7 @@
 
 Composited bot scripts. A tool is a **directory** `library/tools/<name>/` (fleet
 overlay `local/<fleet>/library/tools/<name>/` wins) that the compositor renders
-into the bot directory through staged configuration and activation.
+into the bot directory during a host update.
 
 **Tool, or a helper inside a skill?** This category exists for **compose-time
 parameterization** — values baked into the script at composition time via
@@ -11,9 +11,9 @@ nothing here, and splitting one capability across two library categories costs
 cohesion: ship it beside its `SKILL.md` instead. See `library/skills/README.md`,
 "Shell helpers". Unlike `data/` content (bot-owned, mutable,
 never regenerated), a tool is generated output like `CLAUDE.md`: never
-hand-edited. Review the rendered change with `claudlobby config plan` and
-`config diff PLAN_ID`, then publish it with `host activate PLAN_ID`
-(detaching a tool removes its rendered file during activation).
+hand-edited. Change its authored source; the operator publishes the reviewed
+commit with `host update apply FULL_COMMIT` (detaching a tool removes its
+rendered file at that update).
 
 ## Layout
 

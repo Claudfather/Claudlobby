@@ -18,7 +18,6 @@ The keepalive.log parser is gone with the file it parsed.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -301,11 +300,6 @@ def format_table(results: dict, window: str = "24h") -> str:
     )
     lines.extend(notes)
     return "\n".join(lines)
-
-
-def format_json(results: dict) -> str:
-    """Render full results as JSON."""
-    return json.dumps(results, indent=2)
 
 
 def _fmt_duration(seconds: float | int) -> str:

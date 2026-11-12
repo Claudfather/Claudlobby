@@ -118,7 +118,8 @@ def test_report_list_pages_ingest_order_and_discloses_capture(active, monkeypatc
     first_item = first["items"][0]
     assert set(first_item) == {"message_id", "author", "occurred_at", "ingest_seq",
                                "task_id", "historical_task_reference", "assignment_id",
-                               "task_event", "status", "summary", "report", "evidence"}
+                               "task_event", "status", "summary", "report", "evidence",
+                               "workstream_id"}
     assert (first_item["author"], first_item["task_id"], first_item["status"]) == (
         "worker", None, "completed")
     assert first_item["report"]["state"] == "captured"

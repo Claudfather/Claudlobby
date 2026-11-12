@@ -10,11 +10,11 @@ from pathlib import Path
 import shlex
 import sqlite3
 import stat
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
 from ..reference_hints import (PREFIX_HINT_LIMIT, PREFIX_MIN_HEX, PREFIX_SCAN_LIMIT, PrefixCandidate,
                                PrefixHint, id_shape, note_prefix)
+from ..request_ids import canonical_request_id
 
 
 def _text_file(name: str, *, cap: int) -> str:
@@ -44,15 +44,6 @@ def _json_file(name: str, *, cap: int = 1_048_576) -> dict:
     if not isinstance(value, dict):
         raise CommandFailure("invalid_argument", "check-in input must be a JSON object")
     return value
-
-
-def _request(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
 
 
 def _offline(args) -> CommandOutput:
@@ -224,7 +215,7 @@ def _record(args) -> CommandOutput:
     from ..plane.ids import derive_uid
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
-    request_id = _request(args.request_id)
+    request_id = canonical_request_id(args.request_id)
     decision = _json_file(args.file, cap=16_384)
     selection_file = _json_file(args.selection_file, cap=16_384) if args.selection_file else None
     destination, origin, selected, bindings = _scope(args)

@@ -17,6 +17,6 @@ Project documentation for claudlobby. Each subdirectory has a specific purpose:
 - `screenshots/` — Issue/PR reference images (committed on asset branches for private repos)
 - `integrations/` — External service integration guides
 - `reflections/` — Dated session retrospectives (`type: knowledge`)
-- `archive/` — Completed or superseded docs (moved here, not deleted)
+- `archive/` — Not used: a completed or superseded doc is deleted, and git history keeps it
 
 Top-level files are general guides. Categorized content goes in subdirectories.

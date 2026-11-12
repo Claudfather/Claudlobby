@@ -133,7 +133,14 @@ def _of(rs, kind: str) -> list:
 
 
 def _record(rs) -> dict:
-    return json.loads((rs.state / "slot-0.lock").read_text())
+    """The slot's record, read as the module's own _read reads it (#2125, #2866): an
+    empty or half-written file is no record yet. _acquire creates the file empty and
+    _write truncates it before writing, so a poll can land between."""
+    try:
+        rec = json.loads((rs.state / "slot-0.lock").read_text() or "{}")
+    except ValueError:
+        return {}
+    return rec if isinstance(rec, dict) else {}
 
 
 def _last_line(text: str) -> str:
@@ -188,6 +195,31 @@ def _lift(rs, *args: str, env: dict = None) -> subprocess.CompletedProcess:
 
 def _refused_at(rs) -> list:
     return [d["where"] for d in _of(rs, "heavy_slot_refused")]
+
+
+# --- the tests' own reader of the slot's record -----------------------------------
+
+def test_a_poll_between_the_lock_and_its_record_reads_no_record_yet(rs):
+    """_acquire creates the lock file empty and _write truncates it before
+    writing, so a poll can read it in between (#2125, #2866). CI hit that in the
+    scope test's poll (run 42850852913: JSONDecodeError). The tests read it as the
+    module's own _read does, as no record yet, and poll on."""
+    lock = rs.state / "slot-0.lock"
+    lock.write_text("")  # created by _acquire, not yet written
+    assert _record(rs) == {}
+    lock.write_text('{"state": "rel')  # caught mid-write
+    assert _record(rs) == {}
+    lock.write_text("")
+    reads = []
+
+    def poll():
+        reads.append(_record(rs))
+        if len(reads) == 2:  # the keeper's write lands
+            lock.write_text(json.dumps({"state": "released"}) + "\n")
+        return reads[-1].get("state") == "released"
+
+    _wait_for(poll)
+    assert reads == [{}, {}, {"state": "released"}]
 
 
 # --- the lines themselves ---------------------------------------------------------
@@ -286,6 +318,32 @@ def test_a_lines_file_it_cannot_read_refuses(rs, text):
     assert "render-lines" in r.stderr and _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
 
 
+@pytest.mark.parametrize("text, said", [
+    ("stop_mib = 2999\n", "stop_mib_floor"),  # under this host's floor
+    ("stop_mib_floor = 3900\n", "stop_mib_floor"),  # a floor over this host's line
+    ("poll_s = 6.5\n", "notice_within_s"),  # one reading is a render's notice
+    ("notice_within_s = 1\n", "notice_within_s"),
+    ("stop = off\n", "names no render line"),  # a render has no off line
+])
+def test_a_lines_file_outside_its_bounds_is_refused(tmp_path, text, said):
+    """The render keeps the plain run's bounds where the two share a line (#2790)."""
+    hs = load_lib_module("heavy-slot")
+    (tmp_path / "render-lines").write_text(text)
+    with pytest.raises(hs.LinesError) as refused:
+        hs.render_lines(tmp_path)
+    assert said in str(refused.value)
+
+
+@needs_linux
+def test_a_lines_file_outside_its_bounds_refuses_the_render(rs):
+    (rs.state / "render-lines").write_text("poll_s = 6.5\n")
+    r = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
+    assert r.returncode == 2, r.stderr
+    assert not (rs.tmp / "ran").exists()
+    assert "breaks its bounds" in r.stderr and "notice_within_s" in r.stderr, r.stderr
+    assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
+
+
 def test_an_unknown_profile_is_refused(rs):
     r = subprocess.run([str(WRAPPER), "run", "--profile", "nope", "--", "sh", "-c", 'touch "$STUB_DIR/ran"'],
                        env=rs.env, capture_output=True, text=True, timeout=60)
@@ -314,6 +372,11 @@ def test_no_scope_no_render(rs):
     assert rec["state"] == "released" and rec["ended"] == "not-started", rec
     assert _last_line(r.stderr).startswith("heavy-slot: NOT RUN"), r.stderr
     assert [d["ended"] for d in _of(rs, "heavy_slot_released")] == ["not-started"]
+    (row,) = _of(rs, "heavy_slot_released")
+    # the start's reading, and no PSS: none was read, so it is left out, never 0 (#1645)
+    assert row["peak"] == {"mem_available_mib_start": 6000, "mem_available_mib_low": 6000,
+                           "load1_high": 2.0, "load5_high": 2.0, "readings": 1}
+    assert row["waited_s"] == 0
 
 
 @needs_linux
@@ -357,6 +420,7 @@ def test_a_render_runs_in_its_own_scope_with_the_session_bus_cut(rs, user_scope)
     assert acquired[0]["profile"] == "render" and acquired[0]["unit"] == rec["unit"]
     assert acquired[0]["readings"] == {"mem_available_mib": 6000, "load1": 2.0, "load5": 2.0}
     assert released[0]["ended"] == "done" and released[0]["peak"] == rec["peak"]
+    assert released[0]["waited_s"] == rec["waited_s"] == 0  # a free slot, no ticket (#1645)
     assert _of(rs, "heavy_slot_stopped") == []
     assert "render done" in _last_line(r.stderr), r.stderr
     # nothing left behind: systemd removes the emptied scope's cgroup on its own time
@@ -465,6 +529,9 @@ def test_the_scope_dies_with_its_runner(rs, user_scope):
         stopped = _wait_for(lambda: _of(rs, "heavy_slot_stopped"), timeout=10)
         assert len(stopped) == 1 and stopped[0]["line"] == "runner" and stopped[0]["unit"] == rec["unit"], _events(rs)
         assert [d["ended"] for d in _of(rs, "heavy_slot_released")] == ["killed"], _events(rs)
+        (row,) = _of(rs, "heavy_slot_released")
+        # the keeper has the record's start reading and wait; the runner held the rest (#1645)
+        assert row["peak"] == {"mem_available_mib_start": 6000} and row["waited_s"] == 0
         assert [e["by"] for e in _render_record(rs)] == ["keeper"]
         again = _render(rs, "sh", "-c", 'touch "$STUB_DIR/ran"')
         assert again.returncode == EX_TEMPFAIL and not (rs.tmp / "ran").exists(), again.stderr
