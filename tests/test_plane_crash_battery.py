@@ -141,7 +141,7 @@ def test_derivation_fixtures(tmp_path: Path):
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "fx", "fleet": "fx-fleet",
          "payload": {"work_item_id": wi, "title": "t",
-                      "created_by": "bot:fx-fleet/mgr"}},
+                      "created_by": "bot:fx-fleet/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "fx", "fleet": "fx-fleet",
          "payload": {"assignment_id": a1, "work_item_id": wi,
                       "assignee": "bot:fx-fleet/w1",

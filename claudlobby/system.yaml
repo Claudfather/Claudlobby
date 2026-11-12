@@ -459,6 +459,10 @@ defaults:
       # on every path (UserPromptSubmit stdout feeds the model). Same dormancy.
       - command: "$CLAUDLOBBY_NATIVE_DIR/plane-dispatch-in.sh"
         timeout: 15
+      # #1053: when input last reached the session (data/.turn-input). stdout
+      # empty, exit 0 on every path; nothing reads it yet.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
+        timeout: 10
     # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
     # when a bot answers a Telegram-initiated turn with plain final text
     # (no reply tool call) the bridge's RC auto-relay delivers it and no
@@ -470,6 +474,9 @@ defaults:
       # #996: a turn that ended normally clears the usage-limit record below.
       - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
         timeout: 10
+      # #1053: when the turn ended (data/.turn-ended), normally or not, below.
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
+        timeout: 10
     # #996: Claude Code ends a turn a claude.ai usage limit stopped with
     # StopFailure (error rate_limit, the limit line in last_assistant_message).
     # The hook keeps that fact in data/.usage-limit for keepalive's LIMIT
@@ -477,6 +484,8 @@ defaults:
     # records usage_limit_hit. stdout empty, exit 0 on every path.
     StopFailure:
       - command: "$CLAUDLOBBY_NATIVE_DIR/usage-limit-hook.sh"
+        timeout: 10
+      - command: "$CLAUDLOBBY_NATIVE_DIR/turn-marker.sh"
         timeout: 10
 
   observability:

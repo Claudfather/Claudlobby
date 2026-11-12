@@ -65,6 +65,14 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     # was ever declared" -- the precise false clear the field exists to prevent,
     # re-entering through its own remedy. Closed Literal, so no cap.
     ("task", "pr_attribution_withheld"): {"class": "METADATA"},
+    # `workstream_id` is METADATA for the same reason as `pr_role`, and
+    # registered EXPLICITLY rather than left out (#1053): unregistered, it
+    # would survive a metadata capture by ACCIDENT. It must survive by RULE,
+    # because the failure is silent and passes -- a stripped workstream reads
+    # as "in no workstream", which a reader grouping work by workstream takes
+    # for a task never filed into one. No cap, like `pr_role`: the door reads
+    # it from the task's own record, never from anything a caller types.
+    ("task", "workstream_id"): {"class": "METADATA"},
     ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
     ("workstream_event", "waiting_on"): {"class": "METADATA"},
     ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
@@ -257,6 +265,23 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # One Claude Code compaction, from its compact_boundary transcript row,
     # recorded once by the pulse (claudlobby.compactions, #2206).
     "compaction": "notice",
+    # #1053: a bot's request for its own compaction (`bot compact` on itself:
+    # data.request_id, data.context) and its withdrawal (`--cancel`). A reader
+    # acts on the request file, data/.compact-request, never on these rows.
+    "compact_requested": "notice",
+    "compact_cancelled": "notice",
+    # #1053 build PR 4: keepalive's executor acting on that request. It typed
+    # /compact (data: the request, the slot's lease, every guard's reading); a
+    # compact_boundary row newer than the send proved it (with its sizes); or
+    # none came within the lease's 10 minutes, critical, since a compaction
+    # asked for and not done is a fault nothing resends: `event list --critical`
+    # and the bot's own brief show it. A guard that said not now, or ended the
+    # request unsent, writes
+    # compaction_skipped with its reason, once per reason per request.
+    "compaction_sent": "notice",
+    "compaction_proven": "notice",
+    "compaction_not_proven": "critical",
+    "compaction_skipped": "notice",
     # manager check-in (spec §7): the decision record, and the join row a
     # `dispatch-task.sh --checkin` appends to its batch. notice — the record
     # IS the point; nothing here pages.
@@ -299,10 +324,13 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # FLEET ALERTs (emit_failure_alert): each records its caller's own type and
     # pages the manager and Telegram. Where each row lands is in the
     # fleet-observability protocol's table. From the host jobs: disk-monitor,
-    # fleet-memory-check, host-health-check (one of three types, by finding),
-    # update-claude-code and vault-sync.
+    # fleet-memory-check, plane-host-probe (swap thrash, once an episode, and a
+    # thrash line file it refuses, once a bad edit), host-health-check (one of
+    # three types, by finding), update-claude-code and vault-sync.
     "disk_high": "critical",
     "memory_high": "critical",
+    "memory_thrash": "critical",
+    "memory_thrash_unarmed": "critical",
     "undervoltage": "critical",
     "storage_stall": "critical",
     "host_health": "critical",
@@ -346,12 +374,16 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "vault_sync": "notice",
     "audit_completed": "notice",
     # The Python writers' records: a local operator's first contact
-    # (operation_context), a task re-check and an empty one (task_recheck), and
-    # an empty workstream prune (workstream_operations).
+    # (operation_context), a task re-check and an empty one (task_recheck), an
+    # empty workstream prune (workstream_operations), and a manager's move of a
+    # task into another workstream (task_operations; every task read takes a
+    # task's workstream from its newest move, so it must never join
+    # retention's PRUNABLE_SYSTEM_EVENTS).
     "operator_first_seen": "notice",
     "task_recheck": "notice",
     "task_recheck_noop": "notice",
     "workstream_prune_noop": "notice",
+    "task_moved": "notice",
 }
 
 # ---------------------------------------------------------------------------

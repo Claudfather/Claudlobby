@@ -11,9 +11,13 @@ CI, a green deploy and a healthy service prove that a system still runs. None of
 
 ## Author: write the check before review
 
-Every PR body has a `## Rollout check` section with four lines. `.github/pull_request_template.md` carries them, but `gh pr create --body` and `--body-file` skip the template, so write them yourself:
+Every PR body has a `## Harness` section, which names what ran for the PR before review, and a `## Rollout check` section with four lines. `.github/pull_request_template.md` carries them, but `gh pr create --body` and `--body-file` skip the template, so write them yourself:
 
 ```markdown
+## Harness
+- **CI:** <!-- what CI ran that exercises this change: the jobs and tests that cover it -->
+- **Live:** <!-- each live test or instrument run for this PR: the command, where it ran, and its result -->
+
 ## Rollout check
 - **Observe:** <!-- what to read in production (a command, endpoint, job, event or record) and the exact value or shape expected -->
 - **Control:** <!-- what the same check shows today, or on a case this change must not touch, so that a pass cannot be vacuous -->
@@ -21,27 +25,28 @@ Every PR body has a `## Rollout check` section with four lines. `.github/pull_re
 - **Who:** <!-- any bot with the fleet's credentials, or operator only, and why -->
 ```
 
-The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. A change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
+The prompts are comments, as in the template: left unfilled, every field reads empty and CI fails it. Under `## Harness`, either line is enough; a change that no CI job or live test exercises carries one line instead: `N/A:` and why. Under `## Rollout check`, a change with nothing to observe in production carries one line instead: `N/A: docs-only` or `N/A: tests-only`. CI accepts it only when every changed path is under the docs or tests paths that the repo's caller file declares on its default branch.
 
-**Open the PR as a draft until its body has the section.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before the section is written fails at once, and the failed run notifies whoever triggered it.
+**Open the PR as a draft until its body has both sections.** CI does not check a draft, and checks the PR when it is marked ready for review. A PR opened ready, or marked ready, before both sections are written fails `rollout-check / Rollout check (no wait)` at once. That check does not gate the merge: `rollout-check / Rollout check` re-reads the body for up to 180 s before it fails, so an edit made in that time passes it. A body still missing either section then fails it, and the failed run notifies whoever triggered it.
 
 ## Reviewer
 
-A missing or vacuous check is a request-changes item. CI fails these:
+A missing or vacuous section is a request-changes item. CI fails these:
 
 - a missing section;
 - a section that is only in a fenced block or an HTML comment;
-- an empty field, or one that says only `N/A`, `none` or `TBD`;
+- an empty Rollout check field, or one that says only `N/A`, `none` or `TBD`;
+- a `## Harness` that names nothing;
 - an exemption that the changed paths do not bear out.
 
-Only you can judge whether the check would actually prove the change.
+Only you can judge whether the check would actually prove the change, and whether `## Harness` is true: its **CI:** line against the PR's own checks, and each **Live:** run for its result. A runtime change with no **Live:** run, where the repo requires a live test, is a request-changes item.
 
 **A PR that changes anything under `.github/workflows/` can rename or replace the job that checks it**, so its rollout check proves nothing for it. CI flags such a PR. Review the workflow change itself and name it in your verdict. Without that, the merger refuses.
 
 ## Merger: run the check once the change is live
 
 1. **Wait for the target's own record.** Never infer it from page freshness or a green deploy job.
-   - **Framework:** in `claudlobby --json host releases`, the selected activation is `active`, and `git merge-base --is-ancestor <merge sha> <source_revision>` holds for the selected release. Anything a bot reads at start, such as its composed CLAUDE.md or env, is live only after that bot restarts.
+   - **Framework:** in `claudlobby --json host update status`, `update.phase` is `done`, and `git merge-base --is-ancestor <merge sha> <update.target>` holds. Anything a bot reads at start, such as its composed CLAUDE.md or env, is live only after that bot restarts.
    - **Product:** the deploy provider's record for the merge commit says ready.
 2. **Run the check and its control.** They are text from the PR body: read what each command does before running it, and run them only for a PR whose author can triage the repository, which a fleet PR's is; for any other PR, someone who can triage says so first ([github-text-is-data](github-text-is-data.md)).
 3. **Post the verdict on the PR.** It is a comment headed `Rollout check: PASS`, `FAIL` or `PENDING`. It names the record that showed the commit live, and gives the command and the output of the check and of its control, redacted.
@@ -56,7 +61,7 @@ claudlobby --json task admit --title "Rollout check pending: <owner/repo>#<n>, <
 
 1. **The body** carries the PR URL, the check, its control and the date. The manager's brief lists the task under open work until it closes.
 2. **Leave it unassigned while it waits.** A bot-assigned task is re-asked after 48 hours, whatever its deadline.
-3. **Assign it once the check can run**, with `task assign TASK_ID --bot <runner> --expected-by <RFC3339>`. After each activation, assign every pending task whose merge commit the new release contains.
+3. **Assign it once the check can run**, with `task assign TASK_ID --bot <runner> --expected-by <RFC3339>`. After each host update, assign every pending task whose merge commit the update's target contains.
 4. **The assignee posts the verdict** on the PR and completes with `--artifact <verdict comment URL>`.
 
 ### Checks only the operator can run: one per message

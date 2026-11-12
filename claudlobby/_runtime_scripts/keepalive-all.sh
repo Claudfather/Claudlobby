@@ -103,7 +103,7 @@ for conf in "$BOTS_DIR"/*/bot.conf; do
         rc=$?
         if [ "$rc" -eq 75 ]; then
             paused="${paused:+$paused, }$bot_name"
-            echo "$TS PAUSED — activation holds the host lock; $bot_name will be checked next sweep" >>"$LOG"
+            echo "$TS PAUSED — a host update's fence turned $bot_name away; it will be checked next sweep" >>"$LOG"
         else
             failed="${failed:+$failed, }$bot_name (exit $rc)"
             echo "$TS ERROR — keepalive.sh failed for $bot_name (exit $rc)" >>"$LOG"
@@ -114,7 +114,7 @@ done
 # Admission happens before keepalive.sh installs its ERR trap. A stale CLI or
 # broken selected release would otherwise fail every bot and leave this timer
 # green. Use the shared bounded debounce for one fleet-level alert attempt per
-# window, even when both delivery channels fail. An activation-lock pause is
+# window, even when both delivery channels fail. A pause is
 # transient and must not clear a previous fault until a sweep admits the bots.
 alert_key=$(printf '%s' "$BOTS_DIR" | cksum | awk '{print $1}')
 alert_name="keepalive-admission-$alert_key"
@@ -139,5 +139,5 @@ if [ "$attempted" -eq 0 ]; then
 elif [ -z "$paused" ]; then
     debounce_clear "$CLAUDLOBBY_ROOT/state" "$alert_name" "failed"
 else
-    echo "$TS PAUSED — activation lock held for: $paused" >>"$LOG"
+    echo "$TS PAUSED — a host update's fence turned away: $paused" >>"$LOG"
 fi

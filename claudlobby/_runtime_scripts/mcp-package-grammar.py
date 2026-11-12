@@ -161,12 +161,6 @@ def bare_name(command: str, spec: str) -> str:
     return normalize_pypi_name(_PYPI_VERSION_SUFFIX.sub("", spec).strip())
 
 
-def package_name(command: str, args: list[str]) -> str | None:
-    """`bare_name` of whatever `warm_prefix` identifies, or None."""
-    target = warm_prefix(command, args)
-    return None if target is None else bare_name(command, target[0])
-
-
 def is_pinned(command: str, spec: str) -> bool:
     """Does *spec* name an EXACT version, rather than whatever the registry
     serves today?
@@ -246,26 +240,10 @@ def declared_packages(
 def _probe_argv(command: str, target: tuple[str, list[str]]) -> list[str]:
     """`<command> <warm prefix> --help` — the argv that FETCHES the package.
 
-    One definition because two callers build it: `declared_packages`, which
-    already holds the target, and `warm_argv`, which parses one from args.
-    Typed twice it would be a fork waiting to happen, in the file whose whole
-    thesis is that this grammar has exactly one copy.
+    `warm-cache` runs the same argv, so the probe asks the real package
+    manager to resolve the real spec.
     """
     return [command, *target[1], "--help"]
-
-
-def warm_argv(command: str, args: list[str]) -> list[str] | None:
-    """The EXACT argv that fetches this server's package, command included.
-
-    `<command> <warm_prefix> --help` is what `warm-cache` runs, so a probe
-    built from this asks the real package manager to resolve the real spec.
-    That matters more than it sounds: every hand-rolled version of this
-    question has instead composed a registry URL from a name it parsed itself,
-    and the second one shipped with a scoped name stripping to the empty
-    string — the registry root answered 200 and a dead fragment read healthy.
-    """
-    target = warm_prefix(command, args)
-    return None if target is None else _probe_argv(command, target)
 
 
 def servers_in(fragment: dict) -> list[tuple[str, dict]]:

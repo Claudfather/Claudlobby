@@ -329,7 +329,10 @@ def test_timeout_kills_only_owned_group_with_a_bounded_cleanup(destination, monk
         return process
     monkeypatch.setattr(transport.subprocess, "Popen", popen)
     monkeypatch.setattr(transport.os, "killpg", lambda pid, sig: kills.append((pid, sig)))
-    result = transport.send(source_package(), destination, message_id=MSG, body="hi", timeout=2)
+    # No compaction lease (#1053 PR 6): the lease read is a process of its own,
+    # and this test is about the native call's.
+    result = transport.send(source_package(), destination, message_id=MSG, body="hi", timeout=2,
+                            lease=lambda package, destination: None)
     assert result.status == "unknown"
     assert kills == [(process.pid, signal.SIGTERM), (process.pid, signal.SIGKILL)]
     assert waits == [{"input": b"hi", "timeout": 2}, {"timeout": 1}, {"timeout": 1}]

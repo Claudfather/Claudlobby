@@ -218,7 +218,8 @@ def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=No
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
-         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr"}},
+         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr",
+                     "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,

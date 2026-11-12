@@ -7,20 +7,9 @@ import os
 import re
 import sqlite3
 import stat
-from uuid import UUID
 
 from ..command_result import CommandFailure, CommandOutput
-
-
-def _request_id(value: str) -> str:
-    try:
-        if str(UUID(value)) == value:
-            return value
-    except (TypeError, ValueError, AttributeError):
-        pass
-    raise CommandFailure("invalid_argument", "--request-id requires a canonical UUID")
-
-
+from ..request_ids import canonical_request_id
 from ..runtime_admission import bound_runtime_release as _bound_release
 
 
@@ -131,7 +120,7 @@ def dispatch(args) -> CommandOutput:
     try:
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no message mutations")
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         is_report = args.public_command == "fleet.reports.submit"
         body = report = None
         if is_report:

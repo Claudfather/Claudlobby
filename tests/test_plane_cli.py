@@ -89,7 +89,7 @@ def test_capture_modes_per_family(tmp_path: Path):
     # work_item: body dropped silently
     wi = {"event_type": "work_item", "emitter": "t", "fleet": "example-fleet",
           "payload": {"work_item_id": "wi_" + "5" * 32, "title": "x",
-                       "created_by": "bot:example-fleet/alpha", "body": "secret"}}
+                       "created_by": "bot:example-fleet/alpha", "body": "secret", "workstream_id": "ws-test"}}
     r = _run(["--root", str(tmp_path), "plane", "emit", "work_item", "--file", "-"],
              stdin=_json.dumps(wi))
     assert r.returncode == 0, r.stderr

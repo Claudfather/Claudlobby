@@ -10,8 +10,9 @@ import sqlite3
 
 from ..activation_state import ActivationError
 from ..command_result import CommandFailure, CommandOutput
+from ..request_ids import canonical_request_id
 from ..task_operations import UNSPECIFIED_ASSIGNMENT
-from ..application_tasks import (_reference, _request_id, _text, _committed_notification,
+from ..application_tasks import (_reference, _text, _committed_notification,
                                  _recording_failure, task_outcome)
 
 
@@ -57,7 +58,7 @@ def _deadline(value: str | None) -> str | None:
 
 
 def _inputs(args) -> dict:
-    _request_id(args.request_id)
+    canonical_request_id(args.request_id)
     if args.public_command == "task.feedback":
         from ..message_payload import MessageBody, MessagePayloadError
         from ..plane.ids import ID_PATTERNS
@@ -88,6 +89,11 @@ def _inputs(args) -> dict:
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command == "task.withdraw":
         return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "reason": _text(args.reason, "--reason"),
+                "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
+    if args.public_command == "task.move":
+        return {"task_id": _reference(args.task_id, "TASK_ID"),
+                "workstream_id": _optional(args.workstream, "--workstream", r"\S+"),
                 "reason": _text(args.reason, "--reason"),
                 "by": _optional(args.by, "--by", r"(?:human:[^\s:/]+|bot:[A-Za-z0-9_-]+/[A-Za-z0-9_-]+)")}
     if args.public_command == "task.escalate":
@@ -193,7 +199,7 @@ def dispatch(args) -> CommandOutput:
                                      runtime_release_id, runtime_provenance, runtime_route_matches)
     from .message_write import _bound_release
     from ..task_operations import (TaskRecordingError, accept, admit, assign, block,
-                                   complete, escalate, fail, progress, reassign,
+                                   complete, escalate, fail, move, progress, reassign,
                                    reschedule, return_assignment, withdraw)
     from ..task_queries import TaskQueryError
     from ..task_state import TaskStateError
@@ -263,6 +269,8 @@ def dispatch(args) -> CommandOutput:
                 result = assign(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.withdraw":
                 result = withdraw(ctx, args.request_id, values.pop("task_id"), **values)
+            elif args.public_command == "task.move":
+                result = move(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.escalate":
                 result = escalate(ctx, args.request_id, values.pop("task_id"), **values)
             elif args.public_command == "task.reassign":

@@ -10,12 +10,12 @@ from ..command_result import CommandFailure, CommandOutput, empty_fleet_conflict
 
 _REMEDIES = {
     "orphan_unit": "Review the stale unit, then use host supervision reap-orphans --dry-run before --apply.",
-    "orphan_grant": "Remove the unowned allow rule or equip the declaring source, then stage a plan.",
+    "orphan_grant": "Remove the unowned allow rule or equip the declaring source, then ask the operator to run host update apply FULL_COMMIT_SHA.",
     "unsourced_grant": "Review the fleet tool_permissions.allow override and its declared source.",
-    "under_grant": "Stage a plan so the equipped source's permission is composed.",
+    "under_grant": "Ask the operator to run host update apply FULL_COMMIT_SHA so the equipped source's permission is composed.",
     "missing_external": "Restore the declared host dependency or remove its declaration.",
-    "isolation_not_composed": "Stage and review a plan, then ask the operator to activate it.",
-    "isolation_missing": "Stage and review a plan, then ask the operator to activate it.",
+    "isolation_not_composed": "Ask the operator to run host update apply FULL_COMMIT_SHA so the bot's deny list is composed.",
+    "isolation_missing": "Ask the operator to run host update apply FULL_COMMIT_SHA so the bot's deny list is composed.",
     "isolation_gap": "Review the bot's shared-config isolation and authored exemptions.",
     "isolation_env_read": "Remove the composed instruction that reads host-shared environment files.",
     "improper_path": "Review the emitted path guard and move the reference into the owned bot directory.",
@@ -23,7 +23,7 @@ _REMEDIES = {
     "env_denied_value": "Remove the denied value from the environment tier before staging.",
     "env_bot_secret_leaked": "Move the bot secret out of the host-shared environment tier.",
     "unused_declaration": "Remove the unused declaration or equip its consumer.",
-    "missing_tier_a": "Stage and review a plan to compose the missing setting.",
+    "missing_tier_a": "Ask the operator to run host update apply FULL_COMMIT_SHA so the missing setting is composed.",
     "fleet_pulse_env_inert": "Review the fleet-pulse environment declaration and its switch carrier.",
 }
 

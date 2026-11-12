@@ -14,6 +14,7 @@ from tests.package_fixtures import source_package
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — short private socket root
 from tests.test_releases import installed  # noqa: F401 — cold fixture dependency
 from tests.test_task_read_cli import active  # noqa: F401 — selected private release
+from tests.test_task_read_cli import TASK_HEX, _check_page, _event_plane, _events_printed
 from tests.test_task_state import _assignment, _event, _task
 
 
@@ -143,3 +144,26 @@ def test_git_inbox_cursor_binds_committed_config_not_null_release(active, monkey
     active_config.publish_current_config(changed, installation=package.installation,
                                          expected_previous=snapshot["fingerprint"])
     assert read("--cursor", cursor, expected=2)["error"]["code"] == "invalid_argument"
+
+
+def test_inbox_work_prints_each_event_once_and_keeps_every_fact(active, monkeypatch, capsys):  # noqa: F811
+    from claudlobby.task_queries import list_tasks
+    root, host = active
+    fleet = _event_plane(root, host)
+    monkeypatch.setattr(brief, "load_dispatch_doors",
+                        lambda paths: load_lib_module(source_package().native, "dispatch-overdue.py"))
+    assert main(["--root", str(root), "--json", "fleet", "inbox"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    with sqlite3.connect(db_file(root)) as conn:
+        page = list_tasks(conn, fleet_uid=fleet, state="open")
+    old = _check_page(data, data["work"], page.items)  # the whole inbox is walked for copies
+    work = data["work"]
+    assert [item["task_id"] for item in work["items"]] == ["wi_other", "wi_one", TASK_HEX]
+    # Main printed TASK_HEX's one event three times: in the task's history, in its
+    # assignment's and under its current assignment.
+    (hexed,) = [e["event_id"] for e in work["events"] if e["task_id"] == TASK_HEX]
+    assert _events_printed(old).count(hexed) == 3
+    # The open work is the page task list prints, in the same shape.
+    assert main(["--root", str(root), "--json", "task", "list"]) == 0
+    listed = json.loads(capsys.readouterr().out)["data"]
+    assert work == {key: listed[key] for key in ("items", "events", "issues")}

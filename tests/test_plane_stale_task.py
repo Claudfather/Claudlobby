@@ -76,7 +76,7 @@ def _dispatch(root: Path, h: str, *, dispatch_age_h: float, delivered: bool = Tr
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "t", "fleet": "f", "occurred_at": at,
          "payload": {"work_item_id": "wi_" + stem, "title": f"task {h}",
-                     "created_by": MGR}},
+                     "created_by": MGR, "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "t", "fleet": "f",
          "occurred_at": at, "source_ref": ref, "payload": asg},
         {"event_type": "communication", "emitter": "t", "fleet": "f",

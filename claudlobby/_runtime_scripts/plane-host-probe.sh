@@ -146,13 +146,23 @@ case "$_swap" in ''|*[!0-9]*) _swap="" ;; esac
 [ -n "$_swap" ] && _add "$(_metric host.swap_used_mb "$_swap")"
 
 # host.swap_pages — pages swapped in and out since boot (vmstat pswpin/pswpout).
-_swp=""
+# Each sample object here is built by awk, never in a bash word: bash 3.2
+# (macOS /bin/bash) brace-expands a {a,b} inside a quoted $( ) argument and
+# splits the object in two, which rejects the whole batch.
+_swp=""; _swp_why=""
 if [ -r "$PROC/vmstat" ]; then
     _swp="$(awk '$1 == "pswpin" && $2 ~ /^[0-9]+$/ { i = $2; hi = 1 }
         $1 == "pswpout" && $2 ~ /^[0-9]+$/ { o = $2; ho = 1 }
         END { if (hi && ho) printf "{\"in\":%s,\"out\":%s}", i, o }' "$PROC/vmstat" 2>/dev/null)"
+    [ -n "$_swp" ] || _swp_why="no pswpin and pswpout numbers in $PROC/vmstat"
+else
+    _swp_why="no $PROC/vmstat"
+    [ "$_OS" = Darwin ] && _swp_why="$_swp_why (macOS)"
 fi
 [ -n "$_swp" ] && _add "$(_metric host.swap_pages "$_swp")"
+# The thrash check (below) reads the out count this sample carries: the number
+# after its last colon, less the closing brace. _swp_why says why there is none.
+_swp_out="${_swp##*:}"; _swp_out="${_swp_out%?}"
 
 # host.procs — processes runnable now, and blocked on IO now (stat).
 _procs=""
@@ -162,6 +172,8 @@ if [ -r "$PROC/stat" ]; then
         END { if (hr && hb) printf "{\"running\":%s,\"blocked\":%s}", r, b }' "$PROC/stat" 2>/dev/null)"
 fi
 [ -n "$_procs" ] && _add "$(_metric host.procs "$_procs")"
+# The thrash alert carries the blocked count, read from the sample the same way.
+_blocked="${_procs##*:}"; _blocked="${_blocked%?}"
 
 # host.cpu_ticks — iowait ticks since boot, and every CPU tick since boot, from
 # the aggregate cpu line. The iowait share of a minute is the difference of
@@ -185,4 +197,63 @@ _add "$(_metric host.job_ran 1)"
 
 # Fire-and-forget, so a socket cooldown stages it for the daemon (#1657).
 printf '{"events":[%s]}' "$_samples" | PLANE_EMIT_COOLDOWN_STAGE=1 plane_emit_events plane-host-probe || true
+
+# memory_thrash (#1645): swap-out over this host's line for its number of readings
+# in a row raises one FLEET ALERT an episode, naming the largest bots by memory.
+# memory-thrash.py holds the rule: it keeps the last reading and the episode in
+# state/memory-thrash/ and reads the host's line from the lines file there. No
+# file is no check, said once on this job's journal. A file it refuses is no check
+# either, and raises memory_thrash_unarmed once, so a bad edit never turns the
+# alert off unseen. It runs after the samples are sent, so a slow check never
+# holds them, and it reads the count the samples carry, so a replay of the
+# recorded samples is the check that ran.
+
+# _thrash_sent DIR WHAT MARK...: after an alert, mark it sent (memory-thrash.py
+# delivered MARK...) once Telegram or the manager's pane took it; until then the
+# journal says so and the next reading raises it again. (notify_currency also
+# counts a host with no Telegram target as sent, because a notice has no other
+# leg; this alert has the manager's pane.)
+_thrash_sent() {
+    local dir="$1" what="$2"
+    shift 2
+    if [ "${_ALERT_DELIVERED:-0}" = 1 ] || [ "${_ALERT_TMUX_REACHED:-0}" = 1 ]; then
+        python3 -I "$LIB_DIR/memory-thrash.py" delivered --state-dir "$dir" "$@" || true
+    else
+        printf 'memory-thrash: %s: no channel took the alert; the next reading raises it again\n' \
+            "$what" >&2
+    fi
+}
+
+_thrash() {
+    local dir="$CLAUDLOBBY_ROOT/state/memory-thrash" boot="" given verdict kind id text
+    local dirs=() bots_dir bots msg
+    command -v python3 >/dev/null 2>&1 || return 0
+    given=(--skip "$_swp_why")
+    if [ -n "$_swp_out" ]; then
+        read -r boot 2>/dev/null < "$PROC/sys/kernel/random/boot_id" || boot=""
+        given=(--out "$_swp_out" --boot-id "$boot")
+    fi
+    verdict="$(python3 -I "$LIB_DIR/memory-thrash.py" check --state-dir "$dir" "${given[@]}")"
+    IFS="$(printf '\t')" read -r kind id text <<<"$verdict"
+    case "$kind" in
+        alert)
+            while IFS= read -r bots_dir; do
+                dirs+=(--bots-dir "$bots_dir")
+            done < <(host_bots_dirs 2>/dev/null)
+            bots="$(with_timeout 30 python3 -I "$LIB_DIR/memory-thrash.py" bots --proc "$PROC" \
+                ${dirs[@]+"${dirs[@]}"} 2>/dev/null)"
+            [ -n "$bots" ] || bots="Largest bots by memory: not read."
+            msg="swap thrash on $_host_raw: $text, MemAvailable ${_mem:-unread} MB, ${_blocked:-an unread number of} processes blocked on IO. $bots Read the named bots first, then act through the manager's doors: bot compact, bot restart --fresh or bot stop, once their work is committed."
+            emit_failure_alert "$(resolve_bots_dir)" "memory_thrash" "$msg"
+            _thrash_sent "$dir" "episode $id" --episode "$id"
+            ;;
+        refused)
+            msg="swap thrash alert off on $_host_raw: its line file was refused: $text. This host has no swap thrash alert until the file is fixed; the check reads it every minute, and memory-thrash.py status reads the rule back."
+            emit_failure_alert "$(resolve_bots_dir)" "memory_thrash_unarmed" "$msg"
+            _thrash_sent "$dir" "the refused line file" --refused "$id"
+            ;;
+    esac
+    return 0
+}
+_thrash || true
 exit 0

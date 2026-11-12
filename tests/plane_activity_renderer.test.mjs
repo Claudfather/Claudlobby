@@ -361,6 +361,59 @@ test('missing, malformed, ambiguous and wrong linked task facts fall back to lit
   }
 });
 
+test('a nudged row that also names its workstream pairs for any non-empty ID, in every form a door minted', () => {
+  const ws = `ws_${'4'.repeat(32)}`;
+  // A task's own workstream (task admit); workstream open's title slug and its next free number;
+  // an explicit --id in the CLI's ws- form (a slug never doubles a hyphen); and keys an imported or
+  // older registry can hold, which may be any string (#2871).
+  const minted = [ws, 'ws-release-review', 'ws-release-review-2', 'ws-q4--plan', 'legacy-ws', 'Q4 Plan'];
+  // The ID is never shown, so shapes refused before #2871 only for their form pair too.
+  const odd = [`ws_${'4'.repeat(31)}`, `ws_${'4'.repeat(33)}`, ws.toUpperCase(), `ws_${'g'.repeat(32)}`,
+    ` ${ws}`, `${ws} `, `${ws}\n`, `${ws}\u0000`];
+  for (const workstream_id of [...minted, ...odd]) {
+    for (const detail of [{ reason: 'Any update?', by: 'human:reviewer', workstream_id },
+      { workstream_id, by: 'human:reviewer', reason: 'Any update?' }]) {
+      const t = thread();
+      t.task_events[0].detail = JSON.stringify(detail);
+      assert.equal(api.nudgeReason(t.messages[0], t), 'Any update?', JSON.stringify(detail));
+    }
+  }
+  // Only a non-empty string names a workstream: any other value, or an empty one, still refuses.
+  for (const workstream_id of [4, true, null, [ws], { id: ws }, '']) {
+    const t = thread();
+    t.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', workstream_id });
+    assert.equal(api.nudgeReason(t.messages[0], t), null, JSON.stringify(workstream_id));
+  }
+  for (const workstream_id of ['ws-release-review', 'legacy-ws']) {
+    const t = thread();
+    t.task_events[0].detail = JSON.stringify({ reason: 'Any update?', by: 'human:reviewer', workstream_id });
+    const shown = visible(html(t));
+    assert.match(shown, /task update request/);
+    assert.ok(!shown.includes(panel.esc(t.messages[0].body)), workstream_id);
+  }
+});
+
+test('a nudged row naming a workstream still pairs only with exactly its keys, its by and reason, and one match', () => {
+  const ws = 'ws-release-review', named = { reason: 'Any update?', by: 'human:reviewer' };
+  const shapes = [{ ...named, workstream: ws }, { ...named, workstream_id: ws, other: 1 },
+    { reason: 'Any update?', workstream_id: ws }, { by: 'human:reviewer', workstream_id: ws },
+    { ...named, by: 'human:other', workstream_id: ws }, { ...named, reason: 'Other', workstream_id: ws },
+    // Key names built to collide in the sorted, comma-joined key list.
+    { 'by,reason,workstream_id': ws }, { by: 'human:reviewer', 'reason,workstream_id': ws },
+    { 'by,reason': 'Any update?', workstream_id: ws }];
+  const notObjects = ['null', '7', '"by,reason"', '["by","reason"]'];
+  for (const detail of [...shapes.map(shape => JSON.stringify(shape)), ...notObjects]) {
+    const t = thread();
+    t.task_events[0].detail = detail;
+    assert.equal(api.nudgeReason(t.messages[0], t), null, detail);
+    assert.ok(visible(html(t)).includes(panel.esc(t.messages[0].body)), detail);
+  }
+  const twice = thread();
+  twice.task_events[0].detail = JSON.stringify({ ...named, workstream_id: ws });
+  twice.task_events.push({ ...twice.task_events[0] });
+  assert.equal(api.nudgeReason(twice.messages[0], twice), null);
+});
+
 test('unsafe authored text is escaped in prose, title fallback and raw evidence', () => {
   const t = thread('<img src=x onerror=alert(1)>\n<script>bad()</script>'); t.title = null;
   const rendered = html(t);

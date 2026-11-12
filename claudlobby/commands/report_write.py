@@ -23,14 +23,15 @@ def dispatch(args) -> CommandOutput:
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
     from ..report_operations import AckError, ack_reports
+    from ..request_ids import canonical_request_id
     from ..runtime_admission import (RuntimeIdentity, mutation_admission,
                                      runtime_release_id, runtime_route_matches)
-    from .message_write import _request_id, _bound_release
+    from .message_write import _bound_release
 
     release_id = None
     provenance = {}
     try:
-        request_id = _request_id(args.request_id)
+        request_id = canonical_request_id(args.request_id)
         if args.seed:
             raise CommandFailure("conflict", "seed configuration has no report read position")
         destination, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
