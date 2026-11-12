@@ -15,6 +15,7 @@ from textwrap import dedent
 
 from claudlobby.composer import collect_env_contracts, scaffold_env_files
 from claudlobby.config import load_fleet
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 CLAUDRON_FRAGMENT = {
@@ -38,6 +39,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Paths]:
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -63,7 +65,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Paths]:
         )
     )
     (root / "runtime" / "bots" / "worker").mkdir(parents=True)
-    return root, Paths(root=root, fleet_dir=root)
+    return root, Paths(root=root, fleet_dir=root, package=source_package())
 
 
 def test_composer_provided_var_not_collected(tmp_path):

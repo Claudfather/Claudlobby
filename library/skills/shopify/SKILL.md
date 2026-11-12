@@ -1,6 +1,6 @@
 ---
 name: shopify
-description: "Shopify Admin API actuator built around the fields that lie. Answers the questions people actually ask — is anything unfulfillable, how much discounting is live, what is really in this collection, is the catalogue healthy — using the field that is SOUND rather than the obvious field that silently returns a wrong answer. Read-only by construction. Every trap it encodes was measured against a live store, not recalled."
+description: "Use when a Shopify question needs an answer you can trust — is anything unfulfillable, how much discounting is live, what is really in this collection, is the catalogue healthy. Shopify Admin API actuator built around the fields that lie: it answers from the field that is SOUND rather than the obvious field that silently returns a wrong answer. Read-only by construction. Every trap it encodes was measured against a live store, not recalled."
 argument-hint: "[health-check|catalog [--unfulfillable --fulfiller-ids <file>]|discounts|collections [handle]|webhooks|copy|redirects|orphans|consent [--max-pages N]|orders [limit]|raw <path>]"
 ---
 

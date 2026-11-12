@@ -1,29 +1,24 @@
-"""Lossless-restart age gate + manager detection (lib-common.sh helpers).
+"""Native fresh/resume startup and retained explicit handoff/manager helpers.
 
-These back Mechanism 2 of the fleet update lifecycle:
-
-- ``iso_to_epoch`` / ``session_md_handoff_epoch`` / ``should_resume_session`` —
-  the F6 age gate that decides whether ``start-bot.sh`` resumes from a
-  ``session.md`` handoff or clean-starts a stale one. It keys off the doc-level
-  ``last_updated`` ISO-8601 UTC frontmatter field (robust to file touches the
-  way mtime is not), falling back to mtime only for legacy artifacts.
-- ``bot_is_manager`` — the F5 guard ``weekly-worker-restart.sh`` uses to skip
-  managers (and ``update-claude-code.sh`` to address failure notifications).
-  Managers carry ``MANAGER_TMUX == BOT_ID`` plus an inline comment that
-  ``bot_conf_get`` does not strip; getting this wrong bounces a manager.
-
-CI runs pytest only, so these bash helpers are exercised here via subprocess —
-without this wrapper the logic would be untested in CI.
+Automatic context continuity uses an exact native session. Optional authored
+handoff commands still share provider resolution and timestamp parsing.
 """
 
 from __future__ import annotations
 
 import subprocess
+import json
+import os
+import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+START_BOT = REPO_ROOT / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 
 def _run(snippet: str, *args: str) -> tuple[str, int]:
@@ -51,6 +46,111 @@ def _session_md(tmp_path: Path, name: str, last_updated: str | None) -> Path:
     return f
 
 
+class TestNativeStartup:
+    """Run the actual startup injection branch without a model or native service."""
+
+    @pytest.mark.parametrize("mode", ["fresh", "resume"])
+    @pytest.mark.parametrize("startup", ["", "Authored $literal, `text`, ! and\nsecond line."])
+    def test_only_fresh_session_receives_authored_startup(self, tmp_path, mode, startup):
+        sends, log, errors = (tmp_path / name for name in ("sends", "startup.log", "errors"))
+        source = START_BOT.read_text()
+        block = source[source.index('if [ "$_native_mode" = fresh ]; then'):].split("# Mark bot as idle", 1)[0]
+        script = r'''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { :; }
+''' + block
+        env = {**os.environ, "BOT_DIR": str(tmp_path), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
+               "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
+               "STARTUP_PROMPT": startup, "SESSION_RESUME_COMMAND": "/unavailable:session resume --auto",
+               "SENDS": str(sends), "ERRORS": str(errors)}
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert not errors.exists()
+        payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+        assert payloads == (["set +H; " + startup] if mode == "fresh" and startup else [])
+        if mode == "resume":
+            assert "NATIVE RESUME" in log.read_text()
+
+    @pytest.mark.parametrize("complete", [True, False])
+    def test_boot_classifier_requires_authored_instructions_in_bootstrap(self, tmp_path, complete):
+        prompt = 'Read "my brief" then act.'
+        text = "set +H; FLEET_STARTUP_BOOTSTRAP_V1\nFLEET_STARTUP_INSTRUCTIONS_BEGIN\n"
+        text += (prompt if complete else "different instructions") + "\nFLEET_STARTUP_INSTRUCTIONS_END"
+        (tmp_path / "session.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-10-01T00:01:00Z",
+            "message": {"role": "user", "content": text}}, separators=(",", ":")) + "\n")
+        output, rc = _run('if boot_start_class "$2" "$3" "$4"; then :; fi', str(tmp_path),
+                          "2026-10-01T00:00:00Z", prompt)
+        assert rc == 0
+        assert output.split("\t")[0] == ("payload" if complete else "partial")
+
+
+    @pytest.mark.parametrize("mode, handoff, command, sent, line", [
+        ("fresh", "recent", "/claudna:session resume --auto", True, "RESUME — injecting resume command [available; fresh session]"),
+        ("fresh", "legacy", "/claudna:session resume --auto", True, "RESUME — injecting"),
+        ("fresh", "garbled", "/claudna:session resume --auto", True, "RESUME — injecting"),
+        ("fresh", "stale", "/claudna:session resume --auto", False, "RESUME SKIP — fresh session; handoff older than 86400s"),
+        ("fresh", "absent", "/claudna:session resume --auto", False, None),
+        ("fresh", "recent", "", False, "RESUME SKIP — fresh session and handoff, but no resume command [no-command]"),
+        ("fresh", "recent", "/absent:session resume --auto", False, "[provider-absent:absent]"),
+        ("resume", "recent", "/claudna:session resume --auto", False, "NATIVE RESUME"),
+    ])
+    def test_a_fresh_session_resumes_from_its_saved_handoff_before_startup(
+            self, tmp_path, mode, handoff, command, sent, line):
+        """#2696: the resume command precedes the authored startup only in a fresh session."""
+        sends, log, errors, events = (tmp_path / name for name in ("sends", "startup.log", "errors", "events"))
+        bot, account = tmp_path / "bot", tmp_path / "account"
+        (bot / ".claude").mkdir(parents=True)
+        (account / "plugins/cache/Claudfather/claudna").mkdir(parents=True)
+        checkpoint = bot / ".claude/session.md"
+        now = datetime.now(timezone.utc)
+        if handoff == "recent":
+            checkpoint.write_text(f"---\nlast_updated: {_iso(now)}\n---\ncontext\n")
+        elif handoff == "stale":
+            checkpoint.write_text(f"---\nlast_updated: {_iso(now - timedelta(days=2))}\n---\ncontext\n")
+        elif handoff == "legacy":
+            checkpoint.write_text("## State\nno frontmatter, so its mtime dates it\n")
+        elif handoff == "garbled":
+            checkpoint.write_text("---\nlast_updated: not a time\n---\nits mtime dates it\n")
+        source = START_BOT.read_text()
+        # Everything after the bridge-readiness wait up to the idle mark: what
+        # a session receives once its channel is up.
+        start = source.index("esac\n", source.index('emit_fleet_event "rc_timeout"')) + len("esac\n")
+        block = source[start:].split("# Mark bot as idle", 1)[0]
+        script = r'''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { printf '%s\n' "$1" >> "$EVENTS"; }
+''' + block
+        env = {**os.environ, "BOT_DIR": str(bot), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
+               "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
+               "STARTUP_PROMPT": "Authored startup.", "SESSION_RESUME_COMMAND": command,
+               "CLAUDE_CONFIG_DIR": str(account), "SENDS": str(sends), "ERRORS": str(errors),
+               "EVENTS": str(events)}
+        env.pop("RESUME_MAX_AGE_S", None)
+        result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert not errors.exists()
+        payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+        startup = ["set +H; Authored startup."] if mode == "fresh" else []
+        assert payloads == ([command] if sent else []) + startup
+        text = log.read_text() if log.exists() else ""
+        assert (line in text) if line else "RESUME" not in text
+        skipped = handoff == "recent" and mode == "fresh" and not sent
+        assert (events.read_text() if events.exists() else "") == ("resume_skipped\n" if skipped else "")
+
+
 class TestIsoToEpoch:
     def test_known_value(self):
         out, rc = _run('iso_to_epoch "$2"', "2026-05-15T14:30:00Z")
@@ -62,42 +162,6 @@ class TestIsoToEpoch:
         out, rc = _run('iso_to_epoch "$2"', "")
         assert rc != 0
         assert out == ""
-
-
-class TestShouldResumeSession:
-    """F6 age gate: resume from a fresh checkpoint, clean-start a stale one."""
-
-    def test_fresh_resumes(self, tmp_path):
-        f = _session_md(
-            tmp_path, "fresh.md", _iso(datetime.now(timezone.utc) - timedelta(hours=1))
-        )
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 0  # resume
-
-    def test_stale_skips(self, tmp_path):
-        f = _session_md(
-            tmp_path, "stale.md", _iso(datetime.now(timezone.utc) - timedelta(hours=25))
-        )
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 1  # skip -> clean start
-
-    def test_ancient_skips(self, tmp_path):
-        f = _session_md(tmp_path, "ancient.md", "2020-01-01T00:00:00Z")
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 1
-
-    def test_missing_skips(self, tmp_path):
-        _, rc = _run(
-            'should_resume_session "$2" "$3"', str(tmp_path / "nope.md"), "86400"
-        )
-        assert rc == 1
-
-    def test_legacy_no_field_uses_mtime(self, tmp_path):
-        # A freshly written legacy file (no last_updated) falls back to mtime,
-        # which is "now" -> fresh -> resume.
-        f = _session_md(tmp_path, "legacy.md", None)
-        _, rc = _run('should_resume_session "$2" "$3"', str(f), "86400")
-        assert rc == 0
 
 
 class TestHandoffEpoch:

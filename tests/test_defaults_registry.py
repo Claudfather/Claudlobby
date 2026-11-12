@@ -23,7 +23,9 @@ import pytest
 from claudlobby import config, defaults
 from claudlobby.composer import compose_bot, compose_claude_md
 from claudlobby.config import load_fleet
-from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
+from claudlobby.defaults import (NON_ENTITY_FOLDERS, REGISTRY, TIER_TESTS, Disposition,
+                                 Tier, resolve)
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -49,7 +51,24 @@ NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE = {
         "existing (rootless) naked-probe shape is unaffected — the arm that "
         "actually exercises this entry is the new one Task 4 adds."
     ),
+    "status": (
+        "#2010 — the manager role overlay on `skills` "
+        "(defaults.REGISTRY['skills'].roles). The naked-bot gate's "
+        "`shape:leaf-manager` arm observes the manager, and its delta is "
+        "`.claude/skills/status` linked plus the skill's grants in "
+        "settings.local.json; every other arm composes one non-manager bot "
+        "and is unchanged. Delta named in the PR body."
+    ),
 }
+
+
+def _library_file(etype: str, entry: str) -> Path:
+    """Where a registry entry lives in `library/`. A skill is a directory
+    holding `SKILL.md` (what `composer.resolve_skill_sources` links); every
+    other entity type is one markdown file."""
+    if etype == "skills":
+        return LIBRARY / etype / entry / "SKILL.md"
+    return LIBRARY / etype / f"{entry}.md"
 
 
 def _library_entity_types() -> set[str]:
@@ -60,7 +79,7 @@ def _library_entity_types() -> set[str]:
     """
     return {
         d.name for d in LIBRARY.iterdir() if d.is_dir() and not d.name.startswith(".")
-    }
+    } - set(NON_ENTITY_FOLDERS)
 
 
 class TestCompleteness:
@@ -74,6 +93,15 @@ class TestCompleteness:
             f"disposition before it composes.\n  only on disk: {sorted(on_disk - registered)}"
             f"\n  only in registry: {sorted(registered - on_disk)}"
         )
+
+    def test_every_non_entity_folder_exists_is_unregistered_and_says_why(self):
+        # The one way out of the guard above, so it must not rot: a name for a
+        # folder that is gone, or one that is also registered, would hide a
+        # real type (#2150: voices are library content, not an entity type).
+        for name, reason in NON_ENTITY_FOLDERS.items():
+            assert (LIBRARY / name).is_dir(), f"{name}: no such library folder"
+            assert name not in REGISTRY, f"{name}: both registered and excluded"
+            assert reason.strip(), f"{name}: no reason given"
 
     def test_every_disposition_states_a_reason(self):
         # An empty default is a valid answer; an unexplained one is not. This is
@@ -93,7 +121,7 @@ class TestCompleteness:
         # and they must be enumerable rather than discovered one at a time.
         unsettled = sorted(t for t, d in REGISTRY.items() if not d.settled)
         settled = sorted(t for t, d in REGISTRY.items() if d.settled)
-        assert settled == ["guardrails", "protocols"], (
+        assert settled == ["guardrails", "protocols", "resources", "skills"], (
             "the settled set moved. Every entry here changes what a bot composes "
             "on the default path, so it lands by editing this list deliberately — "
             f"never by a default arriving unannounced: {settled}"
@@ -104,18 +132,22 @@ class TestCompleteness:
 class TestRegistryIsTheSource:
     """F4, binding: the registry is where the constant lives, not a mirror."""
 
-    def test_config_reexports_the_registry_value_by_identity(self):
+    @pytest.mark.parametrize("name", ["DEFAULT_GUARDRAILS", "DEFAULT_RESOURCES"])
+    def test_config_reexports_the_registry_value_by_identity(self, name):
         # IDENTITY, not equality. Equality would still pass if someone
         # re-declared `DEFAULT_GUARDRAILS = ["claudlobby-dev-in-projects"]` in
         # config.py — two sources holding the same value today and drifting
         # tomorrow, which is the exact failure this refinement exists to stop.
-        assert config.DEFAULT_GUARDRAILS is defaults.DEFAULT_GUARDRAILS, (
-            "config.DEFAULT_GUARDRAILS is no longer the registry's value — it has "
+        assert getattr(config, name) is getattr(defaults, name), (
+            f"config.{name} is no longer the registry's value — it has "
             "been re-declared. The registry must be the single source."
         )
 
-    def test_the_derived_constant_matches_what_the_registry_resolves(self):
-        assert defaults.DEFAULT_GUARDRAILS == resolve("guardrails")
+    @pytest.mark.parametrize(
+        "name, etype", [("DEFAULT_GUARDRAILS", "guardrails"), ("DEFAULT_RESOURCES", "resources")]
+    )
+    def test_the_derived_constant_matches_what_the_registry_resolves(self, name, etype):
+        assert getattr(defaults, name) == resolve(etype)
 
     def test_the_composer_consumes_the_registry_value(self, tmp_path):
         # Through `load_fleet`, the real door — NOT `_coerce_bot`. The default is
@@ -129,7 +161,7 @@ class TestRegistryIsTheSource:
         f = tmp_path / "fleet.yaml"
         f.write_text(
             yaml.safe_dump(
-                {"fleet": {"name": "probe", "bots": {"b": {"expertise": ["eng"]}}}}
+                {"fleet": {"name": "probe", "manager": "b", "bots": {"b": {"expertise": ["eng"]}}}}
             )
         )
         fleet, _ = load_fleet(f)
@@ -145,7 +177,14 @@ class TestRoleOverlay:
     """F2, generalised: keyed on role, shipping with one role populated."""
 
     def test_global_entries_apply_with_no_role(self):
-        assert resolve("guardrails") == ["claudlobby-dev-in-projects"]
+        assert resolve("guardrails") == [
+            "claudlobby-dev-in-projects",
+            "no-push-main",
+            "no-destructive-git",
+            "pii-protection",
+            "no-fabrication",
+            "confirm-before-send",
+        ]
 
     def test_a_role_overlay_is_unioned_on_top_of_the_global(self):
         d = Disposition(
@@ -225,7 +264,7 @@ class TestScopeBoundary:
         # exactly as it would from `entries`, and `resolve()` unions the two
         # without distinction. Checking only `entries` is how a role-scoped
         # `checkin` could have landed here already passing, with nothing
-        # short of `lib/naked-bot-observe.py` (which this file does not run)
+        # short of `harness/naked-bot-observe.py` (which this file does not run)
         # ever having looked.
         allowed = set(NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE)
         unexplained = {
@@ -240,7 +279,7 @@ class TestScopeBoundary:
         ungrandfathered = {t: e for t, e in unexplained.items() if e}
         assert not ungrandfathered, (
             "a NEW INSTRUCT default is present (global or role-scoped). It "
-            "cannot be justified by unit test: run lib/naked-bot-observe.py "
+            "cannot be justified by unit test: run harness/naked-bot-observe.py "
             f"--baseline and name the delta. {ungrandfathered}"
         )
 
@@ -292,7 +331,13 @@ class TestScopeBoundary:
         # no such guard: it is a predicate, so a bad `Paths` attribute raises at
         # compose time instead of reading falsy and suppressing the default on
         # every bot, which is why it is a predicate rather than an attribute name.
-        registered = {e for d in REGISTRY.values() for e in d.entries}
+        # A gate may key a role-scoped default (e.g. `status`), so a real entry
+        # is any global entry OR any role entry.
+        registered = {
+            e
+            for d in REGISTRY.values()
+            for e in (*d.entries, *(x for entries in d.roles.values() for x in entries))
+        }
         for entry, gate in defaults.AVAILABILITY_GATES.items():
             assert entry in registered, f"gate for unregistered entry: {entry}"
             assert callable(gate), f"gate for {entry} is not callable"
@@ -349,22 +394,17 @@ class TestScopeBoundary:
             f"{etype}/{entry}"
             for etype in REGISTRY
             for entry in set(resolve(etype)) | set(resolve(etype, all_roles))
-            if not (LIBRARY / etype / f"{entry}.md").is_file()
+            if not _library_file(etype, entry).is_file()
         ]
         assert not missing, f"registered but absent from library/: {missing}"
 
 
 # ---------------------------------------------------------------------------
 # The `checkin` leaf-manager default, end to end (PR4 chunk 4, #1569 task 3).
-# `fleet_dir` (conftest.py) ships lead/worker-1 with lead managing eng —
-# lead is already a leaf manager by that shape alone (test_leaf_manager_role
-# precedent). A `coord` bot is added, managing a team of one (lead), so ONE
-# fleet carries all three roles at once: coord is a coordinator (its only
-# report, lead, is itself a manager — not leaf), lead stays leaf (it still
-# manages eng/worker-1), worker-1 is a plain worker (never a manager). None of
-# the three DECLARES `protocols: [checkin]` — every assertion here is about
-# what the DEFAULT does, not a hand-equipped bot (that is
-# tests/test_checkin_library.py's job).
+# `fleet_dir` supplies lead and worker-1. A separate singleton coordinator
+# fleet reports across fleets to lead. The default reaches the declared
+# manager with local workers, not the coordinator or the worker. None declares
+# checkin: these assertions measure only the role default.
 # ---------------------------------------------------------------------------
 
 
@@ -382,26 +422,20 @@ def _write_checkin_library(fleet_dir: Path) -> None:
     shutil.copytree(LIBRARY / "skills" / "checkin", dst)
 
 
-def _add_coordinator(fleet_dir: Path) -> None:
-    """Add `coord`, managing a team of one (lead) — the same text-surgery
-    convention as test_leaf_manager_role.py's non-leaf validator fixture,
-    minus the explicit `protocols: [checkin]` declaration that test exists to
-    warn about: here nothing is declared, only defaulted."""
-    text = (fleet_dir / "fleet.yaml").read_text()
-    text = text.replace(
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
-        "    top:\n      manager: coord\n      workers: [lead]\n",
+def _coordinator_fleet(fleet_dir: Path):
+    """Keep the reporting coordinator in its own fleet, without local workers."""
+    directory = fleet_dir.parent / "coordinator"
+    directory.mkdir()
+    manifest = directory / "fleet.yaml"
+    manifest.write_text(
+        "fleet:\n  name: coordinator\n  manager: coord\n  bots:\n"
+        "    coord:\n      expertise: [orchestration]\n      manages: [lead]\n"
     )
-    text = text.replace(
-        "  bots:\n    lead:\n",
-        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
-    )
-    (fleet_dir / "fleet.yaml").write_text(text)
+    return load_fleet(manifest)[0], _paths(directory)
 
 
 def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
 
 
 class TestLeafManagerCheckinDefault:
@@ -412,19 +446,20 @@ class TestLeafManagerCheckinDefault:
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         install_real_template(fleet_dir)
         _write_checkin_library(fleet_dir)
-        _add_coordinator(fleet_dir)
+        coordinator, coordinator_paths = _coordinator_fleet(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        assert fleet.leaf_manager_bots() == {"lead"}  # coord is a coordinator
+        assert fleet.leaf_manager_bots() == {"lead"}
+        assert coordinator.leaf_manager_bots() == set()
         paths = _paths(fleet_dir)
 
         lead_md = compose_claude_md(fleet.bots["lead"], fleet, paths)
-        coord_md = compose_claude_md(fleet.bots["coord"], fleet, paths)
+        coord_md = compose_claude_md(coordinator.bots["coord"], coordinator, coordinator_paths)
         worker_md = compose_claude_md(fleet.bots["worker-1"], fleet, paths)
 
         # None of the three DECLARED protocols: [checkin] — this is the
         # default reaching lead alone.
-        for bot_id in ("lead", "coord", "worker-1"):
-            assert "checkin" not in fleet.bots[bot_id].protocols
+        for bot in (fleet.bots["lead"], coordinator.bots["coord"], fleet.bots["worker-1"]):
+            assert "checkin" not in bot.protocols
 
         assert "Silence is the default" in lead_md
         assert "Silence is the default" not in coord_md

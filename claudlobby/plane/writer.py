@@ -32,8 +32,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .db import connect, db_path
-from .migrations import migrate
+from .db import connect, db_file
+from .schema_state import preflight_schema, require_current_schema
 
 #: Explicit rather than passive. SQLite's auto-checkpoint is "it will try", and
 #: a held reader defeats it silently; an explicit call returns a result we can
@@ -71,7 +71,8 @@ class PlaneWriter:
         self._ident: tuple[int, int] | None = None
         self._since_checkpoint = 0
         self._last_checkpoint = 0.0
-        #: Observability, read by the daemon's status surface and the canary.
+        #: Counted, but nothing reads them yet: no status surface reports them,
+        #: and the canary SIGKILLs the daemon (#1905).
         self.reconnects = 0
         self.checkpoints = 0
         self.checkpoint_busy = 0
@@ -79,7 +80,7 @@ class PlaneWriter:
     # --- identity -----------------------------------------------------------
     def _identity(self) -> tuple[int, int] | None:
         try:
-            st = os.stat(db_path(self.root))
+            st = os.stat(db_file(self.root))
             return (st.st_dev, st.st_ino)
         except OSError:
             return None
@@ -113,8 +114,17 @@ class PlaneWriter:
             except sqlite3.Error:
                 pass                # the old handle may be unusable; that is why we are here
             self._conn = None
-        conn = connect(db_path(self.root), synchronous="FULL")
-        migrate(conn)               # DowngradeError propagates — the daemon exits 4 on it
+        preflight_schema(self.root)
+        conn = connect(db_file(self.root), synchronous="FULL")
+        # SQLite's own auto-checkpoint runs INSIDE the commit, so before the
+        # daemon can reply (#1693). The cadence below is the only checkpoint
+        # this connection runs, and the daemon runs it after the reply.
+        try:
+            require_current_schema(conn)
+            conn.execute("PRAGMA wal_autocheckpoint = 0")
+        except BaseException:
+            conn.close()
+            raise
         self._conn = conn
         self._ident = self._identity()
         self._since_checkpoint = 0
@@ -140,7 +150,7 @@ class PlaneWriter:
         the file is what that budget is about.
         """
         try:
-            return os.path.getsize(str(db_path(self.root)) + "-wal")
+            return os.path.getsize(str(db_file(self.root)) + "-wal")
         except OSError:
             return 0
 
@@ -153,10 +163,32 @@ class PlaneWriter:
         way the WAL grows without bound under this design. Under the old
         per-batch close that answer was unobservable, so the estate could not
         tell a checkpoint that worked from one that quietly did nothing.
+
+        **It never waits (#1693).** TRUNCATE waits for readers and for the
+        write lock through the busy handler, up to busy_timeout (5s), and on
+        the daemon's serial loop every client queued behind it waited too: 3 of
+        the 4 wedge arms measured on 2026-09-26 were this call waiting on
+        fleet-pulse's readers. With the handler off for the one call, SQLite
+        still truncates whenever no read-mark and no writer is in the way;
+        otherwise it checkpoints what it can, PASSIVE-style, and answers busy.
+        The WAL stays bounded by the next due checkpoint instead of a 5s wait.
         """
         if self._conn is None:
             return None
-        row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        conn = self._conn
+        patience = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.execute("PRAGMA busy_timeout = 0")
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {int(patience)}")
+            except sqlite3.Error:
+                # A writer left with no busy timeout would fail its next commit
+                # the moment another process held the lock. Forget its identity
+                # instead, so connection() reopens it with the timeout
+                # db.connect() sets.
+                self._ident = None
         self._since_checkpoint = 0
         self._last_checkpoint = time.monotonic()
         self.checkpoints += 1
@@ -165,7 +197,14 @@ class PlaneWriter:
         return tuple(row) if row is not None else None
 
     def after_batch(self) -> None:
-        """Called once per committed batch; checkpoints on cadence."""
+        """Called once per committed batch; checkpoints on cadence.
+
+        The daemon calls it only after the caller has its reply and its
+        connection is closed (#1693), so this never delays an acknowledgment.
+        It still runs on the serial loop, so a slow checkpoint delays whoever
+        connects next; `checkpoint()` not waiting on readers is what bounds
+        that to the checkpoint's own I/O.
+        """
         self._since_checkpoint += 1
         due = (self._wal_size() >= self.wal_bytes
                or self._since_checkpoint >= self.every_batches

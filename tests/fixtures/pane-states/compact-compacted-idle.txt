@@ -1,0 +1,24 @@
+
+
+● User declined to answer questions
+  ⎿  · Which stand-in option? (Option 1 / Option 2)
+
+✻ Churned for 0s · done 12:01 AM
+
+❯ /compact
+  ⎿  Compacted (ctrl+o to see full summary)
+     PreCompact [TMUX_TMPDIR=/work/example/scratch/s /bin/bash
+     /work/example/scratch/hooks/log.sh A] completed successfully
+     PostCompact [TMUX_TMPDIR=/work/example/scratch/s /bin/bash
+     /work/example/scratch/hooks/log.sh A] completed successfully
+
+❯ After the compaction pr4-live-QC-9945b8df.
+
+● Stand-in reply.
+
+✻ Sautéed for 0s · done 12:02 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

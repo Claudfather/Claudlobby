@@ -102,7 +102,7 @@ one layer is misconfigured:
    prompting on them instead of running them unattended.
 
 Never set `META_ADS_ENABLE_WRITE_TOOLS` truthy, and never add a write tool to a
-bot's `tools.allow` — the whole point is a read-only ROI reader. Editing spend or
+bot's `tool_permissions.allow` — the whole point is a read-only ROI reader. Editing spend or
 campaigns is a deliberate, separate, reviewed change.
 
 ## Auth model
@@ -156,9 +156,10 @@ campaigns is a deliberate, separate, reviewed change.
    META_ACCESS_TOKEN=<your-long-lived-ads_read-token>
    ```
 7. **Attach the MCP** — add `meta-ads` to a bot's `mcp:` list, then
-   `claudlobby generate` (see *Equipping a bot*). The first `npx` run downloads the
+   the operator applies the reviewed change with `claudlobby host update apply FULL_COMMIT`
+   (see *Equipping a bot*). The first `npx` run downloads the
    package — warm it once (`npx -y meta-ads-mcp-server@1.5.1 --help`, or
-   `claudlobby warm-cache`) so first bot use isn't a cold download. **Verify** on
+   `claudlobby host cache warm`) so first bot use isn't a cold download. **Verify** on
    first live use with `meta_ads_list_ad_accounts` (confirms the token sees the
    account), then a small `meta_ads_get_adaccount_insights` for the last 7 days.
 
@@ -229,7 +230,7 @@ campaigns → drill with `meta_ads_get_adset_insights` / `meta_ads_get_ad_insigh
   request Standard/Advanced access for real reporting volume — Development-tier apps
   throttle quickly.
 - **`npx` / Node required.** The host needs Node + `npx` on `PATH`. Pre-warm the
-  npx cache (`claudlobby warm-cache`) so first bot start isn't a 30–60s download.
+  npx cache (`claudlobby host cache warm`) so first bot start isn't a 30–60s download.
 - **Verify tool names on a version bump.** The 35 grants match `1.5.1`. If you bump
   the pin, re-confirm the tool list — a rename must update both `read_only_tools`
   (fragment) and `tool_grants` (this doc) together, or generation fails with a
@@ -248,7 +249,8 @@ campaigns → drill with `meta_ads_get_adset_insights` / `meta_ads_get_ad_insigh
 - **`(#17)` / `(#80000)` rate-limit** → back off and widen date buckets; reduce
   parallel insights calls.
 - **A read tool prompts instead of running** → it isn't in `read_only_tools` /
-  `tool_grants`. Add it to both (mirrored) and regenerate.
+  `tool_grants`. Add it to both (mirrored), then the operator applies the
+  reviewed change with `host update apply FULL_COMMIT`.
 - **`npx: command not found`** → host missing Node / `npx`.
 
 ## When NOT to use this
@@ -281,7 +283,8 @@ Set the one fleet `.env` var (gitignored — the real token lives only there):
 META_ACCESS_TOKEN=<your-long-lived-ads_read-token>
 ```
 
-Then `claudlobby generate`. The 35 read-only tools compose in as auto-allowed
+Then the operator applies the reviewed change with `claudlobby host update apply FULL_COMMIT`
+from a shell outside any bot session. The 35 read-only tools compose in as auto-allowed
 `mcp__meta-ads__*` reads (the 19 write tools stay unregistered and prompt-gated, so
-nothing mutating runs unattended). `claudlobby doctor` flags the `.env` var if
+nothing mutating runs unattended). `claudlobby host doctor` flags the `.env` var if
 missing.

@@ -41,8 +41,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../lib/lib-common.sh
-. "$REPO_ROOT/lib/lib-common.sh"
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
+. "$REPO_ROOT/claudlobby/_runtime_scripts/lib-common.sh"
 set +e  # lib-common arms set -e at source time; this suite scores, never aborts
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bws-matrix.XXXXXX")"
@@ -134,7 +134,7 @@ if ! command -v boot_work_state >/dev/null 2>&1; then
         pending=$((pending + 1)); printf '  PENDING: %s\n' "$c"
     done
     echo ""
-    echo "  boot_work_state is NOT DEFINED in lib/lib-common.sh."
+    echo "  boot_work_state is NOT DEFINED in claudlobby/_runtime_scripts/lib-common.sh."
     echo "  That is expected on main today: the predicate lands in #935 (P2)."
     echo "  These $pending cases are the contract it must satisfy. This suite"
     echo "  arms ITSELF -- defining the predicate runs all $pending for real,"

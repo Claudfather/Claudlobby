@@ -1,16 +1,20 @@
-"""Tests for claudlobby doctor — pre-flight fleet health diagnostic."""
+"""Tests for claudlobby host doctor — pre-flight fleet health diagnostic."""
 
 from __future__ import annotations
+
+from tests.plane_setup import initialize_plane
 
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
+import claudlobby.doctor as doctor_module
 from claudlobby.claudron_compat import COMPAT_FLOOR
 from claudlobby.config import load_fleet
 from claudlobby.doctor import (
@@ -24,9 +28,43 @@ from claudlobby.doctor import (
     format_report,
     run_doctor,
 )
+from tests.package_fixtures import source_package
+from tests.fixtures.current_runtime import current_runtime  # noqa: F401
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def test_generated_host_doctor_only_checks_its_fleet(current_runtime, monkeypatch):
+    from types import SimpleNamespace
+    from claudlobby import doctor
+    from claudlobby.commands import host_doctor
+    from claudlobby.paths import load_lib_module
+    from claudlobby.active_config import read_current_config
+    import shutil
+
+    root, installation, rendered, host = current_runtime
+    own = root / "local" / "own"
+    own.mkdir(parents=True)
+    (own / "fleet.yaml").write_text(
+        "fleet:\n  name: own\n  manager: worker\n  bots:\n    worker:\n      expertise: [software-engineering]\n")
+    # The fixture's first publication is complete; prepare the next one in its
+    # existing private render slot rather than replacing a pending render.
+    shutil.rmtree(rendered.directory)
+    fixture = load_lib_module(REPO / "harness", "compose.py")
+    fixture.publish_fixture(installation, "own")
+    snapshot = read_current_config(root, installation=installation,
+                                   revision=host.package.source_revision)
+    assert set(snapshot["fleets"]) == {"example", "own"}
+    monkeypatch.setenv("FLEET_NAME", "own")
+    checked = []
+    monkeypatch.setattr(doctor, "run_doctor", lambda fleet, paths, **_:
+                        checked.append(fleet.name) or DoctorReport())
+    args = SimpleNamespace(root=root, fleet=None, seed=False, markdown=False,
+                           switches=False, delivery=False)
+    result = host_doctor.dispatch(args)
+    assert checked == ["own"]
+    assert [row["fleet"] for row in result.data["fleets"]] == ["own"]
 
 
 @pytest.fixture
@@ -38,6 +76,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -83,7 +122,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "runtime" / "bots").mkdir(parents=True)
     (root / "lib").mkdir()
 
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     fleet, _md = load_fleet(root / "fleet.yaml")
     return root, fleet, paths
 
@@ -123,6 +162,9 @@ class TestCheckMcpConfigs:
 
     def test_fail_when_fragment_missing(self, doctor_fleet):
         root, fleet, paths = doctor_fleet
+        empty_base = root.parent / "package" / "library"
+        empty_base.mkdir(parents=True)
+        paths = replace(paths, package=replace(source_package(), library=empty_base))
         (root / "library" / "mcp" / "github.json").unlink()
         report = DoctorReport()
         check_mcp_configs(fleet, paths, report)
@@ -307,7 +349,7 @@ class TestCheckClaudron:
                 "#!/bin/sh\n"
                 'if [ "$1" = "status" ]; then\n'
                 '  echo \'{"ok":true,"command":"status","data":'
-                '{"engine_version":"0.3.0","root":"/v","total_docs":7}}\'\n'
+                '{"engine_version":"0.3.0","root":"/v","total_docs":7},"warnings":[],"errors":[]}\'\n'
                 "fi\n"
                 "exit 0\n"
             ),
@@ -394,6 +436,313 @@ class TestCheckClaudron:
         assert "not present on this host" in loop.detail
 
 
+#: `claudron doctor --json` answers, shaped from live captures of claudron 0.5.3
+#: on scratch vaults (2026-09-29): D001 is one finding per pending migration,
+#: and `data.pending` carries each one's id, version and title; D008 is ONE
+#: finding whose message lists the files; an unreadable identity file reads
+#: `vault_format: 0` with nothing pending.
+def _finding(code: str, severity: str, path: str, message: str) -> dict:
+    return {
+        "code": code,
+        "severity": severity,
+        "path": path,
+        "field": None,
+        "line": None,
+        "message": message,
+    }
+
+
+def _doctor_envelope(
+    *, vault_format: int = 2, engine_format: int = 2, pending=(), errors=(), warnings=()
+) -> dict:
+    return {
+        "ok": not errors,
+        "command": "doctor",
+        "data": {
+            "engine_format": engine_format,
+            "fixable": [p["id"] for p in pending],
+            "fixed": False,
+            "git": {"state": "clean"},
+            "index": {},
+            "pending": list(pending),
+            "schema": {"errors": 0, "warnings": 0},
+            "vault_format": vault_format,
+        },
+        "warnings": list(warnings),
+        "errors": list(errors),
+    }
+
+
+PENDING = [
+    {
+        "id": "m001",
+        "version": 1,
+        "title": "create the .claudron-vault identity file (#183)",
+    },
+    {
+        "id": "m002",
+        "version": 2,
+        "title": "add the F9 .gitignore rules: runtime, telemetry, *.bak (#182)",
+    },
+]
+D001 = [
+    _finding(
+        "D001",
+        "error",
+        ".",
+        "migration m001 pending (format 1): create the .claudron-vault identity file (#183)"
+        " — run: claudron doctor --fix",
+    ),
+    _finding(
+        "D001",
+        "error",
+        ".",
+        "migration m002 pending (format 2): add the F9 .gitignore rules: runtime, telemetry,"
+        " *.bak (#182) — run: claudron doctor --fix",
+    ),
+]
+D008 = _finding(
+    "D008",
+    "warning",
+    ".",
+    "2 tracked file(s) match the ignore rules, so they keep being committed: a/data/.idle,"
+    " notes.bak — a human decides: `git rm --cached <path>` stops tracking without deleting"
+    " the file",
+)
+D007_UNREADABLE = _finding(
+    "D007",
+    "error",
+    ".claudron-vault",
+    ".claudron-vault is present but unreadable (want YAML with an integer `claudron:`)"
+    " — fix it by hand; doctor never guesses",
+)
+D004 = _finding(
+    "D004", "warning", ".", "git health: dirty (see: claudron sync --check)"
+)
+
+
+class TestClaudronDoctorRung:
+    """Claudron #190 part C: `claudlobby doctor` asks `claudron doctor` about
+    each wired vault on this host and surfaces what only a human should act on:
+    pending migrations (D001), the identity file (D007), and tracked files the
+    ignore rules match (D008). It never passes `--fix`."""
+
+    @staticmethod
+    def _engine(
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        caps=("navigation", "doctor"),
+        version="0.5.3",
+        envelope=None,
+        rc=0,
+        hang=0,
+    ) -> Path:
+        """A stub `claudron`: `status` answers the capability probe, `doctor`
+        prints *envelope* and exits *rc* (or hangs *hang* seconds), and every
+        call's arguments land in the returned log."""
+        log = tmp_path / "claudron-argv.log"
+        answer = tmp_path / "doctor-answer.json"
+        answer.write_text(
+            envelope
+            if isinstance(envelope, str)
+            else json.dumps(envelope or _doctor_envelope())
+        )
+        status = {
+            "ok": True,
+            "command": "status",
+            "data": {"engine_version": version, "root": "/v", "total_docs": 7},
+            "warnings": [],
+            "errors": [],
+        }
+        if caps is not None:
+            status["data"]["capabilities"] = list(caps)
+        status_answer = tmp_path / "status-answer.json"
+        status_answer.write_text(json.dumps(status))
+        doctor_leg = f"exec sleep {hang}" if hang else f'cat "{answer}"; exit {rc}'
+        TestCheckClaudron._stub_cli(
+            tmp_path,
+            monkeypatch,
+            body=(
+                "#!/bin/sh\n"
+                f'echo "$*" >> "{log}"\n'
+                'case "$1" in\n'
+                f'  status) cat "{status_answer}"; exit 0 ;;\n'
+                f"  doctor) {doctor_leg} ;;\n"
+                "esac\n"
+                "exit 0\n"
+            ),
+        )
+        return log
+
+    def _diagnose(
+        self, doctor_fleet, tmp_path: Path, monkeypatch, *, vault=None, **engine
+    ):
+        root, _fleet, paths = doctor_fleet
+        vault = vault or TestCheckClaudron._vault(tmp_path)
+        fleet = TestCheckClaudron._wire(root, vault)
+        log = self._engine(tmp_path, monkeypatch, **engine)
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        rows = {
+            c.name: c for c in report.checks if c.name.startswith("claudron-doctor")
+        }
+        calls = log.read_text().splitlines() if log.exists() else []
+        return vault, rows, [c for c in calls if c.startswith("doctor")], calls
+
+    def test_pending_migrations_are_named_with_the_command_a_human_runs(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        vault, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(vault_format=0, pending=PENDING, errors=D001),
+            rc=1,
+        )
+        row = rows["claudron-doctor"]
+        assert row.status == "warn"
+        assert "2 migration(s) pending" in row.detail
+        assert "m001 (create the .claudron-vault identity file (#183))" in row.detail
+        assert "m002 (" in row.detail
+        assert f"claudron doctor --vault {vault} --fix" in row.detail
+        assert "claudlobby never runs it" in row.detail
+
+    def test_d008_quotes_the_engines_list_of_files(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(warnings=[D008]),
+        )
+        row = rows["claudron-doctor: D008"]
+        assert row.status == "warn"
+        assert "a/data/.idle, notes.bak" in row.detail
+        assert "git rm --cached" in row.detail
+        assert rows["claudron-doctor"].status == "pass"
+
+    def test_an_unreadable_identity_file_is_not_read_as_current(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        # The engine reports format 0 with nothing pending: "nothing pending"
+        # alone must not read as a current vault.
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(
+                vault_format=0, errors=[D007_UNREADABLE], warnings=[D004]
+            ),
+            rc=1,
+        )
+        identity = rows["claudron-doctor: D007"]
+        assert identity.status == "warn"
+        assert "present but unreadable" in identity.detail
+        assert rows["claudron-doctor"].status == "warn"
+        assert "vault format 0, engine format 2" in rows["claudron-doctor"].detail
+
+    def test_a_current_vault_passes_and_counts_what_it_does_not_surface(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(warnings=[D004]),
+        )
+        row = rows["claudron-doctor"]
+        assert row.status == "pass"
+        assert "vault format 2, engine format 2" in row.detail
+        assert "1 other finding(s) (D004)" in row.detail
+        assert set(rows) == {"claudron-doctor"}
+
+    def test_run_doctor_shares_its_probe_with_fleet_validation(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _, paths = doctor_fleet
+        vault = TestCheckClaudron._vault(tmp_path)
+        fleet = TestCheckClaudron._wire(root, vault)
+        log = self._engine(tmp_path, monkeypatch, envelope=_doctor_envelope(
+            vault_format=2, engine_format=3, pending=PENDING, errors=D001), rc=1)
+        report = run_doctor(fleet, paths, delivery=False)
+        calls = log.read_text().splitlines()
+        assert len([c for c in calls if c.startswith("status ")]) == 1
+        assert len([c for c in calls if c.startswith("doctor ")]) == 1
+        fleet_row = next(c for c in report.checks if c.name == "fleet-yaml")
+        assert "claudron-migration" in fleet_row.detail
+        assert any(c.name == "claudron-doctor" and "m001" in c.detail for c in report.checks)
+
+    def test_fix_is_never_passed(self, doctor_fleet, tmp_path, monkeypatch):
+        vault, _, doctor_calls, calls = self._diagnose(
+            doctor_fleet,
+            tmp_path,
+            monkeypatch,
+            envelope=_doctor_envelope(vault_format=0, pending=PENDING, errors=D001),
+            rc=1,
+        )
+        assert doctor_calls == [f"doctor --json --vault {vault}"]
+        assert not [c for c in calls if "--fix" in c]
+
+    def test_an_engine_that_does_not_declare_doctor_is_not_asked(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        # A high version string opens nothing: the declared capability is the gate.
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, caps=("navigation",), version="9.9.9"
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert (
+            "does not declare the `doctor` capability" in rows["claudron-doctor"].detail
+        )
+        assert doctor_calls == []
+
+    def test_the_capability_not_the_version_opens_the_door(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, caps=("doctor",), version="0.0.0-dev"
+        )
+        assert len(doctor_calls) == 1
+        assert rows["claudron-doctor"].status == "pass"
+
+    def test_a_doctor_that_does_not_answer_in_time_is_unknown_never_pass(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(doctor_module, "CLAUDRON_DOCTOR_TIMEOUT_S", 0.5)
+        _, rows, _, _ = self._diagnose(doctor_fleet, tmp_path, monkeypatch, hang=5)
+        row = rows["claudron-doctor"]
+        assert row.status == "warn"
+        assert "did not answer within 0.5s" in row.detail
+        assert "unknown" in row.detail and "#201" in row.detail
+
+    def test_no_vault_there_is_a_warn(self, doctor_fleet, tmp_path, monkeypatch):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, envelope="", rc=3
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert "found no vault" in rows["claudron-doctor"].detail
+
+    def test_an_answer_without_the_envelope_is_a_warn(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, _, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, envelope="not json", rc=0
+        )
+        assert rows["claudron-doctor"].status == "warn"
+        assert "without its envelope" in rows["claudron-doctor"].detail
+
+    def test_a_vault_not_on_this_host_is_left_to_the_loop_row(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        _, rows, doctor_calls, _ = self._diagnose(
+            doctor_fleet, tmp_path, monkeypatch, vault=tmp_path / "nowhere"
+        )
+        assert rows == {}
+        assert doctor_calls == []
+
+
 class TestCheckWorkstreamResidual:
     """#1635: a registry file with rows the plane does not hold — the "two
     stores, one reader" state the F18 closure existed to end."""
@@ -423,6 +772,7 @@ class TestCheckWorkstreamResidual:
         root, fleet, paths = self._fleet_and_paths(tmp_path)
         # anchor real identity for the fleet -- plane_workstreams refuses a
         # fleet the plane holds no bot of, same as any other plane door
+        initialize_plane(root)
         emit_batch(
             root,
             [
@@ -459,7 +809,7 @@ class TestCheckWorkstreamResidual:
         assert check.status == "fail"
         assert "2 row(s)" in check.detail
         assert "ws-one" in check.detail and "ws-two" in check.detail
-        assert "plane import-workstreams" in check.detail
+        assert "migration workstreams" in check.detail
 
     def test_passes_once_every_row_is_on_the_plane(self, tmp_path):
         from tests.plane_fixtures import F
@@ -467,6 +817,7 @@ class TestCheckWorkstreamResidual:
         from claudlobby.plane.emit_api import emit_batch
 
         root, fleet, paths = self._fleet_and_paths(tmp_path)
+        initialize_plane(root)
         emit_batch(
             root,
             [
@@ -544,7 +895,7 @@ class TestCheckWorkstreamResidual:
 
 
 class TestDoctorTimerScriptParity:
-    """`claudlobby doctor` mirrors `generate` for the L1 deny-by-default timer
+    """`claudlobby host doctor` mirrors `generate` for the L1 deny-by-default timer
     rule: a fleet job whose ``script`` is a foreign absolute fails the rollout
     `generate` (compose_fleet_timers), so doctor's fleet-yaml check must fail too.
     validate reads the jobs off ``fleet.defaults``, so every surface that runs it —
@@ -592,7 +943,7 @@ class TestCheckCredentialsScoping:
 
         Required by every test in this class that expects a value decision.
         `Paths.env_resolved` REFUSES rather than falling back when it cannot
-        reach `lib/env-tiers.sh`, so without this the function short-circuits to
+        reach `claudlobby/_runtime_scripts/env-tiers.sh`, so without this the function short-circuits to
         its resolver-unavailable branch and an absence-assertion passes for the
         wrong reason — which is exactly what happened while writing these.
         A stub resolver is not an option: it would certify a cascade the runtime
@@ -603,7 +954,7 @@ class TestCheckCredentialsScoping:
         # supervisor.sh is a third required sibling: lib-common.sh unconditionally
         # sources it from its own directory (#1573 task 6).
         for f in ("lib-common.sh", "env-tiers.sh", "supervisor.sh"):
-            (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+            (paths.root / "lib" / f).write_bytes((repo / "claudlobby/_runtime_scripts" / f).read_bytes())
         fake_home = paths.root.parent / "home"
         fake_home.mkdir(exist_ok=True)
         monkeypatch.setenv("HOME", str(fake_home))
@@ -745,11 +1096,12 @@ class TestCheckCredentialsScoping:
         go and set a credential — and the runtime raises precisely so the
         distinction survives. Folding it into an empty mapping would recreate
         the unreachable-vs-empty defect inside a fix for its sibling. The
-        fixture deliberately does NOT stage lib/env-tiers.sh.
+        selected package deliberately has no native env-tiers.sh resolver.
         """
         _, fleet, paths = doctor_fleet
         self._no_network(monkeypatch)
         monkeypatch.setenv("GITHUB_PAT", "ghp_whatever")
+        paths = replace(paths, package=replace(paths.package, native=paths.root / "lib"))
 
         report = DoctorReport()
         from claudlobby.doctor import check_credentials
@@ -776,6 +1128,7 @@ def _declare_railway(root: Path) -> "FleetConfig":  # noqa: F821
     (root / "fleet.yaml").write_text(
         dedent("""\
         fleet:
+          manager: worker
           name: test-fleet
           service_prefix: com.test
           bots:
@@ -914,7 +1267,7 @@ class TestGoalBindingCheck:
     the check-in beat from producing work."""
 
     def _paths(self, fleet_dir: Path) -> Paths:
-        return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        return Paths(root=fleet_dir, fleet_dir=fleet_dir, package=source_package())
 
     def _scope(self, fleet_dir: Path, org: str, repos: list[str]) -> None:
         import re as _re
@@ -988,7 +1341,7 @@ _BRIEFING_SLOT = (
 _NO_CHECKIN = "  system_defaults:\n    protocols: false\n"
 
 
-def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
+def _fleet_yaml(*, leaf_manager: bool = True, armed: bool = False, equipped: bool = True) -> str:
     """A fleet manifest varying only the three facts #1680's rungs read.
 
     Written at zero indent: these strings are assembled by concatenation and
@@ -996,9 +1349,10 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
     leading whitespace.
     """
     briefing = _BRIEFING_SLOT if armed else ""
-    if not manager:
+    if not leaf_manager:
         return (
             "fleet:\n"
+            "  manager: worker\n"
             "  name: solo-fleet\n"
             "  service_prefix: com.solo\n"
             "  bots:\n"
@@ -1007,6 +1361,7 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
         )
     return (
         "fleet:\n"
+        "  manager: lead\n"
         "  name: mgr-fleet\n"
         "  service_prefix: com.mgr\n"
         + ("" if equipped else _NO_CHECKIN)
@@ -1027,12 +1382,12 @@ def _fleet_yaml(*, manager: bool = True, armed: bool = False, equipped: bool = T
 def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     """A throwaway fleet root complete enough for the WHOLE `run_doctor`.
 
-    Wires the repo's real `lib/` rather than stubbing the resolver: task-recheck
+    Wires the repo's real `claudlobby/_runtime_scripts/` rather than stubbing the resolver: task-recheck
     ships opt-out (on by default), so a resolver-unavailable fallback reads it
     as ARMED and every disarmed scenario in this file silently collapses to
     PASS. The `.env` then disarms it so "no door armed" is reachable at all.
     """
-    from claudlobby.config import DEFAULT_GUARDRAILS
+    from tests.conftest import write_default_stubs
 
     root = tmp_path / "r"
     for kind in (
@@ -1050,18 +1405,18 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     (root / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
     # Wire whatever is MISSING rather than keying on the directory's existence
     # (origin/main's fix for the same #1588 class, adopted here). `root`
-    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # now ships a real `mcp-package-grammar.py`, so `claudlobby/_runtime_scripts/` EXISTS without being
     # wired, and an existence check skips the wiring silently: the switch
     # resolver then cannot read its doors, `task-recheck` falls back to ARMED
     # regardless of `.env`, and `_validate_ignition`'s early return makes every
     # scenario below pass vacuously.
     #
     # Per-entry links, never a whole-dir symlink: fixtures delete files under
-    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # `claudlobby/_runtime_scripts/`, and through a directory symlink those unlinks reach the repo's
     # own copies.
     lib = root / "lib"
     lib.mkdir(exist_ok=True)
-    for real in (REPO / "lib").iterdir():
+    for real in (REPO / "claudlobby/_runtime_scripts").iterdir():
         link = lib / real.name
         if not link.exists():
             link.symlink_to(real)
@@ -1069,16 +1424,18 @@ def _doctor_root(tmp_path: Path, fleet_yaml: str) -> Path:
     # (#1689). Testing for the FILE the resolver needs tests the proposition;
     # testing that a directory exists is the proxy that failed (#1588).
     assert (lib / "env-tiers.sh").is_file(), (
-        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"{lib} exists but does not carry the real claudlobby/_runtime_scripts/ — the switch resolver "
         f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
         f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
     (root / "library" / "expertise" / "orchestration.md").write_text("# Mgr\n")
     (root / "library" / "expertise" / "software-engineering.md").write_text("# Eng\n")
-    for name in DEFAULT_GUARDRAILS:
-        (root / "library" / "guardrails" / f"{name}.md").write_text(
-            f"---\ntitle: {name}\n---\n\nDefault guardrail.\n"
-        )
+    fleet_ops = root / "library" / "skills" / "fleet-ops"
+    fleet_ops.mkdir()
+    (fleet_ops / "SKILL.md").write_bytes(
+        (REPO / "library" / "skills" / "fleet-ops" / "SKILL.md").read_bytes()
+    )
+    write_default_stubs(root / "library")
     (root / "templates" / "claude.md.j2").write_text("# {{ bot.name }}\n")
     (root / "fleet.yaml").write_text(dedent(fleet_yaml))
     (root / ".env").write_text("TASK_RECHECK_ENABLED=0\n")
@@ -1097,9 +1454,9 @@ def _pin_plugin_manifest(tmp_path: Path, monkeypatch, fleet) -> None:
     `run_doctor`'s first rung runs the whole validator, whose plugins check
     resolves `Path.home() / ".claude" / "plugins" / "installed_plugins.json"`
     — so on a box that has never installed a plugin, `fleet-yaml` warns about
-    the developer's own machine. `fleet-yaml` is a COUNT rung: it aggregates
-    every `validate()` warning and cannot say what any of them is about, so
-    that host fact is indistinguishable from a real finding and lands in the
+    the developer's own machine. `fleet-yaml` aggregates every `validate()`
+    warning into one rung (it names their categories, not which finding is a
+    host fact), so that host fact reads as a real finding and lands in the
     allowlist test below as a phantom. Green here, red on a fresh box or a
     runner — which is the whole failure this file's tripwire exists to catch,
     turned on the tripwire itself.
@@ -1130,14 +1487,18 @@ def _doctor_rungs(tmp_path, monkeypatch, fleet_yaml: str, *, projects: bool = Fa
     monkeypatch.delenv("FLEET_NAME", raising=False)
     fleet, _md = load_fleet(root / "fleet.yaml")
     _pin_plugin_manifest(tmp_path, monkeypatch, fleet)
-    report = run_doctor(fleet, Paths(root=root, fleet_dir=root))
+    # This scaffold authors a minimal library and explicitly wires native
+    # peers. Select those assets so unrelated packaged MCP defaults cannot
+    # turn a work-dispatch warning test into a host npx-cache probe.
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    report = run_doctor(fleet, Paths(root=root, fleet_dir=root, package=package))
     return {c.name: c for c in report.checks}
 
 
 class TestCheckIgnition:
     """#1633: does anything give an idle bot on this fleet a turn?
 
-    Uses a real env-tiers resolver (the repo's own lib/, symlinked — the
+    Uses a real env-tiers resolver (the repo's own claudlobby/_runtime_scripts/, symlinked — the
     test_switches.py pattern) rather than stubbing it: task-recheck ships
     opt-out (on by default), so a resolver-unavailable fallback would read it
     as armed regardless of the scenario under test and every case here would
@@ -1146,6 +1507,7 @@ class TestCheckIgnition:
 
     _FLEET_NO_DOOR = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1158,6 +1520,7 @@ class TestCheckIgnition:
 
     _FLEET_BRIEFING_ARMED = """\
         fleet:
+          manager: mgr
           name: ign-fleet
           service_prefix: com.ign
           bots:
@@ -1174,7 +1537,8 @@ class TestCheckIgnition:
     def _check(self, tmp_path, fleet_yaml: str):
         root = _doctor_root(tmp_path, fleet_yaml)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         assert len(report.checks) == 1
@@ -1201,7 +1565,7 @@ class TestCheckIgnition:
 
 
 
-class TestRungAgreementOnAManagerLessFleet:
+class TestRungAgreementOnASingletonFleet:
     """#1680: `goal-binding` and `ignition` are two halves of one question —
     will this fleet ever do any work? — and they were built in parallel
     without seeing each other. On a fleet with no leaf manager they printed a
@@ -1218,7 +1582,7 @@ class TestRungAgreementOnAManagerLessFleet:
     def test_both_rungs_pass_and_give_the_same_not_applicable_reason(
         self, tmp_path, monkeypatch
     ):
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         # Fail closed: a renamed or dropped rung must break this test rather
         # than make it vacuously true.
         assert {"goal-binding", "ignition"} <= set(by_name), sorted(by_name)
@@ -1231,25 +1595,25 @@ class TestRungAgreementOnAManagerLessFleet:
     ):
         """The tripwire the acceptance criterion asks for.
 
-        A fleet with no leaf manager has no dispatcher, so no rung may report
-        a *work-dispatch* gap on it as a finding. `services` is the one
+        A singleton manager has no workers, so no rung may report a
+        *work-dispatch* gap on it as a finding. `services` is the one
         legitimate warning on this fixture — bots exist and are not enrolled,
         which is true and unrelated. Any OTHER rung warning here is either
         the #1680 divergence rebuilt or a deliberate new finding; both need a
         human to look, which is what an allowlist that must be edited buys.
         """
-        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(manager=False))
+        by_name = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False))
         warned = {n for n, c in by_name.items() if c.status in ("warn", "fail")}
         assert warned <= {"services"}, {n: by_name[n].detail for n in warned}
 
-    def test_a_manager_less_fleet_with_projects_still_reports_them(
+    def test_a_singleton_fleet_with_projects_still_reports_them(
         self, tmp_path, monkeypatch
     ):
-        """The gate replaces the no-projects WARN only. A manager-less fleet
+        """The gate replaces the no-projects WARN only. A singleton fleet
         that HAS declared projects keeps its informative PASS — the gate is
         an applicability test, not a mute button."""
         by_name = _doctor_rungs(
-            tmp_path, monkeypatch, _fleet_yaml(manager=False), projects=True
+            tmp_path, monkeypatch, _fleet_yaml(leaf_manager=False), projects=True
         )
         goal = by_name["goal-binding"]
         assert goal.status == "pass", goal.detail
@@ -1348,7 +1712,7 @@ class TestCoRequisiteCrossReference:
         that order for both surfaces."""
         detail = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml())["ignition"].detail
         assert detail.index("co-requisite") < detail.index("Cheapest to arm:")
-        assert detail.rstrip().endswith("generate + lib/setup-fleet"), detail
+        assert detail.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), detail
 
 
 class TestIgnitionGapIsTheRungsOwnPredicate:
@@ -1360,22 +1724,23 @@ class TestIgnitionGapIsTheRungsOwnPredicate:
     there."""
 
     @pytest.mark.parametrize(
-        "armed,manager",
+        "armed,leaf_manager",
         [(False, True), (True, True), (False, False), (True, False)],
     )
     def test_the_predicate_agrees_with_the_rung(
-        self, tmp_path, monkeypatch, armed, manager
+        self, tmp_path, monkeypatch, armed, leaf_manager
     ):
         from claudlobby.ignition import ignition_gap
 
-        root = _doctor_root(tmp_path, _fleet_yaml(manager=manager, armed=armed))
+        root = _doctor_root(tmp_path, _fleet_yaml(leaf_manager=leaf_manager, armed=armed))
         monkeypatch.delenv("FLEET_NAME", raising=False)
         fleet, _md = load_fleet(root / "fleet.yaml")
-        paths = Paths(root=root, fleet_dir=root)
+        package = replace(source_package(), library=root / "library", native=root / "lib")
+        paths = Paths(root=root, fleet_dir=root, package=package)
         report = DoctorReport()
         check_ignition(fleet, paths, report)
         rung_warns = report.checks[0].status == "warn"
-        assert rung_warns is (not armed and manager), report.checks[0].detail
+        assert rung_warns is (not armed and leaf_manager), report.checks[0].detail
         assert ignition_gap(fleet, paths) is rung_warns, report.checks[0].detail
 
 
@@ -1384,7 +1749,7 @@ class TestTheFixtureRefusesDeadWiring:
     must actually FIRE. An assertion nobody has watched fail is not a check —
     it is a comment that raises.
 
-    Reproduces the #1588 mechanism verbatim: a `lib/` that exists as a plain
+    Reproduces the #1588 mechanism verbatim: a `claudlobby/_runtime_scripts/` that exists as a plain
     DIRECTORY satisfies the `if not ... .exists()` guard, so the symlink is
     skipped, the switch resolver cannot run, task-recheck falls back to ARMED,
     and the disarmed scenarios in this file silently measure the opposite of
@@ -1399,7 +1764,7 @@ class TestTheFixtureRefusesDeadWiring:
 
     No shortcut for WHICH tests stay silent has survived: neither assertion
     shape (a presence assertion,
-    `test_a_manager_less_fleet_with_projects_still_reports_them`, is silent)
+    `test_a_singleton_fleet_with_projects_still_reports_them`, is silent)
     nor asserts-why-not-what. The only property that held is the near-tautology
     that a test is silent exactly when its expected outcome is identical under
     both wiring states. Hence a structural refusal, which needs no
@@ -1407,7 +1772,7 @@ class TestTheFixtureRefusesDeadWiring:
     """
 
     def test_a_pre_created_lib_directory_is_REPAIRED_not_skipped(self, tmp_path):
-        """The #1588 arming, verbatim: something creates `lib/` first. The old
+        """The #1588 arming, verbatim: something creates `claudlobby/_runtime_scripts/` first. The old
         guard skipped the wiring and the suite went quiet; the helper now wires
         whatever is missing, per entry, and the resolver is live afterwards."""
         (tmp_path / "r" / "lib").mkdir(parents=True)
@@ -1420,7 +1785,7 @@ class TestTheFixtureRefusesDeadWiring:
         repaired by a per-entry symlink — `link.exists()` is true, so nothing
         is wired — and `.is_file()` is the predicate that still catches it."""
         (tmp_path / "r" / "lib" / "env-tiers.sh").mkdir(parents=True)
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _doctor_root(tmp_path, _fleet_yaml())
 
     def test_a_clean_build_is_wired_so_the_controls_are_not_vacuous(

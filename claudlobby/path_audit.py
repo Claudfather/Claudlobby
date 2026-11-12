@@ -22,6 +22,7 @@ absolute inputs.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, fields, is_dataclass
@@ -45,6 +46,9 @@ COMPOSER_PROVIDED_PATH_ANCHORS: tuple[str, ...] = (
     "CLAUDLOBBY_ROOT",
     "FLEET_ROOT",
     "BOT_DIR",
+    "CLAUDLOBBY_NATIVE_DIR",
+    "CLAUDLOBBY_LIBRARY_DIR",
+    "CLAUDLOBBY_CLI",
 )
 
 
@@ -58,13 +62,14 @@ class PathFinding:
     reason: str
 
 
-# A crude absolute-path token: a run starting with "/" up to whitespace or a
+# An absolute-path token: a run starting with "/" up to whitespace or a
 # common delimiter. `<` and `>` delimit too — they cannot occur in a real path,
 # so they mark the boundary between an XML tag and a path in a launchd plist
 # (``</key><string>/real/path</string>``), keeping the closing tag out of the
-# extracted token. Good enough for the machine-generated wiring files scanned
-# here (bot.conf, .mcp.json, unit files).
-_ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,<>]+")
+# extracted token. Configured roots are recognized before these delimiters in
+# improper_fleet_paths: a root's spaces belong to the path, not to a new token.
+_ABS_TOKEN_CHAR = r"[^\s'\":;,<>]"
+_ABS_TOKEN_RE = re.compile("/" + _ABS_TOKEN_CHAR + "+")
 
 # Bot-dir-relative wiring files whose absolute paths must resolve for the bot to
 # run. Prose (CLAUDE.md) is intentionally excluded — a stale path there does not
@@ -86,10 +91,15 @@ _WIRING_STATIC = (
 
 def _anchor_values(bot: BotConfig, paths: Paths) -> dict[str, str]:
     """Map each composer-provided path anchor to its resolved absolute value."""
+    from .resources import selected_cli
+
     return {
+        "CLAUDLOBBY_CLI": str(selected_cli()),
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
         "BOT_DIR": str(paths.bot_runtime(bot.bot_id)),
+        "CLAUDLOBBY_NATIVE_DIR": str(paths.lib),
+        "CLAUDLOBBY_LIBRARY_DIR": str(paths.base_library),
     }
 
 
@@ -192,7 +202,8 @@ def improper_fleet_paths(
     sanctioned shared parent the fleet belongs to, not a leak. The rule is
     correctness, not "no absolutes".
     """
-    resolved = _resolve_anchor_tokens(text, _anchor_values(bot, paths))
+    anchor_values = _anchor_values(bot, paths)
+    resolved = _resolve_anchor_tokens(text, anchor_values)
     content_roots = _fleet_content_roots(paths)
     layout_needles = _fleet_layout_needles(paths)
     fleet_root = str(paths.fleet_config_dir)
@@ -200,14 +211,31 @@ def improper_fleet_paths(
     # neither the .claudron bridge string nor the fleet.yaml declaration is
     # guaranteed normalized): bridge-derived (paths.vault_root) and/or
     # bot-declared (claudron_vault_path, L1-exempt as declared-by-construction).
+    # Expanded too: the session-loop hooks carry the declared root with "~"
+    # expanded (`--vault <root>`, Claudron #183), so a `~/…` declaration must
+    # bless the path the composer actually wrote.
     vault_roots = {
-        os.path.normpath(r)
+        os.path.normpath(os.path.expanduser(r))
         for r in (paths.vault_root, bot.claudron_vault_path)
         if r
     }
+    # Preserve the exact configured prefix across shell quotes, JSON strings,
+    # XML text and unit assignments. A generic whitespace-consuming regex would
+    # swallow a second, foreign path into a valid one. Only these known prefixes
+    # may contain delimiters; suffixes and unrelated paths keep token boundaries.
+    # Longest first handles a nested fleet root; extra leading slashes preserve
+    # the permission-rule // spelling normalized below.
+    roots = sorted(
+        {r for r in (*anchor_values.values(), *content_roots, *vault_roots)
+         if os.path.isabs(r)}, key=len, reverse=True,
+    )
+    token_re = re.compile(
+        r"/*(?:" + "|".join(re.escape(r) for r in roots) + ")"
+        + _ABS_TOKEN_CHAR + "*|" + _ABS_TOKEN_RE.pattern
+    ) if roots else _ABS_TOKEN_RE
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for m in _ABS_TOKEN_RE.finditer(resolved):
+    for m in token_re.finditer(resolved):
         p = m.group(0).rstrip("/.,:;\"')}")
         if p in seen:
             continue
@@ -259,6 +287,23 @@ def _emitted_scan_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> lis
     return rels
 
 
+def _without_deny_rules(text: str) -> str:
+    """*text* (a composed ``settings.local.json``) with ``permissions.deny``
+    removed. A deny rule is a restriction, not wiring to a path: it never
+    dangles into a broken bot, and naming ANOTHER fleet's paths is the whole
+    job of the host-wide isolation rules (#1665). L1 already leaves denies
+    unclassified for the same reason (``compose_settings_local``). Text that
+    does not parse is scanned whole, the conservative direction."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    perms = data.get("permissions") if isinstance(data, dict) else None
+    if isinstance(perms, dict):
+        perms.pop("deny", None)
+    return json.dumps(data)
+
+
 def audit_bot_paths(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[PathFinding]:
@@ -270,6 +315,8 @@ def audit_bot_paths(
             text = (bot_dir / rel).read_text()
         except (OSError, UnicodeDecodeError):
             continue  # file absent (e.g. no .mcp.json) or binary — nothing to scan
+        if rel == ".claude/settings.local.json":
+            text = _without_deny_rules(text)
         for path, reason in improper_fleet_paths(text, bot, paths):
             findings.append(PathFinding(bot.bot_id, rel, path, reason))
     return findings
@@ -601,6 +648,8 @@ _FIELD_POSTURES: dict[str, Posture] = {
     "permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "tool_permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "autonomous_runner.skill": Posture.EXEMPT,  # a slash-command ref, not a path
+    "env.SESSION_HANDOFF_COMMAND": Posture.EXEMPT,  # literal TUI input, never a shell path
+    "env.SESSION_RESUME_COMMAND": Posture.EXEMPT,  # same configured session-provider contract
     "hooks.type": Posture.EXEMPT,  # hook event kind (e.g. "command"), not a path
     "hooks.matcher": Posture.EXEMPT,  # tool-name matcher, not a path
     # word-split (rule 6, F3=b) — the only fields whose value is scanned token by
@@ -618,7 +667,7 @@ def _posture_for(segments: tuple[str, ...]) -> Posture:
     if not segments:
         return Posture.CHECK
     top = segments[0]
-    if top in ("hooks", "autonomous_runner"):
+    if top in ("hooks", "autonomous_runner", "env"):
         # Both structured fields refine by terminal key and default to CHECK, so a
         # NEW hook/runner sub-field is deny-by-default covered (not silently
         # exempt). The known non-path keys (hooks.type/matcher,

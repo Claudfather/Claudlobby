@@ -2,7 +2,7 @@
 
 F18 closure R2b: the keepalive.log parser is gone, so TestParseKeepaliveLog and
 TestCollectBotLogs went with it; `aggregate_fleet` takes the plane's entries
-through its required `entries_for` seam, and `claudlobby uptime` refuses when
+through its required `entries_for` seam, and canonical `fleet uptime` refuses when
 the plane cannot answer.
 """
 
@@ -12,10 +12,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claudlobby.uptime import (
+    WINDOWS,
     compute_metrics,
     aggregate_fleet,
     format_table,
-    format_json,
     _fmt_duration,
 )
 
@@ -25,19 +25,13 @@ from claudlobby.uptime import (
 TZ = timezone(timedelta(hours=-4))
 
 
-def _ts(hour: int, minute: int = 0) -> str:
-    """Build an ISO timestamp string for 2026-05-17 at given hour:min -04:00."""
-    return datetime(2026, 5, 17, hour, minute, tzinfo=TZ).isoformat()
-
-
-def _write_log(path: Path, lines: list[str]) -> None:
-    path.write_text("\n".join(lines) + "\n")
-
-
 class TestComputeMetrics:
     def test_empty_entries(self):
+        # #891: nothing observed is unknown, not 0% up.
         m = compute_metrics([], timedelta(hours=24))
-        assert m["uptime_pct"] == 0.0
+        assert m["uptime_pct"] is None
+        assert m["observed_pct"] == 0.0
+        assert m["observed_seconds"] == 0
         assert m["restart_count"] == 0
         assert m["entries_in_window"] == 0
 
@@ -54,18 +48,33 @@ class TestComputeMetrics:
         assert m["idle_seconds"] > 0
         assert m["busy_seconds"] == 0
 
+    def test_held_counts_as_up_time(self):
+        # #2070: HELD is a live session whose input box holds text that was
+        # never submitted. Those ticks read UNKNOWN until keepalive could name
+        # them, and counted as up time; a held bot must not start reading down.
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
+        stamps = [datetime(2026, 5, 17, 11, m, tzinfo=TZ) for m in (0, 5, 10)]
+        held = compute_metrics([(t, "HELD") for t in stamps], timedelta(hours=24), now=now)
+        unknown = compute_metrics([(t, "UNKNOWN") for t in stamps], timedelta(hours=24), now=now)
+        assert held["uptime_pct"] > 0
+        assert held["uptime_pct"] == unknown["uptime_pct"]
+        assert held["busy_seconds"] == 0
+
     def test_restart_counted(self):
+        # #891: each restart follows an IDLE tick a minute earlier (seen from up),
+        # and MTBR is the gap between them, not up-seconds per restart.
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
         entries = [
-            (datetime(2026, 5, 17, 10, 0, tzinfo=TZ), "IDLE"),
+            (datetime(2026, 5, 17, 10, 29, tzinfo=TZ), "IDLE"),
             (datetime(2026, 5, 17, 10, 30, tzinfo=TZ), "RESTART"),
             (datetime(2026, 5, 17, 10, 31, tzinfo=TZ), "IDLE"),
+            (datetime(2026, 5, 17, 10, 59, tzinfo=TZ), "IDLE"),
             (datetime(2026, 5, 17, 11, 0, tzinfo=TZ), "RESTART"),
             (datetime(2026, 5, 17, 11, 1, tzinfo=TZ), "IDLE"),
         ]
         m = compute_metrics(entries, timedelta(hours=24), now=now)
         assert m["restart_count"] == 2
-        assert m["mtbr_seconds"] == 900
+        assert m["mtbr_seconds"] == 1800
 
     def test_first_boot_after_restart(self):
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
@@ -90,12 +99,12 @@ class TestComputeMetrics:
         assert m["first_boot"] == first_ts.isoformat()
 
     def test_uptime_pct_numerical(self):
-        """uptime_pct must equal (up_secs / window_secs) * 100, capped at 100.
+        """uptime_pct is up_secs / observed_secs; observed_pct is observed / window (#891).
 
         Scenario: two IDLE entries 5 min apart, now is 5 min after the last.
         Interval 1: 300s (< 600s cap) → 300s IDLE.
         Interval 2: 300s (< 600s cap) → 300s IDLE.
-        up_secs = 600, window = 86400 → pct = round(600/86400*100, 1) = 0.7%.
+        up = observed = 600 → uptime 100.0%; 600/86400 → observed_pct 0.7%.
         """
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
         entries = [
@@ -103,7 +112,9 @@ class TestComputeMetrics:
             (datetime(2026, 5, 17, 11, 55, tzinfo=TZ), "IDLE"),
         ]
         m = compute_metrics(entries, timedelta(hours=24), now=now)
-        assert m["uptime_pct"] == 0.7
+        assert m["uptime_pct"] == 100.0
+        assert m["observed_pct"] == 0.7
+        assert m["observed_seconds"] == 600
         assert m["idle_seconds"] == 600
 
     def test_window_filtering(self):
@@ -124,6 +135,117 @@ class TestComputeMetrics:
         ]
         m = compute_metrics(entries, timedelta(hours=24), now=now)
         assert m["busy_seconds"] == 600  # capped
+
+
+# -- #891: observed time, restart episodes, MTBR between restarts ----------
+
+_NOW = datetime(2026, 9, 18, 20, 0, tzinfo=timezone.utc)
+
+
+def _every(start, end, state, step=60):
+    """(instant, state) every *step* seconds in [start, end): keepalive's ticks."""
+    out, t = [], start
+    while t < end:
+        out.append((t, state))
+        t += timedelta(seconds=step)
+    return out
+
+
+def _dead_tick(at):
+    """keepalive finding the session dead: the RESTART event and the DOWN sample
+    land on the same tick (the event's instant is whole seconds, the sample's is not)."""
+    return [(at, "RESTART"), (at + timedelta(milliseconds=578), "DOWN")]
+
+
+def _host_outage():
+    """#1616's shape: up until the host goes off for 17h40m; on boot keepalive
+    finds the session dead three times, 80 s apart, before it comes up."""
+    off = _NOW - timedelta(hours=18)
+    back = off + timedelta(hours=17, minutes=40)
+    entries = _every(_NOW - timedelta(hours=24), off, "IDLE")
+    for k in range(3):
+        entries += _dead_tick(back + timedelta(seconds=80 * k))
+    return entries + _every(back + timedelta(seconds=240), _NOW, "IDLE")
+
+
+class TestObservedTime891:
+    def test_partial_history_reads_the_up_share_of_observed_time(self):
+        # A healthy bot whose record holds 500 one-minute ticks (8h20m): the
+        # wall-clock denominator read 34.7% / 5.0% / 1.2% for a bot that was
+        # never down. The share of the window observed is reported beside it.
+        entries = _every(_NOW - timedelta(seconds=500 * 60), _NOW, "IDLE")
+        for window, observed_pct in (("24h", 34.7), ("7d", 5.0), ("30d", 1.2)):
+            m = compute_metrics(entries, WINDOWS[window], now=_NOW)
+            assert (m["uptime_pct"], m.get("observed_pct"), m.get("observed_seconds")) == \
+                (100.0, observed_pct, 30000), window
+
+    def test_a_host_outage_is_not_a_bot_restart(self):
+        m = compute_metrics(_host_outage(), WINDOWS["24h"], now=_NOW)
+        # (restart_count, restarts_after_silence, restart_events, mtbr_seconds):
+        # one episode after silence, not three bot restarts, and no MTBR from it
+        assert (m["restart_count"], m.get("restarts_after_silence"), m.get("restart_events"),
+                m["mtbr_seconds"]) == (0, 1, 3, None)
+        # the 17h40m the host was off is unobserved, not downtime: only the three
+        # DOWN samples are observed down (80 + 80 + 79.4 s); 23100 up / 23339 observed
+        assert (m["uptime_pct"], m.get("down_seconds")) == (99.0, 239)
+
+    def test_a_dead_tick_storm_seen_from_up_is_one_restart(self):
+        # the control for the outage case: the same three dead ticks a minute
+        # after an IDLE tick are the bot's own restart, counted once
+        crash = _NOW - timedelta(hours=2)
+        entries = _every(_NOW - timedelta(hours=24), crash, "IDLE")
+        for k in range(3):
+            entries += _dead_tick(crash + timedelta(seconds=80 * k))
+        entries += _every(crash + timedelta(seconds=240), _NOW, "IDLE")
+        m = compute_metrics(entries, WINDOWS["24h"], now=_NOW)
+        assert m["restart_count"] == 1
+        assert m["restarts_after_silence"] == 0
+        assert m["restart_events"] == 3
+
+    def test_first_boot_is_the_first_up_sample_after_a_restart(self):
+        # the DOWN sample keepalive lands with the RESTART is the dead session,
+        # not its boot
+        crash = _NOW - timedelta(hours=2)
+        entries = (_every(_NOW - timedelta(hours=24), crash, "IDLE") + _dead_tick(crash)
+                   + _every(crash + timedelta(seconds=60), _NOW, "IDLE"))
+        m = compute_metrics(entries, WINDOWS["24h"], now=_NOW)
+        assert m["first_boot"] == (crash + timedelta(seconds=60)).isoformat()
+
+    def test_one_restart_has_no_interval_to_average(self):
+        crash = _NOW - timedelta(hours=2)
+        entries = (_every(_NOW - timedelta(hours=24), crash, "IDLE") + _dead_tick(crash)
+                   + _every(crash + timedelta(seconds=60), _NOW, "IDLE"))
+        m = compute_metrics(entries, WINDOWS["24h"], now=_NOW)
+        assert m["restart_count"] == 1
+        assert m["mtbr_seconds"] is None            # not up-seconds per restart
+
+    def test_mtbr_is_the_gap_between_restarts_and_survives_a_rotation(self):
+        # Three crashes a day apart, each a minute after an IDLE tick. A rotation
+        # (a plane prune, or a record that starts late) drops the older samples
+        # and keeps the restart events, which retention never prunes.
+        crashes = [_NOW - timedelta(hours=h) for h in (50, 26, 2)]
+        full, start = [], _NOW - timedelta(hours=72)
+        for c in crashes:
+            full += _every(start, c - timedelta(seconds=60), "IDLE", step=300)
+            full += [(c - timedelta(seconds=60), "IDLE")] + _dead_tick(c)
+            start = c + timedelta(seconds=60)
+        full += _every(start, _NOW, "IDLE", step=300)
+        horizon = _NOW - timedelta(hours=8)
+        rotated = [(t, s) for t, s in full if t >= horizon or s == "RESTART"]
+        for window in ("24h", "7d"):
+            before = compute_metrics(full, WINDOWS[window], now=_NOW)
+            after = compute_metrics(rotated, WINDOWS[window], now=_NOW)
+            # 24h: the one restart in the window measured back to the one before
+            # it, outside the window; 7d: the mean of the two gaps
+            assert (before["mtbr_seconds"], after["mtbr_seconds"]) == (86400, 86400), window
+            assert after["uptime_pct"] > 99, window
+
+    def test_table_labels_the_observed_share_and_says_what_it_did_not_count(self):
+        results = {"b1": {"24h": compute_metrics(_host_outage(), WINDOWS["24h"], now=_NOW)}}
+        table = format_table(results, window="24h")
+        assert "Up (obs)" in table and "Observed" in table
+        assert "99.0%" in table
+        assert "b1: 1 restart not counted" in table
 
 
 # -- aggregate_fleet -------------------------------------------------------
@@ -206,19 +328,6 @@ class TestFormatTable:
         assert "\u2014" in table
 
 
-# -- format_json -----------------------------------------------------------
-
-
-class TestFormatJson:
-    def test_valid_json_output(self):
-        import json
-
-        results = {"bot1": {"24h": {"uptime_pct": 99.0}}}
-        output = format_json(results)
-        parsed = json.loads(output)
-        assert parsed["bot1"]["24h"]["uptime_pct"] == 99.0
-
-
 # -- _fmt_duration ---------------------------------------------------------
 
 
@@ -236,69 +345,8 @@ class TestFmtDuration:
         assert _fmt_duration(90000) == "1d1h"
 
 
-class TestUptimeUnreachableBotsDir:
-    """External round 2 (estate audit): cmd_uptime used is_dir()+glob, so an
-    unreadable bots dir rendered a LIVE fleet as successful emptiness — "No
-    bots found" at rc 0. It now goes through probe_dir like the other read
-    doors: rc 1 with the shared disclosure line."""
-
-    def _args(self, root, **kw):
-        import types
-        return types.SimpleNamespace(
-            root=str(root), fleet=None, bot=None, window=None, json=False,
-            **kw)
-
-    def test_unreadable_bots_dir_is_rc1_disclosed(self, tmp_path, capsys):
-        import os
-
-        import pytest
-
-        from claudlobby.commands.core import cmd_uptime
-
-        if os.geteuid() == 0:
-            pytest.skip("root reads through the mode bits")
-        bots = tmp_path / "runtime" / "bots"
-        (bots / "somebot").mkdir(parents=True)
-        bots.chmod(0)
-        try:
-            rc = cmd_uptime(self._args(tmp_path))
-        finally:
-            bots.chmod(0o755)
-        assert rc == 1
-        out = capsys.readouterr().out
-        assert "cannot" in out and "unreadable" in out
-
-    def test_unreadable_ANCESTOR_is_rc1_disclosed(self, tmp_path, capsys):
-        import os
-
-        import pytest
-
-        from claudlobby.commands.core import cmd_uptime
-
-        if os.geteuid() == 0:
-            pytest.skip("root reads through the mode bits")
-        runtime = tmp_path / "runtime"
-        (runtime / "bots" / "somebot").mkdir(parents=True)
-        runtime.chmod(0)
-        try:
-            rc = cmd_uptime(self._args(tmp_path))
-        finally:
-            runtime.chmod(0o755)
-        assert rc == 1
-        assert "cannot" in capsys.readouterr().out
-
-
-class TestUptimeLateEnumerationFailure:
-    """External round 4: the probe's FIRST enumeration completed, then
-    aggregate_fleet re-globbed and the SECOND enumeration failed mid-
-    iteration — glob swallowed it and a LIVE bot vanished at rc 0. The fix
-    is ONE enumeration: cmd_uptime hands scan_dir's materialized list to
-    aggregate_fleet. NOTE the pin strategy: the failure cannot be injected
-    through os.scandir monkeypatching for the glob half — pathlib's globber
-    binds os.scandir as a staticmethod at import time — so the contract is
-    pinned at the seam: (a) aggregate_fleet consumes the given list and
-    NEVER re-enumerates; (b) cmd_uptime passes its scan listing. With
-    scan_dir's own atomicity pins, the chain is closed."""
+class TestAggregateListing:
+    """The aggregate consumes one materialized bot list without re-enumerating."""
 
     def test_aggregate_consumes_the_list_and_never_reenumerates(self, tmp_path):
         from claudlobby.uptime import aggregate_fleet
@@ -316,110 +364,3 @@ class TestUptimeLateEnumerationFailure:
         # ...and the listing IS what gets consumed
         got = aggregate_fleet(bots, windows=["24h"], bot_dirs=[real_bot], entries_for=lambda d: [])
         assert "realbot" in got
-
-    def test_cmd_uptime_hands_its_scan_to_aggregate(self, tmp_path, monkeypatch):
-        import types
-
-        from claudlobby import uptime as uptime_mod
-        from claudlobby.commands.core import cmd_uptime
-
-        bots = tmp_path / "runtime" / "bots"
-        (bots / "somebot").mkdir(parents=True)
-        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
-        _root_mode_plane(tmp_path)
-
-        seen = {}
-        def _recorder(bots_dir, windows=None, bot_filter=None, bot_dirs=None, *, entries_for):
-            seen["bot_dirs"] = bot_dirs
-            return {}
-
-        monkeypatch.setattr(uptime_mod, "aggregate_fleet", _recorder)
-        cmd_uptime(types.SimpleNamespace(
-            root=str(tmp_path), fleet=None, bot=None, window=None,
-            json=False))
-        assert seen["bot_dirs"] is not None, "cmd_uptime must pass its scan"
-        assert bots / "somebot" in seen["bot_dirs"]
-
-
-# -- the plane is the only source ------------------------------------------
-
-
-def _root_mode_plane(root: Path) -> None:
-    """A root-mode install with a manifest, the repo's lib/ (the readers the
-    command loads) and a plane holding one heartbeat for `somebot`."""
-    from claudlobby.plane.emit_api import emit_batch
-    from tests.plane_fixtures import REPO
-
-    (root / "fleet.yaml").write_text(
-        "fleet:\n  name: rootfleet\n  service_prefix: com.test\n  bots:\n"
-        "    somebot:\n      expertise: [software-engineering]\n")
-    if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
-    (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
-    out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "rootfleet",
-                             "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
-                             "payload": {"subject_kind": "bot_instance", "subject": "bot:rootfleet/somebot",
-                                         "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
-    assert all(o.status == "committed" for o in out), out
-
-
-class TestUptimeReadsThePlaneAlone:
-    def _args(self, root, **kw):
-        import types
-        return types.SimpleNamespace(root=str(root), fleet=None, bot=None, window="24h", json=True, **kw)
-
-    def test_cmd_uptime_serves_the_planes_entries(self, tmp_path, capsys):
-        import json as _json
-
-        from claudlobby.commands.core import cmd_uptime
-
-        bots = tmp_path / "runtime" / "bots"
-        (bots / "somebot").mkdir(parents=True)
-        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
-        _root_mode_plane(tmp_path)
-        assert cmd_uptime(self._args(tmp_path)) == 0
-        out = _json.loads(capsys.readouterr().out)
-        assert out["somebot"]["24h"]["entries_in_window"] == 1
-
-    def test_cmd_uptime_refuses_a_plane_that_never_saw_the_fleet(self, tmp_path, capsys):
-        """A plane holding only another fleet is a wrong root, not bots that
-        never beat: the command once rendered a table of dashes at rc 0 here,
-        byte-identical to a known fleet with zero heartbeats (the R2b-1
-        adversarial lens). It rides the matcher's session and refuses."""
-        from datetime import datetime, timedelta, timezone
-
-        from claudlobby.commands.core import cmd_uptime
-        from claudlobby.plane.emit_api import emit_batch
-        from tests.plane_fixtures import REPO
-
-        _root_mode_plane(tmp_path)                                   # rootfleet's manifest + lib
-        bots = tmp_path / "runtime" / "bots"
-        (bots / "somebot").mkdir(parents=True)
-        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
-        # the plane's only identity belongs to ANOTHER fleet
-        import sqlite3
-        with sqlite3.connect(tmp_path / "state" / "plane" / "plane.db") as c:
-            c.execute("DELETE FROM identity_registry WHERE alias LIKE 'bot:rootfleet/%'")
-            c.execute("DELETE FROM metric_samples")
-        out = emit_batch(tmp_path, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": "elsewhere",
-                                     "occurred_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
-                                     "payload": {"subject_kind": "bot_instance", "subject": "bot:elsewhere/x",
-                                                 "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
-        assert all(o.status == "committed" for o in out), out
-        assert cmd_uptime(self._args(tmp_path)) == 3
-        captured = capsys.readouterr()
-        assert captured.out == "" and "no bot of fleet 'rootfleet'" in captured.err
-
-    def test_cmd_uptime_refuses_without_a_plane(self, tmp_path, capsys):
-        """No plane db: rc 3 and the remedy on stderr, NOTHING on stdout — an
-        empty table would read as a fleet that never ran."""
-        from claudlobby.commands.core import cmd_uptime
-        from tests.plane_fixtures import REPO
-
-        bots = tmp_path / "runtime" / "bots"
-        (bots / "somebot").mkdir(parents=True)
-        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
-        (tmp_path / "lib").symlink_to(REPO / "lib")
-        assert cmd_uptime(self._args(tmp_path)) == 3
-        captured = capsys.readouterr()
-        assert captured.out == "" and "UNREACHABLE" in captured.err and "plane.db" in captured.err

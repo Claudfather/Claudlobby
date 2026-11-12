@@ -1,0 +1,13 @@
+  different approach. Ideal for long-running tasks. Sessions are
+  slightly more expensive. Claude can make mistakes that allow harmful
+  commands to run, it's recommended to only use in isolated
+  environments. Shift+Tab to change mode.
+
+                Removed 1 invisible character · review and press Enter to send
+───────────────────────────────────────────────────────────── heldrepro-564289 ─
+❯ set +H; You just started up. Read your CLAUDE.md, then post a brief
+  ready message and remain running. Wait for task assignments from your
+  manager. PROBE2070HELD
+
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

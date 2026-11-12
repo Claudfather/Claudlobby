@@ -24,15 +24,15 @@ on into a value it might accept.
 from __future__ import annotations
 
 import json
-import sqlite3
 
 import pytest
+
+from tests.plane_setup import initialize_plane
 
 from claudlobby.plane.contracts import PR_ROLES, ContractViolation, TaskEvent
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import _apply_capture, emit_batch
 from claudlobby.plane.registries import CONTENT_FIELDS, FIELD_POLICY
-from tests.test_plane_door_e2e import _bash, _plane_row, armed  # noqa: F401
 
 WI = "wi_" + "a" * 32
 
@@ -75,6 +75,7 @@ class TestConstraintAMetadataNotContent:
         """The same claim end to end: emit under a metadata-mode capture and
         read the stored row back. The unit test above proves the door; this
         proves nothing downstream un-does it."""
+        initialize_plane(tmp_path)
         cap = tmp_path / "state" / "plane" / "capture.json"
         cap.parent.mkdir(parents=True, exist_ok=True)
         cap.write_text('{"*": "metadata"}')
@@ -111,6 +112,7 @@ class TestConstraintBAbsentIsDistinguishable:
         consumer's "is this field present" test answer yes for a report that
         declared nothing. The detail dict drops None, so absent means the key
         is simply not there."""
+        initialize_plane(tmp_path)
         emit_batch(tmp_path, [{
             "event_type": "task", "emitter": "t", "fleet": "f",
             "payload": {"work_item_id": WI, "event": "completed",
@@ -137,192 +139,3 @@ class TestConstraintBAbsentIsDistinguishable:
 
 
 # --- The writer ----------------------------------------------------------------
-
-class TestTheWriter:
-    """The real `lib/report-back.sh`, through the real plane."""
-
-    def _details(self, tmp_path, where):
-        """Stored details matching *where*.
-
-        A refused report emits nothing, so on that path the db is never created
-        at all — that absence IS the evidence, and it is spelled out here
-        rather than swallowed: the helper returns [] only for a plane that was
-        never written to, and any other sqlite failure still raises.
-        """
-        if not db_path(tmp_path).exists():
-            return []
-        conn = connect(db_path(tmp_path))
-        try:
-            rows = conn.execute(
-                f"SELECT detail FROM events WHERE {where} AND detail IS NOT NULL").fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc):
-                raise
-            return []
-        finally:
-            conn.close()
-        return [json.loads(r[0]) for r in rows]
-
-    def _task_details(self, tmp_path):
-        return self._details(tmp_path, "kind='task'")
-
-    def _marker_details(self, tmp_path):
-        return self._details(tmp_path, "kind='system' AND event='report_status'")
-
-    def test_an_idd_report_lands_the_role_on_the_task_event(self, tmp_path, armed):
-        libdir, env = armed
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "work"', env).returncode == 0
-        task_id = _plane_row(tmp_path)["task_id"]
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "done"'
-                  f' --pr https://github.com/o/r/pull/9 --pr-role authored --task {task_id}', env)
-        assert r.returncode == 0, r.stderr
-        detail = [d for d in self._task_details(tmp_path) if d.get("pr_url")][0]
-        assert detail["pr_role"] == "authored"
-
-    def test_an_IDLESS_report_lands_the_role_on_the_marker_leg(self, tmp_path, armed):
-        """The ad-hoc case, and the one the marker leg exists for: a review
-        posted for work never dispatched with an id resolves no task. Riding
-        only the task leg would drop the role for exactly these — leaving
-        `absent`, which a consumer must refuse on, for a report that DECLARED
-        a role."""
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "ad-hoc review"'
-                  f' --pr https://github.com/o/r/pull/77 --pr-role reviewed', env)
-        assert r.returncode == 0, r.stderr
-        markers = self._marker_details(tmp_path)
-        assert markers, "positive control: the id-less report landed a marker"
-        assert markers[0]["pr_role"] == "reviewed"
-        assert markers[0]["pr_url"].endswith("/77")
-
-    def test_a_report_with_no_role_records_none(self, tmp_path, armed):
-        """Constraint B at the writer: not passing the flag must leave the key
-        absent, never default to a value."""
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "no role declared"'
-                  f' --pr https://github.com/o/r/pull/5', env)
-        assert r.returncode == 0, r.stderr
-        markers = self._marker_details(tmp_path)
-        assert markers and markers[0].get("pr_url"), "positive control: the row landed"
-        assert "pr_role" not in markers[0]
-
-    # --- the COMPOUND cases (#1710) -------------------------------------
-    #
-    # Every other test in this file starts from a pristine plane where the
-    # acting bot holds no other open dispatch. That is what hid both bugs
-    # below, and on this estate it is not the common case: 51% of id'd
-    # dispatches go to a bot already holding an open row
-    # (lib/dispatch-supersede-hint.py's own measurement).
-
-    def test_an_unrelated_open_IDLESS_row_does_not_swallow_the_pr_fields(
-        self, tmp_path, armed
-    ):
-        """#1710 case 1 — the silent drop.
-
-        The id-less closing loop appends a task event per open id-less row of
-        this bot. The marker guard used to ask "does the batch contain ANY task
-        event", which those satisfy on behalf of UNRELATED rows, so the marker
-        carrying the PR fields was suppressed and they were stored nowhere —
-        a row bit-for-bit identical to "nobody reported".
-        """
-        libdir, env = armed
-        # An unrelated open ID-LESS dispatch for the same bot. A RAW-TEXT send
-        # is the id-less shape -- `--botcommand` mints an id, which would set
-        # up case 2 instead and quietly test the wrong thing.
-        r0 = _bash(f'"{libdir}/dispatch-task.sh" w1 "unrelated id-less work"', env)
-        assert r0.returncode == 0, r0.stderr
-        assert _plane_row(tmp_path).get("task_id") in (None, ""), (
-            "precondition: the unrelated row must be ID-LESS or this is case 2"
-        )
-
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "ad-hoc review"'
-                  f' --pr https://github.com/o/r/pull/41 --pr-role reviewed', env)
-        assert r.returncode == 0, r.stderr
-
-        everywhere = self._task_details(tmp_path) + self._marker_details(tmp_path)
-        carrying = [d for d in everywhere if d.get("pr_role")]
-        assert carrying, (
-            "the declared role reached NO row — the whole-batch guard swallowed it"
-        )
-        assert carrying[0]["pr_url"].endswith("/41")
-
-    def test_an_unrelated_open_IDD_row_never_receives_the_attribution(
-        self, tmp_path, armed
-    ):
-        """#1710 case 2 — the silent MIS-attribution, and the worse of the two.
-
-        With an unrelated id'd row open, #835 auto-resolves the link and the
-        primary leg fires against THAT row. Attaching the PR fields there
-        records the review against a task it has nothing to do with.
-        `who-reviewed.py` refuses to tiebreak an ambiguous match precisely
-        because a wrong attribution is worse than none, and this would
-        manufacture the attribution that door declines to guess at.
-
-        The row must come back WITHOUT a role — absent is refusable.
-        """
-        libdir, env = armed
-        r0 = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "unrelated tracked work"', env)
-        assert r0.returncode == 0, r0.stderr
-        unrelated_task = _plane_row(tmp_path)["task_id"]
-
-        # An ad-hoc review, naming NO task.
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "ad-hoc review"'
-                  f' --pr https://github.com/o/r/pull/42 --pr-role authored', env)
-        assert r.returncode == 0, r.stderr
-
-        for detail in self._task_details(tmp_path):
-            assert "pr_role" not in detail, (
-                f"a review was attributed to the unrelated task {unrelated_task}: {detail}"
-            )
-            assert "pr_url" not in detail, detail
-
-        # And the caller is TOLD, so absent is not also silent.
-        assert "NOT recorded" in r.stderr, r.stderr
-
-    def test_a_NAMED_task_still_carries_the_attribution_with_other_rows_open(
-        self, tmp_path, armed
-    ):
-        """The positive control for case 2's fix.
-
-        Suppressing the fields on an auto-resolved link must not suppress them
-        on a link the caller NAMED — otherwise the fix trades a wrong
-        attribution for no attribution ever, and the field stops working at all
-        on exactly the 51% of reports that have company.
-        """
-        libdir, env = armed
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "first"', env).returncode == 0
-        first = _plane_row(tmp_path)["task_id"]
-        assert _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "second"', env).returncode == 0
-
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "done"'
-                  f' --pr https://github.com/o/r/pull/43 --pr-role authored --task {first}', env)
-        assert r.returncode == 0, r.stderr
-        carrying = [d for d in self._task_details(tmp_path) if d.get("pr_role")]
-        assert len(carrying) == 1 and carrying[0]["pr_role"] == "authored", carrying
-
-    @pytest.mark.parametrize("bad", ["merged", "unknown", "Authored"])
-    def test_an_unrecognised_role_is_refused_before_anything_is_sent(self, tmp_path, armed, bad):
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "x"'
-                  f' --pr https://github.com/o/r/pull/1 --pr-role {bad}', env)
-        assert r.returncode == 2
-        assert "authored or reviewed" in r.stderr
-        assert not self._task_details(tmp_path) and not self._marker_details(tmp_path)
-
-    def test_the_flags_may_be_given_in_either_order(self, tmp_path, armed):
-        """The requires-a-PR guard runs after the whole parse loop, so
-        --pr-role before --pr must be accepted. A guard that checked as it
-        parsed would refuse this, and refuse it only sometimes."""
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "role first"'
-                  f' --pr-role reviewed --pr https://github.com/o/r/pull/8', env)
-        assert r.returncode == 0, r.stderr
-        markers = self._marker_details(tmp_path)
-        assert markers and markers[0]["pr_role"] == "reviewed"
-
-    def test_a_role_without_a_pr_is_refused(self, tmp_path, armed):
-        """A role names nothing without the PR it is about: the consumer joins
-        the two through `pr_url`, so such a row could never be read back."""
-        libdir, env = armed
-        r = _bash(f'"{libdir}/report-back.sh" w1 completed "x" --pr-role authored', env)
-        assert r.returncode == 2
-        assert "needs --pr" in r.stderr

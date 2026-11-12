@@ -1,0 +1,24 @@
+
+✻ Worked for 12s · done 12:01 AM
+
+❯ And then this pr4-live-Q-336ab32e.
+
+● Stand-in reply.
+
+✻ Brewed for 0s · done 12:01 AM
+
+❯ Ask me pr4-live-ASK-90d0d208.
+
+● User declined to answer questions
+  ⎿  · Which stand-in option? (Option 1 / Option 2)
+
+✻ Churned for 0s · done 12:01 AM
+
+❯ /compact
+
+● Compacting conversation… (0s)
+
+────────────────────────────────────────────────────────────────────────────────
+❯ pr4 typed during compaction
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

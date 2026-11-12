@@ -26,6 +26,7 @@ from claudlobby.composer import (
     write_manifest_provenance,
 )
 from claudlobby.config import BotConfig, FleetConfig
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,7 +39,10 @@ def _git(args, cwd):
 
 
 def _fleet(**kw):
-    return FleetConfig(name="demo", service_prefix="com.example.demo", **kw)
+    base = dict(name="demo", service_prefix="com.example.demo", manager="worker",
+                bots={"worker": BotConfig(bot_id="worker", name="worker", expertise=[])})
+    base.update(kw)
+    return FleetConfig(**base)
 
 
 def _paths(tmp_path: Path, *, in_git: bool = False, manifest: str = FLEET_YAML):
@@ -53,7 +57,7 @@ def _paths(tmp_path: Path, *, in_git: bool = False, manifest: str = FLEET_YAML):
         _git(["config", "user.name", "T"], fleet_dir)
         _git(["add", "fleet.yaml"], fleet_dir)
         _git(["commit", "-qm", "seed"], fleet_dir)
-    return Paths(root=root, fleet_dir=fleet_dir)
+    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
 class TestTheRecord:
@@ -297,7 +301,7 @@ class TestTheRungStaysQuietWhereItHasNothingToSay:
         fleet_dir.mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         (fleet_dir / "fleet.yaml").write_text(FLEET_YAML)
-        paths = Paths(root=root, fleet_dir=fleet_dir)
+        paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
         assert self._checks(_fleet(), paths) == []
 
     def test_a_COMPOSED_fleet_without_a_record_still_warns(self, tmp_path):

@@ -122,6 +122,7 @@ def test_caps_enforce_from_field_policy(monkeypatch):
             "work_item_id": "wi_" + "0" * 32, "title": "t",
             "created_by": "bot:example-fleet/alpha",
             "body": "longer than eight bytes",
+            "workstream_id": "ws-test",
         }))
     monkeypatch.setitem(
         registries.FIELD_POLICY, ("communication", "body"),
@@ -138,8 +139,57 @@ def test_work_item_body_cap_is_bytes():
         validate_request(_req("work_item", {
             "work_item_id": "wi_" + "0" * 32, "title": "t",
             "created_by": "bot:example-fleet/alpha", "body": fat,
+            "workstream_id": "ws-test",
         }))
 
+
+
+def _work_item(**over) -> dict:
+    payload = {"work_item_id": "wi_" + "0" * 32, "title": "t",
+               "created_by": "bot:example-fleet/alpha", "workstream_id": "ws-test", **over}
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def test_a_live_work_item_must_name_its_workstream():
+    """#1053: every live task belongs to a workstream. A live work_item with
+    none, or a blank one, is refused, and the refusal names the field."""
+    for payload in (_work_item(workstream_id=None), _work_item(workstream_id="")):
+        with pytest.raises(ContractViolation) as refused:
+            validate_request(_req("work_item", payload))
+        assert refused.value.errors == [{"loc": ("payload", "workstream_id"),
+                                         "msg": "a live work_item must name its workstream"}]
+    env, payload = validate_request(_req("work_item", _work_item()))
+    assert env.origin == "live" and payload.workstream_id == "ws-test"
+
+
+def test_a_legacy_work_item_may_name_no_workstream():
+    """The rule is for live rows: imported history keeps what it carried."""
+    env, payload = validate_request({**_req("work_item", _work_item(workstream_id=None)),
+                                     "origin": "legacy"})
+    assert env.origin == "legacy" and payload.workstream_id is None
+
+
+def test_a_batch_whose_task_names_no_workstream_records_nothing(tmp_path):
+    """The door validates every request before its one transaction, so a
+    task's batch (its workstream, then the task) whose task names none
+    leaves no row at all, the workstream's included."""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.plane_setup import initialize_plane
+
+    initialize_plane(tmp_path)
+    workstream = _req("workstream", {"workstream_id": "ws-test", "title": "t",
+                                     "opened_by": "bot:example-fleet/alpha"})
+    with pytest.raises(ContractViolation):
+        emit_batch(tmp_path, [workstream, _req("work_item", _work_item(workstream_id=None))],
+                   require_commit=True)
+    conn = connect(db_path(tmp_path))
+    try:
+        counts = [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  for table in ("workstreams", "work_items")]
+    finally:
+        conn.close()
+    assert counts == [0, 0]
 
 def test_receiver_acknowledged_is_gone():
     # 22 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B)
@@ -209,3 +259,33 @@ def test_the_acts_authored_text_is_capped_and_by_survives_a_metadata_capture():
         validate_request(_req(reason="r" * 4097))
     with _pytest.raises(ContractViolation):
         validate_request(_req(question="q" * 4097))
+
+
+def _bot_keyframe(**over) -> dict:
+    """A bot keyframe in the shape of tests/test_plane_registry.py::bot_stub."""
+    entity = {"alias": "bot:example-fleet/alpha", "account": "default", "service": "com.x.z",
+              "model": "opus", "posture": {"permissions_mode": "acceptEdits"},
+              "composed_hashes": {}, "declared_hash": "dh", "schema_version": "1", **over}
+    return _req("registry_snapshot", {"entity_type": "bot", "entity_alias": entity["alias"],
+                                      "payload": entity, "cause": "generate", "scan_id": "s1"})
+
+
+def test_bot_keyframe_may_name_its_agent_cli():
+    """#2145: additive and optional — a keyframe without the key (every emitter
+    before P1, and every claude bot after) still validates; an unknown agent CLI is
+    a contract verdict at the door."""
+    validate_request(_bot_keyframe())
+    validate_request(_bot_keyframe(agent_cli="codex"))
+    validate_request(_bot_keyframe(agent_cli="claude"))
+    with pytest.raises(ContractViolation):
+        validate_request(_bot_keyframe(agent_cli="gemini"))
+
+
+def test_bot_keyframe_agent_cli_vocabulary_matches_config():
+    from typing import get_args
+
+    from claudlobby.known_values import KNOWN_AGENT_CLIS
+    from claudlobby.plane.contracts import BotPayload
+
+    literal = next(a for a in get_args(BotPayload.model_fields["agent_cli"].annotation) if a is not type(None))
+    assert frozenset(get_args(literal)) == KNOWN_AGENT_CLIS

@@ -1,6 +1,6 @@
 ---
 name: eng-status
-description: "Self-diagnostic for work engineer bot."
+description: "Use when a work engineer bot is asked how it is doing. Self-diagnostic for work engineer bot."
 ---
 
 # Engineer Status
@@ -9,7 +9,7 @@ Quick health check. Run:
 
 ```bash
 echo "Session: $(tmux display-message -p '#{session_name}' 2>/dev/null)"
-"$CLAUDLOBBY_ROOT/lib/claude-session-pid.sh" --summary
+"$CLAUDLOBBY_NATIVE_DIR/claude-session-pid.sh" --summary
 ```
 
 *Identity comes from the session you are running **inside**, via the shipped

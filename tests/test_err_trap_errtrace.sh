@@ -3,7 +3,7 @@
 # that happen INSIDE shell functions (#844).
 #
 # A bash ERR trap is not inherited by shell functions unless errtrace is on, so
-# a bare `trap … ERR` covers only top-level failures. lib/ does nearly all its
+# a bare `trap … ERR` covers only top-level failures. claudlobby/_runtime_scripts/ does nearly all its
 # work in functions, which meant the fleet's error-breadcrumb mechanism was
 # silently uninstrumented across the whole supervision surface. Ordinary unit
 # tests cannot catch this — composition is identical either way; only running a
@@ -12,8 +12,9 @@
 #
 # It also pins the two properties that make errtrace safe to arm, because both
 # are the kind of premise that silently stops being true:
-#   * suppressed contexts (`f || true`, `if f`) must stay SILENT — errtrace must
-#     instrument real failures without emitting rows for deliberate tolerance
+#   * ordinary suppressed contexts (`f || true`, `if f`) must stay SILENT —
+#     errtrace must not emit rows for deliberate tolerance. A nested command
+#     substitution differs on Bash 3.2; the final control pins that behavior.
 #   * the handler must write NOTHING to stdout — under errtrace the trap fires
 #     inside the failing command substitution, so any handler stdout is captured
 #     as the caller's value (`local v=$(fn)` silently becomes the handler's
@@ -22,12 +23,12 @@
 # Hermetic: every case runs under `env -i` with a scratch CLAUDLOBBY_ROOT and a
 # scratch bot dir, so rows land in a throwaway ledger and never in a real one.
 # emit_script_error reaches only emit_fleet_event, whose record is the plane —
-# captured here by tests/plane_capture_cli.sh standing in for the CLI rung (no
-# daemon, no db, no tmux, no network). Runs under macOS /bin/bash (3.2).
+# staged as raw batches under the scratch root (no daemon, no db, no tmux,
+# no network). Runs under macOS /bin/bash (3.2).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_COMMON="$SCRIPT_DIR/../lib/lib-common.sh"
+LIB_COMMON="$SCRIPT_DIR/../claudlobby/_runtime_scripts/lib-common.sh"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -42,7 +43,6 @@ assert_eq() {
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 BOTDIR="$T/bots/canary"
 mkdir -p "$BOTDIR/data"
-CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 
 # Run <body> in a pristine shell with the real trap installed, then report both
 # the body's stdout and how many script_error rows it produced, so a case can
@@ -57,12 +57,12 @@ CAPTURE="$T/plane-capture.jsonl"; : > "$CAPTURE"
 # delimiter, not a workaround.
 run_case() {
     local opts="$1" body="$2" out rows
-    : > "$CAPTURE"
+    rm -f "$T/state/plane/staged/"*.batch
     out=$(
         env -i PATH="$PATH" HOME="$T" \
             CLAUDLOBBY_ROOT="$T" BOT_DIR="$BOTDIR" BOT_ID=canary FLEET_NAME=f \
-            PLANE_EMIT_CLI="$SCRIPT_DIR/plane_capture_cli.sh" PLANE_CAPTURE="$CAPTURE" PLANE_SOCKET="$T/no.sock" \
-            bash -c "
+            PLANE_EMIT_DISABLED=0 PLANE_SOCKET="$T/no.sock" \
+            "$BASH" -c "
                 set $opts
                 . '$LIB_COMMON'
                 install_error_trap '$BOTDIR'
@@ -70,7 +70,13 @@ run_case() {
                 $body
             " 2>/dev/null
     )
-    rows=$(grep -c '"type":"script_error"' "$CAPTURE" 2>/dev/null || true)
+    rows=$(python3 - "$T/state/plane/staged" <<'PY'
+import json, pathlib, sys
+print(sum(event["payload"].get("event") == "script_error"
+          for path in pathlib.Path(sys.argv[1]).glob("*.batch")
+          for event in json.loads(path.read_text())["events"]))
+PY
+    )
     printf '%s|%s' "$(printf '%s' "$out" | tr -d '\n')" "$rows"
 }
 
@@ -90,13 +96,13 @@ assert_eq "in-function failure emits a script_error row" "1" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" '/nonexistent-command-xyz-844')
 assert_eq "top-level failure still emits (control)" "1" "$(rows_of "$r")"
 
-# Nested three frames down — functions calling functions is the shape lib/ is
+# Nested three frames down — functions calling functions is the shape claudlobby/_runtime_scripts/ is
 # actually built out of.
 r=$(run_case "-euo pipefail" 'mid() { boom; }; outer() { mid; }; outer')
 assert_eq "failure three frames deep emits exactly one row" "1" "$(rows_of "$r")"
 
 # --- deliberate tolerance must stay silent -------------------------------------
-# Arming errtrace must not turn `lib/`'s 700+ guarded call sites into rows. Bash
+# Arming errtrace must not turn `claudlobby/_runtime_scripts/`'s 700+ guarded call sites into rows. Bash
 # suppresses the ERR trap in the same contexts it suppresses errexit, and that
 # suppression is inherited by callees — these pin that, since the fix is only
 # safe while it holds.
@@ -152,14 +158,25 @@ assert_eq "…while still writing its row" "1" "$(rows_of "$r")"
 # line numbers, so this is characterised rather than deduped — dedup would cost
 # handler state to lose the more precise of the two.
 #
-# Pinned because `echo "$(…)"` is a shape lib/ actually contains (~64 sites), so
+# Pinned because `echo "$(…)"` is a shape claudlobby/_runtime_scripts/ actually contains (~64 sites), so
 # this is the change's real new-row source: silent today, two rows and a
 # still-running script after. A future change that starts collapsing or dropping
 # one of these should have to say so out loud.
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f')
 assert_eq "failing substitution emits at both frames" "2" "$(rows_of "$r")"
 r=$(run_case "-euo pipefail" 'f() { echo "$(boom)"; }; f || true')
-assert_eq "…and stays silent when the caller tolerates it" "0" "$(rows_of "$r")"
+# Bash 3.2 cannot see the parent's `|| true` inside this substitution: a bare
+# native ERR trap also fires twice. Characterize the shell separately so this
+# assertion cannot accidentally make a missing fleet breadcrumb look green.
+native_traps=$("$BASH" -c 'set -Ee; trap '\''printf "ERR\n" >&2'\'' ERR; boom() { false; }; f() { echo "$(boom)"; }; f || true' 2>&1)
+native_rows=$(printf '%s\n' "$native_traps" | grep -c '^ERR$' || true)
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    expected_native_rows=2
+else
+    expected_native_rows=0
+fi
+assert_eq "native Bash nested-substitution trap count" "$expected_native_rows" "$native_rows"
+assert_eq "nested-substitution rows follow native Bash semantics" "$native_rows" "$(rows_of "$r")"
 
 echo
 echo "  $PASS/$TOTAL passed"

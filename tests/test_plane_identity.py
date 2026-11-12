@@ -40,6 +40,19 @@ def test_resolution_is_stable(conn):
     assert row["first_seen"] == NOW and row["last_seen"] == LATER
 
 
+def test_resolve_attaches_missing_parent_but_refuses_conflict(conn):
+    uid = resolve(conn, "actor", "bot:example-fleet/alpha", now=NOW)
+    assert resolve(conn, "actor", "bot:example-fleet/alpha", now=LATER,
+                   parent_uid="fleet_expected") == uid
+    assert conn.execute("SELECT parent_uid FROM identity_registry WHERE uid=?",
+                        (uid,)).fetchone()[0] == "fleet_expected"
+    with pytest.raises(ValueError, match="conflicting parent"):
+        resolve(conn, "actor", "bot:example-fleet/alpha", now=LATER,
+                parent_uid="fleet_other")
+    assert conn.execute("SELECT parent_uid FROM identity_registry WHERE uid=?",
+                        (uid,)).fetchone()[0] == "fleet_expected"
+
+
 def test_distinct_aliases_distinct_uids(conn):
     a = resolve_party(conn, "bot:example-fleet/alpha", NOW)
     b = resolve_party(conn, "bot:example-fleet/beta", NOW)

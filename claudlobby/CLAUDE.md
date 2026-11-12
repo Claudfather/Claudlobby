@@ -1,6 +1,7 @@
 # claudlobby/ — placement guidance
 
-The Python compositor. The module map lives in the root CLAUDE.md §"Python Package Structure";
+The Python compositor. Its module map is
+[`documentation/architecture/module-map.md`](../documentation/architecture/module-map.md);
 this file is the boundary at the seam.
 
 **What belongs here.** Composition and policy code: `fleet.yaml` parsing (owned here — parsed
@@ -20,4 +21,4 @@ status/observability, path resolution, migrations, scaffolding.
 
 **Placement test** (one line): does it transform `fleet.yaml` into a running bot, or police what
 a bot may do? → here. Behavior → clauDNA / `library/`; knowledge → Claudron. Full algorithm:
-Claudron repo, `documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+Claudron repo, `documentation/decisions/005-claudfather-boundary-separation.md` §10.3.

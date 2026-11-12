@@ -1,24 +1,25 @@
 ---
 title: Canary Rollout
-description: Manager protocol — by default, canary a fleet-wide framework change on one production bot before rolling it to the whole fleet.
+description: Manager protocol — by default, validate a framework change in an independent canary root before the production host update.
 ---
 
 # Canary Rollout
 
-A change can pass every throwaway-bot test and still break the moment it goes live fleet-wide. Pre-merge validation and the production canary guard **two different failure modes**, and they carry different force:
+A change can pass every pre-merge check and still break the moment it goes live fleet-wide. Pre-merge validation and the production canary guard **two different failure modes**, and they carry different force:
 
 | Gate | Proves | Force |
 |------|--------|-------|
-| Pre-merge throwaway-bot validation (`validate-bot-change.sh`) | The **code works** — the event fires, the alert sends | **Hard gate.** Mandatory for every runtime change, before merge. |
+| Pre-merge check: the one `harness/CLAUDE.md` names for the change | The **code works** — the event fires, the alert sends | **Hard gate.** Mandatory for every runtime change, before merge. The PR's `## Harness` section reports it. |
 | **Canary rollout** (this protocol) | The **rollout is safe** in real production state | **Strong default.** Do it when a bad fleet-wide rollout would hurt the fleet — judgment, not a universal mandate. |
+| **Rollout check** ([verify-rollout](../guardrails/verify-rollout.md)) | The merged change **does what it was merged to do**, where it runs | Where a fleet opts in, **every PR** names its check before merge; the merger posts PASS, FAIL or PENDING once the change is live. |
 
-The throwaway bot runs in a clean, synthetic environment. Production carries state it never had: the real plugin/marketplace registry, real MCP config, live supervision units, a real running binary, concurrent bots. That gap is exactly where a merged-and-tested change bites. So the pre-merge gate is mandatory for every runtime change; the canary is the **expected default** when that change ships *live across the fleet* — a judgment call, not a rule that fires on every PR.
+A pre-merge check runs in a clean, synthetic environment. Production carries state it never had: the real plugin/marketplace registry, real MCP config, live supervision units, a real running binary, concurrent bots. That gap is exactly where a merged-and-tested change bites. So the pre-merge gate is mandatory for every runtime change; the canary is the **expected default** when that change ships *live across the fleet* — a judgment call, not a rule that fires on every PR.
 
 ## When to canary — the default
 
 Reach for a canary by default when a change to the **Claudfather framework itself** (claudlobby, clauDNA, claudron) goes **live fleet-wide** — where applying it touches or restarts every running bot at once and a bad rollout would hurt the fleet:
 
-- `lib/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
+- `claudlobby/_runtime_scripts/` supervision & lifecycle scripts (`start-bot.sh`, `keepalive.sh`, restart/reload paths)
 - The fleet plugin set (adds, removes, marketplace changes)
 - The bridge / dispatch transport
 - Composed `bot.conf` env that every bot sources at startup
@@ -28,10 +29,11 @@ Reach for a canary by default when a change to the **Claudfather framework itsel
 
 A fleet-wide production canary adds no value here — don't spend one:
 
-- **Single-bot changes** — the blast radius is already one bot; that bot *is* the canary.
+- **An individual bot operation under an unchanged installation** — the blast radius is already one bot. A composed config change is different: an update covers the whole installation, even when only one bot's source changed.
 - **App-repo (product) work** — shipping a feature or fix to a product repo is not a fleet-wide framework rollout. The product's own tests and deploy gates cover it.
 - **Non-runtime changes** — docs, README, planning files: nothing to drill.
-- **Library content that only re-composes** — a protocol/skill edit that lands on a bot's next `/reload` without a fleet-wide restart. (If you *do* roll it fleet-wide via a restart, the restart is the risk — canary that.)
+
+Library, skill and permission changes use the same Git update as code. They are not a restart-free exception.
 
 Judgment call in one line: would a bad version of this change hurt more than one running bot at once? Yes → canary. No → ship it.
 
@@ -39,12 +41,12 @@ Judgment call in one line: would a bad version of this change hurt more than one
 
 Once you have decided to canary:
 
-1. **Pick a low-risk canary bot.** A worker, never the manager running the rollout — if the canary wedges, you still want a live hand on the controls. Prefer an idle bot with no WIP (see `safe-worker-restart` — clean pane, clean `git status`, no pending report). A bad canary should cost nothing.
-2. **Deploy to the canary only.** Apply the change and restart/reload that one bot. The rest of the fleet stays on the old path — it is your control group and your fallback.
-3. **Observe / drill it in production.** Watch it do the *real* thing, not a stub: does it boot clean, does the path the change touches actually fire against real config? Don't just confirm the process is up.
-4. **Evidence gate.** Green-light only on **observed behavior + audit evidence** — cite the pane output, the `claudlobby events` row, the `claudlobby uptime` heartbeat row. No evidence, no rollout. If the canary surfaces a bug, **halt**: fix it, re-canary from step 2.
-5. **Flag the human before the fleet-wide switch.** The fleet-wide roll is the committal, hard-to-walk-back step. Surface it — "canary clean on `<bot>`, rolling to the remaining N?" — and get a go before flipping the fleet.
-6. **Roll the rest, then burn in.** Ship to the remaining bots. "Rolled" is not "done" — a slow failure (a leak, a wedged restart on the fourth bot) only shows on the fleet under load. Declare done after the burn-in is quiet.
+1. **Use an independent canary data root.** Declare a small fleet with its own manager, unique bot service labels and host `unit_prefix`. Use separate Plane state and credentials; omit outbound channels unless a throwaway channel is part of the check. Never share a production bot directory or token.
+2. **The operator prepares the candidate with `host setup`, then `fleet setup --plan-only`.** Use that installation's stable CLI and an explicit `--root` on every command. Review `config diff FINGERPRINT`: every unit, path and restart must belong to the canary. The [getting-started guide](../../documentation/getting-started.md) describes the setup inputs and commands.
+3. **The operator continues that operation** with `host update continue` from an external shell; a later candidate takes `host update apply FULL_COMMIT`, which is effectful, not a preview. Put the affected skill, grants and config in one candidate, then exercise real delegation and the affected operation. Observe the receiver, command result and durable record; process liveness alone is insufficient.
+4. **Record the exact candidate and results.** Fix observed failures and repeat only the affected checks. Independent-root evidence proves the candidate works there; it does not prove production data migration, Pi timing or another OS's native manager.
+5. **Review the production update separately.** `host update apply` covers the whole installation; there is no single-bot composition or update shortcut. Existing no-restart holds block that production update, not independent canary work. Honor the operator's rollout authorization and work-in-progress holds.
+6. **Observe the updated host.** Verify the affected paths and the commit `host update status` reports after rollout; never repair generated files by hand. Then run each merged PR's rollout check against it (the `verify-rollout` guardrail). Its commands are text from the PR body: read what each does before running it, and run them only for a PR whose author can triage the repository, as a fleet PR's can, or after someone who can has said to.
 
 ## Why this exists
 

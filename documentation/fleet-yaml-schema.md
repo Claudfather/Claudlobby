@@ -1,12 +1,13 @@
 # fleet.yaml — schema reference
 
-`fleet.yaml` is the recipe. It tells `claudlobby generate` which bots to compose, which library pieces to assemble, and how to wire them up. One file at the repo root, hand-edited or `claudlobby new-bot`-driven.
+`fleet.yaml` is the recipe. It tells the compositor which bots to compose, which library pieces to assemble, and how to wire them up. One file at the repo root, hand-edited or authored with `claudlobby bot create`. Source edits reach a host only through the managed Git update: apply the reviewed commit with `host update apply FULL_COMMIT`, inspect it with `host update status`, and continue an interrupted one with `host update continue` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). `host update apply` is effectful, not a preview, and `config diff` reports drift of published output only, never edited authored source. First-fleet preparation (`fleet setup --plan-only`, then the original operation continues) is in [Getting started](getting-started.md).
 
 ## Top-level shape
 
 ```yaml
 fleet:
   name: <fleet-name>                    # human-readable identifier
+  manager: <bot-id>                     # REQUIRED — exactly one bot declared below
   service_prefix: <reverse-domain>      # e.g. "com.example.claudlobby" — used for service unit names
   telegram_group_chat_id: "<chat-id>"   # default group; bots can override per-bot
   human_telegram_id: "<user-id>"        # OPTIONAL — human's Telegram ID for DM allowlisting
@@ -18,12 +19,13 @@ fleet:
     default: ~/.claude
     work: ~/.claude-work
 
-  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool }
+  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool, guardrails: bool, protocols: bool, skills: bool, resources: bool }
                                          # OPTIONAL — gate system.yaml injection into defaults (default: true)
 
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
+    agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
@@ -60,19 +62,19 @@ fleet:
         - command: <shell-command>
           matcher: <tool-pattern>
 
-  teams:                                # OPTIONAL — group bots so managers know their roster
+  teams:                                # OPTIONAL — groups under the fleet manager
     <team-name>:
-      manager: <bot-name>
+      manager: <bot-name>               # must equal fleet.manager
       workers: [<bot-name>, ...]
 
   bots:                                 # REQUIRED — one entry per bot
     <bot-name>:
       name: <display-name>              # OPTIONAL — defaults to dict key
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
-      voice: voices/<file>.md           # OPTIONAL — personality overlay
+      voice: voices/<file>.md           # OPTIONAL — personality overlay from library/voices/
       mission: <string>                 # OPTIONAL — one-paragraph charter
-      reports_to: <bot-name>            # OPTIONAL — bot_id of manager
-      manages: [<bot-name>, ...]        # OPTIONAL — bot_ids this bot manages
+      reports_to: <bot-name>            # OPTIONAL — organizational reporting metadata
+      manages: [<bot-name>, ...]        # OPTIONAL — organizational reporting metadata
       scope:                            # OPTIONAL — operational boundary
         org: <github-org>
         repos: [<repo>, ...]
@@ -88,9 +90,10 @@ fleet:
       account: <account-key>
       model: <model>
       effort: <effort>
+      agent_cli: <agent_cli>
       skills: [<list>]                  # appended to defaults.skills
       mcp: [<list>]
-      integrations: [<list>]            # auto-paired with mcp; explicit overrides
+      integrations: [<list>]            # auto-paired with mcp; an explicit list adds to it
       guardrails: [<list>]
       protocols: [<list>]
       resources: [<list>]
@@ -116,11 +119,12 @@ fleet:
         require_mention: true | false
         chat_id: "<override>"
       startup_prompt: <string>
-      bench: true | false                 # OPTIONAL — benchmarking target (default: false)
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
-      remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
+      skill_overrides: {<skill>: "<state>"}  # OPTIONAL — settings.local skillOverrides, merged per skill (default: {auto-mode-setup: "off"})
+      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: 700000)
+      remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
@@ -136,7 +140,7 @@ fleet:
 
 Cosmetic + service-unit naming + default Telegram chat. Bots may override `chat_id` per-bot.
 
-The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first declared channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
+The fleet chat is also where fleet timers' alerts go. It is stamped into their units, and the runtime sends **as a bot in it** (#1771): the first declared channel bot, by name, whose own chat IS the fleet chat (a bot that overrides `chat_id` is not in it). When no bot is in the fleet chat, those alerts are **refused** and `claudlobby config validate` warns — a chat paired with a token that cannot reach it is what silenced one fleet's alerts for two months.
 
 ### `fleet.accounts`
 
@@ -178,6 +182,10 @@ plugins:
 
 **`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 
+**`startup_policy`** — `manage` (default) keeps normal startup marketplace registration and plugin installation/update. `verify-existing` retains selected plugin enablement but refuses startup unless the selected account already has readable installed artifacts for every required plugin. It performs no startup marketplace/plugin maintenance, disables automatic plugin sync and omits marketplace provisioning from bot settings. To prevent scheduled refresh as well, set `defaults.jobs.reload-fleet.enroll: false`; this policy does not change other account or Claude Code behavior. The first-team template uses both settings and requires its plugins to be installed beforehand.
+
+Each bot's generated `settings.local.json` explicitly enables its selected fleet plugins and channel plugins. Plugin keys already present in that bot's selected account `settings.json` are set to `false` when the bot did not select them, so a channel-less bot does not inherit a host-enabled Telegram plugin. `channels: []` still removes the channel flag; `isolation.shared_config` controls tool access rather than Claude's plugin settings.
+
 ### `fleet.system_defaults`
 
 Gates how much of the package's [`system.yaml`](system-yaml-schema.md) (shared hooks, observability defaults, and job timers merged into every fleet) gets folded into this fleet's `defaults`. A value set directly in `fleet.defaults` always wins over the system tier for the same key — this field only controls whether the system tier is consulted at all.
@@ -193,29 +201,35 @@ fleet:
     hooks: true            # merge system.yaml hooks
     timers: true           # merge system.yaml job timers
     observability: true    # merge system.yaml observability defaults
-    guardrails: true       # apply default guardrails (e.g. claudlobby-dev-in-projects)
-    protocols: true        # apply default protocols, including the leaf-manager checkin default
+    guardrails: true       # apply default guardrails: claudlobby-dev-in-projects, no-push-main, no-destructive-git, pii-protection, no-fabrication, confirm-before-send
+    protocols: true        # apply default protocols: context-management, telegram-routing and telegram-formatting (the last two only for a bot with a Telegram channel), shared-documentation, and the leaf-manager checkin default
+    skills: true           # apply default skills: the status skill on every manager
+    resources: true        # apply default resources: timezone
 ```
+
+Guardrail and resource defaults compose **ahead of** the fleet's own `defaults:` list and the bot's stanza, in the order above. A fleet that lists the same entries first, in that order, composes the same bytes with or without its own copies. Protocol defaults compose **after** the bot's declared protocols, so a fleet that removes its copies of `context-management`, `telegram-routing` or `telegram-formatting` moves those sections to the end of its protocol list. Keep those copies where the order matters to you.
 
 Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
 
 `protocols: false` is also how a fleet opts out of the leaf-manager check-in default (see `fleet.teams`, below) — and opting out of the protocol drops the `checkin` skill its `requires:` block links too, unless the bot declares that skill directly. It drops every default protocol for every bot — `shared-documentation` / `shared-documentation-vault` included — and there is no per-bot opt-out.
+
+`skills: false` switches off the default skills: today, the `status` skill the configured `fleet.manager` gets, with the grants its frontmatter declares. **One bot can opt out on its own** with `bots.<name>.system_defaults: {skills: false}`. That is the only per-bot key, and any other key there is refused rather than ignored. Both switches turn off the DEFAULT only: a bot that lists `status` in its own `skills:` keeps it.
 
 ### `fleet.defaults`
 
 Applied to every bot. Merge rules by type:
 
 - **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
-- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Scalars** (model, effort, agent_cli, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
-- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units. An interval job whose interval divides an hour or a day is anchored to the clock at its own second on the host, in this fleet's slot, so the fleets' copies of one job are never due in the same second; any other interval keeps `OnUnitActiveSec=` with a slot for its first run only. `randomized_delay` is for calendar jobs. See `startup_delay` in [`system-yaml-schema.md`](system-yaml-schema.md) for both.
 
 #### `fleet.defaults.jobs.<name>.enroll`
 
-System jobs flagged `enroll: false` are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
+System jobs flagged `enroll: false` are **composed-but-dormant**: their units are listed in the timers/ `DORMANT` manifest, but native enrollment does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
 
 ```yaml
 fleet:
@@ -228,25 +242,33 @@ Opt a fleet **out** of an on-by-default job the same way, with `enroll: false`.
 
 #### Defaults: what a fleet gets without asking
 
-**A job or door is ON by default unless it states a reason to ship off** — most often that it deletes data, spends money, mutates operator source, or sends outbound to people at scale; a few rows state a different reason of their own, and each says which. A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby status`'s header names any reaction door turned off, so a disabled reaction is never silent.
+**A job or door is ON by default unless it states a reason to ship off** — most often that it deletes data, spends money, mutates operator source, or sends outbound to people at scale; a few rows state a different reason of their own, and each says which. A fleet that declares nothing gets the whole reaction loop — the dispatch deadline, the manager's scheduled re-check, expiry, the plane's own recording and equipment — running. What stays opt-in is listed below with the one line that arms it, and `claudlobby host doctor --switches` prints the live version of the table for a given fleet, with each row's current state and the tier that set it. `claudlobby fleet status`'s header names any reaction door turned off, so a disabled reaction is never silent.
 
 <!-- BEGIN GENERATED: switches -->
-<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby doctor --switches --markdown -->
+<!-- Generated from claudlobby/switches.py — do not hand-edit. Regenerate: claudlobby host doctor --switches --markdown -->
 
 | Switch | Ships | Scope | Carrier | Flip it with |
 |---|---|---|---|---|
-| `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then generate + lib/setup-fleet |
-| `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
-| `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then generate + lib/setup-fleet |
-| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
-| `mcp-package-probe` | **off** — reaches the NETWORK on a compose. A generate must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | generate | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
-| `session-digest` | **off** — model spend (a Haiku pass per finished session) | door | fleet.yaml env: → bot.conf | SESSION_DIGEST_ENABLED=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
-| `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then generate + lib/setup-fleet |
-| `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
-| `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `boot-brief` | **off** — standing context per session; rollout operator-held pending ratified cost | door | fleet.yaml | bots.<bot>.brief.on_start: true in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA |
+| `boot-capture-stamp` | **off** — no deployment gate, and more sharply than boot-capture: this half has no enrollment step at all, so a root pull reaches every bot start immediately | door | fleet.yaml env: → bot.conf | BOOT_CAPTURE_ENABLED=1 in fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `claudna-harvest` | **off** — model spend (summaries) and draft-note writes through claudron capture | door | fleet.yaml bots.<bot> → published composition | bots.<bot>.claudna.harvest: true in fleet.yaml on an independent canary root with ONE armed bot first, then host update apply FULL_COMMIT_SHA (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.harvest once it has run clean |
+| `claudna-precompact-reflect` | **off** — it blocks: clauDNA's PreCompact hook refuses every other compaction until /claudna:capture runs, and nobody at a bot's pane runs it (#941) | door | fleet.yaml bots.<bot> → published composition | bots.<bot>.claudna.precompact_reflect: true in fleet.yaml on an independent canary root with ONE armed bot first, then host update apply FULL_COMMIT_SHA (from the bot's next session: bot.conf is read at session start); widen to defaults.claudna.precompact_reflect once it has run clean |
+| `claudna-session-summary` | **off** — model spend (one Haiku call per sealed segment, in the background of the bot's session) | door | fleet.yaml bots.<bot> → published composition | bots.<bot>.claudna.session_summary: true in fleet.yaml on an independent canary root with ONE armed bot first, then host update apply FULL_COMMIT_SHA (recorded when the bot's next session opens: bot.conf is read at session start); widen to defaults.claudna.session_summary once it has run clean |
+| `code-audit-sweep` | **off** — model spend + outbound GitHub issues | fleet job | fleet.yaml | sweep.enabled: true in fleet.yaml (plus owner_bot and repos), then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA |
+| `heavy-slot` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one rewrites the bot's heavy commands, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → published composition | bots.<bot>.heavy_slot: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA (Git update can restart enrolled bots; the deny then binds on the next tool call); widen to defaults.heavy_slot once it has run clean |
+| `keepalive-limit-resume` | **off** — no deployment gate: claudlobby/_runtime_scripts/ is in force on every bot at publication, and this door types into a bot's pane, so one armed bot is the only canary | door | fleet.yaml env: → bot.conf | KEEPALIVE_LIMIT_RESUME_ENABLED=1 in fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `manager-checkin` | **off** — model spend — one manager turn per idle beat — and it injects into a live session | fleet job | fleet.yaml | defaults.jobs.manager-checkin.enroll: true in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA |
+| `mcp-direct-launch` | **off** — changes how every MCP server starts; warm the pinned cache and update an independent canary root with one armed bot before widening the manifest | composition | fleet.yaml bots.<bot> → published composition | bots.<bot>.mcp_direct_launch: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> --fleet <fleet> host cache warm, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA (it takes effect when that bot next restarts: .mcp.json is read at session start); widen to defaults.mcp_direct_launch once it has run clean |
+| `mcp-package-probe` | **off** — reaches the NETWORK on a compose. Planning must stay offline and fast by default, and a registry outage must never be the reason a fleet cannot compose. The offline half of the check (is the package pinned?) is unconditional and needs no flag | composition | fleet .env | CLAUDLOBBY_MCP_PROBE_ENABLED=1 in the fleet-tier .env |
+| `public-write-guard` | **off** — no deployment gate: a composed hook is live on every bot the next generate composes it for (#1310), with no restart in between, and this one refuses GitHub writes, so the manifest is the only place one bot can go first | composition | fleet.yaml bots.<bot> → published composition | bots.<bot>.public_write_guard: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA (Git update can restart enrolled bots; the deny then binds on the next tool call); widen to defaults.public_write_guard once it has run clean |
+| `shared-config-isolation` | **off** — restricts access to shared host resources used by running bots; enable for one canary bot before widening the manifest default through Git update | composition | fleet.yaml bots.<bot> → published composition | bots.<bot>.isolation.shared_config: true in fleet.yaml on an independent canary root with ONE armed bot first, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA (Git update can restart enrolled bots; the deny then binds on the next tool call); widen to defaults.isolation.shared_config once it has run clean |
+| `weekly-worker-restart` | **off** — bounces live worker sessions (context is the thing this system exists to keep) | fleet job | fleet.yaml | defaults.jobs.weekly-worker-restart.enroll: true in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA |
+| `worker-unassigned` | **off** — pages the manager about the assignment loop and has no rate guard beyond the debounce | door | fleet.yaml env: → bot.conf | OBSERVABILITY_UNASSIGNED_CHECK=1 in fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `pane-send-chunking` | **on** | door | fleet.yaml env: → bot.conf | PANE_SEND_CHUNK_BYTES=0 in fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `plane-recording` | **on** | door | fleet .env | PLANE_EMIT_DISABLED=1 in the fleet-tier .env — the ruled harness exemption; silences EVERY door at once |
-| `registry-scan` | **on** | generate | fleet .env | PLANE_EMIT_ENABLED=0 in the fleet-tier .env |
-| `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then generate; the bot reads it at its next start — a .env tier does NOT reach a session) |
+| `registry-scan` | **on** | composition | fleet .env | none — first-fleet initialization refuses PLANE_EMIT_ENABLED=0 in the fleet-tier .env; ordinary updates reuse existing registry identities |
+| `session-export` | **on** | fleet job | fleet .env | SESSION_EXPORT_ENABLED=0 in the fleet-tier .env |
+| `spindown-receipt` | **on** | door | fleet.yaml env: → bot.conf | SPINDOWN_RECEIPT_ENABLED=0 in fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at its next start — a .env tier does NOT reach a session) |
 | `task-recheck` | **on** | fleet job | fleet .env | TASK_RECHECK_ENABLED=0 in the fleet-tier .env |
 
 <!-- END GENERATED: switches -->
@@ -260,15 +282,29 @@ Under an on-by-default rule the stamp matters most for the `0`: an off switch th
 
 Host-scoped switches (`plane-daemon`, `plane-view`, `plane-prune`, `plane-expire`, `plane-host-probe`, `update-siblings`) are **not** reachable from `fleet.yaml` — host jobs bypass the fleet defaults merge. See [`system-yaml-schema.md`'s Defaults section](system-yaml-schema.md#defaults-the-rule).
 
-### `fleet.teams`
+### `fleet.manager` and `fleet.teams`
 
-Optional grouping. The generator uses team membership to inject a "Fleet You Manage" roster into manager personas.
+`manager` is required and names one existing local bot. It owns fleet intake,
+routing and follow-up; changing this field transfers current responsibility.
+Historical actor/assigner records remain unchanged. Missing or ambiguous ownership
+is refused: existing manifests must explicitly name their manager before using
+this release. A single-bot fleet names that bot.
 
-A manager with at least one in-fleet report that is not itself a manager — a `teams:` worker or a `bots.<name>.manages` entry resolving inside this fleet — is a *leaf manager* (`FleetConfig.leaf_manager_bots()`); a coordinator, whose every in-fleet report is itself a manager, is not, and neither is a worker. A cross-fleet `manages:` target never makes a manager leaf (F5, ruled): only in-fleet reports count, because the trigger that injects `/checkin` runs per fleet. A leaf manager is equipped with the `checkin` protocol by default, and the protocol's `requires:` brings the `checkin` skill and its grants along with it; `system_defaults.protocols: false` is the opt-out, and opting out of the protocol also drops the skill it required unless the bot declares the skill directly — and it drops every default protocol for every bot, `shared-documentation` / `shared-documentation-vault` included, since there is no per-bot opt-out. The automatic beat that fires `/checkin` on a schedule is a separate, opt-in switch that stays off until the fleet arms it — `defaults: { jobs: { manager-checkin: { enroll: true } } }` — named in `claudlobby doctor`'s switches table with the line that flips it; a fleet with no leaf manager composes no `manager-checkin` unit at all, and arming the job on one anyway produces a `validate` warning that says why.
+Teams optionally group workers under that same manager. Each team's `manager`
+must equal `fleet.manager`; reporting links cannot introduce another fleet owner.
+The generated organization block always names the fleet manager.
+
+The manager receives the `checkin` protocol default when this fleet has another
+local bot, including workers without team membership. Cross-fleet reporting links
+alone do not qualify a singleton fleet. `system_defaults.protocols: false` removes
+all default protocols (including shared-documentation defaults) and their required
+skills/grants unless explicitly equipped. The scheduled beat remains separately
+opt-in through `defaults.jobs.manager-checkin.enroll: true`. With no local workers,
+no beat unit composes and an armed job produces a validation warning.
 
 ### `fleet.sweep`
 
-Opt-in rolling code-audit sweep. A fleet-level nightly timer runs a no-LLM selector (`lib/code-audit-sweep.sh`) that picks the **stalest** repo — by the timestamp of its most recent `auto-audit`-labelled GitHub issue — and dispatches an audit into the owner bot's session via `lib/bot-sweep-cron.sh`. The audit's filed issues become the next run's staleness signal, so GitHub is the only ledger (no local tracker, no drift). Presence of the block opts in; omit it and nothing is emitted.
+Opt-in rolling code-audit sweep. A fleet-level nightly timer runs a no-LLM selector (`claudlobby/_runtime_scripts/code-audit-sweep.sh`) that picks the **stalest** repo — by the timestamp of its most recent `auto-audit`-labelled GitHub issue — and dispatches an audit into the owner bot's session via `claudlobby/_runtime_scripts/bot-sweep-cron.sh`. The audit's filed issues become the next run's staleness signal, so GitHub is the only ledger (no local tracker, no drift). Presence of the block opts in; omit it and nothing is emitted.
 
 ```yaml
 fleet:
@@ -281,11 +317,11 @@ fleet:
     enabled: true                  # default true when the block is present
 ```
 
-After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby events --bot <owner> --source audit`.
+After editing `fleet.sweep`, apply the reviewed commit with `claudlobby host update apply FULL_COMMIT` from an operator shell and inspect it with `host update status` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). The update enrolls the declared timer on Linux or macOS. The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby --json event list --bot <owner> --source audit` and follow `data.next_cursor` when present.
 
 ### `bots.<bot>.briefing`
 
-Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
+Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: the `briefing` skill is linked for it (no `skills:` entry needed), and each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `claudlobby/_runtime_scripts/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `claudlobby/_runtime_scripts/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
 
 ```yaml
 fleet:
@@ -313,7 +349,7 @@ fleet:
 - **Slot names must be shell identifiers** (`[A-Za-z_][A-Za-z0-9_]*`) — they become the `BRIEFING_SECTIONS_<SLOT>` env-var suffix. A non-identifier name (`week-end`, `9am`) is a **hard parse error**.
 - **Slot values are systemd `OnCalendar`**, the same dialect as `fleet.sweep.schedule` — not 5-field cron. A 5-field cron value (`30 8 * * *`) is a **hard parse error** (the chain has no cron-translation layer).
 - Composed into the equipped bot's `bot.conf`: `BRIEFING_SLOTS` (space-separated slot names), `BRIEFING_SOURCES`, and one `BRIEFING_SECTIONS_<SLOT>` per slot that declares sections — **`<SLOT>` is upper-cased** (shell-var convention; the skill upper-cases the dispatched slot to read it). The `/briefing` skill falls back to sensible per-slot defaults when a var is unset, so equipping with zero personalization works.
-- **Enrollment** is automatic: `setup-fleet`'s generic `install_fleet_timer[_launchd].sh` glob picks up the composed `<prefix>.briefing-*` units — no per-timer installer. `setup-fleet` also **reconciles** the dynamic family: `reconcile_briefing_timers` disables live enrolled briefing timers with no composed counterpart (a renamed/removed slot), glob-bounded to `<prefix>.briefing-*` and dry-run-logged first; `generate` prunes the corresponding unit files. Both sides carry an **abort-on-degenerate guard** — a composition that yields an empty briefing set while units exist is refused rather than allowed to wholesale-delete live timers.
+- **Enrollment** is owned by the Git update's native step. The unit set includes each declared `<prefix>.briefing-*` timer; removing a previously declared slot is currently refused because native-consumer removal is unsupported. The updater does not disable unrelated timers.
 - The validator **warns** when a briefing-equipped bot has no `integrations`/`mcp` source coverage (sections that read external data would be empty).
 
 ### `fleet.workstreams`
@@ -327,7 +363,7 @@ fleet:
     lease_days: 14    # lease length in days before a workstream needs renewal (default: 14)
 ```
 
-Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and are read by the single-writer helper `lib/workstream-update.sh` at open/renew time. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. Reads go through the read-only `claudlobby workstreams` CLI; see `advanced-patterns.md` for the workstream lifecycle.
+Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and govern the `claudlobby workstream` operation's open/renew checks. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. See `advanced-patterns.md` for the workstream lifecycle.
 
 ### `bots.<name>.expertise`
 
@@ -353,9 +389,11 @@ One-paragraph charter — why this bot exists, what success looks like. Forces e
 
 ### `bots.<name>.reports_to` / `bots.<name>.manages`
 
-Org structure fields. `reports_to` names the bot_id of this bot's manager. `manages` lists bot_ids this bot manages. Together they generate an `## Org Structure` section in CLAUDE.md showing the reporting hierarchy. Both are optional — bots without either get no org section.
-
-A manager whose `manages:` (or a `teams:` `workers:` list naming it) includes at least one in-fleet bot that is not itself a manager is a *leaf manager* and is equipped with the `checkin` protocol by default (see `fleet.teams`, above, for the full rule and its opt-out). A `manages:` target outside this fleet never counts toward that test (F5) — only in-fleet reports do, because the trigger that injects `/checkin` runs per fleet.
+Optional organizational reporting metadata, including cross-fleet relationships.
+The generated organization section labels these separately from `fleet.manager`.
+They do not grant fleet task ownership, change worker report routing, or promote
+another bot to manager. Check-in defaults follow the explicit fleet manager and
+presence of local workers, as described above.
 
 ### `bots.<name>.scope`
 
@@ -452,12 +490,12 @@ fleet:
   defaults:
     github_app:
       slug: my-fleet-app          # App URL slug — with bot_user_id, commits become <slug>[bot]
-      bot_user_id: 1234567        # the App BOT USER id (not the App id); both from setup-github-app.sh
+      bot_user_id: 1234567        # the App BOT USER id (not the App id); from host github-app setup
       # orgs: [MyOrg]             # optional: route only these orgs via the App
 ```
 
 **What it composes.** An App section in the per-bot `.gitconfig` (`GIT_CONFIG_GLOBAL`): a
-`cache --timeout=3000` layer, the `lib/git-credential-github-app` helper by absolute path, the
+`cache --timeout=3000` layer, the `claudlobby/_runtime_scripts/git-credential-github-app` helper by absolute path, the
 ssh→https `insteadOf` rewrite (App tokens are HTTPS-only), the `<slug>[bot]` commit identity when
 both identity fields are set, and a composed `tools/gh` shim (on PATH ahead of system `gh`) so
 per-call App minting is mechanical.
@@ -517,7 +555,100 @@ mcp:
 
 This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
-`integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
+`integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). An explicit `integrations:` list adds to the auto-paired docs; it never replaces them.
+
+An integration can also bring skills and protocols, through `requires:` in its frontmatter ([library/integrations/README.md](../library/integrations/README.md)). A bot that equips the integration composes with them as if it had declared them, and loses them when the integration goes, unless it declares them itself.
+
+### `bots.<name>.heavy_slot` / `fleet.defaults.heavy_slot`
+
+Opt-in, off by default (#1686). Heavy jobs stacked across fleets have stormed the primary host: load 25 to 57, iowait up to 66%, swap full. With `heavy_slot: true`, the bot's heavy Bash commands take a host-wide slot, and a call made while every slot is taken is refused before it runs. The refusal names the holder, so the bot retries later instead of hanging behind someone else's suite.
+
+```yaml
+bots:
+  ravi:
+    heavy_slot: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+- **What counts as heavy:** a whole pytest or vitest run (a run that names its test files is not gated), a pip/uv/npm/pnpm/yarn install, a `test` or `build` package script, `next build`, Playwright, and Chromium. They are recognised through `npx`, `pnpm exec`/`dlx`, `yarn`, `timeout`, `env`, `nice`, `nohup`, `flock`, `xargs`, `uv run` and `bash -c '…'`. `--collect-only` pytest calls do not take a slot. Bash tool calls only: a heavy job started from inside a script is not seen.
+- **How:** configuration staging composes a PreToolUse hook, `claudlobby/_runtime_scripts/heavy-slot-guard.sh`, for this bot and for no other. It puts `claudlobby/_runtime_scripts/heavy-slot.py run --` in front of each heavy command and leaves every other byte of the command alone.
+- **The slot** is a `flock` on `$CLAUDLOBBY_ROOT/state/heavy-slot/slot-N.lock`, whose contents name the holder: fleet, bot, the job's shape (its tool and flag names, never an argument value), start and, once it ends, release and exit code. A refusal names each holder's bot, tool and start time, never its command. The kernel drops the lock when its holder dies, so a dead holder never wedges the slot. The next holder records the unreleased hold on the plane (`heavy_slot_unreleased`); a different boot id means the job was running when the host reset (#1644).
+- **The queue** (#2124): a call that cannot take a slot, because every slot is held or a free one is another caller's turn, takes a ticket kept under its fleet and bot, and is refused with exit 75 as before; the same bot's next call finds the ticket. A free slot goes only to the head of the queue: the oldest ticket from a fleet other than the one that took a slot last, else the oldest. A waiter keeps its place by calling again. Nothing expires while every slot is held; once a slot is free, a ticket whose holder has been silent for 180 s is dropped (`heavy_slot_ticket_dropped`). A refusal and the take its ticket waited for carry the ticket's number.
+
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `state/heavy-slot/no-queue`, when it exists, makes every caller decide on the slots alone, as before the queue. `state/heavy-slot/run-lines` and `state/heavy-slot/render-lines`, when they exist, hold the host's own lines and their bounds (below); with no file, the lines and bounds are this host's numbers, held in the code until a design sizes them from each host's own spec. `claudlobby/_runtime_scripts/heavy-slot.py status` answers who holds each slot, or who held it last, and who waits in the queue.
+- **A render** (#2221): a bot runs a headless browser render as `claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND`, opted in or not; plain `run` refuses a script (#2039). The runner reads the host itself before it asks for the slot, and the render starts only while MemAvailable is at or above 4820 MiB, the 1-minute load is under 16 and no stop line is crossed; otherwise it exits 75 with nothing started. With the slot taken through the queue, the render runs in a systemd user scope of its own with its session bus cut, and the runner kills the whole scope when MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40 or the render passes 45 minutes: it exits 79 and records `heavy_slot_stopped`. A runner killed outright still takes its render with it. After a kill, no render starts for 30 minutes (exit 75). After two kills in one local day, renders are on hold (exit 2) until the fleet's manager, or the operator, runs `claudlobby/_runtime_scripts/heavy-slot.py lift-hold --by NAME [--reason TEXT]`, which records who lifted it; time passing never lifts a hold. The kills and lifts are kept in `state/heavy-slot/render-record`. Exit 2 means the render cannot run here: no systemd user scope, a lines file or render record it cannot read, or a hold. `state/heavy-slot/render-lines` sets the numbers, one `name = value` per line (`start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s`, `max_minutes`), and the two bounds a render shares with a plain run (#2790): `stop_mib` at or over `stop_mib_floor` (3000), and `poll_s`, a render's notice, at most `notice_within_s` (6). A file whose numbers break its bounds refuses every render at exit 2. A render has no off. Linux only.
+- **A run stop line** (#2221): every plain `heavy-slot.py run` is watched, on by default at `stop_mib` 3800 MiB (`debounce_reads` 2, `poll_s` 2, `grace_s` 10); `state/heavy-slot/run-lines` (`name = value`) sets the host's own values and bounds, and its one off, the line `stop = off` (#2790). A run runs its job in a session of its own and reads the host's free memory every `poll_s`: MemAvailable where there is a meminfo, else `vm_stat` (free, inactive and speculative pages, the figure `avail_ram_mb` gives on macOS). Once `debounce_reads` readings in a row are under `stop_mib` it sends SIGTERM to the job's process group and to every process found, by parent link, to have left it, SIGKILL after `grace_s`, releases the slot and exits 79 with a `heavy_slot_stopped` row. A failed reading never stops the job. The bounds are host config in the same file: `stop_mib` at or over `stop_mib_floor` (3000 MiB here), a crossing noticed within `notice_within_s` (`debounce_reads` x `poll_s`; 6 s here), and SIGKILL due within `stopped_within_s` (that notice plus `grace_s`; 21 s here). A file it cannot read, or whose values break its bounds, refuses every plain heavy run at exit 2, and `status` names it; no number turns the stop off, and `stop = on` or any word but `off` is refused. With `stop = off` nothing stops a run: it says so on stderr and in `heavy_slot_acquired` every time, and is still read (#1645).
+- **A refusal starts nothing, whatever becomes of its exit status.** Without `set -o pipefail`, `heavy-slot.py run … | tail` exits with tail's status, so a script must not read success from it. The render itself never depends on that status: the runner reads the start line in the process that would start the render, and prints its refusal on stderr as its last line.
+- **It only counts bots that opted in.** A heavy job run by a bot without the key takes no slot and is refused by none, unless that bot runs it through `heavy-slot.py run` itself, as a render does.
+
+To arm one canary bot, set the key in the manifest of an independent native canary (its own installation, data root and labels), then apply the reviewed commit there with `host update apply FULL_COMMIT` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). An update is whole-installation; do not use a production manifest to simulate a one-bot canary. Hooks are read on demand once delivered, so the publication boundary is essential. The earlier hook mechanism was measured with a headless session on Claude 2.1.281; that is not proof of the current update path. To widen it, set `defaults.heavy_slot: true`. A bot's own `false` still opts that bot out.
+
+### `bots.<name>.public_write_guard` / `fleet.defaults.public_write_guard`
+
+Opt-in, off by default. A PreToolUse guard that refuses a GitHub-bound write when it would put a term from the host's list into a **public** repository. A private or internal repository is untouched: the terms are allowed there.
+
+```yaml
+bots:
+  scout:
+    public_write_guard: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+- **The list is host configuration, never repository content.** It lives in `~/.config/claudlobby/public-write-terms`: one case-insensitive regular expression per line, with `#` comment lines. No term goes in a repository, test, issue, PR, commit or doc.
+- **What it reads is what the write puts in the repository:**
+  - an `mcp__github__*` tool that is not a read (`get_`, `list_`, `search_`): every string in its input except `owner` and `repo`;
+  - a `gh` command in the issue, pr, release, gist, repo or label group that is not a read (`view`, `list`, `status`, `diff`, `checks`, `checkout`, `download`, `clone`, `browse`): its own words, the files it names as a body, and its standard input. `gh api` counts when it sends fields, unless it is a GET or a GraphQL query;
+  - `git commit`: its messages, the lines and new paths it adds, and the new files an earlier `git add` in the same command names;
+  - `git push`: the messages, added lines and new paths of every commit it would send, and of any commit made earlier in the same command, which does not exist yet when the guard runs. For git this is the complete check, since a commit publishes nothing until it is pushed.
+
+  It reads the command as the shell does: a backslash-newline continues the line, a GitHub issue or PR URL names the target, `env NAME=value` and `NAME=value` set what the command sees, and the commands inside a command substitution are read. It does not read a directory named by `cd`, a body file's path, or the target repository's name, so a clean write made from a path that contains a term passes. It does not read removed lines either, so a commit that takes a term out passes.
+- **Public means public at write time.** Only a hit asks where the write goes, so a write with no hit makes no call. The repository's visibility is read live (`gh api repos/OWNER/REPO`) and cached for 10 minutes in `state/public-write-guard/visibility.json`, so a repository made public is seen as public within 10 minutes. A REST call that fails fast is asked again over GraphQL (`gh repo view`), since a REST throttle leaves GraphQL working; when both fail, an answer cached up to a day ago stands in. An unknown answer is never cached, and a cache stamp from the future is not trusted.
+- **It refuses with a reason and never rewrites.** The reason names the repository, its visibility and which part matched (the command, a body file, the staged changes, the commits to push), never the matched text. Its events name the bot, so `claudlobby event list --bot <bot> --type public_write_refused` and the bot's brief see them.
+- **Failure directions**, each chosen on purpose:
+
+  | case | what happens |
+  |---|---|
+  | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby event list` (it does not page) |
+  | a broken list: a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming the line and column, never its text |
+  | a payload that is not JSON | allow, with a `script_error` breadcrumb |
+  | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
+  | content it cannot read: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name | counts as a hit (a substitution in any other flag, such as `--match-head-commit`, is not content and is left as written) |
+  | a remote that is not github.com, or a repository with no remote | out of scope, allowed |
+
+- **Its ceiling.** It reads the shell as people write it. `eval`, a shell function, an alias, and a script file that runs `git` or `gh` are not followed, and an annotated tag's own message is not read. Three writes publish content that is not a word of the command, and are not read: `gh pr create --fill` (its title and body come from commits already pushed), `gh repo create --source --push` (the local history), and the asset files of `gh release create` and `upload`. It keeps accidents out of public repositories; it is not a boundary against a caller trying to get past it.
+- **The off switch**, host-wide and instant: `touch $CLAUDLOBBY_ROOT/state/public-write-guard/disabled`. It passes every call and records nothing, so `--check` names it.
+
+To arm one canary bot, write the host's list and check it with `python3 "$CLAUDLOBBY_NATIVE_DIR/public-write-guard.py" --check`, the installation's copy that a bot session exports (it prints `ok` and the pattern count, never a term, and says so when the off switch is set). Then set the key in the manifest of an independent native canary (its own installation, data root and labels) and apply the reviewed commit there with `host update apply FULL_COMMIT` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). An update is whole-installation; do not use a production manifest to simulate a one-bot canary. Hooks are read on demand once delivered, so the publication boundary is the gate. To widen it, set `defaults.public_write_guard: true`; a bot's own `false` still opts that bot out.
+
+### `bots.<name>.mcp_direct_launch` / `fleet.defaults.mcp_direct_launch`
+
+Opt-in, off by default (#1604). `npx -y <pkg>@<version>` keeps an `npm exec` process resident as the parent of the server it starts, for the server's whole life. On the Pi, 41 of those wrappers held 45 MB of private memory and 1,388 MB of swap. With `mcp_direct_launch: true`, the bot launches each **exactly pinned** npx server as `node <entry point>` from a copy that `host cache warm` installs under `$CLAUDLOBBY_ROOT/state/mcp/npm/<name>@<version>/`. No wrapper process exists at all.
+
+```yaml
+bots:
+  ravi:
+    mcp_direct_launch: true   # STRICT bool: a typo string is a parse error, never an arming
+```
+
+To canary this change, use an independent data root with one armed bot:
+
+1. Set the key on that bot.
+2. Run `claudlobby --root <data-root> --fleet <fleet> host cache warm`. It installs the copies, and only for armed bots.
+3. Apply the reviewed commit with `host update apply FULL_COMMIT` from an operator shell and inspect it with `host update status` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)).
+4. `.mcp.json` is read at session start. The update may restart the selected bot; until its next session, a running bot keeps its previous npx servers.
+
+To widen it, set `defaults.mcp_direct_launch: true`. A bot's own `false` still opts that bot out.
+
+Any server that can't launch directly keeps today's npx launch. That launch can't break the server; it only forgoes the saving. Composition names every such server with its reason, in one warning per bot, and the `host doctor` MCP launch rung says the same:
+
+| reason | fix |
+|---|---|
+| `not installed` | run `host cache warm` for the fleet, then apply a fresh Git update with `host update apply FULL_COMMIT` |
+| `not an exact version pin` | pin the fragment. A range or dist-tag would install whatever the registry serves today |
+| `entry point is not a plain node script` | none. `node <path>` would drop a shebang's flags, and a non-node bin is not node at all |
+| `cannot tell which bin npx would run` | none. npx itself refuses an ambiguous bin |
+
+A copy removed *after* the update is different. The bot's composed file still points at it, so that server will not start at the bot's next session, while a fresh update would quietly fall back to npx. The `host doctor` `mcp-launch-composed` rung reads every bot's composed `.mcp.json`, armed or not, and **fails** naming each such bot, server and path. Restore the exact cache with `host cache warm`, then apply a fresh Git update (or apply without warming to return to npx).
+
+The copy installs the fragment's exact pin. npm resolves the rest of its dependency tree from its own cache first (`--prefer-offline`). uvx servers are untouched. `claudlobby/_runtime_scripts/fleet-memory-check.sh` does not show the saving (#862): its fleet total never matched an `npm exec` line, and its per-bot figure counts only the pane process and its direct children.
 
 ### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `permissions` / `post_actions`
 
@@ -531,7 +662,7 @@ The `persona:` key is accepted as a backwards-compatible alias for `expertise:` 
 
 Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env var name holding the token), `require_mention` (whether the bot responds only to @-mentions), `chat_id` (override fleet-level group).
 
-`token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `lib/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
+`token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `claudlobby/_runtime_scripts/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
 
 Telegram fields support defaults merging — set common values (like `token_env`) in `defaults.telegram` and override per-bot as needed.
 
@@ -569,11 +700,13 @@ Control which Claude Code tools a bot may use. Two sub-fields:
 - `deny: [Write, Edit, NotebookEdit]` — generates permission deny rules like `Write(**)` in `settings.local.json`. The bot cannot call these tools.
 - `allow: [Agent, Bash, Read]` — generates permission allow rules. Useful when combined with auto-derived permissions from expertise profiles.
 
+Naming a skill's or integration's `ask_grants` rule under `allow`, in exact text, is how a fleet grants it: the compositor drops that rule from `permissions.ask`, so the call runs without a prompt. This works from `defaults:` or on the bot. A broader allow rule, or another library item's `tool_grants`, does not drop an ask rule (see Auto-derived permissions below).
+
 Deny wins over allow at the same layer. The validator warns if denied tools conflict with the bot's expertise (e.g., denying `Write` for a `software-engineering` bot).
 
 ### `bots.<name>.observability`
 
-Controls fleet observability thresholds for heartbeat pulses and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `lib/fleet-pulse.sh`, `lib/bot-vitals.sh`, and the dispatch watchdog.
+Controls fleet observability thresholds for heartbeat pulses and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `claudlobby/_runtime_scripts/fleet-pulse.sh`, `claudlobby/_runtime_scripts/bot-vitals.sh`, and the dispatch watchdog.
 
 ```yaml
 observability:
@@ -587,17 +720,15 @@ observability:
   unassigned_max_age: 86400     # stop reporting a strand past this age (default: 86400; <= 0 never stops)
 ```
 
-`observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby validate` warns, naming the key.
+`observability.reap_days` is retired (F18 closure, #1467): the event files it aged are gone and the plane's `plane prune` retention replaced them — a manifest that still sets it loads, and `claudlobby config validate` warns, naming the key.
 
-**`dispatch_deadline` is composed for EVERY bot** (chunk M-A, #1481). It used to be written only when a manifest or the system-defaults tier declared one, so a fleet with `system_defaults: false` and no `observability:` block composed no line at all and the door fell back to a bash literal nobody could see from `fleet.yaml` — while the deadline is the one fact the overdue watchdog reads. The composed default when a fleet declares none is **86400 seconds (24 hours)**; a fleet's own value still wins, and `claudlobby/system.yaml`'s own `observability` tier — the one a normal fleet takes — supplies the SAME 86400, so the ruled default reaches the fleets that declare nothing (it sat at 1800 when M-A first shipped, which meant nearly every fleet kept composing the old 30-minute clock; the tier, the composer constant and `dispatch-task.sh`'s fallback are now pinned together).
+**dispatch_deadline remains composed for every bot.** The default is 86400 seconds (24 hours), and a fleet override still reaches bot.conf for historical native watchdog rows. Canonical task assign takes an explicit --expected-by timestamp; it does not read this env value to manufacture a deadline. A value of 0 disables the legacy dispatch clock.
 
-The unit is **seconds**, and the trap is worth naming: 24h is 1440 *minutes*, so composing `1440` here would give every dispatch a 24-minute deadline and page the whole fleet. `--deadline-min N` on `dispatch-task.sh` is the one door that speaks minutes.
-
-**`dispatch_deadline: 0` disables the clock**, on either door: the dispatch mints no `expected_by` at all, so the row is open-ended and never goes overdue. Not "now + 0", which would be overdue in the second it was sent. Control dispatches (`--type query|cancel|compact|restart`) are deadline-less by design regardless.
+`pulse_interval` also sets the `fleet-pulse` timer's cadence. A whole number of minutes that divides an hour (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800 or 3600) keeps the pulse anchored in this fleet's slot on the host. Any other value runs it on `OnUnitActiveSec=` with a slot for its first run only, and that slot lasts only until the copies drift back together; on a four-fleet host, 60 s copies did so within minutes to an hour.
 
 The three threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
-**`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`lib/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
+**`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`claudlobby/_runtime_scripts/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
 
 **`unassigned_check` is the mirror of the overdue-dispatch watchdog** (#1024). `overdue_dispatch` answers "work was sent and never came back"; this answers "work came back and nothing was sent" — a worker that reported terminal and was then forgotten. `activity_stuck` cannot cover it: a genuinely idle bot *is* idle, so keepalive re-stamps `.idle` and that branch never fires. The check emits `worker_unassigned` and pushes a debounced `[FLEET-PULSE]` line, exactly like `overdue_dispatch`.
 
@@ -605,13 +736,13 @@ It is **off by default** because it is the only pulse check whose subject is the
 
 **`unassigned_max_age` is a trade in both directions, and the second one matters here.** Past the cap the check stops reporting a strand *and clears its debounce state*, so the emitted signal becomes indistinguishable from "the strand resolved" — a worker idle longer than the window goes quiet again. That is bounded rather than immediate (roughly 3–4 pushes at the default 6h renotify cadence before it lapses) and it is the same expiry `overdue_dispatch` already applies via `DISPATCH_OVERDUE_MAX_AGE_S`, so it is a deliberate symmetry rather than a gap unique to this check. But a check that exists to close a silent failure does reopen a narrower one at the far end: set `unassigned_max_age: 0` to refuse the trade and keep reporting indefinitely.
 
-**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
+**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `claudlobby/_runtime_scripts/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
 ### Fleet-pulse escalation (environment overrides)
 
-`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `crash_loop`, …) affects multiple bots within a short window.
+`claudlobby/_runtime_scripts/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`, `unit_missing`, `crash_loop`, …) affects multiple bots within a short window. Every event over its threshold in one sweep goes out as one message (#2243).
 
 Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
 
@@ -625,15 +756,23 @@ fleet_pulse:
   escalation_state_dir: "~/.claude/channels/telegram-<bot-handle>"
   renotify_after_s: 21600
   rearm_window_s: 0
+  stopped_remind_days: 3
+  timeout_s: 300
 ```
 
 Omit a key to keep the script's own default; the composer emits only what is set, so a default lives in exactly one place.
+
+`claudlobby fleet notify`, and the alert a failed message write raises, read `escalation_chat_id`, `escalation_state_dir`, `renotify_after_s` and `rearm_window_s` from this block in the active configuration, so with a pair declared they escalate to the same target as the pulse (#2234).
+
+A fleet that declares no pair sends those alerts to the fleet manager's own chat (its `telegram.chat_id`, else `telegram_group_chat_id`), posted by the manager's own bot (#2654). The manager's token is read from its channel state dir's `.env`, where the Telegram plugin keeps it, so a manager whose token lives only in a `token_env` variable reads `failed` there. A `TELEGRAM_GROUP_CHAT_ID` and `TELEGRAM_STATE_DIR` set together in the manager's `.env` tiers still come first. The pulse is unchanged: with no pair it posts to the fleet chat as the first channel bot in it. A manager that is not a channel bot, or has no chat, leaves those alerts in its pane only, and `claudlobby config validate` warns (`alert-pane-only`) when the fleet sets up Telegram: a fleet chat, or a bot that declares a `handle`, `chat_id` or `token_env`. An `escalation_chat_id` set without its `escalation_state_dir` is refused, not replaced by the manager's own.
+
+`timeout_s` is the one key that is not an environment variable: it caps the sweep itself, and `claudlobby fleet pulse` reads it from this block, so a hand run gets the same cap as the timer (#2059). Unset, the cap scales with load: 120 s × load1 per CPU, from 120 up to 240 s, which keeps a run and its stop under the default 300 s pulse cadence. A scheduled run also ends by the largest cap (240 s unset), counted from its unit's start: a wait for admission while an activation holds the lock, or a slow CLI start, cuts the sweep short instead of lengthening the run, and a run with no time left starts no sweep. That ceiling matters because every timer job holds the host's activation lock shared while it runs, and `host activate` waits at most 300 s for those holders before it refuses; a run past the fleet's pulse interval also delays its next tick. Set a longer `timeout_s` only with that trade in mind; it is clamped to 30-3600 and `claudlobby config validate` warns outside it. A sweep that reaches its cap is stopped (SIGTERM, then SIGKILL after 10 s, then at most 1 s for it to exit) and exits 8. The pulse's systemd unit also carries its own limit, `TimeoutStartSec=` at the largest cap plus 14 s (254 s unset) with `TimeoutStopSec=1`, which ends a run that cannot stop itself; launchd has no equivalent. Its summary file is replaced by one that starts `TIMED OUT` and names what the tick skipped, and the last complete summary is kept beside it as `<fleet>.pulse-summary.last-complete.txt`.
 
 > **Do not put these in a `.env` file.** Earlier revisions of this section said to
 > use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):
 > the timer unit sources no `.env` at any tier, and the unit is generated — a
 > hand-edit is reverted by the next `generate`, and its first line says so. Both
-> paths failed silently, which is why they are now a `claudlobby freshbox` FAIL
+> paths failed silently, which is why they are now a `claudlobby config validate --runtime` FAIL
 > (`fleet_pulse_env_inert`) rather than something an audit finds weeks later.
 
 The composed env vars, and what each does:
@@ -641,11 +780,12 @@ The composed env vars, and what each does:
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `FLEET_PULSE_ESCALATION_CHAT_ID` | _(unset)_ | Operator override for where fleet-pulse escalations go, read by every env-less alert path through the shared `resolve_alert_target`. That resolver returns the chat **and its sender** (the channel state dir tg-post reads the token from) as ONE pair from ONE source (#1771): this override pairs **only** with `FLEET_PULSE_ESCALATION_STATE_DIR` below, and without it the escalation is **refused** — a WARNING that names the variable, and a debounced `alert_target_refused` alert to the manager's pane and the plane — never sent with a guessed token. `creds-check` refuses the same pair, but its own `alert_target_refused` notice **does** reach Telegram: it unsets the refused chat, so the alert resolves afresh onto the scanned bot's own chat — a consistent pair, never the refused one — while its per-credential alerts reach only its log, its state and that notice. With no override, the composed `TELEGRAM_GROUP_CHAT_ID` pairs with a channel bot in this fleet whose own chat it is (none is refused); with neither, one bot's own chat and state dir are used together. |
-| `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby validate` warns when the chat is set without it. |
+| `FLEET_PULSE_ESCALATION_STATE_DIR` | _(unset)_ | From `escalation_state_dir`: the escalation chat's declared sender — the channel state dir of a bot that is a **member** of that chat (`~` and `$HOME/` are expanded at generate time, because a unit does not expand them). An escalation chat is by design nobody's own group chat, so no bot can be matched to it; this is its only partner. `claudlobby config validate` warns when the chat is set without it. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
-| `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
+| `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). The overdue page does not use it: each overdue assignment pages once, and `task recheck` re-asks about it once a day (#2457), so a fleet that sets `TASK_RECHECK_ENABLED=0` gets the one page and no reminder after it. `0` disables the re-fire. |
 | `FLEET_PULSE_REARM_WINDOW_S` | _(lib-common default)_ | Bounds debounce re-arming during a known crashloop. `0` disables the bound. |
+| `FLEET_PULSE_STOPPED_REMIND_DAYS` | `3` | From `stopped_remind_days`: a bot stopped through `bot stop` raises no alert, and its manager gets one reminder push once it has been stopped this many days, then one every as many days again (#2243). `0` turns the reminder off. |
 
 Set `FLEET_PULSE_ESCALATION_CHAT_ID` explicitly so alert targeting never depends on bot directory ordering.
 
@@ -724,7 +864,7 @@ Rules enforced at parse time: the path must be absolute (declare the expanded fo
 
 For a host path a bot should *read and write through the bot dir*, prefer `mounts:` (a managed symlink) over a raw `external_paths` grant.
 
-`claudlobby freshbox` reports the surface these declarations bless: an INFO line per declaration with the source values it actually covers (over-broad `/**` grants become visible this way), a `WARN` for a declaration that covers nothing (declaration rot), and a `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface `generate` cannot see (`.env` values are masked in the report; a host-tier `root/.env` / `~/.env` value WARNs). Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
+`claudlobby config validate --runtime` reports finding kinds and severities for this surface: `INFO` for covered external declarations, `WARN` for a declaration that covers nothing (declaration rot), and `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface ordinary validation cannot see. The public result omits values and path details; a host-tier `root/.env` / `~/.env` value warns. Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
 
 ### `bots.<name>.secret_files`
 
@@ -743,10 +883,6 @@ bots:
 Composes into `bot.conf` as `export GOOGLE_SERVICE_ACCOUNT_JSON="$FLEET_ROOT/secrets/kev-service-account.json"`
 — the path is derived and migration-safe, but the *file itself* (like any fleet secret) belongs in
 `local/<fleet>/` and is never committed. Fleet-then-bot merged, bot winning, same shape as `env:`.
-
-### `bots.<name>.bench`
-
-Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.
 
 ### `bots.<name>.permission_mode`
 
@@ -778,9 +914,79 @@ the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time
 first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
 them. Can be set in `defaults:`; bot-level overrides.
 
+### `bots.<name>.skill_overrides`
+
+Mapping of skill name to one of Claude Code's `skillOverrides` states: `"on"`, `"name-only"`,
+`"user-invocable-only"` or `"off"`. Composed into `settings.local.json` as `skillOverrides`. It
+merges per skill: the built-in default, then `defaults.skill_overrides`, then the bot's own, so
+naming one skill keeps the default for the others. Quote each state: YAML reads a bare `on` or
+`off` as a boolean, which is refused.
+
+The built-in default is `{auto-mode-setup: "off"}` (#1388). Once auto mode has blocked several
+actions, Claude Code ends a turn on a dialog, "Teach auto mode about your environment?", offering
+to run `/auto-mode-setup`. No one at a bot's pane answers it, and an accepted draft would be
+written to `~/.claude/settings.json`, which every bot running as that user shares. `"off"`
+removes both the command and the offer. To turn them back on for a fleet:
+
+```yaml
+defaults:
+  skill_overrides: {auto-mode-setup: "on"}
+```
+
+### `bots.<name>.auto_compact_window`
+
+A whole number of tokens from `100000` to `1000000` (default `700000`), or `auto`: the
+autocompact window, the context size Claude Code compacts the bot's conversation within. Claude
+Code checks its count of the context between requests and compacts once the count has passed the
+window less its own autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k
+tokens. The count can run below the real context: in a live run on 2.1.322 at a window of
+`100000`, reading files of numbers, Claude Code compacted with its count (`pre_tokens`) at
+83,661 while the context held about 95,000 tokens. One large step, such as several file reads in
+one response, can carry the context past the window before that check, and if the compaction
+fails ("Not enough messages to compact"), the request still goes out. Can be set in `defaults:`;
+bot-level overrides.
+
+- **A number** composes a top-level `autoCompactWindow` into `settings.local.json`: the window
+  for every model. Claude Code caps the window at the model's own context window, so a model
+  with a 200,000-token window keeps its own. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the bot's
+  environment takes precedence over the setting. Claude Code drops a value outside the range
+  without a word, so the parser refuses one.
+- **The default, `700000`,** is the window a bot's conversation compacts within when no key is
+  set. With nothing set, a model with a native 1M window compacts within its 1M window: at about
+  967,000 tokens, Claude Code's docs say. The bound is a number of tokens, so it means the same
+  on any host, which is why it is a package default rather than a number each host tunes.
+- **`auto`** turns that bound off. It composes `modelSettings`, naming each model Claude Code
+  gives a native 1M window `{"autoCompactWindow": "auto"}`: Claude Code's own window, the one it
+  uses with nothing set.
+- **Either form stops an offer nobody answers** (#1388). On a model with a native 1M window,
+  Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier … Want to
+  autocompact at 400k tokens instead?". The answer is kept per account and model in the global
+  config that every bot running as that user shares, so a new account or a new model asks again.
+  A window set in local settings stops the asking.
+
+A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with a
+number on any model, with `auto` on the models below. Set it here instead. The models are
+`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry;
+under `auto`, a model Claude Code adds later can ask again until it is added there.
+
+```yaml
+defaults:
+  auto_compact_window: 400000
+```
+
+### `bots.<name>.agent_cli`
+
+String enum, `claude` (default) or `codex`. The agent CLI the bot runs under; composed into `bot.conf` as `CLAUDLOBBY_AGENT_CLI`, which names the rule the bot's session uid is derived with (#2145 §2.2; the doors that record the caller's session read it from #2145 P1 Half B). `codex` is accepted by the parser and **refused by the validator** (`execution adapter not shipped`) until the Codex execution adapter ships (#2149). An explicit `null` reads as `claude`; any other value outside the set fails to parse. Can be set in `defaults:`.
+
+`runtime:` was this key's draft spelling and is not read. A `runtime:` key in a bot stanza or under `defaults:` gets a `retired-key` warning naming `agent_cli:`, and is an **error** when its value is not the CLI the bot runs (`runtime: codex` would otherwise run `claude` in silence).
+
+`agent_cli` is the one name for this value everywhere: the `fleet.yaml` key, `CLAUDLOBBY_AGENT_CLI` in `bot.conf`, the bot keyframe's `agent_cli` and the session join key `(agent_cli, session_id)` (`session_alias(id, agent_cli)`, #2145 F2). It is not `runtime`, which already names release activation, the Claude Code binary update (`host update runtime`) and the composed-output audit (`config validate --runtime`) (#1997).
+
 ### `bots.<name>.remote_control`
 
-Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
+Boolean. Controls whether the bot runs with `--remote-control`, Claude Code's Remote Control session. Unset, it follows the bot's role: `true` for the fleet's manager (`fleet.manager`) and `false` for every other bot. An explicit value on the bot, or in `defaults:`, wins in either direction, so a worker opts in with `remote_control: true` and a fleet that wants it nowhere sets `defaults: {remote_control: false}`. `config explain bot.remote_control --bot <bot>` reports an unset value as `source: role_default`, decided by `fleet.manager`.
+
+Two behaviours change with it. While Remote Control is up, Claude Code arms neither its own automatic continue nor its usage-limit menu at a usage limit; without it, both arm, and the menu's options can come in any order, usage credits first included. keepalive chooses "Stop and wait for limit to reset" only by that label (`keepalive.sh`, #996), and no framework send types into a pane while a menu holds it (`pane_is_menu` in `lib-common.sh`). And a plain-text answer to a Telegram message reaches Telegram through Remote Control's relay (`plane-rc-relay-out.sh`), so a bot without it answers through the channel's reply tool only.
 
 ### `bots.<name>.prompt_suggestions`
 
@@ -816,12 +1022,12 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 
 | Field | Env var | Purpose |
 |-------|---------|---------|
-| `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
-| `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `docs/CLI_CONTRACT.md` §Environment). |
-| `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby validate` error. See `documentation/integrations/claudron-integration.md`. |
+| `claudna_version` | `CLAUDNA_VERSION` | A separate version hint; exports this variable and does not pin the installed plugin. |
+| `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `documentation/specs/CLI_CONTRACT.md` §Environment). |
+| `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby config validate` error. See `documentation/integrations/claudron-integration.md`. |
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
 
-Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but the **`claudron` CLI is not reachable**, or the path does not resolve to a vault — the CLI is the fleet-consumption door (Claudron `docs/INTEGRATION.md`). It does *not* check for an MCP server: that door is demand-gated and unbuilt (decision C).
+Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but the **`claudron` CLI is not reachable**, or the path does not resolve to a vault — the CLI is the fleet-consumption door (Claudron `documentation/guides/INTEGRATION.md`). It does *not* check for an MCP server: that door is demand-gated and unbuilt (decision C).
 
 ### `bots.<name>.autonomous_runner`
 
@@ -855,7 +1061,7 @@ All sub-fields except `skill`, `cadence`, and `target_repo` are optional with se
 
 Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_id }}` (the fleet.yaml key — what `claudlobby brief --bot` takes; `bot_name` is a display name and may differ), `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`.
 
-**Omit this field and a bot composes a read-then-act default instead of an idle instruction** (#1633): read `CLAUDE.md`, run `claudlobby brief --bot <id>` (or, when `brief.on_start` is armed, read the brief already injected at session start), act on what it shows — continue open rows, report anything blocked — then idle and await messages. Set your own `startup_prompt` only when a bot needs something beyond that; do not end a custom prompt in a bare "idle" instruction with no read or action before it, which is the exact defect the default replaced.
+**Omit this field and a bot composes a read-then-act default instead of an idle instruction** (#1633): read `CLAUDE.md`, invoke `/fleet-ops`, confirm identity with `claudlobby --json context show`, then read `claudlobby --json brief` (or the brief already injected at session start when `brief.on_start` is armed). Act on open rows, report blockers, then idle and await messages. A refused read must be reported rather than bypassed by guessing context from environment variables. Set `startup_prompt` under `bots.<name>` only when a bot needs custom coaching; `fleet.defaults.startup_prompt` is not a supported field.
 
 ## Auto-derived permissions
 
@@ -868,10 +1074,44 @@ The compositor auto-derives permission entries in `settings.local.json` from sev
 | **MCP permission contracts** | `library/mcp/<name>.json` `_permissions_contract.tools` field lists tool names → generates `mcp__<server>__<tool>` allow patterns. |
 | **Channel plugins** | Bots with a Telegram handle get allow rules for `mcp__plugin_telegram_telegram__*` tools. |
 | **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns, plus any `tool_grants` (Bash/MCP/bare tools) the skill's own frontmatter declares. |
+| **Configured session resume** | The built-in resume default or `bots.<name>.env.SESSION_RESUME_COMMAND` naming a selected plugin Skill or equipped local Skill derives only `Skill(name)`. This grants the whole Skill (all its modes), not just resume arguments or underlying tools. Empty/native/opaque entries derive no new grant. Runtime-only `.env` overrides require explicit `tool_permissions.allow` for a different Skill; deny/ask policy remains authoritative. |
+| **Skill and integration ask and deny rules** | A skill's or integration's frontmatter `ask_grants` generate `permissions.ask` rules, and its `deny_grants` are appended to the deny list. `permissions.ask` is written only when a rule survives, so a bot with none keeps the same file. |
 | **Claudron session loop** | When `claudron_session_loop` resolves true, a narrow allowlist of `claudron` CLI verb grants (never a `Bash(claudron *)` wildcard). |
 | **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |
 
 Layering order (later layers win on conflict): guardrails → expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins. (Sibling-bot directory isolation is a separate, always-on deny layer beneath all of these — see `permissions-model.md`.)
+
+Ask rules do not follow that order. An ask rule prompts in every permission mode, auto included, and wins over an allow rule that also matches; the fleet drops one by naming the same rule, in exact text, under `tool_permissions.allow` (see above). An ask rule that carries an absolute path is held to the same anchoring rule as an allow grant (see `external_paths`). A `deny_grants` rule is a deny: a matching call is refused in every permission mode and no allow rule overrides it. A rule matches the command's text, so it stops the plain form of a call and not every way of making it; do not present one as the only gate on a change.
+
+### `isolation` — shared-config isolation (opt-in, #1665)
+
+Layer 0 denies each fleet sibling's bot **directory**. Most cross-bot content is not there: a session transcript lives in the shared Claude config dir, beside the shared prompt history, the OAuth credential and the account config, and none of those, no `.env` tier, and nothing in the install root is named by Layer 0. `isolation.shared_config: true` adds **Layer 0b**, which names them.
+
+```yaml
+defaults:            # or bots.<bot>:, which wins over defaults
+  isolation:
+    shared_config: true          # strict YAML boolean; default false
+    exempt: [account_config]     # union of both tiers; restores a READ only
+```
+
+| Class | What it denies | Tools |
+|---|---|---|
+| `transcripts` | every other bot's transcripts on the host, keyed by bot NAME so a `move-bot` keeps them covered | Read + Edit |
+| `history` | `history.jsonl` in each config dir on the host | Read + Edit |
+| `credentials` | `.credentials.json` in each config dir | Read + Edit |
+| `account_config` | `.config.json*` and `.claude.json*` in each config dir, and `~/.claude.json*` | Read + Edit |
+| `env` | `~/.env*`, the root `.env` and `.env.bak*`, every fleet's `.env*`, and every bot's `.env*` — **its own included** | Read + Edit |
+| `install_root` | the install's `claudlobby/_runtime_scripts/`, `claudlobby/`, `library/`, `templates/`, `bin/` | Edit only |
+| `telegram` | every other bot's Telegram state dir, token included | Read + Edit |
+| `config_surfaces` | `settings.json`, `settings.local.json`, `CLAUDE.md`, `hooks/`, `skills/`, `plugins/`, `agents/`, `commands/` in each config dir | Edit only |
+
+`exempt` accepts `account_config` (a platform bot's trust and flag diagnostics) and `env_host` (a fleet whose own overlay still tells its bot to `source ~/.env`). An exemption restores the class's Read rules and never its Edit rules. Any other key or name is a parse error: a typo in a knob that arms deny rules must not switch anything silently.
+
+**What turning it on buys, and what it does not.** The rules gate Claude Code's own tool calls: the Read tool, and a Bash file command given a literal path. They do not stop `python3 -c "open(...)"`, a path the matcher cannot resolve (`$HOME/…`), or any script, hook, timer or MCP server, and every bot runs as one user. They reduce **accidental** reads; they are not confidentiality (#1408, #1606).
+
+**What turning it off gives up:** nothing a running bot had before #1665. Off is the shipped default; `claudlobby config validate --runtime` reports `isolation_off` for the fleet.
+
+**Rolling it out.** A composed deny binds on the bot's next tool call, with no restart in between, so arm **one** bot in an independent native canary and apply the reviewed Git update before driving a real turn and widening. Before arming, `claudlobby config validate` names every composed file (skill, resource, protocol, expertise) that tells the bot to `source ~/.env` or `. ~/.env`, which the `env` class denies; the variables are already in the session env, so drop the line. After arming, `claudlobby config validate --runtime` compares the bot's composed deny list with what the current install would compose and reports any class that falls short, including a bot that joined the host after the last update. Backout is `shared_config: false` followed by the same Git update, in force on the next tool call.
 
 ## Composition order (per bot)
 
@@ -884,16 +1124,19 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 5. **Scope** — `## Scope` section if `scope:` is set.
 6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
 7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
-8. **Org Structure** — `## Org Structure` section if `reports_to` or `manages` is set.
-9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-12. **Principles** — `## Principles` section.
-13. **Permissions** — `## Permissions` section.
-14. **Protocols** — `## Protocols` section.
-15. **Guardrails** — `## Guardrails` section.
-16. **Lessons** — `## Lessons` section.
-17. **Post-actions** — `## Post-actions` section.
+8. **Org Structure** — the declared fleet manager, plus optional organizational reporting metadata.
+9. **System orientation** — `## System orientation`, the same short text on every bot: what the plane is, the doors a bot reads and writes through (only doors every role is granted), and `bot show` for what it has at hand (#2331). Fixed in `templates/claude.md.j2`; its size and its grants are pinned by `tests/test_system_orientation.py`.
+10. **Dispatches framed as pasted text** — `## Dispatches framed as pasted text`, the verify-then-trust check for a framed dispatch, on every bot. Fixed in the template.
+11. **Commands that need root** — `## Commands that need root`, on a worker only (a bot its fleet does not name as manager): the commands its settings deny and what to do when the deny refuses one (#2464). Fixed in the template; its size, its remedy's commands and its reach are pinned by `tests/test_worker_root_steps.py`.
+12. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+13. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+14. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+15. **Principles** — `## Principles` section.
+16. **Permissions** — `## Permissions` section.
+17. **Protocols** — `## Protocols` section.
+18. **Guardrails** — `## Guardrails` section.
+19. **Lessons** — `## Lessons` section.
+20. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 
@@ -929,25 +1172,53 @@ does not own.
 
 ## Validation rules
 
-`claudlobby validate` checks:
+`claudlobby config validate` checks:
 
 - **Hard fail** — bot's `expertise:` list is empty or references missing files
 - **Hard fail** — `fleet.yaml` itself is invalid YAML or missing required keys
+- **Hard fail** — a bot's `agent_cli:` is not `claude` (`execution adapter not shipped`, until #2149)
+- **Hard fail** — a leftover `runtime:` key (bot or `defaults:`) whose value is not the bot's `agent_cli` (warn, `retired-key`, when it matches)
 - **Warn** — bot references a `skill` / `mcp` / `guardrail` / `protocol` / `resource` / `lesson` / `post_action` that doesn't exist (skipped during generate)
 - **Warn** — MCP fragment references an env var (`${FOO}`) that's not set in the current environment
 - **Warn** — `voice:` path doesn't resolve
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
-- **Warn** — fleet has multiple bots but none has `bench: true` — benchmarking won't know which bot to measure
 - **Warn** — `claudron_vault_path` is set but the `claudron` CLI is not on PATH, or the path does not resolve to a vault
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
+
+`claudlobby --fleet <fleet> config explain fleet.manager` and
+`claudlobby --fleet <fleet> config explain bot.model --bot <bot>` name the
+declaration or built-in default that supplied supported scalar settings.
+`config explain GITHUB_PAT --bot <bot>` uses the environment tier register.
+These reads report source and set/unset state without printing values. A bot
+field whose built-in default follows the bot's role, `remote_control` today,
+reports `source: role_default` with `fleet.manager` as its declaration. Nested
+merge fields such as `bot.env` are explicitly unsupported; `bot.env` is read
+from the bot stanza itself and does not inherit `defaults.env`.
+
+### Warning discipline
+
+Warnings are advisory: `validate` and `generate` exit 0 on warnings alone, by design.
+
+- **Every warning carries a category**, printed in front of it: `[env-empty] mcp/github requires GITHUB_PAT but it is SET BUT EMPTY …`. A category is a stable slug for a kind of finding. It is passed where the warning is raised, never derived from the message text, so rewording a warning never moves it to another category. The full list, each slug with a one-line meaning, is `WARNING_CATEGORIES` in `claudlobby/validator.py`. `validate` ends with a count by category, and `claudlobby host doctor`'s `fleet-yaml` rung prints that same line instead of a bare total.
+- **A finding with one cause is one line.** Some causes reach every bot that inherits them: a key set under `defaults:`, a variable assigned (or missing) above the bot tier, or a fact about the host such as the `claudron` CLI, a vault path, or the operator gitconfig. Each is reported once, as `… — affects N bot(s): a, b, c, d (+K more)`. A finding caused by one bot's own declaration (its grants, its own stanza, its own `.env`) stays on that bot. Fixing a shared cause therefore cannot hide a separate one.
+- **`--strict` is all-or-nothing**: any warning fails the run. It suits a fleet with no warnings at all.
+- **`--warn-baseline FILE` is the gate for a fleet that has accepted some warnings.** Record the current categories once, then check later runs against them:
+
+  ```bash
+  claudlobby --fleet <fleet> config validate --warn-baseline <fleet-dir>/validate-baseline.json --write
+  claudlobby --fleet <fleet> config validate --warn-baseline <fleet-dir>/validate-baseline.json
+  ```
+
+  The check exits 0 when no category grows, 4 when a category is new or has more warnings than the baseline recorded, and 6 when the baseline is absent or unreadable. A grown category is named, for example `new warning category: skill-missing (0 → 1)`. A category that shrinks or disappears never fails the check; rerun with `--write` to keep the lower count. An unreadable baseline is not an unchanged one. The file is a plain `{category: count}` JSON map. Scripted callers of the retired validation route must update their exit-code checks from 1/2 to 4/6.
 
 ## Example: minimal 2-bot fleet
 
 ```yaml
 fleet:
   name: starter
+  manager: lead
   service_prefix: com.example.starter
   telegram_group_chat_id: "-1001234567890"
 
@@ -1006,3 +1277,40 @@ notifying from all.
 A composed **bot name always wins over this list** and cannot be allowlisted.
 Without that, someone eventually adds a bot's name here meaning *our* bot and
 silently re-arms the original bug.
+
+### bots.<name>.claudna / fleet.defaults.claudna
+
+```yaml
+claudna:
+  session_summary: true  # OPTIONAL strict bool; one background model call per sealed segment
+  harvest: false        # OPTIONAL strict bool; summaries + unverified draft notes through claudron
+  precompact_reflect: false  # OPTIONAL strict bool; clauDNA's capture prompt before a compaction
+```
+
+Bot fields override defaults field by field; null inherits. Unknown keys and string
+booleans are refused. `harvest: true` implies summaries; combining it with explicit
+`session_summary: false` is refused after merging. `CLAUDNA_STATE_DIR` always names
+`$BOT_DIR/data/claudna`; `CLAUDNA_SESSION_SUMMARY` is always composed (`0` unless
+summaries or harvest is armed), so unarmed bots export with reason `disabled`.
+`CLAUDNA_HARVEST` is composed when harvest is explicitly set.
+`CLAUDNA_PRECOMPACT_REFLECT` is always composed, `0` unless `precompact_reflect` arms it:
+clauDNA's PreCompact hook otherwise refuses every other compaction until `/claudna:capture`
+runs, and no one at a bot's pane runs it (#941). A vault-wired bot whose session loop
+composes Claudron's own `hook pre-compact` entry still meets that hook's prompt on its first
+compaction in a session; this knob does not reach it.
+
+Harvest needs **Claudron >= 0.8.0 on the host first (PR 6a)**. The current install
+pin is older: `config validate` warns `claudna-harvest-pin` until that separate bump.
+Move assignments of these variables out of `.env` tiers and `env:` into `claudna:`;
+`claudna-env` warns because tier values are overridden by composition while bot
+`env:` is emitted afterwards and overrides the mapping. The state-root invariant
+remains reserved and is refused in `env:`/`secret_files:`.
+`claudna_version` stays a separate flat field: it exports `CLAUDNA_VERSION` but
+plugin startup still updates marketplace-latest. `CLAUDNA_TELEMETRY` is an operator
+`env:` knob outside this mapping.
+
+Arm one bot in an independent native canary (its own installation, data root and
+labels), apply the reviewed commit with `host update apply FULL_COMMIT`, and inspect the next sealed
+segment's `session_summary` event. The job is on by default, every 15 minutes;
+`SESSION_EXPORT_ENABLED=0` is its loud fleet-tier opt-out. Complete the
+[old-root cutover](runbooks/claudna-state-dir-cutover.md) after 6b.

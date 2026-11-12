@@ -20,7 +20,7 @@ import pytest
 from claudlobby import path_audit
 from claudlobby.validator import _inert_path_errors
 
-LIB = Path(__file__).resolve().parent.parent / "lib"
+LIB = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
 
 
 class TestInertPathRefusal:

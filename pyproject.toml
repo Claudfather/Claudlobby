@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,7 +9,8 @@ description = "Compositor for Claude Code agent fleets — assembles bots from a
 authors = [{ name = "Chris Rogers" }]
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "PyYAML>=6.0,<7",
     "Jinja2>=3.1,<4",
@@ -18,23 +19,33 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
+       # Installed-artifact smoke builds wheels directly and through an sdist.
+       "build>=1,<2", "setuptools>=77", "wheel",
+       # CI's shards: each runs its share of a platform's suite, divided by the
+       # times in .test_durations (.github/workflows/test.yml, tests/ci_shards.py).
+       "pytest-split==0.11.0",
        # the plane-ui battery runs in CI; self-extra keeps ONE copy of the
        # pins (httpx = starlette TestClient engine)
-       "claudlobby[plane-ui]", "httpx>=0.24"]
+       "claudlobby[plane-ui]"]
 # Phase-4 operator plane UI (design walk ruling 2026-08-28): the view daemon.
 # OPTIONAL by §14's degrade rule — the core ledger, doors, and ingest daemon
 # never import these; `claudlobby plane view` refuses helpfully without them.
-plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1"]
+plane-ui = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "PyJWT[crypto]==2.15.1", "httpx==0.28.1"]
 # Pinned (F1 lock) — bump policy: documentation/integrations/claudron-integration.md
-vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.4.0"]
+vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@v0.9.0"]
 
 [project.scripts]
 claudlobby = "claudlobby.__main__:main"
 
 [tool.setuptools]
-packages = ["claudlobby", "claudlobby.commands", "claudlobby.plane"]
+packages = ["claudlobby", "claudlobby.commands", "claudlobby.infra", "claudlobby.plane"]
+include-package-data = false
 
 [tool.setuptools.package-data]
+# system.yaml is package-owned data, not operator config: every default job,
+# hook, host job and boot policy is read from it. A built wheel must include it,
+# and a missing or empty copy is refused by _load_system_defaults.
+claudlobby = ["system.yaml", "contracts/*.json", "contracts/*.ref"]
 "claudlobby.plane" = ["migrations/*.sql", "ui/*"]
 
 [tool.pytest.ini_options]
@@ -61,10 +72,16 @@ testpaths = ["tests"]
 # ways, and pinned by tests/test_pytest_reportchars.py so a future -r edit
 # cannot silently blank the names again.
 addopts = "-rsfE"
-# Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
-# warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
-# they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
+# The markers that decide which CI lane runs a test (pinned by
+# tests/test_ci_lanes.py). `vault` tests importorskip/skipif on the [vault]
+# extra, so they SKIP in the default `.[dev]` lane and RUN in the vault-tests
 # lane that installs pinned claudron (boundary phase L4 / issue #682).
+# `harness` runs in test.yml's own `harness` job, beside `pytest`. A
+# `quarantine` test is left out of every required lane and runs in the
+# non-required quarantine workflow, and collection refuses one that names no
+# tracking issue (tests/conftest.py).
 markers = [
     "vault: requires the [vault] extra (pinned claudron); run in the vault-tests CI lane",
+    "harness: the end-to-end validation harness; runs in its own CI job (test.yml harness)",
+    "quarantine(issue): a known-flaky test out of CI's required lanes until its tracking issue is fixed; still runs in the quarantine workflow",
 ]
