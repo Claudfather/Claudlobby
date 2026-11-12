@@ -107,9 +107,10 @@ def test_other_resolution_errors_still_warn_without_raw_text(private_fleet, erro
     marker = "SYNTHETIC_PRIVATE_" + error_type.__name__
     original = env_tiers.resolve
     def failure(paths, **kwargs):
-        # Own only the package rung; leave per-bot callers unaffected when
-        # this fix is combined with the separate #1661 consumer change.
-        if "fleet_name" in kwargs:
+        # Own only the package rung, the one call with a fleet and no bot; leave
+        # per-bot callers unaffected (the per-bot claudna tier read passes the
+        # fleet too, and handles only ResolverUnavailable, the real resolver's error).
+        if "fleet_name" in kwargs and kwargs.get("bot_name") is None:
             raise error_type(marker)
         return original(paths, **kwargs)
     monkeypatch.setattr(env_tiers, "resolve", failure)
