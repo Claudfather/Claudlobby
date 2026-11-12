@@ -1,6 +1,7 @@
 """Public package-check warnings never repeat an env resolver's private data."""
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -14,8 +15,9 @@ from claudlobby import env_tiers, mcp_packages, validator
 from claudlobby.config import BotConfig, FleetConfig, McpEntry, SystemDefaultsConfig
 from claudlobby.paths import Paths
 from tests.conftest import constructed_env
+from tests.package_fixtures import source_package
 
-SOURCE = Path(__file__).resolve().parents[1]
+SCRIPTS = Path(__file__).resolve().parents[1] / "claudlobby" / "_runtime_scripts"
 FLAG = mcp_packages.PROBE_FLAG
 
 
@@ -27,7 +29,7 @@ def private_fleet(tmp_path, monkeypatch):
     (root / "library/expertise").mkdir(parents=True)
     home.mkdir()
     for name in ("env-tiers.sh", "lib-common.sh", "supervisor.sh", "mcp-package-grammar.py"):
-        shutil.copy2(SOURCE / "lib" / name, root / "lib" / name)
+        shutil.copy2(SCRIPTS / name, root / "lib" / name)
     (root / "library/expertise/engineering.md").write_text("# Engineering\n")
     (root / "library/mcp/sample.json").write_text(json.dumps({
         "sample": {"command": "npx", "args": ["-y", "@example/fixture-mcp@1.2.3"]},
@@ -56,7 +58,9 @@ def private_fleet(tmp_path, monkeypatch):
         "one": BotConfig(bot_id="one", name="One", expertise=["engineering"],
                          channels=[], mcp=[McpEntry("sample")])},
         system_defaults=SystemDefaultsConfig(enabled=False, protocols=False))
-    return fleet, Paths(root=root), probes
+    # A private package: its library and scripts are this fixture's copies.
+    package = replace(source_package(), library=root / "library", native=root / "lib")
+    return fleet, Paths(root=root, package=package), probes
 
 
 def query_warning(result):
@@ -71,7 +75,7 @@ def assert_disclosed_without_value(result, marker, capsys, caplog):
     assert "declared packages resolve" in warnings[0]
     captured = capsys.readouterr()
     assert marker not in repr(result) + captured.out + captured.err + caplog.text
-    assert "lib/env-tiers.sh" in warnings[0]
+    assert "claudlobby/_runtime_scripts/env-tiers.sh" in warnings[0]
     assert "dependencies" in warnings[0]
     assert not result.has_errors
 
