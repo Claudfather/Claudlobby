@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -11,7 +12,7 @@ import subprocess
 
 import pytest
 
-from claudlobby import env_tiers, mcp_packages, validator
+from claudlobby import composer, env_tiers, mcp_packages, validator
 from claudlobby.config import BotConfig, FleetConfig, McpEntry, SystemDefaultsConfig
 from claudlobby.paths import Paths
 from tests.conftest import constructed_env
@@ -180,6 +181,17 @@ def test_a_resolver_path_the_os_refuses_to_examine_is_unavailable(private_fleet)
     refused = Paths(root=paths.root, package=replace(paths.package, native=paths.root / ("x" * 300)))
     with pytest.raises(env_tiers.ResolverUnavailable):
         env_tiers.read_tiers(refused, fleet_name=fleet.name)
+
+
+def test_the_composer_reads_take_their_fallback_for_output_that_is_not_text(private_fleet, caplog):
+    fleet, paths, probes = private_fleet
+    write_non_text_resolver(paths, "stdout")
+    # The bot.conf render composes no switch carriers when it cannot read the fleet's cascade.
+    assert composer._bot_conf_cascade(paths, fleet, None) == {}
+    # A host job's door keeps its own default, with no Environment= line, when its cascade cannot be read.
+    assert composer._host_job_switch_env(paths, ("PLANE_EMIT_ENABLED",), {}) is None
+    warned = [r for r in caplog.records if r.name == composer._log.name and r.levelno == logging.WARNING]
+    assert len(warned) == 2
 
 
 @pytest.mark.parametrize("setting", [None, "0", ""])
