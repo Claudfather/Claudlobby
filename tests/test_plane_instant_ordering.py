@@ -140,6 +140,35 @@ def test_heartbeat_utilization_keeps_gap_cap_with_mixed_offsets(tmp_path):
     assert row["samples"] == 2
 
 
+def test_heartbeat_window_edge_where_text_and_instant_order_disagree(tmp_path):
+    # The 7-day window opens at 2026-09-01T00:10Z. Two samples inside it, stored at
+    # -12:00 and +14:00, sort the other way as text, and the -12:00 one sorts below
+    # the window's opening as text; one sample just before the window sorts above it.
+    root = _root(tmp_path)
+    late = "2026-08-31T12:30:00-12:00"      # 2026-09-01T00:30Z, inside
+    before = "2026-09-01T14:00:00+14:00"    # 2026-09-01T00:00Z, outside
+    early = "2026-09-01T14:20:00+14:00"     # 2026-09-01T00:20Z, inside
+    for at, state in ((late, "IDLE"), (before, "UNKNOWN"), (early, "BUSY")):
+        _heartbeat(root, at, state)
+    with _conn(root) as conn:
+        entries = heartbeat_series(conn, now=datetime(2026, 9, 8, 0, 10, tzinfo=timezone.utc),
+                                   fleet="f", days=7)["bot:f/a"]
+    assert [(at.isoformat(), state) for at, state in entries] == [
+        (_stored(early), "BUSY"), (_stored(late), "IDLE")]
+
+
+def test_heartbeat_samples_at_one_instant_keep_ingest_order(tmp_path):
+    # One instant on two clocks: as text the second sorts first, and so do the states.
+    root = _root(tmp_path)
+    _heartbeat(root, "2026-09-01T12:00:00+00:00", "IDLE")
+    _heartbeat(root, "2026-09-01T08:00:00-04:00", "BUSY")
+    with _conn(root) as conn:
+        entries = heartbeat_series(conn, now=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc),
+                                   fleet="f", days=1)["bot:f/a"]
+    assert [state for _, state in entries] == ["IDLE", "BUSY"]
+    assert entries[0][0] == entries[1][0]
+
+
 @pytest.mark.parametrize("tz", ["UTC", "America/New_York", "Asia/Tokyo"])
 def test_instant_key_is_fixed_width_precise_and_host_timezone_independent(monkeypatch, tz):
     from claudlobby.plane.time import instant_key
