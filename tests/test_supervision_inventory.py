@@ -890,10 +890,11 @@ def test_selected_adapter_catalog_uses_recording_native_functions(tmp_path):
     package = source_package()
     prologue = f'''
 uname() {{ printf 'Linux\\n'; }}
-systemd-analyze() {{ printf '%s\\n' {shlex.quote(str(tmp_path))}; }}
+systemd-analyze() {{ return 98; }}
 systemctl() {{
     printf '%s\\n' "$*" >> {shlex.quote(str(trace))}
     case "$2" in
+        show) printf '%s\\n' {shlex.quote(str(tmp_path))} ;;
         list-unit-files) printf 'worker.service enabled enabled\\n' ;;
         list-units) printf 'worker.service loaded active running Fixture\\n' ;;
         *) return 99 ;;
@@ -909,10 +910,52 @@ systemctl() {{
     assert adapter.read("svc_inventory_catalog") == (
         f"manager\tLinux\ndirectory\t{tmp_path}\ninstalled\tworker.service\nloaded\tworker.service\n")
     assert trace.read_text().splitlines() == [
+        "--user show --property=UnitPath --value",
         "--user list-unit-files --no-legend --no-pager --plain",
         "--user list-units --all --no-legend --no-pager --plain"]
     with pytest.raises(InventoryError, match="unsupported"):
         adapter.call("arbitrary_shell")
+
+
+@pytest.mark.parametrize("xdg", [None, "/usr/share:/var/lib/snapd/desktop"])
+def test_linux_catalog_uses_running_manager_paths_not_caller_xdg(tmp_path, monkeypatch, xdg):
+    if xdg is None:
+        monkeypatch.delenv("XDG_DATA_DIRS", raising=False)
+    else:
+        monkeypatch.setenv("XDG_DATA_DIRS", xdg)
+    prologue = r'''
+uname() { printf 'Linux\n'; }
+systemd-analyze() { printf '/caller/%s\n' "${XDG_DATA_DIRS:-scrubbed}"; }
+systemctl() {
+    case "$2" in
+        show) printf '/manager/config /manager/data\n' ;;
+        list-unit-files|list-units) : ;;
+        *) return 99 ;;
+    esac
+}
+'''
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+    assert Adapter(source_package(), runner=recording).read("svc_inventory_catalog") == (
+        "manager\tLinux\ndirectory\t/manager/config\ndirectory\t/manager/data\n")
+
+
+@pytest.mark.parametrize("value,rc", [
+    ("", 0), ("relative", 0), ("/valid relative", 0),
+    ("/valid\n/other", 0), ("/valid\t/other", 0),
+    (r"/escaped\x20path", 0), ("/valid", 1),
+])
+def test_linux_catalog_refuses_unavailable_or_malformed_manager_paths(tmp_path, value, rc):
+    prologue = f'''
+uname() {{ printf 'Linux\\n'; }}
+systemctl() {{ [ "$2" = show ] || return 99; printf '%s' {shlex.quote(value)}; return {rc}; }}
+'''
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+    with pytest.raises(InventoryError, match="svc_inventory_catalog failed"):
+        Adapter(source_package(), runner=recording).read("svc_inventory_catalog")
 
 
 def test_linux_catalog_keeps_escaped_services_but_skips_non_consumers(tmp_path):
