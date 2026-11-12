@@ -393,7 +393,20 @@ PY
 
 # Exact job stop keeps generated/installed bytes for the Python owner to
 # remove only after process/cgroup/socket witnesses are proved quiet.
-python3() { return "$CALLER_RC"; }
+python3() {
+    # The policy parser reads stdin; its double must drain the producer too.
+    if [ "${1:-}" = -I ]; then cat >/dev/null; fi
+    return "$CALLER_RC"
+}
+# Verify the policy double consumes a shared input descriptor even when the
+# producer wins the pipe race; otherwise a tiny printf can hide the defect.
+printf 'policy fixture input\n' > "$T/policy-input"
+exec 9< "$T/policy-input"
+python3 -I -c fixture-policy <&9
+remaining=$(cat <&9)
+exec 9<&-
+[ -z "$remaining" ]
+
 _OS=Linux; CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0
 file="$T/scoped-job.service"; target=scoped-job.service
 source="$T/generated/scoped-job.service"; mkdir -p "${source%/*}"

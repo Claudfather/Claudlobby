@@ -5,6 +5,7 @@ are supported. Installed absence is retained by the ordinary updater.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 import fcntl
 import os
@@ -125,15 +126,53 @@ def _node(path):
     return (info.st_dev, info.st_ino), FileSnapshot.read(path)
 
 
+def _pin_node(path, pins):
+    # Keep the original inode allocated until all checks/effects have finished.
+    # A snapshot alone cannot distinguish unlink/recreate with inode reuse.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    pins.callback(os.close, fd)
+    opened = os.fstat(fd)
+    saved = _node(path)
+    if (opened.st_dev, opened.st_ino) != saved[0]:
+        raise JobStopError("job definition changed during observation")
+    return saved
+
+
 def _check_node(path, saved):
     if _node(path) != saved:
         raise JobStopError("job definition changed before effect")
 
 
+def _pin_link(link, target, pins):
+    # O_PATH pins the symlink itself on Linux. O_SYMLINK supplies the same
+    # ownership check for Linux-catalog fixtures running on macOS.
+    if hasattr(os, "O_PATH"):
+        flags = os.O_PATH | os.O_NOFOLLOW
+    elif hasattr(os, "O_SYMLINK"):
+        flags = os.O_RDONLY | os.O_SYMLINK
+    else:
+        raise JobStopError("symlink identity pinning is unsupported")
+    fd = os.open(link, flags)
+    pins.callback(os.close, fd)
+    opened, current = os.fstat(fd), link.lstat()
+    identity = (opened.st_dev, opened.st_ino)
+    if (not stat.S_ISLNK(opened.st_mode) or opened.st_uid != os.getuid()
+            or identity != (current.st_dev, current.st_ino)
+            or link.resolve() != target):
+        raise JobStopError("job enablement node changed during observation")
+    return link, identity, os.readlink(link)
+
+
+def _link_matches(link, identity, value):
+    current = link.lstat()
+    return (stat.S_ISLNK(current.st_mode)
+            and (current.st_dev, current.st_ino) == identity
+            and os.readlink(link) == value)
+
+
 def _check_links(links):
-    for link, inode, value in links:
-        if (not link.is_symlink() or link.lstat().st_ino != inode
-                or os.readlink(link) != value):
+    for link, identity, value in links:
+        if not _link_matches(link, identity, value):
             raise JobStopError("job enablement node changed before effect")
 
 
@@ -194,7 +233,7 @@ def _shape(service, members, metadata, manager, name):
         raise JobStopError("job is dormant in committed configuration")
 
 
-def _bind(current, name, fleet, adapter):
+def _bind(current, name, fleet, adapter, pins):
     allowed = {"keepalive", "fleet-pulse", "log-rotation"} if fleet else {"plane-daemon"}
     if name not in allowed or fleet is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", fleet):
         raise JobStopError("job or fleet selector is unsupported")
@@ -214,7 +253,7 @@ def _bind(current, name, fleet, adapter):
         file = Path(unit.installed[0].path)
         if file.parent != Path(placement["directory"]):
             raise JobStopError("job is outside committed placement")
-        node = _node(file)
+        node = _pin_node(file, pins)
         if node[1] != unit.installed[0] or node[1].content != FileSnapshot.read(unit.declaration.source).content:
             raise JobStopError("installed job differs from committed generated definition")
         # Preflight exact enablement links for the ENTIRE family before stopping timer.
@@ -227,7 +266,7 @@ def _bind(current, name, fleet, adapter):
                 if link.exists() or link.is_symlink():
                     if not link.is_symlink() or link.resolve() != file:
                         raise JobStopError("job enablement link is foreign")
-                    links.append((link, link.lstat().st_ino, os.readlink(link)))
+                    links.append(_pin_link(link, file, pins))
         saved.append((unit, file, node, links))
     return adapter, manager, domain, directories, saved
 
@@ -240,7 +279,12 @@ def stop_job(root, name, *, fleet=None, adapter=None):
 
 
 def _stop(current, name, fleet, adapter):
-    adapter, manager, domain, directories, saved = _bind(current, name, fleet, adapter)
+    with ExitStack() as pins:
+        return _stop_pinned(current, name, fleet, adapter, pins)
+
+
+def _stop_pinned(current, name, fleet, adapter, pins):
+    adapter, manager, domain, directories, saved = _bind(current, name, fleet, adapter, pins)
     outcomes = [{"target": unit.target, "outcome": "unattempted"} for unit, *_ in saved]
     data = {"name": name, "fleet": fleet, "revision": current.revision,
             "config_fingerprint": current.config_fingerprint, "members": outcomes}
@@ -318,10 +362,10 @@ def _stop(current, name, fleet, adapter):
                 outcomes[index]["recorder_endpoint_quiet"] = True
                 outcomes[index]["recorder_lifetime_lock_released"] = True
             _check_node(file, node)
-            for link, inode, value in links:
+            for link, identity, value in links:
                 # Native disable may remove the owned enablement link.
                 if link.exists() or link.is_symlink():
-                    if not link.is_symlink() or link.lstat().st_ino != inode or os.readlink(link) != value:
+                    if not _link_matches(link, identity, value):
                         raise JobStopError("job enablement node changed")
                     link.unlink()
             file.unlink()
