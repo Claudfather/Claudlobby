@@ -374,6 +374,11 @@ def test_it_closes_what_it_inherited_under_an_unlimited_descriptor_limit(scratch
         report = os.dup(1)
         held = [os.open(os.devnull, os.O_RDONLY) for _ in range(4)]
         os.sysconf = lambda name: -1
+        # Without close_range(2), closerange loops up to its bound, so a bound of -1
+        # closes nothing (with it, -1 closes everything). Take the loop's behaviour,
+        # so close_above passes only through its /proc/self/fd branch.
+        real_closerange = os.closerange
+        os.closerange = lambda lo, hi: real_closerange(lo, hi) if hi > lo else None
         mod.close_above(report)
         def is_open(fd):
             try:
