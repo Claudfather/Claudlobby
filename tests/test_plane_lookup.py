@@ -35,7 +35,8 @@ def _dispatch(root, n, task_id, bot="w1"):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
          "source_ref": f"dispatch-log:{task_id}",
-         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr",
+                     "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F,
          "source_ref": f"dispatch-log:{task_id}",
          "payload": {"assignment_id": asg, "work_item_id": wi,
@@ -71,7 +72,8 @@ def test_two_field_output_for_assignment_without_dispatch_message(tmp_path):
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "historical-fixture", "fleet": F,
          "source_ref": "dispatch-log:t-2-cccc",
-         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr",
+                     "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "historical-fixture", "fleet": F,
          "source_ref": "dispatch-log:t-2-cccc",
          "payload": {"assignment_id": asg, "work_item_id": wi,

@@ -228,6 +228,12 @@ def register_orientation_subparsers(sub):
                     route.add_argument("--check", action="store_true",
                                        help="Send nothing; read whether the last requested handoff "
                                             "was saved, is pending or is unknown (#990)")
+                elif verb == "compact":
+                    route.add_argument("--request-id", metavar="UUID",
+                                       help="On your own ID: this request's UUID. A bot's compact "
+                                            "on itself records a request and types nothing (#1053)")
+                    route.add_argument("--cancel", action="store_true",
+                                       help="On your own ID: withdraw your pending compaction request")
             elif domain == "project" and verb == "show":
                 route.add_argument("project_id", metavar="PROJECT", help="Exact project key")
             elif domain == "context":

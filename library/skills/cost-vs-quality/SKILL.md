@@ -30,7 +30,7 @@ So: **refuse to report a saving without a quality number beside it.** If quality
 
 ## Step 1: Pre-register both axes
 
-Per `eval-workflow`, before any run:
+Per `run-eval`'s Step 1, before any run:
 
 | Axis | What to fix in advance |
 |------|------------------------|

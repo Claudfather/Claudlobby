@@ -114,9 +114,9 @@ DEFAULT_SKILL_OVERRIDES = MappingProxyType({"auto-mode-setup": "off"})
 # to 1000000 (per model also "auto") and drops any other value without a word.
 # Its end-of-turn autocompact offer appears only on a model with a native 1M
 # window: these, the `native_1m` models in Claude Code 2.1.316's registry.
-# BotConfig.auto_compact_window defaults to "auto", which names each of them
-# "auto" in modelSettings (#1388). A model Claude Code adds later can show the
-# offer until it is added here.
+# With auto_compact_window: auto, a bot's settings name each of them "auto" in
+# modelSettings (#1388), and a model Claude Code adds later can show the offer
+# until it is added here. A number, the default included, blocks it on every model.
 AUTO_COMPACT_WINDOW_MIN = 100_000
 AUTO_COMPACT_WINDOW_MAX = 1_000_000
 NATIVE_1M_MODELS: tuple[str, ...] = (

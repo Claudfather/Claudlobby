@@ -66,6 +66,12 @@ def _dispatch_host_update(args):
                    json_output=args.json)
 
 
+def _dispatch_host_spec(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_spec", __package__).dispatch(args),
+                   json_output=args.json)
+
+
 def _dispatch_host_supervision(args):
     return execute(args.public_command,
                    lambda: import_module(".host_supervision", __package__).dispatch(args),
@@ -110,6 +116,9 @@ def register_release_subparsers(sub):
     register_host_repos(hosts)
     from ._host_owner_parsers import register_host_owner
     register_host_owner(hosts)
+    spec = _route(hosts, "spec", "host.spec",
+                  "Read this host's facts, each with its source, and what its OS can enforce; changes nothing")
+    spec.set_defaults(func=_dispatch_host_spec)
     supervision = hosts.add_parser("supervision", help="Inspect the selected release's supervised units")
     supervision_actions = supervision.add_subparsers(dest="supervision_command", required=True)
     failed = supervision_actions.add_parser(

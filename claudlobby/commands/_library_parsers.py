@@ -1,14 +1,8 @@
 """Dependency-light public library authoring grammar."""
 
-from importlib import import_module
+from . import lazy
 
-from ..command_result import execute
-
-
-def _dispatch(args):
-    return execute(args.public_command,
-                   lambda: import_module(".library", __package__).dispatch(args),
-                   json_output=args.json)
+_dispatch = lazy(".library")
 
 
 def register_library_subparsers(sub):

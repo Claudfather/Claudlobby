@@ -123,7 +123,7 @@ fleet:
       skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
       skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
       skill_overrides: {<skill>: "<state>"}  # OPTIONAL — settings.local skillOverrides, merged per skill (default: {auto-mode-setup: "off"})
-      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: auto)
+      auto_compact_window: auto | <tokens>  # OPTIONAL — settings.local autocompact window, 100000 to 1000000 (default: 700000)
       remote_control: true | false        # OPTIONAL — run with --remote-control (default: true for the fleet manager, false for every other bot)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -574,8 +574,9 @@ bots:
 - **The slot** is a `flock` on `$CLAUDLOBBY_ROOT/state/heavy-slot/slot-N.lock`, whose contents name the holder: fleet, bot, the job's shape (its tool and flag names, never an argument value), start and, once it ends, release and exit code. A refusal names each holder's bot, tool and start time, never its command. The kernel drops the lock when its holder dies, so a dead holder never wedges the slot. The next holder records the unreleased hold on the plane (`heavy_slot_unreleased`); a different boot id means the job was running when the host reset (#1644).
 - **The queue** (#2124): a call that cannot take a slot, because every slot is held or a free one is another caller's turn, takes a ticket kept under its fleet and bot, and is refused with exit 75 as before; the same bot's next call finds the ticket. A free slot goes only to the head of the queue: the oldest ticket from a fleet other than the one that took a slot last, else the oldest. A waiter keeps its place by calling again. Nothing expires while every slot is held; once a slot is free, a ticket whose holder has been silent for 180 s is dropped (`heavy_slot_ticket_dropped`). A refusal and the take its ticket waited for carry the ticket's number.
 
-- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `state/heavy-slot/no-queue`, when it exists, makes every caller decide on the slots alone, as before the queue. `claudlobby/_runtime_scripts/heavy-slot.py status` answers who holds each slot, or who held it last, and who waits in the queue.
-- **A render** (#2221): a bot runs a headless browser render as `claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND`, opted in or not; plain `run` refuses a script (#2039). The runner reads the host itself before it asks for the slot, and the render starts only while MemAvailable is at or above 4820 MiB, the 1-minute load is under 16 and no stop line is crossed; otherwise it exits 75 with nothing started. With the slot taken through the queue, the render runs in a systemd user scope of its own with its session bus cut, and the runner kills the whole scope when MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40 or the render passes 45 minutes: it exits 79 and records `heavy_slot_stopped`. A runner killed outright still takes its render with it. After a kill, no render starts for 30 minutes (exit 75). After two kills in one local day, renders are on hold (exit 2) until the fleet's manager, or the operator, runs `claudlobby/_runtime_scripts/heavy-slot.py lift-hold --by NAME [--reason TEXT]`, which records who lifted it; time passing never lifts a hold. The kills and lifts are kept in `state/heavy-slot/render-record`. Exit 2 means the render cannot run here: no systemd user scope, a lines file or render record it cannot read, or a hold. `state/heavy-slot/render-lines` sets the numbers, one `name = value` per line (`start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s`, `max_minutes`). Linux only.
+- **Knobs, host-wide, read on every use:** `state/heavy-slot/slots` holds the slot count (1 when absent). `state/heavy-slot/disabled`, when it exists, makes the hook pass every call through at once, with no generate and no restart. `state/heavy-slot/no-queue`, when it exists, makes every caller decide on the slots alone, as before the queue. `state/heavy-slot/run-lines` and `state/heavy-slot/render-lines`, when they exist, hold the host's own lines and their bounds (below); with no file, the lines and bounds are this host's numbers, held in the code until a design sizes them from each host's own spec. `claudlobby/_runtime_scripts/heavy-slot.py status` answers who holds each slot, or who held it last, and who waits in the queue.
+- **A render** (#2221): a bot runs a headless browser render as `claudlobby/_runtime_scripts/heavy-slot.py run --profile render -- COMMAND`, opted in or not; plain `run` refuses a script (#2039). The runner reads the host itself before it asks for the slot, and the render starts only while MemAvailable is at or above 4820 MiB, the 1-minute load is under 16 and no stop line is crossed; otherwise it exits 75 with nothing started. With the slot taken through the queue, the render runs in a systemd user scope of its own with its session bus cut, and the runner kills the whole scope when MemAvailable falls under 3800 MiB, the 5-minute load passes 25, the 1-minute load passes 40 or the render passes 45 minutes: it exits 79 and records `heavy_slot_stopped`. A runner killed outright still takes its render with it. After a kill, no render starts for 30 minutes (exit 75). After two kills in one local day, renders are on hold (exit 2) until the fleet's manager, or the operator, runs `claudlobby/_runtime_scripts/heavy-slot.py lift-hold --by NAME [--reason TEXT]`, which records who lifted it; time passing never lifts a hold. The kills and lifts are kept in `state/heavy-slot/render-record`. Exit 2 means the render cannot run here: no systemd user scope, a lines file or render record it cannot read, or a hold. `state/heavy-slot/render-lines` sets the numbers, one `name = value` per line (`start_mib`, `start_load1`, `stop_mib`, `stop_load5`, `stop_load1`, `poll_s`, `max_minutes`), and the two bounds a render shares with a plain run (#2790): `stop_mib` at or over `stop_mib_floor` (3000), and `poll_s`, a render's notice, at most `notice_within_s` (6). A file whose numbers break its bounds refuses every render at exit 2. A render has no off. Linux only.
+- **A run stop line** (#2221): every plain `heavy-slot.py run` is watched, on by default at `stop_mib` 3800 MiB (`debounce_reads` 2, `poll_s` 2, `grace_s` 10); `state/heavy-slot/run-lines` (`name = value`) sets the host's own values and bounds, and its one off, the line `stop = off` (#2790). A run runs its job in a session of its own and reads the host's free memory every `poll_s`: MemAvailable where there is a meminfo, else `vm_stat` (free, inactive and speculative pages, the figure `avail_ram_mb` gives on macOS). Once `debounce_reads` readings in a row are under `stop_mib` it sends SIGTERM to the job's process group and to every process found, by parent link, to have left it, SIGKILL after `grace_s`, releases the slot and exits 79 with a `heavy_slot_stopped` row. A failed reading never stops the job. The bounds are host config in the same file: `stop_mib` at or over `stop_mib_floor` (3000 MiB here), a crossing noticed within `notice_within_s` (`debounce_reads` x `poll_s`; 6 s here), and SIGKILL due within `stopped_within_s` (that notice plus `grace_s`; 21 s here). A file it cannot read, or whose values break its bounds, refuses every plain heavy run at exit 2, and `status` names it; no number turns the stop off, and `stop = on` or any word but `off` is refused. With `stop = off` nothing stops a run: it says so on stderr and in `heavy_slot_acquired` every time, and is still read (#1645).
 - **A refusal starts nothing, whatever becomes of its exit status.** Without `set -o pipefail`, `heavy-slot.py run … | tail` exits with tail's status, so a script must not read success from it. The render itself never depends on that status: the runner reads the start line in the process that would start the render, and prints its refusal on stderr as its last line.
 - **It only counts bots that opted in.** A heavy job run by a bot without the key takes no slot and is refused by none, unless that bot runs it through `heavy-slot.py run` itself, as a render does.
 
@@ -934,26 +935,39 @@ defaults:
 
 ### `bots.<name>.auto_compact_window`
 
-`auto` (the default) or a whole number of tokens from `100000` to `1000000`: the context size
-Claude Code compacts the bot's conversation at by itself. Can be set in `defaults:`; bot-level
-overrides.
+A whole number of tokens from `100000` to `1000000` (default `700000`), or `auto`: the
+autocompact window, the context size Claude Code compacts the bot's conversation within. Claude
+Code checks its count of the context between requests and compacts once the count has passed the
+window less its own autocompact buffer, which `/context` on Claude Code 2.1.322 shows as 33k
+tokens. The count can run below the real context: in a live run on 2.1.322 at a window of
+`100000`, reading files of numbers, Claude Code compacted with its count (`pre_tokens`) at
+83,661 while the context held about 95,000 tokens. One large step, such as several file reads in
+one response, can carry the context past the window before that check, and if the compaction
+fails ("Not enough messages to compact"), the request still goes out. Can be set in `defaults:`;
+bot-level overrides.
 
-- **`auto`** composes `modelSettings` into `settings.local.json`, naming each model Claude Code
-  gives a native 1M window `{"autoCompactWindow": "auto"}`. That is Claude Code's own window, the
-  one it uses with nothing set, so the bot compacts when it did before. What it stops (#1388): on
-  such a model, Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier
-  … Want to autocompact at 400k tokens instead?". No one at a bot's pane answers it, and the
-  answer is kept per account and model in the global config that every bot running as that user
-  shares, so a new account or a new model asks again. A window set in local settings stops the
-  asking.
-- **A number** composes `autoCompactWindow`: the bot compacts as its context nears that many
-  tokens, or its model's own window when that is smaller. It stops the asking too. Claude Code
-  drops a value outside the range without a word, so the parser refuses one.
+- **A number** composes a top-level `autoCompactWindow` into `settings.local.json`: the window
+  for every model. Claude Code caps the window at the model's own context window, so a model
+  with a 200,000-token window keeps its own. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the bot's
+  environment takes precedence over the setting. Claude Code drops a value outside the range
+  without a word, so the parser refuses one.
+- **The default, `700000`,** is the window a bot's conversation compacts within when no key is
+  set. With nothing set, a model with a native 1M window compacts within its 1M window: at about
+  967,000 tokens, Claude Code's docs say. The bound is a number of tokens, so it means the same
+  on any host, which is why it is a package default rather than a number each host tunes.
+- **`auto`** turns that bound off. It composes `modelSettings`, naming each model Claude Code
+  gives a native 1M window `{"autoCompactWindow": "auto"}`: Claude Code's own window, the one it
+  uses with nothing set.
+- **Either form stops an offer nobody answers** (#1388). On a model with a native 1M window,
+  Claude Code can end a turn past 200,000 tokens on "We recommend compacting earlier … Want to
+  autocompact at 400k tokens instead?". The answer is kept per account and model in the global
+  config that every bot running as that user shares, so a new account or a new model asks again.
+  A window set in local settings stops the asking.
 
-A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with `auto`
-on those models, with a number on any model. Set it here instead. The models are
-`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry; a
-model Claude Code adds later can ask again until it is added there.
+A window set in user settings (`~/.claude/settings.json`) no longer reaches the bot: with a
+number on any model, with `auto` on the models below. Set it here instead. The models are
+`NATIVE_1M_MODELS` in `claudlobby/known_values.py`, from Claude Code 2.1.316's model registry;
+under `auto`, a model Claude Code adds later can ask again until it is added there.
 
 ```yaml
 defaults:

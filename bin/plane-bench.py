@@ -103,7 +103,7 @@ def _seed_realistic(root: Path, n_items: int = 400) -> None:
             {"event_type": "work_item", "emitter": "bench",
              "fleet": "bench-fleet",
              "payload": {"work_item_id": wi, "title": f"objective {i}",
-                          "created_by": "bot:bench-fleet/mgr"}},
+                          "created_by": "bot:bench-fleet/mgr", "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "bench",
              "fleet": "bench-fleet",
              "payload": {"assignment_id": asg, "work_item_id": wi,

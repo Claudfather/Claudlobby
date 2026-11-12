@@ -39,7 +39,7 @@ def _seed(root: Path, fleets=(("engineering", "a"), ("data", "b")),
         emit_batch(root, [
             {"event_type": "work_item", "emitter": "t", "fleet": fleet,
              "payload": {"work_item_id": "wi_" + h * 32,
-                         "title": f"work for {fleet}", "created_by": mgr}},
+                         "title": f"work for {fleet}", "created_by": mgr, "workstream_id": "ws-test"}},
             {"event_type": "assignment", "emitter": "t", "fleet": fleet,
              "payload": asg},
             {"event_type": "communication", "emitter": "t", "fleet": fleet,

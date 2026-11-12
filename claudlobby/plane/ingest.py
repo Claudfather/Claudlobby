@@ -243,6 +243,8 @@ def _family_values(payload, party, entity=None) -> tuple[str, dict]:
                 "reason": payload.reason,
                 "question": payload.question,
                 "by": payload.by,
+                # the task's workstream at the moment of the act (#1053)
+                "workstream_id": payload.workstream_id,
             }.items() if v is not None
         }
         return "events", {

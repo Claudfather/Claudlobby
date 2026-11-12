@@ -29,7 +29,6 @@ class ConfigInstall:
     plan_id: str
     status: str
     progress: tuple[str, ...]
-    retained_directories: tuple[Path, ...]
 
 
 def _location(root: Path, activation_id: str) -> Path:
@@ -101,9 +100,7 @@ def _load(directory: Path) -> dict:
 
 def _result(directory: Path, journal: dict) -> ConfigInstall:
     return ConfigInstall(directory, journal["plan_id"], journal["status"],
-                         tuple(row["status"] for row in journal["rows"]),
-                         tuple(Path(row["target"]) for row in journal["rows"]
-                               if row.get("retained")))
+                         tuple(row["status"] for row in journal["rows"]))
 
 
 def read_config_install(data_root: Path, activation_id: str) -> ConfigInstall:

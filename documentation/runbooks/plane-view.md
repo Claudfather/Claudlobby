@@ -115,7 +115,7 @@ channel (one card per fleet, one host card), and every board scoped to the tab.
   host-wide read. A fleet the plane holds **no identity for** (while it holds
   others) answers a typed `unknown` state naming the fleets it does hold — the
   plane's own rule, never a healthy empty room; a plane holding no fleet yet lets
-  the name through to the route's idle remedy (`generate`). The grid and presence
+  the name through to the route's idle state and its remedy. The grid and presence
   routes also accept a fleet the sampler knows from disk before its first row.
 - **The roster rail.** Inside a room, a flat list ordered by last-seen. Under
   `all` — the only read that spans fleets — the rail groups by fleet under a
