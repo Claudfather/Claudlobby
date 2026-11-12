@@ -1,0 +1,9 @@
+### Fixed — a session that lost its subreaper now reaches its manager, and CI asserts it (#2892)
+
+Since #2226 the pulse recorded `bot_subreaper_missing` and nothing read the record: it was not pushed, not critical and not in the brief.
+
+- **One push an episode to the bot's own fleet manager.** It goes through the debounce every pulse alert uses, its re-notify window included. It carries one instruction: restart the bot at its next safe point, after the `safe-worker-restart` checks. When the bot is the manager itself, the instruction is `/restart`. That push posts nothing to the fleet's alert channel, because the manager's own pane can act on it. A sweep that reads the session under its subreaper again ends the episode, and a sweep with no live session leaves it open. So a restart that brings no subreaper back is not pushed again before the re-notify window. Recording is unchanged: every sweep that reads the loss still records it.
+- **On by default, with an off switch.** `OBSERVABILITY_SUBREAPER_PUSH=0` in a bot's `fleet.yaml` env (`bots.<name>.env`) stops the push for that bot. The sweep then says so on stderr each time, and still records the event.
+- **Documented** in the fleet-observability protocol's decision table and per-type sweep, in the fleet-pulse skill's push list, and in the observability guide's row for the event.
+- **CI's harness job asserts it on Linux.** The harness's first worker runs on a tmux server outside any subreaper. Its real sweep records `bot_subreaper_missing` and pushes it to the manager, and the harness now checks both.
+- **The helper's tests also run under the pulse's own options:** `set -euo pipefail` and an ERR trap that functions and command substitutions inherit. Every verdict returns 0 under them, and a control shows the trap fails such a run.
