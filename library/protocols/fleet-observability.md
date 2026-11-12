@@ -92,11 +92,16 @@ Managers must use live checks for these until the hook schema exposes them:
   warning short of a trip is a *sighting*: label it as one, use it to raise a
   question, never as a measurement.
 - **`context_warning`** — not present in the payload. It is, however, **sometimes
-  visible in the pane**: above an undocumented threshold a `NN% context used`
-  figure is rendered, and below it the same slot renders empty. Above the threshold it is a
-  **live gauge, not a one-time alarm** — the same bot read `97%` then `98%`
-  minutes later — and it is **not a latch**: a bot observed at `100%` rendered
-  nothing later in the same session, with no restart *(cause not established;
+  visible in the pane**: above an undocumented threshold a figure is rendered,
+  and below it the same slot renders empty. It reads `N% until auto-compact`,
+  the share left before Claude Code compacts, not the share used, wherever
+  Claude Code holds the conversation to an autocompact window, and
+  `NN% context used` where it holds it to none (the `context-management`
+  protocol says when each shows). In August 2026, when it read
+  `NN% context used`, it was a **live gauge, not a one-time alarm** — the same
+  bot read `97%` then `98%` minutes later — and it was **not a latch**: a bot
+  observed at `100%` rendered nothing later in the same session, with no
+  restart *(cause not established;
   do not assert one)*. **A rendered figure is real and worth acting on. A blank
   slot means nothing**, and specifically it has **two causes this instrument
   cannot separate** — never reached the threshold, or reached it and came back
