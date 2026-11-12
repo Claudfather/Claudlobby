@@ -24,6 +24,7 @@ Each row in the protocol keeps what its event means and what the manager does; t
 - `usage_limit_held` — `reset` and `reset_epoch` name when it was due; `resume` says whether keepalive's one resume is `off`, `armed`, or already `tried`. While the menu is up, typed text goes to the menu, not the bot, so the framework's own sends refuse rather than type into it.
 - `pane_stuck` — Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`.
 - `crash_loop` — Before #1769 this read as "boot in flight" indefinitely and paged no one.
+- `bot_subreaper_missing` — `data.server` is the session's tmux server and `data.parent` the process it runs under (#2184). Every sweep that reads it records it, and the push is once an episode (#2892). A sweep that reads the session under its subreaper again ends the episode, and so does a read that gives no verdict, since `bot_subreaper_lost` prints nothing for either; a sweep with no live session leaves it open.
 - `browser_outside_render` — `owner` names the bot whose session started it (a login CLI, an Artifact preview, `claudlobby plane open`, a render run without the render profile); `owner: null` means no bot did (the desktop session, or a bot session that has since ended). The payload also carries `pid`, `age_s`, `processes`, `pss_mib` and its cgroup `unit`.
 - `unit_failed` — `data.surface` and `data.detail` say what was read: systemd's `ActiveState=failed` with its `Result`, or launchd's last exit status.
 - `compaction_sent` — It carries the request, the host compaction slot's lease and each guard's reading.
@@ -38,13 +39,13 @@ Once it has been stopped `fleet_pulse.stopped_remind_days` days (default 3, `0` 
 
 ## Active Notifications (push)
 
-Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `input_held`, `usage_limit_held`, `activity_stuck`, `pane_unknown`, `overdue_dispatch`, `browser_outside_render` once per browser, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for the findings that need you (`crash_loop`, `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `input_held`, `usage_limit_held`, `activity_stuck`, `pane_unknown`, `overdue_dispatch`, `browser_outside_render` once per browser, `bot_subreaper_missing` unless the bot's `OBSERVABILITY_SUBREAPER_PUSH=0` turns it off, and `worker_unassigned` where `OBSERVABILITY_UNASSIGNED_CHECK=1` arms it), debounced to once per episode:
 
 ```
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
 ```
 
-**An alert about you, the fleet manager, also posts to the fleet's alert channel**, once an episode (#997). Its push lands in your own pane, and when your pane is the one that cannot act, nobody else in the fleet sees it. The post goes through the escalation's chat and sender. The reminder about a bot stopped on purpose posts nothing.
+**An alert about you, the fleet manager, also posts to the fleet's alert channel**, once an episode (#997). Its push lands in your own pane, and when your pane is the one that cannot act, nobody else in the fleet sees it. The post goes through the escalation's chat and sender. The reminder about a bot stopped on purpose posts nothing, and neither does `bot_subreaper_missing` about you: your pane can act on that one, with `/restart`.
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload.
 

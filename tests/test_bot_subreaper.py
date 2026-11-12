@@ -507,46 +507,76 @@ def test_it_never_sends_a_signal():
 # A subreaper lost mid-session (#2184): what fleet-pulse.sh reads for each live
 # session, and records as bot_subreaper_missing.
 
-def lost(socket, env, os_name=""):
-    """bot_subreaper_lost on one socket, as the pulse calls it."""
-    script = (f". {shlex.quote(str(LIB))} >/dev/null 2>&1\nset +e\n"
+# The options fleet-pulse.sh runs under: set -euo pipefail, and install_error_trap's
+# ERR trap, which set -E hands to every function and command substitution. Under
+# them a non-zero status anywhere in the helper would end the sweep or record a
+# script_error; this trap makes either a failed run here.
+PULSE_OPTIONS = ("set -euo pipefail\nset -E\n"
+                 "trap 'echo \"ERR trap: $BASH_COMMAND\" >&2; exit 97' ERR\n")
+
+
+def lost(socket, env, os_name="", pulse=False):
+    """bot_subreaper_lost on one socket. With pulse, under the pulse's own options and
+    assigned as Check 2c assigns it, so it must return 0 on every path."""
+    script = (f". {shlex.quote(str(LIB))} >/dev/null 2>&1\n"
+              + (PULSE_OPTIONS if pulse else "set +e\n")
               + (f"_OS={os_name}\n" if os_name else "")
-              + 'bot_subreaper_lost "$1"\n')
+              + ('_subreaper_lost=$(bot_subreaper_lost "$1")\nprintf "%s\\n" "$_subreaper_lost"\n'
+                 if pulse else 'bot_subreaper_lost "$1"\n'))
     done = subprocess.run(["bash", "-c", script, "_", socket], env=env,
                           capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
     return done.stdout.strip()
 
 
-def test_a_session_under_its_subreaper_reads_as_kept(start):
+# Each verdict, under set +e as the helper's own tests ran it, and under the pulse's
+# options (#2892).
+under = pytest.mark.parametrize("pulse", [False, True], ids=["set+e", "pulse-options"])
+
+
+@under
+def test_a_session_under_its_subreaper_reads_as_kept(start, pulse):
     session = start("exec sleep 600\n")
     assert session.report.get("adopted") == "yes", session.report_text
     wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's name")
-    assert lost(session.socket, session.env) == ""
+    assert lost(session.socket, session.env, pulse=pulse) == ""
 
 
-def test_a_session_whose_subreaper_died_reads_as_lost(start):
+@under
+def test_a_session_whose_subreaper_died_reads_as_lost(start, pulse):
     session = start("exec sleep 600\n")
     wait_for(lambda: comm(session.subreaper) == "bot-subreaper", "the subreaper's name")
     os.kill(session.subreaper, signal.SIGKILL)  # the one signal it cannot ignore
     wait_for(lambda: parent(session.server) == session.manager.pid, "the server's re-adoption")
-    found = json.loads(lost(session.socket, session.env))
+    found = json.loads(lost(session.socket, session.env, pulse=pulse))
     assert found == {"server": session.server, "parent": comm(session.manager.pid)}
     # Off Linux there is no subreaper to lose, so no verdict.
-    assert lost(session.socket, session.env, os_name="Darwin") == ""
+    assert lost(session.socket, session.env, os_name="Darwin", pulse=pulse) == ""
 
 
-def test_a_session_started_without_its_subreaper_reads_as_lost(start):
+@under
+def test_a_session_started_without_its_subreaper_reads_as_lost(start, pulse):
     session = start("exec sleep 600\n", python="/bin/false")
     server = int(session.tmux("display-message", "-p", "#{pid}").stdout)
     assert parent(server) == session.manager.pid
-    found = json.loads(lost(session.socket, session.env))
+    found = json.loads(lost(session.socket, session.env, pulse=pulse))
     assert found == {"server": server, "parent": comm(session.manager.pid)}
 
 
-def test_with_no_server_on_the_socket_there_is_no_verdict(scratch):
+@under
+def test_with_no_server_on_the_socket_there_is_no_verdict(scratch, pulse):
     env = constructed_env(TMUX_TMPDIR=scratch / "s", CLAUDLOBBY_ROOT=scratch / "root")
-    assert lost(f"sr{random.randrange(10**6)}", env) == ""
+    assert lost(f"sr{random.randrange(10**6)}", env, pulse=pulse) == ""
+
+
+def test_the_pulse_options_trap_is_live():
+    """Positive control for the pulse-options runs: a helper that returns non-zero
+    fails the run under them, so their exit 0 is the helper's own."""
+    script = (f". {shlex.quote(str(LIB))} >/dev/null 2>&1\n" + PULSE_OPTIONS
+              + 'bot_subreaper_lost() { false; }\n_subreaper_lost=$(bot_subreaper_lost "$1")\n')
+    done = subprocess.run(["bash", "-c", script, "_", "sr0"], env=constructed_env(),
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 97 and "ERR trap: false" in done.stderr, (done.returncode, done.stderr)
 
 
 def test_the_pulse_records_a_live_session_that_lost_its_subreaper():

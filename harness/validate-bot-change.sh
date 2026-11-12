@@ -704,6 +704,29 @@ printf '%s' "$mgr_pane" | grep -q '\[FLEET-PULSE\]' && r=yes || r=no
 harness_check "manager notified via [FLEET-PULSE] push" "$r"
 printf '%s' "$events_rows" | grep -q '"type":"bridge_down"' && r=yes || r=no
 harness_check "bridge_down event emitted (live session, Telegram poller not delivering)" "$r"
+# #2892: this worker's pane runs on a tmux server this harness started with plain
+# tmux, outside any bot-subreaper, so on Linux the real sweep reads the session as
+# having lost it: it records bot_subreaper_missing and pushes it to the manager.
+# The record is the control #2226's rollout check reads beside a clean production
+# read. The whole scrollback, since later pushes in this sweep may scroll the line.
+# Run from inside a bot session on a host that starts sessions under a subreaper,
+# the server is adopted by that session's own bot-subreaper and reads as kept, so
+# the check is skipped there. That is read from the server's parent with ps, not
+# from the helper under test, so a helper that never fires still fails it in CI.
+if [ "$_OS" = Linux ]; then
+    _w_server=$(tmux display-message -p -t "$BOT" '#{pid}' 2>/dev/null || true)
+    _w_ppid=$(ps -o ppid= -p "${_w_server:-0}" 2>/dev/null | tr -d ' ' || true)
+    _w_parent=$(ps -o comm= -p "${_w_ppid:-0}" 2>/dev/null || true)
+    if [ "$_w_parent" = bot-subreaper ]; then
+        echo "  SKIP  bot_subreaper_missing checks: the worker's tmux server runs under a bot-subreaper (this run is inside a bot session)"
+    else
+        printf '%s' "$events_rows" | grep -q '"type":"bot_subreaper_missing"' && r=yes || r=no
+        harness_check "bot_subreaper_missing event emitted (Linux: a live session outside its subreaper)" "$r"
+        mgr_scroll=$(tmux capture-pane -J -t "$MGR" -p -S - 2>/dev/null || true)
+        printf '%s\n' "$mgr_scroll" | grep -qF "[FLEET-PULSE] $BOT bot_subreaper_missing" && r=yes || r=no
+        harness_check "manager notified of bot_subreaper_missing via [FLEET-PULSE] push" "$r"
+    fi
+fi
 ls "$EVENTS"/*.jsonl >/dev/null 2>&1 && r=no || r=yes
 harness_check "no legacy event file was written by the sweep (the plane is the only record — F18 R1)" "$r"
 

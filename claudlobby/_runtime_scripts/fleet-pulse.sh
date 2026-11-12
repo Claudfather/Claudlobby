@@ -255,11 +255,19 @@ _notify_current_bot() {
 # One alert about the bot in the loop, "<bot> <type> — <text>": the debounced
 # push to its manager, then _page_manager_subject. Every per-bot alert below
 # opens here and closes in _clear_current_bot, except the reminder about a bot
-# stopped on purpose, which is not an alert (#2243).
+# stopped on purpose, which is not an alert (#2243), and bot_subreaper_missing,
+# which opens through _push_current_bot.
 _alert_current_bot() {
-    local msg="$bot_id $2 — $3"
-    debounce_notify "$state_dir" "$bot_id" "$1" _notify_current_bot "$msg" "$_mgr_token" "$_RENOTIFY_AFTER_S"
-    _page_manager_subject "$1" "$2" "$msg"
+    _push_current_bot "$1" "$2" "$3"
+    _page_manager_subject "$1" "$2" "$bot_id $2 — $3"
+}
+
+# _push_current_bot <suffix> <type> <text>
+# The alert's debounced push alone, with no post to the fleet's channel: for a
+# notice whose push the manager can act on even when the bot is the manager
+# itself (bot_subreaper_missing, #2892). It closes in _clear_current_bot too.
+_push_current_bot() {
+    debounce_notify "$state_dir" "$bot_id" "$1" _notify_current_bot "$bot_id $2 — $3" "$_mgr_token" "$_RENOTIFY_AFTER_S"
 }
 
 # _clear_current_bot <suffix>
@@ -723,7 +731,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             _clear_current_bot "$_ep"
         done
         if [ "$_session_alive" -eq 0 ]; then
-            for _ep in bridge_alerted activity_alerted held_alerted limit_alerted; do
+            for _ep in bridge_alerted subreaper_alerted activity_alerted held_alerted limit_alerted; do
                 _clear_current_bot "$_ep"
             done
         fi
@@ -887,11 +895,39 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # server whose parent is anything else has lost it (or the subreaper never
     # took its name): the session's orphans go to the user manager again. A
     # notice, not a page: the bot still works, and a restart at a quiet moment
-    # gives it a new subreaper.
+    # gives it a new subreaper. So every sweep that reads it records it, and the
+    # bot's manager gets one push an episode (#2892), through the debounce every
+    # alert uses, its re-notify window included. The push about the manager
+    # itself posts nothing to the fleet's channel (#997 posts an alert the
+    # manager's own pane cannot act on; this one it can, with /restart).
+    # OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's bot.conf stops the push and
+    # says so; the record stays. A live read that gives no verdict ends the
+    # episode as a kept subreaper does: bot_subreaper_lost prints nothing for
+    # either. A sweep with no live session leaves it as it is, so a restart that
+    # brings no subreaper back is not pushed again before the re-notify window.
     if [ "$_session_alive" -eq 1 ]; then
         _subreaper_lost=$(bot_subreaper_lost "$_bot_socket")
         if [ -n "$_subreaper_lost" ]; then
             emit_fleet_event "bot_subreaper_missing" "pulse" "$_subreaper_lost" "$bot_dir" "$bot_id"
+            OBSERVABILITY_SUBREAPER_PUSH=$(bot_conf_get "$bot_dir" OBSERVABILITY_SUBREAPER_PUSH 1)
+            if switch_is_on OBSERVABILITY_SUBREAPER_PUSH "fleet-pulse: $bot_id bot_subreaper_missing push" \
+                "the sweep still records the event"; then
+                # {"server":PID,"parent":"NAME"}, as bot_subreaper_lost prints it
+                _sr_server=${_subreaper_lost#*\"server\":}
+                _sr_server=${_sr_server%%,*}
+                _sr_parent=${_subreaper_lost#*\"parent\":\"}
+                _sr_parent=${_sr_parent%\"*}
+                _sr_do="Restart it at its next safe point, after the safe-worker-restart checks; it works meanwhile."
+                if bot_is_manager "$bot_dir"; then
+                    _sr_do="This is you: restart yourself with /restart at your next safe point; you work meanwhile."
+                fi
+                _push_current_bot "subreaper_alerted" bot_subreaper_missing \
+                    "its tmux server (pid $_sr_server) runs under $_sr_parent, not its bot-subreaper, so what the session orphans goes to the user manager that runs every bot. $_sr_do"
+            else
+                _clear_current_bot "subreaper_alerted"
+            fi
+        else
+            _clear_current_bot "subreaper_alerted"
         fi
     fi
 

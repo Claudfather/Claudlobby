@@ -51,6 +51,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `session_missing` | pulse | The tmux session is gone while the unit is active (keepalive restarts it within a minute), or on a bot with no supervised service configured. If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID` with its literal declared ID; inspect state and readiness. |
 | `unit_missing` | pulse | The bot names a service, its unit file is **not installed**, and **no stop was recorded**: nobody stopped it through `bot stop` (a botched disenroll, a broken activation, a deleted unit directory). It replaces `service_down` and `session_missing` for that bot and escalates like them (#2243). If the bot is meant to run, the selected manager calls `claudlobby --json bot start BOT_ID`; if it was stopped on purpose, `claudlobby --json bot stop BOT_ID` (with `--reason TEXT`) records that, and the alert ends. |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. **Decide on the payload's `paths`, never on `dirty_files`**: a count cannot separate `M lib/foo.py` from `?? .venv/`, and reading it as a count is what made this alert fire forever and get skipped (#1728). `dirty_tracked`/`dirty_untracked` are facts to read, not a filter — an unadded new source file is untracked and is the unrecoverable case. `unchanged_for_s` is a floor measured from the sweep's first sighting; past ~2h on a source path, check for staleness. |
+| `bot_subreaper_missing` | pulse | Linux: the bot's live session **runs without its own subreaper**, so a process the session orphans goes to the user manager that runs every bot, where a kill aimed at the orphan's parent can stop them all. The bot itself still works. **Restart it at its next safe point, after the `safe-worker-restart` checks**: the new session gets a subreaper. When it is about you, restart yourself with `/restart` at a safe point. A restart that brings no subreaper back is not pushed again before the re-notify window: its start recorded `bot_subreaper_unavailable` with the reason, so read that before you restart it again. `OBSERVABILITY_SUBREAPER_PUSH=0` in the bot's `fleet.yaml` env turns this push off, and every sweep still records the event. |
 | `browser_outside_render` | pulse | A browser has run for **more than 15 minutes outside a heavy-slot render scope** (#2332). **The pulse never stops it** and pushes it once. Find what opened it and close it there, through the bot that started it or the operator at the desktop; never kill a browser by name, because every bot shares the user. Bot sessions have had no display since #2332, so a browser one opened anyway took a path the cut does not cover: report it. |
 | `unit_failed` | pulse | An owned **unit is in the failed state** (#2532): one of the fleet's jobs, or an instance of its failure template, which means the alert a failed job sends did not go out. The pulse records it once an episode and pages the fleet's escalation chat once. Read the unit's log (`journalctl --user -u <unit>`) and tell the operator what failed; fixing or restarting a unit is the operator's. |
 | `memory_thrash` | alert | The host is **swapping hard**: swap-out stayed over its line for its minutes in a row (once an episode). The alert names the largest bots by memory. **Read those bots first**, then act on the one that grew through your own doors: `bot compact`, `bot restart --fresh` or `bot stop`, once its work is committed. |
@@ -145,12 +146,12 @@ list` shows the fleet's but never the host's. Each FLEET ALERT still reaches a m
 Telegram when it is raised: treat a `[FLEET-ALERT]` line like a linked report.
 
 **`--critical` does not cover every actionable type in the decision table above.** `pane_stuck`,
-`wip_uncommitted`, `sweep_repo_unreachable` and `audit_failed` are registered `notice`, and each is
-actionable per the table. Pair `--critical` with either a periodic unfiltered `--limit N` sweep, or
-explicit per-type calls:
+`wip_uncommitted`, `sweep_repo_unreachable`, `audit_failed` and `bot_subreaper_missing` are
+registered `notice`, and each is actionable per the table. Pair `--critical` with either a periodic
+unfiltered `--limit N` sweep, or explicit per-type calls:
 
 ```bash
-for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
+for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed bot_subreaper_missing; do
     claudlobby --json event list --type "$t" --limit 10
 done
 ```
