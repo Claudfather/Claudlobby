@@ -77,6 +77,8 @@ def assert_disclosed_without_value(result, marker, capsys, caplog):
     assert marker not in repr(result) + captured.out + captured.err + caplog.text
     assert "claudlobby/_runtime_scripts/env-tiers.sh" in warnings[0]
     assert "dependencies" in warnings[0]
+    # Counted under its category, so a warn-baseline still tracks it.
+    assert ("mcp-unchecked", warnings[0]) in result.categorized()
     assert not result.has_errors
 
 
@@ -129,6 +131,7 @@ def test_missing_or_empty_resolver_remains_unknown(private_fleet, failure):
     assert len(warnings) == 1
     assert "registry check did NOT run" in warnings[0]
     assert "declared packages resolve" in warnings[0]
+    assert ("mcp-unchecked", warnings[0]) in result.categorized()
     assert probes == []
     assert not result.has_errors
 
