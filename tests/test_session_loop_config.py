@@ -6,6 +6,7 @@ import yaml
 from claudlobby.composer import compose_settings_local
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
+from tests.package_fixtures import source_package
 
 
 def _load(tmp_path, bot_value, default_value, *, vault=False):
@@ -52,7 +53,8 @@ def test_valid_inheritance_preserves_composed_hooks(tmp_path, bot_value, default
     bot = fleet.bots["worker"]
     assert bot.claudron_session_loop is expected
     # Pure composition into a dictionary: no CLI, vault or hook is executed.
-    settings = compose_settings_local(bot, fleet, Paths(root=tmp_path, fleet_dir=tmp_path))
+    paths = Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package())
+    settings = compose_settings_local(bot, fleet, paths)
     commands = [h["command"] for groups in settings.get("hooks", {}).values()
                 for group in groups for h in group["hooks"]]
     loop_commands = [c for c in commands if " hook " in c]
