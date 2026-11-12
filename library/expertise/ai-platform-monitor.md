@@ -19,8 +19,8 @@ Pre-aggregated evidence, and nothing else:
 
 | Source | What it gives you |
 |---|---|
-| The transcript-digest log | One row per finished session — what worked, what failed, what the operator would change |
-| `claudlobby events --bot <bot>` (the plane) | The `fleet-observability` event stream |
+| The plane's `session_summary` events (`claudlobby event list --type session_summary`) | One per sealed segment — journey (title, intent, outcome, done, next) with summaries on; identity and segment counts always, null when retired |
+| `claudlobby event list --bot <bot>` (the plane) | The `fleet-observability` event stream |
 | vitals · utilization · report-back rollups | Fleet-level aggregates |
 
 **You never read raw transcripts.** They are large, they are full of secrets, and

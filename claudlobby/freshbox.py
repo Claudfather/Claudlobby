@@ -6,7 +6,7 @@ in its ``settings.local.json`` allow-list traces to an equipped source's contrac
 allow-list (no under-grant / silent reliance on the retired global ``~/.claude``),
 and the Tier-A settings surface (``enabledPlugins`` / skip-flags / ``sandbox``) is
 composed per-bot rather than inherited from the hand-accumulated global. The
-real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
+real-boot half of the gate lives in ``harness/freshbox-boot-gate.sh``.
 
 #703 folds the deny-by-default path guard into the same audit: a source re-check
 (the L1 guard, ``_value_findings``), an externals visibility report
@@ -29,11 +29,13 @@ from pathlib import Path
 from .composer import (
     BASE_TOOLS,
     _resolve_channel_permissions,
-    _resolve_default_boot_grant,
     _resolve_expertise_permissions,
+    _resolve_fleet_ops_grants,
     _resolve_guardrail_permissions,
     _resolve_integration_grants,
+    _resolve_integration_rules,
     _resolve_mcp_permissions,
+    _resolve_resume_permission,
     _resolve_skill_grants,
     _resolve_skill_permissions,
     compose_settings_local,
@@ -65,7 +67,7 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
     feeds into the allow list, recomputed here independently so a divergence
     between the composed output and the declared contracts surfaces. Excludes
     the always-injected ``BASE_TOOLS`` floor and the ad-hoc fleet
-    ``tools.allow`` override, which are classified separately.
+    ``tool_permissions.allow`` override, which are classified separately.
 
     Skill grants are resolved from the EFFECTIVE skill set
     (:func:`resolve_effective_skills`, spec §10), never ``bot.skills`` alone —
@@ -83,9 +85,24 @@ def _sourced_grants(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str
         bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
     )
     sourced |= set(_resolve_skill_permissions(effective_skills))
+    sourced |= set(_resolve_resume_permission(bot, fleet, paths, effective_skills))
     sourced |= set(_resolve_skill_grants(effective_skills, paths))
-    sourced |= set(_resolve_default_boot_grant(bot, paths))
+    sourced |= set(_resolve_fleet_ops_grants(bot, fleet))
     return sourced
+
+
+def _sourced_ask_rules(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> set[str]:
+    """Every ask rule the bot's equipped skills and integrations declare (#2476).
+
+    Taken before the fleet's ``tool_permissions.allow`` drops the ones it grants,
+    so :func:`classify_grants` can tell a fleet grant of an asked rule, the
+    designed way to grant one, from an override no source declares.
+    """
+    effective_skills = resolve_effective_skills(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()
+    )
+    asked = set(_resolve_skill_grants(effective_skills, paths, key="ask_grants"))
+    return asked | set(_resolve_integration_rules(bot, paths, "ask_grants"))
 
 
 # Grant finding vocabulary — kind → (severity, allow-list detail suffix). One
@@ -98,7 +115,7 @@ _GRANT_KINDS: dict[str, tuple[str, str]] = {
     ),
     "unsourced_grant": (
         WARN,
-        "granted via fleet tools.allow but no equipped source declares it",
+        "granted via fleet tool_permissions.allow but no equipped source declares it",
     ),
     "under_grant": (
         FAIL,
@@ -114,6 +131,7 @@ def classify_grants(
     sourced: set[str],
     base: set[str],
     override: set[str],
+    asked: frozenset[str] | set[str] = frozenset(),
 ) -> list[tuple[str, str, str]]:
     """Classify each grant against its provenance — the pure, testable core.
 
@@ -121,9 +139,13 @@ def classify_grants(
       - ``orphan_grant`` (fail): an allow entry tracing to no source, base floor,
         or fleet override — composition emitted a grant nothing produced.
       - ``unsourced_grant`` (warn): an allow entry present only via the ad-hoc
-        fleet ``tools.allow`` override (drift signal — no source contract).
+        fleet ``tool_permissions.allow`` override (drift signal — no source contract).
       - ``under_grant`` (fail): a source-declared grant that is not denied yet
         never reached the allow list (the bot would rely on the retired global).
+
+    An allow entry the fleet override grants that an equipped source declares as
+    an ask rule (``asked``, #2476) gets no finding: that override is how a fleet
+    grants an asked rule.
     """
     results: list[tuple[str, str, str]] = []
     allow_set = set(allow)
@@ -131,6 +153,8 @@ def classify_grants(
 
     for grant in allow:
         if grant in sourced or grant in base:
+            continue
+        if grant in override and grant in asked:
             continue
         kind = "unsourced_grant" if grant in override else "orphan_grant"
         results.append((kind, _GRANT_KINDS[kind][0], grant))
@@ -168,6 +192,71 @@ def _tier_a_findings(bot_id: str, settings: dict) -> list[Finding]:
                     "would inherit it from the retired global ~/.claude",
                 )
             )
+    return findings
+
+
+def _isolation_findings(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """Shared-config isolation (#1665 Layer 0b) for a bot that has it on.
+
+    Reads the deny list the bot is RUNNING with (its on-disk
+    ``settings.local.json``), never a re-derivation, and compares it class by
+    class with what this install and today's host roster would compose. A
+    missing rule means the file was composed by an older install, or a bot joined
+    the host after it was; either way the fix is staged host activation, and the finding says
+    which fleet. WARN, never FAIL: a present rule reduces accidental reads through
+    Claude's own tools and is not confidentiality (see isolation.py), so a FAIL
+    would overclaim what fixing it buys. Also names each composed file that tells
+    the bot to read ``~/.env`` itself, the read row E denies."""
+    import json
+
+    from .composer import composed_text_sources
+    from .isolation import CLASSES, EXEMPTIONS, env_reads, layer0b
+
+    if not bot.isolation.shared_config:
+        return []
+    findings: list[Finding] = []
+    expected = layer0b(bot, fleet, paths, home=home or Path.home())
+    target = paths.bot_runtime(bot.bot_id) / ".claude" / "settings.local.json"
+    try:
+        composed = set(json.loads(target.read_text())["permissions"]["deny"])
+    except (OSError, ValueError, KeyError, TypeError):
+        composed = None
+    remedy = "run `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`"
+    if composed is None:
+        findings.append(Finding(
+            bot.bot_id, "isolation_not_composed", WARN,
+            f"shared-config isolation is on, but {target} holds no deny list to"
+            f" check — the bot runs without its rules until you {remedy}"))
+    else:
+        for cls, what in CLASSES.items():
+            rules = [r for r in expected.rules if r.cls == cls]
+            missing = [r for r in rules if r.text not in composed]
+            if not missing:
+                continue
+            subjects = sorted({r.subject for r in missing if r.subject})
+            why = (f"no rule yet for {', '.join(subjects)} (on the host roster"
+                   " since this bot was composed)"
+                   if subjects and all(r.subject for r in missing)
+                   else f"{len(missing)} of {len(rules)} rule(s) absent, e.g."
+                        f" {missing[0].text} (composed by an older install?)")
+            findings.append(Finding(
+                bot.bot_id, "isolation_missing", WARN,
+                f"{cls} — {what}: {why}; {remedy}"))
+    for name in sorted(bot.isolation.exempt):
+        findings.append(Finding(
+            bot.bot_id, "isolation_exempt", INFO,
+            f"exempt by manifest: {name} — {EXEMPTIONS[name]}"))
+    for note in expected.notes:
+        findings.append(Finding(bot.bot_id, "isolation_gap", WARN, note))
+    for source, text in composed_text_sources(bot, fleet, paths):
+        for number, line in env_reads(text, home=home or Path.home()):
+            findings.append(Finding(
+                bot.bot_id, "isolation_env_read", WARN,
+                f"{source}:{number} tells the bot to read ~/.env itself"
+                f" ({line[:80]}); its isolation rules deny that read, and the"
+                " variables are already in the session env — drop the line"))
     return findings
 
 
@@ -283,7 +372,7 @@ def _env_secret_leak_findings(
 ) -> list[Finding]:
     """#792: a per-bot identity secret sitting in a host-shared env tier.
 
-    ``source_env_tiered`` (lib/lib-common.sh) sources the global ``~/.env`` and the
+    ``source_env_tiered`` (claudlobby/_runtime_scripts/lib-common.sh) sources the global ``~/.env`` and the
     deprecated/install-shared ``$CLAUDLOBBY_ROOT/.env`` into EVERY bot's process
     env, so a per-bot secret placed in either leaks host-wide — the A1
     config-review incident, where one bot's token became readable by another. A
@@ -572,7 +661,7 @@ def _orphan_unit_findings(
             WARN,
             f"{f.name} — stale supervision unit, not the composed "
             f"{fleet.service_prefix}.{bot.bot_id} long-form; reap with "
-            "`claudlobby freshbox --reap`",
+            "`claudlobby host supervision reap-orphans --dry-run` (then --apply)",
         )
         for f in _orphan_unit_files(bot, fleet, paths)
     ]
@@ -611,12 +700,14 @@ def audit_bot(
         sourced=_sourced_grants(bot, fleet, paths),
         base=set(BASE_TOOLS),
         override=set(bot.tool_permissions.allow),
+        asked=_sourced_ask_rules(bot, fleet, paths),
     )
     findings = [
         Finding(bot.bot_id, kind, sev, f"{grant} {_GRANT_KINDS[kind][1]}")
         for kind, sev, grant in triples
     ]
     findings.extend(_tier_a_findings(bot.bot_id, settings))
+    findings.extend(_isolation_findings(bot, fleet, paths, home=home))
     findings.extend(_path_findings(bot, fleet, paths))
     findings.extend(_value_findings(bot, fleet, paths))
     findings.extend(_env_file_findings(bot, fleet, paths, home=home))
@@ -630,13 +721,14 @@ def _fleet_pulse_env_findings(
 ) -> list[Finding]:
     """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
 
-    ``lib/fleet-pulse.sh`` runs from a composed timer unit that sources no
-    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
-    a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
-    its own default. The operator sees no change and cannot tell "ignored" from
-    "applied, and the condition is genuinely still firing". That is the shape
-    this rung exists to make audible: without it the only feedback is an audit
-    weeks later.
+    ``claudlobby/_runtime_scripts/fleet-pulse.sh`` runs from a composed timer unit that sources no
+    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — and
+    ``fleet notify`` and a message write's alert read the same keys from the
+    active fleet.yaml block (#2234), so a ``FLEET_PULSE_*`` key in any tier
+    reaches nothing and the script keeps its own default. The operator sees no
+    change and cannot tell "ignored" from "applied, and the condition is
+    genuinely still firing". That is the shape this rung exists to make
+    audible: without it the only feedback is an audit weeks later.
 
     FAIL at every tier, deliberately, and not the F5 rung's tier-derived
     severity — for the same reason ``_env_secret_leak_findings`` departs from
@@ -665,10 +757,12 @@ def _fleet_pulse_env_findings(
                             "fleet_pulse_env_inert",
                             FAIL,
                             f"{path}: {key} is set but reaches nothing — the "
-                            "composed fleet-pulse timer unit sources no .env, so "
-                            "this is silently ignored and the script keeps its "
-                            "default. Move it to the fleet.yaml `fleet_pulse:` "
-                            "block, which composes into the unit's Environment=.",
+                            "composed fleet-pulse timer unit sources no .env, and "
+                            "`fleet notify` and a message write's alert read the "
+                            "fleet.yaml block, so this is silently ignored and the "
+                            "script keeps its default. Move it to the fleet.yaml "
+                            "`fleet_pulse:` block, which composes into the unit's "
+                            "Environment=.",
                         )
                     )
     return findings
@@ -685,7 +779,29 @@ def audit_fleet(
     # bot, so scan them once (#792), not once per bot.
     findings.extend(_env_secret_leak_findings(fleet, paths, home=home))
     findings.extend(_fleet_pulse_env_findings(fleet, paths, home=home))
+    findings.extend(_isolation_off_finding(fleet))
     return findings
+
+
+def _isolation_off_finding(fleet: FleetConfig) -> list[Finding]:
+    """ONE line for the bots with shared-config isolation off, the shipped
+    default: what their deny lists do not name. INFO, since off is a supported
+    state and a warning on every fleet would be scrolled past; but said, because
+    137 correctly-shaped sibling rules otherwise read as "the bots are isolated"
+    while transcripts, the credential and every .env tier are named by none."""
+    from .isolation import CLASSES
+    from .switches import by_key
+
+    off = sorted(b.bot_id for b in fleet.bots.values()
+                 if not b.isolation.shared_config)
+    if not off:
+        return []
+    shown = ", ".join(off[:4]) + (f" (+{len(off) - 4} more)" if len(off) > 4 else "")
+    return [Finding(
+        "(fleet)", "isolation_off", INFO,
+        f"shared-config isolation is off for {len(off)} of {len(fleet.bots)}"
+        f" bot(s) ({shown}): no deny rule names {', '.join(CLASSES)}. Arm:"
+        f" {by_key('shared-config-isolation').arm}")]
 
 
 def has_failures(findings: list[Finding]) -> bool:
@@ -701,33 +817,3 @@ def exits_nonzero(findings: list[Finding], *, strict: bool) -> bool:
     if has_failures(findings):
         return True
     return strict and any(f.severity == WARN for f in findings)
-
-
-def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
-    """Human-readable fresh-box self-containment report (the over-grant report)."""
-    lines = [
-        f"Fresh-box self-containment audit — {fleet.name} ({len(fleet.bots)} bots)"
-    ]
-    if not findings:
-        lines.append(
-            "  OK — every grant traces to an equipped source; Tier-A settings "
-            "composed per-bot. Self-contained."
-        )
-        return "\n".join(lines)
-
-    by_bot: dict[str, list[Finding]] = {}
-    for f in findings:
-        by_bot.setdefault(f.bot_id, []).append(f)
-    icons = {FAIL: "FAIL", WARN: "warn", INFO: "info"}
-    for bot_id in sorted(by_bot):
-        lines.append(f"  {bot_id}:")
-        for f in by_bot[bot_id]:
-            lines.append(
-                f"    [{icons.get(f.severity, f.severity)}] {f.kind}: {f.detail}"
-            )
-
-    fails = sum(1 for f in findings if f.severity == FAIL)
-    warns = sum(1 for f in findings if f.severity == WARN)
-    infos = sum(1 for f in findings if f.severity == INFO)
-    lines.append(f"  {fails} fail, {warns} warn, {infos} info")
-    return "\n".join(lines)

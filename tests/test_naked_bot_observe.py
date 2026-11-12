@@ -12,7 +12,7 @@ Two layers, and the split is deliberate:
     every type, which is what Phase 2 needs before it populates the other
     eleven.
 
-The real compose sweep is `lib/naked-bot-observe.py` itself, run against a
+The real compose sweep is `harness/naked-bot-observe.py` itself, run against a
 history-free export. It is not invoked here: it shells out to `git archive` and
 runs twelve-plus full `generate` passes, which is a minutes-long job and belongs
 in the gate, not in every suite run.
@@ -21,6 +21,8 @@ in the gate, not in every suite run.
 from __future__ import annotations
 
 import importlib.util
+import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -33,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _load_harness():
     """Import the hyphenated standalone module (`dispatch-overdue.py` precedent)."""
-    path = REPO_ROOT / "lib" / "naked-bot-observe.py"
+    path = REPO_ROOT / "harness" / "naked-bot-observe.py"
     spec = importlib.util.spec_from_file_location("naked_bot_observe", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["naked_bot_observe"] = mod
@@ -167,7 +169,7 @@ def test_all_twelve_types_have_an_explicit_disposition():
         p.name
         for p in (REPO_ROOT / "library").iterdir()
         if p.is_dir() and p.name != "__pycache__"
-    }
+    } - set(registry.NON_ENTITY_FOLDERS)
     assert set(registry.REGISTRY) == library_types
     assert len(registry.REGISTRY) == 12
 
@@ -208,22 +210,24 @@ def test_declaring_a_list_does_not_act_as_an_opt_out(etype, monkeypatch):
 
 #: Entity types that have a `system_defaults.<type>` opt-out key today.
 #: Inverted one at a time as Phase 2 builds them — `guardrails` at Phase 1,
-#: `protocols` when `shared-documentation` was admitted to the registry.
-TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols"}
+#: `protocols` when `shared-documentation` was admitted to the registry,
+#: `skills` with the manager role's `status` default (#2010), `resources` with
+#: the `timezone` default (#1168).
+TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols", "skills", "resources"}
 
 
-def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
+def test_the_opt_out_surface_does_not_exist_for_eight_of_twelve_types():
     """MEASURED, and this test records a GAP rather than blessing it.
 
     `SystemDefaultsConfig` reads a FIXED set of keys, not one per entity type.
-    Ten of the twelve still have no opt-out, so the plan's checklist item — "for
+    Eight of the twelve still have no opt-out, so the plan's checklist item — "for
     each of the 12 types, `system_defaults.<type>: false` demonstrably removes
-    the default" — remains unsatisfiable for those ten.
+    the default" — remains unsatisfiable for those eight.
 
     Worse, and UNCHANGED by Phase 2 so far: an unrecognised key is accepted
     silently. `_coerce_system_defaults` drops it and `generate` exits 0, so a
     fleet still cannot tell a working opt-out from a typo. Both confirmed on
-    real composes by `lib/naked-bot-observe.py` (`optout:*` and
+    real composes by `harness/naked-bot-observe.py` (`optout:*` and
     `control:unknown-key` arms).
 
     This test FAILS every time Phase 2 adds a key. That is the intent: it is the
@@ -244,10 +248,10 @@ def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
     ]
     assert len(still_on) == len(nbo.SURFACES) - len(TYPES_WITH_AN_OPT_OUT), (
         "the per-entity-type opt-out surface changed — re-run "
-        "lib/naked-bot-observe.py and update the baseline record"
+        "harness/naked-bot-observe.py and update the baseline record"
     )
-    assert still_on and len(still_on) == 10, (
-        f"expected ten types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
+    assert still_on and len(still_on) == 8, (
+        f"expected eight types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
     )
 
 
@@ -380,8 +384,8 @@ def test_the_two_always_present_files_have_a_content_probe():
 def test_inert_flags_a_registry_entry_that_composed_nothing():
     """The Phase 2 trap: the constant moves and no bot changes.
 
-    `config.py` consumes only `DEFAULT_GUARDRAILS`; nothing feeds
-    `resolve(<type>)` into the merge for the other eleven. Measured with a REAL
+    `config.py` consumes only `DEFAULT_GUARDRAILS` and `DEFAULT_RESOURCES`; nothing
+    feeds `resolve(<type>)` into that merge for the other ten. Measured with a REAL
     skill (`doctor`): in the registry it composed no symlink, declared in
     fleet.yaml it composed one.
     """
@@ -417,6 +421,11 @@ def test_scrub_removes_the_run_specific_export_path(tmp_path):
     """Two observations of the SAME commit must be byte-identical."""
     assert nbo.scrub(f"composed -> {tmp_path}/local/x", tmp_path) == (
         "composed -> $EXPORT/local/x"
+    )
+    package = tmp_path / ".probe-release/lib/python3.12/site-packages/claudlobby"
+    assert nbo.scrub(f"composed -> {package}/_resources/library/skills/checkin",
+                     tmp_path, package) == (
+        "composed -> $PACKAGE/_resources/library/skills/checkin"
     )
 
 
@@ -454,6 +463,9 @@ class _StubRoot:
 
     def __str__(self) -> str:
         return "/var/x/export"
+
+    parent = Path("/var/x")
+    name = "export"
 
     def resolve(self) -> Path:
         return Path("/private/var/x/export")
@@ -573,7 +585,7 @@ def test_build_report_refuses_when_a_remnant_survives(monkeypatch):
 # ------------------------------------------- the leaf-manager arm (PR4 chunk 4)
 #
 # A role overlay (`Disposition.roles`) is invisible to every arm above — none
-# of them composes a manager at all (`naked-bot-observation-gate.md`, "One bot,
+# of them composes a manager with workers (`naked-bot-observation-gate.md`, "One bot,
 # one expertise"). Task 3 landed `REGISTRY["protocols"].roles = {"leaf-manager":
 # ("checkin",)}`; this section gives the gate a fleet shape that can see it.
 
@@ -646,6 +658,17 @@ def test_write_probe_adds_a_teams_block_and_a_second_bot_only_when_teams_is_set(
     assert "nakedmgr:" in teams_yaml
     assert "nakedbot:" in teams_yaml  # the in-fleet report is still declared
 
+    from claudlobby.config import load_fleet
+
+    plain, _ = load_fleet(plain_root / "local" / "naked-probe" / "fleet.yaml")
+    teams, _ = load_fleet(teams_root / "local" / "naked-probe" / "fleet.yaml")
+    assert plain.manager == "nakedbot"
+    assert plain.manager in plain.bots
+    assert plain.leaf_manager_bots() == set()
+    assert teams.manager == "nakedmgr"
+    assert teams.manager in teams.bots
+    assert teams.leaf_manager_bots() == {"nakedmgr"}
+
 
 @pytest.fixture(scope="module")
 def leaf_manager_compose(tmp_path_factory):
@@ -661,37 +684,64 @@ def leaf_manager_compose(tmp_path_factory):
     and a HEAD export would compose whatever was last committed. The export
     copies tracked and untracked-but-not-ignored files from disk
     (`tests/fixtures/worktree_export.py`), so uncommitted edits are what
-    composes. `_assert_compositor` checks that a subprocess started the way
-    `generate` is (same interpreter, cwd at the export) imports the exported
-    package rather than an installed copy. The probe fleet lands in the
-    export, not in the checkout.
+    composes. The harness builds that export and installs it offline into an
+    owned venv, including its dependency closure. `_assert_compositor` checks
+    the installed code, resource identity and selected CLI. Both arms invoke
+    production `generate` through that CLI after source assets are removed;
+    ambient PATH/PYTHONPATH and a stale CLI must not supply another candidate.
+    The probe fleet lands in the export, not in the checkout.
     """
     root = export_working_tree(REPO_ROOT, tmp_path_factory.mktemp("naked-bot") / "export")
-    nbo._assert_compositor(root, sys.executable)
-    sys.path.insert(0, str(REPO_ROOT))
-    import claudlobby.defaults as registry
-
-    baseline = nbo.observe_arm(
-        root, sys.executable, nbo.Arm(label="baseline", system_defaults=None), registry
-    )
-    leaf = nbo.observe_arm(
-        root,
-        sys.executable,
-        nbo.Arm(
-            label="shape:leaf-manager",
-            system_defaults=None,
-            teams=True,
-            observed_bot="nakedmgr",
-        ),
-        registry,
-    )
+    candidate = nbo.prepare_candidate(root)
+    assert not (root / ".git").exists()
+    assert candidate.cli.is_relative_to(root.resolve() / ".probe-release")
+    assert candidate.package.is_relative_to(root.resolve() / ".probe-release")
+    unavailable = root / "source-unavailable"
+    unavailable.mkdir()
+    for name in ("claudlobby", "library", "templates"):
+        (root / name).rename(unavailable / name)
+    # Poison any accidental source/module or ambient CLI selection. The real
+    # candidate has already been installed, so neither is part of this run.
+    (root / "claudlobby").mkdir()
+    (root / "claudlobby" / "__init__.py").write_text(
+        "raise RuntimeError('probe imported the source checkout')\n")
+    stale_bin = root / "stale-bin"
+    stale_bin.mkdir()
+    stale = stale_bin / "claudlobby"
+    sentinel = root / "stale-cli-ran"
+    stale.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(sentinel))}\nexit 91\n")
+    stale.chmod(0o755)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PATH", f"{stale_bin}{os.pathsep}{os.environ['PATH']}")
+        patch.setenv("PYTHONPATH", str(root))
+        patch.setenv("CLAUDLOBBY_CLI", str(stale))
+        baseline = nbo.observe_arm(
+            root, candidate, nbo.Arm(label="baseline", system_defaults=None)
+        )
+        leaf = nbo.observe_arm(
+            root, candidate,
+            nbo.Arm(label="shape:leaf-manager", system_defaults=None,
+                    teams=True, observed_bot="nakedmgr"),
+        )
+    assert not sentinel.exists(), "the probe executed an ambient CLI"
+    assert not (root / ".git").exists()
+    for arm in (baseline, leaf):
+        if arm.generate_rc == 0:
+            bot_conf = root / "local/naked-probe/runtime/bots" / arm.observed_bot / "bot.conf"
+            selected, = [shlex.split(line.removeprefix("export "))[0].partition("=")[2]
+                         for line in bot_conf.read_text().splitlines()
+                         if line.removeprefix("export ").startswith("CLAUDLOBBY_CLI=")]
+            # The verified wheel supplies composition inputs; native output
+            # binds the helper's private Git installation through its one CLI.
+            expected = root.resolve().parent / (".harness-installation-" + root.name) / "bin/claudlobby"
+            assert selected == str(expected)
     return baseline, leaf
 
 
 def test_the_leaf_manager_arm_sees_the_role_overlay(leaf_manager_compose):
     """The role-scoped default (`REGISTRY["protocols"].roles`) reaches a
     composed leaf manager's `## Protocols` section and reaches nothing on the
-    baseline arm, which composes no manager at all."""
+    baseline arm, whose lone manager has no workers."""
     baseline, leaf = leaf_manager_compose
     assert baseline.generate_rc == 0, baseline.generate_stderr_tail
     assert leaf.generate_rc == 0, leaf.generate_stderr_tail
@@ -711,9 +761,9 @@ def test_the_arm_records_the_skill_symlink_and_the_grant(leaf_manager_compose):
     assert not any(s.split(" -> ", 1)[0] == ".claude/skills/checkin" for s in baseline_skills)
 
     leaf_grants = leaf.types["permissions"].composed_content or []
-    assert any("checkin-record.sh" in g for g in leaf_grants)
+    assert any("checkin record" in g for g in leaf_grants)
     baseline_grants = baseline.types["permissions"].composed_content or []
-    assert not any("checkin-record.sh" in g for g in baseline_grants)
+    assert not any("checkin record" in g for g in baseline_grants)
 
 
 def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
@@ -729,6 +779,6 @@ def test_the_recorded_skill_symlink_target_is_scrubbed(leaf_manager_compose):
     _, leaf = leaf_manager_compose
     leaf_skills = leaf.types["skills"].composed_artifacts
     checkin_entry = next(s for s in leaf_skills if s.startswith(".claude/skills/checkin"))
-    assert checkin_entry == ".claude/skills/checkin -> $EXPORT/library/skills/checkin", (
+    assert checkin_entry == ".claude/skills/checkin -> $INSTALLATION/src/library/skills/checkin", (
         f"symlink target was not scrubbed: {checkin_entry!r}"
     )

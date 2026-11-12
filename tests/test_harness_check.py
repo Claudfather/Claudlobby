@@ -2,7 +2,7 @@
 
 Since #780 consolidated the PASS/FAIL assertion into the shared `harness_check`
 helper, it is the single point of failure behind ~112 assertion sites across the
-lib/ rehearsal and gate harnesses (validate-bot-change, freshbox-boot-gate,
+claudlobby/_runtime_scripts/ rehearsal and gate harnesses (validate-bot-change, freshbox-boot-gate,
 ab-comms-eval). Nothing in the suite exercised its OWN discrimination, so a
 regression that broke it — e.g. always incrementing `pass` — would leave every
 harness reporting all-green regardless of the real behavior, and the whole suite
@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "lib-common.sh"
 
 
 def _run_harness_check(*calls: tuple[str, str]) -> tuple[str, int, int]:

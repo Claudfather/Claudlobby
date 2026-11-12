@@ -64,6 +64,23 @@ _BLESSED_RAW_READS = {
     # config.py — fleet.yaml / system.yaml parse. The parsed BotConfig feeds
     # audit_bot_sources (the dataclass walk); system.yaml is asserted L1-clean below.
     ("config.py", "yaml.safe_load(f)"),
+    # load_fleet reads fleet.yaml's bytes once (#2267): the raw bytes are inspected
+    # only for emptiness and length, and the parsed document takes the same
+    # _fleet_document -> BotConfig audit path as the yaml.safe_load(f) it replaced.
+    ("config.py", "fleet_yaml.read_bytes()"),
+    ("config.py", "yaml.safe_load(text)"),
+    # config explain rereads the already selected, validated fleet manifest
+    # solely to distinguish authored scalar declarations from defaults. The
+    # parsed values never become grants or paths; effective values still come
+    # from load_context's validated FleetConfig. This is read-only metadata, not
+    # a second operational configuration decision.
+    ("config.py", "yaml.safe_load(source)"),
+    # The active parser sees only content-addressed inputs retained by staging.
+    # Staging now validates and renders the SAME captured bytes before sealing;
+    # fleet values pass the existing BotConfig source audit, while projects use
+    # the same _project_document validation as the authoring loader.
+    ("config.py", "yaml.safe_load(fleet_content)"),
+    ("config.py", "yaml.safe_load(projects_content)"),
     # composer.py — MCP fragment loads feed audit_bot_sources(fragments=...);
     # grant/integration frontmatter reads feed the grant choke; template / prose /
     # runtime-state reads are exempt-as-code (tool .j2 → #703) or non-source.
@@ -76,6 +93,12 @@ _BLESSED_RAW_READS = {
     ("composer.py", "int_path.read_text()"),
     ("composer.py", "env_path.read_text()"),
     ("composer.py", "dotenv.read(env_path)"),
+    # The selected account's settings.json supplies only enabledPlugins keys.
+    # Compose validates it as a string-to-bool map, then sets each key's value
+    # from this bot's selected equipment; the account's bools are not grants,
+    # paths, or commands and cannot enable an unselected plugin.
+    ("composer.py", "source.read_text(encoding='utf-8')"),
+    ("composer.py", "json.loads(source.read_text(encoding='utf-8'))"),
     # composer.py — manifest provenance (#1722). EXEMPT, and narrowly, on the
     # same grounds as the $HOME/.env walk below: `_sha256_file` consumes ONLY a
     # hex digest of the bytes. No value read here crosses into a path, a grant,
@@ -129,6 +152,13 @@ _BLESSED_RAW_READS = {
     # validating loader: a sibling fleet with a broken manifest must not be able
     # to fail this fleet's generate, nor silently empty the guard.
     ("composer.py", "manifest.read_text(encoding='utf-8')"),
+    # composer.py — the Layer 0b ~/.env lint (#1665). composed_text_sources
+    # reads the markdown a bot is TOLD (library items, expertise, voice, the
+    # charter, skill .md files) so validate and freshbox can name a line that
+    # runs `source ~/.env`. A lint over prose, the charter read's category:
+    # nothing read becomes a path, a grant or composed output. The variable
+    # name is site-specific on purpose, since this set keys on the expression.
+    ("composer.py", "told.read_text(encoding='utf-8')"),
     ("composer.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
 }
 

@@ -23,6 +23,8 @@ import pytest
 
 from claudlobby.plane.db import db_path
 from claudlobby.plane.writer import PlaneWriter
+from claudlobby.plane.schema_state import PendingMigrationError
+from tests.plane_setup import initialize_plane
 
 
 def _rows(conn) -> int:
@@ -34,6 +36,7 @@ class TestDurabilityRidesOnTheCommit:
         """The whole design rests on this pragma. NORMAL would mean the commit
         does not fsync the WAL, and with no per-batch close there would be
         nothing else to make an acknowledged row durable."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         assert w.connection().execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
         w.close()
@@ -41,6 +44,7 @@ class TestDurabilityRidesOnTheCommit:
     def test_the_same_connection_is_reused_across_batches(self, tmp_path):
         """If it reconnected per batch we would be paying the old cost with
         new code."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         first = w.connection()
         assert w.connection() is first
@@ -58,13 +62,16 @@ class TestTheNewFailureMode:
         that is the danger. This asserts the writer notices anyway, which it
         can only do by checking IDENTITY rather than health.
         """
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         conn = w.connection()
         db = db_path(tmp_path)
 
         # Positive control: the stale handle really does still work, so the
         # detection cannot be crediting an error that happened anyway.
+        replacement = initialize_plane(tmp_path / "replacement")
         os.replace(db, tmp_path / "moved-aside.db")
+        os.replace(replacement, db)
         conn.execute("SELECT 1").fetchone()          # no exception: still writable
 
         assert w._is_stale(), "a replaced db must be seen as stale"
@@ -74,10 +81,21 @@ class TestTheNewFailureMode:
         w.close()
 
     def test_a_DELETED_db_is_detected(self, tmp_path):
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         conn = w.connection()
         os.unlink(db_path(tmp_path))
         assert w._is_stale()
+        with pytest.raises(PendingMigrationError, match="initialize"):
+            w.connection()
+        assert not db_path(tmp_path).exists()
+        # Closing an unlinked SQLite inode can retain its old WAL/SHM. Move
+        # only this fixture's sidecars aside before explicit empty setup.
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(str(db_path(tmp_path)) + suffix)
+            if sidecar.exists():
+                sidecar.rename(tmp_path / ("deleted-db" + suffix))
+        initialize_plane(tmp_path)  # explicit fixture setup, never writer recovery
         assert w.connection() is not conn
         assert w.reconnects == 1
         w.close()
@@ -86,6 +104,7 @@ class TestTheNewFailureMode:
         """The other direction, and it matters as much: a detector that
         reconnects constantly would reintroduce the per-batch cost it exists to
         remove, and nothing else in these tests would notice."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         first = w.connection()
         for _ in range(20):
@@ -100,6 +119,7 @@ class TestTheNewFailureMode:
         perfectly healthy — it just is not the database anyone can read. Only
         (dev, inode) separates those.
         """
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         w.connection()
         st = os.stat(db_path(tmp_path))
@@ -118,6 +138,7 @@ class TestTheCheckpointCadence:
         batches the WAL reaches ~9 MB, over the 4 MB ceiling the same design
         proposed. Triggering on the file size needs no such prediction.
         """
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path, wal_bytes=1, every_batches=10**6, every_seconds=9999)
         w.connection()
         w.connection().execute(
@@ -131,6 +152,7 @@ class TestTheCheckpointCadence:
         """The other direction: an enormous threshold must leave the size
         trigger inert, or the backstops below are never what fires and the
         test above proves nothing about which trigger ran."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path, wal_bytes=10**12, every_batches=10**6,
                         every_seconds=9999)
         w.connection()
@@ -140,6 +162,7 @@ class TestTheCheckpointCadence:
         assert w.checkpoints == before
 
     def test_it_fires_on_the_batch_count(self, tmp_path):
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path, every_batches=5, every_seconds=9999, wal_bytes=10**12)
         w.connection()
         before = w.checkpoints
@@ -149,6 +172,7 @@ class TestTheCheckpointCadence:
         w.close()
 
     def test_it_fires_on_the_clock(self, tmp_path):
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path, every_batches=10**6, every_seconds=0.05, wal_bytes=10**12)
         w.connection()
         before = w.checkpoints
@@ -161,6 +185,7 @@ class TestTheCheckpointCadence:
         """The batch is already committed and already fsync'd when this runs.
         A checkpoint error is a WAL-SIZE event; raising here would turn a
         durable, acknowledged write into a reported failure."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path, every_batches=1, every_seconds=9999, wal_bytes=10**12)
         w.connection()
         monkeypatch.setattr(
@@ -173,6 +198,7 @@ class TestTheCheckpointCadence:
         """A reader holding a snapshot blocks truncation — the one way the WAL
         grows without bound under this design. Under the old per-batch close
         that answer was unobservable; here it is recorded."""
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         w.connection()
         ro = sqlite3.connect(f"file:{db_path(tmp_path)}?mode=ro", uri=True)
@@ -184,6 +210,93 @@ class TestTheCheckpointCadence:
         # ACCOUNTING follows the answer rather than asserting the answer.
         assert w.checkpoint_busy == (1 if row[0] else 0)
         ro.close()
+        w.close()
+
+    def _reader_in_the_way(self, tmp_path):
+        """A writer with every cadence trigger armed, and a read-only snapshot
+        taken BEFORE its latest commit, so a checkpoint cannot pass it."""
+        initialize_plane(tmp_path)
+        w = PlaneWriter(tmp_path, wal_bytes=1, every_batches=10**6, every_seconds=9999)
+        conn = w.connection()
+        conn.execute("CREATE TABLE _probe(x)")
+        conn.execute("INSERT INTO _probe VALUES(1)")
+        ro = sqlite3.connect(f"file:{db_path(tmp_path)}?mode=ro", uri=True)
+        ro.execute("BEGIN")
+        ro.execute("SELECT COUNT(*) FROM _probe").fetchone()
+        conn.execute("INSERT INTO _probe VALUES(2)")
+        return w, conn, ro
+
+    def test_a_held_reader_does_NOT_make_the_cadence_wait(self, tmp_path):
+        """#1693: 3 of the 4 wedge arms measured on 2026-09-26 were this
+        checkpoint waiting on fleet-pulse's readers. TRUNCATE calls the busy
+        handler, busy_timeout is 5s, and the cadence runs on the serial loop,
+        so every client behind it waited too. A reader must cost it nothing:
+        checkpoint what can be checkpointed, count the busy, move on."""
+        w, conn, ro = self._reader_in_the_way(tmp_path)
+        busy_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        t0 = time.monotonic()
+        w.after_batch()
+        waited = time.monotonic() - t0
+        ro.close()
+        # The reader really was in the way. Without this, the timing below
+        # would also pass against a checkpoint that had nothing to wait for.
+        assert (w.checkpoints, w.checkpoint_busy) == (1, 1)
+        assert waited < busy_ms / 2000, f"the cadence waited {waited:.2f}s on a reader"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == busy_ms, (
+            "the writer's commits must get their busy timeout back")
+        w.close()
+
+    def test_with_the_reader_gone_the_cadence_still_TRUNCATES(self, tmp_path):
+        """Not waiting must not become not bounding. TRUNCATE is what holds
+        the WAL under its ceiling; a cadence that stopped truncating would
+        pass the test above and let the WAL grow for the daemon's life."""
+        w, conn, ro = self._reader_in_the_way(tmp_path)
+        w.after_batch()                                 # busy: the reader
+        ro.close()
+        conn.execute("INSERT INTO _probe VALUES(3)")
+        wal = Path(str(db_path(tmp_path)) + "-wal")
+        assert wal.stat().st_size > 0
+        w.after_batch()
+        assert wal.stat().st_size == 0, "no reader left, and the WAL was not truncated"
+        w.close()
+
+    def test_a_failed_restore_REOPENS_rather_than_keep_a_writer_that_cannot_wait(
+            self, tmp_path):
+        """The busy timeout is off only for the checkpoint call. If putting it
+        back fails, the writer must not carry on with no timeout: its next
+        commit would fail the moment another process held the lock. It
+        reopens instead, with the timeout db.connect() sets."""
+
+        class RestoreFails:
+            def __init__(self, conn):
+                self._c = conn
+
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA busy_timeout = ") and not sql.endswith("= 0"):
+                    raise sqlite3.OperationalError("injected: restore failed")
+                return self._c.execute(sql, *args)
+
+            def close(self):
+                self._c.close()
+
+        initialize_plane(tmp_path)
+        w = PlaneWriter(tmp_path, wal_bytes=1, every_batches=10**6, every_seconds=9999)
+        real = w.connection()
+        real.execute("CREATE TABLE _checkpoint_probe(x)")  # make WAL cadence due
+        w._conn = RestoreFails(real)
+        w.after_batch()                                 # must not raise
+        fresh = w.connection()
+        assert w.reconnects == 1 and fresh is not real
+        assert fresh.execute("PRAGMA busy_timeout").fetchone()[0] > 0
+        w.close()
+
+    def test_sqlite_never_checkpoints_inside_the_commit(self, tmp_path):
+        """SQLite's own auto-checkpoint runs inside COMMIT, which is before the
+        daemon can reply. The explicit cadence, after the reply, is the only
+        checkpoint the held connection runs (#1693)."""
+        initialize_plane(tmp_path)
+        w = PlaneWriter(tmp_path)
+        assert w.connection().execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
         w.close()
 
 
@@ -224,6 +337,7 @@ class TestTheConnectionIsOpenedLATE:
         NOT called would pass against a build that never calls it at all."""
         from claudlobby.plane.emit_api import emit_batch
 
+        initialize_plane(tmp_path)
         w = PlaneWriter(tmp_path)
         calls = []
 

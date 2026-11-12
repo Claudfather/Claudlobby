@@ -24,7 +24,7 @@ import subprocess
 from tests.conftest import constructed_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB = os.path.join(REPO_ROOT, "lib")
+LIB = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 # A notify_fn that records delivery instead of sending: the assertion surface is
 # "did a notification fire", which is the property the outage turned on.

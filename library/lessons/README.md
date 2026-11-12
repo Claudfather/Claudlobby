@@ -17,8 +17,8 @@
 > **Existing files are retained** as the composition fallback for **non-vault** fleets (a fleet with
 > no `claudron_vault_path` still renders the lessons it lists in `fleet.yaml`). They also carry the
 > provenance behind the protocols/guardrails they motivated. The referential subset has been
-> migrated to the vault via `claudlobby lessons-migrate`; the per-note verdicts are the triage
-> ledger at `documentation/plans/2026-07-23-l3-lessons-triage-ledger.md`. Removal of these files is a
+> migrated to the vault via `claudlobby migration lessons`; the per-note verdicts are the
+> classification in `claudlobby/commands/lessons_migrate.py`. Removal of these files is a
 > later, scheduled release — not this one.
 
 "We learned this the hard way" notes. Specific incidents, retro findings, or empirically-discovered failure modes that bots should know about — distinct from rules (guardrails) or workflow patterns (protocols).

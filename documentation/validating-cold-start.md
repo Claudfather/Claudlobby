@@ -56,14 +56,14 @@ confusing, circular, or missing a step.
 
 ## Level 2 — a real cold run (for any onboarding change)
 
-Driven by the **`simulate-cold-start`** skill, which wraps `lib/coldstart-harness.sh`:
+Driven by the **`simulate-cold-start`** skill, which wraps `harness/coldstart-harness.sh`:
 
 ```bash
-lib/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
-# ... run the cold arm in a NEW terminal: cd <tree> && claude, then /setup ...
-lib/coldstart-harness.sh status        # what did the run create?
-lib/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
-lib/coldstart-harness.sh transcript    # harvest the session narrative
+harness/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
+# ... run the cold arm in a NEW terminal with the launch line prepare prints, then /setup ...
+harness/coldstart-harness.sh status        # what did the run create?
+harness/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
+harness/coldstart-harness.sh transcript    # harvest the session narrative
 ```
 
 **Export, do not clone.** A `git clone` carries `.git`, and your own commit messages describe the
@@ -134,7 +134,7 @@ env "${UNSET_ARGS[@]}" -u GITHUB_PAT -u TELEGRAM_BOT_TOKEN bash
 Confirmed live on the same reference bot: `RAILWAY_API_TOKEN` survives every name above, because
 this fleet has a Railway integration this recipe doesn't know about. Any fleet-specific credential
 your own `.env` declares needs its own `-u`, or check what's actually resolving with
-`claudlobby creds-reconcile` before trusting the scrub blind.
+`claudlobby host credentials reconcile` before trusting the scrub blind.
 
 **This only applies to running the exercise from inside an existing bot session** — the only
 case where any of this can leak, because it's the only case with a `bot.conf` to leak from. A
@@ -165,7 +165,12 @@ interactive session whose entire input is `/setup`.
 revealing that supervision exists. So snapshot the host, let the run do whatever it does, and
 diff. `reap` removes only what is *absent from the pre-run snapshot*, which is what makes this
 safe to run on a host carrying a production fleet. Fence only the irreversible: no `sudo`, no
-`--break-system-packages`, no writes outside the tree and the user unit directory.
+`--break-system-packages`, no writes outside the tree and the user unit directory. **Root is
+fenced structurally, because a prompt cannot be relied on:** `prepare`'s launch line loads no
+user settings (`--setting-sources project,local --strict-mcp-config`) and puts a refusing `sudo`
+first on `PATH`. On the #2002 host, Claude Code's default auto mode, a user-level bare `Bash`
+allow rule and passwordless sudo were all present at once; together they would have let a blind
+run act as root without asking.
 
 Stop at the credential gate. Needing real tokens is not a reason to skip the exercise —
 essentially every onboarding defect lives before it. Going *past* it exercises generate,
@@ -203,7 +208,7 @@ about whether your changes caused the success.
 
 Seven defects, two of them blockers at the first command; six further findings from the blind
 arms, **two of which were defects the fix itself had just introduced** — a doc promoting
-`lib/setup-system` without disclosing that it needs `sudo`, and prose ambiguous enough that a
+`claudlobby host setup` without disclosing that it needs `sudo`, and prose ambiguous enough that a
 fresh reader ran `generate` to test it.
 
 That last pair is the argument for Level 3 in one line: **the person fixing the docs is the

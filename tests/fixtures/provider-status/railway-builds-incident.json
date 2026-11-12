@@ -1,0 +1,354 @@
+{
+ "activeIncidents": [
+  {
+   "id": "00000000-0000-4000-8000-000000000010",
+   "slug": "FAKE0011",
+   "title": "Builds are taking longer than usual",
+   "status": "IDENTIFIED",
+   "createdAt": "2026-10-21T07:24:24.727677+00:00",
+   "resolvedAt": null,
+   "components": [
+    {
+     "id": "00000000-0000-4000-8000-000000000012",
+     "name": "Builds",
+     "groupName": "US West (California, USA)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000013",
+     "name": "Builds",
+     "groupName": "EU West (Amsterdam, Netherlands)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000014",
+     "name": "Builds",
+     "groupName": "Southeast Asia (Singapore)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000015",
+     "name": "Builds",
+     "groupName": "US East (Virginia, USA)",
+     "impact": "DEGRADED_PERFORMANCE"
+    }
+   ],
+   "updates": [
+    {
+     "id": "00000000-0000-4000-8000-000000000018",
+     "status": "IDENTIFIED",
+     "message": "Status update text.",
+     "createdAt": "2026-10-21T22:45:55.455550+00:00"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000019",
+     "status": "INVESTIGATING",
+     "message": "Status update text.",
+     "createdAt": "2026-10-21T08:28:31.264650+00:00"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000020",
+     "status": "INVESTIGATING",
+     "message": "Status update text.",
+     "createdAt": "2026-10-21T07:24:24.727677+00:00"
+    }
+   ]
+  }
+ ],
+ "entries": [
+  {
+   "type": "group",
+   "data": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "name": "Railway",
+    "components": [
+     {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Dashboard — railway.com",
+      "uptimePercentage": "100.00%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "API — backboard.railway.com",
+      "uptimePercentage": "100.00%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Support & Community — station.railway.com",
+      "uptimePercentage": "99.27%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Dev Studio — dev.new",
+      "uptimePercentage": "100.00%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "component",
+   "data": {
+    "id": "00000000-0000-4000-8000-000000000006",
+    "name": "Payments & Billing",
+    "uptimePercentage": "100.00%",
+    "months": [
+     {
+      "name": "July",
+      "percentage": "100.00%",
+      "days": [
+       {
+        "date": "2026-07-01",
+        "status": "none",
+        "incidents": []
+       },
+       {
+        "date": "2026-07-02",
+        "status": "none",
+        "incidents": []
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "group",
+   "data": {
+    "id": "00000000-0000-4000-8000-000000000007",
+    "name": "US East (Virginia, USA)",
+    "components": [
+     {
+      "id": "00000000-0000-4000-8000-000000000008",
+      "name": "Builds",
+      "uptimePercentage": "99.09%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Deployments",
+      "uptimePercentage": "100.00%",
+      "months": [
+       {
+        "name": "July",
+        "percentage": "100.00%",
+        "days": [
+         {
+          "date": "2026-07-01",
+          "status": "none",
+          "incidents": []
+         },
+         {
+          "date": "2026-07-02",
+          "status": "none",
+          "incidents": []
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "generatedAt": "2026-10-21T23:06:13.820Z",
+ "maintenances": [],
+ "recentIncidents": [
+  {
+   "id": "00000000-0000-4000-8000-000000000021",
+   "slug": "FAKE0022",
+   "title": "API degradation causing slow or stuck deployments",
+   "status": "RESOLVED",
+   "createdAt": "2026-09-29T15:29:30.391697+00:00",
+   "resolvedAt": "2026-09-29T19:15:15.828708+00:00",
+   "components": [
+    {
+     "id": "00000000-0000-4000-8000-000000000023",
+     "name": "API — backboard.railway.com",
+     "groupName": "Railway",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000024",
+     "name": "Deployments",
+     "groupName": "US East (Virginia, USA)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000025",
+     "name": "Deployments",
+     "groupName": "US West (California, USA)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000026",
+     "name": "Deployments",
+     "groupName": "EU West (Amsterdam, Netherlands)",
+     "impact": "DEGRADED_PERFORMANCE"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000027",
+     "name": "Deployments",
+     "groupName": "Southeast Asia (Singapore)",
+     "impact": "DEGRADED_PERFORMANCE"
+    }
+   ],
+   "updates": [
+    {
+     "id": "00000000-0000-4000-8000-000000000028",
+     "status": "RESOLVED",
+     "message": "Status update text.",
+     "createdAt": "2026-09-29T19:15:15.828708+00:00"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000029",
+     "status": "MONITORING",
+     "message": "Status update text.",
+     "createdAt": "2026-09-29T18:37:57.901531+00:00"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000030",
+     "status": "INVESTIGATING",
+     "message": "Status update text.",
+     "createdAt": "2026-09-29T15:29:30.391697+00:00"
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-000000000031",
+   "slug": "FAKE0032",
+   "title": "Builds paused for Free, Trial and Hobby workspaces",
+   "status": "RESOLVED",
+   "createdAt": "2026-10-21T02:49:46.359069+00:00",
+   "resolvedAt": "2026-10-21T02:51:30.987902+00:00",
+   "components": [
+    {
+     "id": "00000000-0000-4000-8000-000000000033",
+     "name": "Builds",
+     "groupName": "US East (Virginia, USA)",
+     "impact": "OPERATIONAL"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000034",
+     "name": "Builds",
+     "groupName": "Southeast Asia (Singapore)",
+     "impact": "OPERATIONAL"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000035",
+     "name": "Builds",
+     "groupName": "US West (California, USA)",
+     "impact": "OPERATIONAL"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000036",
+     "name": "Builds",
+     "groupName": "EU West (Amsterdam, Netherlands)",
+     "impact": "OPERATIONAL"
+    }
+   ],
+   "updates": [
+    {
+     "id": "00000000-0000-4000-8000-000000000037",
+     "status": "RESOLVED",
+     "message": "Status update text.",
+     "createdAt": "2026-10-21T02:51:30.987902+00:00"
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000038",
+     "status": "TRIAGE",
+     "message": "Status update text.",
+     "createdAt": "2026-10-21T02:49:46.359069+00:00"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,3 @@
+### Fixed — the plane's trust panel warns only on unconfirmed bot actors, as `plane doctor` does (#1814)
+
+The trust panel raised its warning on every provisional identity. An external human recorded from a real Telegram message stays provisional for good, because no roster declares one, so the panel warned on the operator's own name as if it were a mistyped bot. It now warns on the list `plane doctor`'s `provisional actors` rung reads (`provisional_actors`, which leaves `human:` actors out), and shows the total of provisional identities beside it, without a warning. `/api/trust` gains `provisional_actor_suspects`; `provisional_identities` is unchanged.

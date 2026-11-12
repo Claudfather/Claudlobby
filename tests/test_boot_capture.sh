@@ -18,8 +18,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BC="$SCRIPT_DIR/../lib/boot-capture.sh"
-LIBC="$SCRIPT_DIR/../lib/lib-common.sh"
+BC="$SCRIPT_DIR/../claudlobby/_runtime_scripts/boot-capture.sh"
+LIBC="$SCRIPT_DIR/../claudlobby/_runtime_scripts/lib-common.sh"
 PASS=0; FAIL=0; TOTAL=0
 SOCKETS=""
 
