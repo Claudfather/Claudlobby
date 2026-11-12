@@ -80,7 +80,7 @@ def _stop(args) -> CommandOutput:
     from .host import _operator_shell
     from .releases import _host_root
 
-    root = _host_root(args)
+    root = _host_root(args, allow_fleet=args.fleet_job is not None)
     _operator_shell(root)
     if args.fleet_job and not args.fleet:
         raise CommandFailure("invalid_argument", "--fleet-job requires an explicit --fleet selector")
