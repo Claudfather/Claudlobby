@@ -41,6 +41,60 @@ def test_spawn_scheduled_projection_is_binding_only_for_explicit_restore(tmp_pat
     assert inventory._darwin_print(observed, "gui/501/fixture", restore_pending=True)["ActiveState"] == "activating"
 
 
+@pytest.mark.parametrize("fault", [None, "missing-service", "foreign-service", "wrong-trigger"])
+def test_added_timer_restore_observes_its_real_service_binding(tmp_path, monkeypatch, fault):
+    import base64
+    import hashlib
+    from types import SimpleNamespace
+    from claudlobby import update_services as services
+
+    obs = Observations(tmp_path)
+    service = obs.add("alpha.watch.service", "fleet")
+    timer = obs.add("alpha.watch.timer", "fleet", service=service.name)
+    declaration = obs.declarations[-1]
+    timer.chmod(declaration.source.stat().st_mode & 0o777)
+    content = declaration.source.read_bytes()
+    row = {"target": timer.name, "manager": "Linux", "scheduled": True,
+           "bot_binding": None, "enroll": True, "enabled": True,
+           "destination": str(timer), "declaration": {
+               "source": str(declaration.source), "working_directory": str(declaration.working_directory),
+               "environment": list(declaration.environment)},
+           "candidate": {"sha256": hashlib.sha256(content).hexdigest(),
+                         "mode": declaration.source.stat().st_mode & 0o777,
+                         "content": {"base64": base64.b64encode(content).decode()}}}
+    # Resume the native failure point: files published, service restored,
+    # timer not yet started. Inventory and ownership are the real implementation.
+    progress = {"restore": "files"}
+    record = {"consumers": {service.name: {"restore": "done", "intent": {
+        "manager": "Linux", "scheduled": True}}, timer.name: progress}}
+    saved = []
+    store = SimpleNamespace(save=lambda value: saved.append(value))
+    monkeypatch.setattr(services, "current_git_declarations", lambda *_: tuple(obs.declarations))
+    if fault == "missing-service":
+        service.unlink()
+    elif fault == "foreign-service":
+        service.write_bytes(service.read_bytes().replace(str(obs.root).encode(), b"/foreign"))
+    elif fault == "wrong-trigger":
+        obs.properties[timer.name]["Triggers"] = "foreign.service"
+
+    def runner(command, **kwargs):
+        if command[5] in {"svc_activation_reload", "svc_activation_start", "svc_inventory_state"}:
+            obs.calls.append((command[5], command[6:]))
+            return subprocess.CompletedProcess(command, 0, "enabled loaded active", "")
+        return obs.runner(command, **kwargs)
+
+    adapter = Adapter(obs.package, runner=runner)
+    if fault:
+        with pytest.raises(InventoryError):
+            services._restore_added(store, record, progress, row, adapter, {"data_root": str(obs.root)})
+        assert not any(name == "svc_activation_start" for name, _ in obs.calls)
+    else:
+        services._restore_added(store, record, progress, row, adapter, {"data_root": str(obs.root)})
+        assert progress["restore"] == "done" and saved
+        assert {args[0] for name, args in obs.calls if name == "svc_inventory_properties"} == {
+            service.name, timer.name}
+
+
 def test_nonstandard_apple_xml_remains_raw_and_classifies_foreign(tmp_path, monkeypatch):
     raw = _apple_xml()
     obs = Observations(tmp_path)
