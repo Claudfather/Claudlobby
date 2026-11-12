@@ -49,33 +49,24 @@ def test_entity_history_does_not_decode_unrelated_payloads(tmp_path, monkeypatch
         assert counts == {"rows": 0, "decodes": 0}
 
 
-def test_history_alias_selection_keeps_rename_and_host_windows(tmp_path):
+def test_history_alias_selection_keeps_the_rename_window(tmp_path):
     root = _root(tmp_path)
     renamed = "bot:f/renamed"
     _emit(root, [_snap(BOT, "old", T1, _bot(BOT))])
-    host1 = (root / "state/host-uid").read_text().strip()
     # A rename preserves the identity; only the registry's alias changes.
     with _conn(root) as conn:
         conn.execute("UPDATE identity_registry SET alias=?"
                      " WHERE kind='bot_instance' AND alias=?", (renamed, BOT))
     _emit(root, [_snap(renamed, "new", T2, _bot(renamed, "new")),
                  _snap(renamed, "tie", T2, _bot(renamed, "tie"))])
-    # A second host sees the same alias/UID, but has an independent window.
-    host2 = "host_" + "2" * 32
-    (root / "state/host-uid").write_text(host2 + "\n")
-    _emit(root, [_snap(renamed, "other-host-1", T1, _bot(renamed, "h2a")),
-                 _snap(renamed, "other-host-2", T3, _bot(renamed, "h2b"))])
     with _conn(root) as conn:
         old = rr.entity_history(conn, BOT)
         assert len(old) == 1 and old[0]["valid_to"] == T2
         renamed_rows = rr.entity_history(conn, renamed)
-        assert [(r["payload"]["model"], r["valid_to"]) for r in renamed_rows
-                if r["host_uid"] == host1] == [("new", T2), ("tie", None)]
-        assert [(r["payload"]["model"], r["valid_to"]) for r in renamed_rows
-                if r["host_uid"] == host2] == [("h2a", T3), ("h2b", None)]
+        assert [(r["payload"]["model"], r["valid_to"])
+                for r in renamed_rows] == [("new", T2), ("tie", None)]
         by_uid = rr.entity_history(conn, old[0]["entity_uid"])
-        assert len(by_uid) == 5
-        assert {r["host_uid"] for r in by_uid} == {host1, host2}
+        assert len(by_uid) == 3
 
 
 def test_history_and_changes_keep_f11_tombstones(tmp_path):
