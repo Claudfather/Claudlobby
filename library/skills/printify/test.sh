@@ -14,9 +14,15 @@ pass=0; fail=0
 ok() { printf 'ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no() { printf 'FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 
+# Captured output is matched with a bash pattern ([[ $x == *text* ]]), never
+# piped to `grep -q`: grep -q exits at its first match, and bash's printf writes
+# to a pipe one line at a time, so a later line can meet a closed pipe. Under
+# pipefail that SIGPIPE (status 141) becomes the pipeline's status, which fails
+# a check whose match was found and passes one that negates it.
+
 # 1. help works with NO creds and exits 0
 if out=$(env -u PRINTIFY_API_KEY -u PRINTIFY_API_TOKEN "$SH" help 2>&1) \
-   && printf '%s' "$out" | grep -q "printify"; then
+   && [[ $out == *printify* ]]; then
   ok "help works without creds"
 else no "help without creds"; fi
 
@@ -75,10 +81,10 @@ if [ "$(printf '%s' "$cov" | grep -c '\[+\]')" -eq 4 ] && [ "$(printf '%s' "$cov
 else no "migrate --dry-run coverage counts (got +$(printf '%s' "$cov" | grep -c '\[+\]') -$(printf '%s' "$cov" | grep -c '\[-\]'))"; fi
 
 # 8. migrate --dry-run maps the right ids: White retained, Transparent dropped
-if printf '%s' "$cov" | grep -q '\[+\] 45748' \
-   && printf '%s' "$cov" | grep -q '\[+\] 45754' \
-   && printf '%s' "$cov" | grep -q '\[-\] 45747' \
-   && printf '%s' "$cov" | grep -q '\[-\] 45753'; then
+if [[ $cov == *'[+] 45748'* ]] \
+   && [[ $cov == *'[+] 45754'* ]] \
+   && [[ $cov == *'[-] 45747'* ]] \
+   && [[ $cov == *'[-] 45753'* ]]; then
   ok "migrate --dry-run: White 45748/45754 retained, Transparent 45747/45753 dropped"
 else no "migrate --dry-run id mapping"; fi
 
@@ -128,7 +134,7 @@ STUB
 chmod +x "$stub/curl"
 mf_out=$(PATH="$stub:$PATH" PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
          "$SH" migrate --product P --to-provider 99 --dry-run 2>&1); mf_rc=$?
-if [ "$mf_rc" -eq 0 ] && ! printf '%s' "$mf_out" | grep -q 'unbound variable'; then
+if [ "$mf_rc" -eq 0 ] && [[ $mf_out != *'unbound variable'* ]]; then
   ok "hermetic: two api_get calls in one door scope (no RETURN-trap/unbound crash)"
 else no "hermetic multi-fetch regression (rc=$mf_rc): $(printf '%s' "$mf_out" | grep -i 'unbound\|error' | head -1)"; fi
 
@@ -136,8 +142,8 @@ else no "hermetic multi-fetch regression (rc=$mf_rc): $(printf '%s' "$mf_out" | 
 # verified across providers within one blueprint).
 xb_out=$(PATH="$stub:$PATH" PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
          "$SH" migrate --product P --to-provider 99 --to-blueprint 794 --dry-run 2>&1)
-if printf '%s' "$xb_out" | grep -q 'CROSS-BLUEPRINT MIGRATE' \
-   && printf '%s' "$xb_out" | grep -q 'UNVERIFIED'; then
+if [[ $xb_out == *'CROSS-BLUEPRINT MIGRATE'* ]] \
+   && [[ $xb_out == *UNVERIFIED* ]]; then
   ok "cross-blueprint migrate warns the coverage report is unverified"
 else no "cross-blueprint migrate caveat"; fi
 rm -rf "$stub"

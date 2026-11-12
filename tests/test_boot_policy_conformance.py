@@ -47,6 +47,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import BotConfig, FleetConfig, TeamConfig
+from tests.package_fixtures import git_package
 from claudlobby.paths import Paths
 
 # design doc §6.1's table, in claudlobby.boot.bot_conf_lines' render order.
@@ -62,7 +63,7 @@ BOOT_KEYS = [
 # Only MCP_TIMEOUT carries an `export` prefix IN THE FILE (spec §6.1: it is
 # the one key Claude Code itself reads out of the environment; the rest are
 # read by the launcher). That is a fact about bot.conf's text, NOT about what
-# reaches the session: lib/start-bot.sh sources bot.conf under `set -a`, so
+# reaches the session: claudlobby/_runtime_scripts/start-bot.sh sources bot.conf under `set -a`, so
 # all six land in `exec claude`'s environment as exported variables whatever
 # their prefix. The prefix is what makes MCP_TIMEOUT independent of that
 # sourcing convention.
@@ -76,7 +77,7 @@ _BOT_IDS_AND_PRIORITY = [("lead", 0), ("w1", 1), ("w2", 1)]
 
 
 def _fixture_fleet() -> FleetConfig:
-    return FleetConfig(
+    return FleetConfig(manager="lead",
         name="fixture-fleet",
         service_prefix="com.fixture",
         bots={
@@ -93,7 +94,7 @@ def _fixture_paths(tmp_path) -> Paths:
     for bot_id in ("lead", "w1", "w2"):
         (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
     (root / "lib").mkdir()
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 def _pin_cpu_count(monkeypatch, count: int) -> None:
@@ -136,7 +137,7 @@ def _mock_host_boot(monkeypatch) -> dict:
 
 def _key_line(conf: str, key: str) -> list[str]:
     """Every bot.conf line whose key is `key`, matching the exact grep
-    `bot_conf_get` (lib/lib-common.sh) uses at runtime: optional `export `,
+    `bot_conf_get` (claudlobby/_runtime_scripts/lib-common.sh) uses at runtime: optional `export `,
     then `KEY=`."""
     pattern = re.compile(rf"^(export )?{re.escape(key)}=")
     return [line for line in conf.splitlines() if pattern.match(line)]
@@ -236,14 +237,14 @@ class TestUnitsCarryNoBootPolicy:
             assert needle not in plist, f"{needle!r} leaked into the launchd plist"
 
 
-# lib/start-bot.sh cannot import claudlobby.boot.READY_TIMEOUT_FLOOR_S -- bash
+# claudlobby/_runtime_scripts/start-bot.sh cannot import claudlobby.boot.READY_TIMEOUT_FLOOR_S -- bash
 # has no such door -- so it names the floor literally in two places (final
 # wave item 7): the `${RC_READY_TIMEOUT_S:-N}` default read at startup, and
 # the `_rc_timeout_s=N` fallback a non-numeric/empty override coerces to
 # under `set -u` (F4: an un-regenerated bot.conf that predates the BOOT_*
 # keys still has a value to fall back on). Nothing pinned either literal to
 # the Python constant it must equal -- this reads the real shipped script.
-_START_BOT_SH = Path(__file__).resolve().parent.parent / "lib" / "start-bot.sh"
+_START_BOT_SH = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts" / "start-bot.sh"
 
 
 class TestStartBotShReadyTimeoutFloor:
@@ -255,7 +256,7 @@ class TestStartBotShReadyTimeoutFloor:
         text = self._start_bot_sh_text()
         match = re.search(r"RC_READY_TIMEOUT_S:-(\d+)\}", text)
         assert match, (
-            "could not find ${RC_READY_TIMEOUT_S:-N} in lib/start-bot.sh"
+            "could not find ${RC_READY_TIMEOUT_S:-N} in claudlobby/_runtime_scripts/start-bot.sh"
         )
         assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
 
@@ -263,6 +264,197 @@ class TestStartBotShReadyTimeoutFloor:
         text = self._start_bot_sh_text()
         match = re.search(r"_rc_timeout_s=(\d+)\s*;;", text)
         assert match, (
-            "could not find the _rc_timeout_s=N coercion fallback in lib/start-bot.sh"
+            "could not find the _rc_timeout_s=N coercion fallback in claudlobby/_runtime_scripts/start-bot.sh"
         )
         assert int(match.group(1)) == READY_TIMEOUT_FLOOR_S
+
+
+class TestStartBotShScrubsTheLeakedMarkers:
+    """#2145 C10 (run log 2026-10-05): a tmux server started from inside a Claude Code
+    session hands the pane CLAUDECODE, CLAUDE_CODE_CHILD_SESSION and that session's
+    CLAUDE_CODE_SESSION_ID, and an interactive claude inheriting the child marker
+    boots with transcript saving off. The launch command unsets all three after the
+    env file and right before exec."""
+
+    _LINE = re.compile(r"^CLAUDE_CMD=.*$", re.MULTILINE)
+
+    def _line(self) -> str:
+        lines = self._LINE.findall(_START_BOT_SH.read_text())
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_the_launch_command_unsets_the_leaked_markers(self):
+        line = self._line()
+        loaded = line.index(". '$BOT_ENV_FILE';")
+        scrubbed = re.search(
+            r"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION "
+            r"CLAUDE_CODE_SESSION_ID; exec \$CLAUDE ", line)
+        assert scrubbed and loaded < scrubbed.start()
+
+    def test_a_bot_started_from_inside_a_claude_session_sees_no_marker(self, tmp_path):
+        import os
+        import subprocess
+
+        env_file = tmp_path / "bot.env"
+        env_file.write_text("")
+        stub = tmp_path / "claude"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s|%s\\n" "${CLAUDECODE-unset}" '
+                        '"${CLAUDE_CODE_CHILD_SESSION-unset}" "${CLAUDE_CODE_SESSION_ID-unset}" "$*"\n')
+        stub.chmod(0o755)
+        # The script's own assignment, expanded by bash, then run as the pane runs it.
+        script = f'{self._line()}\nexec /bin/bash -c "$CLAUDE_CMD"\n'
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BOT_ENV_FILE": str(env_file),
+                 "CLAUDE": str(stub), "SESSION_NAME": "bot-session", "CLAUDE_FLAGS": "",
+                 "CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_SESSION_ID": "parent"},
+            capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "unset|unset|unset|--name bot-session\n"
+
+
+class TestStartBotShKeepsSessionsOffTheDesktop:
+    """#2332: on a host with a desktop, the user manager hands every unit the
+    desktop's DISPLAY and WAYLAND_DISPLAY, so a bot session that opened a browser
+    (a login CLI, an Artifact preview, `claudlobby plane open`) put a window on the
+    host's screen, and the window outlived the command. The launch command cuts the
+    desktop before the env file: DISPLAY unset, WAYLAND_DISPLAY set empty and
+    BROWSER=true.
+
+    No real browser runs: every opener is a stand-in. The stand-in xdg-open decides
+    as xdg-utils 1.1.3's generic path does (the desktop's browser while a display is
+    named, then $BROWSER, then a console browser). The stand-in browser opens a
+    window exactly when a display server is reachable: a non-empty DISPLAY, or a
+    Wayland socket found by libwayland's rule (WAYLAND_DISPLAY when set, else
+    wayland-0, under XDG_RUNTIME_DIR), checked against libwayland itself below. The
+    test's XDG_RUNTIME_DIR holds a listening wayland-0, as a desktop session's does."""
+
+    _URL = "https://example.invalid/sign-in"
+
+    _XDG_OPEN = ('#!/bin/sh\n'
+                 'if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then exec gui-browser "$1"; fi\n'
+                 'if [ -n "$BROWSER" ]; then exec $BROWSER "$1"; fi\n'
+                 'echo "console browser" >> "$OPENER_LOG"\n'
+                 'exit 3\n')
+
+    _GUI_BROWSER = """#!/usr/bin/env python3
+import os, socket
+def wayland():
+    name = os.environ.get("WAYLAND_DISPLAY")
+    if name is None:
+        name = "wayland-0"
+    if not name:
+        return False
+    path = name if name.startswith("/") else os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), name)
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+seen = [n for n, up in (("x11", bool(os.environ.get("DISPLAY"))), ("wayland", wayland())) if up]
+with open(os.environ["OPENER_LOG"], "a") as log:
+    log.write(("window " + ",".join(seen) if seen else "no display") + "\\n")
+raise SystemExit(0 if seen else 1)
+"""
+
+    # What the session runs: a CLI that hands its URL to xdg-open; Claude Code's own
+    # opener (2.1.303: $BROWSER, else xdg-open, and nothing at all with no display);
+    # and a tool that starts a GUI browser itself.
+    _CLI = ('#!/bin/sh\n'
+            'printf "env %s|%s|%s\\n" "${DISPLAY-unset}" "${WAYLAND_DISPLAY-unset}" "${BROWSER-unset}" >> "$OPENER_LOG"\n'
+            'xdg-open "$URL"\n'
+            'if [ -n "$BROWSER" ]; then "$BROWSER" "$URL"\n'
+            'elif [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then xdg-open "$URL"; fi\n'
+            'gui-browser "$URL"\n'
+            'exit 0\n')
+
+    def _desktop(self, tmp_path, env_file_text=""):
+        """Run the launch line as the pane runs it, in the environment a bot unit
+        gets from a desktop host's user manager; return the openers' log."""
+        import os
+        import shutil
+        import socket
+        import subprocess
+        import tempfile
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in (("xdg-open", self._XDG_OPEN), ("gui-browser", self._GUI_BROWSER),
+                           ("claude", self._CLI)):
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        env_file = tmp_path / "bot.env"
+        env_file.write_text(env_file_text)
+        log = tmp_path / "openers.log"
+        # a short path: a unix socket's path is limited to about 100 bytes
+        runtime = Path(tempfile.mkdtemp(prefix="xdg-", dir="/tmp"))
+        server = socket.socket(socket.AF_UNIX)
+        try:
+            server.bind(str(runtime / "wayland-0"))
+            server.listen(8)
+            script = f'{TestStartBotShScrubsTheLeakedMarkers()._line()}\nexec /bin/bash -c "$CLAUDE_CMD"\n'
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "BOT_ENV_FILE": str(env_file),
+                     "CLAUDE": "claude", "SESSION_NAME": "bot-session", "CLAUDE_FLAGS": "",
+                     "OPENER_LOG": str(log), "URL": self._URL,
+                     "DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0", "XDG_SESSION_TYPE": "wayland",
+                     "XDG_RUNTIME_DIR": str(runtime)},
+                capture_output=True, text=True, timeout=30)
+        finally:
+            server.close()
+            shutil.rmtree(runtime, ignore_errors=True)
+        assert result.returncode == 0, result.stderr
+        return log.read_text().splitlines()
+
+    def test_no_opener_in_a_bot_session_reaches_the_desktop(self, tmp_path):
+        lines = self._desktop(tmp_path)
+        assert [line for line in lines if line.startswith("window")] == [], lines
+        # xdg-open ran $BROWSER, not a console browser in the bot's terminal
+        assert "console browser" not in lines, lines
+        assert lines == ["env unset||true", "no display"], lines
+
+    def test_a_display_the_bots_own_config_declares_still_reaches_it(self, tmp_path):
+        lines = self._desktop(tmp_path, "export DISPLAY=:7 BROWSER=gui-browser\n")
+        assert lines[0] == "env :7||gui-browser", lines
+
+    def test_the_stand_ins_wayland_rule_is_libwaylands(self, tmp_path):
+        """Unset, WAYLAND_DISPLAY falls back to wayland-0; empty, it names no socket."""
+        import ctypes.util
+        import shutil
+        import socket
+        import subprocess
+        import sys
+        import tempfile
+
+        import pytest
+
+        lib = ctypes.util.find_library("wayland-client")
+        if not lib:
+            pytest.skip("libwayland-client is not installed here")
+        probe = ("import ctypes, sys\n"
+                 f"wl = ctypes.CDLL({lib!r})\n"
+                 "wl.wl_display_connect.restype = ctypes.c_void_p\n"
+                 "wl.wl_display_connect.argtypes = [ctypes.c_char_p]\n"
+                 "wl.wl_display_disconnect.argtypes = [ctypes.c_void_p]\n"
+                 "d = wl.wl_display_connect(None)\n"
+                 "if d:\n    wl.wl_display_disconnect(d)\n"
+                 "print('connected' if d else 'refused')\n")
+        runtime = Path(tempfile.mkdtemp(prefix="xdg-", dir="/tmp"))
+        server = socket.socket(socket.AF_UNIX)
+        try:
+            server.bind(str(runtime / "wayland-0"))
+            server.listen(8)
+            seen = {}
+            for arm, extra in (("unset", {}), ("empty", {"WAYLAND_DISPLAY": ""})):
+                result = subprocess.run([sys.executable, "-I", "-c", probe],
+                                        env={"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": str(runtime), **extra},
+                                        capture_output=True, text=True, timeout=30)
+                seen[arm] = result.stdout.strip()
+        finally:
+            server.close()
+            shutil.rmtree(runtime, ignore_errors=True)
+        assert seen == {"unset": "connected", "empty": "refused"}

@@ -12,7 +12,7 @@ The cost reasons are about what a door DOES when it runs. This one is about
 how it ARRIVES — a different axis, so the list is deliberately not numbered
 here or in its test (``weekly-worker-restart`` already states a reason outside
 the original four, and a prose count over a registry is the thing that rots).
-It exists and it exists because ``lib/`` is read on demand, per use: a root
+It exists and it exists because ``claudlobby/_runtime_scripts/`` is read on demand, per use: a root
 pull is in force for every bot on its next call, with no restart gate and no
 canary window. Where that is the whole delivery mechanism there is no step at
 which one bot can be staged ahead of the others, so the flag is not a hedge
@@ -21,17 +21,16 @@ one fleet IS the canary. It is deliberately narrow, and the test is DELIBERATENE
 rather than mechanism: a gate is something a human has to CHOOSE, never
 something that happens on the next scheduled run. A restart, a per-fleet
 compose, or an enrollment that is ALREADY opt-in all count. Automatic
-enrollment does not — ``lib/setup-fleet`` skips only the jobs in the composed
-DORMANT manifest, so a job that is not opt-in is enrolled on the next setup run
-with nobody deciding to. Naming enrollment itself as a gate would therefore
+enrollment does not — host activation skips jobs declared dormant, but enrolls
+a default-on job in its candidate unit set. Naming enrollment itself as a gate would therefore
 disqualify ``boot-capture``, whose enrollment is automatic *precisely absent
 this flag*: the flag is what creates the gate, so it cannot also be the reason
 the category does not apply. A door claiming the category must additionally do
 nothing from the four above.
 
 Whatever stays opt-in must be NAMED where the operator looks — ``claudlobby
-doctor``, ``claudlobby plane doctor``, and the closing summary of
-``lib/setup-fleet`` / ``lib/setup-system`` — with the one line that arms it.
+host doctor --switches`` and ``claudlobby plane doctor`` — with the one line
+that arms it.
 
 The reason the rule exists is not caution about defaults; it is that a
 behavior nobody can SEE is a behavior nobody has. A dozen doors shipped dormant
@@ -42,7 +41,7 @@ closes — did not run anywhere unless an operator had read a dozen source
 comments and armed a dozen flags. That is opacity, not safety.
 
 **Why a registry rather than the flags themselves.** The flags already
-existed, spread across ``system.yaml`` enroll keys, ``lib/*.sh`` self-gates,
+existed, spread across ``system.yaml`` enroll keys, ``claudlobby/_runtime_scripts/*.sh`` self-gates,
 ``composer.py`` arming tables and a validator's hardcoded prefix list. Four
 copies of "what knobs exist" means the fifth reader gets it wrong: the F18
 closure deleted the shadow and ``PLANE_SHADOW_ENABLED`` kept sitting in a live
@@ -53,7 +52,7 @@ consumer DERIVES from it:
   which ``Environment=`` line (a scheduler env is closed; #1383).
 * ``validator`` — a ``*_ENABLED`` key in a claudlobby namespace that no
   switch claims is a DEAD flag, warned without anyone maintaining a list.
-* ``doctor`` / ``plane doctor`` / ``setup-fleet`` / ``setup-system`` — the
+* ``host doctor`` / ``plane doctor`` — the
   table the operator reads.
 * ``status`` — the header line that names a target-workflow door turned off.
 * the three schema/architecture docs — a GENERATED block rendered by
@@ -66,7 +65,9 @@ consumer DERIVES from it:
     everything the rule puts on. An explicit ``0`` is honoured and is said
     LOUDLY by the door itself, so an off switch is visible in the logs of the
     host it is off on — a silent no-op is how a disarmed door reads as a
-    broken one.
+    broken one. The exception is a row marked ``off_refused``: activation
+    needs it on and refuses its ``0`` before it stops any bot, and the row's
+    disarm line says so.
 ``opt-in``
     OFF unless the env var resolves to exactly ``"1"`` (or, for a pure enroll
     knob, until the manifest arms it). Reserved for the four categories above.
@@ -103,7 +104,7 @@ broken. So the carrier is declared and the two lines are DERIVED from it:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -114,7 +115,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 HOST_JOB = "host job"
 HOST_SERVICE = "host service"
 FLEET_JOB = "fleet job"
-GENERATE = "generate"
+GENERATE = "composition"
 DOOR = "door"
 
 # --- polarities -------------------------------------------------------------
@@ -128,17 +129,21 @@ ENV_HOST = "host/root .env"
 BOT_CONF = "fleet.yaml env: → bot.conf"
 ENROLL_HOST = "system.yaml enroll"
 ENROLL_FLEET = "fleet.yaml"
+#: A per-bot manifest key the composer reads and nothing else: no unit.
+#: Activation publishes it for one selected bot before the operator widens it;
+#: a deny can bind on the next tool call, while .mcp.json is read at session start.
+COMPOSE_BOT = "fleet.yaml bots.<bot> → published composition"
 
-#: Carriers whose scope is a FLEET. A host-wide run (``lib/setup-system``,
+#: Carriers whose scope is a FLEET. A host-wide run (``host doctor``,
 #: ``plane doctor`` without ``--fleet``) has not read these, and saying so is
 #: the whole of F5: an unread scope reported as "shipped default" is an
 #: assertion about something nobody looked at.
-FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET})
+FLEET_SCOPED_CARRIERS = frozenset({ENV_FLEET, BOT_CONF, ENROLL_FLEET, COMPOSE_BOT})
 
 _ENV_WHERE = {
     ENV_FLEET: "the fleet-tier .env",
     ENV_HOST: "the host or root .env",
-    BOT_CONF: ("fleet.yaml bots.NAME.env: (then generate; the bot reads it at"
+    BOT_CONF: ("fleet.yaml bots.NAME.env: (then host update apply FULL_COMMIT_SHA; the bot reads it at"
                " its next start — a .env tier does NOT reach a session)"),
 }
 
@@ -171,6 +176,16 @@ class Switch:
     #: loop), never merely a slower or quieter one.
     target_workflow: bool = False
     why_opt_in: str = ""  #: which of the four categories keeps it off
+    #: an opt-out whose off value Git update REFUSES, before it stops any bot:
+    #: its disarm line names that refusal instead of offering the value
+    off_refused: bool = False
+    #: COMPOSE_BOT only: what to run after setting the key, and when what it
+    #: composes takes effect. The defaults are the deny-rule shape #1665 set;
+    #: a key whose file is read at SESSION START (#1604's .mcp.json) must say
+    #: restart, or the arm line promises something the key cannot do.
+    compose_steps: str = ("claudlobby --root <data-root> host update apply FULL_COMMIT_SHA")
+    takes_effect: str = "Git update can restart enrolled bots; the deny then binds on the next tool call"
+    takes_effect_off: str = "Git update can restart enrolled bots; the deny is removed for the next tool call"
 
     @property
     def default_on(self) -> bool:
@@ -203,19 +218,30 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
             return (f"unset {var} — recording by default",
                     f"{var}=1 in {where} — the ruled harness exemption;"
                     " silences EVERY door at once")
-        return f"unset {var} — on by default", f"{var}=0 in {where}"
+        disarm = (f"none — first-fleet initialization refuses {var}=0 in {where}; ordinary updates reuse existing registry identities"
+                  if sw.off_refused else f"{var}=0 in {where}")
+        return f"unset {var} — on by default", disarm
+    if sw.carrier == COMPOSE_BOT:
+        return (
+            f"bots.<bot>.{sw.config}: true in fleet.yaml on an independent canary root with ONE armed bot first, then"
+            f" {sw.compose_steps} ({sw.takes_effect}); widen to"
+            f" defaults.{sw.config} once it has run clean",
+            f"{sw.config}: false at bots.<bot> or defaults in fleet.yaml, then"
+            f" {sw.compose_steps} ({sw.takes_effect_off})",
+        )
     if sw.carrier == ENROLL_HOST:
         key = sw.config or f"host.jobs.{sw.job}.enroll"
+        extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
         return (
-            f"{key}: true in THIS host's system.yaml (host jobs bypass the"
-            " fleet merge), then generate + lib/setup-system",
-            f"{key}: false in THIS host's system.yaml, then generate (composes"
-            " no unit) + lib/setup-system (walks back the installed one)",
+            f"{key}: true in this host's override, ~/.config/claudlobby/system.yaml"
+            f" (host jobs bypass the fleet merge){extra}, then host update apply FULL_COMMIT_SHA",
+            f"{key}: false in this host's override, ~/.config/claudlobby/system.yaml"
+            "; removing an existing native consumer is currently refused by Git update",
         )
     key = sw.config or f"defaults.jobs.{sw.job}.enroll"
     extra = f" (plus {sw.config_extra})" if sw.config_extra else ""
-    return (f"{key}: true in fleet.yaml{extra}, then generate + lib/setup-fleet",
-            f"{key}: false in fleet.yaml, then generate + lib/setup-fleet")
+    return (f"{key}: true in fleet.yaml{extra}, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA",
+            f"{key}: false in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA")
 
 
 #: Every switch the shipped system has. Adding a door with a knob means adding
@@ -223,6 +249,32 @@ def _carrier_lines(sw: Switch) -> tuple[str, str]:
 #: warning is the enforcement (a flag no row claims is reported as dead).
 SWITCHES: tuple[Switch, ...] = (
     # ---------------- the target workflow, on ------------------------------
+    Switch(key="session-export", scope=FLEET_JOB, polarity=OPT_OUT, carrier=ENV_FLEET,
+           env="SESSION_EXPORT_ENABLED", job="session-export", plane=True,
+           what="every 15 min, read each bot's clauDNA export door, record one session_summary per sealed segment, then ack"),
+    Switch(key="claudna-session-summary", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.session_summary",
+           why_opt_in="model spend (one Haiku call per sealed segment, in the background of the bot's session)",
+           what="let clauDNA summarize this bot's sealed segments; session-export carries the journey to the plane",
+           compose_steps="host update apply FULL_COMMIT_SHA",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="from the next session on, sealed segments export as skipped: disabled"),
+    Switch(key="claudna-harvest", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.harvest",
+           why_opt_in="model spend (summaries) and draft-note writes through claudron capture",
+           what="opt this bot into clauDNA harvest: composition arms summaries too; typed blocks become unverified "
+                "drafts in CLAUDRON_VAULT_PATH; needs Claudron >= 0.8.0 on the host (PR 6a)",
+           compose_steps="host update apply FULL_COMMIT_SHA",
+           takes_effect="recorded when the bot's next session opens: bot.conf is read at session start",
+           takes_effect_off="no harvest from the bot's next session on"),
+    Switch(key="claudna-precompact-reflect", scope=DOOR, polarity=OPT_IN, carrier=COMPOSE_BOT,
+           config="claudna.precompact_reflect",
+           why_opt_in="it blocks: clauDNA's PreCompact hook refuses every other compaction until"
+                      " /claudna:capture runs, and nobody at a bot's pane runs it (#941)",
+           what="let clauDNA's PreCompact hook ask this bot for a capture before it compacts",
+           compose_steps="host update apply FULL_COMMIT_SHA",
+           takes_effect="from the bot's next session: bot.conf is read at session start",
+           takes_effect_off="from the bot's next session, compactions pass without the prompt"),
     Switch(
         key="task-recheck",
         scope=FLEET_JOB,
@@ -271,8 +323,9 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=ENROLL_HOST,
         job="plane-daemon",
         plane=True,
-        what="the resident ingest daemon — without it every emit takes the "
-             "cold CLI rung (slower, still recorded)",
+        what="the resident ingest daemon — the only recorder for hooks and "
+             "timers: without it their emits stage (bounded) and are NOT "
+             "recorded until it runs; `plane doctor` flags the backlog",
     ),
     Switch(
         key="plane-view",
@@ -284,6 +337,18 @@ SWITCHES: tuple[Switch, ...] = (
         plane=True,
         what="the read-only operator plane on localhost (needs the [plane-ui] "
              "extra; fronting it with Tailscale Serve stays yours)",
+    ),
+    Switch(
+        key="plane-owner",
+        scope=HOST_SERVICE,
+        polarity=OPT_IN,
+        carrier=ENROLL_HOST,
+        job="plane-owner",
+        config_extra="origin, tailscale and optional socket/workspace origins",
+        requires_extra="plane-ui",
+        plane=True,
+        why_opt_in="private write-capable endpoint can spend model budget and mutate operator configuration",
+        what="private owner server under native supervision; grants and Tailscale Serve stay separate",
     ),
     Switch(
         key="plane-host-probe",
@@ -312,7 +377,7 @@ SWITCHES: tuple[Switch, ...] = (
     ),
     # OFF BY DEFAULT BECAUSE IT DELETES DATA -- and this lane is the one that
     # could delete a RECORD rather than a sample, which is why it is an
-    # allowlist rather than an age sweep. `lib/selfstart-snapshot.sh`'s boot
+    # allowlist rather than an age sweep. `claudlobby/_runtime_scripts/selfstart-snapshot.sh`'s boot
     # gate fails CLOSED on an UNREACHABLE rescue-receipt read (its own exit 7:
     # "a receipt gate that fails OPEN is the one failure this measurement must
     # never have") -- but a receipt that was PRUNED is not unreachable, it is
@@ -362,19 +427,22 @@ SWITCHES: tuple[Switch, ...] = (
         carrier=ENV_FLEET,
         env="PLANE_EMIT_ENABLED",
         plane=True,
-        what="one registry keyframe scan per `generate` — what the fleet IS, "
+        what="first-fleet initialization registry keyframes — what the fleet IS, "
              "so every metric sample has something to join to",
+        # Activation's identity bindings join to the scan's keyframes, so it
+        # refuses the off value (plane/registry_emit.activation_scan_refusal).
+        off_refused=True,
     ),
     # ---------------- other doors, on --------------------------------------
     Switch(
         key="pane-send-chunking",
         scope=DOOR,
         polarity=OPT_OUT,
-        # bot.conf, for the same reason session-digest and spindown-receipt use
+        # bot.conf, for the same reason spindown-receipt use
         # it: the door runs inside a bot's own session (every dispatch, every
         # boot, every keepalive reload), and start-bot.sh sources the .env tiers
         # BEFORE `set -a`, so a bare tier assignment never reaches it. A
-        # host-side sender — a hand-run lib/ script, a timer's dispatch — reads
+        # host-side sender — a hand-run claudlobby/_runtime_scripts/ script, a timer's dispatch — reads
         # the host or root .env instead, which is why the `what` below names
         # both: one door, two kinds of caller.
         carrier=BOT_CONF,
@@ -412,7 +480,7 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=ENV_FLEET,
         env="CLAUDLOBBY_MCP_PROBE_ENABLED",
-        why_opt_in="reaches the NETWORK on a compose. A generate must stay "
+        why_opt_in="reaches the NETWORK on a compose. Planning must stay "
                    "offline and fast by default, and a registry outage must "
                    "never be the reason a fleet cannot compose. The offline "
                    "half of the check (is the package pinned?) is unconditional "
@@ -461,10 +529,10 @@ SWITCHES: tuple[Switch, ...] = (
         env="CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED",
         job="claude-update",
         why_opt_in="no deployment gate — it changes which claude binary every "
-                   "bot on the host launches, and lib/ is read on demand, so a "
+                   "bot on the host launches, and claudlobby/_runtime_scripts/ is read on demand, so a "
                    "root pull would move the whole host at once. Armed per "
                    "host, on the operator's say-so, after the rehearsal "
-                   "(lib/rehearse-staged-claude-update.sh)",
+                   "(harness/rehearse-staged-claude-update.sh)",
         what="stage each Claude Code version into its own npm prefix under "
              "state/claude/versions, run it there, and only then repoint the "
              "one fleet link (state/bin/claude) in a single rename, keeping "
@@ -477,7 +545,7 @@ SWITCHES: tuple[Switch, ...] = (
         polarity=OPT_IN,
         carrier=ENROLL_HOST,
         job="boot-capture",
-        why_opt_in="no deployment gate — lib/ is read on demand per use, so "
+        why_opt_in="no deployment gate — claudlobby/_runtime_scripts/ is read on demand per use, so "
                    "the pull that delivers it is in force on every bot at once "
                    "and nothing can be staged ahead. Enrollment is the only "
                    "canary available; flip it on once one host has run it "
@@ -503,16 +571,21 @@ SWITCHES: tuple[Switch, ...] = (
              "fire to the second, sessions appear 36-168s later)",
     ),
     Switch(
-        key="session-digest",
+        key="keepalive-limit-resume",
         scope=DOOR,
         polarity=OPT_IN,
-        # The SessionEnd hook runs inside the bot's Claude session, so bot.conf
-        # is the only carrier that reaches it.
+        # keepalive reads each bot's bot.conf on its tick, so this one bot's
+        # conf arms it there and nowhere else; a .env tier never reaches it.
         carrier=BOT_CONF,
-        env="SESSION_DIGEST_ENABLED",
-        why_opt_in="model spend (a Haiku pass per finished session)",
-        what="distil each finished session into one structured JSONL row for "
-             "the fleet monitor",
+        env="KEEPALIVE_LIMIT_RESUME_ENABLED",
+        why_opt_in="no deployment gate: claudlobby/_runtime_scripts/ is in "
+                   "force on every bot at publication, and this door types into "
+                   "a bot's pane, so one armed bot is the only canary",
+        what="once a usage limit's printed reset has passed, confirm the limit "
+             "menu's \"Stop and wait for limit to reset\" by its label if the "
+             "menu is up, then submit one resume prompt: one action per limit "
+             "(#996). Off, keepalive still names the stop (LIMIT) and "
+             "fleet-pulse pages usage_limit_held after the reset",
     ),
     Switch(
         key="code-audit-sweep",
@@ -562,6 +635,77 @@ SWITCHES: tuple[Switch, ...] = (
              "an empty assignment rather than a stale one",
     ),
     Switch(
+        key="shared-config-isolation",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="isolation.shared_config",
+        why_opt_in="restricts access to shared host resources used by running "
+                   "bots; enable for one canary bot before widening the "
+                   "manifest default through Git update",
+        what="compose the Layer 0b deny rules (#1665): other bots' transcripts "
+             "and Telegram dirs, the shared history, credential and account "
+             "config, every .env tier, and Edit on the install's code and the "
+             "shared settings — a guard on Claude's own tools against "
+             "ACCIDENTAL reads, not a boundary a process running as the same "
+             "user respects",
+    ),
+    Switch(
+        key="mcp-direct-launch",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="mcp_direct_launch",
+        compose_steps=("claudlobby --root <data-root> --fleet <fleet> host cache warm,"
+                       " then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA"),
+        takes_effect=("it takes effect when that bot next restarts: .mcp.json is"
+                      " read at session start"),
+        takes_effect_off="back on npx at the bot's next restart",
+        why_opt_in="changes how every MCP server starts; warm the pinned cache "
+                   "and update an independent canary root with one armed bot "
+                   "before widening the manifest",
+        what="launch each exactly pinned npx MCP server as `node <entry>` from "
+             "the copy warm-cache installs under state/mcp/npm, instead of "
+             "through npx, which keeps an idle `npm exec` wrapper resident as "
+             "the parent of every server (#1604: 41 of them held 1.4 GB, "
+             "mostly swap, on the Pi). A server that cannot launch directly "
+             "keeps npx, and composition says which and why",
+    ),
+    Switch(
+        key="heavy-slot",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="heavy_slot",
+        # Measured (#1686, claude 2.1.281, headless): a PreToolUse hook added to
+        # settings.local.json mid-session fired on the session's next Bash
+        # call, so the default "next tool call, no restart" holds for it.
+        why_opt_in="no deployment gate: a composed hook is live on every bot the "
+                   "next generate composes it for (#1310), with no restart in "
+                   "between, and this one rewrites the bot's heavy commands, so "
+                   "the manifest is the only place one bot can go first",
+        what="run the bot's heavy Bash commands (a whole pytest or vitest run, "
+             "an npm/pnpm/yarn install, a test or build script, next build, "
+             "Playwright, Chromium) under the host's heavy-job slot: one at a "
+             "time host-wide, a refused call names the holder, and the lock "
+             "file records what was running if the host resets (#1686)",
+    ),
+    Switch(
+        key="public-write-guard",
+        scope=GENERATE,
+        polarity=OPT_IN,
+        carrier=COMPOSE_BOT,
+        config="public_write_guard",
+        why_opt_in="no deployment gate: a composed hook is live on every bot the "
+                   "next generate composes it for (#1310), with no restart in "
+                   "between, and this one refuses GitHub writes, so the manifest "
+                   "is the only place one bot can go first",
+        what="refuse a GitHub-bound write (the gh writers, git commit and push, "
+             "every GitHub MCP writer) that would put a term from the host's "
+             "list (~/.config/claudlobby/public-write-terms) into a PUBLIC "
+             "repository, read live at write time; a private one is untouched",
+    ),
+    Switch(
         key="boot-brief",
         scope=DOOR,
         polarity=OPT_IN,
@@ -581,6 +725,10 @@ SWITCHES: tuple[Switch, ...] = (
 #: in NEITHER this map nor :data:`SWITCHES` is reported as dead generically, so
 #: the next deletion warns without anyone remembering to add a row.
 RETIRED: dict[str, str] = {
+    "STARTUP_BOOTSTRAP_ENABLED": (
+        "the model bootstrap envelope was removed — planned restart and update"
+        " continue the exact native session independently of optional handoff"
+    ),
     "PLANE_SHADOW_ENABLED": (
         "the dual-write shadow was deleted in the F18 closure (R2a) — nothing"
         " compares, nothing reads this"
@@ -685,7 +833,7 @@ def missing_extra(job: str) -> str:
 
 
 def extra_install_line(extra: str) -> str:
-    return f"pip install -e '.[{extra}]' in the install's venv, then generate"
+    return f"use a managed Git runtime lock containing the [{extra}] dependencies"
 
 
 # ---------------------------------------------------------------------------
@@ -702,11 +850,12 @@ class SwitchState:
     source: str  #: "default" | "<tier> .env" | "system.yaml" | "fleet.yaml"
     detail: str = ""
     #: the state could not be READ — ``on`` is the DECLARED default, never a
-    #: measurement. Said, never quietly rendered as fact. Two causes ship, and
+    #: measurement. Said, never quietly rendered as fact. Three causes ship, and
     #: :attr:`unknown_reason` names which: the env resolver was unreachable,
-    #: or this run named no fleet and the switch is fleet-scoped.
+    #: this run named no fleet and the switch is fleet-scoped, or the host's
+    #: jobs could not be read (a malformed host override, #1251).
     unknown: bool = False
-    unknown_reason: str = ""  #: "resolver" | "no-fleet"
+    unknown_reason: str = ""  #: "resolver" | "no-fleet" | "host-override"
     #: overrides the switch's derived arm line when a RUNTIME fact changes it
     #: (today: the [plane-ui] extra being absent).
     arm_override: str = ""
@@ -726,6 +875,10 @@ class SwitchState:
     @property
     def disarm(self) -> str:
         return self.switch.disarm
+
+    def as_dict(self) -> dict:
+        """The same resolved state and action lines used by the plain table."""
+        return {**asdict(self), "label": self.label, "arm": self.arm, "disarm": self.disarm}
 
 
 def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
@@ -752,13 +905,38 @@ def _env_state(cascade, sw: Switch) -> tuple[bool | None, str]:
     return not resolves_to(cascade, sw.env, "0"), tier
 
 
+def _bot_config_value(bot, dotted: str) -> bool:
+    """A per-bot switch's value on one bot, by its manifest key's dotted path
+    (``isolation.shared_config`` -> ``bot.isolation.shared_config``). A path
+    that does not resolve raises: it is a registry typo, not an off switch."""
+    value = bot
+    for part in dotted.split("."):
+        value = getattr(value, part)
+    return value is True
+
+
 def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
-                  sweep_on: bool | None) -> tuple[bool | None, str]:
+                  sweep_on: bool | None,
+                  per_bot: dict[str, tuple[list[str], int]] | None = None,
+                  ) -> tuple[bool | None, str]:
     """(enrolled, where) from the composed manifests' own config truth."""
     if sw.key == "code-audit-sweep":
         if sweep_on is None:
             return None, ""
         return sweep_on, "fleet.yaml sweep:"
+    if sw.carrier == COMPOSE_BOT:
+        # PER BOT, so neither an env var nor a job can say it: read every
+        # bot's own resolved value. On means on for at least one bot, and the
+        # source names which, because a canary is exactly one bot of many.
+        seen = (per_bot or {}).get(sw.key)
+        if seen is None:
+            return None, ""
+        on, total = seen
+        if not on:
+            return False, "fleet.yaml"
+        shown = ", ".join(on[:4]) + (f" (+{len(on) - 4} more)" if len(on) > 4 else "")
+        return True, (f"fleet.yaml {sw.config} — {len(on)} of"
+                      f" {total} bot(s): {shown}")
     if not sw.job:
         return None, ""
     if sw.scope == HOST_SERVICE:
@@ -778,7 +956,7 @@ def _enroll_state(sw: Switch, host_jobs: dict, fleet_jobs: dict,
 #: reported these as "shipped default", which is an assertion about a fleet
 #: nobody named — the same class as an unreachable reader answering "nothing".
 NO_FLEET_DETAIL = ("no fleet named — fleet-tier switches not read; run"
-                   " `claudlobby --fleet <name> doctor --switches`")
+                   " `claudlobby --fleet <name> host doctor --switches`")
 RESOLVER_DETAIL = "env resolver unreachable — showing the shipped default"
 
 
@@ -794,7 +972,7 @@ def resolve(
     and a table that buries the four off switches under the nine on ones has
     named them without surfacing them.
 
-    ``fleet=None`` is a HOST run (``lib/setup-system``, ``plane doctor`` with
+    ``fleet=None`` is a HOST run (``host doctor``, ``plane doctor`` with
     no ``--fleet``). Its host rows are true; its fleet-scoped rows are UNKNOWN
     and say so, because the fleet tier was never read.
     """
@@ -812,23 +990,41 @@ def resolve(
         except _env_tiers.ResolverUnavailable:
             cascade, unresolved = {}, True
 
+    host_jobs_unread = ""
     try:
         host_jobs = load_host_jobs()
-    except Exception:  # noqa: BLE001 — a broken system.yaml must not kill the table
+    except Exception as exc:  # noqa: BLE001 — a broken system.yaml must not kill the table
+        # ...and must not be rendered as the shipped default either. An empty
+        # dict reads as "every job as shipped", so a refused override that
+        # PAUSED a job would show it on, at rc 0: the opposite of the host's
+        # intended state. Every host-job row is UNKNOWN instead, naming why.
         host_jobs = {}
+        # The error names its file: the override refusal says which host
+        # override, a parse error in the packaged file says that file.
+        host_jobs_unread = (f"host jobs could not be read ({exc}) — no state"
+                            " is shown, not the shipped default")
     fleet_jobs: dict = {}
     sweep_on: bool | None = None
+    per_bot: dict[str, tuple[list[str], int]] = {}
     if fleet is not None:
         # FleetConfig.defaults IS the merged system<fleet tier (config.py
         # writes it there), so a fleet's `enroll: true` override is already
         # folded in — re-merging here would be a second copy of that rule.
         fleet_jobs = (getattr(fleet, "defaults", None) or {}).get("jobs") or {}
         sweep_on = fleet.sweep_enabled()
+        # Each per-bot switch's own key, off every bot's resolved config by the
+        # switch's dotted `config` path, so a new one needs no branch here.
+        for s in SWITCHES:
+            if s.carrier == COMPOSE_BOT:
+                per_bot[s.key] = (sorted(b.bot_id for b in fleet.bots.values()
+                                         if _bot_config_value(b, s.config)),
+                                  len(fleet.bots))
 
     rows: list[SwitchState] = []
     for sw in SWITCHES:
         env_on, tier = _env_state(cascade, sw)
-        enrolled, where = _enroll_state(sw, host_jobs, fleet_jobs, sweep_on)
+        enrolled, where = _enroll_state(sw, host_jobs, fleet_jobs, sweep_on,
+                                        per_bot)
 
         # A door runs only when BOTH gates allow it: the manifest may enroll a
         # unit whose script still no-ops on its own flag, and that combination
@@ -864,7 +1060,10 @@ def resolve(
         detail = ""
         reason = ""
         unknown = False
-        if unresolved and sw.env:
+        if host_jobs_unread and sw.scope in (HOST_JOB, HOST_SERVICE):
+            detail, reason, unknown = host_jobs_unread, "host-override", True
+            source = "?"
+        elif unresolved and sw.env:
             detail, reason, unknown = RESOLVER_DETAIL, "resolver", True
         elif fleet is None and sw.fleet_scoped:
             detail, reason, unknown = NO_FLEET_DETAIL, "no-fleet", True
@@ -880,7 +1079,7 @@ def resolve(
             detail = (f"{extra} does not import in this install — no unit is"
                       " composed (a supervised unit that cannot start is a"
                       " crash loop, not an honest failure)")
-            arm_override = extra_install_line(extra) + " + lib/setup-system"
+            arm_override = extra_install_line(extra) + ", then host update apply FULL_COMMIT_SHA"
 
         rows.append(
             SwitchState(
@@ -901,7 +1100,7 @@ def target_workflow_off(states: list[SwitchState]) -> list[SwitchState]:
 
 # ---------------------------------------------------------------------------
 # rendering — ONE definition, called by doctor, plane doctor and both shell
-# setup doors (through `claudlobby doctor --switches`). A second copy in bash
+# setup doors (through `claudlobby host doctor --switches`). A second copy in bash
 # is how the table and the truth drift apart.
 # ---------------------------------------------------------------------------
 
@@ -930,7 +1129,7 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
                        f"[{sw.scope}]  set by: {src}")
             out.append(f"    {'':<{name_w}}  {sw.what}")
             if sw.why_opt_in:
-                out.append(f"    {'':<{name_w}}  stays off — "
+                out.append(f"    {'':<{name_w}}  ships off because "
                            f"{sw.why_opt_in}")
             # An UNKNOWN row prints BOTH directions: we do not know which way
             # it is set, so printing only one would be picking a side.
@@ -952,13 +1151,19 @@ def format_table(states: list[SwitchState], *, plane_only: bool = False) -> str:
     render(rest, "on by default", "")
     n_off = sum(1 for s in rest if not s.on and not s.unknown)
     n_unknown = sum(1 for s in rows if s.unknown)
-    tail = (f"  {len(rows)} shipped · {len(opt_in)} opt-in (off)"
+    tail = (f"  {len(rows)} shipped · {_opt_in_summary(opt_in)}"
             f" · {n_off} on-by-default door(s) turned off here")
     if n_unknown:
         tail += f" · {n_unknown} not read here"
     out.append(tail)
     out.append("")
     return "\n".join(out)
+
+
+def _opt_in_summary(rows: list[SwitchState]) -> str:
+    unknown = sum(row.unknown for row in rows)
+    on = sum(row.on and not row.unknown for row in rows)
+    return f"{len(rows)} opt-in ({on} on, {len(rows) - on - unknown} off, {unknown} unknown)"
 
 
 def summary_line(states: list[SwitchState]) -> str:
@@ -969,7 +1174,7 @@ def summary_line(states: list[SwitchState]) -> str:
     unknown = [s for s in states if s.unknown]
     parts = [f"{len(states)} shipped",
              f"{len(rest) - len(off) - sum(1 for s in rest if s.unknown)} on",
-             f"{len(opt_in)} opt-in (off)"]
+             _opt_in_summary(opt_in)]
     if off:
         parts.append("turned off here: " + ", ".join(s.switch.key for s in off))
     if any(s.unknown_reason == "resolver" for s in unknown):
@@ -977,6 +1182,9 @@ def summary_line(states: list[SwitchState]) -> str:
                      " defaults, not a reading")
     if any(s.unknown_reason == "no-fleet" for s in unknown):
         parts.append("no fleet named — fleet-tier switches not read")
+    if any(s.unknown_reason == "host-override" for s in unknown):
+        parts.append("host jobs unreadable — host-job states are unknown, not"
+                     " the shipped defaults")
     return " · ".join(parts)
 
 
@@ -986,7 +1194,7 @@ def summary_line(states: list[SwitchState]) -> str:
 
 #: The three hand-written tables the fold replaced. Each doc carries the block
 #: between these markers; `tests/test_switches.py` asserts the file's block
-#: equals this render, and `claudlobby doctor --switches --markdown` prints
+#: equals this render, and `claudlobby host doctor --switches --markdown` prints
 #: them for regeneration. A doc table is a copy of the registry like any other,
 #: and the estate's recurring defect is a copy drifting (#892/#1143).
 DOC_BEGIN = "<!-- BEGIN GENERATED: switches -->"
@@ -1009,7 +1217,7 @@ def format_markdown(*, plane_only: bool = False,
             if (s.plane or not plane_only) and (s.fleet_scoped or not fleet_only)]
     out = [DOC_BEGIN,
            "<!-- Generated from claudlobby/switches.py — do not hand-edit."
-           " Regenerate: claudlobby doctor --switches --markdown -->",
+           " Regenerate: claudlobby host doctor --switches --markdown -->",
            "",
            "| Switch | Ships | Scope | Carrier | Flip it with |",
            "|---|---|---|---|---|"]

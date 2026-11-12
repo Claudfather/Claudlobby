@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import yaml
 
 from claudlobby.config import (
     DEFAULT_MARKETPLACES,
@@ -13,6 +15,7 @@ from claudlobby.config import (
     AutonomousRunnerBypass,
     AutonomousRunnerConfig,
     AutonomousRunnerPicker,
+    FleetConfig,
     _coerce_bot,
     _coerce_plugins,
     load_fleet,
@@ -20,7 +23,140 @@ from claudlobby.config import (
 from claudlobby.path_audit import ExternalDecl
 
 
+class TestFleetManager:
+    @staticmethod
+    def _raw():
+        return {
+            "name": "manager-contract",
+            "manager": "lead",
+            "bots": {
+                "lead": {"expertise": ["orchestration"], "manages": ["worker"]},
+                "worker": {"expertise": ["software-engineering"]},
+                "coordinator": {
+                    "expertise": ["orchestration"],
+                    "manages": ["other-fleet-manager"],
+                },
+            },
+            "teams": {"engineering": {"manager": "lead", "workers": ["worker"]}},
+        }
+
+    @staticmethod
+    def _load(tmp_path, raw):
+        manifest = tmp_path / "fleet.yaml"
+        manifest.write_text(yaml.safe_dump({"fleet": raw}))
+        return load_fleet(manifest)[0]
+
+    def test_missing_manager_is_not_inferred_from_teams_or_manages(self, tmp_path):
+        raw = self._raw()
+        del raw["manager"]
+        with pytest.raises(ValueError, match="fleet.manager is required"):
+            self._load(tmp_path, raw)
+
+    @pytest.mark.parametrize("manager", [None, "", " ", True, 42, ["lead"], {}, "missing"])
+    def test_manager_must_name_one_existing_local_bot(self, tmp_path, manager):
+        raw = self._raw()
+        raw["manager"] = manager
+        with pytest.raises(ValueError, match="fleet.manager"):
+            self._load(tmp_path, raw)
+
+    def test_team_cannot_introduce_a_competing_manager(self, tmp_path):
+        raw = self._raw()
+        raw["teams"]["engineering"]["manager"] = "coordinator"
+        with pytest.raises(ValueError, match="must match fleet.manager 'lead'"):
+            self._load(tmp_path, raw)
+
+    def test_direct_model_construction_also_rejects_an_absent_manager(self):
+        with pytest.raises(ValueError, match="not in fleet.bots"):
+            FleetConfig(name="manager-contract", service_prefix="test", manager="missing")
+
+    def test_reporting_metadata_does_not_grant_fleet_task_ownership(self, tmp_path):
+        fleet = self._load(tmp_path, self._raw())
+        assert fleet.manager == "lead"
+        assert fleet.manager_bots() == {"lead"}
+        assert fleet.leaf_manager_bots() == {"lead"}
+        assert fleet.bots["coordinator"].manages == ["other-fleet-manager"]
+
+    def test_local_workers_need_no_redundant_team_or_reporting_edges(self, tmp_path):
+        raw = self._raw()
+        del raw["teams"]
+        del raw["bots"]["lead"]["manages"]
+        fleet = self._load(tmp_path, raw)
+        assert fleet.manager_bots() == fleet.leaf_manager_bots() == {"lead"}
+
+    def test_singleton_cross_fleet_coordinator_is_not_a_leaf_manager(self, tmp_path):
+        raw = self._raw()
+        raw["manager"] = "coordinator"
+        raw["bots"] = {"coordinator": raw["bots"]["coordinator"]}
+        del raw["teams"]
+        fleet = self._load(tmp_path, raw)
+        assert fleet.manager_bots() == {"coordinator"}
+        assert fleet.leaf_manager_bots() == set()
+
+    @pytest.mark.parametrize("template", [
+        "fleet.yaml.seed", "fleet.yaml.example",
+        "examples/teams/revenue-web-app/fleet.yaml",
+    ])
+    def test_cold_fleet_templates_declare_a_local_manager(self, template):
+        fleet, _ = load_fleet(Path(__file__).resolve().parents[1] / template)
+        assert fleet.manager in fleet.bots
+
+
+class TestRemoteControlRoleDefault:
+    """remote_control left unset follows the bot's role (#2325): on for the
+    fleet manager, off for every other bot, a bot that `manages` another
+    fleet's manager included. An explicit value on the bot or in the fleet's
+    `defaults:` wins in either direction."""
+
+    @staticmethod
+    def _flags(fleet):
+        return {name: bot.remote_control for name, bot in fleet.bots.items()}
+
+    def test_the_manager_is_on_and_every_other_bot_off(self, tmp_path):
+        fleet = TestFleetManager._load(tmp_path, TestFleetManager._raw())
+        assert self._flags(fleet) == {"lead": True, "worker": False, "coordinator": False}
+
+    @pytest.mark.parametrize(("bot", "value"), [("worker", True), ("lead", False)])
+    def test_an_explicit_bot_value_wins_either_way(self, tmp_path, bot, value):
+        raw = TestFleetManager._raw()
+        raw["bots"][bot]["remote_control"] = value
+        assert TestFleetManager._load(tmp_path, raw).bots[bot].remote_control is value
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_a_fleet_default_wins_over_the_role_either_way(self, tmp_path, value):
+        raw = TestFleetManager._raw()
+        raw["defaults"] = {"remote_control": value}
+        fleet = TestFleetManager._load(tmp_path, raw)
+        assert set(self._flags(fleet).values()) == {value}
+
+    def test_a_fleet_default_of_false_with_the_manager_set_true(self, tmp_path):
+        raw = TestFleetManager._raw()
+        raw["defaults"] = {"remote_control": False}
+        raw["bots"]["lead"]["remote_control"] = True
+        fleet = TestFleetManager._load(tmp_path, raw)
+        assert self._flags(fleet) == {"lead": True, "worker": False, "coordinator": False}
+
+    def test_a_fleet_built_in_code_gets_the_role_default_too(self):
+        from claudlobby.config import BotConfig, FleetConfig
+
+        bots = {name: BotConfig(bot_id=name, name=name, expertise=["x"])
+                for name in ("lead", "worker")}
+        bots["pinned"] = BotConfig(bot_id="pinned", name="pinned", expertise=["x"],
+                                   remote_control=True)
+        fleet = FleetConfig(name="f", service_prefix="com.f", manager="lead", bots=bots)
+        assert self._flags(fleet) == {"lead": True, "worker": False, "pinned": True}
+
+
 class TestCoercePlugins:
+    def test_startup_policy_defaults_and_verify_existing(self):
+        assert _coerce_plugins(None).startup_policy == "manage"
+        result = _coerce_plugins({"startup_policy": "verify-existing"})
+        assert result.startup_policy == "verify-existing"
+        assert result.required == DEFAULT_PLUGINS
+
+    def test_unknown_startup_policy_refuses(self):
+        with pytest.raises(ValueError, match="plugins.startup_policy"):
+            _coerce_plugins({"startup_policy": "skip"})
+
     def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
         assert result.required == DEFAULT_PLUGINS
@@ -109,7 +245,8 @@ class TestCoerceBot:
         assert bot.expertise == ["software-engineering"]
         assert bot.account == "default"
         assert bot.model is None
-        assert bot.remote_control is True
+        # Unset stays unset here: FleetConfig applies the role default.
+        assert bot.remote_control is None
         # Conservative default: a bot that opts into nothing is NOT dangerous —
         # the composer turns this (no permission_mode + no skip) into acceptEdits.
         assert bot.dangerously_skip_permissions is False
@@ -123,7 +260,6 @@ class TestCoerceBot:
         assert bot.mcp == []
         assert bot.skills == []
         assert bot.guardrails == []
-        assert bot.bench is False
 
     def test_headless_config_defaults_overridable(self):
         """The 4 headless config defaults are fleet.yaml-overridable per bot."""
@@ -158,6 +294,38 @@ class TestCoerceBot:
         assert bot.preferred_notif_channel == "terminal_bell"
         assert bot.disable_nonessential_traffic is True  # unset → headless default
 
+    def test_agent_cli_defaults_to_claude_and_follows_bot_over_defaults(self):
+        """#2145: `agent_cli` is an inherited scalar with a built-in `claude`. An
+        explicit bot-level null reads as `claude`, never None — the composer always
+        needs a string to write into bot.conf."""
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {}).agent_cli == "claude"
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": "codex"}).agent_cli == "codex"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "claude"}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
+        bot = _coerce_bot("t", {"expertise": ["eng"], "agent_cli": None}, {"agent_cli": "codex"})
+        assert bot.agent_cli == "claude"
+
+    def test_agent_cli_rejects_unknown_values(self):
+        with pytest.raises(ValueError, match=r"Invalid agent_cli 'code'.*Did you mean 'codex'"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": "code"}, {})
+        with pytest.raises(ValueError, match="Invalid agent_cli"):
+            _coerce_bot("t", {"expertise": ["eng"], "agent_cli": 1}, {})
+        # Only null reads as the default: a falsy value is checked like any other,
+        # never quietly taken for claude.
+        for falsy in ("", 0, False):
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"], "agent_cli": falsy}, {})
+            with pytest.raises(ValueError, match="Invalid agent_cli"):
+                _coerce_bot("t", {"expertise": ["eng"]}, {"agent_cli": falsy})
+
+    def test_a_leftover_runtime_key_is_recorded_not_read(self):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:`. It never sets
+        the agent CLI; the bot carries it so `validate` can say so."""
+        bot = _coerce_bot("t", {"expertise": ["eng"], "runtime": "codex"}, {"runtime": "codex"})
+        assert bot.agent_cli == "claude"
+        assert bot.retired_keys == {"runtime": "codex"}
+        assert _coerce_bot("t", {"expertise": ["eng"]}, {"runtime": "codex"}).retired_keys == {}
+
     def test_skip_permission_prompts_default_true(self):
         """G6: both first-run consent skip-flags default True (skip the prompt) so a
         headless bot never hangs on the first-run permission prompt."""
@@ -190,20 +358,6 @@ class TestCoerceBot:
         )
         assert bot2.skip_auto_permission_prompt is False
         assert bot2.skip_dangerous_mode_permission_prompt is False
-
-    def test_bench_from_bot(self):
-        bot = _coerce_bot("test", {"expertise": ["eng"], "bench": True}, {})
-        assert bot.bench is True
-
-    def test_bench_from_defaults(self):
-        bot = _coerce_bot("test", {"expertise": ["eng"]}, {"bench": True})
-        assert bot.bench is True
-
-    def test_bench_bot_overrides_defaults(self):
-        bot = _coerce_bot(
-            "test", {"expertise": ["eng"], "bench": False}, {"bench": True}
-        )
-        assert bot.bench is False
 
     def test_defaults_merge(self):
         defaults = {
@@ -784,6 +938,7 @@ class TestObservabilityConfig:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     observability:
@@ -817,6 +972,7 @@ class TestGitCredentialsParsing:
             dedent(f"""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   bots:
                     lead:
@@ -834,6 +990,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:
@@ -858,6 +1015,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:
@@ -918,6 +1076,7 @@ class TestGitCredentialsParsing:
             dedent("""\
                 fleet:
                   name: test-fleet
+                  manager: lead
                   service_prefix: com.test
                   defaults:
                     git_credentials:
@@ -929,3 +1088,68 @@ class TestGitCredentialsParsing:
         )
         with pytest.raises(ValueError, match="fleet defaults"):
             load_fleet(root / "fleet.yaml")
+
+
+@pytest.mark.parametrize(
+    "defaults,raw,expected",
+    [
+        ({}, {}, (None, None)),
+        ({"harvest": True}, {"harvest": False}, (None, False)),
+        ({"session_summary": True}, {"harvest": True}, (True, True)),
+        ({"session_summary": True}, {"session_summary": None}, (True, None)),
+    ],
+)
+def test_claudna_fieldwise_merge(defaults, raw, expected):
+    cfg = _coerce_bot(
+        "b", {"expertise": ["x"], "claudna": raw}, {"claudna": defaults}
+    ).claudna
+    assert (cfg.session_summary, cfg.harvest) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"harvest": "true"},
+        {"nonesuch": True},
+        {"harvest": True, "session_summary": False},
+    ],
+)
+def test_claudna_strict_fields_and_merged_cross_field_rule(raw):
+    with pytest.raises(ValueError, match="claudna"):
+        _coerce_bot("b", {"expertise": ["x"], "claudna": raw}, {})
+    with pytest.raises(ValueError, match="harvest.*session_summary"):
+        _coerce_bot(
+            "b",
+            {"expertise": ["x"], "claudna": {"session_summary": False}},
+            {"claudna": {"harvest": True}},
+        )
+
+
+def test_registered_mappings_refuse_unknown_keys():
+    from claudlobby.config import _parse_strict_mapping, _STRICT_MAPPING_FIELDS
+
+    for head, fields in _STRICT_MAPPING_FIELDS.items():
+        with pytest.raises(ValueError, match="nonesuch.*accepted"):
+            _parse_strict_mapping({"nonesuch": True}, head, fields)
+
+
+@pytest.mark.parametrize("tier", ["bot", "fleet.defaults", "built_in"])
+def test_claudna_scalar_origin_from_authored_tiers(tmp_path, tier):
+    from claudlobby.config import scalar_config_origin
+
+    raw = {"name": "canary", "manager": "b", "bots": {"b": {"expertise": ["x"]}}}
+    if tier == "bot":
+        raw["bots"]["b"]["claudna"] = {"harvest": True}
+    if tier == "fleet.defaults":
+        raw["defaults"] = {"claudna": {"harvest": True}}
+    path = tmp_path / "fleet.yaml"
+    path.write_text(yaml.safe_dump({"fleet": raw}))
+    _, defaults = load_fleet(path)
+    assert scalar_config_origin(path, defaults, "claudna.harvest", bot="b") == (
+        tier,
+        None
+        if tier == "built_in"
+        else f"fleet.{('bots.b' if tier == 'bot' else 'defaults')}.claudna.harvest",
+    )
+    with pytest.raises(NotImplementedError):
+        scalar_config_origin(path, defaults, "claudna", bot="b")

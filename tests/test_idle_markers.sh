@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 
 assert_eq() {
@@ -74,54 +74,6 @@ assert_eq "tool-call marker older than window → not busy" "idle" "$result"
 rm -f "$TMPBOT/data/.last-tool-call"
 result=$(marker_age_within "$TMPBOT/data/.last-tool-call" 180 && echo "busy" || echo "idle")
 assert_eq "missing tool-call marker → not busy (fall back to pane)" "idle" "$result"
-
-echo ""
-echo "=== fleet-pulse activity_stuck marker logic tests ==="
-
-# Simulate the fleet-pulse decision logic as a function
-_should_alert_activity_stuck() {
-    local bot_dir="$1" threshold="$2"
-    local idle_marker="$bot_dir/data/.idle"
-    local tool_marker="$bot_dir/data/.last-tool-call"
-
-    # If idle marker is newer, bot is idle — no alert
-    if marker_is_newer "$idle_marker" "$tool_marker"; then
-        echo "skip"
-        return
-    fi
-
-    # Check tool-call staleness
-    local now_epoch last_epoch gap
-    now_epoch=$(date +%s)
-    last_epoch=$(stat_mtime "$tool_marker" 2>/dev/null || echo "$now_epoch")
-    gap=$(( now_epoch - last_epoch ))
-    if [ "$gap" -ge "$threshold" ]; then
-        echo "alert"
-    else
-        echo "skip"
-    fi
-}
-
-# Test 6: idle marker present and newer → no alert even with stale tool-call
-touch "$TMPBOT/data/.last-tool-call"
-sleep 1
-touch "$TMPBOT/data/.idle"
-# Backdate .last-tool-call to simulate staleness
-touch -d "2 hours ago" "$TMPBOT/data/.last-tool-call" 2>/dev/null || \
-    touch -t "$(date -v-2H +%Y%m%d%H%M.%S 2>/dev/null)" "$TMPBOT/data/.last-tool-call"
-result=$(_should_alert_activity_stuck "$TMPBOT" 300)
-assert_eq "idle bot with stale tool-call → skip (no false positive)" "skip" "$result"
-
-# Test 7: no idle marker + stale tool-call → alert
-rm -f "$TMPBOT/data/.idle"
-result=$(_should_alert_activity_stuck "$TMPBOT" 300)
-assert_eq "no idle marker + stale tool-call → alert" "alert" "$result"
-
-# Test 8: no idle marker + fresh tool-call → skip
-touch "$TMPBOT/data/.last-tool-call"
-rm -f "$TMPBOT/data/.idle"
-result=$(_should_alert_activity_stuck "$TMPBOT" 300)
-assert_eq "no idle marker + fresh tool-call → skip" "skip" "$result"
 
 echo ""
 echo "=== classify_pane idle detection tests ==="

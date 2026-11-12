@@ -26,8 +26,8 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
-GIT_PULL_ALL = REPO_ROOT / "lib" / "git-pull-all.sh"
+LIB_COMMON = REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh"
+GIT_PULL_ALL = REPO_ROOT / "claudlobby/_runtime_scripts" / "git-pull-all.sh"
 
 
 def _run(snippet: str, *args: str) -> tuple[str, int]:
@@ -105,6 +105,29 @@ class TestBotInFleet:
         _, rc = _run('bot_in_fleet "$2" "$3"', "al", "alex\nari")
         assert rc == 1
 
+    # A long roster (#2428). bot_in_fleet piped the roster into grep -qx, which
+    # exits at its first match; the roster lines still to be written then met a
+    # closed pipe, and pipefail (set by lib-common) read a declared bot as
+    # undeclared (rc 141). A pipe holds 64 KiB to 256 KiB, and 100k lines of 13
+    # bytes outlast it on every host. The roster is built inside bash, since
+    # 1.3 MB cannot ride argv (E2BIG). $2 is the first line, $3 the last, $4
+    # the bot asked about.
+    _LONG_ROSTER = (
+        "roster=$(awk -v first=\"$2\" -v last=\"$3\" "
+        "'BEGIN { print first; for (i = 0; i < 100000; i++) printf \"filler%06d\\n\", i; print last }'); "
+        'bot_in_fleet "$4" "$roster"'
+    )
+
+    def test_member_first_in_a_long_roster(self):
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "first-bot")
+        assert rc == 0
+
+    def test_member_last_in_a_long_roster(self):
+        # Control: grep reads the whole roster before its match, so the pipe
+        # never closes early; this passed before the fix too.
+        _, rc = _run(self._LONG_ROSTER, "first-bot", "last-bot", "last-bot")
+        assert rc == 0
+
 
 class TestGitPullAllFleetGuard:
     """A stale per-bot cron entry for a departed bot must not resurrect its dir."""
@@ -150,3 +173,43 @@ class TestGitPullAllFleetGuard:
         proc = self._run_script(tmp_path, repos)
         assert proc.returncode == 0
         assert (tmp_path / "git-pull.log").exists()  # LOG = dirname(repos)/git-pull.log
+
+    def test_selected_status_distinguishes_updated_unchanged_dirty_and_failed(self, tmp_path):
+        _make_fleet(tmp_path, "demo", declared=["alex"], present=["alex"])
+        projects = tmp_path / "local/demo/runtime/bots/alex/projects"
+        for name in ("updated", "unchanged", "dirty", "failed"):
+            (projects / name / ".git").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        (outside / ".git").mkdir(parents=True)
+        (projects / "redirected").symlink_to(outside, target_is_directory=True)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text("""#!/bin/bash
+if [ "$1" = -C ]; then repo=$2; shift 2; else repo=$PWD; fi
+name=$(basename "$repo")
+case "$1" in
+  rev-parse) [ -e "$repo/.pulled" ] && echo after || echo before ;;
+  status) if [ "$name" = dirty ]; then echo ' M local-file'; fi ;;
+  symbolic-ref) echo main ;;
+  rev-list) echo 0 ;;
+  pull) [ "$2" = --ff-only ] || exit 9
+        [ "$name" = failed ] && exit 1
+        [ "$name" = updated ] && : > "$repo/.pulled"
+        echo ok ;;
+  *) exit 9 ;;
+esac
+""")
+        git.chmod(0o755)
+        env = {**os.environ, "CLAUDLOBBY_ROOT": str(tmp_path),
+               "PATH": f"{bindir}:{os.environ['PATH']}"}
+        result = subprocess.run([str(GIT_PULL_ALL), str(projects), "--status-nul"],
+                                capture_output=True, env=env, timeout=30)
+        assert result.returncode == 1, result.stderr
+        assert result.stdout.split(b"\0") == [
+            b"git-pull-all-v1", b"dirty", b"skipped_dirty", b"failed", b"failed",
+            b"redirected", b"skipped_redirected",
+            b"unchanged", b"unchanged", b"updated", b"updated", b""]
+        assert (projects / "updated/.pulled").exists()
+        assert not (projects / "dirty/.pulled").exists()
+        assert not (outside / ".pulled").exists()

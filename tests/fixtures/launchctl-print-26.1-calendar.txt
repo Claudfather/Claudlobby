@@ -1,0 +1,84 @@
+gui/501/com.fixture.observed = {
+	active count = <redacted>
+	path = <redacted>
+	type = LaunchAgent
+	state = not running
+
+	program = <redacted>
+	arguments = {
+		<redacted>
+	}
+
+	working directory = <redacted>
+
+	inherited environment = {
+		SSH_AUTH_SOCK => <redacted>
+	}
+
+	default environment = {
+		PATH => <redacted>
+	}
+
+	environment = {
+		OSLogRateLimit => <redacted>
+		CLAUDLOBBY_ROOT => <redacted>
+		XPC_SERVICE_NAME => <redacted>
+	}
+
+	domain = <redacted>
+	asid = <redacted>
+	minimum runtime = <redacted>
+	exit timeout = <redacted>
+	runs = <redacted>
+	last exit code = <redacted>
+
+	event triggers = {
+		com.fixture.event => {
+			keepalive = <redacted>
+			service = <redacted>
+			stream = <redacted>
+			monitor = <redacted>
+			descriptor = {
+				"Minute" => <redacted>
+				"Hour" => <redacted>
+			}
+		}
+	}
+
+	event channels = {
+		"com.apple.launchd.calendarinterval" = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+	}
+
+	resource coalition = {
+		ID = <redacted>
+		type = resource
+		state = active
+		active count = <redacted>
+		name = <redacted>
+	}
+
+	jetsam coalition = {
+		ID = <redacted>
+		type = jetsam
+		state = active
+		active count = <redacted>
+		name = <redacted>
+	}
+
+	spawn type = <redacted>
+	jetsam priority = <redacted>
+	jetsam memory limit (active) = <redacted>
+	jetsam memory limit (inactive) = <redacted>
+	jetsamproperties category = <redacted>
+	jetsam thread limit = <redacted>
+	cpumon = <redacted>
+
+	properties = <redacted>
+}

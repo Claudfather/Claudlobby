@@ -6,7 +6,7 @@ files, not the full POSIX env-var grammar. Two helpers:
   - read(path)               → parse to dict, strips `export ` prefix and quotes
   - format_file(header, vars) → render `export VAR=<quoted>` lines for writing
 
-Lives in its own module so __main__ (env-migrate writer) and validator
+Lives in its own module so __main__ (migration env writer) and validator
 (env-presence checker) can both import without circularity.
 
 Output contract: format_file produces shell-safe output suitable for

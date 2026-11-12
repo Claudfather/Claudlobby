@@ -1,0 +1,24 @@
+
+
+● Stand-in reply.
+
+✻ Brewed for 0s · done 12:01 AM
+
+❯ Ask me pr4-live-ASK-90d0d208.
+
+● User declined to answer questions
+  ⎿  · Which stand-in option? (Option 1 / Option 2)
+
+✻ Churned for 0s · done 12:01 AM
+
+❯ /compact
+
+❯ After the compaction pr4-live-QC-9945b8df.
+  ctrl+x ctrl+s to send now
+
+● Compacting conversation… (0s)
+                                                  Ctrl+Y to paste deleted text
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt

@@ -27,10 +27,11 @@
 #   eng-1:
 #     <<: *engineer-base                         # merges all keys from anchor
 #     expertise: [software-engineering]           # bot-specific keys override
-#     voice: voices/dinesh.md
+#     voice: voices/dinesh-chugtai.md
 
 fleet:
   name: example-fleet
+  manager: lead                            # required local bot ID; owns all fleet tasks
   service_prefix: com.example.claudlobby
   telegram_group_chat_id: "-1001234567890"   # replace with your group ID
   # human_telegram_id: "1234567890"          # your Telegram user ID — enables DM allowlisting for all bots
@@ -56,6 +57,7 @@ fleet:
   defaults:
     model: opus
     effort: max
+    # agent_cli: claude                        # claude | codex — codex waits for the execution adapter (#2149)
     account: default
     prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
     # Headless config defaults (all overridable per bot):
@@ -63,6 +65,7 @@ fleet:
     spinner_tips_enabled: false              # settings.local spinnerTipsEnabled — silence the "Tip:" lines
     preferred_notif_channel: notifications_disabled  # settings.local preferredNotifChannel — no desktop on a headless bot
     prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based
+    # auto_compact_window: auto              # settings.local autocompact window — auto keeps Claude Code's own and stops its end-of-turn offer; or 100000 to 1000000 tokens
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
     # worker-lifecycle is the ack/report doctrine's canonical owner — several
@@ -77,7 +80,7 @@ fleet:
     # github_app:                              # OPTIONAL — GitHub App git auth (App-auth P3 #1273).
     #   slug: my-fleet-app                     # BOTH slug + bot_user_id -> commits as <slug>[bot];
     #   bot_user_id: 1234567                   # omit both to keep the operator identity. Values from
-    #   # orgs: [MyOrg]                        # lib/setup-github-app.sh. orgs: scopes the App helper
+    #   # orgs: [MyOrg]                        # host github-app setup. orgs: scopes the App helper
     #                                          # (else all of github.com). Restart-not-reload applies.
     #                                          # Credentials ride GITHUB_APP_* in the fleet .env.
     telegram:                                  # telegram defaults — bot stanza overrides per field
@@ -93,14 +96,17 @@ fleet:
       # filesystem_allow_write: []           # additional write paths (bot dir is always writable)
 
     # Hooks (bot-vitals.sh) and observability come from system defaults.
-    # Override: declare hooks/observability here (your version wins via dedup).
+    # Override: declare hooks/observability here (your version wins via dedup —
+    # dedup keys on (command, matcher), so spell a default hook exactly as the
+    # release does, matcher included; a different path, e.g. the retired root
+    # lib/, runs it twice and `config validate` warns hook-retired-path, #2062).
     # Disable: system_defaults: false (or per-category: system_defaults: { hooks: false })
     #
     # hooks:                                       # uncomment to override system default hooks
     #   PreToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    #     - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
     #   PostToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    #     - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
     # observability:                               # uncomment to override system default values
     #   pulse_interval: 300
     #   # Mirror watchdog (#1024): flag a worker that reported and was then
@@ -112,7 +118,7 @@ fleet:
     #   # strand outliving the window goes quiet again — set 0 to refuse that.
     #   unassigned_max_age: 86400    # stop reporting past this age (default 86400 = 24h; <=0 never stops)
 
-  teams:
+  teams:                                    # optional groups; each names the fleet manager
     engineering:
       manager: lead
       workers: [eng-1, reviewer-1]
@@ -175,7 +181,7 @@ fleet:
 #     # lessons — library/lessons/ is FROZEN (L3). Existing referential lessons still
 #     # compose for non-vault fleets; a vault-wired fleet reaches them via `claudron recall`
 #     # instead. New behavior rules → protocols/guardrails; new referential findings → the
-#     # vault (`claudlobby lessons-migrate`, /claudna:capture). See library/lessons/README.md.
+#     # vault (`claudlobby migration lessons`, /claudna:capture). See library/lessons/README.md.
 #     lessons:
 #       - review/empirical-verification
 #       - telegram/mcp-drops
@@ -205,7 +211,7 @@ fleet:
 #         purpose: vendored CLI tree the bot shells out to
 #
 #     # integrations — usage docs from library/integrations/ (auto-paired with mcp by default)
-#     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
+#     # An explicit list adds to auto-pairing; it never replaces it. Omit it to let mcp drive it.
 #     integrations: [neon, railway, vercel]
 #
 #     # brief — the SessionStart boot brief (#904 M1, epic #1102 R3). DEFAULT
@@ -220,13 +226,31 @@ fleet:
 #     brief:
 #       on_start: true
 #
+#     # isolation — shared-config isolation, the Layer 0b deny rules (#1665).
+#     # DEFAULT OFF. Layer 0 denies each fleet sibling's bot DIR; that is not
+#     # where most cross-bot content lives. Armed, the composer also denies this
+#     # bot's own tools: other bots' transcripts and Telegram dirs (host-wide,
+#     # keyed by name), the shared history, credential and account config,
+#     # every .env tier (its own included: the values are already in its
+#     # session env), and Edit on the install's code and the shared settings.
+#     # It stops ACCIDENTAL reads through Claude's own tools; a process running
+#     # as the same user (a script, `python3 -c "open(...)"`, a `$HOME/...` path
+#     # the matcher cannot resolve) is not stopped. A composed deny binds on the
+#     # bot's NEXT tool call with no restart, so arm one bot, run a real turn,
+#     # then widen to `defaults:`. `claudlobby config validate --runtime` and `config validate` name
+#     # every composed file that still tells the bot to `source ~/.env`.
+#     # `exempt` restores a READ only: account_config | env_host.
+#     isolation:
+#       shared_config: true
+#       exempt: []          # account_config | env_host — each restores a READ only
+#
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
-#     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
+#     # into THIS bot's session via claudlobby/_runtime_scripts/briefing-trigger.sh — never hand-install
 #     # cron. Slot names must be shell identifiers (they become the
 #     # BRIEFING_SECTIONS_<SLOT> env suffix); values are systemd OnCalendar, NOT
 #     # 5-field cron. BRIEFING_* lands in bot.conf for the /briefing skill; the
-#     # timers enroll on `setup-fleet` and prune when a slot is removed.
+#     # timers enroll on host activation and retire when a slot is removed.
 #     briefing:
 #       slots:
 #         morning: "*-*-* 08:30:00"          # daily 08:30
@@ -282,10 +306,6 @@ fleet:
 #     telegram:
 #       chat_id: "-1009999999999"
 #
-#     # bench — marks this bot as the fleet's benchmarking target for cold-start timing.
-#     # Multi-bot fleets should set bench: true on exactly one bot.
-#     bench: true
-#
 #     # Permission model — set AT MOST ONE of the two fields below; they do NOT
 #     # combine. permission_mode wins whenever it is set. With neither set, the
 #     # compositor default is --permission-mode acceptEdits.
@@ -300,8 +320,8 @@ fleet:
 #     # unset (omit Option A above to use this).
 #     dangerously_skip_permissions: true
 #
-#     # remote_control — enable --remote-control flag (default: true)
-#     # Allows dispatch via tmux send-keys. Disable for standalone bots.
+#     # remote_control — run with --remote-control (default: true for the
+#     # fleet manager, false for every other bot). Set true to opt a worker in.
 #     remote_control: true
 #
 #     # channels — Claude Code channel plugins for messaging (default: [plugin:telegram@claude-plugins-official])
@@ -315,7 +335,10 @@ fleet:
 #
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
-#     claudna_version: "0.2.0"                    # pin clauDNA plugin version
+#     claudna: {session_summary: true, harvest: false}  # OPTIONAL strict booleans
+#     # precompact_reflect: true arms clauDNA's capture prompt, off for bots.
+#     # harvest needs Claudron >= 0.8.0 on the host first (PR 6a).
+#     claudna_version: "0.2.0"                    # exports a version hint; pins nothing
 #     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
 #
@@ -340,22 +363,13 @@ fleet:
 #     # `claudron_session_loop: true` with no claudron_vault_path is a validate error.
 #     claudron_session_loop: true
 #
-#     # Vault-wired MANAGER bots can also opt into the Claudron query-before
-#     # preflight: dispatch-task.sh prepends fleet-memory pointers (titles +
-#     # paths from `claudron lookup`) to every dispatched task. Needs the
-#     # claudron CLI on the host PATH. Off unless set — see
-#     # documentation/integrations/claudron-integration.md.
-#     env:
-#       CLAUDRON_QUERY_BEFORE: "1"
-#       CLAUDRON_QUERY_LIMIT: "3"                  # max pointers per dispatch (default 3)
-#
 #     # autonomous_runner — turns a bot into an Autonomous Worker that picks
 #     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto
-#     # skill (typically /claudna:implement-plan) to resolve them. The bot's
+#     # skill (typically /claudna:build) to resolve them. The bot's
 #     # CLAUDE.md gets a rendered "Autonomous Runner" section describing the job.
 #     # See library/skills/autonomous-runner/{SKILL.md,archetype.md} for details.
 #     autonomous_runner:
-#       skill: /claudna:implement-plan            # required: which clauDNA --auto skill to run
+#       skill: /claudna:build                     # required: which clauDNA --auto skill to run
 #       cadence: 1h                                # required: how often (15m | 1h | 6h | 24h, etc.)
 #       target_repo: my-org/my-repo                # required: <owner>/<repo>
 #       args: ""                                   # optional: appended after --auto
@@ -391,7 +405,7 @@ fleet:
 #       telegram:
 #         handle: my_dbt_auto_bot
 #       autonomous_runner:
-#         skill: /claudna:implement-plan
+#         skill: /claudna:build
 #         cadence: 1h
 #         target_repo: my-org/my-dbt-repo
 #         picker:

@@ -1,0 +1,473 @@
+"""Source attestation over disposable actual Plane schemas; no live host data."""
+import sqlite3
+
+import pytest
+
+from claudlobby.plane.db import db_file
+from claudlobby.plane.ids import ensure_host_uid, read_host_uid
+from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable
+from claudlobby.plane.owner_source import (HOST_TABLES, SourceDenied, SourceNeedsBinding, SourceUnavailable,
+    admit_source, bind_source, inspect_source, source_host_uid)
+from claudlobby.plane.view import _envelope
+from tests.plane_setup import initialize_plane
+from tests.plane_fixtures import ro
+from tests.test_plane_two_fleets import _seed
+
+TABLES = HOST_TABLES
+
+
+@pytest.mark.parametrize(('failure', 'state', 'reason', 'operation'), [
+    (SourceNeedsBinding, 'unavailable', 'source_binding_required', 'bind_source'),
+    (SourceDenied, 'denied', 'source_denied', 'inspect_source'),
+    (SourceUnavailable, 'unavailable', 'source_unavailable', 'inspect_source'),
+])
+def test_source_recovery_preserves_typed_failure_without_pairing_or_foreign_rebind(failure, state, reason, operation):
+    from claudlobby.plane.owner_observation import source_refusal
+
+    observed = source_refusal(failure('synthetic source failure'))
+    assert (observed.version, observed.state, observed.reason, observed.next_operation) == (1, state, reason, operation)
+    with pytest.raises(TypeError):
+        source_refusal(AccessDenied('session_unavailable'))
+
+
+def add_row(root, table, host_uid, *, legacy=False):
+    """Explicit synthetic SQL fixture, including tombstone and null fleet."""
+    with sqlite3.connect(db_file(root)) as conn:
+        seq = conn.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at)"
+                           " VALUES ('fixture-event', ?, 'now')", (table,)).lastrowid
+        values = {r[1]: "fixture" for r in conn.execute(f"PRAGMA table_info({table})")
+                  if r[3] and r[4] is None}
+        values.update(ingest_seq=seq, event_id="fixture-event", host_uid=host_uid,
+                      fleet_uid=None, origin="legacy" if legacy else "live")
+        if table == "communications":
+            values.update(message_class="chat", privacy="metadata")
+        elif table == "registry_snapshots":
+            values.update(entity_type="host", tombstone=1, cause="probe")
+        elif table == "metric_samples":
+            values.update(subject_kind="host")
+        elif table == "events":
+            values.update(kind="system", event="fixture", subject_kind="host", subject_uid="fixture", severity="notice")
+        columns = list(values)
+        conn.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES "
+                     f"({','.join('?' for _ in columns)})", tuple(values.values()))
+
+
+def test_binding_is_explicit_idempotent_existing_only_and_preserves_schema(tmp_path):
+    with pytest.raises(AccessUnavailable):
+        bind_source(tmp_path)
+    assert not (tmp_path / "state").exists()
+    _seed(tmp_path)
+    path = db_file(tmp_path)
+    with sqlite3.connect(path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    with pytest.raises(AccessUnavailable):
+        inspect_source(tmp_path)
+    host = read_host_uid(tmp_path / "state")
+    assert bind_source(tmp_path, expected_host_uid=host) == host
+    assert bind_source(tmp_path) == inspect_source(tmp_path) == host
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert conn.execute("SELECT * FROM owner_source_binding").fetchall() == [(1, host)]
+
+
+@pytest.mark.parametrize("table", TABLES)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_every_family_refuses_mixed_host_including_legacy_null_fleet_tombstone(tmp_path, table, legacy):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    add_row(tmp_path, table, "foreign-host", legacy=legacy)
+    with pytest.raises(AccessDenied):
+        inspect_source(tmp_path)
+    with pytest.raises(AccessDenied):
+        bind_source(tmp_path)
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_each_family_alone_cannot_be_attested_to_wrong_host(tmp_path, table):
+    initialize_plane(tmp_path)
+    ensure_host_uid(tmp_path / "state")
+    add_row(tmp_path, table, "foreign-host", legacy=True)
+    with pytest.raises(AccessDenied):
+        bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='owner_source_binding'").fetchone()
+
+
+def test_explicit_foreign_fleet_parent_refused_but_shared_human_and_two_fleets_allowed(tmp_path):
+    _seed(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("INSERT INTO identity_registry VALUES ('human','actor','human:shared',"
+                     " NULL,0,'now','now')")
+        # Null parent is unattributed history, explicitly attested by binding.
+        conn.execute("UPDATE identity_registry SET parent_uid=NULL WHERE kind='fleet' AND alias='data'")
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("UPDATE identity_registry SET parent_uid='foreign-host' WHERE kind='fleet' AND alias='data'")
+    with pytest.raises(AccessDenied):
+        inspect_source(tmp_path)
+
+
+def test_copied_pruned_marker_cannot_be_rebound(tmp_path):
+    original, copied = tmp_path / "original", tmp_path / "copied"
+    _seed(original)
+    bind_source(original)
+    initialize_plane(copied)
+    ensure_host_uid(copied / "state")
+    with sqlite3.connect(db_file(original)) as source, sqlite3.connect(db_file(copied)) as target:
+        source.backup(target)
+    with sqlite3.connect(db_file(copied)) as conn:
+        for table in TABLES:
+            conn.execute(f"DELETE FROM {table}")
+        conn.execute("DELETE FROM identity_registry")
+        conn.execute("DELETE FROM ingest_ledger")
+    for operation in (inspect_source, bind_source):
+        with pytest.raises(AccessDenied):
+            operation(copied)
+
+
+def test_expected_displayed_host_cannot_bind_changed_identity(tmp_path):
+    _seed(tmp_path)
+    with pytest.raises(AccessDenied):
+        bind_source(tmp_path, expected_host_uid="other-host")
+    with pytest.raises(AccessUnavailable):
+        inspect_source(tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ["marker", "rows"])
+def test_admission_query_and_provenance_share_snapshot_then_next_query_refuses(tmp_path, mutation):
+    _seed(tmp_path)
+    host = bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        previous_seq = conn.execute("SELECT MAX(ingest_seq) FROM ingest_ledger").fetchone()[0]
+
+    def admit_and_change(conn):
+        admit_source(conn, host)
+        with sqlite3.connect(db_file(tmp_path)) as writer:
+            if mutation == "marker":
+                writer.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
+            else:
+                writer.execute("UPDATE work_items SET host_uid='foreign-host', title='foreign secret'")
+            writer.execute("INSERT INTO ingest_ledger(event_id,family,ingested_at) VALUES ('later','test','later')")
+
+    env = _envelope(tmp_path, lambda c: [r[0] for r in c.execute("SELECT title FROM work_items")],
+                    admit_connection=admit_and_change)
+    assert set(env["data"]) == {"work for engineering", "work for data"}
+    assert env["provenance"]["last_ingest_seq"] == previous_seq
+    with pytest.raises(AccessDenied):
+        _envelope(tmp_path, lambda c: None, admit_connection=lambda c: admit_source(c, host))
+
+
+@pytest.mark.parametrize("shape", ["absent", "directory", "corrupt", "missing-table", "bad-marker"])
+def test_unavailable_sources_are_not_repaired_or_exposed(tmp_path, shape):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    path = db_file(tmp_path)
+    if shape == "absent":
+        path.unlink()
+    elif shape == "directory":
+        path.unlink(); path.mkdir()
+    elif shape == "corrupt":
+        path.write_bytes(b"not SQLite")
+    else:
+        with sqlite3.connect(path) as conn:
+            if shape == "missing-table":
+                conn.execute("DROP TABLE metric_samples")
+            else:
+                conn.execute("DELETE FROM owner_source_binding")
+    for operation in (inspect_source, bind_source):
+        with pytest.raises(AccessUnavailable, match="owner source unavailable"):
+            operation(tmp_path)
+
+
+def test_admission_requires_explicit_transaction(tmp_path):
+    _seed(tmp_path)
+    host = bind_source(tmp_path)
+    with ro(tmp_path) as conn:
+        with pytest.raises(AccessUnavailable):
+            admit_source(conn, host)
+
+
+@pytest.mark.parametrize("version", [0, 999])
+def test_schema_mismatch_is_unavailable_without_binding_or_migration(tmp_path, version):
+    _seed(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute(f"PRAGMA user_version={version}")
+    with pytest.raises(AccessUnavailable):
+        bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='owner_source_binding'").fetchone()
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_host_extrema_use_covering_indexes_created_only_by_binding(tmp_path, table):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        for direction in ("ASC", "DESC"):
+            rows = conn.execute(f"EXPLAIN QUERY PLAN SELECT host_uid FROM {table}"
+                                f" ORDER BY host_uid COLLATE BINARY {direction} LIMIT 1").fetchall()
+            plan = " ".join(r[3] for r in rows)
+            assert f"COVERING INDEX owner_source_{table}_host" in plan
+            assert "TEMP B-TREE" not in plan
+
+
+@pytest.mark.parametrize("foreign", ["!before", "zz-after"])
+def test_binary_host_extrema_refuse_both_sides_of_expected_host(tmp_path, foreign):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    add_row(tmp_path, "metric_samples", foreign)
+    with pytest.raises(AccessDenied):
+        inspect_source(tmp_path)
+
+
+def test_missing_index_does_not_disable_invariant_or_repair_on_read(tmp_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DROP INDEX owner_source_work_items_host")
+        conn.execute("UPDATE work_items SET host_uid='foreign-host'")
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(tmp_path)
+    with pytest.raises(SourceDenied):
+        bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='owner_source_work_items_host'").fetchone()
+
+
+def test_source_host_oserror_is_generic_unavailable(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    def unreadable(_path):
+        raise OSError("private host path")
+    monkeypatch.setattr(owner_source, "read_host_uid", unreadable)
+    with pytest.raises(AccessUnavailable, match="^owner source unavailable$"):
+        source_host_uid(tmp_path)
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_missing_covering_index_fails_fast_readonly_then_explicit_binding_restores(tmp_path, table, monkeypatch):
+    from claudlobby.plane import owner_source
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    path = db_file(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"DROP INDEX owner_source_{table}_host")
+    before = path.read_bytes()
+    original = owner_source._retained
+    monkeypatch.setattr(owner_source, "_retained", lambda *args: pytest.fail("scanned unindexed source"))
+    with pytest.raises(SourceNeedsBinding):
+        inspect_source(tmp_path)
+    assert path.read_bytes() == before
+    monkeypatch.setattr(owner_source, "_retained", original)
+    assert bind_source(tmp_path) == inspect_source(tmp_path)
+
+
+@pytest.mark.parametrize("index", ["CREATE INDEX owner_source_work_items_host ON work_items(title)",
+    "CREATE INDEX owner_source_work_items_host ON work_items(host_uid) WHERE host_uid IS NOT NULL"])
+def test_incompatible_index_is_unavailable_and_not_silently_repaired(tmp_path, index):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    path = db_file(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX owner_source_work_items_host")
+        conn.execute(index)
+    before = path.read_bytes()
+    for operation in (inspect_source, bind_source):
+        with pytest.raises(SourceUnavailable):
+            operation(tmp_path)
+    assert path.read_bytes() == before
+
+
+def test_foreign_marker_precedes_missing_index_remediation(tmp_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        conn.execute("DROP INDEX owner_source_work_items_host")
+        conn.execute("UPDATE owner_source_binding SET host_uid='foreign-host'")
+    with pytest.raises(SourceDenied):
+        inspect_source(tmp_path)
+
+
+def test_pre_activation_owner_is_pairable_but_not_a_recorder(tmp_path):
+    from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1001")
+    challenge = store.begin_pairing(principal)
+    grant = store.confirm_pairing(challenge.token, expected_principal=principal)
+    assert inspect_owner_setup(tmp_path) == grant.host_uid
+    with pytest.raises(AccessUnavailable):
+        inspect_source(tmp_path)
+    assert not db_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("entry", ["plane.db", "spool", "staged", "owner.sock", "unknown"])
+def test_pre_activation_owner_refuses_other_plane_content(tmp_path, entry):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path).prepare_first_fleet()
+    (db_file(tmp_path).parent / entry).write_text("synthetic unexpected state")
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+
+
+@pytest.mark.parametrize("problem", ["foreign", "corrupt", "redirected", "activation", "runtime", "selection", "config",
+                                    "restored-backup.json", "restored-backup", "migrations", "workspace_schema", "connected_schema"])
+def test_fresh_owner_admission_never_masks_old_or_invalid_state(tmp_path, problem):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    if problem == "foreign":
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("UPDATE metadata SET host_uid=?", ("host_" + "f" * 32,))
+    elif problem == "corrupt":
+        store.path.write_bytes(b"not a database")
+    elif problem == "redirected":
+        old = store.path.with_name("private-copy")
+        store.path.rename(old)
+        store.path.symlink_to(old)
+    elif problem in {"selection", "config", "restored-backup.json", "restored-backup", "migrations"}:
+        marker = {"selection": "selected-release.json", "config": "config.json"}.get(problem, problem)
+        (tmp_path / "state" / marker).write_text("invalid")
+    elif problem in {"workspace_schema", "connected_schema"}:
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("CREATE TABLE " + problem.split("_")[0] + "_metadata(singleton,version)")
+            conn.execute("INSERT INTO " + problem.split("_")[0] + "_metadata VALUES(1,99)")
+    else:
+        directory = tmp_path / ("state/activations" if problem == "activation" else "runtime")
+        directory.mkdir()
+        (directory / "begun").write_text("retained")
+    with pytest.raises((AccessUnavailable, ValueError)):
+        inspect_owner_setup(tmp_path)
+
+
+def test_default_authority_without_explicit_fresh_marker_never_falls_back(tmp_path):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path)
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+
+
+def test_retired_preparation_never_reclassifies_missing_recorder_as_fresh(tmp_path):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    store = OwnerAccess.initialize(tmp_path)
+    store.prepare_first_fleet()
+    store.retire_first_fleet()
+    store.retire_first_fleet()
+    # Even if all external activation/recorder/runtime witnesses disappeared.
+    assert not db_file(tmp_path).exists()
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+
+
+@pytest.mark.parametrize("overlay", ["local/example", "local/system/example"])
+@pytest.mark.parametrize("redirected", [False, True])
+def test_fresh_owner_refuses_retained_overlay_runtime_without_manifest(tmp_path, overlay, redirected):
+    from claudlobby.plane.owner_access import OwnerAccess
+    from claudlobby.plane.owner_source import inspect_owner_setup
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    runtime = tmp_path / overlay / "runtime"
+    runtime.parent.mkdir(parents=True)
+    if redirected:
+        target = tmp_path / "old-runtime"
+        target.mkdir()
+        runtime.symlink_to(target, target_is_directory=True)
+    else:
+        runtime.mkdir()
+        (runtime / "retained").write_text("old installation")
+    with pytest.raises(AccessUnavailable):
+        inspect_owner_setup(tmp_path)
+
+
+def test_first_fleet_source_completion_without_owner_storage_is_noop(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('absent owner must not bind'))
+    monkeypatch.setattr(owner_source, 'inspect_source', lambda *_: pytest.fail('absent owner must not inspect'))
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not OwnerAccess(tmp_path).path.exists()
+    assert not db_file(tmp_path).exists()
+
+
+def test_first_fleet_source_completion_resumes_after_binding_before_retirement(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    host = ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    retire = OwnerAccess.retire_first_fleet
+    monkeypatch.setattr(OwnerAccess, 'retire_first_fleet',
+        lambda _: (_ for _ in ()).throw(OSError('interrupted before retirement')))
+    with pytest.raises(OSError, match='before retirement'):
+        owner_source.complete_first_fleet_source(tmp_path)
+    assert access.first_fleet_pending()
+    assert inspect_source(tmp_path) == host
+    monkeypatch.setattr(OwnerAccess, 'retire_first_fleet', retire)
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending() and read_host_uid(tmp_path / 'state') == host
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('retired owner must only inspect'))
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert inspect_source(tmp_path) == host
+
+
+@pytest.mark.parametrize('defect', ['unbound', 'foreign'])
+def test_retired_first_fleet_completion_never_reattests_changed_source(tmp_path, monkeypatch, defect):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending()
+    with sqlite3.connect(db_file(tmp_path)) as conn:
+        if defect == 'unbound':
+            conn.execute('DROP TABLE owner_source_binding')
+        else:
+            conn.execute('UPDATE owner_source_binding SET host_uid=?', ('host_' + 'f' * 32,))
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not re-attest'))
+    with pytest.raises((SourceNeedsBinding, SourceDenied)):
+        owner_source.complete_first_fleet_source(tmp_path)
+    assert not access.first_fleet_pending()
+
+
+def test_first_fleet_completion_refuses_pending_owner_after_writers_started(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    initialize_plane(tmp_path)
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('writers already admitted'))
+    with pytest.raises(SourceUnavailable, match='before recorder writers'):
+        owner_source.complete_first_fleet_source(tmp_path, writers_started=True)
+    assert access.first_fleet_pending()
+
+
+@pytest.mark.parametrize('marker', ['config.json', 'selected-release.json', 'restored-backup.json',
+                                    'restored-backup', 'migrations'])
+def test_fresh_owner_refuses_redirected_committed_or_recovery_evidence_without_recorder(tmp_path, monkeypatch, marker):
+    from claudlobby import activation_state
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    before = access.path.read_bytes()
+    path = tmp_path / 'state' / marker
+    path.symlink_to(tmp_path / 'missing-evidence')
+    monkeypatch.setattr(activation_state, 'read_selection', lambda *_: pytest.fail('fresh gate must not select legacy runtime'))
+    monkeypatch.setattr(owner_source, 'bind_source', lambda *_: pytest.fail('must not attest absent recorder'))
+    assert not db_file(tmp_path).exists()
+    with pytest.raises(SourceUnavailable, match='fresh owner setup unavailable'):
+        owner_source.inspect_owner_setup(tmp_path)
+    assert access.path.read_bytes() == before and access.first_fleet_pending()
+    assert path.is_symlink()

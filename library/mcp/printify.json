@@ -1,4 +1,5 @@
 {
+  "_deprecated": "Use skills: [printify] with integrations: [printify], which call the Printify REST API directly (library/integrations/printify.md).",
   "_env_contract": {
     "PRINTIFY_API_KEY": {
       "description": "Printify Personal Access Token",
@@ -48,7 +49,7 @@
   },
   "printify": {
     "command": "npx",
-    "args": ["-y", "printify-mcp"],
+    "args": ["-y", "@tsavo/printify-mcp@0.1.1"],
     "env": {
       "PRINTIFY_API_KEY": "${PRINTIFY_API_KEY}",
       "PRINTIFY_SHOP_ID": "${PRINTIFY_SHOP_ID}"

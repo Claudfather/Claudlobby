@@ -141,7 +141,7 @@ def test_derivation_fixtures(tmp_path: Path):
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "fx", "fleet": "fx-fleet",
          "payload": {"work_item_id": wi, "title": "t",
-                      "created_by": "bot:fx-fleet/mgr"}},
+                      "created_by": "bot:fx-fleet/mgr", "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "fx", "fleet": "fx-fleet",
          "payload": {"assignment_id": a1, "work_item_id": wi,
                       "assignee": "bot:fx-fleet/w1",
@@ -423,5 +423,10 @@ def test_unopenable_db_spools(tmp_path: Path):
     # A directory where the db file should be → connect raises → spool.
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "plane.db").mkdir()
+    with pytest.raises(sqlite3.OperationalError):
+        emit(tmp_path, _mk_request(2), require_commit=True)
+    assert not (tmp_path / "state" / "plane" / "spool").exists()
+    assert not (tmp_path / "state" / "plane" / "staged").exists()
     outcome = emit(tmp_path, _mk_request(2))
     assert outcome.status == "spooled"
+    assert len(list((tmp_path / "state" / "plane" / "spool").glob("*.json"))) == 1

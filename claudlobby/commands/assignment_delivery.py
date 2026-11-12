@@ -1,0 +1,194 @@
+"""Public generated-manager assignment delivery over the strict domain owner."""
+
+from __future__ import annotations
+
+import sqlite3
+from types import SimpleNamespace
+
+from ..command_result import CommandFailure, CommandOutput
+
+
+_RECEIPT_WAIT_S = 10
+
+
+def _data(route, result) -> dict:
+    return {"fleet": route.selected.fleet.name, "task_id": result.task_id,
+            "assignment_id": result.assignment_id, "message_id": result.message_id,
+            "sender": {"uid": route.caller.uid, "alias": route.caller.alias},
+            "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
+            "recording": result.recording, "transmission_recording": result.transmission_recording,
+            "request_persisted": result.request_persisted, "transport": result.delivery,
+            "delivery": result.delivery, "replayed": result.replayed,
+            "attempt_no": result.attempt_no, "receipt_observation": None,
+            "integrity_verdict": None, "reason": result.reason}
+
+
+def dispatch(args) -> CommandOutput:
+    from ..activation_state import ActivationError
+    from ..assignment_delivery import deliver
+    from ..config_plan import PlanError
+    from ..context import BotNotFoundError
+    from ..message_context import MessageContextError, resolve_message_route
+    from ..message_operations import MessageConflict, read_recipient_box, repair_held_delivery
+    from ..message_queries import MessageQueryError, receipt
+    from ..operation_context import (OperationContextError, OperationContextUnavailableError,
+                                     bind_task_context, resolve_operation_scope)
+    from ..paths import InvalidPathSelector
+    from ..plane.contracts import ContractViolation
+    from ..plane.migrations import DowngradeError
+    from ..plane.schema_state import PendingMigrationError
+    from ..releases import ReleaseError
+    from ..request_ids import canonical_request_id
+    from ..request_receipts import ReceiptBusy, ReceiptConflict, ReceiptError
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission,
+                                     runtime_release_id, runtime_provenance, runtime_route_matches)
+    from ..task_operations import TaskRecordingError, _reader
+    from ..task_queries import TaskQueryError, show_assignment
+    from ..task_state import TaskStateError
+    from .message_write import _body, _bound_release
+    from ..application_messages import _effect_failure
+
+    release_id = None
+    try:
+        if args.seed:
+            raise CommandFailure("conflict", "seed configuration has no assignment delivery")
+        request_id = canonical_request_id(args.request_id)
+        if not isinstance(args.assignment_id, str) or not args.assignment_id.strip() or "\0" in args.assignment_id:
+            raise CommandFailure("invalid_argument", "ASSIGNMENT_ID requires a task assignment reference")
+        body = _body(SimpleNamespace(text=None, file=args.file))
+        selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
+        if selected.paths.seed or origin is None or origin.bot_id != selected.fleet.manager:
+            raise CommandFailure("conflict", "assignment delivery requires a generated fleet manager")
+        bound_release = _bound_release(selected.paths.package, generated=True)
+        with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
+                                expected_release=bound_release) as release:
+            release_id = runtime_release_id(release)
+            ctx = bind_task_context(selected, origin=origin)
+            if (ctx.caller != ctx.bots.get(selected.fleet.manager)
+                    or ctx.caller_fleet_uid != ctx.fleet_uid):
+                raise CommandFailure("conflict", "selected fleet manager identity is not the caller",
+                                     release_id=release_id)
+            with _reader(ctx) as conn:
+                view = show_assignment(conn, args.assignment_id, fleet_uid=ctx.fleet_uid)
+            workers = [name for name, actor in ctx.bots.items()
+                       if actor.uid == view.assignment.assignee_uid]
+            if len(workers) != 1:
+                raise CommandFailure("conflict", "assignment worker is not a unique active bot",
+                                     release_id=release_id)
+            route = resolve_message_route(workers[0], root=selected.paths.root,
+                                          fleet=selected.fleet.name,
+                                          package=selected.paths.package)
+            if (not runtime_route_matches(release, route) or route.host_uid != ctx.host_uid
+                    or route.selected_fleet_uid != ctx.fleet_uid
+                    or route.caller_fleet_uid != ctx.caller_fleet_uid
+                    or route.caller != ctx.caller or route.peer != ctx.bots[workers[0]]
+                    or route.manager != ctx.caller):
+                raise CommandFailure("conflict", "assignment route differs from active task identities",
+                                     release_id=release_id)
+            # The box just before the send, for the chip repair (#2105).
+            box_before = read_recipient_box(route, selected.paths.package)
+            result = deliver(ctx, route, selected.paths.package, request_id,
+                             args.assignment_id, body, retry_uncertain=args.retry_uncertain)
+            data = {**_data(route, result), **runtime_provenance(release)}
+            # rc 3 (#1236): the box never showed the payload and the transport
+            # withheld its Enter; the receipt wait and held-box repair decide (#2105).
+            withheld = result.delivery == "unknown" and result.native_returncode == 3
+            if result.delivery != "submitted" and not withheld:
+                code = "delivery_failed" if result.delivery == "failed" else "delivery_unknown"
+                raise _effect_failure(code,
+                                     "assignment intent recorded; native delivery was not confirmed; inspect request",
+                                     data=data, request_id=request_id, release_id=release_id)
+            try:
+                observed = receipt(ctx, result.message_id, destination=route.peer.alias,
+                                   wait=_RECEIPT_WAIT_S)
+                repair, observed = repair_held_delivery(
+                    route, selected.paths.package, result.message_id, first=observed,
+                    box_before=box_before,
+                    observe=lambda wait: receipt(ctx, result.message_id,
+                                                 destination=route.peer.alias, wait=wait))
+                if repair is not None:
+                    data["enter_repair"] = repair.as_dict()
+            except (OperationContextUnavailableError, OperationContextError,
+                    MessageQueryError, PendingMigrationError, DowngradeError,
+                    OSError, sqlite3.Error) as exc:
+                data["receipt_observation"] = "unavailable"
+                data["integrity_verdict"] = "unknown"
+                raise _effect_failure("delivery_unknown",
+                                     "assignment was submitted; final receipt proof is unavailable",
+                                     data=data, request_id=request_id, release_id=release_id) from exc
+            data["receipt_observation"] = observed.receipt_observation
+            data["integrity_verdict"] = observed.integrity_verdict
+            if (observed.sender is None or observed.destination is None
+                    or observed.sender.uid != route.caller.uid
+                    or observed.sender.alias != route.caller.alias
+                    or observed.destination.uid != route.peer.uid
+                    or observed.destination.alias != route.peer.alias):
+                data["integrity_verdict"] = "unknown"
+                raise _effect_failure("delivery_unknown",
+                                     "assignment was submitted; receipt identities differ from the frozen route",
+                                     data=data, request_id=request_id, release_id=release_id)
+            if (observed.exit_code == 0 and observed.receipt_observation == "received"
+                    and observed.integrity_verdict == "delivered"):
+                data["delivery"] = "received"
+            elif observed.integrity_verdict in {"truncated", "altered"}:
+                data["delivery"] = "failed"
+                raise _effect_failure("delivery_failed",
+                                     "assignment receiver proof shows a byte mismatch; inspect request",
+                                     data=data, request_id=request_id, release_id=release_id)
+            else:
+                raise _effect_failure("delivery_unknown",
+                                     "assignment was submitted; final receiver proof is incomplete",
+                                     data=data, request_id=request_id, release_id=release_id)
+            if result.request_persisted is not True:
+                raise _effect_failure("delivery_unknown",
+                                     "assignment received; request history was not retained reliably; inspect request",
+                                     data=data, request_id=request_id, release_id=release_id)
+        return CommandOutput(data, release_id=release_id,
+                             lines=(f"{result.task_id}\t{result.assignment_id}\t{result.message_id}\t"
+                                    "recording=committed\tdelivery=received",))
+    except CommandFailure:
+        raise
+    except TaskRecordingError as exc:
+        data = {"fleet": selected.fleet.name if "selected" in locals() else None,
+                "task_id": exc.task_id, "assignment_id": exc.assignment_id,
+                "message_id": exc.message_id, "recording": exc.recording,
+                "request_persisted": exc.request_persisted, "transport": "not_requested",
+                "delivery": "not_requested", "receipt_observation": None,
+                "integrity_verdict": None}
+        code = "delivery_unknown" if exc.recording == "committed" else "unavailable"
+        message = ("assignment intent committed; native delivery was not attempted; inspect the request"
+                   if exc.recording == "committed" else
+                   "assignment recording is unconfirmed; inspect the request")
+        raise _effect_failure(code, message, data=data, request_id=request_id, release_id=release_id) from exc
+    except ReceiptBusy as exc:
+        raise CommandFailure("conflict", "another invocation holds this request",
+                             hint=f"Retry the same request UUID {request_id} after it exits.",
+                             retryable=True, release_id=release_id) from exc
+    except (ReceiptConflict, MessageConflict) as exc:
+        raise CommandFailure("conflict", "assignment request conflicts with recorded history or route",
+                             release_id=release_id) from exc
+    except ReceiptError as exc:
+        raise CommandFailure("conflict", "assignment request receipt is invalid or unsafe",
+                             release_id=release_id) from exc
+    except TaskQueryError as exc:
+        raise CommandFailure(exc.code, str(exc), hint=exc.hint,
+                             retryable=exc.retryable, release_id=release_id) from exc
+    except ContractViolation as exc:
+        raise CommandFailure("conflict", "assignment capture or Plane contract is invalid",
+                             release_id=release_id) from exc
+    except InvalidPathSelector as exc:
+        raise CommandFailure("invalid_argument", "invalid assignment root or fleet selector",
+                             release_id=release_id) from exc
+    except OperationContextUnavailableError as exc:
+        raise CommandFailure("unavailable", "assignment identity registry is unavailable",
+                             retryable=True, release_id=release_id) from exc
+    except (MessageContextError, OperationContextError, BotNotFoundError,
+            ActivationError, PlanError, TaskStateError) as exc:
+        raise CommandFailure("conflict", "active assignment scope or state is invalid",
+                             release_id=release_id) from exc
+    except ReleaseError as exc:
+        raise CommandFailure("release_mismatch", "selected release is unavailable or mismatched",
+                             release_id=release_id) from exc
+    except (PendingMigrationError, DowngradeError, OSError, sqlite3.Error) as exc:
+        raise CommandFailure("unavailable", "assignment scope or storage is unavailable",
+                             release_id=release_id) from exc

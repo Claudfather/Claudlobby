@@ -33,27 +33,32 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "lib"
+LIB = REPO_ROOT / "claudlobby/_runtime_scripts"
 
 # Wrappers on _emit_fleet_signal, plus the one that wraps a wrapper (rule 1).
 DOORS = ("emit_failure_alert", "emit_fleet_notice", "notify_currency")
 
 # Scripts that can reach the signal door. Update deliberately, never to go green.
 SCRIPTS_REACHING_DOOR = {
-    "disk-monitor", "fleet-memory-check", "host-health-check", "keepalive",
-    "migrate-fleet-to-system", "notify-behind", "orphan-browser-reaper",
+    "disk-monitor", "fleet-memory-check", "host-health-check", "keepalive", "keepalive-all",
+    "notify-behind", "orphan-browser-reaper",
     "reload-fleet", "rolling-restart", "start-bot", "update-claude-code",
-    "update-siblings", "validate-bot-change", "weekly-worker-restart",
+    "update-siblings", "weekly-worker-restart",
     "vault-sync",
     # #1771: a REFUSED alert target is raised through emit_failure_alert (a plane
     # event and the manager's pane, the channels that do not need the target).
     "fleet-pulse", "creds-check",
+    # #1826: a missed briefing slot is raised through emit_fleet_notice.
+    "briefing-trigger",
+    # #1645: swap thrash, once an episode, through emit_failure_alert.
+    "plane-host-probe",
 }
 
 # Of those, the ones systemd runs with NO fleet TODAY -- the retrofit half.
 ACTIVE_MISROUTING = {
     "disk-monitor", "fleet-memory-check", "host-health-check",
     "notify-behind", "orphan-browser-reaper", "update-claude-code",
+    "plane-host-probe",
 }
 
 # A third category, not a tiebreak. update-siblings is host-scoped BY DESIGN
@@ -72,10 +77,10 @@ LATENT = {"update-siblings", "vault-sync"}
 # Pass a fleet, resolve at step 1, and must stay untouched. Over-reaching into
 # this set is the realistic failure mode of a fix aimed at the other one.
 CORRECT = {
-    "keepalive", "migrate-fleet-to-system", "reload-fleet", "rolling-restart",
-    "start-bot", "weekly-worker-restart", "validate-bot-change",
+    "keepalive", "keepalive-all", "reload-fleet", "rolling-restart",
+    "start-bot", "weekly-worker-restart",
     # fleet jobs: each takes its fleet positionally and resolves in its own bots dir
-    "fleet-pulse", "creds-check",
+    "fleet-pulse", "creds-check", "briefing-trigger",
 }
 
 def _callers() -> set[str]:

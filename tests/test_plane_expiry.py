@@ -4,25 +4,31 @@ assignments (a fresh one and a completed one are untouched); the event
 removes the card from ATTENTION_SQL and TASK_STATUS_SQL says `expired`;
 a second run is a no-op (idempotent by construction); dry-run emits
 nothing; the launcher self-gates; the composer stamps the arming flag.
+Public expiry requires committed Git configuration and filters to its fleets.
 """
 
 from __future__ import annotations
 
-import os
+from tests.plane_setup import initialize_plane
+
 import subprocess
-import sys
+import shlex
+import sqlite3
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.expiry import expirable, expired_events
+from claudlobby.plane.expiry import ExpiryChanged, expirable, expired_events, require_expirable
 from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL, attention_params
+from tests.conftest import constructed_env
 from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
 # The REAL clock, not a literal instant, and that is load-bearing rather than
-# lazy. Three of these tests run lib/plane-expire.sh as a SUBPROCESS, which
+# lazy. Three of these tests run claudlobby/_runtime_scripts/plane-expire.sh as a SUBPROCESS, which
 # reads the wall clock; every other test seeds its rows at NOW +/- N days. Pin
 # NOW to a fixed past instant and the two clocks drift apart at one day per day
 # until the `fresh` row (NOW - 2d) crosses the 7-day horizon by the real clock
@@ -38,17 +44,18 @@ def _root(tmp_path):
     return plane_root(tmp_path)
 
 
-def _dispatch(root, n, *, expected_by):
+def _dispatch(root, n, *, expected_by, fleet=F, emitter="t"):
     """work_item + assignment — the 6b fixture shape."""
     wi, aid = f"wi_{n:0>32}", f"asg_{n:0>32}"   # ID_PATTERNS: asg_ + 32 hex
+    initialize_plane(root)
     emit_batch(root, [
-        {"event_type": "work_item", "emitter": "t", "fleet": F,
+        {"event_type": "work_item", "emitter": emitter, "fleet": fleet,
          "payload": {"work_item_id": wi, "title": "t",
-                     "created_by": f"bot:{F}/mgr"}},
-        {"event_type": "assignment", "emitter": "t", "fleet": F,
+                     "created_by": f"bot:{fleet}/mgr", "workstream_id": "ws-test"}},
+        {"event_type": "assignment", "emitter": emitter, "fleet": fleet,
          "payload": {"assignment_id": aid, "work_item_id": wi,
-                     "assignee": f"bot:{F}/w1", "assigned_by": f"bot:{F}/mgr",
-                     "expected_by": expected_by.isoformat(),
+                     "assignee": f"bot:{fleet}/w1", "assigned_by": f"bot:{fleet}/mgr",
+                     **({"expected_by": expected_by.isoformat()} if expected_by else {}),
                      "dispatch_msg_id": f"msg_{n:0>32}"}}])
     return wi, aid
 
@@ -105,6 +112,28 @@ def test_expired_event_clears_attention_and_sets_status_idempotently(tmp_path):
     assert again.rows == []                         # idempotent: nothing left
 
 
+def test_sweep_expiry_releases_canonical_work_to_queued(tmp_path):
+    from claudlobby.task_state import TASK_EMITTER, read_tasks
+
+    root = _root(tmp_path)
+    task_id, assignment_id = _dispatch(root, "9", expected_by=NOW - timedelta(days=10),
+                                       emitter=TASK_EMITTER)
+    with closing(connect(db_path(root))) as conn:
+        plan = expirable(conn, now=NOW, after_days=7)
+    assert [row["assignment_id"] for row in plan.rows] == [assignment_id]
+    emit_batch(root, expired_events(plan, now=NOW, after_days=7))
+    with closing(connect(db_path(root))) as conn:
+        fleet_uid = conn.execute(
+            "SELECT uid FROM identity_registry WHERE kind='fleet' AND alias=?", (F,)
+        ).fetchone()[0]
+        state = read_tasks(conn, fleet_uid=fleet_uid)
+        task = state.get(task_id)
+    assert task.state == "queued" and task.current_assignment is None
+    assert task.terminal_event is None and not task.blockers
+    assert task.assignments[0].terminal_event.emitter == "attention-expiry"
+    assert [t.task_id for t in state.tasks] == [task_id] and not state.blockers
+
+
 def test_negative_horizon_refused():
     import pytest
     import sqlite3
@@ -112,25 +141,87 @@ def test_negative_horizon_refused():
         expirable(sqlite3.connect(":memory:"), now=NOW, after_days=-1)
 
 
-def _cli(root, *argv):
-    return subprocess.run(
-        [sys.executable, "-m", "claudlobby", "--root", str(root),
-         "plane", "expire", *argv], capture_output=True, text=True, timeout=120)
+def test_public_huge_horizon_refuses_before_native_or_storage(tmp_path):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
+
+    args = SimpleNamespace(fleet=None, seed=False, after_days=1000000,
+                           root=tmp_path, dry_run=True)
+    with pytest.raises(CommandFailure) as failure:
+        plane_expire.dispatch(args)
+    assert failure.value.error.code == "invalid_argument"
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_cli_dry_run_then_live(tmp_path):
+def _selected_sweep(monkeypatch, root, *, dry_run=False):
+    from claudlobby.commands import plane_expire
+
+    @contextmanager
+    def admitted(*_args, **_kwargs):
+        from claudlobby.runtime_admission import GitCurrentRuntime
+        from tests.package_fixtures import git_package
+
+        yield GitCurrentRuntime(git_package(root).installation,
+                                "a" * 40, "b" * 64, {"fleets": {F: {}}})
+
+    monkeypatch.setattr(plane_expire, "mutation_admission", admitted)
+    monkeypatch.setattr(plane_expire, "resolve_paths", lambda **_kwargs:
+                        SimpleNamespace(root=root))
+    monkeypatch.setattr(plane_expire.RuntimeIdentity, "current", classmethod(
+        lambda cls: SimpleNamespace()))
+    return plane_expire.dispatch(SimpleNamespace(root=root, fleet=None, seed=False,
+                                                  after_days=None, dry_run=dry_run))
+
+
+def test_git_expiry_uses_admitted_fleet_roster_and_preserves_unknown_outcome(tmp_path, monkeypatch):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import plane_expire
     root = _root(tmp_path)
     _seed(root)
-    dry = _cli(root, "--dry-run")
-    assert dry.returncode == 0 and "would expire 1" in dry.stdout
+    _dispatch(root, "d", expected_by=NOW - timedelta(days=10), fleet="parked-fleet")
+    dry = _selected_sweep(monkeypatch, root, dry_run=True)
+    assert dry.release_id is None
+    assert dry.data["source_revision"] == "a" * 40
+    assert dry.data["config_fingerprint"] == "b" * 64
+    assert dry.data["fleets"] == [F]
+    assert dry.data["candidates"] == 1 and dry.data["skipped_unselected"] == 1
+    emit = plane_expire.emit_batch
+    def unknown(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic I/O failure")
+    monkeypatch.setattr(plane_expire, "emit_batch", unknown)
+    with pytest.raises(CommandFailure) as failed:
+        _selected_sweep(monkeypatch, root)
+    assert failed.value.error.code == "commit_unknown"
+    assert failed.value.data["recording"] == "unknown"
+    assert failed.value.data["config_fingerprint"] == "b" * 64
+    assert failed.value.data["event_ids"] and "expired" not in failed.value.data
+    # The fake emitter failed before commit. Resolve that fact before a fresh sweep.
+    with closing(connect(db_path(root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='expired'").fetchone()[0] == 0
+    monkeypatch.setattr(plane_expire, "emit_batch", emit)
+    live = _selected_sweep(monkeypatch, root)
+    assert live.data["expired"] == 1 and live.data["recording"] == "committed"
+    assert _selected_sweep(monkeypatch, root).data["expired"] == 0
+
+
+def test_selected_dry_run_then_live(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    _seed(root)
+    _dispatch(root, "d", expected_by=NOW - timedelta(days=10), fleet="retired-fleet")
+    dry = _selected_sweep(monkeypatch, root, dry_run=True)
+    assert dry.data["candidates"] == 1 and dry.data["skipped_unselected"] == 1
+    assert "expired" not in dry.data
+    assert "would expire 1" in dry.lines[0]
     conn = connect(db_path(root))
     try:
         assert not list(conn.execute(
             "SELECT 1 FROM events WHERE kind='task' AND event='expired'"))
     finally:
         conn.close()
-    live = _cli(root)
-    assert live.returncode == 0 and "expired 1" in live.stdout
+    live = _selected_sweep(monkeypatch, root)
+    assert live.data["recording"] == "committed" and "expired 1" in live.lines[0]
     conn = connect(db_path(root))
     try:
         n = conn.execute("SELECT COUNT(*) FROM events WHERE kind='task'"
@@ -138,32 +229,77 @@ def test_cli_dry_run_then_live(tmp_path):
     finally:
         conn.close()
     assert n == 1
-    assert _cli(root, "--after-days", "-1").returncode == 2   # clean refusal
-    assert _cli(tmp_path / "nope").returncode == 0            # absent db no-op
+    assert _selected_sweep(monkeypatch, root).data["expired"] == 0
 
 
-def _launcher(root, *argv, armed):
-    env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+def test_completion_between_preview_and_commit_refuses_expiry(tmp_path):
+    import pytest
+
+    root = _root(tmp_path)
+    stale = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    with closing(connect(db_path(root))) as conn:
+        plan = expirable(conn, now=NOW, after_days=7)
+    with pytest.raises(ValueError, match="precondition requires require_commit"):
+        emit_batch(root, expired_events(plan, now=NOW, after_days=7),
+                   precondition=lambda conn: require_expirable(
+                       conn, plan, now=NOW, after_days=7))
+    _complete(root, *stale)
+    with pytest.raises(ExpiryChanged):
+        emit_batch(root, expired_events(plan, now=NOW, after_days=7),
+                   require_commit=True,
+                   precondition=lambda conn: require_expirable(
+                       conn, plan, now=NOW, after_days=7))
+    with closing(connect(db_path(root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='expired'").fetchone()[0] == 0
+
+
+def test_unproved_expiry_commit_never_claims_expired(tmp_path, monkeypatch):
+    import pytest
+    from claudlobby.command_result import CommandFailure
+
+    root = _root(tmp_path)
+    _dispatch(root, "f", expected_by=NOW - timedelta(days=10))
+    def uncertain(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O")
+    monkeypatch.setattr("claudlobby.commands.plane_expire.emit_batch", uncertain)
+    with pytest.raises(CommandFailure) as error:
+        _selected_sweep(monkeypatch, root)
+    assert error.value.error.code == "commit_unknown"
+    assert error.value.data["recording"] == "unknown"
+    assert "expired" not in error.value.data
+    assert len(error.value.data["event_ids"]) == 1
+
+
+def _launcher(root, *argv, cli, armed):
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
     # Since the defaults flip the flag is an opt-OUT: absence RUNS the sweep,
     # and only an exact 0 stops it. The harness spells both explicitly rather
     # than relying on absence, so the pin reads the same way the door does.
     env["PLANE_EXPIRE_ENABLED"] = "1" if armed else "0"
-    return subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), *argv],
+    return subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-expire.sh"), *argv],
                           capture_output=True, text=True, timeout=120, env=env)
 
 
+def _recording_cli(tmp_path):
+    cli = tmp_path / "record-cli.sh"
+    argv = tmp_path / "recorded-argv"
+    cli.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {shlex.quote(str(argv))}\nexit 7\n")
+    cli.chmod(0o755)
+    return cli, argv
+
+
 def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
-    """Opt-OUT since the defaults flip. Two halves, and the second is the one
-    the ruling is about: a door turned off must SAY so, because a silent skip
-    is indistinguishable from a broken timer and that ambiguity is exactly
-    what a dormant-by-default estate taught operators to ignore."""
+    """The ON arm reaches its CLI; the OFF arm reports the disabled sweep."""
     root = _root(tmp_path)
     _seed(root)
-    on = _launcher(root, "--dry-run", armed=True)
-    assert on.returncode == 0 and "would expire 1" in on.stdout
-    off = _launcher(root, "--dry-run", armed=False)
+    cli, argv = _recording_cli(tmp_path)
+    on = _launcher(root, "--dry-run", cli=cli, armed=True)
+    assert on.returncode == 7
+    assert argv.read_text().splitlines() == ["--root", str(root), "plane", "expire", "--dry-run"]
+    argv.unlink()
+    off = _launcher(root, "--dry-run", cli=cli, armed=False)
     assert off.returncode == 0
+    assert not argv.exists()
     # REWRITTEN by the fold (F6): the loud line is now the SHARED gate's
     # (lib-common `switch_is_on`), not this door's own copy — four launchers
     # had four spellings of one comparison. What is pinned is unchanged: the
@@ -175,21 +311,21 @@ def test_launcher_runs_by_default_and_the_off_switch_is_LOUD(tmp_path):
 
 
 def test_launcher_runs_with_no_flag_at_all(tmp_path):
-    """Absence is ON — the flip itself, pinned. This is the assertion that
-    fails if someone restores `${FLAG:-0}` while leaving the comments alone."""
-    import os as _os
+    """Absence is ON — the launcher still reaches its CLI."""
     root = _root(tmp_path)
     _seed(root)
-    env = dict(HOME=str(root), CLAUDLOBBY_ROOT=str(root),
-               PATH=f"{REPO / '.venv' / 'bin'}:" + _os.environ.get("PATH", ""))
-    r = subprocess.run(["bash", str(REPO / "lib" / "plane-expire.sh"), "--dry-run"],
+    cli, argv = _recording_cli(tmp_path)
+    env = constructed_env(CLAUDLOBBY_ROOT=root, CLAUDLOBBY_CLI=cli)
+    r = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-expire.sh"), "--dry-run"],
                        capture_output=True, text=True, timeout=120, env=env)
-    assert r.returncode == 0 and "would expire 1" in r.stdout
+    assert r.returncode == 7
+    assert argv.read_text().splitlines() == ["--root", str(root), "plane", "expire", "--dry-run"]
 
 
 def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     import yaml
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -212,7 +348,7 @@ def test_job_composes_and_carries_its_own_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
@@ -225,6 +361,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     would keep firing with no way to tell why (#1383's class, inverted)."""
     import yaml  # noqa: F401 — mirrors the fixture above
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -239,7 +376,7 @@ def test_an_OFF_tier_reaches_the_unit_too(tmp_path, monkeypatch):
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EXPIRE_ENABLED": Resolution(name="PLANE_EXPIRE_ENABLED",
                                            value="0", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     assert "Environment=PLANE_EXPIRE_ENABLED=0" in (
         out / "claudlobby-plane-expire.service").read_text()
 
@@ -268,29 +405,64 @@ def test_an_alive_assignment_is_never_expired(tmp_path):
     assert [r["assignment_id"] for r in plan.rows] == [stale[1]]   # alive kept
 
 
-def test_a_changed_deadline_is_honored(tmp_path):
-    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
-    the future must keep the assignment — the sweep reads the EFFECTIVE
-    deadline, not the original row."""
-    root = _root(tmp_path)
-    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+def _deadline_fact(root, wi, aid, deadline):
+    """A deadline_changed on the assignment (None = open-ended), its ingest
+    backdated so the quiet-horizon clause is not what decides."""
     emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
                        "payload": {"work_item_id": wi, "assignment_id": aid,
                                    "event": "deadline_changed",
-                                   "deadline": (NOW + timedelta(days=5)).isoformat()}}])
-    # backdate that event's ingest so the quiet-horizon clause is not what saves it
+                                   "deadline": deadline.isoformat() if deadline else None}}])
     db = connect(db_path(root))
     try:
         db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
                    ((NOW - timedelta(days=9)).isoformat(),))
     finally:
         db.close()
+
+
+def test_a_changed_deadline_is_honored(tmp_path):
+    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
+    the future must keep the assignment — the sweep reads the EFFECTIVE
+    deadline, not the original row."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, NOW + timedelta(days=5))
     conn = connect(db_path(root))
     try:
         plan = expirable(conn, now=NOW, after_days=7)
     finally:
         conn.close()
     assert plan.rows == []
+
+
+def test_an_open_ended_deadline_fact_is_never_expired(tmp_path):
+    """#2469: a deadline_changed with no deadline makes the assignment
+    open-ended. The sweep keeps it, rather than skipping the fact for the
+    original deadline ten days back."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    _deadline_fact(root, wi, aid, None)
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert plan.rows == []
+
+
+def test_a_deadline_fact_gives_an_open_ended_assignment_a_deadline(tmp_path):
+    """#2469: an assignment dispatched with no deadline and given one by a
+    deadline_changed is swept like any other once that deadline is past the
+    horizon."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=None)
+    _deadline_fact(root, wi, aid, NOW - timedelta(days=10))
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert [r["assignment_id"] for r in plan.rows] == [aid]
 
 
 def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):

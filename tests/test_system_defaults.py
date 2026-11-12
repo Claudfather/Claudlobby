@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
 from claudlobby.config import (
+    BotConfig,
     FleetConfig,
     SystemDefaultsConfig,
     _hook_key,
@@ -26,6 +28,7 @@ from claudlobby.config import (
     _merge_system_into_defaults,
     load_fleet,
 )
+from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 from tests.conftest import install_real_template
 
@@ -193,6 +196,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               bots:
                 worker:
@@ -204,7 +208,7 @@ class TestLoadFleetSystemDefaults:
         # System hooks should be present
         assert "PreToolUse" in bot.hooks
         cmds = [h["command"] for h in bot.hooks["PreToolUse"]]
-        assert "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh" in cmds
+        assert "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh" in cmds
 
     def test_system_defaults_inject_observability(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -213,6 +217,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               bots:
                 worker:
@@ -234,11 +239,12 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               defaults:
                 hooks:
                   PreToolUse:
-                    - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+                    - command: "$CLAUDLOBBY_NATIVE_DIR/bot-vitals.sh"
                       timeout: 10
               bots:
                 worker:
@@ -260,6 +266,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               system_defaults: false
               bots:
@@ -279,6 +286,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               system_defaults:
                 hooks: false
@@ -302,6 +310,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               defaults:
                 observability:
@@ -324,6 +333,7 @@ class TestLoadFleetSystemDefaults:
             """\
             fleet:
               name: test-fleet
+              manager: worker
               service_prefix: com.test
               system_defaults:
                 timers: false
@@ -352,6 +362,7 @@ class TestDefaultGuardrails:
                 """\
                 fleet:
                   name: test-fleet
+                  manager: second
                   service_prefix: com.test
                   bots:
                     worker:
@@ -371,6 +382,7 @@ class TestDefaultGuardrails:
                 """\
                 fleet:
                   name: test-fleet
+                  manager: worker
                   service_prefix: com.test
                   system_defaults:
                     guardrails: false
@@ -389,6 +401,7 @@ class TestDefaultGuardrails:
                 """\
                 fleet:
                   name: test-fleet
+                  manager: worker
                   service_prefix: com.test
                   system_defaults: false
                   bots:
@@ -417,6 +430,7 @@ class TestDefaultGuardrails:
                 """\
                 fleet:
                   name: test-fleet
+                  manager: worker
                   service_prefix: com.test
                   defaults:
                     guardrails: [no-push-main, no-destructive-git, pii-protection]
@@ -439,6 +453,7 @@ class TestDefaultGuardrails:
                 """\
                 fleet:
                   name: test-fleet
+                  manager: worker
                   service_prefix: com.test
                   bots:
                     worker:
@@ -484,8 +499,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         merged = _default_merged()
 
         timers_dir = compose_fleet_timers(fleet, paths, merged)
@@ -501,11 +516,33 @@ class TestComposeFleetTimers:
 
         svc_text = svc.read_text()
         assert "Type=oneshot" in svc_text
-        assert "fleet-pulse.sh" in svc_text
+        assert '"--fleet" "test-fleet" "fleet" "pulse"' in svc_text
+        # The unit's own limit: the 240 s ceiling plus the stop, the reap and the
+        # summary, then 1 s per systemd kill phase (#2347). Only the pulse has one.
+        assert "TimeoutStartSec=254" in svc_text and "TimeoutStopSec=1" in svc_text
+        keepalive = (timers_dir / "com.test.keepalive.service").read_text()
+        assert "TimeoutStartSec" not in keepalive
 
         timer_text = timer.read_text()
-        assert "OnBootSec=300" in timer_text
-        assert "OnUnitActiveSec=300" in timer_text
+        # Every 300 s, anchored to the clock at minute 0 of each five (#1654).
+        assert "OnCalendar=*-*-* *:00/5:" in timer_text and "-- tick every 300s" in timer_text
+        assert "OnUnitActiveSec" not in timer_text
+        assert "OnBootSec" not in timer_text
+
+    def test_the_pulse_units_limit_follows_a_configured_cap(self, tmp_path):
+        from claudlobby.composer import compose_fleet_timers
+        from claudlobby.config import FleetPulseConfig
+
+        fleet = FleetConfig(
+            manager="lead",
+            bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])},
+            name="test-fleet",
+            service_prefix="com.test",
+            fleet_pulse=FleetPulseConfig(timeout_s=600),
+        )
+        timers_dir = compose_fleet_timers(fleet, self._paths(tmp_path), _default_merged())
+        svc_text = (timers_dir / "com.test.fleet-pulse.service").read_text()
+        assert "TimeoutStartSec=614" in svc_text
 
     def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
         """Fleet timers carry the fleet Telegram group, so a scheduled job's
@@ -514,7 +551,7 @@ class TestComposeFleetTimers:
         from claudlobby.composer import compose_fleet_timers
 
         paths = self._paths(tmp_path)
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])},
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-1009999999999",
@@ -533,7 +570,7 @@ class TestComposeFleetTimers:
         every fleet-timer alert (#1771), so the validator says so at generate."""
         from claudlobby.validator import ValidationReport, _validate_alert_pair
 
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="alpha",
             name="test-fleet",
             service_prefix="com.test",
             telegram_group_chat_id="-1009999999999",
@@ -543,12 +580,59 @@ class TestComposeFleetTimers:
         _validate_alert_pair(fleet, report)
         assert any("no declared channel bot is in the fleet chat" in w for w in report.warnings)
 
+    @pytest.mark.parametrize(("fleet_chat", "lead", "aide", "pulse", "warns"), [
+        (None, "telegram", "none", None, "has no Telegram chat"),
+        ("-1009999999999", "none", "telegram", None, "is not a Telegram channel bot"),
+        ("-1009999999999", "telegram", "none", None, None),
+        (None, "telegram-own-chat", "none", None, None),
+        ("-1009999999999", "none", "telegram", ("-1007777777777", "/srv/escalation"), None),
+        ("-1009999999999", "none", "telegram", ("-1007777777777", None), None),
+        (None, "none", "none", None, None),
+        (None, "default", "default", None, None),
+    ], ids=["telegram-manager-without-a-chat", "manager-without-telegram", "fleet-chat",
+            "own-chat", "declared-pair", "chat-without-its-sender", "no-telegram",
+            "telegram-channel-by-default-only"])
+    def test_a_fleet_whose_alerts_reach_only_the_managers_pane_is_a_validator_warning(
+            self, fleet_chat, lead, aide, pulse, warns):
+        """#2654: with neither a declared pair nor the manager's own chat, `fleet
+        notify` and a failed job alert the manager's pane only. A fleet that sets up
+        no Telegram is not warned, though its bots take the Telegram channel by
+        default, and a chat without its sender is alert-unpaired's."""
+        from claudlobby.config import FleetPulseConfig, TelegramConfig
+        from claudlobby.validator import ValidationReport, _validate_alert_target
+
+        def bot(bot_id, kind):
+            # "default": the channel bot every bot is unless it says otherwise,
+            # with no Telegram set up; "telegram": the documented token_env.
+            if kind == "none":
+                return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"], channels=[])
+            if kind == "default":
+                return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"])
+            chat = "-1008888888888" if kind == "telegram-own-chat" else None
+            return BotConfig(bot_id=bot_id, name=bot_id, expertise=["eng"],
+                             channels=["plugin:telegram@claude-plugins-official"],
+                             telegram=TelegramConfig(token_env="TELEGRAM_BOT_TOKEN", chat_id=chat))
+
+        fleet = FleetConfig(manager="lead", name="test-fleet", service_prefix="com.test",
+                            telegram_group_chat_id=fleet_chat,
+                            bots={"lead": bot("lead", lead), "aide": bot("aide", aide)},
+                            fleet_pulse=None if pulse is None else FleetPulseConfig(
+                                escalation_chat_id=pulse[0], escalation_state_dir=pulse[1]))
+        report = ValidationReport()
+        _validate_alert_target(fleet, report)
+        found = [message for kind, message in report.categorized() if kind == "alert-pane-only"]
+        if warns is None:
+            assert found == []
+        else:
+            assert len(found) == 1 and warns in found[0], found
+            assert found[0].startswith("fleet manager 'lead' ")
+
     @staticmethod
     def _paths(tmp_path):
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     @staticmethod
     def _channel_bot(bot_id, chat=None):
@@ -567,8 +651,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
         svc = (timers_dir / "com.test.creds-check.service").read_text()
@@ -581,7 +665,7 @@ class TestComposeFleetTimers:
             {"interval_from": "observability.pulse_interval"},
             {"observability": {"pulse_interval": 600}},
         )
-        assert sched == {"type": "interval", "seconds": 600}
+        assert sched == {"type": "interval", "seconds": 600, "startup": 600, "phase": 0, "calendar": None}
 
     def test_calendar_schedule(self, tmp_path):
         from claudlobby.composer import _resolve_timer_schedule
@@ -596,7 +680,7 @@ class TestComposeFleetTimers:
         from claudlobby.composer import _resolve_timer_schedule
 
         sched = _resolve_timer_schedule({"interval": 60}, {})
-        assert sched == {"type": "interval", "seconds": 60}
+        assert sched == {"type": "interval", "seconds": 60, "startup": 60, "phase": 0, "calendar": None}
 
     def test_calendar_timer_uses_oncalendar(self, tmp_path):
         from claudlobby.composer import compose_fleet_timers
@@ -604,8 +688,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -613,6 +697,8 @@ class TestComposeFleetTimers:
         assert timer.is_file()
         timer_text = timer.read_text()
         assert "OnCalendar=" in timer_text
+        # a calendar timer takes no startup delay and no monotonic cadence (#2059)
+        assert "OnActiveSec" not in timer_text and "OnUnitActiveSec" not in timer_text
 
         # A daily timer (no weekday in its OnCalendar) gets no launchd Weekday.
         plist_text = (timers_dir / "com.test.creds-check.plist").read_text()
@@ -624,8 +710,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -643,15 +729,14 @@ class TestComposeFleetTimers:
 
     def test_reload_fleet_daily_timer(self, tmp_path):
         # Mechanism 1 of the fleet update lifecycle: a daily, calendar-scheduled
-        # reload-fleet timer that refreshes plugins + composed skills live (no
-        # restart). It must compose as a distinct timer alongside the others.
+        # Selected CLI refreshes plugins without composing or enrolling units.
         from claudlobby.composer import compose_fleet_timers
 
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -660,6 +745,7 @@ class TestComposeFleetTimers:
         assert svc.is_file()
         assert timer.is_file()
         assert "reload-fleet.sh" in svc.read_text()
+        assert "CLAUDLOBBY_NATIVE_DIR" in svc.read_text()
         # Daily cadence is a systemd OnCalendar expression, not an interval.
         assert "OnCalendar=" in timer.read_text()
 
@@ -671,8 +757,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -689,8 +775,8 @@ class TestComposeFleetTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
 
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
@@ -718,13 +804,13 @@ class TestComposeFleetTimers:
 
 class TestPathsRuntimeFleet:
     def test_runtime_fleet_property(self, tmp_path):
-        paths = Paths(root=tmp_path)
+        paths = Paths(root=tmp_path, package=source_package())
         assert paths.runtime_fleet == tmp_path / "runtime" / "fleet"
 
     def test_runtime_fleet_with_overlay(self, tmp_path):
         fleet_dir = tmp_path / "local" / "myfleet"
         fleet_dir.mkdir(parents=True)
-        paths = Paths(root=tmp_path, fleet_dir=fleet_dir)
+        paths = Paths(root=tmp_path, fleet_dir=fleet_dir, package=source_package())
         assert paths.runtime_fleet == fleet_dir / "runtime" / "fleet"
 
 
@@ -735,6 +821,7 @@ class TestPathsRuntimeFleet:
 _NO_OVERRIDE_FLEET = """
 fleet:
   name: test-fleet
+  manager: worker
   service_prefix: com.test
   bots:
     worker:
@@ -751,6 +838,7 @@ _ALL_JOB_NAMES = {
     "data-sweep",
     "task-recheck",
     "manager-checkin",
+    "session-export",
 }
 
 
@@ -880,11 +968,12 @@ class TestJobsThreeLayerMerge:
                 """
 fleet:
   name: test-fleet
+  manager: worker
   service_prefix: com.test
   defaults:
     jobs:
       keepalive:
-        script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+        script: "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh"
         interval: 30
         type: oneshot
   bots:
@@ -905,6 +994,7 @@ fleet:
                 """
 fleet:
   name: test-fleet
+  manager: worker
   service_prefix: com.test
   system_defaults:
     timers: false
@@ -923,15 +1013,15 @@ class TestJobsComposition:
 
         root = tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_fleet_timers(fleet, paths, merged)
 
     def test_byte_identical_units_no_override(self, tmp_path):
         # A fleet with NO jobs override composes exactly the system default job
         # units — same names + content as the pre-Phase-1 fleet_timers — WITH
         # ONE EXCEPTION: manager-checkin is leaf-manager-gated (PR4 task 3,
-        # #1569), and _NO_OVERRIDE_FLEET is a single worker with no manager
-        # at all, so it composes no unit for that job. See
+        # #1569), and _NO_OVERRIDE_FLEET has only its declared manager,
+        # with no local worker, so it composes no unit for that job. See
         # TestManagerCheckinJobGate for the gate's own dedicated coverage.
         timers_dir = self._compose(tmp_path, _NO_OVERRIDE_FLEET)
         for name in _ALL_JOB_NAMES - {"manager-checkin"}:
@@ -940,11 +1030,11 @@ class TestJobsComposition:
             assert (timers_dir / f"com.test.{name}.plist").is_file()
         for ext in ("service", "timer", "plist"):
             assert not (timers_dir / f"com.test.manager-checkin.{ext}").is_file()
-        # keepalive static interval unchanged
-        assert "OnBootSec=60" in (timers_dir / "com.test.keepalive.timer").read_text()
+        # keepalive's static 60 s interval: a second of every minute
+        assert "OnCalendar=*-*-* *:*:" in (timers_dir / "com.test.keepalive.timer").read_text()
         # interval_from resolves end-to-end (observability.pulse_interval = 300)
         assert (
-            "OnBootSec=300" in (timers_dir / "com.test.fleet-pulse.timer").read_text()
+            "OnCalendar=*-*-* *:00/5:" in (timers_dir / "com.test.fleet-pulse.timer").read_text()
         )
         # weekly calendar expression unchanged
         assert (
@@ -958,11 +1048,12 @@ class TestJobsComposition:
             """
 fleet:
   name: test-fleet
+  manager: worker
   service_prefix: com.test
   defaults:
     jobs:
       keepalive:
-        script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+        script: "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh"
         interval: 30
         type: oneshot
   bots:
@@ -970,7 +1061,9 @@ fleet:
       expertise: [eng]
 """,
         )
-        assert "OnBootSec=30" in (timers_dir / "com.test.keepalive.timer").read_text()
+        keepalive = (timers_dir / "com.test.keepalive.timer").read_text()
+        # the override sets the cadence; the packaged startup delay merges in beside it
+        assert "OnUnitActiveSec=30" in keepalive and "OnActiveSec=60" in keepalive
         assert (timers_dir / "com.test.fleet-pulse.service").is_file()
         assert (timers_dir / "com.test.reload-fleet.service").is_file()
 
@@ -984,7 +1077,7 @@ fleet:
 
         root = tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
 
         gen_dir = compose_fleet_timers(fleet, paths, merged)
         gen = {f.name: f.read_text() for f in sorted(gen_dir.iterdir())}
@@ -1006,7 +1099,7 @@ class TestComposeHostTimers:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        return Paths(root=root, fleet_dir=root)
+        return Paths(root=root, fleet_dir=root, package=git_package(root))
 
     @pytest.mark.parametrize(
         "job,script,schedule",
@@ -1038,7 +1131,11 @@ class TestComposeHostTimers:
 
         svc_text = svc.read_text()
         # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
-        assert svc_text.rstrip().endswith(f"lib/{script}")
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc_text.splitlines()
+                                   if line.startswith("ExecStart=")))
+        assert command == [str(paths.package.installation.cli), "--root", str(paths.root),
+                           "_native", "--unit", f"claudlobby-{job}", "--phase", "producers",
+                           "--mode", "oneshot", "--", str(paths.package.runtime_native / script)]
         assert "CLAUDLOBBY_FLEET" not in svc_text
 
         timer_text = timer.read_text()
@@ -1080,10 +1177,12 @@ class TestComposeHostTimers:
         from claudlobby.composer import compose_fleet_timers
 
         paths = self._paths(tmp_path)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
         svc_text = (timers_dir / "com.test.data-sweep.service").read_text()
-        assert "data-sweep.sh --purge test-fleet" in svc_text
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc_text.splitlines()
+                                   if line.startswith("ExecStart=")))
+        assert command[-3:] == [str(paths.package.runtime_native / "data-sweep.sh"), "--purge", "test-fleet"]
 
     def test_fleet_units_knobs_match_declarations(self, tmp_path):
         # Guard: persistent/randomized_delay appear in a fleet unit IFF the
@@ -1092,7 +1191,7 @@ class TestComposeHostTimers:
         from claudlobby.composer import compose_fleet_timers
 
         paths = self._paths(tmp_path)
-        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        fleet = FleetConfig(manager="lead", bots={"lead": BotConfig(bot_id="lead", name="lead", expertise=[])}, name="test-fleet", service_prefix="com.test")
         merged = _default_merged()
         timers_dir = compose_fleet_timers(fleet, paths, merged)
         units = list(timers_dir.glob("*.timer"))
@@ -1120,7 +1219,7 @@ class TestDormantManifest:
         root = tmp_path / "claudlobby"
         root.mkdir()
         (root / "lib").mkdir()
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         # manager-checkin (PR4 task 3, #1569) is leaf-manager-gated: a fleet
         # with no leaf manager composes no unit for it at all, which would
         # make this class's dormancy-manifest assertions about that job
@@ -1129,7 +1228,7 @@ class TestDormantManifest:
         # weekly-worker-restart beside it — this class is about the DORMANT
         # manifest mechanism, not leaf-manager topology, so the shape is
         # chosen to keep that mechanism exercised.
-        fleet = FleetConfig(
+        fleet = FleetConfig(manager="lead",
             name="test-fleet",
             service_prefix="com.test",
             bots={
@@ -1186,10 +1285,9 @@ class TestDormantManifest:
 # manager-checkin's compose-time job gate (PR4 task 3, #1569, controller
 # correction 5): the fleet-job emitter skips `manager-checkin` entirely for a
 # fleet with NO leaf manager (`fleet.leaf_manager_bots()` empty) — not even a
-# dormant unit, because such a fleet can never satisfy the job's own
-# precondition (there is no manager for it to ever inject into). A fleet
+# dormant unit, because its manager has no local workers to route. A fleet
 # whose leaf manager disappears between generates must not leave a STALE
-# unit on disk that a later `enroll: true` or a naive setup-fleet run would
+# unit on disk that a later `enroll: true` activation would
 # enroll for real.
 # ---------------------------------------------------------------------------
 
@@ -1198,6 +1296,7 @@ class TestManagerCheckinJobGate:
     _NO_LEAF_MANAGER = """
 fleet:
   name: test-fleet
+  manager: worker
   service_prefix: com.test
   bots:
     worker:
@@ -1207,6 +1306,7 @@ fleet:
     _WITH_LEAF_MANAGER = """
 fleet:
   name: test-fleet
+  manager: lead
   service_prefix: com.test
   teams:
     eng:
@@ -1226,6 +1326,7 @@ fleet:
     _LEAF_MANAGER_WORKER_REMOVED = """
 fleet:
   name: test-fleet
+  manager: lead
   service_prefix: com.test
   bots:
     lead:
@@ -1240,6 +1341,7 @@ fleet:
     _NO_LEAF_MANAGER_TIMERS_OFF = """
 fleet:
   name: test-fleet
+  manager: lead
   service_prefix: com.test
   system_defaults:
     timers: false
@@ -1253,7 +1355,7 @@ fleet:
 
         root = root if root is not None else tmp_path / "claudlobby"
         fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         return compose_fleet_timers(fleet, paths, merged)
 
     def test_a_fleet_with_no_leaf_manager_composes_no_manager_checkin_unit(
@@ -1302,7 +1404,7 @@ fleet:
         assert siblings_before  # sanity: there ARE siblings to compare
 
         # Re-compose the SAME output dir after removing the worker (lead
-        # keeps its bot id; only its team is gone) — no leaf manager remains.
+        # keeps its bot id and manager role) — no leaf manager remains.
         self._compose(tmp_path, self._LEAF_MANAGER_WORKER_REMOVED, root=root)
 
         for ext in ("service", "timer", "plist"):
@@ -1407,20 +1509,22 @@ def _write_checkin_library_for_opt_out_tests(fleet_dir: Path) -> None:
     shutil.copytree(repo / "library" / "skills" / "checkin", dst)
 
 
-def _add_coordinator_for_opt_out_tests(fleet_dir: Path) -> None:
-    """Add `coord`, managing a team of one (lead) — lead stays a leaf manager
-    (it still manages eng/worker-1); coord is a coordinator, not a leaf."""
-    text = (fleet_dir / "fleet.yaml").read_text()
-    text = text.replace(
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n",
-        "  teams:\n    eng:\n      manager: lead\n      workers: [worker-1]\n"
-        "    top:\n      manager: coord\n      workers: [lead]\n",
+def _coordinator_for_opt_out_tests(fleet_dir: Path):
+    """A separate coordinator fleet uses the same fixture library and template."""
+    import shutil
+
+    root = fleet_dir.parent / "coordinator"
+    root.mkdir()
+    shutil.copytree(fleet_dir / "library", root / "library")
+    shutil.copytree(fleet_dir / "templates", root / "templates")
+    manifest = root / "fleet.yaml"
+    manifest.write_text(
+        "fleet:\n  name: coordinator\n  manager: coord\n"
+        "  service_prefix: com.coordinator\n  bots:\n"
+        "    coord:\n      expertise: [orchestration]\n      manages: [lead]\n"
     )
-    text = text.replace(
-        "  bots:\n    lead:\n",
-        "  bots:\n    coord:\n      expertise: [orchestration]\n    lead:\n",
-    )
-    (fleet_dir / "fleet.yaml").write_text(text)
+    fleet, _md = load_fleet(manifest)
+    return fleet, Paths(root=root, fleet_dir=root, package=git_package(root))
 
 
 class TestLeafManagerCheckinOptOut:
@@ -1457,7 +1561,7 @@ class TestLeafManagerCheckinOptOut:
         )
         (fleet_dir / "fleet.yaml").write_text(text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
         # the opt-out is the ONLY thing that changed — lead is still a leaf
         # manager; it is simply not EQUIPPED, because the default that would
         # equip it is switched off fleet-wide.
@@ -1471,21 +1575,23 @@ class TestLeafManagerCheckinOptOut:
     ):
         """The contrasting positive, in the SAME file as the opt-out it is
         the baseline for: a leaf manager with no opt-out gets the section,
-        the symlink AND the grant; a coordinator and a worker in the same
-        fleet get none of the three."""
+        the symlink AND the grant; its worker and a separate singleton
+        coordinator fleet get none of the three."""
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         install_real_template(fleet_dir)
         _write_checkin_library_for_opt_out_tests(fleet_dir)
-        _add_coordinator_for_opt_out_tests(fleet_dir)
+        coordinator, coordinator_paths = _coordinator_for_opt_out_tests(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
+        paths = Paths(root=fleet_dir, fleet_dir=fleet_dir, package=git_package(fleet_dir))
         assert fleet.leaf_manager_bots() == {"lead"}
 
         lead_got = self._checkin_state(fleet, paths, "lead")
         assert lead_got == {"section": True, "symlink": True, "grant": True}, lead_got
 
-        coord_got = self._checkin_state(fleet, paths, "coord")
+        assert coordinator.manager_bots() == {"coord"}
+        assert coordinator.leaf_manager_bots() == set()
+        coord_got = self._checkin_state(coordinator, coordinator_paths, "coord")
         assert coord_got == {
             "section": False, "symlink": False, "grant": False,
         }, coord_got
@@ -1494,3 +1600,122 @@ class TestLeafManagerCheckinOptOut:
         assert worker_got == {
             "section": False, "symlink": False, "grant": False,
         }, worker_got
+
+
+@pytest.fixture(scope="module")
+def startup_delay_units(tmp_path_factory):
+    """The default fleet's and the host's timers, composed once for TestTimerStartupDelay."""
+    from claudlobby.composer import compose_fleet_timers, compose_host_timers
+
+    base = tmp_path_factory.mktemp("startup-delay")
+    root = base / "claudlobby"
+    fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
+    fleet_timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), merged)
+    host = base / "host"
+    host.mkdir()
+    (host / "lib").mkdir()
+    return fleet_timers, compose_host_timers(Paths(root=host, fleet_dir=host, package=git_package(host)))
+
+
+class TestTimerStartupDelay:
+    """An interval job whose interval divides an hour or a day is anchored to the
+    clock (OnCalendar=, #1654) at its startup_delay into each cycle, rounded down
+    to the minute. Any other counts its first run from its own start (OnActiveSec=,
+    #2059) and keeps its cadence with OnUnitActiveSec=. A past OnBootSec= or
+    OnStartupSec= point fires a timer at once (systemd.timer(5)), and an
+    activation restarts every timer."""
+
+    # job: (startup delay, interval, its anchor's start in slot 0), as system.yaml ships them
+    PACKAGED = {
+        "keepalive": (60, 60, "*-*-* *:*:"),
+        "fleet-pulse": (330, 300, "*-*-* *:00/5:"),
+        "task-recheck": (945, 21600, "*-*-* 00/6:15:"),
+        "log-rotation": (1230, 86400, "*-*-* 00:20:"),
+    }
+    OVERRIDE = """
+fleet:
+  name: test-fleet
+  manager: worker
+  service_prefix: com.test
+  defaults:
+    jobs:
+      task-recheck:
+        startup_delay: {delay}
+  bots:
+    worker:
+      expertise: [eng]
+"""
+
+    def test_no_composed_timer_counts_from_boot(self, startup_delay_units):
+        timers = [t for d in startup_delay_units for t in sorted(d.glob("*.timer"))]
+        assert timers, "nothing composed: the check would pass vacuously"
+        for timer in timers:
+            assert "OnBootSec=" not in timer.read_text(), timer.name
+
+    @pytest.mark.parametrize("job", sorted(PACKAGED))
+    def test_a_packaged_interval_job_is_anchored_at_its_startup_minute(self, startup_delay_units, job):
+        _, interval, anchor = self.PACKAGED[job]
+        text = (startup_delay_units[0] / f"com.test.{job}.timer").read_text()
+        lines = text.splitlines()
+        assert any(line.startswith(f"OnCalendar={anchor}") and line.endswith(" UTC") for line in lines), lines
+        assert "AccuracySec=1" in lines and f"-- tick every {interval}s" in text, lines
+        assert not any(line.startswith(("OnActiveSec=", "OnUnitActiveSec=")) for line in lines), lines
+
+    def test_the_host_probe_takes_the_band_after_the_fleets(self, startup_delay_units):
+        # This root holds no fleet under local/, so there are two slots, a fleet's and
+        # the host's: the minute splits into two 30 s bands and the probe takes the second.
+        lines = (startup_delay_units[1] / "claudlobby-plane-host-probe.timer").read_text().splitlines()
+        assert "OnCalendar=*-*-* *:*:30 UTC" in lines
+
+    def test_launchd_starts_an_interval_job_one_interval_after_load(self, startup_delay_units):
+        """A known limitation, pinned: launchd has no first-run delay apart from the
+        interval, so after each load a long-interval job waits a full interval."""
+        plist = (startup_delay_units[0] / "com.test.task-recheck.plist").read_text()
+        assert "<key>StartInterval</key>" in plist and "<integer>21600</integer>" in plist
+        assert "RunAtLoad" not in plist
+
+    def test_every_packaged_interval_job_names_its_startup_delay(self):
+        data = _load_system_defaults()
+        jobs = {**data["host"]["jobs"], **data["defaults"]["jobs"]}
+        interval_jobs = {n: j for n, j in jobs.items() if "interval" in j or "interval_from" in j}
+        assert interval_jobs
+        assert {n for n, j in interval_jobs.items() if "startup_delay" not in j} == set()
+
+    def test_the_frequent_fleet_producers_sit_in_separate_slots_of_the_minute(self):
+        # Where a job keeps the interval form (a fleet sets an interval that does not
+        # divide an hour or a day), its first run after a start comes in this slot, and
+        # AccuracySec=10 would merge slots under 10 s apart. An anchored job takes its
+        # second from its slot's band instead (composer._calendar_seconds).
+        jobs = _load_system_defaults()["defaults"]["jobs"]
+        slots = {n: jobs[n]["startup_delay"] % 60
+                 for n in ("keepalive", "fleet-pulse", "manager-checkin", "task-recheck")}
+        for a in slots:
+            for b in slots:
+                if a < b:
+                    gap = abs(slots[a] - slots[b])
+                    assert min(gap, 60 - gap) >= 15, (a, b, slots)
+
+    def test_a_job_without_a_startup_delay_waits_its_interval_up_to_15_minutes(self):
+        from claudlobby.composer import _resolve_timer_schedule
+
+        assert _resolve_timer_schedule({"interval": 7200}, {})["startup"] == 900
+        assert _resolve_timer_schedule({"interval": 120, "startup_delay": 45}, {})["startup"] == 45
+
+    def test_a_fleet_override_sets_its_own_startup_delay(self, tmp_path):
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        fleet, merged = load_fleet(_write_fleet(root, self.OVERRIDE.format(delay=1800)))
+        timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), merged)
+        lines = (timers / "com.test.task-recheck.timer").read_text().splitlines()
+        # 1800 s into each six hours: minute 30.
+        assert any(line.startswith("OnCalendar=*-*-* 00/6:30:") for line in lines), lines
+
+    @pytest.mark.parametrize("delay,warns", [(1800, False), (0, True), (7200, True)])
+    def test_the_validator_bounds_a_startup_delay(self, tmp_path, delay, warns):
+        from claudlobby.validator import ValidationReport, _validate_timers
+
+        fleet, _ = load_fleet(_write_fleet(tmp_path / "claudlobby", self.OVERRIDE.format(delay=delay)))
+        report = ValidationReport()
+        _validate_timers(fleet, report)
+        assert any("startup_delay" in w for w in report.warnings) == warns, report.warnings

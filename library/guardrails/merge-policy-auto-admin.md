@@ -5,6 +5,8 @@ description: Manager auto-merges PRs using --admin after a real peer review verd
 
 # Auto-merge with --admin after peer review
 
+The reasons behind these rungs, with the measurements and incidents they rest on, are in `.claude/skills/fleet-ops/merge-policy-reference.md`; `§X` below means its section X, and it adds no rule.
+
 The manager auto-merges PRs using `--admin` when ALL of:
 
 0. **RECONCILE THE HEAD BEFORE ANCHORING ANYTHING TO IT — and a mismatch is never a pass.** Read the PR's head and the branch's own ref, and refuse if they differ:
@@ -17,64 +19,83 @@ The manager auto-merges PRs using `--admin` when ALL of:
    [ "$PH" = "$RH" ] || { echo "REFUSE: PR head $PH != branch ref $RH"; exit 1; }
    ```
 
-   **Why this rung exists, and why the paragraphs below it were not enough.** This page already tells you to anchor your evidence to a head, in several places and at length. That did not help, because **the failure is not an operator forgetting to anchor — it is the anchor being reported stale by the surface the operator is told to read.** No amount of instruction to check the head fixes a head that answers wrongly.
-
-   Measured on this estate: a PR head persisted at an **old** sha across **both** the GraphQL and REST surfaces, two reads each, while the branch ref sat one commit ahead. CI was green **on the old code** and the new commit had no checks at all. So every rung below — review, checks, mergeable — was answering truthfully about a commit that was no longer the branch tip, and would have passed.
+   Why this rung exists: §Rung 0.
 
    **It does NOT self-resolve on re-query the way `mergeable` does.** Rung 3 below tells you to re-query a lazy `UNKNOWN` until it settles; that instinct is wrong here and applying it wastes the window. A stale head stays stale, so the only safe response is to refuse and re-read after a push has demonstrably landed.
 
    **A mismatch means you do not yet know what you are merging.** It is not a slow answer to wait out — it is two sources disagreeing about which commit the PR *is*, and there is no rule for picking a winner. Refuse, confirm the push landed (`git ls-remote <remote> refs/heads/$BR` against your local `HEAD`), and start the rungs again.
 
-1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.
+1. **Peer review posted — and attributed BY HAND.** A reviewer has posted an `APPROVE` verdict, or a `COMMENT` with a `**[<bot>] [VERDICT] approve**` verdict line, anchored to the reviewed SHA (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews. `claudlobby --json task reviews OWNER/REPO --pr N` reads the recorded reviewer attribution and current-head verdict, but does not establish authorship or authorize merging. A verdict counts only when that read attributes it `MATCH` to a recorded review-role report; one it reads `UNKNOWN` or `AMBIGUOUS` never counts.
 
    **MULTIPLE VERDICTS RESOLVE PER REVIEWER, NEVER GLOBAL-LATEST.** Each reviewer's own latest verdict stands, and the PR is blocked while **any** reviewer's latest is `REQUEST-CHANGES`.
 
-   Global-latest is the intuitive rule and it is wrong in one specific, silent way: with reviewer A blocking and reviewer B approving later, newest-on-the-PR reports `APPROVE` **over an unresolved block**. It is correct only while a PR has exactly one reviewer — which is why it survives so long on a fleet where that is usually true, and why it fails the first time two people review.
-
-   **This codebase already settled it, so read the rule from the tool rather than from here:** `lib/pr-review-state.py` documents the prototype's global-latest, the reversed-reviewers counterexample, and its own resolution, and `test_reversing_the_reviewers_flips_the_answer` pins it. If this paragraph and that tool ever disagree, the tool is right — it is the thing with a test.
+   **Read the recorded state from `claudlobby --json task reviews OWNER/REPO --pr N`.** The read does not authorize a merge.
 
    (That is not in tension with the warning below about not reading the tool for **authorship**. It is authoritative on *which verdicts are live and blocking* and is not an authority on *who wrote the PR* — two different questions, one of which it answers.)
 
-   **This rung cannot be verified from GitHub, and no shipped door checks it for you.** Read that before the rungs below, because every automated surface on this page reads green on a self-review. The fleet shares one GitHub identity, so every mechanical source of authorship collapses to the same login: the PR `author` field (18 of 18 recent PRs), the commit author and committer (12 of 12 merged commits, resolved from a host-global gitconfig — and rewritten by squash-merge anyway), and the branch name (18 of 18 encode an issue number, never a bot). There is no field to read, so the comparison this rung asks for is `x != x`.
+   **This authorship rung cannot be verified from GitHub or `task reviews`.** Read that before the rungs below, because reviewer attribution alone reads green on a self-review.
 
-   **So perform it by hand, on every `--admin` merge.** Authorship is recorded in exactly one place on this estate — the prose of the report a bot files when it opens a PR:
+   **So perform it by hand, on every `--admin` merge.** An opening report with explicit `pr_role: authored` is the recorded authorship evidence; older reports may carry only prose, which cannot acquire a missing role afterward:
 
    ```bash
-   claudlobby --fleet <fleet> report-back --since 7d --json | grep -E 'pull/<N>([^0-9]|$)'
+   FLEET=ai-platform; SINCE=2026-09-20T00:00:00Z  # replace with the candidate fleet and window
+   claudlobby --json --fleet "$FLEET" fleet reports list --since "$SINCE" --limit 100
+   # Continue with the returned data.next_cursor, keeping FLEET and SINCE identical:
+   claudlobby --json --fleet "$FLEET" fleet reports list --since "$SINCE" --limit 100 --cursor "$NEXT_CURSOR"
    ```
 
-   Read the rows in time order and find the one saying the PR was *opened* — `"clauDNA PR #328 opened: …"`. That bot is the author. If a clearing verdict on the same PR comes from that same bot, **rung 1 is unsatisfied: do not merge**, however green everything else reads. Bound the number or the match is wrong in the silent direction: plain `pull/328` also matches `pull/3281`.
-
-   **The manager's own authorship needs no detector** — it knows what it wrote. The case this manual check exists for is the third-party one: bot A opens, bot A approves, the manager merges. Nothing visible to that manager distinguishes it from a clean peer review.
+   Read every page until `data.next_cursor` is null, across each fleet that may have opened the PR. Inspect `data.items[].evidence.pr_url` for the exact owner/repo and bounded `pull/N` URL, and require explicit `data.items[].evidence.pr_role == "authored"` before attributing the opening report. Keep the author distinct from `task reviews`' reviewer actor. If the same bot authored and approved, **rung 1 is unsatisfied: do not merge**, however green everything else reads. An absent role or content-stripped summary cannot prove authorship. Bound the PR number or `pull/328` also matches `pull/3281`.
 
    **When it cannot answer, this rung REFUSES — it never passes.** Three states are not a pass:
 
-   - **No opening row at all.** Over the 21 PRs created in the current plane epoch, **4 (19%) have no citing report of any kind** — one of them merged. No answer is available at any confidence.
-   - **An empty summary.** Authorship lives in a content-capped field: **17 of 57 PR-citing task events (29%) carry an empty summary**, and a restrictive capture policy strips that prose by design. The one channel this rung depends on is a setting away from returning nothing — and "nothing" reads exactly like "no self-review".
-   - **The author is on another fleet.** `report-back` is fleet-scoped. Measured: the same PR returns 5 rows under `--fleet ai-platform` and **0 under `--fleet crog-eng-team`**. Zero rows from the wrong fleet is indistinguishable from zero rows because nobody reported.
+   - **No opening row at all.** No answer is available at any confidence.
+   - **An older row with no explicit authored role.** The current explicit `pr_role: authored` metadata survives that content policy; an older absent role cannot be backfilled or assumed.
+   - **The author is on another fleet.** `fleet reports list` is fleet-scoped. Zero rows from the wrong fleet is indistinguishable from zero rows because nobody reported.
 
-   In all three the honest output is "rung 1 unanswerable — verify by hand or do not merge", never a pass. An *empty* answer is at least distinguishable from a *failed* one: the door prints `0 event(s) matched — read N row(s) from the plane (fleet F)`, and refuses at rc 3 rather than printing an empty table when it cannot reach the plane. So zero-matched-out-of-N means the plane answered and the row is genuinely absent — which is a refusal, not a clear.
+   In all three the honest output is "rung 1 unanswerable — verify by hand or do not merge", never a pass. Neither an empty page nor an unavailable source proves a different author.
 
-   **Do NOT read `lib/pr-review-state.py`'s output as bearing on this rung.** It does not fetch PR authorship and never has — its `PR_FIELDS` is `number,title,reviews,comments,headRefOid`. The name it reports is the *reviewer's* self-reported name parsed out of a verdict header, which is the other operand entirely. A clean `SUMMARY: N live verdict(s), 0 blocking` is a true statement about verdicts and says nothing whatever about who wrote the PR. Measured on a real self-review: it read `2 live verdict(s), 1/2 anchored, 0 stale, 0 blocking` on a PR whose author had cleared their own work.
+   The measurements behind the three states: §Rung 1.
+
+   **Do NOT read `task reviews` as proof of PR authorship.** A result with no live block says nothing about the author.
 2. **CI green — the repo's DECLARED required checks, BY NAME, never by count.** Verify that every check **this repo declares as required** appears in the status rollup by name, and that every one is `SUCCESS`.
 
-   **The required set is declared per repo and is deliberately not listed here.** Workflow names are a property of a repository, not of a fleet: one repo's set may be `Lint` / `Test` / `Security Scan` / `Changelog Check` while another's is `api-ci` / `frontend-ci`. A list written into this guardrail would be correct for exactly one repo and silently wrong on every other — hunting for names that do not exist there, and so either blocking every PR on that repo or, worse, being quietly softened by whoever hits it first. **The softening is the real hazard: a guardrail that fires wrongly gets weakened, and the weakening outlives the repo that caused it.**
+   **The required set is declared per repo and is deliberately not listed here.**
 
-   **A repo that cannot declare a stable set declares nothing, and that is the design working rather than a gap in it.** Where workflows are path-filtered — say `api-ci` on `api/**` and `frontend-ci` on `frontend/**` — a docs-only PR triggers neither, so no set is always-present and a required context would strand such a PR permanently. Under a hardcoded list that repo is a special case somebody has to remember; under declaration its exclusion falls out of the design: nothing declared, nothing to verify, and the gap is visible instead of forgotten.
+   **A repo that cannot declare a stable set declares nothing, and that is the design working rather than a gap in it.**
 
-   **ABSENCE is the failure mode, so absence is what this rung tests for.** A PR with conflicts has no computable merge commit, so `pull_request`-triggered workflows are **never scheduled** — while GitHub App integrations keep reporting `SUCCESS` against the head SHA. The rollup then reads all-success *with the entire test suite missing*, and a naive green gate passes. Measured on a real conflicting PR: three checks, all passing, `gh pr checks` exit `0`, no tests run.
+   **ABSENCE is the failure mode, so absence is what this rung tests for.**
 
-   A **count** does not survive this. It is a proxy for "the tests ran": it breaks the moment a workflow is added or removed, and it is satisfied by the wrong N.
+   Why names, not counts, and why the rollup: §Rung 2.
 
-   **Read the rollup, not `/check-runs` — because the rollup is GUARANTEED complete and `/check-runs` is only INCIDENTALLY complete.** `statusCheckRollup` is the union of the Checks API and the legacy commit-Status API, so by construction it carries every gate whichever surface reports it. `/check-runs` finds all four names today, and keeps working only for as long as nobody ever adds a required gate as a legacy commit status — which a plain Vercel entry on one of these repos already is. Measured on one real commit: 2 check-runs, 1 status, 3 in the rollup. That is evidence a second surface exists and *can* carry a gate; it is not a claim that any of the four hides there today.
+   **Read the rollup, not `/check-runs` — because the rollup is GUARANTEED complete and `/check-runs` is only INCIDENTALLY complete.**
 
-   **Incidentally correct is a proxy** — the same distinction as counting versus naming, one layer down. A thing that happens to be right is not a thing that must be right, and only the second belongs in a guardrail. Use `gh pr view <n> --json statusCheckRollup` or `gh pr checks <n>`.
+   Use `gh pr view <n> --json statusCheckRollup` or `gh pr checks <n>`.
 
-3. **Mergeable reads `MERGEABLE` explicitly** — never "not `CONFLICTING`". GitHub computes this field **lazily**: the first read after a push returns `UNKNOWN`, and only a re-query resolves it. `UNKNOWN` is not `false`, so a not-conflicting test passes on a field that has not been computed yet. Re-query until the value is `MERGEABLE` or `CONFLICTING`, and treat a persistent `UNKNOWN` as not mergeable.
+   **One name is fixed in every repo that has adopted it: the rollout check** (`verify-rollout`). Read whether the repo's default branch carries `.github/workflows/rollout-check.yml`: only a 404 means the repo has not adopted the check, and any other failed read refuses. Where it has, the newest `rollout-check / Rollout check` run at the head must be `SUCCESS`. The rollup lists every run of a name, so a read that takes any `SUCCESS` would pass a stale green after a red body edit. Anything but `SUCCESS` in the newest run, or no run, refuses. A run that has not completed has not passed, newest or not, so the read names it `PENDING` rather than trusting timestamps to order runs that have not finished. Run it in the same call as rung 0, which sets `$REPO` and `$N`:
 
-   This rung is deliberately **not** a `mergeStateStatus` test. That field reports `BLOCKED` for the ordinary case of a PR still awaiting its review, so gating on `clean`/`unstable` refuses PRs that are perfectly mergeable.
+   ```bash
+   DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
+   if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
+     ROLLOUT=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "rollout-check / Rollout check")] | if any(.status != "COMPLETED") then "PENDING" else (sort_by(.startedAt) | last | .conclusion // "ABSENT") end') || { echo "REFUSE: cannot read the rollout check"; exit 1; }
+     [ "$ROLLOUT" = SUCCESS ] || { echo "REFUSE: the rollout check reads $ROLLOUT"; exit 1; }
+   else
+     case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
+   fi
+   ```
 
-4. **KEEP THE BRANCH WHILE ANY OPEN PR IS BASED ON IT.** `--delete-branch` makes GitHub close such a PR, and tells nobody: #1779 went `CLOSED` two seconds after #1776 merged (#1781). Delete only after a listing that succeeded and came back empty. A failed listing or an empty `$BR` (`gh pr list --base ""` is no filter) keeps the branch too:
+   **A PR that changes anything under `.github/workflows/` gets no proof from that `SUCCESS`.** So the merger reads the PR's own file list from the API, every page and each rename's old name, and a failed read refuses. A PR that lists any workflow file merges only on the rung 1 verdict (a different bot's, at this head) that names each one:
+
+   ```bash
+   WF=$(gh api --paginate "repos/$REPO/pulls/$N/files" --jq '.[] | .filename, (.previous_filename // empty)') || { echo "REFUSE: cannot read the PR's files"; exit 1; }
+   WF=$(printf '%s\n' "$WF" | grep '^\.github/workflows/' || true)
+   [ -z "$WF" ] || { printf 'WORKFLOW CHANGE: %s\n' $WF; echo "Merge only on the rung 1 verdict that names each workflow file above."; }
+   ```
+
+3. **Mergeable reads `MERGEABLE` explicitly** — never "not `CONFLICTING`". `UNKNOWN` is not `false`, so a not-conflicting test passes on a field that has not been computed yet. Re-query until the value is `MERGEABLE` or `CONFLICTING`, and treat a persistent `UNKNOWN` as not mergeable.
+
+   This rung is deliberately **not** a `mergeStateStatus` test.
+
+4. **KEEP THE BRANCH WHILE ANY OPEN PR IS BASED ON IT.** Delete only after a listing that succeeded and came back empty. A failed listing or an empty `$BR` (`gh pr list --base ""` is no filter) keeps the branch too:
 
    ```bash
    DELETE=--delete-branch
@@ -83,6 +104,29 @@ The manager auto-merges PRs using `--admin` when ALL of:
 
    Run rung 0, this rung and the merge command in one call: the Bash tool keeps no variables between calls, and a `$DELETE` that was never set just keeps the branch.
 
+5. **NO OPEN ROLLOUT HOLD on a repo that has adopted the rollout check** (`verify-rollout`). This rung applies only where the repo's default branch carries `.github/workflows/rollout-check.yml`, read as rung 2 reads it. Elsewhere it is inert: a fleet that composes this guardrail without opting into `verify-rollout` gains no hold listing that could refuse its merge. Only a 404 says the repo has not adopted the check; any other failed read refuses, because it cannot tell the two apart. Where the rung applies, a failed rollout check opens an issue labelled `rollout-hold`. While one is open, only a PR that fixes or reverts the change that failed may merge into the repo, and it needs both:
+   - **It closes that hold** (`closingIssuesReferences`, filled from a `Closes #N` keyword in its body). It may close any one open hold: requiring every hold would deadlock two independent ones.
+   - **The rung 1 verdict names the hold:** a different bot's verdict, at this head, that names the hold issue and says this PR fixes or reverts the change that failed. The keyword is the author's to write, and a body edit after the review adds it without moving the head, so the keyword never grants the exception by itself.
+
+   A failed listing or read refuses, like rung 4's. Run it in the same call as rung 0, which sets `$REPO` and `$N`. When the PR closes a hold, the snippet names it, and the verdict is held to that name:
+
+   ```bash
+   DEFAULT=$(gh api "repos/$REPO" --jq .default_branch) || { echo "REFUSE: cannot read the default branch"; exit 1; }
+   if ERR=$(gh api "repos/$REPO/contents/.github/workflows/rollout-check.yml?ref=$DEFAULT" --silent 2>&1); then
+     HOLDS=$(gh issue list --repo "$REPO" --label rollout-hold --state open --json number --jq '.[].number') || { echo "REFUSE: the rollout-hold listing failed"; exit 1; }
+     if [ -n "$HOLDS" ]; then
+       CLOSES=$(gh pr view "$N" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number') || { echo "REFUSE: cannot read what this PR closes"; exit 1; }
+       HOLD=$(printf '%s\n' $HOLDS | grep -xF -f <(printf '%s\n' $CLOSES) | head -1) || true
+       [ -n "$HOLD" ] || { echo "REFUSE: rollout hold open: $HOLDS"; exit 1; }
+       echo "This PR closes rollout hold #$HOLD: merge only if the rung 1 verdict names #$HOLD and says this PR fixes or reverts the change that failed."
+     fi
+   else
+     case "$ERR" in *"HTTP 404"*) echo "This repo has not adopted the rollout check: no hold applies" ;; *) echo "REFUSE: cannot tell whether this repo runs the rollout check: $ERR"; exit 1 ;; esac
+   fi
+   ```
+
+   After the merge, the PR's own rollout check is the merger's to run, once the change is live: see `verify-rollout`.
+
 Merge command — **carrying the same `$PH` rung 0 anchored to**:
 
 ```bash
@@ -90,43 +134,13 @@ Merge command — **carrying the same `$PH` rung 0 anchored to**:
 gh pr merge "$N" --repo "$REPO" --squash --admin $DELETE --match-head-commit "$PH"
 ```
 
-**`--match-head-commit` makes the gate refuse a head that moved under it**, which rung 0 cannot do on its own: rung 0 reconciles at the *start*, and the rungs take time. This closes the window between them.
+**`--match-head-commit` makes the gate refuse a head that moved under it**, which rung 0 cannot do on its own: rung 0 reconciles at the *start*, and the rungs take time.
 
 **Reuse `$PH` — do not re-read the sha, and never abbreviate it.** The flag requires the full 40-character object id and **fails closed** on anything else:
 
-```
-$ gh pr merge <n> --squash --admin --delete-branch --match-head-commit bda6de9
-GraphQL: Variable $input of type MergePullRequestInput! was provided invalid value
-for expectedHeadOid (Could not coerce value "bda6de9" to GitObjectID)
-```
+The refusal an abbreviated sha gets: §The merge flag.
 
-The merge did **not** proceed and the PR stayed `OPEN` — verified on a real merge. That direction is the right one: an abbreviation is *rejected*, never silently coerced or ignored. A flag that quietly no-opped on a malformed value would be worse than no flag, because the gate would report itself protected while protecting nothing — the same "reads green on the wrong thing" family as the stale head itself.
-
-`$PH` from rung 0 is already the full id, so **using one variable for both the anchor and the flag makes the abbreviation mistake unavailable by construction** — which is why this page hands you a variable rather than telling you to be careful.
-
-**Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox. And a verdict is only a gate once rung 1 has attributed it: the same bypass that makes `--admin` necessary is what makes a self-review invisible.
-
-**Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this, and it covers far less than a first look suggests. Measured across **nine** repos of one estate via the repository **rulesets** API (re-measured 2026-08-22):
-
-| state | count | repos |
-|---|---|---|
-| ruleset `enforcement: active` | **4** | branch deletion, non-fast-forward, pull-request rules |
-| ruleset present but `enforcement: disabled` | **2** | covers nothing in practice |
-| **no ruleset possible at all** — private repo on a plan returning `403 Upgrade to GitHub Pro or make the repository public` | **3** | nothing to configure, nothing to bypass |
-
-**So five of the nine have no ruleset enforcing anything at all** — and those five are not one bucket. The two `disabled` repos are one flag flip from live; the three plan-403 repos **cannot be protected at any configuration** without a paid upgrade. Same headline, opposite remediation cost: reserve "unenforceable" for the plan-403 three, where it is literally true.
-
-Of the six that carry a ruleset, **four DECLARE an approval requirement and only three ENFORCE one** — declared and enforced are separate counts, which is what *A present ruleset proves nothing until you read its `enforcement` field* (below) is about. Read the rule, not its presence: one active repo carries a `pull_request` rule with **`required_approving_review_count: 0`**, which declares the *absence* of an approval requirement rather than one; and one of the disabled pair carries no `pull_request` rule at all.
-
-**Not one of the nine declares `required_status_checks`. Zero of nine** — verified rule-by-rule on all six rulesets, not inferred.
-
-**Do not read the plan-403 state as an edge case.** It is a *third* of this estate, and a repo in it cannot be protected at any configuration — so on those repos an auto-merge clause does not "fail closed against a server-side control"; it simply merges. A prior revision of this paragraph surveyed six repos and reported the disabled and plan-403 states as one repo each, which invited exactly that misreading.
-
-**Be precise about what that leaves enforced, because it is less than it looks.** Counting the whole nine, not the six with rulesets: force-push and branch-deletion are enforced on **4 of 9**; an approving review on **3 of 9**; and whether the tests ran on **0 of 9**. So GitHub enforces force-push protection on under half this estate, an approving review on a third of it, and **nothing anywhere** about test status. That is precisely and only the gap these rungs address — they are not a belt beside braces, they are the sole control over exactly the failure mode described above them.
-
-**Check the right surface, or you will confidently conclude the opposite.** That measurement is from the rulesets API, **not** `/branches/main/protection`. The legacy endpoint returns `404 Branch not protected` for a repo that is fully protected by a ruleset — asserting a negative in plain English that it has no standing to assert. This is the same guaranteed-versus-incidental distinction as the rollup above, one layer out: a surface that answers is not the same as a surface that answers *completely*.
-
-**A present ruleset proves nothing until you read its `enforcement` field.** A ruleset can exist and enforce nothing (`enforcement: disabled`), and **two** repos in that survey are in exactly that state. The two obvious checks then fail in **opposite** directions: the legacy endpoint reports "not protected" about a repo that is, while a ruleset *listing* reports "protected" about a repo that is not. Two confident wrong answers pointing opposite ways — only the `enforcement` field settles it, and neither reviewer who checked this had that third state in hand.
+Why the flag fails closed, why `--admin`, and what branch protection enforces on this estate: §The merge flag, §Why --admin, §The ruleset survey.
 
 **Red lines (even with --admin):**
 - Never `--admin` merge without an actual peer review on the PR.
@@ -135,6 +149,7 @@ Of the six that carry a ruleset, **four DECLARE an approval requirement and only
 - Never merge a PR with `Request Changes` verdict outstanding.
 - Never merge a PR where CI is failing — **or where a required workflow is missing from the rollup.** "Not failing" is not "passed": an absent workflow cannot fail.
 - Never merge a PR the manager itself authored without a separate reviewer.
+- Never merge into a repo that has adopted the rollout check while a `rollout-hold` issue is open, except a PR that closes it and whose rung 1 verdict names it (rung 5).
 - Never treat an **unanswerable** rung 1 as a satisfied one. No authorship row is a refusal, not a clear — the same absence is produced by a self-review nobody reported, by a stripped summary, and by querying the wrong fleet.
 
 The manager posts "Merging #NN (--admin, reviewed by <reviewer>)" to Telegram before executing, **naming any branch rung 4 kept** — the stacked PR's author is told nowhere else.

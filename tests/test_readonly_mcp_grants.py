@@ -7,7 +7,7 @@ every other tool keeps prompting. The server wildcard is never emitted for
 such a server, the paired integration's ``tool_grants`` must mirror the read
 set exactly, and no library-derived layer (integration, skill, expertise,
 guardrail) may cover a write — both directions hard-fail compose. fleet.yaml
-``tools.allow`` stays the operator's explicit escape hatch.
+``tool_permissions.allow`` stays the operator's explicit escape hatch.
 
 The shipped split-contract library content is pinned here too — the mechanism
 guarding writes is only as good as the curated lists it enforces.
@@ -17,17 +17,20 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from claudlobby.composer import (
+    _mcp_deprecation,
     _resolve_integration_grants,
     _resolve_mcp_permissions,
     compose_settings_local,
 )
 from claudlobby.config import BotConfig, FleetConfig, McpEntry
-from claudlobby.loader import integration_tool_grants
+from claudlobby.loader import integration_tool_grants, parse_frontmatter
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -73,7 +76,8 @@ def _build_library(
         (skill_dir / "SKILL.md").write_text(
             f"---\nname: catalog\ntool_grants:\n{grants_yaml}---\n\n# catalog\n\nbody\n"
         )
-    return Paths(root=root, fleet_dir=root)
+    return Paths(root=root, fleet_dir=root,
+                 package=replace(source_package(), library=root / "library"))
 
 
 def _bot(
@@ -89,7 +93,7 @@ def _bot(
 
 
 def _single_bot_fleet(bot: BotConfig) -> FleetConfig:
-    return FleetConfig(name="t", service_prefix="p", bots={bot.bot_id: bot})
+    return FleetConfig(manager=bot.bot_id, name="t", service_prefix="p", bots={bot.bot_id: bot})
 
 
 class TestReadOnlySubsetEmission:
@@ -231,7 +235,7 @@ class TestUnionLayerWriteGuard:
 
     Skill ``tool_grants`` join the same allow union as integration grants; the
     union-layer assert must catch a write there, while the operator's
-    fleet.yaml ``tools.allow`` stays exempt.
+    fleet.yaml ``tool_permissions.allow`` stays exempt.
     """
 
     def _compose_with_skill(self, tmp_path, skill_grants: list[str]):
@@ -256,7 +260,7 @@ class TestUnionLayerWriteGuard:
         assert "mcp__shopify__getProduct" in settings["permissions"]["allow"]
 
     def test_operator_tools_allow_write_stays_exempt(self, tmp_path):
-        """fleet.yaml tools.allow is appended after the guard — the escape hatch."""
+        """fleet.yaml tool_permissions.allow is appended after the guard — the escape hatch."""
         paths = _build_library(
             tmp_path / "r", integration_grants=[f"mcp__shopify__{t}" for t in READS]
         )
@@ -279,6 +283,15 @@ def _split_fragment_names() -> list[str]:
 
 
 SPLIT_FRAGMENTS = _split_fragment_names()
+
+# A deprecated fragment keeps its own contract and no integration mirrors it, so
+# the mirror pin covers the current fragments; Printify's is pinned at the end.
+MIRRORED_FRAGMENTS = [
+    name
+    for name in SPLIT_FRAGMENTS
+    if "_deprecated"
+    not in json.loads((REPO_DIR / "library" / "mcp" / f"{name}.json").read_text())
+]
 
 
 class TestShippedLibraryContent:
@@ -313,6 +326,24 @@ class TestShippedLibraryContent:
             "delete_product",
             "publish_product",
             "upload_image",
+        ],
+        # homeassistant: hass-mcp 0.6.0. entity_action and call_service_tool
+        # control devices; a bot that needs them unattended grants them in its
+        # fleet.yaml tool_permissions.allow. restart_ha and the dashboard tools
+        # restart HA or rewrite a dashboard in one call.
+        "homeassistant": [
+            "entity_action",
+            "call_service_tool",
+            "restart_ha",
+            "set_dashboard_config",
+            "add_card",
+            "update_card",
+            "remove_card",
+            "move_card",
+            "add_view",
+            "update_view",
+            "remove_view",
+            "restore_dashboard",
         ],
         "google-analytics": [],
         "posthog": [],
@@ -393,6 +424,14 @@ class TestShippedLibraryContent:
             "batch_url_inspection",
             "check_indexing_issues",
         },
+        # homeassistant: checked in the pinned hass-mcp 0.6.0 source. Each reads
+        # HA's states (and its area map, through a POST to /api/template that
+        # only renders a template); none calls a service or saves a dashboard.
+        "homeassistant": {
+            "domain_summary_tool",
+            "search_entities_tool",
+            "system_overview",
+        },
         # meta-ads uses meta_ads_<verb>_<object> naming; none fit get_*/list_*.
         # All 35 are confirmed side-effect-free reads in the pinned
         # meta-ads-mcp-server@1.5.1 source (its 19 write tools are gated off —
@@ -443,7 +482,7 @@ class TestShippedLibraryContent:
     def _tool_grants(self, name: str) -> list[str]:
         # The production reader — the mirror is pinned through the same code
         # path _resolve_integration_grants composes from.
-        return integration_tool_grants(Paths(root=REPO_DIR, fleet_dir=REPO_DIR), name)
+        return integration_tool_grants(Paths(root=REPO_DIR, fleet_dir=REPO_DIR, package=source_package()), name)
 
     def test_shipped_split_fragments_discovered(self):
         assert {"shopify", "printify"} <= set(SPLIT_FRAGMENTS)
@@ -473,7 +512,7 @@ class TestShippedLibraryContent:
                 f"VERIFIED_NONSTANDARD_READS[{name!r}]"
             )
 
-    @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
+    @pytest.mark.parametrize("name", MIRRORED_FRAGMENTS)
     def test_integration_grants_mirror_read_only_exactly(self, name):
         contract = self._contract(name)
         expected = {f"mcp__{name}__{t}" for t in contract["read_only_tools"]}
@@ -494,3 +533,140 @@ class TestShippedLibraryContent:
             )
             assert write not in contract["read_only_tools"]
             assert f"mcp__{name}__{write}" not in grants
+
+
+class TestShippedHomeAssistantGrant:
+    """The shipped Home Assistant grant: hass-mcp's 17 reads, never the server.
+
+    hass-mcp 0.6.0 serves 29 tools. The library grants the 17 that only read;
+    the 12 that change HA prompt unless a bot's fleet.yaml grants them in
+    ``tool_permissions.allow``. A bot that controls devices grants
+    ``entity_action`` and ``call_service_tool`` there and composes exactly 19.
+    Composed from the shipped library, so the wildcard coming back by either
+    path (the fragment losing ``read_only_tools``, or ``tool_grants`` going back
+    to ``mcp__homeassistant__*``) fails these tests.
+    """
+
+    READS = {
+        "domain_summary_tool",
+        "get_dashboard_config",
+        "get_entities_by_area",
+        "get_entity",
+        "get_error_log",
+        "get_history",
+        "get_history_range",
+        "get_statistics",
+        "get_statistics_range",
+        "get_version",
+        "list_automations",
+        "list_dashboard_backups",
+        "list_dashboards",
+        "list_entities",
+        "list_view_sections",
+        "search_entities_tool",
+        "system_overview",
+    }
+    DEVICE_CONTROL = {"call_service_tool", "entity_action"}
+    PROMPTING = {
+        "restart_ha",
+        "set_dashboard_config",
+        "add_card",
+        "update_card",
+        "remove_card",
+        "move_card",
+        "add_view",
+        "update_view",
+        "remove_view",
+        "restore_dashboard",
+    }
+
+    @staticmethod
+    def _names(tools) -> list[str]:
+        return sorted(f"mcp__homeassistant__{t}" for t in tools)
+
+    def _composed(self, tmp_path, operator_allow: list[str]) -> list[str]:
+        """The bot's composed ``mcp__homeassistant`` allows, from the shipped library."""
+        (tmp_path / "runtime" / "bots").mkdir(parents=True)
+        paths = Paths(root=tmp_path, fleet_dir=tmp_path, package=source_package())
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="homeassistant", instances=["default"])],
+        )
+        bot.tool_permissions.allow.extend(operator_allow)
+        settings = compose_settings_local(bot, _single_bot_fleet(bot), paths)
+        return sorted(
+            p for p in settings["permissions"]["allow"] if p.startswith("mcp__homeassistant")
+        )
+
+    def test_contract_splits_the_29_tools(self):
+        contract = json.loads(
+            (REPO_DIR / "library" / "mcp" / "homeassistant.json").read_text()
+        )["_permissions_contract"]
+        universe = self.READS | self.DEVICE_CONTROL | self.PROMPTING
+        assert len(universe) == 29
+        assert set(contract["tools"]) == universe
+        assert set(contract.get("read_only_tools") or []) == self.READS
+
+    def test_library_grants_the_17_reads_and_no_wildcard(self, tmp_path):
+        composed = self._composed(tmp_path, [])
+        assert "mcp__homeassistant__*" not in composed
+        assert composed == self._names(self.READS)
+
+    def test_device_control_grant_composes_exactly_the_19(self, tmp_path):
+        composed = self._composed(tmp_path, self._names(self.DEVICE_CONTROL))
+        assert "mcp__homeassistant__*" not in composed
+        assert composed == self._names(self.READS | self.DEVICE_CONTROL)
+        assert not set(composed) & set(self._names(self.PROMPTING))
+
+
+class TestShippedPrintifyIsDeprecated:
+    """The shipped Printify MCP fragment is deprecated; the integration is the API.
+
+    The integration grants no ``mcp__printify__`` tool. A bot that still lists
+    the fragment composes exactly the fragment's read set from its own contract:
+    never the wildcard, never a write.
+    """
+
+    @staticmethod
+    def _paths(root: Path) -> Paths:
+        (root / "runtime" / "bots").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=root, package=source_package())
+
+    def test_the_fragment_is_marked_and_names_its_replacement(self, tmp_path):
+        note = _mcp_deprecation(self._paths(tmp_path), "printify")
+        assert note is not None
+        assert "skills: [printify]" in note and "integrations: [printify]" in note
+
+    def test_the_integration_is_cli_keeps_its_env_contract_and_grants_no_mcp_tool(self):
+        meta, _ = parse_frontmatter(
+            (REPO_DIR / "library" / "integrations" / "printify.md").read_text()
+        )
+        assert meta["type"] == "cli"
+        assert {k: v["secret"] for k, v in meta["env_contract"].items()} == {
+            "PRINTIFY_API_KEY": True,
+            "PRINTIFY_SHOP_ID": False,
+        }
+        paths = Paths(root=REPO_DIR, fleet_dir=REPO_DIR, package=source_package())
+        assert not [
+            g for g in integration_tool_grants(paths, "printify") if g.startswith("mcp__")
+        ]
+
+    def test_a_bot_that_still_lists_it_composes_exactly_its_reads(self, tmp_path):
+        paths = self._paths(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="printify", instances=["default"])],
+        )
+        settings = compose_settings_local(bot, _single_bot_fleet(bot), paths)
+        composed = sorted(
+            p for p in settings["permissions"]["allow"] if p.startswith("mcp__printify")
+        )
+        reads = json.loads(
+            (REPO_DIR / "library" / "mcp" / "printify.json").read_text()
+        )["_permissions_contract"]["read_only_tools"]
+        assert len(reads) == 10
+        assert composed == sorted(f"mcp__printify__{tool}" for tool in reads)

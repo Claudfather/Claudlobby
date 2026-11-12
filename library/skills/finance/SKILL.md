@@ -10,13 +10,15 @@ View portfolio performance, account balances, and transaction summaries via Simp
 
 ## Environment Setup
 
-SimpleFIN requires the `SIMPLEFIN_ACCESS_URL` env var. It does NOT load from .bashrc in non-interactive shells, so always export it inline:
+SimpleFIN requires the `SIMPLEFIN_ACCESS_URL` env var, and it is already in your session: `start-bot.sh` sources the `.env` tiers at boot (`~/.env` among them), and every Bash tool call inherits the session environment. So never read `~/.env` yourself. Check the variable instead, so a missing one fails loudly here rather than as a SimpleFIN error later:
 
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 ```
 
-Run this before every finance command.
+Run this before every finance command. It prints nothing when the variable is set, and never prints the value.
+
+**Why not `source ~/.env`.** It loads nothing the session does not already hold, and it makes the skill depend on reading a secrets file through your own tools — a path an isolation rule may deny (#1665). A denied read there would drop the finance section from every briefing, and nothing records a denied tool call. A credential rotated in `~/.env` reaches the session at the bot's next restart, like every other composed secret.
 
 ## Scripts
 
@@ -97,7 +99,7 @@ If snapshots are missing or stale, check:
 
 3. **Test SimpleFIN connectivity:**
    ```bash
-   source ~/.env
+   : "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
    curl -s --max-time 30 "$SIMPLEFIN_ACCESS_URL/accounts?version=2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d.get(\"accounts\",[]))} accounts')"
    ```
 
@@ -105,7 +107,7 @@ If snapshots are missing or stale, check:
 
 5. **Manual refresh:** If cron failed, run the scripts manually:
    ```bash
-   source ~/.env
+   : "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
    python3 <ASSISTANT_TOOLS_DIR>/finances/portfolio-snapshot.py
    python3 <ASSISTANT_TOOLS_DIR>/finances/transaction-snapshot.py
    ```
@@ -117,12 +119,12 @@ If snapshots are missing or stale, check:
 Run both scripts. If no snapshot exists today, run without flags first to save, then the output already includes the diff/summary.
 
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 python3 <ASSISTANT_TOOLS_DIR>/finances/portfolio-snapshot.py
 ```
 
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 python3 <ASSISTANT_TOOLS_DIR>/finances/transaction-snapshot.py
 ```
 
@@ -131,7 +133,7 @@ python3 <ASSISTANT_TOOLS_DIR>/finances/transaction-snapshot.py
 Show current balances and day-over-day changes:
 
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 python3 <ASSISTANT_TOOLS_DIR>/finances/portfolio-snapshot.py
 ```
 
@@ -140,7 +142,7 @@ python3 <ASSISTANT_TOOLS_DIR>/finances/portfolio-snapshot.py
 Show today's transactions:
 
 ```bash
-source ~/.env
+: "${SIMPLEFIN_ACCESS_URL:?not in the session env - declare it with export in a .env tier, then restart the bot}"
 python3 <ASSISTANT_TOOLS_DIR>/finances/transaction-snapshot.py
 ```
 
@@ -178,7 +180,7 @@ Transactions: $<spent> (<merchant 1> $<amt>, <merchant 2> $<amt>)
 
 ## Instructions
 
-1. Always export `SIMPLEFIN_ACCESS_URL` inline before running scripts
+1. Run the `SIMPLEFIN_ACCESS_URL` check before the scripts. Never `source ~/.env`: the variable is already in the session (see Environment Setup)
 2. If a snapshot doesn't exist for today, run without flags first (saves + shows)
 3. If `--diff-only` or `--summary` fails, run the base command instead
 4. On weekends/holidays, portfolio values may be unchanged — note this briefly

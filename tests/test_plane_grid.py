@@ -9,6 +9,8 @@ flat, nested, and root-mode layouts.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import asyncio
 import json
 from pathlib import Path
@@ -20,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
 from claudlobby.plane.sampler import PaneSampler, discover_panes  # noqa: E402
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 
@@ -110,7 +113,7 @@ def test_snapshot_is_pure_cache_read(tmp_path):
 def test_grid_unavailable_is_typed_never_empty(tmp_path):
     s = PaneSampler(tmp_path, tmux="/nonexistent/tmux")
     s.tmux = None  # simulate: no tmux resolvable anywhere
-    body = TestClient(create_app(tmp_path, sampler=s)).get("/api/grid").json()
+    body = TestClient(create_app(tmp_path, sampler=s, package=source_package())).get("/api/grid").json()
     assert body["state"] == "unavailable"
     assert "tmux" in body["remediation"]
 
@@ -124,7 +127,7 @@ def test_grid_ok_serves_snapshot_and_focus(tmp_path):
     async def run():
         await s._capture(s._panes[0], 14)
     asyncio.run(run())
-    client = TestClient(create_app(tmp_path, sampler=s))
+    client = TestClient(create_app(tmp_path, sampler=s, package=source_package()))
     body = client.get("/api/grid").json()
     assert body["state"] == "ok"
     assert body["data"]["panes"][0]["bot"] == "up"
@@ -141,6 +144,7 @@ def _seed_two_fleets(root: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "capture.json").write_text('{"*": "full"}')
     for fleet, h in (("engineering", "a"), ("data", "b")):
+        initialize_plane(root)
         emit_batch(root, [{
             "event_type": "communication", "emitter": "t", "fleet": fleet,
             "payload": {"msg_id": "msg_" + h * 32,
@@ -152,7 +156,7 @@ def _seed_two_fleets(root: Path) -> None:
 
 def test_channel_fleet_filter_scopes_the_room(tmp_path):
     _seed_two_fleets(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     eng = client.get("/api/channel?fleet=engineering").json()
     bodies = [m["body"] for t in eng["data"]["threads"]
               for m in t["messages"]]
@@ -163,7 +167,7 @@ def test_channel_fleet_filter_scopes_the_room(tmp_path):
 
 def test_channel_unknown_fleet_is_a_typed_refusal(tmp_path):
     _seed_two_fleets(tmp_path)
-    body = TestClient(create_app(tmp_path)).get(
+    body = TestClient(create_app(tmp_path, package=source_package())).get(
         "/api/channel?fleet=nonexistent").json()
     # a fleet the plane does not hold is a typed refusal (U, #1467) — the
     # room it would have shown is empty by construction, and saying so as
@@ -270,7 +274,7 @@ def test_focus_endpoint_ships_only_the_focused_pane(tmp_path):
         for p in s._panes:
             await s._capture(p, 14)
     asyncio.run(run())
-    client = TestClient(create_app(tmp_path, sampler=s))
+    client = TestClient(create_app(tmp_path, sampler=s, package=source_package()))
     full = client.get("/api/grid").json()
     assert len(full["data"]["panes"]) == 2
     focused = client.get("/api/grid?focus=up&fleet=f1").json()
@@ -298,10 +302,11 @@ def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
     (d / "capture.json").write_text('{"*": "full"}')
     wi = "wi_" + "e" * 32
     # eng -> data dispatch, and the data -> eng reply
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
          "payload": {"work_item_id": wi, "title": "cross", "created_by":
-                     "bot:engineering/lead"}},
+                     "bot:engineering/lead", "workstream_id": "ws-test"}},
         {"event_type": "communication", "emitter": "t", "fleet": "engineering",
          "payload": {"msg_id": "msg_" + "e" * 32, "sender":
                      "bot:engineering/lead", "recipient": "bot:data/worker",
@@ -313,7 +318,7 @@ def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
                      "message_class": "report", "work_item_id": wi,
                      "reply_to_msg_id": "msg_" + "e" * 32,
                      "body": "the answer"}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for room in ("engineering", "data"):
         threads = client.get(f"/api/channel?fleet={room}").json()["data"]["threads"]
         bodies = sorted(m["body"] for t in threads for m in t["messages"])
@@ -372,7 +377,7 @@ def test_room_is_immune_to_like_metacharacters(tmp_path):
     returned the whole firehose dressed as a room. Equality arms retire the
     metacharacter class."""
     _seed_two_fleets(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for evil in ("en_", "%", "engineerin_"):
         body = client.get(f"/api/channel?fleet={evil}").json()
         # not a fleet the plane holds: refused by name, never a room —
@@ -384,7 +389,7 @@ def test_room_is_immune_to_like_metacharacters(tmp_path):
 def test_index_html_alias_is_rewritten_too(tmp_path):
     """Probed in review: /index.html served the RAW file via the mount —
     an unbusted second door that re-pins stale modules."""
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for path in ("/", "/index.html"):
         r = client.get(path)
         assert r.status_code == 200
@@ -392,7 +397,8 @@ def test_index_html_alias_is_rewritten_too(tmp_path):
         assert r.headers.get("cache-control") == "no-store"
 
 
-def test_asset_token_tracks_in_place_updates(tmp_path):
+@pytest.mark.parametrize("asset", ["app.js", "api-client.js", "workspace.css", "work-loop.js", "action-state.js", "workspace-display.js"])
+def test_asset_token_tracks_in_place_updates(tmp_path, asset):
     """The token must change when a UI file changes UNDER the running
     daemon (update-siblings pulls weekly; host services are not restarted
     by the worker restart) — a process-lifetime token went stale in exactly
@@ -402,16 +408,16 @@ def test_asset_token_tracks_in_place_updates(tmp_path):
 
     from claudlobby.plane import view as view_mod
 
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     tok1 = _re.search(r"/app\.js\?v=([a-f0-9]+)", client.get("/").text).group(1)
-    app_js = view_mod.UI_DIR / "app.js"
-    st = app_js.stat()
-    _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    path = view_mod.UI_DIR / asset
+    st = path.stat()
+    _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     try:
         tok2 = _re.search(r"/app\.js\?v=([a-f0-9]+)",
                           client.get("/").text).group(1)
     finally:
-        _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns))
+        _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert tok1 != tok2
 
 
@@ -429,7 +435,7 @@ def test_focus_ships_exactly_one_pane_for_twin_names(tmp_path):
         for p in s._panes:
             await s._capture(p, 14)
     asyncio.run(run())
-    client = TestClient(create_app(tmp_path, sampler=s))
+    client = TestClient(create_app(tmp_path, sampler=s, package=source_package()))
     body = client.get("/api/grid?focus=twin").json()
     assert len(body["data"]["panes"]) == 1
 
@@ -474,7 +480,7 @@ def test_grid_fleet_filter_keeps_twin_named_bots_apart(tmp_path):
         for p in s._panes:
             await s._capture(p, 14)
     asyncio.run(run())
-    client = TestClient(create_app(tmp_path, sampler=s))
+    client = TestClient(create_app(tmp_path, sampler=s, package=source_package()))
     both = client.get("/api/grid").json()["data"]["panes"]
     assert sorted((p["fleet"], p["bot"]) for p in both) == [
         ("data", "one"), ("engineering", "one")]
@@ -511,6 +517,7 @@ def test_presence_fleet_filter_scopes_both_halves(tmp_path):
              "payload": {"subject_kind": "bot_instance", "subject": alias,
                          "metric": "bot.heartbeat",
                          "value": {"state": "BUSY", "marker_age_s": 3}}}]
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, rows)
 
     class _Sampler:
@@ -530,7 +537,7 @@ def test_presence_fleet_filter_scopes_both_halves(tmp_path):
         async def stop(self):
             pass
 
-    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    client = TestClient(create_app(tmp_path, sampler=_Sampler(), package=source_package()))
     host = client.get("/api/presence").json()["data"]
     assert host["counts"]["working"] == 2 and host["counts"]["down"] == 1
     data = client.get("/api/presence?fleet=data").json()["data"]
@@ -559,6 +566,7 @@ def test_overview_presence_is_each_rooms_not_the_hosts(tmp_path):
              "payload": {"subject_kind": "bot_instance", "subject": alias,
                          "metric": "bot.heartbeat",
                          "value": {"state": state, "marker_age_s": 3}}})
+    initialize_plane(tmp_path)
     emit_batch(tmp_path, rows)
 
     class _Sampler:
@@ -578,7 +586,7 @@ def test_overview_presence_is_each_rooms_not_the_hosts(tmp_path):
         async def stop(self):
             pass
 
-    client = TestClient(create_app(tmp_path, sampler=_Sampler()))
+    client = TestClient(create_app(tmp_path, sampler=_Sampler(), package=source_package()))
     strip = {r["alias"]: r["presence"]["counts"]
              for r in client.get("/api/overview").json()["data"]["fleets"]}
     for fleet in ("engineering", "data"):

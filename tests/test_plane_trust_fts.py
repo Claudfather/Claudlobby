@@ -10,6 +10,8 @@ with dormant-fleet disclosure, and unconfirmed identities.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 from pathlib import Path
 
@@ -19,6 +21,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from claudlobby.plane.emit_api import emit_batch  # noqa: E402
+from tests.package_fixtures import source_package
 from claudlobby.plane.view import create_app  # noqa: E402
 
 
@@ -27,6 +30,7 @@ def _seed(root: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "capture.json").write_text(
         '{"engineering": "full", "data": "metadata", "ghostfleet": "full"}')
+    initialize_plane(root)
     emit_batch(root, [
         {"event_type": "communication", "emitter": "dispatch-task",
          "fleet": "engineering",
@@ -47,7 +51,7 @@ def _seed(root: Path) -> None:
 
 def test_search_finds_permitted_words(tmp_path):
     _seed(tmp_path)
-    body = TestClient(create_app(tmp_path)).get(
+    body = TestClient(create_app(tmp_path, package=source_package())).get(
         "/api/search?q=huntress rebase").json()
     assert body["state"] == "ok"
     hits = body["data"]["results"]
@@ -64,7 +68,7 @@ def test_metadata_rows_never_enter_the_index(tmp_path):
     """§11 structurally: the data fleet is metadata-capture, so its body is
     NULL at ingest — the secret word is unfindable BY CONSTRUCTION."""
     _seed(tmp_path)
-    body = TestClient(create_app(tmp_path)).get(
+    body = TestClient(create_app(tmp_path, package=source_package())).get(
         "/api/search?q=secret").json()
     assert body["state"] == "ok"
     assert body["data"]["results"] == []
@@ -72,7 +76,7 @@ def test_metadata_rows_never_enter_the_index(tmp_path):
 
 def test_search_scopes_to_the_room(tmp_path):
     _seed(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     eng = client.get("/api/search?q=huntress&fleet=engineering").json()
     assert len(eng["data"]["results"]) == 1
     # a fleet the plane holds no identity for is a typed refusal naming the
@@ -85,7 +89,7 @@ def test_hostile_query_is_never_a_source_error(tmp_path):
     """A human's unbalanced quote or FTS syntax must never render as
     'unreadable source' — the query is tokenized and quoted."""
     _seed(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for evil in ('"unbalanced', "NEAR(", "a AND OR NOT", "col:injection",
                  "*", '"" ""', "  ", "\x00", "hunt\x00ress", "\x00\x00"):
         body = client.get("/api/search", params={"q": evil}).json()
@@ -99,8 +103,13 @@ def test_trust_counts_quarantine_with_reasons(tmp_path):
     (q / "ev_bad.json").write_text("{}")
     (q / "ev_bad.json.reason").write_text("schema violation: missing sender")
     (q / "ev_worse.json").write_text("{}")
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    staged = tmp_path / "state" / "plane" / "staged"
+    staged.mkdir()
+    (staged / "pending.batch").write_text('{"events": []}')
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     d = body["data"]
+    assert d["staged"]["state"] == "ok"
+    assert d["staged"]["pending"] == 1 and d["staged"]["bytes"] > 0
     assert d["quarantined"] == 2
     reasons = {r["event"]: r["reason"] for r in d["quarantine_reasons"]}
     assert reasons["ev_bad.json"].startswith("schema violation")
@@ -109,7 +118,7 @@ def test_trust_counts_quarantine_with_reasons(tmp_path):
 
 def test_trust_emitter_freshness_is_data_driven(tmp_path):
     _seed(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     emitters = {e["emitter"] for e in body["data"]["emitters"]}
     assert {"dispatch-task", "report-back"} <= emitters
 
@@ -118,7 +127,7 @@ def test_trust_discloses_dormant_fleet_with_policy(tmp_path):
     """A fleet with a declared capture policy and zero events ever is a
     DORMANT emitter — disclosed, never silently absent (§16)."""
     _seed(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     fleets = {f["fleet"]: f for f in body["data"]["fleets"]}
     assert "ghostfleet" in fleets
     assert fleets["ghostfleet"]["comms"] == 0
@@ -130,20 +139,20 @@ def test_trust_discloses_dormant_fleet_with_policy(tmp_path):
 def test_trust_malformed_capture_is_typed_not_silent(tmp_path):
     _seed(tmp_path)
     (tmp_path / "state" / "plane" / "capture.json").write_text("{broken")
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     assert body["state"] == "ok"
     assert body["data"]["capture_config"] == "malformed"
 
 
 def test_trust_counts_provisional_identities(tmp_path):
     _seed(tmp_path)
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     assert body["data"]["provisional_identities"] > 0  # lazily-minted seeds
 
 
 def test_search_and_trust_are_read_only_routes(tmp_path):
     _seed(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     for path in ("/api/search?q=x", "/api/trust"):
         assert client.post(path).status_code == 405
 
@@ -163,7 +172,7 @@ def test_markers_are_per_request_random(tmp_path):
                     "recipient": "bot:engineering/y",
                     "message_class": "chat",
                     "body": "smuggle \x01fake\x02 marker huntress"}}])
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     b1 = client.get("/api/search?q=smuggle").json()["data"]
     b2 = client.get("/api/search?q=smuggle").json()["data"]
     assert b1["marker_open"] != b2["marker_open"]     # fresh per request
@@ -220,7 +229,7 @@ def test_emitter_freshness_covers_every_construct_table(tmp_path):
          "fleet": "engineering",
          "payload": {"workstream_id": "ws-pin", "title": "t",
                      "opened_by": "bot:engineering/lead"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     emitters = {e["emitter"]: e for e in body["data"]["emitters"]}
     assert "assign-only-door" in emitters
     assert "ws-only-door" in emitters
@@ -241,7 +250,7 @@ def test_unreadable_quarantine_dir_is_disclosed_never_zero(tmp_path):
     (q / "ev_hidden.json").write_text("{}")
     q.chmod(0)
     try:
-        body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     finally:
         q.chmod(0o700)
     assert body["state"] == "ok"                      # panel survives
@@ -258,7 +267,7 @@ def test_dangling_quarantine_entry_does_not_kill_the_panel(tmp_path):
     (q / "dangling.json").symlink_to(q / "never-existed")
     (q / "real.json").write_text("{}")
     (q / "isdir.json").mkdir()                        # not an event either
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     assert body["state"] == "ok"
     assert body["data"]["quarantined"] == 1           # only the real file
 
@@ -274,7 +283,7 @@ def test_quarantine_reason_read_through_the_real_door(tmp_path):
     f = sp / "ev_door.json"
     f.write_text('{"spooled_at": "2026-01-01T00:00:00"}')
     spool.quarantine_entry(tmp_path, f, "pin: through the real door")
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     reasons = {r["event"]: r["reason"]
                for r in body["data"]["quarantine_reasons"]}
     assert reasons["ev_door.json"] == "pin: through the real door"
@@ -285,7 +294,7 @@ def test_search_discloses_unsearchable_metadata_rows(tmp_path):
     'no matches' alone is a FALSE IDLE — the panel must state what was
     never indexed."""
     _seed(tmp_path)
-    client = TestClient(create_app(tmp_path))
+    client = TestClient(create_app(tmp_path, package=source_package()))
     data_room = client.get("/api/search?q=anything&fleet=data").json()
     assert data_room["data"]["results"] == []
     assert data_room["data"]["unsearchable"] == 1     # the metadata row
@@ -306,7 +315,7 @@ def test_search_matches_the_recipient_side_of_a_room(tmp_path):
                     "body": "crossfleet zebra finding"}}])
     # sender fleet is FULL capture (a metadata sender's body is nulled at
     # the emit door and structurally unfindable — §11, its own pin)
-    hits = TestClient(create_app(tmp_path)).get(
+    hits = TestClient(create_app(tmp_path, package=source_package())).get(
         "/api/search?q=zebra&fleet=engineering").json()["data"]["results"]
     assert len(hits) == 1                             # recipient-arm match
 
@@ -332,7 +341,7 @@ def test_unreadable_spool_PARENT_is_disclosed_never_a_green_zero(tmp_path):
         '{"spooled_at": "2026-01-01T00:00:00"}')
     spool.chmod(0)                                    # the PARENT, not a leaf
     try:
-        body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+        body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     finally:
         spool.chmod(0o700)
     assert body["state"] == "ok"                      # panel survives
@@ -353,7 +362,7 @@ def test_truncated_body_is_disclosed_as_partially_indexed(tmp_path):
                     "recipient": "bot:engineering/y",
                     "message_class": "report",
                     "body": ("x" * 16390) + " tailzebra"}}])
-    body = TestClient(create_app(tmp_path)).get(
+    body = TestClient(create_app(tmp_path, package=source_package())).get(
         "/api/search?q=tailzebra&fleet=engineering").json()
     assert body["data"]["results"] == []              # past the cap: unfindable
     assert body["data"]["partially_indexed"] == 1     # …and DISCLOSED
@@ -371,7 +380,7 @@ def test_fleet_liveness_never_trusts_producer_clocks(tmp_path):
                     "sender": "bot:engineering/skewed",
                     "recipient": "bot:engineering/y",
                     "message_class": "chat", "body": "future-stamped"}}])
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     fleets = {f["fleet"]: f for f in body["data"]["fleets"]}
     at = fleets["engineering"]["last_comm_at"]
     assert at is not None and not at.startswith("2099")
@@ -469,7 +478,7 @@ def test_later_readdir_failure_never_reads_as_a_green_zero(
     (spool / "ev_live.json").write_text('{"spooled_at": "2026-01-01T00:00:00"}')
     monkeypatch.setattr(source_state.os, "scandir",
                         _scandir_one_then_eio(spool, "quarantine"))
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     assert body["state"] == "ok"
     assert body["data"]["spool_state"] == "unreadable"
     assert body["data"]["spool_pending"] == 0        # withheld, never partial
@@ -489,7 +498,7 @@ def test_later_readdir_failure_in_quarantine_is_disclosed(
     (q / "ev_live.json.reason").write_text("real refusal")
     monkeypatch.setattr(source_state.os, "scandir",
                         _scandir_one_then_eio(q, "ev_live.json.reason"))
-    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    body = TestClient(create_app(tmp_path, package=source_package())).get("/api/trust").json()
     assert body["state"] == "ok"
     assert body["data"]["quarantine_state"] == "unreadable"
     assert body["data"]["quarantined"] == 0
@@ -504,7 +513,9 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
     three now consume spool.scan_spool: doctor fails the rung and exits
     nonzero; status discloses instead of a numeric zero."""
     from claudlobby import source_state
-    from claudlobby.commands.plane import cmd_plane_doctor, cmd_plane_status
+    from claudlobby.commands.plane import cmd_plane_doctor
+    from claudlobby.commands import plane_status
+    from tests.package_fixtures import source_package
 
     _seed(tmp_path)
     spool = tmp_path / "state" / "plane" / "spool"
@@ -515,13 +526,15 @@ def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
 
     import types
     args = types.SimpleNamespace(root=str(tmp_path))
+    monkeypatch.setattr("claudlobby.context.get_resources", source_package)
     rc = cmd_plane_doctor(args)
     out = capsys.readouterr().out
     assert rc != 0
     assert "UNREADABLE" in out and "spool depth" in out
-    assert "0 pending" not in out                    # never the green zero
+    assert "spool depth — 0 pending" not in out      # never the green zero for this queue
 
-    rc = cmd_plane_status(args)
-    out = capsys.readouterr().out
-    assert "unreadable" in out
-    assert "spool: 0 pending" not in out
+    monkeypatch.setattr(plane_status, "resolve_paths", lambda **_: types.SimpleNamespace(root=tmp_path))
+    status = plane_status.dispatch(types.SimpleNamespace(root=tmp_path, fleet=None, seed=False))
+    assert status.data["spool"]["state"] == "unreadable"
+    assert status.data["spool"]["pending"] is None
+    assert any(line.startswith("spool: unreadable") for line in status.lines)

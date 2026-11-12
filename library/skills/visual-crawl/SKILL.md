@@ -1,6 +1,6 @@
 ---
 name: visual-crawl
-description: "Autonomous visual crawl of a deployed web app. Screenshots at multiple viewports, compares against design tokens, files GitHub issues for findings."
+description: "Use when a deployed web app needs a visual quality pass across its routes. Autonomous visual crawl of a deployed web app. Screenshots at multiple viewports, compares against design tokens, files GitHub issues for findings."
 argument-hint: "[--url <base-url>] [--auto] [--output github|session]"
 ---
 

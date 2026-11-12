@@ -2,6 +2,10 @@
 
 claudlobby is a **compositor**: a thin Python program that reads `fleet.yaml`, assembles bot directories from `library/` building blocks, and writes them to `runtime/bots/<name>/`. Claude Code then runs the assembled bots like normal.
 
+Claudlobby is the stack's **composition system**: it turns `fleet.yaml` into wired bots — identities, plugins, env, permission grants, supervision — and owns fleet *policy* (what each bot may do, including vault writer topology). Engineering-workflow behavior is clauDNA's; the durable knowledge corpus is Claudron's. `library/skills/` operate the fleet itself (dispatch, restart, pulse) — runtime content that happens to use the skill format. `library/` composes context into bots; it is not the corpus.
+
+The rules that follow from this are in the root `CLAUDE.md`, under "Ecosystem boundary".
+
 ## The four layers
 
 ```
@@ -10,6 +14,27 @@ claudlobby is a **compositor**: a thin Python program that reads `fleet.yaml`, a
 3. runtime/      — what the compositor produces (gitignored)
 4. host         — systemd / launchd start the bots from runtime/
 ```
+
+```
+fleet.yaml          →  managed Git host update  →  runtime/bots/<name>/
+library/                                         ├── CLAUDE.md      (composed instructions)
+  expertise/                                     ├── bot.conf       (env vars, sourced at startup)
+  skills/                                        ├── .mcp.json      (MCP server config)
+  mcp/                                           ├── .claude/       (settings.local.json, skills/ symlinks)
+  guardrails/                                    ├── *.service      (systemd unit, Linux)
+  protocols/                                     ├── *.plist        (launchd unit, macOS)
+  integrations/                                  ├── memory/        (bot-owned persistent state)
+  resources/                                     ├── data/          (bot-owned data — mutable, never regenerated)
+  lessons/                                       ├── tools/         (composited scripts — generated, never hand-edited)
+  principles/                                    ├── logs/          (bot log files)
+  permissions/                                   └── projects/      (git checkouts, gitignored)
+  post_actions/
+  tools/
+  voices/
+templates/claude.md.j2
+```
+
+The compositor reads `fleet.yaml` (which declares bots, their expertise, skills, MCP servers, guardrails, etc.) and assembles each bot's directory from the shared `library/`.
 
 ### 1. `library/` — building blocks
 
@@ -40,6 +65,15 @@ library/
 **Guardrails** are composable rule sets (`no-push-main`, `pii-protection`, `dbt-safety`). Each is appended to the bot's CLAUDE.md as a self-contained section.
 
 **Protocols** are reusable communication and workflow patterns (`report-back`, `dispatch`, `telegram-routing`, `consensus-loop`). Same append model as guardrails.
+
+#### Key concepts
+
+- **Expertise** — Role definitions (e.g. `software-engineering`, `orchestration`, `code-review`). Each bot gets one or more. This is who the bot is.
+- **Skills** — Composable slash-command packages in `library/skills/<name>/SKILL.md`. What the bot can do.
+- **Guardrails** — Safety rules composed per-bot (e.g. `no-push-main`, `snowflake-read-only`).
+- **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
+- **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
+- **Voices** — Optional personality overlays in `library/voices/`.
 
 ### 2. `fleet.yaml` — the recipe
 
@@ -93,13 +127,13 @@ jobs, per-fleet defaults), `fleet.yaml` governs WHO the bots are, and optional
 
 ### 3. `runtime/bots/<name>/` — generated output
 
-For each bot in `fleet.yaml`, `claudlobby generate` writes:
+For each bot in `fleet.yaml`, the Git updater writes:
 
 ```
 runtime/bots/<name>/
 ├── CLAUDE.md                ← composed from expertise + voice + all library sections
 ├── .mcp.json                ← merged from library/mcp/ fragments
-├── bot.conf                 ← env exports for lib/start-bot.sh
+├── bot.conf                 ← env exports for claudlobby/_runtime_scripts/start-bot.sh
 ├── .claude/
 │   ├── settings.local.json  ← memory dir, permissions, sandbox, hooks
 │   └── skills/              ← symlinks → library/skills/<skill>
@@ -144,20 +178,23 @@ Expertise / protocol / guardrail files may use `{{BOT_NAME}}`, `{{SERVICE_PREFIX
 
 ### 4. The host — systemd / launchd
 
-The bot is started by `lib/start-bot.sh`:
+Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet.
+
+The bot is started by `claudlobby/_runtime_scripts/start-bot.sh`:
 
 ```bash
 # Reads runtime/bots/<bot>/bot.conf
 # Sources $CLAUDLOBBY_ROOT/.env
-# Launches `claude --channels plugin:telegram --remote-control` inside a tmux
+# Launches `claude --channels plugin:telegram` (with `--remote-control` for the
+# fleet manager, or a bot that sets remote_control: true) inside a tmux
 # session on the bot's OWN tmux server (private `-L <socket>` == BOT_SERVICE),
 # so one server's death drops only that bot, never the whole fleet
 ```
 
-The OS-specific service unit (`<service_prefix>.<bot>.service` on Linux, `<service_prefix>.<bot>.plist` on macOS) wraps that. Both are generated by `claudlobby generate`. The easiest way to enroll and start a bot is `lib/spin-up-bot.sh`:
+The OS-specific service unit (`<service_prefix>.<bot>.service` on Linux, `<service_prefix>.<bot>.plist` on macOS) wraps that. The Git updater writes both. The easiest way to enroll and start a bot is `claudlobby/_runtime_scripts/spin-up-bot.sh`:
 
 ```bash
-lib/spin-up-bot.sh runtime/bots/<bot>     # idempotent: enroll + start
+claudlobby/_runtime_scripts/spin-up-bot.sh runtime/bots/<bot>     # idempotent: enroll + start
 ```
 
 This detects the OS, links the service unit, enables it, and starts the bot. For manual control:
@@ -178,12 +215,12 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<service_prefix>.<bot>.p
 Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bots/` is gitignored, so the host filesystem is the workspace.
 
 - **Skills auto-sync** because they're symlinks: editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is actually editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
-- **Composed CLAUDE.md doesn't auto-sync** — the next `generate` would overwrite it. The flow is:
+- **Composed CLAUDE.md doesn't auto-sync** — the next host update would overwrite it. The flow is:
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
-  2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` — **v1 is a pointer only, not a mover**: it prints which `library/` file each category of drift belongs in (`library/expertise/<role>.md`, `voices/<voice>.md`, a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`, etc.); no content is copied automatically, and the bot's composed `CLAUDE.md` is not read back — you hand-edit the named file yourself. An interactive picker that performs the move is planned for v2.
-  4. After hand-editing `library/` per the pointer, re-running `generate` produces a CLAUDE.md consistent with the new library state.
+  2. `claudlobby config diff --bot <bot>` identifies drifted rendered files without exposing their contents. Review the runtime file and its authored source when deciding what to retain.
+  3. Hand-edit the relevant authored source: `library/expertise/<role>.md`, `library/voices/<voice>.md`, `library/guardrails/<name>.md`, `library/protocols/<name>.md`, or the bot declaration in `fleet.yaml`.
+  4. Commit the change through review; the operator applies the reviewed commit with `claudlobby host update apply FULL_COMMIT` and inspects `host update status` ([Managed Git delivery](../fleet-update-lifecycle.md#managed-git-delivery)).
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
 
@@ -194,9 +231,11 @@ all of them: how does anyone find out what a *running* fleet actually did — wh
 where, whether it was acknowledged, what a bot is doing right now, what the operator said and what
 came back — after the fact, across restarts, without grepping tmux panes. That is the **observable
 plane** (`claudlobby/plane/`, a subpackage of the compositor): one append-only, typed SQLite
-database per host that the existing `lib/` doors and hooks write into from the side, and that the
+database per host that the existing `claudlobby/_runtime_scripts/` doors and hooks write into from the side, and that the
 read side — `brief`, the operator plane (`claudlobby plane view`), the fleet-pulse watchdog's
 reader, the dispatch resolver — answers from.
+
+The canonical `claudlobby task admit` / `task assign` commands record work; `assignment deliver` sends the committed assignment, and `assignment progress|block|return|complete|fail` records a linked worker report. `message send` and `fleet reports submit` handle ordinary and unlinked communication.
 
 Full reference: [`observable-plane.md`](observable-plane.md) — the ten families and the common
 envelope, identity (aliases vs minted uids), the write spine and its ladder (daemon socket → cold
@@ -205,9 +244,9 @@ read-only), the F18 cutover as history (the closure deleted its machinery), migr
 
 Two properties matter at this altitude. **The plane ships ON** (chunk N — it was dormant by
 default until then, and a behavior nobody can see is a behavior nobody has): every runtime door
-records, `generate` scans the registry, and the ingest daemon, the view daemon and the sweeps are
+records, the Git update scans the registry, and the ingest daemon, the view daemon and the sweeps are
 enrolled host jobs. Nothing it does reaches the four categories the defaults rule reserves for
-opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby doctor
+opt-in. Turning any of it off is one line, named where the operator looks — `claudlobby host doctor
 --switches` (`system.yaml`, see
 [`system-yaml-schema.md`](../system-yaml-schema.md#defaults-the-rule)). And
 **nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what
@@ -216,7 +255,7 @@ writer, moved every reader onto the plane, and deleted the transition machinery.
 
 ## Validation
 
-`claudlobby validate` is permissive by default:
+`claudlobby config validate` is permissive by default:
 
 - **Hard error** — bot references an `expertise` that doesn't exist (can't generate without a base)
 - **Hard error** — `fleet.yaml` is invalid YAML or missing required keys
@@ -237,7 +276,7 @@ The compositor logic has grown to ~24,000 lines of Python (`claudlobby/`, includ
 
 Python's data/ML ecosystem (sentence-transformers, chroma, scikit-learn) is the dominant story for those. Bash can't get there; Node could but the SDKs lag; bun is great but adds a runtime dep on every host. Python ships with macOS, Debian, Pi OS — zero install friction.
 
-The bash lifecycle scripts (`start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`) stay bash. They're tightly coupled to tmux, launchd, systemd, and `gh` — bash is the right tool there.
+The bash lifecycle scripts (`start-bot.sh`, `keepalive.sh`, `tg-post.sh`) stay bash. They're tightly coupled to tmux, launchd, systemd, and `gh` — bash is the right tool there.
 
 ## Why YAML (not TOML, not JSON)
 
