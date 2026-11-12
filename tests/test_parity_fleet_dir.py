@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 from claudlobby.paths import Paths, _find_fleet_dir
+from tests.package_fixtures import source_package
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -23,7 +24,7 @@ def estate(tmp_path, monkeypatch):
     for path in (root / "local", root / "lib", home, bindir):
         path.mkdir(parents=True, exist_ok=True)
     for name in ("lib-common.sh", "supervisor.sh", "env-tiers.sh"):
-        shutil.copyfile(REPO / "lib" / name, root / "lib" / name)
+        shutil.copyfile(REPO / "claudlobby" / "_runtime_scripts" / name, root / "lib" / name)
     # Only source-time detection and the read-only resolver/consumer tools.
     # No inherited PATH, shell startup file, model, network or supervisor CLI.
     for name in ("bash", "uname", "dirname", "awk", "grep", "rm"):
@@ -134,7 +135,7 @@ def test_real_consumers_use_nested_fleet_instead_of_runtime_husk(estate, consume
         assert rows["fleet"] == [str(nested / ".env"), "present"]
         # The shipped Python resolver asks this same shell door under its own
         # constructed environment; ensure its consumer also identifies it.
-        tiers = Paths(root=root, fleet_dir=nested).env_tiers()
+        tiers = Paths(root=root, fleet_dir=nested, package=source_package()).env_tiers()
         assert next(row.path for row in tiers if row.tier == "fleet") == nested / ".env"
     else:
         shell = _bash(estate, '"$1" f', consumer)
