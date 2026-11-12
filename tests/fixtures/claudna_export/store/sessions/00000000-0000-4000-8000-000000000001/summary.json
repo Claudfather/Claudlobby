@@ -1,0 +1,31 @@
+{
+  "fields": {
+    "arc": [
+      {
+        "from_seg": 1,
+        "result": "Harmless command completed",
+        "step": "Run local probe"
+      }
+    ],
+    "blocks": [],
+    "done": [
+      {
+        "from_seg": 1,
+        "text": "Validated local protocol path"
+      }
+    ],
+    "in_progress": [],
+    "intent": "Verify sealed segment export",
+    "next": [],
+    "outcome": "shipped",
+    "procedures": [],
+    "title": "Local summary consumer canary"
+  },
+  "schema": "claudna.session-summary/2",
+  "screened": true,
+  "segments": [
+    1
+  ],
+  "sid": "00000000-0000-4000-8000-000000000001",
+  "through_seg": 1
+}

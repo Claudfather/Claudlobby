@@ -1,0 +1,578 @@
+"""Real private-socket server; only the native Tailscale CLI is a synthetic stand-in."""
+
+import asyncio
+from contextlib import contextmanager
+import http.client
+import os
+import select
+import json
+from pathlib import Path
+import socket
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+import pytest
+
+from claudlobby.__main__ import main
+from claudlobby.plane.owner_access import OwnerAccess, PrincipalRef
+from claudlobby.plane.owner_browser import COOKIE_NAME
+from claudlobby.plane.owner_server import (
+    OwnerServerConfigurationError, _serve_authority_app, private_listener,
+)
+from claudlobby.plane.owner_source import bind_source
+from tests.conftest import _short_test_directory, constructed_env
+from tests.test_plane_two_fleets import _seed
+
+
+@pytest.fixture
+def socket_path():
+    # Reuse the shared allocator without the unrelated CLI shebang preflight.
+    directory = _short_test_directory("owner-")
+    try:
+        yield directory / "owner.sock"
+    finally:
+        shutil.rmtree(directory)
+
+
+def test_private_listener_permissions_and_owned_cleanup(socket_path):
+    with private_listener(socket_path) as listener:
+        assert listener.family == socket.AF_UNIX
+        assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(socket_path))
+            peer, _ = listener.accept()
+            peer.close()
+    assert not socket_path.exists()
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    assert lease.read_bytes() == b"" and stat.S_IMODE(lease.stat().st_mode) == 0o600
+
+
+def test_private_listener_preserves_existing_and_replacement_paths(socket_path):
+    socket_path.write_text("foreign path")
+    with pytest.raises(ValueError, match="exists"):
+        with private_listener(socket_path):
+            pytest.fail("clobbered an existing path")
+    assert socket_path.read_text() == "foreign path"
+    socket_path.unlink()
+    with private_listener(socket_path):
+        socket_path.unlink()
+        socket_path.write_text("replacement")
+    assert socket_path.read_text() == "replacement"
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o770])
+def test_private_listener_rejects_accessible_parent(socket_path, mode):
+    socket_path.parent.chmod(mode)
+    with pytest.raises(ValueError, match="owner-only"):
+        with private_listener(socket_path):
+            pytest.fail("opened accessible listener")
+    assert not socket_path.exists()
+
+
+def test_private_listener_rejects_symlink_parent_and_relative_path(socket_path):
+    link = socket_path.parent / "alias"
+    link.symlink_to(socket_path.parent, target_is_directory=True)
+    with pytest.raises(ValueError, match="owner-only"):
+        with private_listener(link / "owner.sock"):
+            pytest.fail("followed final parent symlink")
+    with pytest.raises(ValueError, match="absolute"):
+        with private_listener(Path("owner.sock")):
+            pytest.fail("accepted relative path")
+
+
+def test_private_listener_failed_bind_does_not_remove_unowned_path(socket_path, monkeypatch):
+    class FailedSocket:
+        def bind(self, path):
+            Path(path).write_text("raced before bind")
+            raise OSError("bind refused")
+        def close(self):
+            pass
+    monkeypatch.setattr(socket, "socket", lambda *a: FailedSocket())
+    with pytest.raises(OSError, match="bind refused"):
+        with private_listener(socket_path):
+            pytest.fail("bound failed socket")
+    assert socket_path.read_text() == "raced before bind"
+
+
+def test_cli_serve_requires_explicit_configuration_and_refuses_json(tmp_path):
+    assert main(["--json", "--root", str(tmp_path), "host", "owner", "serve",
+                 "--origin", "https://plane.example.test", "--tailscale", "/not/a/binary"]) == 2
+    assert not list(tmp_path.iterdir())
+
+
+def test_missing_server_dependency_has_actionable_cli_failure(tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "uvicorn", None)
+    assert main(["--root", str(tmp_path), "host", "owner", "serve",
+                 "--origin", "https://plane.example.test", "--tailscale", "/not/a/binary"]) == 6
+    captured = capsys.readouterr()
+    assert "[plane-ui]" in captured.err
+    assert "Traceback" not in captured.err
+    assert not list(tmp_path.iterdir())
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("plane.example.test", timeout=5)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.path))
+
+
+@contextmanager
+def running_server(root, socket_path, binary, *, origin="https://plane.example.test"):
+    with (root / "server.log").open("w+") as log:
+        process = subprocess.Popen([sys.executable, "-m", "claudlobby", "--root", str(root),
+            "host", "owner", "serve", "--socket", str(socket_path),
+            "--origin", origin, "--tailscale", str(binary)],
+            env=constructed_env(), stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 10
+            ready = False
+            # bind creates the path before listen and application startup.
+            # Wait for the actual read route, not merely the filesystem entry.
+            while process.poll() is None and time.monotonic() < deadline:
+                try:
+                    ready = request(socket_path, "/owner", headers={
+                        "Host": origin.removeprefix("https://")})[0] == 200
+                except (OSError, http.client.HTTPException):
+                    ready = False
+                if ready:
+                    break
+                time.sleep(0.02)
+            log.flush()
+            assert process.poll() is None and ready, (root / "server.log").read_text()
+            yield process
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                pytest.fail("owner server did not shut down")
+        assert process.returncode == 0, (root / "server.log").read_text()
+        assert not socket_path.exists()
+
+
+def request(path, route, *, action=False, cookie=None, headers=None):
+    values = {"Host": "plane.example.test", "X-Forwarded-For": "100.64.0.42"}
+    if action:
+        values.update({"Origin": "https://plane.example.test", "Content-Type": "application/json",
+                       "X-Claudlobby-Owner": "1"})
+    if cookie:
+        values["Cookie"] = cookie
+    values.update(headers or {})
+    connection = UnixHTTP(path)
+    try:
+        connection.request("POST" if action else "GET", route,
+                           body=b"{}" if action else None, headers=values)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def raw_request(path, route, headers):
+    """Keep repeated HTTP fields visible to uvicorn instead of folding them into a dict."""
+    connection = UnixHTTP(path)
+    try:
+        connection.putrequest("GET", route, skip_host=True)
+        for name, value in headers:
+            connection.putheader(name, value)
+        connection.endheaders()
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def test_serve_unix_forwarded_authority_is_exact_and_keeps_browser_origin(tmp_path, socket_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    authority = "plane.example.test:8443"
+    # Captured twice from installed Tailscale 1.104.1 Serve over a Unix backend:
+    # Host localhost, one X-Forwarded-Host with external :8443, one HTTPS proto.
+    # The hostname is synthetic; the port and header cardinality preserve capture.
+    forwarded = [("Host", "localhost"), ("X-Forwarded-Host", authority),
+                 ("X-Forwarded-Proto", "https"), ("X-Forwarded-For", "100.64.0.42")]
+    with running_server(tmp_path, socket_path, sys.executable,
+                        origin="https://" + authority):
+        assert raw_request(socket_path, "/owner", forwarded)[0] == 200
+        assert raw_request(socket_path, "/owner-entry.js", forwarded)[0] == 200
+        cases = {
+            "duplicate host": forwarded + [("Host", "localhost")],
+            "duplicate forwarded host": forwarded + [("X-Forwarded-Host", authority)],
+            "duplicate forwarded proto": forwarded + [("X-Forwarded-Proto", "https")],
+            "wrong host": [("Host", authority), *forwarded[1:]],
+            "wrong forwarded host": [forwarded[0], ("X-Forwarded-Host", "other.example.test:8443"), *forwarded[2:]],
+            "wrong forwarded proto": [*forwarded[:2], ("X-Forwarded-Proto", "http"), forwarded[3]],
+            "funnel": forwarded + [("Tailscale-Funnel-Request", "?1")],
+            "foreign browser origin": forwarded + [("Origin", "https://other.example.test")],
+        }
+        for label, headers in cases.items():
+            code, response_headers, body = raw_request(socket_path, "/owner", headers)
+            if label == "duplicate host" and code == 400:
+                continue  # Uvicorn's HTTP parser may reject before the adapter.
+            assert code == 403 and json.loads(body) == {"state": "denied"}, label
+            assert response_headers["cache-control"] == "no-store", label
+
+
+def test_serve_authority_adapter_refuses_tcp_even_with_exact_headers():
+    async def unexpected(*_):
+        pytest.fail("TCP request reached browser app")
+
+    async def probe():
+        messages = []
+        async def send(message):
+            messages.append(message)
+        scope = {"type": "http", "method": "GET", "path": "/owner",
+                 "client": ("127.0.0.1", 5555), "headers": [
+                     (b"host", b"localhost"), (b"x-forwarded-host", b"plane.example.test:8443"),
+                     (b"x-forwarded-proto", b"https")]}
+        await _serve_authority_app(unexpected, "plane.example.test:8443")(
+            scope, unexpected, send)
+        return messages
+
+    assert asyncio.run(probe())[0]["status"] == 403
+
+
+def test_foreground_cli_pair_read_revoke_and_restart_over_real_unix_socket(tmp_path, socket_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    store = OwnerAccess.initialize(tmp_path)
+    # Shape grounded in an installed native WhoIs capture; every value here is
+    # synthetic. No real daemon, proxy configuration or external HTTPS is used.
+    identity = {"Node": {"User": 1234, "Addresses": ["100.64.0.42/32"]},
+                "UserProfile": {"ID": 1234, "LoginName": "example@example.test"}, "CapMap": {}}
+    binary = tmp_path / "synthetic-tailscale"
+    binary.write_text("#!/bin/sh\ncase \"$1 $2\" in\n"
+        "'debug prefs') printf '%s\\n' '{\"ControlURL\":\"https://controlplane.tailscale.com\"}';;\n"
+        "'whois --json') printf '%s\\n' '" + json.dumps(identity) + "';;\n*) exit 1;;\nesac\n")
+    binary.chmod(0o700)
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1234")
+    with running_server(tmp_path, socket_path, binary):
+        assert request(socket_path, "/owner")[0] == 200
+        assert request(socket_path, "/api/summary")[0] == 403
+        code, _, body = request(socket_path, "/api/owner/pair", action=True)
+        assert code == 202, body
+        grant = store.confirm_pairing(json.loads(body)["challenge"], expected_principal=principal)
+        code, headers, body = request(socket_path, "/api/owner/login", action=True)
+        assert code == 200, body
+        assert "Secure" in headers["set-cookie"] and "HttpOnly" in headers["set-cookie"]
+        cookie = headers["set-cookie"].split(";", 1)[0]
+        assert cookie.startswith(COOKIE_NAME + "=")
+        assert request(socket_path, "/api/summary", cookie=cookie)[0] == 200
+        assert request(socket_path, "/api/summary", cookie=cookie,
+                       headers={"X-Forwarded-For": "100.64.0.43"})[0] == 403
+        assert request(socket_path, "/api/summary", cookie=cookie,
+                       headers={"Tailscale-Funnel-Request": "?1"})[0] == 403
+    with running_server(tmp_path, socket_path, binary):
+        assert request(socket_path, "/api/summary", cookie=cookie)[0] == 200
+        store.revoke_owner(expected_revision=grant.revision)
+        assert request(socket_path, "/api/summary", cookie=cookie)[0] == 403
+
+
+@pytest.mark.parametrize("problem", ["binary", "origin", "existing-socket", "parent"])
+def test_cli_configuration_failure_has_specific_local_remediation(tmp_path, socket_path, capsys, problem):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    binary = sys.executable
+    origin = "https://plane.example.test"
+    expected = ""
+    if problem == "binary":
+        binary = str(tmp_path / "missing")
+        expected = "absolute configured native Tailscale executable"
+    elif problem == "origin":
+        origin = "http://plane.example.test"
+        expected = "canonical external HTTPS origin"
+    elif problem == "existing-socket":
+        socket_path.write_text("retained")
+        expected = "socket path exists"
+    else:
+        socket_path.parent.chmod(0o755)
+        expected = "owner-only directory"
+    assert main(["--root", str(tmp_path), "host", "owner", "serve", "--origin", origin,
+                 "--tailscale", binary, "--socket", str(socket_path)]) == 6
+    error = capsys.readouterr().err
+    assert expected in error
+    assert "owner authority is unavailable" not in error and "Traceback" not in error
+
+
+def test_cli_runtime_oserror_is_not_mislabeled_as_socket_open(tmp_path, monkeypatch, capsys):
+    from claudlobby.plane import owner_server
+    def failed(*a, **k):
+        raise OSError("private runtime diagnostic")
+    monkeypatch.setattr(owner_server, "serve", failed)
+    assert main(["--root", str(tmp_path), "host", "owner", "serve",
+                 "--origin", "https://plane.example.test", "--tailscale", sys.executable]) == 6
+    error = capsys.readouterr().err
+    assert "owner server failed" in error
+    assert "open its configured private socket" not in error and "private runtime diagnostic" not in error
+
+
+def test_actual_uvicorn_lifespan_failure_exits_unavailable_and_cleans_owned_socket(tmp_path, socket_path):
+    """Real uvicorn failure; synthetic app startup, no Tailscale command or ingress."""
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    program = r"""
+from contextlib import asynccontextmanager
+from pathlib import Path
+import sys
+from starlette.applications import Starlette
+from claudlobby.plane import owner_browser
+from claudlobby.__main__ import main
+@asynccontextmanager
+async def failed_startup(app):
+    raise RuntimeError("synthetic sampler startup failure")
+    yield
+owner_browser.create_owner_browser_app = lambda *a, **k: Starlette(lifespan=failed_startup)
+raise SystemExit(main(["--root", sys.argv[1], "host", "owner", "serve", "--socket", sys.argv[2],
+    "--origin", "https://plane.example.test", "--tailscale", sys.executable]))
+"""
+    result = subprocess.run([sys.executable, "-c", program, str(tmp_path), str(socket_path)],
+        env=constructed_env(), capture_output=True, text=True, timeout=15)
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert "owner server startup failed" in result.stderr
+    assert "Owner server stopped" not in result.stdout + result.stderr
+    assert not socket_path.exists()
+
+
+def test_server_run_returning_without_startup_is_not_a_clean_stop(tmp_path, socket_path, monkeypatch, capsys):
+    import uvicorn
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    monkeypatch.setattr(uvicorn.Server, "run", lambda *a, **k: None)
+    assert main(["--root", str(tmp_path), "host", "owner", "serve", "--socket", str(socket_path),
+        "--origin", "https://plane.example.test", "--tailscale", sys.executable]) == 6
+    output = capsys.readouterr()
+    assert "startup failed" in output.err and "Owner server stopped" not in output.out
+    assert not socket_path.exists()
+
+
+def test_private_listener_recovers_after_real_sigkill_and_excludes_second_owner(socket_path):
+    code = ("from pathlib import Path; import sys,time; "
+            "from claudlobby.plane.owner_server import private_listener\n"
+            "with private_listener(Path(sys.argv[1])):\n"
+            " print('ready',flush=True)\n"
+            " time.sleep(60)\n")
+    process = subprocess.Popen([sys.executable, "-c", code, str(socket_path)],
+        env=constructed_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert select.select([process.stdout], [], [], 10)[0], "listener did not become ready"
+        assert process.stdout.readline().strip() == "ready"
+        process.kill()
+        process.wait(timeout=5)
+        assert socket_path.exists()
+        with private_listener(socket_path) as listener:
+            with pytest.raises(OwnerServerConfigurationError, match="running server"):
+                with private_listener(socket_path):
+                    pytest.fail("second owner acquired a live listener")
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(socket_path))
+                peer, _ = listener.accept()
+                peer.close()
+        assert not socket_path.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def test_private_listener_preserves_unrecorded_dead_and_recorded_live_sockets(socket_path):
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    # Legacy/unrecorded listeners are never ours to reclaim, even when dead.
+    with socket.socket(socket.AF_UNIX) as other:
+        other.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        other.listen(1)
+        stamp = socket_path.stat()
+        parent = socket_path.parent.stat()
+        with pytest.raises(OwnerServerConfigurationError, match="path exists"):
+            with private_listener(socket_path):
+                pytest.fail("replaced an unrecorded listener")
+        # A matching record is insufficient when the kernel still has a listener.
+        lease.write_text(json.dumps({"version": 1, "parent": [parent.st_dev, parent.st_ino],
+                                     "socket": [stamp.st_dev, stamp.st_ino]}))
+        with pytest.raises(OwnerServerConfigurationError, match="running server"):
+            with private_listener(socket_path):
+                pytest.fail("replaced a live listener")
+    lease.write_text("")
+    with pytest.raises(OwnerServerConfigurationError, match="path exists"):
+        with private_listener(socket_path):
+            pytest.fail("replaced an unrecorded dead socket")
+    assert socket_path.stat().st_ino == stamp.st_ino
+
+
+def test_private_listener_refuses_invalid_or_shared_lock_record(socket_path):
+    lease = socket_path.with_name(socket_path.name + ".lock")
+    lease.write_text('{"version":1,"version":1,"parent":[1,2],"socket":[3,4]}')
+    lease.chmod(0o600)
+    with pytest.raises(OwnerServerConfigurationError, match="record is invalid"):
+        with private_listener(socket_path):
+            pytest.fail("accepted corrupt ownership record")
+    lease.write_text("")
+    os.link(lease, lease.with_name("foreign-lock"))
+    with pytest.raises(OwnerServerConfigurationError, match="private regular file"):
+        with private_listener(socket_path):
+            pytest.fail("modified a shared file")
+    assert not socket_path.exists()
+
+
+def test_service_handover_refuses_live_foreground_without_changing_it(socket_path):
+    from types import SimpleNamespace
+    from claudlobby.activation_state import ActivationRefusal
+    from claudlobby.plane.owner_service import preflight
+
+    root = socket_path.parent
+    unit = SimpleNamespace(argv=("/example/bin/python",), root=root, unit="example-plane-owner",
+        command=("/example/bin/claudlobby", "--root", str(root), "host", "owner", "serve",
+                 "--origin", "https://host.example.test", "--socket", str(socket_path)))
+    starts = {"unit": (None, None, unit)}
+    preflight(starts)
+    assert not list(root.iterdir()), "preflight must not create sockets or lock files"
+    with private_listener(socket_path):
+        before = {p.name: p.stat().st_ino for p in root.iterdir()}
+        with pytest.raises(ActivationRefusal, match="stop the foreground"):
+            preflight(starts)
+        # An already-managed unit is quiesced by the existing activation owner.
+        preflight(starts, managed={(unit.unit, socket_path)})
+        assert {p.name: p.stat().st_ino for p in root.iterdir()} == before
+    preflight(starts)
+
+
+@pytest.mark.parametrize("explicit_default", [False, True])
+def test_fresh_server_socket_stays_outside_activation_storage(socket_path, monkeypatch, explicit_default):
+    import uvicorn
+    from claudlobby.plane.ids import ensure_host_uid
+    from claudlobby.plane import owner_server
+    root = socket_path.parent
+    ensure_host_uid(root / "state")
+    OwnerAccess.initialize(root).prepare_first_fleet()
+    seen = []
+    def stopped(server, *, sockets):
+        server.started = True
+        seen.append(Path(sockets[0].getsockname()))
+    monkeypatch.setattr(uvicorn.Server, "run", stopped)
+    owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                       socket_path=root / "state/owner/owner.sock" if explicit_default else None)
+    assert seen == [root / "state/owner/owner.sock"]
+    assert not seen[0].exists()
+    assert {p.name for p in (root / "state/plane").iterdir()} == {"owner-access.db"}
+    with pytest.raises(OwnerServerConfigurationError, match="existing owner-only directory"):
+        owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                           socket_path=root / "custom/owner.sock")
+    assert not (root / "custom").exists()
+    with pytest.raises(OwnerServerConfigurationError, match="outside Plane"):
+        owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+                           socket_path=root / "state/plane/owner.sock")
+
+
+def test_guided_owner_child_waits_for_real_unix_readiness_and_cleans_owned_socket(tmp_path, socket_path, capfd):
+    from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.plane.ids import ensure_host_uid
+    ensure_host_uid(tmp_path / "state")
+    OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    command = [sys.executable, "-m", "claudlobby", "--root", str(tmp_path), "host", "owner", "serve",
+        "--socket", str(socket_path), "--origin", "https://plane.example.test", "--tailscale", sys.executable]
+    with _serving(command, socket_path, "https://plane.example.test") as child:
+        assert child.poll() is None
+        assert request(socket_path, "/owner")[0] == 200
+    assert child.poll() is not None and not socket_path.exists()
+    from claudlobby.command_result import CommandFailure
+    failed = command + ["--workspace-issuer", "https://accounts.example.test", "--workspace-origin", "https://browser.example.test"]
+    with pytest.raises(CommandFailure, match="did not become ready"):
+        with _serving(failed, socket_path, "https://plane.example.test"):
+            pytest.fail("uninitialized workspace server was admitted")
+    assert "workspace bootstrap authority unavailable" in capfd.readouterr().err
+    assert not socket_path.exists()
+
+
+def test_guided_owner_shutdown_drains_started_workspace_work_without_kill_deadline(tmp_path, socket_path, monkeypatch):
+    import threading
+    from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.plane.ids import ensure_host_uid
+    ensure_host_uid(tmp_path / "state")
+    access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+    principal = PrincipalRef("tailscale:controlplane.tailscale.com", "1234")
+    pair = access.begin_pairing(principal)
+    owner = access.confirm_pairing(pair.token, expected_principal=principal)
+    access.workspace().initialize(expected_owner=owner)
+    # Exercise the real consumer's started synchronous-work drain, with a
+    # private file effect in place of activation. No native work is launched.
+    script = r'''
+import sys, time
+from pathlib import Path
+from claudlobby.plane import owner_browser, owner_server
+root, path = map(Path, sys.argv[1:])
+original = owner_browser.create_owner_browser_app
+def app(*args, **kwargs):
+    browser = original(*args, **kwargs)
+    def held():
+        (root / "started").touch()
+        deadline = time.monotonic() + 30
+        while not (root / "release").exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("test work was not released")
+            time.sleep(0.01)
+        (root / "finished").touch()
+    async def perform(scope, receive):
+        await browser.workspace_bootstrap._blocking(held)
+        return {"state": "complete"}, 202
+    browser.workspace_bootstrap._perform = perform
+    return browser
+owner_browser.create_owner_browser_app = app
+owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
+    socket_path=path, workspace_issuer="https://accounts.example.test",
+    workspace_origin="https://browser.example.test")
+'''
+    command = [sys.executable, "-c", script, str(tmp_path), str(socket_path)]
+    answers = []
+    def work():
+        answers.append(request(socket_path, "/api/owner/workspace/challenge", action=True,
+            headers={"Origin": "https://browser.example.test"})[0])
+    child = None
+    request_thread = None
+    original_wait = None
+    try:
+        with _serving(command, socket_path, "https://plane.example.test") as child:
+            original_wait = child.wait
+            assert os.getpgid(child.pid) == child.pid  # Terminal Ctrl-C cannot signal it directly.
+            request_thread = threading.Thread(target=work)
+            request_thread.start()
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "started").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (tmp_path / "started").exists()
+            waits = []
+            def drain(*args, **kwargs):
+                assert not args and not kwargs, "admitted work must have no kill deadline"
+                waits.append(True)
+                if len(waits) == 1:
+                    raise KeyboardInterrupt  # A repeated operator Ctrl-C cannot abandon drainage.
+                (tmp_path / "release").touch()
+                return original_wait()
+            monkeypatch.setattr(child, "wait", drain)
+        assert len(waits) == 2 and child.returncode == 0
+        assert (tmp_path / "finished").exists() and not socket_path.exists()
+    finally:
+        (tmp_path / "release").touch()
+        if child is not None and child.poll() is None:
+            child.terminate()
+            original_wait(timeout=10)
+        if request_thread is not None:
+            request_thread.join(timeout=10)
+    assert answers and answers[0] in (202, 503)

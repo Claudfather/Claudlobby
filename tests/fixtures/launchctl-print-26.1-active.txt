@@ -1,0 +1,74 @@
+gui/501/com.fixture.observed = {
+	active count = 1
+	path = <redacted>
+	type = LaunchAgent
+	state = running
+
+	program = <redacted>
+	arguments = {
+		<redacted>
+	}
+
+	working directory = <redacted>
+
+	stdout path = <redacted>
+	stderr path = <redacted>
+	inherited environment = {
+		SSH_AUTH_SOCK => <redacted>
+	}
+
+	default environment = {
+		PATH => <redacted>
+	}
+
+	environment = {
+		OSLogRateLimit => <redacted>
+		PATH => <redacted>
+		CLAUDLOBBY_ROOT => <redacted>
+		XPC_SERVICE_NAME => <redacted>
+	}
+
+	domain = <redacted>
+	asid = <redacted>
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 658
+	immediate reason = <redacted>
+	forks = <redacted>
+	execs = <redacted>
+	initialized = <redacted>
+	trampolined = <redacted>
+	started suspended = <redacted>
+	proxy started suspended = <redacted>
+	checked allocations = <redacted>
+	checked allocations reason = <redacted>
+	checked allocations flags = <redacted>
+	last exit code = (never exited)
+
+	resource coalition = {
+		ID = <redacted>
+		type = resource
+		state = active
+		active count = 1
+		name = <redacted>
+	}
+
+	jetsam coalition = {
+		ID = <redacted>
+		type = jetsam
+		state = active
+		active count = 1
+		name = <redacted>
+	}
+
+	spawn type = <redacted>
+	jetsam priority = <redacted>
+	jetsam memory limit (active) = <redacted>
+	jetsam memory limit (inactive) = <redacted>
+	jetsamproperties category = <redacted>
+	jetsam thread limit = <redacted>
+	cpumon = <redacted>
+
+	properties = <redacted>
+}

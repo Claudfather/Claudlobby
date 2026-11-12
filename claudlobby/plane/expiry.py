@@ -45,28 +45,24 @@ from datetime import datetime, timedelta, timezone
 
 
 from .ids import derive_uid
-from .queries import NON_TERMINAL_CLAUSE
+from .queries import DEADLINE_PASSED_SQL, EFFECTIVE_DEADLINE_SQL, NON_TERMINAL_CLAUSE
 
 DEFAULT_AFTER_DAYS = 7
 
-# Binds (cutoff, cutoff): the EFFECTIVE deadline (latest deadline_changed,
-# else the assignment's expected_by) must be older than the cutoff, the
-# assignment must be non-terminal (the SAME clause ATTENTION_SQL uses), and
-# NO task event of any kind may have landed since the cutoff — a bot still
-# posting progress is alive, whatever its deadline says.
+# Binds (cutoff, cutoff): the assignment must be non-terminal (the SAME clause
+# ATTENTION_SQL uses, first so a closed row is not read further), its deadline
+# in force (EFFECTIVE_DEADLINE_SQL; NULL = open-ended, never expired) must have
+# passed before the cutoff, and NO task event of any kind may have landed since
+# the cutoff — a bot still posting progress is alive, whatever its deadline says.
 EXPIRABLE_SQL = (
-    "SELECT a.assignment_id, a.work_item_id, a.expected_by, f.alias AS fleet"
+    "SELECT a.assignment_id, a.work_item_id, " + EFFECTIVE_DEADLINE_SQL + " AS deadline, f.alias AS fleet"
     " FROM assignments a"
     " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
-    " WHERE a.expected_by IS NOT NULL"
-    " AND COALESCE((SELECT d.deadline FROM events d WHERE d.kind='task'"
-    "     AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
-    "     AND d.deadline IS NOT NULL ORDER BY d.ingest_seq DESC LIMIT 1),"
-    "    a.expected_by) < ?"
-    " AND" + NON_TERMINAL_CLAUSE +
+    " WHERE" + NON_TERMINAL_CLAUSE +
+    " AND " + DEADLINE_PASSED_SQL +
     " AND NOT EXISTS (SELECT 1 FROM events q WHERE q.kind='task'"
     "   AND q.assignment_id = a.assignment_id AND q.ingested_at >= ?)"
-    " ORDER BY a.expected_by"
+    " ORDER BY deadline"
 )
 
 
@@ -75,6 +71,19 @@ class ExpiryPlan:
     cutoff: str
     rows: list           # attributable assignments to expire
     unattributed: list   # assignment_ids with no fleet alias — skipped, disclosed
+
+
+class ExpiryChanged(RuntimeError):
+    """An assignment changed after the preview and before the write lock."""
+
+
+def require_expirable(conn, plan: ExpiryPlan, *, now: datetime,
+                      after_days: int) -> None:
+    """Recheck a planned batch inside ingest_many's BEGIN IMMEDIATE lock."""
+    current = {r["assignment_id"]: r for r in
+               expirable(conn, now=now, after_days=after_days).rows}
+    if any(current.get(r["assignment_id"]) != r for r in plan.rows):
+        raise ExpiryChanged("assignment changed before expiry commit")
 
 
 def expirable(conn, *, now: datetime | None = None,

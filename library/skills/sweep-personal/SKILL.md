@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: "Nightly code sweep variant that integrates with a personal `<ASSISTANT_TOOLS_DIR>` of helper scripts (rolling-audit selector + audit-tracker). Feeds a morning briefing. Template — replace placeholders with your own tooling paths."
+description: "Use when the nightly code sweep fires on a personal-assistant bot, or you are asked for its status. Nightly code sweep variant that integrates with a personal `<ASSISTANT_TOOLS_DIR>` of helper scripts (rolling-audit selector + audit-tracker). Feeds a morning briefing. Template — replace placeholders with your own tooling paths."
 argument-hint: "[run|status]"
 ---
 

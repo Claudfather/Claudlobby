@@ -1,12 +1,12 @@
 ---
-title: "Lesson: env-migrate must merge with existing .env, never overwrite"
+title: "Lesson: migration env must merge with existing .env, never overwrite"
 ---
 
 When a migration tool writes a `.env` file, the temptation is to render the dict and call `write_text`. **Don't.** A `.env` is a living document — operators hand-edit it, earlier migration runs populated keys the current pass doesn't know about, and an overwrite silently destroys all of it.
 
 ## The bug
 
-`claudlobby env-migrate` originally wrote tier `.env` files from scratch each run:
+`claudlobby migration env` originally wrote tier `.env` files from scratch each run:
 
 ```python
 # bad
@@ -18,7 +18,7 @@ fleet_env_path.write_text("\n".join(lines))
 
 If the destination already had 12 keys (operator-set: `GITHUB_PAT`, `NEON_API_KEY`, `RAILWAY_*`, `NOTION_TOKEN`, `SNOWFLAKE_*`, ...) and this pass discovered 6 new ones from the legacy source, the result was a file with **only those 6**. The 12 prior keys were gone, and the operator's bot was suddenly broken in non-obvious ways (auth failures days later when the operator wasn't paying attention to the migration).
 
-Real exposure on the test fleet: 12 hand-set vars in `local/<fleet>/.env`. Without the merge fix, they would have been wiped on first `env-migrate --apply`.
+Real exposure on the test fleet: 12 hand-set vars in `local/<fleet>/.env`. Without the merge fix, they would have been wiped on first `migration env --apply`.
 
 ## The fix
 

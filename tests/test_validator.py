@@ -12,6 +12,7 @@ import pytest
 from claudlobby import validator as validator_module
 from claudlobby.config import load_fleet
 from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 from claudlobby.validator import _grant_wellformed, validate
 
@@ -19,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=None)
+    return Paths(root=root, fleet_dir=None, package=source_package())
 
 
 def _ignition_warnings(report) -> list[str]:
@@ -46,7 +47,7 @@ def _arm_briefing(text: str) -> str:
 def _validate_with_real_resolver(
     fleet_dir, monkeypatch, *, env_text: str = "TASK_RECHECK_ENABLED=0\n"
 ):
-    """`validate()` with the repo's REAL `lib/` wired (#1633/#1680).
+    """`validate()` with the repo's REAL `claudlobby/_runtime_scripts/` wired (#1633/#1680).
 
     task-recheck ships opt-out, so a resolver-unavailable fallback reads it as
     ARMED and every disarmed ignition case collapses to silence; the `.env`
@@ -58,18 +59,18 @@ def _validate_with_real_resolver(
     monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
     # Wire whatever is MISSING rather than keying on the directory's existence
     # (origin/main's fix for the same #1588 class, adopted here). `fleet_dir`
-    # now ships a real `mcp-package-grammar.py`, so `lib/` EXISTS without being
+    # now ships a real `mcp-package-grammar.py`, so `claudlobby/_runtime_scripts/` EXISTS without being
     # wired, and an existence check skips the wiring silently: the switch
     # resolver then cannot read its doors, `task-recheck` falls back to ARMED
     # regardless of `.env`, and `_validate_ignition`'s early return makes every
     # scenario below pass vacuously.
     #
     # Per-entry links, never a whole-dir symlink: fixtures delete files under
-    # `lib/`, and through a directory symlink those unlinks reach the repo's
+    # `claudlobby/_runtime_scripts/`, and through a directory symlink those unlinks reach the repo's
     # own copies.
     lib = fleet_dir / "lib"
     lib.mkdir(exist_ok=True)
-    for real in (REPO / "lib").iterdir():
+    for real in (REPO / "claudlobby/_runtime_scripts").iterdir():
         link = lib / real.name
         if not link.exists():
             link.symlink_to(real)
@@ -77,7 +78,7 @@ def _validate_with_real_resolver(
     # (#1689). Testing for the FILE the resolver needs tests the proposition;
     # testing that a directory exists is the proxy that failed (#1588).
     assert (lib / "env-tiers.sh").is_file(), (
-        f"{lib} exists but does not carry the real lib/ — the switch resolver "
+        f"{lib} exists but does not carry the real claudlobby/_runtime_scripts/ — the switch resolver "
         f"cannot run, so TASK_RECHECK_ENABLED=0 never lands and task-recheck "
         f"reads ARMED. Every disarmed case here would measure the wrong state."
     )
@@ -110,6 +111,60 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not report.has_errors
+
+    def test_codex_agent_cli_is_refused_until_the_adapter_ships(self, fleet_dir, monkeypatch):
+        """#2145 F11: `codex` parses (the vocabulary ships) but is an error, so
+        `config plan` refuses it, until the execution adapter (#2149) lands."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        manifest = fleet_dir / "fleet.yaml"
+        base = manifest.read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        assert anchor in base, "the fixture's worker-1 stanza moved"
+        paths = _make_paths(fleet_dir)
+
+        manifest.write_text(base.replace(anchor, anchor + "      agent_cli: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "execution adapter not shipped" in e]
+        assert report.has_errors
+        assert len(refused) == 1 and "'worker-1'" in refused[0], report.errors
+
+        manifest.write_text(base.replace(anchor, anchor + "      agent_cli: claude\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        assert not report.has_errors, report.errors
+
+    def test_a_leftover_runtime_key_never_quietly_runs_another_cli(self, fleet_dir, monkeypatch):
+        """#2145 Q1: `runtime:` is the draft spelling of `agent_cli:`; nothing reads
+        it. A value naming a CLI the bot will not run is refused (it would otherwise
+        run claude in silence); `runtime: claude` changes nothing and only warns."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        manifest = fleet_dir / "fleet.yaml"
+        base = manifest.read_text()
+        anchor = "    worker-1:\n      expertise: [software-engineering]\n"
+        defaults = "    protocols: [report-back]\n"
+        assert anchor in base and base.count(defaults) == 1, "the fixture moved"
+        paths = _make_paths(fleet_dir)
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "runtime" in e]
+        assert refused == ["bot 'worker-1': runtime is 'codex', but nothing reads it — the key is agent_cli:, "
+                           "so this would run 'claude'. Rename it to agent_cli: (#2145)."], report.errors
+
+        manifest.write_text(base.replace(defaults, defaults + "    runtime: codex\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        refused = [e for e in report.errors if "runtime" in e]
+        assert refused == ["defaults.runtime is 'codex', but nothing reads it — the key is agent_cli:, "
+                           "so this would run 'claude'. Rename it to agent_cli: (#2145)."], report.errors
+
+        manifest.write_text(base.replace(anchor, anchor + "      runtime: claude\n"))
+        report = validate(load_fleet(manifest)[0], paths)
+        assert not report.has_errors, report.errors
+        assert ("retired-key", "bot 'worker-1': runtime has no reader — the key is agent_cli: (#2145); "
+                "rename or remove it") in report.categorized()
 
     def test_missing_expertise_is_error(self, fleet_dir, monkeypatch):
         # Overwrite fleet.yaml with a bot referencing nonexistent expertise
@@ -176,6 +231,38 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("GITHUB_PAT" in w for w in report.warnings)
+
+    def test_an_explicit_integrations_list_keeps_the_auto_paired_doc_contract(
+        self, fleet_dir, monkeypatch
+    ):
+        # An explicit integrations: list adds to auto-pairing (the composer's
+        # union), so validate still checks the env contract of the doc paired
+        # with the bot's mcp server. Only that doc declares the var here.
+        monkeypatch.delenv("SPROCKET_API_KEY", raising=False)
+        library = fleet_dir / "library"
+        (library / "mcp" / "sprocket.json").write_text(
+            json.dumps({"sprocket": {"command": "sprocket-mcp", "args": []}})
+        )
+        (library / "integrations" / "sprocket.md").write_text(
+            "---\ntitle: Sprocket\nenv_contract:\n  SPROCKET_API_KEY:\n"
+            "    description: Sprocket API key\n    default_tier: bot\n"
+            "    secret: true\n---\n\n# Sprocket\n\nUse the sprocket server.\n"
+        )
+        (library / "integrations" / "gadget.md").write_text(
+            "---\ntitle: Gadget\n---\n\n# Gadget\n\nUse the gadget CLI.\n"
+        )
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [orchestration]",
+            "expertise: [orchestration]\n      mcp: [sprocket]\n      integrations: [gadget]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any(
+            "integration/sprocket" in w and "SPROCKET_API_KEY" in w
+            for w in report.warnings
+        ), report.warnings
 
     def test_env_has_value_is_value_based(self):
         # The shared predicate behind all three "requires VAR but it's not set"
@@ -256,13 +343,12 @@ class TestValidate:
         # Verify the warning was emitted via logging
         assert "skipping" in caplog.text
 
-    def test_empty_bots_is_error(self, fleet_dir):
-        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert report.has_errors
-        assert any("empty" in e for e in report.errors)
+    def test_empty_bots_is_rejected_while_loading(self, fleet_dir):
+        (fleet_dir / "fleet.yaml").write_text(
+            "fleet:\n  name: empty\n  manager: lead\n  bots: {}\n"
+        )
+        with pytest.raises(ValueError, match=r"fleet.manager.*not in fleet.bots"):
+            load_fleet(fleet_dir / "fleet.yaml")
 
     def test_reports_to_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
@@ -343,52 +429,6 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("both allow and deny" in w for w in report.warnings)
-
-
-class TestBenchValidation:
-    """bench: true marker — multi-bot fleets should designate one."""
-
-    def _env_patch(self, monkeypatch):
-        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-
-    def test_multi_bot_no_bench_warns(self, fleet_dir, monkeypatch):
-        """Multiple bots with no bench: true → warning."""
-        self._env_patch(monkeypatch)
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert any("bench: true" in w for w in report.warnings)
-
-    def test_multi_bot_with_bench_no_warn(self, fleet_dir, monkeypatch):
-        """Multiple bots with one bench: true → no warning."""
-        self._env_patch(monkeypatch)
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        fleet.bots["lead"].bench = True
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert not any("bench: true" in w for w in report.warnings)
-
-    def test_single_bot_no_bench_no_warn(self, fleet_dir, monkeypatch):
-        """Single-bot fleet without bench: true → no warning."""
-        self._env_patch(monkeypatch)
-        from textwrap import dedent
-
-        (fleet_dir / "fleet.yaml").write_text(
-            dedent("""\
-            fleet:
-              name: solo
-              service_prefix: com.test
-              bots:
-                solo:
-                  expertise: [orchestration]
-        """)
-        )
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = _make_paths(fleet_dir)
-        report = validate(fleet, paths)
-        assert not any("bench: true" in w for w in report.warnings)
 
 
 class TestPluginValidation:
@@ -538,7 +578,6 @@ class TestObservabilityValidation:
     def test_default_observability_no_warnings(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        fleet.bots["lead"].bench = True
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any("observability" in w for w in report.warnings)
@@ -740,7 +779,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert any(
             "lead" in w and "other-fleet" in w and "collide" in w
@@ -760,7 +799,7 @@ class TestCrossFleetCollisions:
         (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -773,7 +812,7 @@ class TestCrossFleetCollisions:
         (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -781,7 +820,7 @@ class TestCrossFleetCollisions:
         """No local/ directory at all — should not crash."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=None)
+        paths = Paths(root=fleet_dir, fleet_dir=None, package=source_package())
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
 
@@ -854,6 +893,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, skill=dead)
         report = validate(fleet, paths)
         assert self._auto_eligible_warned(report)
+        assert any(f"renamed it to '{live}'" in w for w in report.warnings)
 
     def test_bad_cadence_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -972,6 +1012,26 @@ class TestToolGrantsValidation:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         report = validate(fleet, _make_paths(fleet_dir))
         assert not any("tool_grants" in w for w in report.warnings)
+
+    def test_deprecated_mcp_warns_once_and_skips_the_migration_gap(self, fleet_dir, monkeypatch):
+        import json
+
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        p = fleet_dir / "library" / "mcp" / "github.json"
+        frag = json.loads(p.read_text())
+        frag["_permissions_contract"] = {"tools": ["search_code"]}  # grants, unmirrored
+        frag["_deprecated"] = "Use the gh CLI."
+        p.write_text(json.dumps(frag))
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        deprecated = [w for w in report.warnings if "is deprecated" in w]
+        assert len(deprecated) == 1, report.warnings
+        assert "Use the gh CLI." in deprecated[0] and "lead" in deprecated[0]
+        assert report.warning_categories.get("mcp-deprecated") == 1
+        # No migration hint to re-add the grants, and compose keeps the fragment's own.
+        assert not any("tool_grants" in w for w in report.warnings)
+        assert not any("drop legacy MCP grants" in e for e in report.errors), report.errors
 
     def test_malformed_mid_string_wildcard_warns(self, fleet_dir, monkeypatch):
         self._env(monkeypatch)
@@ -1253,6 +1313,193 @@ class TestSkillGuardrailGrantValidation:
         assert any("malformed" in w and "bad grant!" in w for w in report.warnings)
 
 
+class TestAskAndDenyGrantValidation:
+    """Skills and integrations declare ask_grants and deny_grants beside tool_grants (#2476).
+
+    Each entry in either list is one Claude Code permission rule. A rule there
+    restricts, so one dropped on the way fails open: a list that would not compose
+    as written is an error naming its source, from validate and from the composer
+    alike. Both lists are held to the single-slash path rule tool_grants are. A
+    bare 'Bash' is not flagged in either: asking about, or refusing, every shell
+    command is legitimate where granting it is over-broad."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _write_source(self, fleet_dir, kind, name, grants_yaml):
+        """Write a skill or an integration whose frontmatter holds ``grants_yaml``."""
+        if kind == "skill":
+            d = fleet_dir / "library" / "skills" / name
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\n{grants_yaml}---\n\n# {name}\n"
+            )
+        else:
+            (fleet_dir / "library" / "integrations" / f"{name}.md").write_text(
+                f"---\ntitle: {name}\n{grants_yaml}---\n\n# {name}\n"
+            )
+
+    def _equip_worker(self, fleet_dir, kind, names):
+        """Equip worker-1 with skills or integrations ``names``, in one call: a second
+        call would add a second ``skills:`` or ``integrations:`` key."""
+        field = "skills" if kind == "skill" else "integrations"
+        manifest = fleet_dir / "fleet.yaml"
+        before = manifest.read_text()
+        after = before.replace(
+            "expertise: [software-engineering]",
+            f"expertise: [software-engineering]\n      {field}: [{names}]",
+        )
+        assert after != before, "replace() no-opped: the fixture's worker stanza moved"
+        manifest.write_text(after)
+
+    def _refused(self, fleet_dir, kind, name, frontmatter):
+        """Equip worker-1 with one source holding ``frontmatter``; return the errors
+        that name it, its warnings, and the composer's refusal of the bot."""
+        from claudlobby.composer import compose_settings_local
+
+        self._write_source(fleet_dir, kind, name, frontmatter)
+        self._equip_worker(fleet_dir, kind, name)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        with pytest.raises(ValueError) as refusal:
+            compose_settings_local(fleet.bots["worker-1"], fleet, paths)
+        return (
+            [e for e in report.errors if f"{kind} '{name}'" in e],
+            [w for w in report.warnings if f"{kind} '{name}'" in w],
+            str(refusal.value),
+        )
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    @pytest.mark.parametrize(
+        "tail, shape",
+        [(': "Bash(curl *)"\n', "a string"), (":\n  Bash: x\n", "a mapping"), (":\n", "empty")],
+        ids=["string", "mapping", "empty-key"],
+    )
+    def test_a_value_that_is_not_a_list_is_an_error_naming_its_source(
+        self, fleet_dir, monkeypatch, kind, key, tail, shape
+    ):
+        # Read as an empty list, such a value composed no rule at all, without a
+        # word: for a deny list that fails open.
+        self._env(monkeypatch)
+        errors, warnings, refusal = self._refused(
+            fleet_dir, kind, "notalist", f"{key}{tail}"
+        )
+        said = f"{kind} 'notalist' {key} is {shape}, not a list"
+        assert len(errors) == 1 and errors[0].startswith(f"bot 'worker-1': {said}"), errors
+        assert warnings == []
+        assert refusal.startswith(said), refusal
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    @pytest.mark.parametrize(
+        "entry, shown",
+        [
+            ("3", "3"),
+            ('["Bash(curl *)"]', "['Bash(curl *)']"),
+            ('"rm -rf /"', "'rm -rf /'"),
+            ('"  Bash(curl *)"', "'  Bash(curl *)'"),
+        ],
+        ids=["number", "nested-list", "not-a-rule", "leading-spaces"],
+    )
+    def test_an_entry_that_is_not_a_rule_is_an_error_naming_its_source(
+        self, fleet_dir, monkeypatch, kind, key, entry, shown
+    ):
+        # Such a deny entry was warned about and still written into
+        # permissions.deny; such an ask entry stopped validate and generate with a
+        # bare TypeError. The whole list is refused, its good rule with it.
+        self._env(monkeypatch)
+        errors, warnings, refusal = self._refused(
+            fleet_dir, kind, "badgrants", f'{key}:\n  - "Bash(wget *)"\n  - {entry}\n'
+        )
+        said = f"{kind} 'badgrants' {key} holds {shown}, which is not a permission rule"
+        assert len(errors) == 1 and errors[0].startswith(f"bot 'worker-1': {said}"), errors
+        assert warnings == []
+        assert refusal.startswith(said), refusal
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    def test_tool_grants_keep_the_lenient_read_and_the_rule_lists_take_any_rule(
+        self, fleet_dir, monkeypatch, kind
+    ):
+        # Controls for the two tests above. A tool_grants value that is not a list
+        # still reads as empty, and a malformed grant still warns: a grant dropped
+        # there only withholds a tool. A rule outside the tool_grants grammar, such
+        # as a path or a domain rule, composes into a deny list, and an empty list
+        # is no error.
+        from claudlobby.composer import compose_settings_local
+
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, kind, "loose", 'tool_grants: "Bash(curl *)"\n')
+        self._write_source(fleet_dir, kind, "odd", 'tool_grants:\n  - "bad grant!"\n')
+        self._write_source(
+            fleet_dir,
+            kind,
+            "wide",
+            'deny_grants:\n  - "Read(//srv/x/**)"\n  - "WebFetch(domain:example.com)"\n'
+            "ask_grants: []\n",
+        )
+        self._equip_worker(fleet_dir, kind, "loose, odd, wide")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        names = [f"{kind} '{name}'" for name in ("loose", "odd", "wide")]
+        assert not [e for e in report.errors if any(n in e for n in names)], report.errors
+        named = [
+            (slug, w)
+            for slug, w in report.categorized()
+            if slug.startswith("grant-") and any(n in w for n in names)
+        ]
+        assert [slug for slug, _w in named] == ["grant-malformed"], named
+        assert f"{kind} 'odd'" in named[0][1]
+        permissions = compose_settings_local(fleet.bots["worker-1"], fleet, paths)["permissions"]
+        assert "Read(//srv/x/**)" in permissions["deny"]
+        assert "WebFetch(domain:example.com)" in permissions["deny"]
+        assert "ask" not in permissions
+
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    def test_a_bare_bash_in_ask_or_deny_grants_is_not_flagged_as_broad(
+        self, fleet_dir, monkeypatch, key
+    ):
+        # Control: the same bare 'Bash' as a tool_grant is the grant the warning is for.
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, "skill", "loud", 'tool_grants:\n  - "Bash"\n')
+        self._write_source(fleet_dir, "skill", "quiet", f'{key}:\n  - "Bash"\n')
+        self._equip_worker(fleet_dir, "skill", "loud, quiet")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        grant_warnings = [
+            (slug, w) for slug, w in report.categorized() if slug.startswith("grant-")
+        ]
+        assert any(
+            slug == "grant-broad" and "skill 'loud'" in w for slug, w in grant_warnings
+        ), report.warnings
+        assert not any("'quiet'" in w for _slug, w in grant_warnings), grant_warnings
+
+    @pytest.mark.parametrize("kind", ["skill", "integration"])
+    @pytest.mark.parametrize("key", ["ask_grants", "deny_grants"])
+    def test_a_single_slash_path_rule_is_an_error(
+        self, fleet_dir, monkeypatch, kind, key
+    ):
+        # A single leading slash anchors at the settings source, so the rule never matches (#1312).
+        self._env(monkeypatch)
+        self._write_source(fleet_dir, kind, "inert", f'{key}:\n  - "Read(/abs/x)"\n')
+        self._write_source(
+            fleet_dir, kind, "anchored", f'{key}:\n  - "Read(//abs/y)"\n'
+        )
+        self._equip_worker(fleet_dir, kind, "inert, anchored")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        refused = [e for e in report.errors if "can never match" in e]
+        assert len(refused) == 1, report.errors
+        assert refused[0].startswith(
+            f"bot 'worker-1': {kind} 'inert' rule 'Read(/abs/x)' can never match"
+        )
+        assert "Use 'Read(//abs/x)' for an absolute path." in refused[0]
+
+
 class TestClaudronDoor:
     """The door a vault-wired bot actually walks through is the CLI (phase L1).
 
@@ -1291,7 +1538,13 @@ class TestClaudronDoor:
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         stub = bindir / "claudron"
-        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  status) echo \'{"ok":true,"command":"status","data":{"capabilities":["doctor"]},"warnings":[],"errors":[]}\' ;;\n'
+            "  doctor) echo '{\"ok\":true,\"command\":\"doctor\",\"data\":{\"vault_format\":3,\"engine_format\":3,\"pending\":[]},\"errors\":[],\"warnings\":[]}' ;;\n"
+            "esac\n"
+        )
         stub.chmod(0o755)
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
@@ -1310,11 +1563,13 @@ class TestClaudronDoor:
         self._no_cli_on_path(tmp_path, monkeypatch)
         self._wire(fleet_dir, self._vault(tmp_path))
         warnings = self._warnings(fleet_dir)
+        # A host fact every vault-wired bot shares: one line naming the bots.
         assert any(
-            "bot 'lead'" in w and "claudron CLI is not on PATH" in w for w in warnings
+            "claudron CLI is not on PATH" in w and "affects 1 bot(s): lead" in w
+            for w in warnings
         ), warnings
         # The message names the door, and where the door is documented.
-        assert any("docs/INTEGRATION.md" in w for w in warnings), warnings
+        assert any("documentation/guides/INTEGRATION.md" in w for w in warnings), warnings
 
     def test_cli_present_and_vault_valid_is_silent(
         self, fleet_dir, tmp_path, monkeypatch
@@ -1624,7 +1879,10 @@ class TestManagerCheckinArmedLeaflessWarning:
         self, fleet_dir, monkeypatch
     ):
         fleet, paths = self._load(fleet_dir, monkeypatch)
-        fleet.teams = {}  # no team names a manager -> no leaf manager
+        # No other local bot exists for the declared manager to route.
+        fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1633,9 +1891,8 @@ class TestManagerCheckinArmedLeaflessWarning:
         report = validate(fleet, paths)
         matches = [w for w in report.warnings if "manager-checkin" in w]
         assert len(matches) == 1, report.warnings
-        assert "no leaf manager" in matches[0]
-        # names what WOULD make it fire
-        assert "in-fleet report" in matches[0] and "not itself a manager" in matches[0]
+        assert "no local workers" in matches[0]
+        assert "declared manager is the only bot" in matches[0]
 
     def test_armed_with_a_leaf_manager_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1646,13 +1903,15 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
     def test_unarmed_and_leafless_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -1660,7 +1919,7 @@ class TestManagerCheckinArmedLeaflessWarning:
         }
         report = validate(fleet, paths)
         assert not any(
-            "manager-checkin" in w and "no leaf manager" in w
+            "manager-checkin" in w and "no local workers" in w
             for w in report.warnings
         ), report.warnings
 
@@ -1701,7 +1960,7 @@ class TestManagerCheckinUnarmedLeafWarning:
             "defaults: { jobs: { manager-checkin: { enroll: true } } }"
             in matches[0]
         )
-        assert "lib/setup-fleet" in matches[0]
+        assert "host activate PLAN_ID" in matches[0]
 
     def test_leaf_manager_and_armed_stays_silent(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1721,6 +1980,8 @@ class TestManagerCheckinUnarmedLeafWarning:
         # — this one only ever fires when a leaf manager was actually equipped.
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.teams = {}
+        fleet.bots = {fleet.manager: fleet.bots[fleet.manager]}
+        fleet.bots[fleet.manager].manages = []
         assert fleet.leaf_manager_bots() == set()
         fleet.defaults["jobs"] = {
             **fleet.defaults.get("jobs", {}),
@@ -2177,7 +2438,7 @@ class TestGithubAppWarnings:
 
 class TestExpertiseGrantValidation:
     """Expertise declares deny-capable ``permissions:`` exactly as guardrails do, and
-    was the one grant-declaring source ``_grant_shape_warnings`` never ran on (#913).
+    was the one grant-declaring source ``_warn_grant_shapes`` never ran on (#913).
 
     The shipped library grants bare ``Bash`` from expertise in 14 of its 19 expertise
     files, so the validator forbade from three doors what the library does through a
@@ -2318,7 +2579,7 @@ class TestGoalBinding:
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path)
+        return fleet, Paths(root=fleet_dir, fleet_dir=fleet_dir_path, package=source_package())
 
     @staticmethod
     def _scope(text: str, bot: str, org: str, repos: list[str]) -> str:
@@ -2388,7 +2649,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n",
         )
@@ -2410,7 +2671,9 @@ class TestGoalBinding:
             )
         )
         sib = self._sibling(
-            fleet_dir, "other-fleet", "fleet:\n  name: other-fleet\n  bots: {}\n"
+            fleet_dir, "other-fleet",
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n"
+            "    bee:\n      expertise: [x]\n",
         )
         (sib / "projects.yaml").write_text(
             "projects:\n  shop:\n    title: Shop\n    repos: [acme/storefront]\n"
@@ -2428,7 +2691,7 @@ class TestGoalBinding:
         self._sibling(
             fleet_dir,
             "other-fleet",
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: zenith\n"
             "        repos: [something-else]\n",
         )
@@ -2470,7 +2733,7 @@ class TestGoalBinding:
         nested = fleet_dir / "local" / "home" / "other-fleet"
         nested.mkdir(parents=True)
         (nested / "fleet.yaml").write_text(
-            "fleet:\n  name: other-fleet\n  bots:\n    bee:\n"
+            "fleet:\n  name: other-fleet\n  manager: bee\n  bots:\n    bee:\n"
             "      expertise: [x]\n      scope:\n        org: acme\n"
             "        repos: [storefront]\n"
         )
@@ -2531,9 +2794,9 @@ class TestIgnitionValidation:
     """#1633: the same composite ignition question as doctor's check_ignition,
     at validate() time too. `fleet_dir`'s `lead`/`worker-1` team already makes
     `lead` a leaf manager, so these tests need only control which door is
-    armed — but the shared fixture carries no `lib/`, and task-recheck ships
+    armed — but the shared fixture carries no `claudlobby/_runtime_scripts/`, and task-recheck ships
     opt-out (on by default), so a resolver-unavailable fallback reads it as
-    armed regardless of scenario. Wire the repo's real lib/ (the
+    armed regardless of scenario. Wire the repo's real claudlobby/_runtime_scripts/ (the
     test_switches.py / test_doctor.py pattern) so "off" is reachable at all.
     """
 
@@ -2593,7 +2856,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
 
     `fleet_dir`'s lead/worker-1 team already makes `lead` a leaf manager and
     the fixture declares no projects; what varies below is only which of the
-    two conditions is fixed. The repo's real lib/ is wired (the
+    two conditions is fixed. The repo's real claudlobby/_runtime_scripts/ is wired (the
     TestIgnitionValidation pattern) because task-recheck ships opt-out and a
     resolver-unavailable fallback reads it as ARMED, which would collapse
     every disarmed case here to silence.
@@ -2686,7 +2949,7 @@ class TestGoalBindingAndIgnitionNameEachOther:
     ):
         ignition = self._ignition(self._report(fleet_dir, monkeypatch))
         assert ignition.index("co-requisite") < ignition.index("Cheapest to arm:")
-        assert ignition.rstrip().endswith("generate + lib/setup-fleet"), ignition
+        assert ignition.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), ignition
 
 
 class TestTheValidatorFixtureRefusesDeadWiring:
@@ -2701,10 +2964,10 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         self, fleet_dir, monkeypatch
     ):
         """Armed with the REAL shipped armer rather than a synthetic
-        directory: `conftest.equip_grammar` plants a one-file `lib/` for the
+        directory: `conftest.equip_grammar` plants a one-file `claudlobby/_runtime_scripts/` for the
         modules that need the package grammar, and its own docstring records
         that thirteen helpers key on `(root / "lib").exists()` — so a partial
-        `lib/` makes that check answer yes, skip, and run the test against
+        `claudlobby/_runtime_scripts/` makes that check answer yes, skip, and run the test against
         doors it cannot read. A module that equips the grammar and then calls
         this helper is the live pairing, and it must be repaired, not skipped.
         """
@@ -2713,7 +2976,7 @@ class TestTheValidatorFixtureRefusesDeadWiring:
         equip_grammar(fleet_dir)
         assert (fleet_dir / "lib").exists(), "precondition: the armer ran"
         assert not (fleet_dir / "lib" / "env-tiers.sh").exists(), (
-            "precondition: lib/ must be PARTIAL — that is the case an "
+            "precondition: claudlobby/_runtime_scripts/ must be PARTIAL — that is the case an "
             "existence-keyed guard gets wrong"
         )
         report, _fleet = _validate_with_real_resolver(fleet_dir, monkeypatch)
@@ -2728,5 +2991,5 @@ class TestTheValidatorFixtureRefusesDeadWiring:
     ):
         (fleet_dir / "lib").mkdir(exist_ok=True)
         (fleet_dir / "lib" / "env-tiers.sh").mkdir()
-        with pytest.raises(AssertionError, match="does not carry the real lib"):
+        with pytest.raises(AssertionError, match="does not carry the real claudlobby/_runtime_scripts/"):
             _validate_with_real_resolver(fleet_dir, monkeypatch)

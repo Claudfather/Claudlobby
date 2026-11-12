@@ -1,0 +1,3 @@
+### Fixed — session-loop arming requires a real YAML Boolean (#1136)
+
+Non-null `claudron_session_loop` declarations now reject strings, numbers and containers in both fleet defaults and bot settings. Before, a quoted `claudron_session_loop: "false"` was truthy and armed the session hooks. Null and omission still inherit, and real Boolean overrides keep the existing hook behavior. An invalid fleet default is refused even where a bot sets a valid value. A quoted Boolean that was accepted before is now refused, so correct the source YAML before the next generation. Permission and sandbox Boolean hardening remains a separate change (#1809).

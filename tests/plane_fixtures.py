@@ -9,12 +9,15 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect_ro, db_file
 from claudlobby.plane.emit_api import emit_batch
+from tests.plane_setup import initialize_plane
 
 
-def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}') -> Path:
+def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}', initialize: bool = False) -> Path:
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text(capture)
+    if initialize:
+        initialize_plane(root)
     return root
 
 
@@ -41,6 +44,7 @@ def ro(root: Path):
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -49,22 +53,39 @@ REPO = Path(__file__).resolve().parent.parent
 F = "f"
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 NOW_EPOCH = int(datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc).timestamp())
-MATCHER = REPO / "lib" / "dispatch-overdue.py"
-FLEET_YAML = ("fleet:\n  name: f\n  service_prefix: com.test\n  bots:\n"
+
+
+def _at(seconds: float) -> str:
+    """The instant `seconds` from NOW_EPOCH, as a door stamps it."""
+    return datetime.fromtimestamp(NOW_EPOCH + seconds, timezone.utc).isoformat()
+
+
+# A plan step that walks: a scan, or a seek on the kind alone.
+WALK = re.compile(r"^SCAN|\(kind=\?\)")
+
+
+def plan_steps(conn, sql: str, params, aliases: str) -> list[str]:
+    """The EXPLAIN QUERY PLAN steps on the tables aliased *aliases* (one letter each)."""
+    plan = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    # "SEARCH t" on SQLite 3.36 and later, "SEARCH TABLE events AS t" before it
+    return [d for d in plan if re.match(rf"(SEARCH|SCAN) (TABLE \w+ AS )?[{aliases}]\b", d)]
+MATCHER = REPO / "claudlobby/_runtime_scripts" / "dispatch-overdue.py"
+FLEET_YAML = ("fleet:\n  manager: w2\n  name: f\n  service_prefix: com.test\n  bots:\n"
               "    w1:\n      expertise: [software-engineering]\n"
               "    w2:\n      expertise: [software-engineering]\n")
 
 
 def _paths(root):
-    """An overlay root whose lib/ IS the repo's lib/ — the matcher a door
+    """An overlay root whose claudlobby/_runtime_scripts/ IS the repo's claudlobby/_runtime_scripts/ — the matcher a door
     loads is the install's own script, never a copy. `bots:` nests under
     `fleet:` (a top-level `bots:` parses to zero bots, silently)."""
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
     (root / "local" / F / "runtime").mkdir(parents=True, exist_ok=True)
     (root / "local" / F / "fleet.yaml").write_text(FLEET_YAML)
     if not (root / "lib").exists():
-        (root / "lib").symlink_to(REPO / "lib")
-    return Paths(root=root, fleet_dir=root / "local" / F)
+        (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
+    return Paths(root=root, fleet_dir=root / "local" / F, package=source_package())
 
 
 def _epoch(iso):
@@ -89,11 +110,15 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger=None):
 _REPORT_SEQ = [0]
 
 
-def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None):
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None,
+            link_communication=True):
     """What the REAL report door lands for one report: the `report` communication
     and, when it resolved an assignment, the task event — both under one
-    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
+    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing;
+    `link_communication=False` = a legacy report whose communication names no
+    assignment beside its linked task event.)"""
     from claudlobby.plane.emit_api import emit_batch
+    initialize_plane(root)
     _REPORT_SEQ[0] += 1
     msg = f"msg_{'e' * 24}{_REPORT_SEQ[0]:0>8x}"
     ref = f"report-back:{msg}"
@@ -101,7 +126,8 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
                "source_ref": ref, "occurred_at": ts,
                "payload": {"msg_id": msg, "sender": f"bot:{F}/{bot}", "recipient": f"bot:{F}/mgr",
                            "recipient_raw": "mgr", "message_class": "report",
-                           **({"work_item_id": wi, "assignment_id": asg} if event else {}), "body": "r"}}]
+                           **({"work_item_id": wi, "assignment_id": asg} if event and link_communication else {}),
+                           "body": "r"}}]
     if event:
         events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
                        "source_ref": ref, "occurred_at": ts,
@@ -114,6 +140,16 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, statu
                                    "subject": f"bot:{F}/{bot}", "data": {"status": status, "msg_id": msg}}})
     emit_batch(root, events)
     return msg
+
+
+def _deadline_changed(root, wi, asg, deadline, *, ts):
+    """What `assignment reschedule` records (#2469): a deadline_changed on the
+    SAME assignment, its new deadline (None = open-ended), by the manager."""
+    emit_batch(root, [{"event_type": "task", "emitter": "claudlobby.tasks.v1", "fleet": F,
+                       "source_ref": f"request:deadline-{asg}-{ts}", "occurred_at": ts,
+                       "payload": {"work_item_id": wi, "assignment_id": asg, "event": "deadline_changed",
+                                   "actor": f"bot:{F}/mgr", "by": f"bot:{F}/mgr",
+                                   "reason": "waits on the operator", "deadline": deadline}}])
 
 
 def _complete(root, wi, asg, ts, task_id, reports=None, *, bot="w1"):
@@ -156,7 +192,7 @@ def _cli(root, *args, **extra):
 
 
 def _stdlib_readers():
-    spec = importlib.util.spec_from_file_location("pr", REPO / "lib" / "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("pr", REPO / "claudlobby/_runtime_scripts" / "plane-readers.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -168,18 +204,22 @@ def _stdlib_readers():
 # no ledger left to compare or import. These four helpers were its exports;
 # the suites that land a dispatch the way the live door does still ride them.
 
-def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None, ref=None):
+def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None, ref=None,
+                   title="t"):
     """A dispatch the LIVE door landed: three events, emitter dispatch-task.
     *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
     the watchdog's question answered on both sides; *ref* overrides the
-    source_ref (an id-less construct's ``dispatch-log:sha:<key>``)."""
+    source_ref (an id-less construct's ``dispatch-log:sha:<key>``); *title* is the
+    work item's title, which the live door fills with the whole dispatch text."""
+    initialize_plane(root)
     fl = fleet or F
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     ref = ref or f"dispatch-log:{task_id}"
     emit_batch(root, [
         {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
-         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{fl}/mgr"}},
+         "payload": {"work_item_id": wi, "title": title, "created_by": f"bot:{fl}/mgr",
+                     "workstream_id": "ws-test"}},
         {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": ref, "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,

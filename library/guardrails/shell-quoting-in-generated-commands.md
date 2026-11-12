@@ -25,7 +25,7 @@ Two constructs do it, and both are properties of the shell rather than of any to
 
 ## This is a security property, not a formatting nicety
 
-`lib/gh-mention-guard.sh` rewrites `@handle` out of GitHub-bound calls. It uses two *different*
+`claudlobby/_runtime_scripts/gh-mention-guard.sh` rewrites `@handle` out of GitHub-bound calls. It uses two *different*
 replacements by surface, and the asymmetry is deliberate: MCP gets `` `handle` `` (safe in a JSON field),
 Bash gets bare `handle` — **never backticks**. Its own comment records why:
 
@@ -36,7 +36,7 @@ Bash gets bare `handle` — **never backticks**. Its own comment records why:
 The obvious fix for one bug was arbitrary code execution, because the rewrite targeted a *string* that
 was really a *command*.
 
-**Related:** the `!word` rule's tmux application — and the fact that `lib/dispatch.sh` prepends `set +H;`
+**Related:** the `!word` rule's tmux application — and the fact that `claudlobby/_runtime_scripts/dispatch.sh` prepends `set +H;`
 for you, so hand-rolled `send-keys` is the exposed path — is in the `dispatch` protocol and
 `library/lessons/tmux-dispatch-shell-expansion.md`. For a pipeline hiding a command's exit status, a
 separate mechanism, see the `exit-status-through-pipes` guardrail.

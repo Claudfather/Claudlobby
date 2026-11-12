@@ -18,15 +18,15 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import (
-    TG_STUB,
     _write_exec,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
+from tests.test_maintenance_jobs import _native_fixture
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
-LIB = REPO / "lib"
+LIB = REPO / "claudlobby/_runtime_scripts"
 
 CHAT_A = "-1001111111111"
 CHAT_B = "-1002222222222"
@@ -73,27 +73,26 @@ def _home_state(tmp_path: Path, bot: str) -> str:
 # --- the required case: an env chat no bot is in --------------------------------
 
 
-def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path):
+def test_the_refusal_sends_nothing_and_the_row_says_why(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
+    native = _native_fixture(tmp_path)
     bots = root / "runtime" / "bots"
     _bot(bots, "alpha", CHAT_B)
     capture = tmp_path / "tg-capture"
     env = constructed_env(
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
         TG_CAPTURE=capture,
         TELEGRAM_GROUP_CHAT_ID=CHAT_A,
-        FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **plane_emit_env(),
+        **scratch_plane_env(root, initialize=True),
     )
     driver = (
-        f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
+        f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
     )
-    r = subprocess.run(
-        ["bash", "-c", driver], env=env, capture_output=True, text=True, timeout=300
-    )
+    with _serving(root, scratch_plane_env) as socket:
+        r = subprocess.run(
+            ["bash", "-c", driver], env={**env, "PLANE_SOCKET": str(socket)},
+            capture_output=True, text=True, timeout=300
+        )
     assert r.returncode == 0, r.stderr
     assert not capture.exists(), "the refused pair must send NOTHING"
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
@@ -126,7 +125,7 @@ def test_a_moved_bots_leftover_dir_does_not_send_its_old_fleets_alerts(tmp_path)
     bots = tmp_path / "root" / "runtime" / "bots"
     _bot(bots, "alpha", CHAT_A)  # moved to another fleet; its old dir remains
     _bot(bots, "beta", CHAT_A)
-    (tmp_path / "root" / "fleet.yaml").write_text("fleet:\n  bots:\n    beta:\n")
+    (tmp_path / "root" / "fleet.yaml").write_text("fleet:\n  manager: beta\n  bots:\n    beta:\n")
     got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
     assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:beta", got
 
@@ -194,21 +193,21 @@ TOKEN_STUB = (
 
 def _token_seen(tmp_path: Path) -> str:
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True, exist_ok=True)
-    _write_exec(root / "lib" / "tg-post.sh", TOKEN_STUB)
+    native = _native_fixture(tmp_path)
+    _write_exec(native / "tg-post.sh", TOKEN_STUB)
     bots = root / "runtime" / "bots"
     if not bots.exists():
         _bot(bots, "alpha", CHAT_B)
     capture = tmp_path / "tg-capture"
     full = constructed_env(
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
         TG_CAPTURE=capture,
+        CLAUDLOBBY_ROOT=root,
         TELEGRAM_BOT_TOKEN="ambient-session-token",
         PLANE_EMIT_DISABLED="1",
     )
     driver = (
-        f'. "{LIB}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
+        f'. "{native}/lib-common.sh"; emit_failure_alert "{bots}" probe_alert "a probe"'
     )
     r = subprocess.run(
         ["bash", "-c", driver], env=full, capture_output=True, text=True, timeout=120

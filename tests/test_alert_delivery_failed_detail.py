@@ -6,7 +6,7 @@ own plane record — and a manager read that benign line as the cause of the
 failure, when the real rejection came second. The verdict now leads.
 
 End to end, so the benign line comes from the real code rather than from the
-fixture: the throwaway root's lib/ IS the repo's lib/ (the real tg-post and
+fixture: the throwaway root's claudlobby/_runtime_scripts/ IS the repo's claudlobby/_runtime_scripts/ (the real tg-post and
 lib-common), a stub curl answers the rejection a quoted token earned in
 production (404 Not Found), the env is constructed with no FLEET_NAME, and the
 row is read back from the root's own plane.
@@ -24,9 +24,9 @@ import pytest
 from tests.conftest import (
     _write_exec,
     constructed_env,
-    plane_emit_env,
     read_fleet_events,
 )
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -36,11 +36,11 @@ CURL_REJECTS = (
 )
 
 
-def _host(tmp_path):
+def _host(tmp_path, *, scratch_plane_env):
     root = tmp_path / "root"
     root.mkdir()
     # The real lib, never written to: the alert path runs ${CLAUDLOBBY_ROOT}/lib/tg-post.sh.
-    (root / "lib").symlink_to(REPO / "lib")
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")
     chan = tmp_path / "chan"
     chan.mkdir()
     (chan / ".env").write_text("TELEGRAM_BOT_TOKEN=123:ABC\n")
@@ -56,18 +56,14 @@ def _host(tmp_path):
     env = constructed_env(
         PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}",
         HOME=tmp_path / "home",
-        CLAUDLOBBY_ROOT=root,
-        # Every event is a cold emit with no daemon; a loaded host can outrun
-        # the 10s production bound and reap the row this test reads.
-        FLEET_EVENT_EMIT_TIMEOUT_S="120",
-        **plane_emit_env(),
+        **scratch_plane_env(root, initialize=True),
     )
     return root, env
 
 
 def _fire(root, env):
     driver = (
-        f'. "{REPO}/lib/lib-common.sh"; '
+        f'. "{REPO}/claudlobby/_runtime_scripts/lib-common.sh"; '
         f'emit_failure_alert "{root}/runtime/bots" probe_alert "a probe"'
     )
     return subprocess.run(
@@ -75,9 +71,10 @@ def _fire(root, env):
     )
 
 
-def test_the_rejection_leads_the_recorded_detail(tmp_path):
-    root, env = _host(tmp_path)
-    r = _fire(root, env)
+def test_the_rejection_leads_the_recorded_detail(tmp_path, *, scratch_plane_env):
+    root, env = _host(tmp_path, scratch_plane_env=scratch_plane_env)
+    with _serving(root, scratch_plane_env) as socket:
+        r = _fire(root, {**env, "PLANE_SOCKET": str(socket)})
     assert r.returncode == 0, r.stderr
 
     rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
@@ -101,15 +98,16 @@ def _failed_row(root):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
-def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path):
+def test_an_unreadable_token_file_is_a_verdict_not_a_script_error(tmp_path, *, scratch_plane_env):
     # The shared parser returns non-zero when it cannot open the file; unguarded
     # inside tg-post's command substitution that tripped the ERR trap, landing
     # critical script_error rows for what is simply a missing token.
-    root, env = _host(tmp_path)
+    root, env = _host(tmp_path, scratch_plane_env=scratch_plane_env)
     token_file = tmp_path / "chan" / ".env"
     token_file.chmod(0)
     try:
-        _fire(root, env)
+        with _serving(root, scratch_plane_env) as socket:
+            _fire(root, {**env, "PLANE_SOCKET": str(socket)})
     finally:
         token_file.chmod(0o600)
     rows, data = _failed_row(root)

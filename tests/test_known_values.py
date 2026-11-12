@@ -9,9 +9,11 @@ from claudlobby.known_values import (
     _AUTO_ELIGIBLE_STANDALONE,
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_LIVE_SKILLS,
     CLAUDNA_SKILL_RENAMES,
     EXPERTISE_CORE_TOOLS,
     KNOWN_EFFORTS,
+    KNOWN_AGENT_CLIS,
     KNOWN_HOOK_EVENTS,
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
@@ -48,6 +50,12 @@ class TestClosestMatch:
 
     def test_distant_value_returns_none(self):
         assert closest_match("x", KNOWN_EFFORTS) is None
+
+    def test_agent_cli_vocabulary_names_claude_and_codex(self):
+        """#2145 F18 (a): Claude Code and Codex are admitted by name; a further CLI
+        enters by its own ratified fork."""
+        assert KNOWN_AGENT_CLIS == frozenset({"claude", "codex"})
+        assert closest_match("code", KNOWN_AGENT_CLIS) == "codex"
 
     def test_permission_mode_typo(self):
         assert closest_match("dontask", VALID_PERMISSION_MODES) == "dontAsk"
@@ -128,14 +136,14 @@ class TestSetsPopulated:
             "/claudna:access-path-audit": "/claudna:audit access-path",
             "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
             "/claudna:session-handoff": "/claudna:session handoff",
+            "/claudna:implement-plan": "/claudna:build",
+            "/claudna:visual-crawl": "/claudna:qa crawl",
         }
-        # The four un-consolidated standalones survive under their own names.
+        # The two un-consolidated standalones survive under their own names.
         assert _AUTO_ELIGIBLE_STANDALONE == frozenset(
             {
                 "/claudna:product-enhance",
                 "/claudna:product-vision",
-                "/claudna:visual-crawl",
-                "/claudna:implement-plan",
             }
         )
         # SSOT invariant: eligible == the live rename targets + the survivors, so
@@ -168,12 +176,16 @@ class TestClaudnaRenameSSOT:
     pins against (#570)."""
 
     def test_doc_guard_covers_every_dead_name(self):
-        from tests.test_no_dead_claudna_refs import DEAD_REF
+        from tests.test_no_dead_claudna_refs import DEAD_REF, LIBRARY_SKILLS
 
         for dead in CLAUDNA_SKILL_RENAMES:
-            bare = "/" + dead.removeprefix("/claudna:")
+            name = dead.removeprefix("/claudna:")
             assert DEAD_REF.search(dead), dead
-            assert DEAD_REF.search(bare), bare
+            bare_banned = name not in LIBRARY_SKILLS  # /visual-crawl is ours (#2543)
+            assert bool(DEAD_REF.search("/" + name)) == bare_banned, name
+        # A new dead name that is also a library skill widens the exemption: make it a choice.
+        dead_names = {k.removeprefix("/claudna:") for k in CLAUDNA_SKILL_RENAMES}
+        assert dead_names & LIBRARY_SKILLS == {"visual-crawl"}
 
     def test_session_guard_covers_every_dead_session_name(self):
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
@@ -206,19 +218,25 @@ class TestClaudnaRenameSSOT:
     def test_auto_eligible_is_subset_of_canonical(self):
         assert _AUTO_ELIGIBLE_RENAMES.items() <= CLAUDNA_SKILL_RENAMES.items()
 
+    def test_a_renamed_away_name_is_never_live(self):
+        # A name leaves the live sets the moment it gains a rename entry
+        # (known_values.py); pinned, so a dead name left in either fails (#2543).
+        assert CLAUDNA_LIVE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
+        assert AUTO_ELIGIBLE_SKILLS.isdisjoint(CLAUDNA_SKILL_RENAMES)
+
     def test_session_hyphen_typo_policy_agrees_across_guards(self):
         """The session-hyphen typo family (live verbs with no dead standalone,
         e.g. `checkpoint`) is guard-local pattern policy — pin the guards'
         intended split so it cannot drift silently: both ban the namespaced
-        form; the bare form is doc-guard territory, and lib/ coverage for it
-        rides on the doc guard scanning lib/*.sh."""
+        form; the bare form is doc-guard territory, and claudlobby/_runtime_scripts/ coverage for it
+        rides on the doc guard scanning claudlobby/_runtime_scripts/*.sh."""
         from tests.test_no_dead_claudna_refs import DEAD_REF, SCAN_GLOBS
         from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
 
         assert DEAD_REF.search("/claudna:session-checkpoint")
         assert _DEAD_SESSION_CMD.search("/claudna:session-checkpoint")
         assert DEAD_REF.search("/session-checkpoint")
-        assert ("lib", "*.sh") in SCAN_GLOBS
+        assert ("claudlobby/_runtime_scripts", "*.sh") in SCAN_GLOBS
         # Neither guard flags the live space-form or the unrelated bare tmux
         # `session-name` (no leading slash).
         for benign in ("/claudna:session resume", "tmux session-name x"):
@@ -288,6 +306,7 @@ class TestValidatorModelCheck:
 
     def _make_fleet_and_validate(self, tmp_path, bot_kwargs):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -301,9 +320,9 @@ class TestValidatorModelCheck:
         exp_dir.mkdir()
         (exp_dir / "eng.md").write_text("---\ntitle: eng\n---\n# eng\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(bot_id="test", name="test", expertise=["eng"], **bot_kwargs)
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         return report
@@ -347,6 +366,7 @@ class TestValidatorHookEventCheck:
 
     def _make_fleet_and_validate(self, tmp_path, hooks):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -359,9 +379,9 @@ class TestValidatorHookEventCheck:
         exp_dir.mkdir()
         (exp_dir / "eng.md").write_text("---\ntitle: eng\n---\n# eng\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(bot_id="test", name="test", expertise=["eng"], hooks=hooks)
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         return report
@@ -406,6 +426,7 @@ class TestValidatorExpertiseSuggestion:
 
     def test_expertise_typo_suggestion(self, tmp_path):
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
         from claudlobby.validator import ValidationReport, _validate_bots
 
@@ -418,13 +439,13 @@ class TestValidatorExpertiseSuggestion:
         exp_dir.mkdir()
         (exp_dir / "software-engineering.md").write_text("---\ntitle: SE\n---\n# SE\n")
 
-        paths = Paths(root=root)
+        paths = Paths(root=root, package=source_package())
         bot = BotConfig(
             bot_id="test",
             name="test",
             expertise=["software-enginering"],  # typo
         )
-        fleet = FleetConfig(name="test", service_prefix="com.test", bots={"test": bot})
+        fleet = FleetConfig(manager="test", name="test", service_prefix="com.test", bots={"test": bot})
         report = ValidationReport()
         _validate_bots(fleet, paths, {}, report)
         expertise_errors = [e for e in report.errors if "expertise" in e]

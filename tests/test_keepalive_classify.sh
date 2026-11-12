@@ -13,13 +13,13 @@ FIXTURE_DIR="$SCRIPT_DIR/fixtures/pane-states"
 
 # classify_pane delegates to lib-common's pane_is_busy/pane_is_idle, so
 # lib-common.sh must be sourced first.
-# shellcheck source=../lib/lib-common.sh
-. "$REPO_DIR/lib/lib-common.sh"
+# shellcheck source=../claudlobby/_runtime_scripts/lib-common.sh
+. "$REPO_DIR/claudlobby/_runtime_scripts/lib-common.sh"
 
 # Source only the classify_pane function from keepalive.sh.
 # keepalive.sh runs bot-level setup at the top level, so we extract just
 # the function definition.
-eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/lib/keepalive.sh")"
+eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/claudlobby/_runtime_scripts/keepalive.sh")"
 
 passed=0
 failed=0
@@ -44,6 +44,44 @@ assert_state() {
     fi
 }
 
+# assert_not_state <fixture> <state> [locale]: the property is what the frame
+# is NOT. Used for the frames that must never read as a held box (#2070),
+# whatever else the idle patterns make of them.
+assert_not_state() {
+    local fixture="$1" unwanted="$2" loc="${3:-}" content actual
+    total=$((total + 1))
+    content=$(tail -10 "$FIXTURE_DIR/$fixture")
+    if [ -n "$loc" ]; then
+        actual=$(LC_ALL="$loc" classify_pane "$content")
+    else
+        actual=$(classify_pane "$content")
+    fi
+    if [ "$actual" != "$unwanted" ]; then
+        passed=$((passed + 1))
+        printf "  PASS  %-35s → %s (not %s)%s\n" "$fixture" "$actual" "$unwanted" "${loc:+ [LC_ALL=$loc]}"
+    else
+        failed=$((failed + 1))
+        printf "  FAIL  %-35s → %s (must not be %s)%s\n" "$fixture" "$actual" "$unwanted" "${loc:+ [LC_ALL=$loc]}"
+    fi
+}
+
+# assert_state_c <fixture> <state>: the same verdict under LC_ALL=C. keepalive
+# can run with no UTF-8 locale (a unit whose environment sets none), and there
+# grep reads the glyph bracket byte by byte (#2070).
+assert_state_c() {
+    local fixture="$1" expected="$2" content actual
+    total=$((total + 1))
+    content=$(tail -10 "$FIXTURE_DIR/$fixture")
+    actual=$(LC_ALL=C classify_pane "$content")
+    if [ "$actual" = "$expected" ]; then
+        passed=$((passed + 1))
+        printf "  PASS  %-35s → %s [LC_ALL=C]\n" "$fixture" "$actual"
+    else
+        failed=$((failed + 1))
+        printf "  FAIL  %-35s → %s (expected %s) [LC_ALL=C]\n" "$fixture" "$actual" "$expected"
+    fi
+}
+
 echo "=== keepalive pane-state classification tests ==="
 echo ""
 
@@ -55,6 +93,33 @@ assert_state "busy-spinner.txt" "BUSY"
 # UNKNOWN (see _BUSY_PATTERN_BASE in lib-common.sh for the rationale).
 assert_state "verb-no-esc.txt" "UNKNOWN"
 
+# A running turn whose only busy sign is the activity line (hooks running, no
+# esc affordance): BUSY through _BUSY_ACTIVITY_LINE_RE.
+assert_state "hooks-running-turn.txt" "BUSY"
+
+# The same two frames above one 2 MiB line (#2428). pane_is_busy piped the
+# pane into grep -q, which exits at its first match; the rest of the pane then
+# met a closed pipe, and pipefail read the match as a miss, so a running turn
+# read as not busy. A pipe holds 64 KiB to 256 KiB, so 2 MiB outlasts it on
+# every host. busy-spinner matches the esc pattern; hooks-running-turn matches
+# only the activity line, the second grep.
+long_line=$(awk 'BEGIN { s = "x"; while (length(s) < 2097152) s = s s; print s }')
+assert_state_long() {
+    local fixture="$1" expected="$2" content actual
+    total=$((total + 1))
+    content=$(tail -10 "$FIXTURE_DIR/$fixture")
+    actual=$(classify_pane "$content"$'\n'"$long_line")
+    if [ "$actual" = "$expected" ]; then
+        passed=$((passed + 1))
+        printf "  PASS  %-35s → %s [above a 2 MiB line]\n" "$fixture" "$actual"
+    else
+        failed=$((failed + 1))
+        printf "  FAIL  %-35s → %s (expected %s) [above a 2 MiB line]\n" "$fixture" "$actual" "$expected"
+    fi
+}
+assert_state_long "busy-spinner.txt" "BUSY"
+assert_state_long "hooks-running-turn.txt" "BUSY"
+
 # IDLE fixtures
 assert_state "idle-prompt.txt" "IDLE"
 assert_state "idle-chevron.txt" "IDLE"
@@ -64,6 +129,39 @@ assert_state "idle-permission.txt" "IDLE"
 # UNKNOWN fixtures
 assert_state "unknown-blank.txt" "UNKNOWN"
 assert_state "unknown-output.txt" "UNKNOWN"
+
+# HELD fixtures (#2070): text sits in the input box and no turn is running. The
+# input-stuck-* frames are earlier stranded sends. input-held-cr and
+# input-held-after-enter are a live capture's shape (claude 2.1.285, the
+# identifiers replaced): the held text with the swallowed Enter's empty line
+# under it, and the same box after a first Enter removed that character
+# ("review and press Enter to send"), still held.
+assert_state "input-stuck-literal.txt" "HELD"
+assert_state "input-stuck-wrapped.txt" "HELD"
+assert_state "input-stuck-wrapped-early.txt" "HELD"
+assert_state "input-stuck-collapsed-paste.txt" "HELD"
+assert_state "input-held-cr.txt" "HELD"
+assert_state "input-held-after-enter.txt" "HELD"
+
+# Never HELD (#2070), the negative controls. Claude Code draws its own text in
+# the box: the queued-message hint behind a running turn, and an empty box's
+# suggestion. A menu's selected option sits on the glyph line too, and an Enter
+# there CHOOSES. A check keyed on "the glyph line is not empty", or on a length
+# floor, calls all three held; the first did, on a mid-turn bot.
+assert_not_state "input-queued-hint.txt" "HELD"
+assert_not_state "idle-placeholder.txt" "HELD"
+assert_not_state "menu-option.txt" "HELD"
+assert_state "input-clean-submit.txt" "IDLE"
+
+# The same, with no UTF-8 locale. Under LC_ALL=C the idle bracket matches the
+# box's border bytes, so a held box read IDLE there: a held box still reads
+# HELD, and none of the controls does.
+assert_state_c "input-stuck-literal.txt" "HELD"
+assert_state_c "input-held-cr.txt" "HELD"
+assert_state_c "input-held-after-enter.txt" "HELD"
+assert_not_state "input-queued-hint.txt" "HELD" C
+assert_not_state "idle-placeholder.txt" "HELD" C
+assert_not_state "menu-option.txt" "HELD" C
 
 # Extensibility test: custom patterns via env vars
 echo ""

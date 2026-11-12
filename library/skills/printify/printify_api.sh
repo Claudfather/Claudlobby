@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# printify — direct Printify v1 REST actuator (reads + writes). A sanctioned
-# complement to the Printify MCP: the reads the MCP is weak at (real shop/status,
-# LOSSLESS descriptions, orders) AND the writes the MCP is buggy/limited at
-# (create, migrate) done as clean direct REST. Shares the fleet Printify env
-# contract with library/mcp/printify.json (one contract, two tools).
+# printify — direct Printify v1 REST actuator (reads + writes), the tool of
+# library/integrations/printify.md, which declares its env contract: real
+# shop/status, LOSSLESS descriptions and orders, and the draft-first writes
+# (create, migrate, publish), all as clean direct REST. The Printify MCP
+# (library/mcp/printify.json) is deprecated.
 #
 # Env contract:
 #   PRINTIFY_API_KEY   Printify Personal Access Token / API key (JWT). Also

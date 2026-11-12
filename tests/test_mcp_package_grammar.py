@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 import pytest
 
 from tests.conftest import constructed_env, load_lib_module
+from tests.package_fixtures import source_package
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CHECKER = REPO_ROOT / "lib" / "check-npx-cache.sh"
+CHECKER = REPO_ROOT / "claudlobby/_runtime_scripts" / "check-npx-cache.sh"
 SHIPPED_MCP = REPO_ROOT / "library" / "mcp"
 
 g = load_lib_module("mcp-package-grammar")
@@ -61,6 +63,13 @@ class TestTheGrammarReadsBothRuntimes:
     def test_npx_yields_the_package_after_dash_y(self):
         assert g.warm_prefix("npx", ["-y", "pkg@1.0", "--flag"]) == ("pkg@1.0", ["-y", "pkg@1.0"])
 
+    def test_server_flags_and_placeholders_are_not_carried_into_the_probe(self):
+        """A fragment's own args can hold unexpanded ${VAR}; the probe is the
+        package identity only, so they never reach a subprocess."""
+        assert g.warm_prefix(
+            "npx", ["-y", "mcp-remote@0.1.38", "https://x/${TOKEN}", "--port", "${P}"]
+        ) == ("mcp-remote@0.1.38", ["-y", "mcp-remote@0.1.38"])
+
     def test_uvx_bare_takes_the_first_token(self):
         assert g.warm_prefix("uvx", ["workspace-mcp", "--tools", "gmail"]) == (
             "workspace-mcp",
@@ -84,6 +93,9 @@ class TestTheGrammarReadsBothRuntimes:
         obvious rule; warming the wrong token still exits 0."""
         assert g.warm_prefix("uvx", ["--python", "3.12", "foo"]) is None
         assert g.warm_prefix("uvx", ["--from", "some-pkg==1.0"]) is None
+
+    def test_an_unreadable_npx_shape_is_refused_not_guessed(self):
+        assert g.warm_prefix("npx", []) is None
 
 
 class TestOneParseServesBothConsumers:
@@ -111,25 +123,23 @@ class TestTheProbeNameIsNotTheWarmName:
     a version-suffixed key that no cache holds."""
 
     def test_npm_version_suffix_is_stripped_for_the_probe_only(self):
-        assert g.package_name("npx", ["-y", "docker-mcp@1.0.0"]) == "docker-mcp"
+        assert g.bare_name("npx", "docker-mcp@1.0.0") == "docker-mcp"
         assert g.warm_prefix("npx", ["-y", "docker-mcp@1.0.0"])[0] == "docker-mcp@1.0.0"
 
     def test_a_scoped_name_keeps_its_leading_at(self):
         """`@org/name` must not lose its scope to the version-stripping rule."""
         assert (
-            g.package_name("npx", ["-y", "@modelcontextprotocol/server-github@2025.4.8"])
+            g.bare_name("npx", "@modelcontextprotocol/server-github@2025.4.8")
             == "@modelcontextprotocol/server-github"
         )
 
     def test_an_unversioned_package_is_left_alone(self):
-        assert g.package_name("npx", ["-y", "printify-mcp"]) == "printify-mcp"
+        assert g.bare_name("npx", "printify-mcp") == "printify-mcp"
 
     def test_pypi_spec_is_stripped_and_pep503_normalized(self):
         """uv keys its wheel cache on the normalized name."""
-        assert g.package_name("uvx", ["--from", "Google_Analytics_MCP==2.8.1", "ga4"]) == (
-            "google-analytics-mcp"
-        )
-        assert g.package_name("uvx", ["workspace-mcp", "--tools", "gmail"]) == "workspace-mcp"
+        assert g.bare_name("uvx", "Google_Analytics_MCP==2.8.1") == "google-analytics-mcp"
+        assert g.bare_name("uvx", "workspace-mcp") == "workspace-mcp"
 
 
 class TestTheShippedFragmentsAreAllReadable:
@@ -147,7 +157,6 @@ class TestTheShippedFragmentsAreAllReadable:
                 assert g.warm_prefix(rt, server.get("args", [])) is not None, (
                     f"{frag.name}:{name} — unreadable arg shape"
                 )
-                assert g.package_name(rt, server.get("args", [])) is not None
         # A negative that asserts nothing is not evidence.
         assert seen["uvx"] >= 3 and seen["npx"] >= 10, seen
 
@@ -247,7 +256,9 @@ class TestTheProbeSeesUvPackages:
             "exit 1\n"
         )
         stub.chmod(0o755)
-        env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
+        env = constructed_env(CLAUDLOBBY_ROOT=root,
+                              CLAUDLOBBY_LIBRARY_DIR=root / "library",
+                              NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:{env.get('PATH', '')}"
         return subprocess.run(
             ["bash", str(CHECKER)], capture_output=True, text=True, env=env
@@ -328,7 +339,9 @@ class TestTheProbeSeesUvPackages:
         root = self._root(tmp_path, {"u": {"command": "uvx", "args": ["some-pkg"]}})
         npx_cache = tmp_path / "npx"; npx_cache.mkdir()
         bindir = tmp_path / "emptybin"; bindir.mkdir()
-        env = constructed_env(CLAUDLOBBY_ROOT=root, NPX_CACHE_DIR=npx_cache)
+        env = constructed_env(CLAUDLOBBY_ROOT=root,
+                              CLAUDLOBBY_LIBRARY_DIR=root / "library",
+                              NPX_CACHE_DIR=npx_cache)
         env["PATH"] = f"{bindir}:/usr/bin:/bin"
         r = subprocess.run(["bash", str(CHECKER)], capture_output=True, text=True, env=env)
         assert r.returncode == 1, r.stdout + r.stderr
@@ -345,7 +358,8 @@ class TestTheRefusalCanActuallyFire:
         from tests.conftest import make_paths
 
         (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
-        paths = make_paths(fleet_dir)
+        paths = replace(make_paths(fleet_dir),
+                        package=replace(source_package(), native=fleet_dir / "lib"))
         try:
             grammar(paths)
         except GrammarUnavailable as e:
@@ -354,7 +368,7 @@ class TestTheRefusalCanActuallyFire:
             raise AssertionError("a missing grammar was silently tolerated")
 
     def test_warm_cache_refuses_rather_than_warming_the_wrong_thing(
-        self, fleet_dir: Path, caplog
+        self, fleet_dir: Path, caplog, monkeypatch
     ):
         """A fallback grammar would be consulted exactly when the two copies
         had diverged, so warm-cache exits nonzero instead of guessing."""
@@ -363,12 +377,16 @@ class TestTheRefusalCanActuallyFire:
         import argparse
 
         from claudlobby.commands.core import cmd_warm_cache
+        from claudlobby import context
 
         _equip(fleet_dir, {"n": {"command": "npx", "args": ["-y", "demo@1.0"]}})
         (fleet_dir / "lib" / "mcp-package-grammar.py").unlink()
+        monkeypatch.setattr(context, "get_resources", lambda: replace(
+            source_package(), native=fleet_dir / "lib"))
         args = argparse.Namespace(root=str(fleet_dir), fleet=None, seed=False, dry_run=False)
         with caplog.at_level(logging.INFO):
             assert cmd_warm_cache(args) != 0
+        assert "mcp-package-grammar.py" in caplog.text
         assert "cache warm complete" not in caplog.text
 
 

@@ -1,7 +1,7 @@
 """Host facet probe (chunk 3) — the cause=probe emitter for host.* metrics.
 
-Drives the REAL lib/plane-host-probe.sh (real lib-common, real shim, real
-cold-CLI ingest into a scratch db; the facet tools stubbed on PATH so the
+Drives the REAL claudlobby/_runtime_scripts/plane-host-probe.sh (real lib-common, real shim, private
+Plane daemon committing to a scratch db; the facet tools stubbed on PATH so the
 values are deterministic). Load-bearing laws: subject_kind=host keyed by
 hostname (joins the Host card); Pi-only facets are ABSENT on a non-Pi host,
 never a fabricated 0; the job_ran proof-of-run always lands; always on
@@ -17,13 +17,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from claudlobby.plane.db import db_path
+from claudlobby.plane.daemon import probe_daemon
+from tests.test_plane_events_door import _serving
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = Path(sys.executable).parent / "claudlobby"
 
 
-def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
+def _rig(tmp_path, *, pi=False, armed=True, disabled=False, scratch_plane_env):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
@@ -53,15 +57,17 @@ def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
     for f in stub.iterdir():
         f.chmod(0o755)
     env = {
-        "CLAUDLOBBY_ROOT": str(root),
+        **scratch_plane_env(root, initialize=not disabled),
         "HOME": str(tmp_path),
-        "PLANE_EMIT_CLI": str(CLI),
-        "PLANE_SOCKET": str(tmp_path / "no.sock"),
+
+
         "FLEET_NAME": "_host",
         "PATH": f"{stub}:/usr/bin:/bin",
     }
     if armed:
         env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
+    if not armed:
+        env.pop("PLANE_EMIT_DISABLED")  # validated scratch destination, default-on contract
     if disabled:
         env["PLANE_EMIT_DISABLED"] = "1"
     return root, env
@@ -69,8 +75,13 @@ def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
 
 def _run(root, env):
     return subprocess.run(
-        ["bash", str(REPO / "lib" / "plane-host-probe.sh")],
+        ["bash", str(REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh")],
         capture_output=True, text=True, env=env, timeout=120)
+
+
+def _run_committed(root, env, scratch_plane_env):
+    with _serving(root, scratch_plane_env) as socket:
+        return _run(root, {**env, "PLANE_SOCKET": str(socket)})
 
 
 def _samples(root):
@@ -87,9 +98,9 @@ def _samples(root):
         conn.close()
 
 
-def test_probe_emits_the_portable_facets(tmp_path):
-    root, env = _rig(tmp_path)
-    r = _run(root, env)
+def test_probe_emits_the_portable_facets(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    r = _run_committed(root, env, scratch_plane_env)
     assert r.returncode == 0, r.stderr
     s = _samples(root)
     assert json.loads(s["host.load"]["value"]) == {
@@ -101,30 +112,30 @@ def test_probe_emits_the_portable_facets(tmp_path):
     assert s["host.load"]["subject_uid"].startswith("host_")
 
 
-def test_pi_facets_present_only_on_a_pi(tmp_path):
-    root, env = _rig(tmp_path, pi=True)
-    assert _run(root, env).returncode == 0
+def test_pi_facets_present_only_on_a_pi(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, pi=True, scratch_plane_env=scratch_plane_env)
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert s["host.thermal_flags"]["value"].strip('"') == "0x50005"
     assert json.loads(s["host.undervoltage"]["value"]) is True   # bit0 set
 
 
-def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path):
-    root, env = _rig(tmp_path, pi=False)   # no vcgencmd on PATH
-    assert _run(root, env).returncode == 0
+def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, pi=False, scratch_plane_env=scratch_plane_env)   # no vcgencmd on PATH
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert "host.thermal_flags" not in s   # absent, never a fabricated 0
     assert "host.undervoltage" not in s
 
 
-def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
+def test_records_without_any_flag_and_disabled_silences_it(tmp_path, *, scratch_plane_env):
     """The always-on contract (F18 closure R1): no plane flag → the probe
     records (the job_ran proof-of-run lands); PLANE_EMIT_DISABLED=1 → nothing."""
-    root, env = _rig(tmp_path, armed=False)
-    r = _run(root, env)
+    root, env = _rig(tmp_path, armed=False, scratch_plane_env=scratch_plane_env)
+    r = _run_committed(root, env, scratch_plane_env)
     assert r.returncode == 0, r.stderr
     assert _samples(root)["host.job_ran"]["value"] in ("1", 1)
-    root2, env2 = _rig(tmp_path / "d", disabled=True)
+    root2, env2 = _rig(tmp_path / "d", disabled=True, scratch_plane_env=scratch_plane_env)
     r = _run(root2, env2)
     assert r.returncode == 0
     assert not db_path(root2).is_file()
@@ -133,6 +144,7 @@ def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
 def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
                                                             monkeypatch):
     from claudlobby.composer import compose_host_timers
+    from tests.package_fixtures import git_package
     from claudlobby.paths import Paths
     from claudlobby.env_tiers import Resolution
     import claudlobby.env_tiers as et
@@ -156,7 +168,7 @@ def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
     monkeypatch.setattr(et, "cascade", lambda tiers: {
         "PLANE_EMIT_ENABLED": Resolution(
             name="PLANE_EMIT_ENABLED", value="1", tier="host", path=None)})
-    out = compose_host_timers(Paths(root=root))
+    out = compose_host_timers(Paths(root=root, package=git_package(root)))
     svc = (out / "claudlobby-plane-host-probe.service").read_text()
     # The probe has no flag of its OWN — it is gated by the estate silencer
     # (plane_armed / PLANE_EMIT_DISABLED), so the composer stamps it nothing.
@@ -168,9 +180,9 @@ def test_probe_job_ships_enrolled_and_carries_the_emit_flag(tmp_path,
 
 
 def test_launcher_parses_and_references():
-    body = (REPO / "lib" / "plane-host-probe.sh").read_text()
+    body = (REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh").read_text()
     assert "plane_armed plane-host-probe" in body
-    r = subprocess.run(["bash", "-n", str(REPO / "lib" / "plane-host-probe.sh")],
+    r = subprocess.run(["bash", "-n", str(REPO / "claudlobby/_runtime_scripts" / "plane-host-probe.sh")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
@@ -191,24 +203,24 @@ def test_boot_time_sed_extracts_sec_not_usec():
     assert bad == "60460"                    # the old greedy bug, for contrast
 
 
-def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path):
+def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path, *, scratch_plane_env):
     """End-to-end, OS-tolerant: whichever source the host uses (/proc/stat
     on Linux, kern.boottime on macOS) the recorded boot_time is a valid
     UTC+Z ISO instant and never 1970 (the SEV-1 symptom)."""
     import re
-    root, env = _rig(tmp_path)
-    assert _run(root, env).returncode == 0
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     bt = _samples(root)["host.boot_time"]["value"].strip('"')
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", bt), bt
     assert not bt.startswith("1970")
 
 
-def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path):
+def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path, *, scratch_plane_env):
     """r-gauntlet SEV-2: a comma-decimal locale (0,52) would split a
     decimal comma into a bogus separator and record silently-wrong
     numbers. Each token is validated as a bare decimal; a comma-decimal
     line is DROPPED, never mis-recorded."""
-    root, env = _rig(tmp_path)
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     import os
     # override uptime to emit the comma-decimal shape (LC_ALL=C in the
     # script normalizes real locales, but a pre-formatted comma line still
@@ -217,21 +229,120 @@ def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path):
         '#!/bin/bash\ncase "$*" in *-s*) exit 1 ;;'
         ' *) echo " up  load average: 0,52, 0,58, 0,59" ;; esac\n')
     (tmp_path / "bin" / "uptime").chmod(0o755)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert "host.load" not in s              # dropped, not {"one":0,...}
     assert "host.job_ran" in s               # the rest of the batch survives
 
 
-def test_empty_hostname_never_poisons_the_whole_batch(tmp_path):
+def test_empty_hostname_never_poisons_the_whole_batch(tmp_path, *, scratch_plane_env):
     """r-gauntlet SEV-3: an empty subject fails min_length=1 and the CLI
     rejects the ENTIRE batch — job_ran included, the edge it exists for.
     A fallback host keeps the batch valid."""
-    root, env = _rig(tmp_path)
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
     (tmp_path / "bin" / "hostname").write_text('#!/bin/bash\nexit 1\n')
     (tmp_path / "bin" / "hostname").chmod(0o755)
     (tmp_path / "bin" / "uname").write_text('#!/bin/bash\necho\n')  # empty -n
     (tmp_path / "bin" / "uname").chmod(0o755)
-    assert _run(root, env).returncode == 0
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
     s = _samples(root)
     assert s["host.job_ran"]["subject_uid"].startswith("host_")  # batch landed
+
+
+def test_the_wal_size_is_recorded_once_a_plane_exists(tmp_path, *, scratch_plane_env):
+    """#1905: the probe records the plane's WAL size, one stat, so a reader
+    holding a snapshot shows up as a number rather than nowhere. A missing WAL
+    beside an initialized plane reports 0; once a writer keeps the WAL on disk
+    the sample is its size at the probe's instant."""
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    assert int(_samples(root)["host.plane_wal_bytes"]["value"]) == 0
+    # A held writer connection keeps a WAL on disk, the shape the daemon's
+    # long-lived connection leaves between checkpoints.
+    held = sqlite3.connect(db_path(root))
+    try:
+        held.execute("PRAGMA wal_autocheckpoint = 0")
+        held.execute("CREATE TABLE IF NOT EXISTS probe_wal_scratch (b BLOB)")
+        held.execute("INSERT INTO probe_wal_scratch VALUES (zeroblob(65536))")
+        held.commit()
+        wal = Path(str(db_path(root)) + "-wal")
+        with _serving(root, scratch_plane_env) as socket:
+            # Socket publication precedes startup writes; a read-only reply
+            # proves those writes finished before measuring the WAL.
+            assert probe_daemon(socket)
+            before = wal.stat().st_size
+            assert before > 65536
+            assert _run(root, {**env, "PLANE_SOCKET": str(socket)}).returncode == 0
+            values = [int(r[0]) for r in held.execute(
+                "SELECT value FROM metric_samples WHERE metric = 'host.plane_wal_bytes'")]
+    finally:
+        held.close()
+    assert values == [0, before]
+
+# --- #1644: the facets that split load into CPU and IO ----------------------
+
+_FACETS_1644 = ("host.swap_used_mb", "host.swap_pages", "host.procs", "host.cpu_ticks")
+_STAT = ("cpu  100 20 30 400 50 6 7 8 9 10\ncpu0 1 2 3 4 5 6 7 8 0 0\n"
+         "btime 1790000000\nprocs_running 3\nprocs_blocked 2\n")
+
+
+def _proc(tmp_path, **files):
+    """A fixture dir standing in for /proc: only the files named are there."""
+    d = tmp_path / "proc"
+    d.mkdir(exist_ok=True)
+    for name, text in files.items():
+        (d / name).write_text(text)
+    return d
+
+
+def test_the_cpu_and_io_facets_read_proc(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(
+        tmp_path, meminfo="MemTotal: 8000000 kB\nSwapTotal: 4194304 kB\nSwapFree: 1048576 kB\n",
+        vmstat="pgpgin 5\npswpin 70408\npswpout 337788\n", stat=_STAT))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    assert int(s["host.swap_used_mb"]["value"]) == 3072
+    assert json.loads(s["host.swap_pages"]["value"]) == {"in": 70408, "out": 337788}
+    assert json.loads(s["host.procs"]["value"]) == {"running": 3, "blocked": 2}
+    # the total is user..steal (621); guest and guest_nice are already in user and nice
+    assert json.loads(s["host.cpu_ticks"]["value"]) == {"iowait": 50, "total": 621}
+
+
+def test_no_swap_is_a_recorded_zero_not_an_absence(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(tmp_path, meminfo="SwapTotal: 0 kB\nSwapFree: 0 kB\n"))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    assert int(_samples(root)["host.swap_used_mb"]["value"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("files", "absent"),
+    [
+        ({}, _FACETS_1644),
+        ({"meminfo": "SwapFree: 10 kB\n"}, ("host.swap_used_mb",)),
+        ({"meminfo": "SwapTotal: 10 kB\nSwapFree: 20 kB\n"}, ("host.swap_used_mb",)),
+        ({"vmstat": "pswpin 5\n"}, ("host.swap_pages",)),
+        ({"vmstat": "pswpin 5\npswpout -3\n"}, ("host.swap_pages",)),
+        ({"stat": _STAT.replace("procs_blocked 2", "procs_blocked x")}, ("host.procs",)),
+        ({"stat": _STAT.replace("cpu  100 20", "cpu  100 2O")}, ("host.cpu_ticks",)),
+        ({"stat": "cpu  1 2 3 4\n"}, ("host.cpu_ticks", "host.procs")),
+    ],
+)
+def test_a_missing_or_garbled_field_leaves_its_facet_absent(tmp_path, files, absent,
+                                                           *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    env["HOST_PROBE_PROC"] = str(_proc(tmp_path, **files))
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    for metric in absent:
+        assert metric not in s, (metric, s.get(metric) and s[metric]["value"])
+    assert s["host.job_ran"]["value"] in ("1", 1)    # the probe itself still ran
+
+
+@pytest.mark.skipif(not Path("/proc/stat").is_file(), reason="Linux /proc only")
+def test_the_real_proc_yields_every_facet(tmp_path, *, scratch_plane_env):
+    root, env = _rig(tmp_path, scratch_plane_env=scratch_plane_env)
+    assert _run_committed(root, env, scratch_plane_env).returncode == 0
+    s = _samples(root)
+    assert all(m in s for m in _FACETS_1644), sorted(s)

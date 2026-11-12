@@ -3,7 +3,7 @@
 A channel bot could sit deaf — revoked token, or a token resolving *empty*
 through the env tiers (#492) — with zero credential alerts. The check's
 mechanics (SSOT token resolution shared with bridge_state, getMe via curl
-config file) are documented at check_telegram_tokens in lib/creds-check.sh;
+config file) are documented at check_telegram_tokens in claudlobby/_runtime_scripts/creds-check.sh;
 this suite runs the real script end-to-end against a scratch fleet with a
 canned-response curl stub.
 
@@ -22,9 +22,11 @@ import subprocess
 from pathlib import Path
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec
+from tests.fixtures.provider_status import STATUS_PAGE_ARM
+from tests.test_maintenance_jobs import _native_fixture
+from tests.package_fixtures import git_package
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
 
 VALID_TOKEN = "111111:validAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WRONGBOT_TOKEN = "222222:wrongbotAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -35,6 +37,12 @@ ALL_TOKENS = (VALID_TOKEN, WRONGBOT_TOKEN, REVOKED_TOKEN)
 #: the refusal in a GraphQL `errors` body. Every other Railway token the stub
 #: sees gets a real 401, so the two failure branches keep separate coverage.
 REJECTED_RAILWAY = "not-a-real-token-rejected-with-200-and-graphql-errors"
+
+#: A token ending in one of these gets that answer from every provider the stub
+#: plays (#2424): accepted, an HTTP 503, or a transfer that times out with no
+#: answer at all. Railway reads ``-answers-html-200`` and ``-answers-null-data``
+#: too, and Telegram ``-answers-429``, ``-answers-500`` and ``-answers-html-502``.
+IS_VALID, ANSWERS_503, TIMES_OUT = "-is-valid", "-answers-503", "-times-out"
 
 
 def _curl_stub(bindir: Path) -> None:
@@ -53,6 +61,16 @@ for a in "$@"; do
 done
 url=""
 [ -n "$cfg" ] && url=$(sed -n 's/^url *= *"\\(.*\\)"$/\\1/p' "$cfg")
+# The bearer token, for the arms that answer by token.
+bearer() {{
+  [ -n "$cfg" ] && sed -n 's/^header = "Authorization: Bearer \\(.*\\)"$/\\1/p' "$cfg"
+}}
+times_out() {{
+  echo "curl: (28) Operation timed out after 10000 milliseconds with 0 bytes received" >&2
+  printf '000'
+  exit 28
+}}
+{STATUS_PAGE_ARM}
 # Railway's URL rides ARGV, not the --config file, so the url-keyed cases
 # below never match it and it fell to the catch-all -- which ignores -o and
 # -w, leaving $code set to the JSON body. Answer it the way the real endpoint
@@ -65,21 +83,37 @@ case "$*" in
       [ "$prev" = "-o" ] && out="$a"
       prev="$a"
     done
-    tok=""
-    [ -n "$cfg" ] && tok=$(sed -n 's/^header = "Authorization: Bearer \\(.*\\)"$/\\1/p' "$cfg")
-    if [ "$tok" = "{REJECTED_RAILWAY}" ]; then
-      [ -n "$out" ] && printf '{{"errors":[{{"message":"Not Authorized"}}]}}' > "$out"
-      printf '200'
-    else
-      [ -n "$out" ] && : > "$out"
-      printf '401'
-    fi
+    [ -n "$out" ] || out=/dev/null
+    : > "$out"
+    case "$(bearer)" in
+      "{REJECTED_RAILWAY}")
+        printf '{{"errors":[{{"message":"Not Authorized"}}]}}' > "$out"
+        printf '200' ;;
+      *{IS_VALID}) printf '{{"data":{{"me":{{"email":"someone@example.com"}}}}}}' > "$out"; printf '200' ;;
+      *-answers-html-200) printf '<html><body>Service Unavailable</body></html>' > "$out"; printf '200' ;;
+      *-answers-null-data) printf '{{"data":null}}' > "$out"; printf '200' ;;
+      *{ANSWERS_503}) printf '503' ;;
+      *{TIMES_OUT}) times_out ;;
+      *) printf '401' ;;
+    esac
+    exit 0 ;;
+  *api.github.com/user*)
+    case "$(bearer)" in
+      *{IS_VALID}) printf '200' ;;
+      *{ANSWERS_503}) printf '503' ;;
+      *{TIMES_OUT}) times_out ;;
+      *) printf '401' ;;
+    esac
     exit 0 ;;
 esac
 case "$url" in
   *bot{VALID_TOKEN}/getMe*)    printf '{{"ok":true,"result":{{"username":"bot_one_bot"}}}}' ;;
   *bot{WRONGBOT_TOKEN}/getMe*) printf '{{"ok":true,"result":{{"username":"some_other_bot"}}}}' ;;
   *bot{REVOKED_TOKEN}/getMe*)  printf '{{"ok":false,"error_code":401,"description":"Unauthorized"}}' ;;
+  *{TIMES_OUT}/getMe*) times_out ;;
+  *-answers-429/getMe*) printf '{{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5","parameters":{{"retry_after":5}}}}' ;;
+  *-answers-500/getMe*) printf '{{"ok":false,"error_code":500,"description":"Internal Server Error"}}' ;;
+  *-answers-html-502/getMe*) printf '<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center></body></html>' ;;
   *bot{VALID_TOKEN}/getChat*)  printf '{{"ok":true,"result":{{"id":-1001234567890}}}}' ;;
   *sendMessage*) echo "$url" >> "$(dirname "$0")/send.log"; printf '{{"ok":true,"result":{{"message_id":1}}}}' ;;
   *) printf '{{"ok":false,"error_code":404,"description":"Not Found"}}' ;;
@@ -96,20 +130,17 @@ def _fleet(
     roster: list[tuple] | None = None,
 ) -> dict:
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    (root / "state").mkdir()
+    native = _native_fixture(tmp_path, "creds-check.sh")
+    (root / "state").mkdir(parents=True)
     tg_log = root / "tg-posts.log"
     if real_tgpost:
         # Real delivery path: creds-check resolves + exports the delivery
         # token, the real tg-post.sh posts under it, the curl stub records
         # the sendMessage URL (which embeds the token) in send.log.
-        # supervisor.sh is a required sibling: lib-common.sh unconditionally
-        # sources it from its own directory (#1573 task 6).
-        for helper in ("tg-post.sh", "lib-common.sh", "supervisor.sh"):
-            shutil.copy(REPO_ROOT / "lib" / helper, root / "lib" / helper)
+        shutil.copy2(REPO_ROOT / "claudlobby/_runtime_scripts" / "tg-post.sh", native / "tg-post.sh")
     else:
         _write_exec(
-            root / "lib" / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
+            native / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
         )
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -196,6 +227,7 @@ def _fleet(
     (tmp_path / "home").mkdir()
     return {
         "root": root,
+        "native": native,
         "env": env,
         "state": state,
         "tg_log": tg_log,
@@ -206,7 +238,7 @@ def _fleet(
 def _run(f: dict) -> dict:
     # Positional fleet arg — the composed-timer contract.
     r = subprocess.run(
-        ["bash", str(SCRIPT), "f"],
+        ["bash", str(f["native"] / "creds-check.sh"), "f"],
         capture_output=True,
         text=True,
         env=f["env"],
@@ -214,6 +246,89 @@ def _run(f: dict) -> dict:
     )
     assert r.returncode == 0, f"creds-check exited {r.returncode}\n{r.stderr}"
     return json.loads(f["state"].read_text())
+
+
+def test_selected_check_uses_reviewed_roster_not_mutable_manifest(tmp_path):
+    f = _fleet(tmp_path)
+    fleet_root = f["root"] / "local" / "f"
+    # The selected CLI supplies the frozen roster. A later source edit cannot
+    # make this one-shot probe a residue bot or another declared bot.
+    (fleet_root / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
+    installation = git_package(f["root"]).installation
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(installation.cli),
+           "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f"}
+    result = subprocess.run(
+        ["bash", str(f["native"] / "creds-check.sh"),
+         "--admitted-runtime", "--fleet", "f",
+         "--fleet-root", str(fleet_root),
+         "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "bot1"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "tick-complete\n"
+    state = json.loads(f["state"].read_text())
+    assert "telegram_f_bot1" in state
+    assert "telegram_f_bot2" not in state
+
+
+def test_selected_check_takes_its_alert_sender_from_the_activated_roster(tmp_path):
+    """#2515: the selected CLI hands the probe the roster frozen in the activated plan,
+    and the alert pair's sender is chosen from it too. An edit to fleet.yaml is not live
+    before activation, so it cannot choose the sender: here the edit drops bot1, the
+    first activated bot in the chat, and the pair still names bot1. Read from the
+    edited fleet.yaml, the pair named bot2."""
+    f = _fleet(tmp_path)
+    fleet_root = f["root"] / "local" / "f"
+    (fleet_root / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n    bot2:\n      expertise: [x]\n")
+    installation = git_package(f["root"]).installation
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(installation.directory),
+           "CLAUDLOBBY_NATIVE_ADMITTED": "1",
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(installation.cli),
+           "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
+           # The activated fleet chat, which the selected CLI passes from the plan.
+           "TELEGRAM_GROUP_CHAT_ID": "-1001234567890"}
+    result = subprocess.run(
+        ["bash", str(f["native"] / "creds-check.sh"),
+         "--admitted-runtime", "--fleet", "f",
+         "--fleet-root", str(fleet_root),
+         "--bots-dir", str(fleet_root / "runtime" / "bots"),
+         "--bot", "bot1", "--bot", "bot2"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "tick-complete\n"
+    pair = json.loads(f["state"].read_text())["telegram_alert_pair_f"]
+    assert pair["status"] == "ok", pair
+    assert ("(sender: env:TELEGRAM_GROUP_CHAT_ID+bot:bot1, delivered by bot:bot1)"
+            in pair["detail"]), pair
+
+
+def test_selected_timer_delegates_to_selected_cli_before_probing(tmp_path):
+    f = _fleet(tmp_path)
+    called = tmp_path / "called"
+    cli = tmp_path / "selected-cli"
+    _write_exec(cli, f'#!/bin/bash\nprintf "%s\\n" "$@" > "{called}"\n')
+    env = {**f["env"], "CLAUDLOBBY_INSTALLATION": str(git_package(f["root"]).installation.directory),
+           "CLAUDLOBBY_NATIVE_DIR": str(f["native"]),
+           "CLAUDLOBBY_CLI": str(cli),
+           "FLEET_ROOT": str(f["root"] / "local" / "f"), "CLAUDLOBBY_FLEET": "f"}
+    result = subprocess.run(["bash", str(f["native"] / "creds-check.sh"), "f"],
+                            capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert called.read_text().splitlines() == [
+        "--root", str(f["root"]), "--fleet", "f", "host", "credentials", "check"]
+    assert not f["state"].exists(), "the timer must not probe before selected admission"
+    called.unlink()
+    bad = dict(env)
+    bad.pop("FLEET_ROOT")
+    result = subprocess.run(["bash", str(f["native"] / "creds-check.sh"), "f"],
+                            capture_output=True, text=True, env=bad, timeout=10)
+    assert result.returncode == 2
+    assert not called.exists() and not f["state"].exists()
 
 
 def test_valid_token_matching_handle_ok(tmp_path):
@@ -363,7 +478,7 @@ def test_no_live_channel_exports_no_delivery_token(tmp_path):
     # EMPTY token is indistinguishable downstream (tg-post's ${VAR:-fallback}
     # treats empty as unset), so this absence is what catches a dropped
     # [ -n "$_dtok" ] guard. Wording is a tested contract, pinned at the log
-    # call in lib/creds-check.sh.
+    # call in claudlobby/_runtime_scripts/creds-check.sh.
     log_text = (f["root"] / "creds-check.log").read_text()
     assert "alert delivery token resolved" not in log_text
 
@@ -388,8 +503,8 @@ def _alldead_scene(tmp_path, bot_chat):
     timer env carrying the fleet chat, and a tg-post stub recording the chat,
     the state dir and the message creds-check handed it."""
     root = tmp_path / "root"
-    (root / "lib").mkdir(parents=True)
-    (root / "state").mkdir()
+    native = _native_fixture(tmp_path, "creds-check.sh")
+    (root / "state").mkdir(parents=True)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _curl_stub(bindir)
@@ -408,9 +523,9 @@ def _alldead_scene(tmp_path, bot_chat):
     )
     (bot / ".env").write_text(f'T_CHAN_TOKEN="{REVOKED_TOKEN}"\n')  # own token dead
     (root / "local" / "f" / "fleet.yaml").write_text(
-        "fleet:\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
+        "fleet:\n  manager: chanbot\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
     )
-    _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
+    _write_exec(native / "tg-post.sh", TG_STUB)
     capture = root / "tg-capture.log"
     state = root / "state" / "creds-check-state.json"
     env = _scrubbed_env()
@@ -438,7 +553,7 @@ def _alldead_scene(tmp_path, bot_chat):
         }
     )
     (tmp_path / "home").mkdir()
-    _run({"env": env, "state": state})
+    _run({"native": native, "env": env, "state": state})
     log = (root / "creds-check.log").read_text()
     assert "alert delivery token resolved" not in log, "a live token would mask the gap"
     return root, channel, capture, state

@@ -1,9 +1,9 @@
-"""`claudlobby new-guardrail` — interactive guardrail scaffolding.
+"""`claudlobby library create --kind guardrail` — interactive guardrail scaffolding.
 
 Two modes:
 
-  Interactive:     `claudlobby new-guardrail`              (prompts for each field)
-  Non-interactive: `claudlobby new-guardrail --name X ...` (all flags up front)
+  Interactive:     `claudlobby library create --kind guardrail`              (prompts for each field)
+  Non-interactive: `claudlobby library create --kind guardrail --name X ...` (all flags up front)
 
 Creates a guardrail file at `library/guardrails/<name>.md` with proper YAML
 frontmatter (title, description), H1 heading, and placeholder content.
@@ -12,6 +12,7 @@ frontmatter (title, description), H1 heading, and placeholder content.
 from __future__ import annotations
 import logging
 import re
+import json
 
 from .prompts import ask as _ask
 
@@ -22,8 +23,8 @@ def render_guardrail(name: str, title: str, description: str) -> str:
     """Render guardrail markdown content."""
     lines: list[str] = []
     lines.append("---")
-    lines.append(f"title: {title}")
-    lines.append(f'description: "{description}"')
+    lines.append(f"title: {json.dumps(title, ensure_ascii=False)}")
+    lines.append(f"description: {json.dumps(description, ensure_ascii=False)}")
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")
@@ -37,7 +38,7 @@ def render_guardrail(name: str, title: str, description: str) -> str:
 
 def interactive_collect() -> tuple[str, str, str]:
     """Walk the user through guardrail creation. Returns (name, title, description)."""
-    print("\n=== claudlobby new-guardrail — interactive ===\n")
+    print("\n=== claudlobby library create --kind guardrail — interactive ===\n")
 
     name = _ask("Guardrail slug (lowercase, e.g. 'no-push-main')", allow_empty=False)
     while not re.match(r"^[a-z][a-z0-9_-]*$", name):

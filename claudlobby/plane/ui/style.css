@@ -104,6 +104,15 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .msg .body { white-space: pre-wrap; word-break: break-word; font-size: 13px;
              color: var(--ink); }
 .msg .body.redacted { color: var(--dim); font-style: italic; }
+.msg .report-status { font-size: 12px; font-weight: 600; margin: 5px 0; }
+.report-status.completed { color: var(--ok); }
+.report-status.blocked { color: var(--warn); }
+.report-status.failed { color: var(--bad); }
+.msg .report-evidence { list-style: none; margin: 8px 0; padding: 0;
+                        font-size: 12px; overflow-wrap: anywhere; }
+.report-evidence li + li { margin-top: 4px; }
+.report-evidence span { color: var(--dim); }
+.report-evidence a { color: var(--accent); text-underline-offset: 2px; }
 .msg .delivery { font-size: 11px; margin-top: 3px; }
 .delivery.ok { color: var(--ok); }
 .delivery.pend { color: var(--warn); }
@@ -117,6 +126,7 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .msg summary { font-size: 11px; color: var(--dim); cursor: pointer; }
 .msg .machinery { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
                   color: var(--dim); padding: 4px 0 0; }
+.msg .machinery.raw { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* tasks + attention */
 .card {
@@ -181,12 +191,14 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .overview { display: flex; gap: 8px; padding: 6px 10px 8px; flex-wrap: wrap;
             border-bottom: 1px solid var(--edge); flex: none; }
 .overview:empty { display: none; }
+.overview > .ov-line { flex-basis: 100%; }
 .overview .panel-state { padding: 6px 10px; flex: 1; text-align: left; }
 .ov-card { background: var(--panel); border: 1px solid var(--edge);
            border-radius: 8px; padding: 6px 10px; font-size: 12px;
            color: var(--dim); min-width: 200px; flex: 1 1 200px; }
-.ov-card.pick { cursor: pointer; }
-.ov-card.pick:hover { border-color: var(--accent); }
+.ov-team .ov-head { justify-content: space-between; }
+.ov-team-details { margin-top: 6px; }
+.ov-team-details > summary { cursor: pointer; color: var(--ink); }
 .ov-card.on { border-color: var(--accent); }
 .ov-card .ov-head { display: flex; gap: 8px; align-items: baseline; }
 .ov-card .ov-head b { color: var(--ink); font-size: 13px; }

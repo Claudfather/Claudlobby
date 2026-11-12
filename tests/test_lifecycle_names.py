@@ -20,7 +20,7 @@ import pytest
 # Always resolve relative to this file's location so the test uses the
 # checkout's lib-common.sh, not the shared install's.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_DIR = os.path.join(_REPO_ROOT, "lib")
+LIB_DIR = os.path.join(_REPO_ROOT, "claudlobby", "_runtime_scripts")
 
 
 @pytest.fixture
@@ -150,7 +150,7 @@ class TestKeepaliveAllArgConvention:
 
     def _run(self, root, arg):
         # keepalive-all resolves its worker script from CLAUDLOBBY_ROOT — give
-        # the tmp root a real lib/ so only the arg semantics are under test.
+        # the tmp root a real scripts dir so only the arg semantics are under test.
         libdir = os.path.join(root, "lib")
         os.makedirs(libdir, exist_ok=True)
         # supervisor.sh is a required sibling: lib-common.sh unconditionally
@@ -181,3 +181,50 @@ class TestKeepaliveAllArgConvention:
     def test_unknown_fleet_name_still_fatals(self, tmp_path):
         r = self._run(tmp_path, "ghost-fleet")
         assert r.returncode == 1
+
+
+@pytest.mark.parametrize("manager_reached", [False, True])
+def test_keepalive_sweep_reports_fault_once_but_not_activation_pause(tmp_path, manager_reached):
+    """A pre-trap admission failure must not look like a successful timer run."""
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    native = tmp_path / "native"
+    bot = root / "local/fleet/runtime/bots/worker"
+    for directory in (home / ".config/systemd/user", native, bot):
+        directory.mkdir(parents=True)
+    (bot / "bot.conf").write_text("BOT_SERVICE=worker\n")
+    (home / ".config/systemd/user/worker.service").write_text("[Unit]\n")
+    (native / "lib-common.sh").write_text(
+        '_OS=Linux\n'
+        'resolve_bots_dir() { printf "%s/local/fleet/runtime/bots\\n" "$CLAUDLOBBY_ROOT"; }\n'
+        'setup_log_dir() { mkdir -p "$(dirname "$1")"; }\n'
+        'ts_iso() { echo now; }\n'
+        'install_error_trap() { :; }\n'
+        'parse_fleet_bots() { echo worker; }\n'
+        'bot_in_fleet() { return 0; }\n'
+        'bot_conf_get() { echo worker; }\n'
+        'emit_failure_alert() { echo "$2" >> "$ALERTS"; _ALERT_DELIVERED=0; _ALERT_TMUX_REACHED="$STUB_TMUX"; }\n'
+        'debounce_notify() { local marker="$1/$2.$3"; if [ ! -f "$marker" ]; then "$4" "$5"; touch "$marker"; fi; }\n'
+        'debounce_clear() { rm -f "$1/$2.$3"; }\n'
+    )
+    worker = native / "keepalive.sh"
+    worker.write_text('#!/bin/sh\nexit "${STUB_RC:-0}"\n')
+    worker.chmod(0o755)
+    shutil.copy2(os.path.join(LIB_DIR, "keepalive-all.sh"), native / "keepalive-all.sh")
+    alerts = tmp_path / "alerts"
+    env = {**os.environ, "HOME": str(home), "CLAUDLOBBY_ROOT": str(root),
+           "ALERTS": str(alerts), "STUB_TMUX": str(int(manager_reached)),
+           "PLANE_EMIT_DISABLED": "1"}
+
+    def sweep(rc):
+        return subprocess.run(["/bin/bash", str(native / "keepalive-all.sh"), "fleet"],
+                              env={**env, "STUB_RC": str(rc)}, text=True, capture_output=True)
+
+    assert sweep(7).returncode == 1
+    assert "worker (exit 7)" in sweep(7).stderr
+    assert alerts.read_text().splitlines() == ["keepalive_failed"]
+    assert sweep(75).returncode == 0
+    assert alerts.read_text().splitlines() == ["keepalive_failed"]
+    assert sweep(0).returncode == 0
+    assert sweep(7).returncode == 1
+    assert alerts.read_text().splitlines() == ["keepalive_failed", "keepalive_failed"]

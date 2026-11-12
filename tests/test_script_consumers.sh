@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/test_script_consumers.sh — verify every lib/ script has a consumer reference
+# tests/test_script_consumers.sh — verify every claudlobby/_runtime_scripts/ script has a consumer reference
 #
-# Checks that each lib/*.sh is referenced in at least one of:
+# Checks that each claudlobby/_runtime_scripts/*.sh is referenced in at least one of:
 #   - CLAUDE.md (root)
 #   - library/protocols/*.md
 #   - documentation/**/*.md
@@ -28,11 +28,11 @@ is_allowlisted() {
 }
 
 echo "=== Script-consumer drift test ==="
-echo "Checking that every lib/*.sh has a documentation reference..."
+echo "Checking that every claudlobby/_runtime_scripts/*.sh has a documentation reference..."
 echo ""
 
 orphans=""
-for script in "$REPO_ROOT"/lib/*.sh; do
+for script in "$REPO_ROOT"/claudlobby/_runtime_scripts/*.sh; do
     [ -f "$script" ] || continue
     name=$(basename "$script")
 

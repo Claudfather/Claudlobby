@@ -1,0 +1,14 @@
+[
+  {
+    "id": 301,
+    "status": "ASSIGNED",
+    "validity": "unknown",
+    "severity": "high",
+    "occurrences_count": 3,
+    "secret_hash": "fixture-secret-hash-301",
+    "hmsl_hash": "fixture-hmsl-hash-301",
+    "gitguardian_url": "https://dashboard.gitguardian.com/workspace/1/incidents/301",
+    "detector": {"name": "generic_password", "display_name": "Generic Password"},
+    "occurrences": null
+  }
+]
