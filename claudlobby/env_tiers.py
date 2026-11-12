@@ -148,9 +148,21 @@ def read_tiers(
     redirect the answer.
     That has already happened here once, to a ledger assertion, and it read as
     a clean pass on every arm at once.
+
+    Every way the resolver can fail raises :class:`ResolverUnavailable` and
+    nothing else: it cannot be examined or started, it times out or exits
+    non-zero, its output is not valid text, or its rows do not parse. Callers
+    catch that type to treat the failure as unknown; a failure raised as
+    another type passes their catch.
     """
     script = resolver_path(paths)
-    if not script.is_file():
+    try:
+        present = script.is_file()
+    except OSError as exc:
+        # is_file() answers False for an absent path and raises for other OS
+        # errors, such as a directory that cannot be searched.
+        raise ResolverUnavailable(f"could not look for {script}: {exc}") from exc
+    if not present:
         raise ResolverUnavailable(
             f"env tier resolver not found at {script} — the compositor reads the "
             f"tier order from the runtime and will not substitute a copy of it"
@@ -176,7 +188,9 @@ def read_tiers(
             timeout=_RESOLVER_TIMEOUT_S,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # text=True decodes the output strictly, so output that is not valid
+        # text raises UnicodeDecodeError, a ValueError, from inside this call.
         raise ResolverUnavailable(f"could not run {script}: {exc}") from exc
     if proc.returncode != 0:
         raise ResolverUnavailable(
