@@ -27,7 +27,7 @@ from .runtime_versions import SQL_SCHEMA_VERSION
 from .supervision_inventory import _catalog
 from .update_services import (
     freeze_service_intent, consumer_scope, validate_candidate_consumers,
-    quiesce_consumer, observe_quiet, restore_consumer, native_state_matches,
+    quiesce_consumer, mark_session_gone, observe_quiet, restore_consumer, native_state_matches,
 )
 
 
@@ -329,7 +329,7 @@ def quiesce_operation(store, adapter):
         if progress.get("stop") == "done":
             continue
         if (row.get("kind") != "added" and row["bot_binding"] and row["disposition"] == "running"
-                and progress.get("stop") is None):
+                and progress.get("stop") is None and not mark_session_gone(store, key, adapter)):
             _checkpoint(store, key, adapter)
         quiesce_consumer(store, key, adapter)
     return store.load()
@@ -346,9 +346,10 @@ def assert_operation_quiet(store, adapter):
         if progress.get("stop") != "done":
             raise UpdateError("consumer stop has not completed")
         if row.get("kind") != "added" and row["bot_binding"] and row["disposition"] == "running":
-            if progress.get("checkpoint") is None:
+            if progress.get("checkpoint") is not None:
+                verify_checkpoint_after_stop(Path(row["bot_binding"][0]), progress["checkpoint"])
+            elif not progress.get("session_gone"):
                 raise UpdateError("running bot lacks its original checkpoint proof")
-            verify_checkpoint_after_stop(Path(row["bot_binding"][0]), progress["checkpoint"])
         observe_quiet(store, key, adapter)
     if record.get("initialize", False):
         _fresh_root(store)
