@@ -28,7 +28,7 @@ These are available to every bot on the system:
 | `/audit design` | Visual/UX audit of deployed apps |
 | `/audit frontend-perf` | Performance analysis |
 | `/product-vision` | Architecture-aware product roadmapping |
-| `/implement-plan` | Execute a written plan step-by-step |
+| `/build` | Execute a written plan step-by-step |
 | `/session handoff` | Capture context for session continuity |
 | `/session resume` | Restore context from a previous session |
 | `/investigate-app` | Debug production issues |
@@ -70,7 +70,7 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 
 | Skill | Purpose |
 |-------|---------|
-| `/dispatch` | Send tasks to fleet bots via tmux with structured tracking |
+| `/dispatch` | Admit, assign, and deliver tracked work through the public CLI; see `/fleet-ops` |
 | `/lifecycle` | Full pipeline: implement → review → iterate → merge → retro → issues |
 | `/fleet-status` | Health check across all bots (alive/dead, reported context-degraded state, idle/working) |
 | `/fleet-pulse` | Actionable fleet health — restart dead workers, flag stuck panes, protect WIP |
@@ -95,7 +95,7 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 
 Equip via `fleet.yaml` — never a hand-installed cron (see
 [`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsbotbriefing)). Each slot becomes a composed
-per-(bot,slot) timer whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>`,
+per-(bot,slot) timer whose `ExecStart` runs `claudlobby/_runtime_scripts/briefing-trigger.sh <fleet> <bot> <slot>`,
 delivering `/briefing <slot>` into the bot's own session:
 
 ```yaml
@@ -132,7 +132,7 @@ Focused executor. Takes tasks from the manager, works in worktrees, creates PRs.
 | `/restart` | Graceful self-restart |
 | `/eng-status` | Self-diagnostic (uptime, memory, session) |
 
-**Inherits from global:** `/review-work pr`, `/worktree`, `/commit-push-pr`, `/audit tech-debt`, `/audit security`, `/implement-plan`
+**Inherits from global:** `/review-work pr`, `/worktree`, `/commit-push-pr`, `/audit tech-debt`, `/audit security`, `/build`
 
 ### CLAUDE.md Essentials
 
@@ -142,9 +142,11 @@ Focused executor. Takes tasks from the manager, works in worktrees, creates PRs.
 - You don't initiate work — you execute what's assigned
 - Work in git worktrees for isolation
 - Always branch, always PR, never push to main
-- When done, report back via report-back.sh
-- If blocked, report back immediately. Don't spin.
+- Accept your current assignment through `claudlobby assignment accept` before working.
+- Report through `claudlobby assignment complete` or `assignment block`, using that assignment's ID and a retained request UUID; follow `/fleet-ops` for the required arguments.
 ```
+
+See [the CLI assignment and reporting examples](advanced-patterns.md#5-inter-bot-communication-and-reports).
 
 ### No Crons
 

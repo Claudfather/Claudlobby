@@ -24,13 +24,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import constructed_env, read_fleet_events
+from tests.test_plane_events_door import _serving
+
 REPO = Path(__file__).resolve().parent.parent
-GUARD = REPO / "lib" / "vault-git-guard.sh"
+GUARD = REPO / "claudlobby/_runtime_scripts" / "vault-git-guard.sh"
 
 
 def _decider():
     spec = importlib.util.spec_from_file_location(
-        "vault_git_decide", REPO / "lib" / "vault-git-decide.py")
+        "vault_git_decide", REPO / "claudlobby/_runtime_scripts" / "vault-git-decide.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -75,6 +78,19 @@ class TestTheHookEndToEnd:
         assert rc == 0
         assert _decision(out) == "deny"
         assert "claudron sync" in out and "projects/" in out
+
+    def test_symlinked_vault_configuration_keeps_the_scope_boundary(self, tree, tmp_path):
+        vault, proj = tree
+        alias = tmp_path / "vault-alias"
+        alias.symlink_to(vault, target_is_directory=True)
+        payload = {"tool_name": "Bash", "cwd": vault,
+                   "tool_input": {"command": "git checkout -b x"}}
+        rc, out = _run(payload, str(alias))
+        assert rc == 0 and _decision(out) == "deny"
+
+        payload["cwd"] = proj
+        rc, out = _run(payload, str(alias))
+        assert rc == 0 and _decision(out) is None
 
     def test_the_same_command_in_a_projects_checkout_is_allowed(self, tree):
         """The twin. A guard that denied this would break every bot's own work."""
@@ -133,6 +149,52 @@ class TestTheHookEndToEnd:
         _, out = _run({"tool_name": "Bash", "cwd": vault,
                        "tool_input": {"command": "ls -la"}}, vault)
         assert _decision(out) is None
+
+
+# --- the decision is recorded as data ---------------------------------------
+
+class TestTheDecisionIsRecordedAsData:
+    """A denial the plane can be asked about (#1909). The event door is
+    `<type> <source> <data_json>`, and the guard handed it the detail as the
+    SOURCE, so every row read `source: "checkout"` with `data: {}`: a reader
+    filtering by script found none of them, and the verb the guard exists to
+    count sat in a field no reader treats as data.
+
+    Read back from the plane the real door writes, under a throwaway root. The
+    detail carries a double quote, so a JSON string built by hand breaks here
+    where jq's does not.
+    """
+
+    def test_the_source_is_the_script_and_the_detail_is_data(
+        self, tree, tmp_path, scratch_plane_env
+    ):
+        vault, _ = tree
+        root = tmp_path / "root"
+        bot = root / "runtime" / "bots" / "tbot"
+        bot.mkdir(parents=True)
+        env = constructed_env(
+            HOME=tmp_path / "home",
+            FLEET_NAME="testfleet",
+            BOT_ID="tbot",
+            BOT_DIR=bot,
+            CLAUDRON_VAULT_PATH=vault,
+            **scratch_plane_env(root, initialize=True),
+        )
+        cmd = "git '--some\"flag' checkout main"
+        verdict, detail = D.decide(cmd, vault, vault)
+        assert (verdict, '"' in detail) == ("deny", True), detail
+        with _serving(root, scratch_plane_env) as socket:
+            p = subprocess.run(["bash", str(GUARD)],
+                               env={**env, "PLANE_SOCKET": str(socket)},
+                               capture_output=True, text=True, timeout=300,
+                               input=json.dumps({"tool_name": "Bash", "cwd": vault,
+                                                 "tool_input": {"command": cmd}}))
+        assert _decision(p.stdout) == "deny", p.stderr
+        rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
+        denied = [r for r in rows if r["type"] == "vault_guard_denied"]
+        assert len(denied) == 1, (rows, p.stderr)
+        assert denied[0]["source"] == "vault-git-guard", denied[0]
+        assert denied[0]["data"] == {"detail": detail}, denied[0]
 
 
 # --- the decision rule, unit level ------------------------------------------
@@ -772,7 +834,7 @@ class TestShellCompositionSpellings:
 class TestTheComposedFormsAreATripwireBeforeTheContinuationFix:
     """#1759 review: pinned BEFORE the continuation fix touches anything.
 
-    Measured tonight (lib/vault-git-base-rate.py): command substitution,
+    Measured tonight (harness/vault-git-base-rate.py): command substitution,
     xargs and a pipeline all leave `git` as a bare token, so the guard SEES
     them -- it is stronger than #1725 credited. A continuation fix that
     changes tokenisation could silently lose these. This class is the

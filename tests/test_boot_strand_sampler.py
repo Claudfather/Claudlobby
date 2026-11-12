@@ -1,4 +1,4 @@
-"""#843 boot-strand sampler — pytest wrapper for lib/boot-strand-sampler.sh.
+"""#843 boot-strand sampler — pytest wrapper for harness/boot-strand-sampler.sh.
 
 Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
@@ -23,9 +23,12 @@ Two tiers, mirroring tests/test_freshbox_boot_harness.py:
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -35,13 +38,14 @@ from tests.conftest import (
     constructed_env,
     load_lib_module,
     realboot_skip_reason,
+    REALBOOT_HOST_CREDS,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAMPLER = REPO_ROOT / "lib" / "boot-strand-sampler.sh"
+SAMPLER = REPO_ROOT / "harness" / "boot-strand-sampler.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "pane-states"
 
-summary = load_lib_module("boot-strand-summary")
+summary = load_lib_module("boot-strand-summary", directory="harness")
 
 # A stranded STARTUP_PROMPT payload, passed in FULL exactly as pane_send_verified
 # now passes it (#1082). It used to be truncated to 60 chars here, mirroring the
@@ -194,9 +198,29 @@ class TestSummarize:
 _skip = realboot_skip_reason("BOOT_SAMPLER_REALBOOT", extra_bins=("tmux",))
 
 
+@pytest.mark.parametrize("entrypoint", [
+    "test_real_boot_smoke_one_boot",
+    "test_strand_under_load_is_never_reported_as_a_clean_send",
+])
+def test_realboot_wrapper_keeps_checked_auth_path_with_private_home(monkeypatch, tmp_path, entrypoint):
+    class Captured(Exception):
+        pass
+
+    def capture(_argv, **kwargs):
+        assert kwargs["env"]["HOME"] == str(tmp_path)
+        assert kwargs["env"]["CLAUDLOBBY_REALBOOT_HOST_CREDS"] == str(REALBOOT_HOST_CREDS)
+        raise Captured
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", capture)
+    with pytest.raises(Captured):
+        globals()[entrypoint]()
+
+
 @pytest.mark.skipif(bool(_skip), reason=_skip)
 def test_real_boot_smoke_one_boot():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     result = subprocess.run(
         ["bash", str(SAMPLER), "-n", "1", "--deadline", "90"],
         capture_output=True,
@@ -241,7 +265,8 @@ _load_skip = _skip or (
 
 @pytest.mark.skipif(bool(_load_skip), reason=_load_skip)
 def test_strand_under_load_is_never_reported_as_a_clean_send():
-    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT),
+           "CLAUDLOBBY_REALBOOT_HOST_CREDS": str(REALBOOT_HOST_CREDS)}
     burners = os.environ.get("BOOT_SAMPLER_LOAD_BURNERS", "20")
     result = subprocess.run(
         [
@@ -367,9 +392,9 @@ class TestKnobDisclosure:
         assert "forwarded" in out
 
     def test_set_ready_discloses_inert(self):
-        # start-bot.sh arms PANE_READY_TICKS itself at both injection call
-        # sites, so a forwarded override cannot reach the measured path; the
-        # disclosure must say so rather than let a ladder read as if it varied
+        # start-bot.sh passes its own PANE_READY_TICKS budget through the
+        # canonical injection owner, so a forwarded override cannot reach the
+        # measured path. Disclosure must say so rather than imply it varied
         # something.
         out = self._disclosure({"PANE_READY_TICKS": "200"})
         assert "PANE_READY_TICKS=200" in out
@@ -411,7 +436,7 @@ class TestKnobDisclosure:
         # knob be scrubbed silently. The regex reads `${PANE_X...}` expansion
         # reads — a bare `$PANE_X` read would escape it, which is accepted as
         # the floor (lib-common uses braced reads for every current knob).
-        lib_common = (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+        lib_common = (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
         actual = set(re.findall(r"\$\{(PANE_[A-Z0-9_]+)", lib_common))
         declared = set(
             call_script_fn(
@@ -422,21 +447,42 @@ class TestKnobDisclosure:
         )
         assert declared == actual
 
-    def test_inert_label_matches_start_bot_arming(self):
-        # The disclosure calls a forwarded PANE_READY_TICKS INERT because
-        # start-bot.sh prefix-arms its own value at both pane_send_verified
-        # call sites. If this pin fails, start-bot now honors an inherited
-        # value — update knob_disclosure's INERT branch (and this pin), or the
-        # disclosure starts lying in the safe-but-wrong direction.
-        start_bot = (REPO_ROOT / "lib" / "start-bot.sh").read_text(encoding="utf-8")
-        arming = re.findall(
-            r'PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"\s*\\\s*\n\s*pane_send_verified',
-            start_bot,
+    @pytest.mark.parametrize("mode", ["fresh", "resume"])
+    def test_inert_label_matches_start_bot_arming(self, tmp_path, mode):
+        # Fresh native sessions arm the authored startup send; continuation
+        # restores the exact transcript without another model turn. Neither
+        # branch may change the inherited boot-budget knob.
+        start_bot = (REPO_ROOT / "claudlobby/_runtime_scripts/start-bot.sh").read_text()
+        marker = "# Native continuation already restores"
+        injection = marker + start_bot.split(marker, 1)[1].split("# Mark bot as idle", 1)[0]
+        capture, inherited = tmp_path / "sends", tmp_path / "inherited"
+        bot = tmp_path / "bot"
+        bot.mkdir()
+        capture.write_text("")
+        script = '''
+. "$1"
+_PANE_READY_TICKS_BOOT=37
+_native_mode="$MODE"
+pane_send_verified() { printf '%s\\t%s\\n' "$PANE_READY_TICKS" "$3" >> "$SEND_CAPTURE"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { :; }
+''' + injection + '\nprintf "%s" "$PANE_READY_TICKS" > "$INHERITED_CAPTURE"\n'
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "_", str(REPO_ROOT / "claudlobby/_runtime_scripts/lib-common.sh")],
+            capture_output=True, text=True, timeout=15,
+            env=constructed_env(MODE=mode, BOT_DIR=bot, LOG=tmp_path / "startup.log",
+                                TMUX_SOCKET="private", TMUX_SESSION="worker",
+                                SESSION_RESUME_COMMAND="/provider:restore --auto",
+                                STARTUP_PROMPT="Authored startup",
+                                PANE_READY_TICKS="200", SEND_CAPTURE=capture, INHERITED_CAPTURE=inherited),
         )
-        assert len(arming) == 2, (
-            "start-bot.sh no longer arms PANE_READY_TICKS unconditionally at "
-            "exactly its two injection sites; re-derive the INERT disclosure."
-        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        payloads = ["set +H; Authored startup"] if mode == "fresh" else []
+        if mode == "resume":
+            assert "NATIVE RESUME" in (tmp_path / "startup.log").read_text()
+        assert capture.read_text().splitlines() == ["37\t" + payload for payload in payloads]
+        assert inherited.read_text() == "200"
 
 
 # ── #843 arm identity: the row must evidence its own IV ───────────────────────
@@ -457,7 +503,7 @@ def _arm_record(**overrides) -> dict:
 
 
 def _lib_common() -> str:
-    return (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+    return (REPO_ROOT / "claudlobby/_runtime_scripts" / "lib-common.sh").read_text(encoding="utf-8")
 
 
 def _lib_common_constants() -> dict[str, str]:
@@ -1230,7 +1276,7 @@ class TestSummaryExitPropagation:
     def _run(tmp_path: Path, exit_code: int) -> subprocess.CompletedProcess:
         """Drive emit_summary against a stub summarizer that exits `exit_code`.
 
-        LIB_DIR is overridden AFTER sourcing so the real python3 still runs the
+        HARNESS_DIR is overridden AFTER sourcing so the real python3 still runs the
         stub — the exit path under test is the shell's, not python's.
         """
         (tmp_path / "boot-strand-summary.py").write_text(
@@ -1243,7 +1289,7 @@ class TestSummaryExitPropagation:
             [
                 "bash",
                 "-c",
-                f'. "{SAMPLER}"; LIB_DIR="{tmp_path}"; emit_summary "$1"',
+                f'. "{SAMPLER}"; HARNESS_DIR="{tmp_path}"; emit_summary "$1"',
                 "_",
                 str(rows),
             ],
@@ -1376,7 +1422,7 @@ class TestCountSendRetriesReadsThePlane:
         bot_dir.mkdir(parents=True)
         (bot_dir / "bot.conf").write_text(f'BOT_ID="{bot}"\nFLEET_NAME="{fleet}"\n')
         if not (root / "lib").exists():
-            (root / "lib").symlink_to(REPO_ROOT / "lib")
+            (root / "lib").symlink_to(REPO_ROOT / "claudlobby/_runtime_scripts")
         return bot_dir
 
     @staticmethod
@@ -1390,6 +1436,7 @@ class TestCountSendRetriesReadsThePlane:
                    "payload": {"event": etype, "subject_kind": "actor", "subject": f"bot:{fleet}/{bot}",
                                "data": {"source": "start-bot", "legacy_ts": f"2026-08-06T12:4{i}:00Z",
                                         "data": {"attempt": i}}}} for i in range(n)]
+        initialize_plane(root)
         out = emit_batch(root, events)
         assert all(o.status == "committed" for o in out), out
 
@@ -1429,7 +1476,7 @@ class TestSummaryDisclosesUnknownRetries:
         rows[3]["retry_fired"] = 2
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "lib" / "boot-strand-summary.py")
+        spec = importlib.util.spec_from_file_location("bss_summary", REPO_ROOT / "harness" / "boot-strand-summary.py")
         summary_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(summary_mod)
         lines, _machine, _k, _valid = summary_mod.arm_block(rows, None)
@@ -1437,3 +1484,206 @@ class TestSummaryDisclosesUnknownRetries:
         assert "send_retry UNKNOWN on 1 boot(s)" in text
         assert "clean via #837 send_retry: 1 boot(s)" in text
         assert "retry_fired == 0: 0/1" in text or "retry_fired == 0: " in text
+
+
+def _sampler_rc(fn: str, *args: str) -> int:
+    """The exit status of one sampler function. call_script_fn asserts rc 0,
+    and these are predicates, so their status is the answer."""
+    r = subprocess.run(
+        ["bash", "-c", f'. "{SAMPLER}"; {fn} "$@"', "_", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return r.returncode
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the evidence checks require jq")
+class TestResumeBootEvidence:
+    """--resume: what counts as the startup prompt reaching the model, what is
+    only queued, and a boot that never took the resume path."""
+
+    MARKER = "BSPROBE_843"
+
+    def _transcript(self, tmp_path, *records):
+        cfg = tmp_path / "cfg"
+        project = cfg / "projects" / "p"
+        project.mkdir(parents=True)
+        newer = tmp_path / ".boot-marker"
+        newer.write_text("")
+        os.utime(newer, (1_000_000_000, 1_000_000_000))
+        (project / "s.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+        )
+        return str(cfg), str(newer)
+
+    def _enqueue(self):
+        return {"type": "queue-operation", "operation": "enqueue",
+                "content": f"Boot probe {self.MARKER}: reply"}
+
+    def test_typed_user_record_is_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_queued_command_attachment_is_submitted(self, tmp_path):
+        # The record shape of claude 2.1.285: a prompt typed mid-turn reaches
+        # the running turn as this attachment, with no user record.
+        cfg, newer = self._transcript(tmp_path, self._enqueue(), {
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "commandMode": "prompt",
+                           "prompt": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_enqueue_alone_is_queued_not_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, self._enqueue())
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+        assert _sampler_rc("queued_evidence", cfg, newer, self.MARKER) == 0
+
+    def test_typed_prompt_is_not_read_as_queued(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": f"Boot probe {self.MARKER}: reply"},
+        })
+        assert _sampler_rc("queued_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_tool_result_carrying_the_marker_is_not_submitted(self, tmp_path):
+        # A resume turn runs tools, and their output is recorded as a user
+        # record: it must never read as the prompt arriving.
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": f"output that mentions {self.MARKER}"},
+            ]},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_assistant_echo_is_not_submitted(self, tmp_path):
+        cfg, newer = self._transcript(tmp_path, {
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": self.MARKER}]},
+        })
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 1
+
+    def test_a_record_of_unexpected_shape_does_not_end_the_scan(self, tmp_path):
+        # Indexing a string attachment raises in jq, which reports that record
+        # and goes on: the submission after it must still be found.
+        cfg, newer = self._transcript(
+            tmp_path,
+            {"type": "attachment", "attachment": f"not an object {self.MARKER}"},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": f"Boot probe {self.MARKER}: reply"}]}},
+        )
+        assert _sampler_rc("submitted_evidence", cfg, newer, self.MARKER) == 0
+
+    # The handoff-age gate test was retired with skill-based automatic resume.
+    # Native continuation does not consult a seeded Markdown handoff.
+
+    def test_resume_injected_reads_only_this_boots_part_of_the_log(self, tmp_path):
+        line = ("RESUME — injecting resume command [available]: "
+                "/claudna:session resume --auto\n")
+        log = tmp_path / "startup.log"
+        log.write_text("2026-10-02T00:00:00Z " + line, encoding="utf-8")
+        offset = str(log.stat().st_size)
+        assert _sampler_rc("resume_injected", str(log), offset) == 1
+        with log.open("a", encoding="utf-8") as f:
+            f.write("2026-10-02T00:05:00Z " + line)
+        assert _sampler_rc("resume_injected", str(log), offset) == 0
+        assert _sampler_rc("resume_injected", str(tmp_path / "absent.log"), "0") == 1
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the plugin copy and fingerprint require jq")
+class TestMinimalPluginCopy:
+    """--minimal-plugins: the probe gets only what it loads from the host cache,
+    and its first boot's fingerprint shows what that was."""
+
+    def _host(self, tmp_path):
+        host = tmp_path / "host-plugins"
+        for rel, text in {
+            "cache/m/a/1.0/skills/x/SKILL.md": "enabled, installed version",
+            "cache/m/a/0.9/old.txt": "enabled plugin, older version",
+            "cache/m/b/2.0/b.txt": "installed, not enabled",
+            "marketplaces/m/.claude-plugin/marketplace.json": "{}",
+            "known_marketplaces.json": "{}",
+            "blocklist.json": "{}",
+        }.items():
+            (host / rel).parent.mkdir(parents=True, exist_ok=True)
+            (host / rel).write_text(text, encoding="utf-8")
+        (host / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+            "a@m": [{"scope": "user", "installPath": str(host / "cache/m/a/1.0")}],
+            "b@m": [{"scope": "user", "installPath": str(host / "cache/m/b/2.0")}],
+        }}), encoding="utf-8")
+        return host
+
+    def _settings(self, tmp_path, enabled):
+        settings = tmp_path / "settings.local.json"
+        settings.write_text(json.dumps({"enabledPlugins": enabled}), encoding="utf-8")
+        return settings
+
+    def test_copies_the_enabled_plugins_and_skips_the_rest(self, tmp_path):
+        host = self._host(tmp_path)
+        dst = tmp_path / "probe-plugins"
+        settings = self._settings(tmp_path, {"a@m": True, "b@m": False})
+        call_script_fn(SAMPLER, "copy_minimal_plugins", str(host), str(dst), str(settings))
+        assert (dst / "cache/m/a/1.0/skills/x/SKILL.md").is_file()
+        assert not (dst / "cache/m/a/0.9").exists()
+        assert not (dst / "cache/m/b").exists()
+        for kept in ("installed_plugins.json", "known_marketplaces.json", "blocklist.json",
+                     "marketplaces/m/.claude-plugin/marketplace.json"):
+            assert (dst / kept).is_file(), kept
+
+    def test_an_enabled_plugin_with_no_install_is_named_not_copied(self, tmp_path):
+        host = self._host(tmp_path)
+        dst = tmp_path / "probe-plugins"
+        settings = self._settings(tmp_path, {"a@m": True, "c@m": True})
+        out = call_script_fn(SAMPLER, "copy_minimal_plugins", str(host), str(dst), str(settings))
+        assert "c@m not copied" in out
+        assert (dst / "cache/m/a/1.0/skills/x/SKILL.md").is_file()
+
+    def test_fingerprint_keeps_initial_skills_session_hooks_and_mcp(self, tmp_path):
+        cfg = tmp_path / "cfg"
+        project = cfg / "projects" / "p"
+        project.mkdir(parents=True)
+        newer = tmp_path / ".boot-marker"
+        newer.write_text("")
+        os.utime(newer, (1_000_000_000, 1_000_000_000))
+        records = [
+            {"type": "attachment", "attachment": {"type": "skill_listing", "isInitial": True,
+                                                  "names": ["b-skill", "a-skill"]}},
+            {"type": "attachment", "attachment": {"type": "skill_listing", "isInitial": False,
+                                                  "names": ["later-skill"]}},
+            {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "SessionStart",
+                                                  "hookName": "SessionStart:startup",
+                                                  "command": "${CLAUDE_PLUGIN_ROOT}/hooks/start.sh"}},
+            {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "PreToolUse",
+                                                  "hookName": "PreToolUse:Bash", "command": "guard.sh"}},
+            {"type": "attachment", "attachment": {"type": "mcp_instructions_delta",
+                                                  "addedNames": ["srv"], "removedNames": []}},
+        ]
+        (project / "s.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records),
+                                         encoding="utf-8")
+        out = call_script_fn(SAMPLER, "boot_fingerprint", str(cfg), str(newer))
+        assert out.splitlines() == [
+            "hook hook_success SessionStart:startup ${CLAUDE_PLUGIN_ROOT}/hooks/start.sh",
+            "mcp srv",
+            "skill a-skill",
+            "skill b-skill",
+        ]
+
+    def test_tree_digest_is_equal_for_equal_trees_and_moves_with_one_byte(self, tmp_path):
+        def tree(d, text):
+            (d / "x" / "y").mkdir(parents=True)
+            (d / "x" / "y" / "f.txt").write_text(text, encoding="utf-8")
+            (d / "g.txt").write_text("g", encoding="utf-8")
+            return str(d)
+
+        a = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "a", "same")).strip()
+        b = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "b", "same")).strip()
+        c = call_script_fn(SAMPLER, "tree_digest", tree(tmp_path / "c", "Same")).strip()
+        assert a and a == b
+        assert a != c

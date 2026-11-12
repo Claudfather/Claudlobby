@@ -121,7 +121,7 @@ def test_context_management_still_carries_a_restart_duty():
     """
     text = (LIBRARY / "protocols" / "context-management.md").read_text()
     assert "context-degraded" in text, "no greppable signal for the manager to route on"
-    assert re.search(r"report-back", text), "no duty to raise it"
+    assert "assignment progress ASSIGNMENT_ID" in text, "no linked progress report duty"
     assert re.search(r"symptom", text, re.I), "no observable trigger named"
     assert re.search(r"re-read|look up the same", text, re.I), "symptoms not concrete"
 

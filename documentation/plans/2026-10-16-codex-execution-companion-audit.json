@@ -1,0 +1,127 @@
+{
+  "kind": "sanitized-planning-document-receipt",
+  "document_label": "2149-codex-execution-companion-plan",
+  "document_sha256": "0cfc1a07e5dfd2f60a27a03491210ede613304b46e4a32bd6d5fa4ba126b36e2",
+  "inventory_source": "94088c2bdf61c9daa72561e3d34ef6a28383068a",
+  "inventory_tree": "588f69d933634641a93efa9029a851ce1d0b3019",
+  "source_manifest_label": "2149-frozen-source-manifest",
+  "source_manifest_sha256": "f273b2315b5f33dbf924a0d232c9f95fc1c8e26f39a0cd9ce06189f4c3c8dcfd",
+  "selected_source_files": 170,
+  "targeted_core_files": 32,
+  "evidence": [
+    {
+      "label": "issue2149-current",
+      "sha256": "e08746b6fa95f5c0134d3542eb3a14f11976b771143ba59b2ef564bcb31e2b61"
+    },
+    {
+      "label": "epic-current-private-snapshot",
+      "sha256": "aaf566b5346555f6f2dc912dfb3e6f5fea207bd4fe466fbdf67027a1ca70eb85"
+    },
+    {
+      "label": "halfB-saved-status",
+      "sha256": "a6d07e97c45f1caac0b56d92f093b06b89e3b36a7759e6c0ff2c948bbbb9dab4"
+    },
+    {
+      "label": "P0-final-report",
+      "sha256": "4d13c914c1227807d736293573b24e10ac9f055a504f298c6955288369bc9cb7"
+    },
+    {
+      "label": "P0-exec-help",
+      "sha256": "df0d864ca2076f7654288c6a1e3394e3eaa2ea8f15021df2524efdd90c70986c"
+    },
+    {
+      "label": "P0-version",
+      "sha256": "7747b1c26798719d98cac787dfc2c425f845f347a443492894a0d739fae8ca0d"
+    },
+    {
+      "label": "P0-interactive-launch",
+      "sha256": "da46813379465985d88ecaff542d7ba0a210b130fc10efd39cf0b0b34a98af87"
+    },
+    {
+      "label": "P0-c5-config",
+      "sha256": "ebd3dfbc83d04bfd9e8967ff6ae3b6013608259a9df1b258d85efb1687faf84e"
+    },
+    {
+      "label": "P0-launch-source",
+      "sha256": "5546ec8bdb62dd6ef802d6d9749000ae5a279758b48da63df90bbc42c05f108b"
+    },
+    {
+      "label": "P0-harness-source",
+      "sha256": "d84982af190ce84292456744a678cb0d007671500d1fccd03bb291c0008afbec"
+    },
+    {
+      "label": "halfb-native-literal-clear-report",
+      "sha256": "9496ce862e76b5197a7a362343b2c90bff191a73c66162c07545afaf9f445891"
+    },
+    {
+      "label": "halfb-native-literal-clear-result",
+      "sha256": "7b1cd34e236e763dba2010be609eef9e913e40923eff957b6d604242ca870c6a"
+    },
+    {
+      "label": "halfb-native-literal-clear-pr-summary",
+      "sha256": "6b3bac4f5892ddfc4859972d7a74c9a0e83dcd50f73aa1da8ef9bb6feaf12d5e"
+    }
+  ],
+  "supplied_prerequisites": {
+    "claudron": "v0.10.0 published per parent",
+    "claudna": "v0.30.0 published at 4e4a5401116a7407b12f80c90a4437546cca4f56; actual public marketplace installation verified; #404 stays open for mixed week",
+    "lobby": "94088c2 P4 merged per parent",
+    "halfB": "draft/unmerged; literal native Claude clear passed with accepted bounded fixed-localhost proof. Remaining blockers: real selected-release service/supervision and complete48h BEFORE plus48h AFTER observations, then accepted merge."
+  },
+  "planning_only": true,
+  "public_writes": 0,
+  "independent_review": "Original planning review and final complete five-path document review NO FINDINGS; actual release/native/registry, failed-profile and cleanup evidence independently reviewed on 2026-10-19.",
+  "regenerate_after": "any document promotion/sanitization/edit",
+  "revision": "released-behavior-and-failed-profile-prerequisite",
+  "accepted_literal_claude_clear": {
+    "passed": true,
+    "source_head": "5f9798810034209a21c6f84ffebd857184bf34e6",
+    "native_cli_version": "Claude Code 2.1.301",
+    "claudna_version": "0.28.1",
+    "claudron_version": "0.9.0",
+    "provider": "fixed localhost fake provider; no real Claude inference",
+    "proof_labels_and_sha256": {
+      "halfb-native-literal-clear-report": "9496ce862e76b5197a7a362343b2c90bff191a73c66162c07545afaf9f445891",
+      "halfb-native-literal-clear-result": "7b1cd34e236e763dba2010be609eef9e913e40923eff957b6d604242ca870c6a",
+      "halfb-native-literal-clear-pr-summary": "6b3bac4f5892ddfc4859972d7a74c9a0e83dcd50f73aa1da8ef9bb6feaf12d5e"
+    },
+    "limit": "Native Claude CLI/receipt protocol only; no real service/supervision or elapsed-window proof; no Codex clear support established."
+  },
+  "promotion": "Original planning document promoted with actual published behavior-release and independently reviewed failed-profile prerequisite updates; original inventory/source-start dependencies preserved. Final complete document review NO FINDINGS.",
+  "original_planning_audit_runtime_tests_or_probes": 0,
+  "native_profile_prerequisite": {
+    "verdict": "tested immutable carrier disproven; positive settings delivery unproven",
+    "reviewed_utc_date": "2026-10-19",
+    "evidence_members_verified": 52,
+    "strict_negative_exit": 1,
+    "anonymous_retry_exit_after_ctrl_c": 0,
+    "native_positive_exit": 1,
+    "positive_failure": "workspace routing discovery during TUI bootstrap; zero prompt inputs",
+    "tested_profile_before": {
+      "mode": "0400",
+      "sha256": "b0b01e4ba06ca955e53b0d8617486981b0e61cd58acaafdeaa5e121522a2a769"
+    },
+    "tested_profile_after": {
+      "mode": "0600",
+      "sha256": "0a5c587d51da06ce5573ef2f3fd29d1320a234cc029e6245f7cd970e610f36c5"
+    },
+    "mutation_arm_isolated": false,
+    "final_originals_and_binary_readback": "unperformed",
+    "private_auth_copy_cleanup": "removed; source credentials not published",
+    "replacement_carrier": "none selected or proven",
+    "proofs": [
+      {
+        "label": "profile-strict-negative-stderr",
+        "sha256": "6a148a5aade3947ad762d36711afa72befd16017d8a8c91fc8dd176ced43c746"
+      },
+      {
+        "label": "profile-positive-stderr",
+        "sha256": "cdcd82bba78f9e2a904b4a12ea0bb716975d640e331ba714850d40fc54237a24"
+      },
+      {
+        "label": "profile-auth-copy-cleanup",
+        "sha256": "cba5b27a7846564a7b23fe35da5730735fb00680983eb35206892aea09210f32"
+      }
+    ]
+  }
+}

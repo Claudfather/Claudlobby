@@ -12,6 +12,9 @@ idle state, never a blank {}.
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
+from tests.package_fixtures import source_package
 from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
@@ -86,6 +89,7 @@ def _done(scan="s1", complete=True):
 
 
 def _seed(root):
+    initialize_plane(root)
     emit_batch(root, [
         _bot(f"bot:{FLEET}/erlich", skills=("dispatch", "pulse"),
              mcp=("github",), guardrails=("no-push-main",),
@@ -181,7 +185,7 @@ def test_inventory_and_equipment_endpoints(tmp_path):
 
     root = _root(tmp_path)
     _seed(root)
-    client = TestClient(create_app(root))
+    client = TestClient(create_app(root, package=source_package()))
     inv = client.get("/api/inventory", params={"fleet": FLEET}).json()
     assert inv["state"] == "ok"
     assert inv["data"]["counts"]["bots"] == 2
@@ -193,7 +197,8 @@ def test_inventory_and_equipment_endpoints(tmp_path):
     miss = client.get("/api/equipment",
                       params={"alias": f"bot:{FLEET}/nobody"}).json()
     assert miss["state"] == "idle"
-    assert "generate" in miss["remediation"]
+    assert "config plan --release" in miss["remediation"]
+    assert "host activate <plan-id> --install-directory" in miss["remediation"]
     assert "data" not in miss
 
 
@@ -203,7 +208,7 @@ def test_absent_db_is_typed_never_zero(tmp_path):
 
     root = tmp_path / "empty-root"
     root.mkdir()
-    body = TestClient(create_app(root)).get("/api/inventory").json()
+    body = TestClient(create_app(root, package=source_package())).get("/api/inventory").json()
     assert body["state"] == "absent"
     assert "data" not in body
 

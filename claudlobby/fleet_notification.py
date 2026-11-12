@@ -1,0 +1,116 @@
+"""One selected-fleet notification operation and its recording policy."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import os
+from pathlib import Path
+import re
+from uuid import uuid4
+
+from .context import resolve_paths, native_environment
+from .env_tiers import resolve as resolve_tiers
+from .message_context import _transport
+from .operation_context import resolve_operation_scope
+from .plane.emit_api import emit_batch
+from .plane.fleet_events import fleet_event_request
+from .plane.ids import mint_event_id
+from .recording_alerts import (_TIER_KEYS, ChannelOutcome, RecordingAlertOutcome,
+                               send_fleet_notification)
+from .runtime_admission import RuntimeIdentity, mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
+
+
+class FleetNotificationError(ValueError):
+    pass
+
+
+class FleetNotificationInputError(FleetNotificationError):
+    pass
+
+
+@dataclass(frozen=True)
+class FleetNotificationResult:
+    fleet: str
+    release_id: str | None
+    event_id: str
+    request_id: str
+    level: str
+    event: str
+    recording: str
+    manager: ChannelOutcome
+    telegram: ChannelOutcome
+    source_revision: str | None = None
+    config_fingerprint: str | None = None
+
+    def data(self) -> dict:
+        result = asdict(self)
+        if self.source_revision is None:
+            result.pop("source_revision")
+            result.pop("config_fingerprint")
+        result["notification"] = ("submitted" if self.manager.status == "submitted"
+                                  or self.telegram.status == "carrier_accepted" else
+                                  "suppressed" if "suppressed" in (self.manager.status,
+                                                                     self.telegram.status) else "failed")
+        return result
+
+
+def notify_fleet(*, root: Path | None, fleet: str | None, level: str,
+                 event: str, message: str, identity: RuntimeIdentity | None = None,
+                 emit=emit_batch, send=send_fleet_notification) -> FleetNotificationResult:
+    if level not in {"alert", "notice"}:
+        raise FleetNotificationInputError("--level must be alert or notice")
+    if not isinstance(event, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event):
+        raise FleetNotificationInputError("--event must be a literal lower-case identifier")
+    if (not isinstance(message, str) or not message.strip() or not message.isprintable()
+            or len(message.encode("utf-8")) > 2000):
+        raise FleetNotificationInputError("--message must be printable text of at most 2000 UTF-8 bytes")
+    selected_root = resolve_paths(root=root).root
+    bound_release = os.environ.get("CLAUDLOBBY_RELEASE_ID")
+    with mutation_admission(selected_root, identity=identity or RuntimeIdentity.current(),
+                            expected_release=bound_release) as release:
+        selected, origin = resolve_operation_scope(root=selected_root, fleet=fleet)
+        if origin is not None and (origin.fleet.name != selected.fleet.name
+                                   or origin.bot_id != selected.fleet.manager):
+            raise FleetNotificationError("only the selected fleet manager may notify its fleet")
+        bound_runtime_release(selected.paths.package, generated=origin is not None)
+        native_environment(selected.paths, current=release)
+        destination = _transport(selected, selected.fleet.manager)
+        try:
+            tiers = resolve_tiers(selected.paths, bot_name=selected.fleet.manager,
+                                  fleet_name=selected.fleet.name)
+            trusted = {key: tiers[key].value for key in _TIER_KEYS if key in tiers}
+            tiers_available = True
+        except (OSError, ValueError, RuntimeError):
+            trusted = {}
+            tiers_available = False
+        event_id = mint_event_id()
+        request_id = str(uuid4())
+        at = datetime.now(timezone.utc)
+        raw = fleet_event_request(
+            "fleet_alert" if level == "alert" else "fleet_notice",
+            fleet=selected.fleet.name, subject_kind="fleet", subject=selected.fleet.name,
+            source="fleet-notify",
+            data={"event": event, "message": message, "request_id": request_id, "at": at.isoformat()},
+            occurred_at=at.isoformat(), legacy_ts=at.isoformat(), event_id=event_id, key=request_id)
+        try:
+            recorded = emit(selected.paths.root, [raw], require_commit=True)[0]
+            recording = "committed" if recorded.status in {"committed", "duplicate"} else "unknown"
+        except Exception:
+            # O1: a recording outage cannot block an independently configured alert.
+            recording = "unknown"
+        text = f"FLEET {level.upper()} [{event}]: {message}"
+        try:
+            channels = send(selected, selected.paths.package, destination,
+                            message=text, event=event, request_id=request_id,
+                            at=at, trusted_tiers=trusted)
+        except Exception:
+            channels = RecordingAlertOutcome(ChannelOutcome("failed", None, "adapter_error"),
+                                             ChannelOutcome("failed", None, "adapter_error"))
+        if not tiers_available and channels.telegram.status == "unconfigured":
+            channels = RecordingAlertOutcome(channels.manager,
+                                             ChannelOutcome("failed", None, "tier_unavailable"))
+        return FleetNotificationResult(selected.fleet.name, runtime_release_id(release), event_id,
+                                       request_id,
+                                       level, event, recording,
+                                       channels.manager, channels.telegram, **runtime_provenance(release))

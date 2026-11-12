@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import yaml
+
 from claudlobby.newguardrail import render_guardrail, interactive_collect
 
 
@@ -10,7 +12,7 @@ class TestRenderGuardrail:
         content = render_guardrail(
             "no-yolo", "No YOLO deploys", "Never deploy untested code"
         )
-        assert "title: No YOLO deploys" in content
+        assert yaml.safe_load(content.split("---", 2)[1])["title"] == "No YOLO deploys"
         assert 'description: "Never deploy untested code"' in content
         assert "# No YOLO deploys" in content
 
@@ -50,7 +52,7 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "no-yolo",
                 "--title",
@@ -63,7 +65,7 @@ class TestCmdNewGuardrail:
         guardrail = tmp_path / "library" / "guardrails" / "no-yolo.md"
         assert guardrail.is_file()
         content = guardrail.read_text()
-        assert "title: No YOLO deploys" in content
+        assert yaml.safe_load(content.split("---", 2)[1])["title"] == "No YOLO deploys"
         assert "Never deploy untested" in content
 
     def test_rejects_duplicate(self, tmp_path):
@@ -76,14 +78,14 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "existing",
                 "--description",
                 "Already there",
             ]
         )
-        assert rc == 1
+        assert rc == 4
 
     def test_auto_generates_title(self, tmp_path):
         from claudlobby.__main__ import main
@@ -94,7 +96,7 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "no-force-push",
                 "--description",
@@ -103,7 +105,7 @@ class TestCmdNewGuardrail:
         )
         assert rc == 0
         content = (tmp_path / "library" / "guardrails" / "no-force-push.md").read_text()
-        assert "title: No Force Push" in content
+        assert yaml.safe_load(content.split("---", 2)[1])["title"] == "No Force Push"
 
     def test_rejects_invalid_name(self, tmp_path):
         from claudlobby.__main__ import main
@@ -114,11 +116,11 @@ class TestCmdNewGuardrail:
             [
                 "--root",
                 str(tmp_path),
-                "new-guardrail",
+                "library", "create", "--kind", "guardrail",
                 "--name",
                 "Bad Name!",
                 "--description",
                 "x",
             ]
         )
-        assert rc == 1
+        assert rc == 2

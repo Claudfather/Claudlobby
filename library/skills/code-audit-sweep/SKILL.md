@@ -1,13 +1,13 @@
 ---
 name: code-audit-sweep
-description: "Run one automated code audit on a specific repo, dispatched by the rolling-sweep selector. Pulls latest main, runs the audit non-interactively, filing GitHub issues, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
+description: "Use when the rolling-sweep selector dispatches `/code-audit-sweep <org/repo> <audit-type>` into your session. Runs that one automated code audit: pulls latest main, runs the audit non-interactively, filing GitHub issues, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
 argument-hint: "<org/repo> <audit-type>"
 ---
 
 # Code Audit Sweep
 
 The execution half of the rolling code-audit sweep. The no-LLM selector
-(`lib/code-audit-sweep.sh`) picks the stalest repo and the audit type for the
+(`claudlobby/_runtime_scripts/code-audit-sweep.sh`) picks the stalest repo and the audit type for the
 run, then dispatches `/code-audit-sweep <org/repo> <audit-type>` into this
 bot's session. This skill runs exactly that one audit — it does **not** choose
 the target (the selector already did, from live GitHub staleness).
@@ -88,7 +88,7 @@ observability loop the selector opened with `audit_selected`):
 
 ```bash
 # the ONE fleet-event door: the event lands on the plane (nothing lives in a file any more)
-. "{{CLAUDLOBBY_ROOT}}/lib/lib-common.sh"
+. "{{CLAUDLOBBY_NATIVE_DIR}}/lib-common.sh"
 emit_fleet_event audit_completed audit '{"repo":"<org/repo>","audit_type":"<audit-type>","issues":<count>}'
 ```
 

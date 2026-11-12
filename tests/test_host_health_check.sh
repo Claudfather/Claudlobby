@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$SCRIPT_DIR/../lib"
+LIB_DIR="$SCRIPT_DIR/../claudlobby/_runtime_scripts"
 PASS=0; FAIL=0; TOTAL=0
 assert_eq() {
     TOTAL=$((TOTAL + 1)); local d="$1" e="$2" a="$3"
@@ -19,7 +19,10 @@ assert_eq() {
 }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/root/lib"
+mkdir -p "$T/bin" "$T/native" "$T/root/state/logs"
+for helper in host-health-check.sh lib-common.sh supervisor.sh cli-context.sh plane-emit.sh plane-socket-client.py; do
+    cp "$LIB_DIR/$helper" "$T/native/$helper"
+done
 # Stub vcgencmd: emit throttled=$THROTTLED (default 0x0 = clean, models a healthy Pi).
 printf '#!/bin/bash\nprintf "throttled=%%s\\n" "${THROTTLED:-0x0}"\n' > "$T/bin/vcgencmd"
 # Stub journalctl: emit $JOURNAL verbatim (default empty = clean storage); ignores args.
@@ -28,27 +31,27 @@ printf '#!/bin/bash\nprintf "%%s" "${JOURNAL:-}"\n' > "$T/bin/journalctl"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/tmux"
 chmod +x "$T/bin/vcgencmd" "$T/bin/journalctl" "$T/bin/tmux"
 
-ROOT="$T/root"; LOG="$ROOT/lib/host-health-check.log"
+ROOT="$T/root"; LOG="$ROOT/state/logs/host-health-check.log"
 
-# Stub tg-post at the path lib-common actually invokes ($CLAUDLOBBY_ROOT/lib/tg-post.sh),
+# Stub tg-post beside the private lib-common copy that actually invokes it,
 # exiting $TGPOST_RC. Before #977 this file was simply ABSENT, so every delivery
 # failed by accident and nothing depended on it. It does now: the de-dup
 # fingerprint is written only on a DELIVERED alert, so "does the alert go out"
 # is a variable these tests must control rather than inherit. Default 0 keeps
 # the de-dup contract below testing what it always tested.
-printf '#!/bin/bash\nexit "${TGPOST_RC:-0}"\n' > "$ROOT/lib/tg-post.sh"
-chmod +x "$ROOT/lib/tg-post.sh"
+printf '#!/bin/bash\nexit "${TGPOST_RC:-0}"\n' > "$T/native/tg-post.sh"
+chmod +x "$T/native/tg-post.sh"
 
 # run_check THROTTLED JOURNAL BOOT_ID → one check in an isolated env; the
 # ALERT/REPEAT/OK verdict lands in $LOG. The alert-delivery leg is neutered:
-# scratch CLAUDLOBBY_ROOT has no lib/tg-post.sh, env -i drops any real token, and
+# the private native sibling is stubbed, env -i drops any real token, and
 # tmux is a no-op — so nothing escapes to the real fleet.
 run_check() {
-    env -i PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
+    env -i PLANE_EMIT_DISABLED=1 PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
         CLAUDLOBBY_ROOT="$ROOT" TGPOST_RC="${TGPOST_RC:-0}" \
         TELEGRAM_GROUP_CHAT_ID="-1001234567890" TELEGRAM_STATE_DIR="$T/sender" \
         THROTTLED="$1" JOURNAL="$2" HOST_HEALTH_BOOT_ID="$3" \
-        bash "$LIB_DIR/host-health-check.sh" >/dev/null 2>&1 || true
+        bash "$T/native/host-health-check.sh" >/dev/null 2>&1 || true
 }
 # Read the verdict by ANCHOR, never by line position. Every log line is
 # `<ts> <TOKEN> -- <msg>`, so the verdict is field 2 followed by " -- "; this
@@ -63,8 +66,8 @@ last_verdict() {
     grep -oE '^[^ ]+ (OK|ALERT|REPEAT) --' "$LOG" 2>/dev/null | tail -1 | awk '{print $2}'
 }
 log_has() { grep -qE "$1" "$LOG" 2>/dev/null; }
-state_file() { printf '%s' "$ROOT/lib/host-health-check.state"; }
-reset() { rm -f "$ROOT/lib/host-health-check.state" "$LOG"; }
+state_file() { printf '%s' "$ROOT/state/logs/host-health-check.state"; }
+reset() { rm -f "$ROOT/state/logs/host-health-check.state" "$LOG"; }
 
 echo "=== host-health-check detection + de-dup contract ==="
 

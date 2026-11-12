@@ -20,6 +20,8 @@ from claudlobby.commands.core import cmd_generate
 from claudlobby.known_values import CLAUDNA_LIVE_SKILLS
 
 from .conftest import load_test_fleet, make_paths
+from claudlobby.paths import Paths
+from tests.package_fixtures import git_package
 
 from claudlobby.skill_refs import (
     BUILTIN_COMMANDS,
@@ -243,6 +245,11 @@ def test_scan_composable_tolerates_an_overlay_path_that_does_not_exist(tmp_path)
 
 class TestGenerateNeverFails:
     """`generate` runs against live fleets. A docs typo must not block it."""
+
+    @pytest.fixture(autouse=True)
+    def managed_render_paths(self, fleet_dir, monkeypatch):
+        paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+        monkeypatch.setattr("claudlobby.commands.core._resolve_paths", lambda _args: paths)
 
     def _args(self, fleet_dir, strict=False):
         return SimpleNamespace(

@@ -1,0 +1,32 @@
+{
+  "counts": {
+    "failures": 0,
+    "interrupts": 0,
+    "prompts": 1,
+    "skills": 0
+  },
+  "index": 1,
+  "opened_at": "2026-10-15T21:46:21.048Z",
+  "opened_by": "session_open",
+  "projected_from": {
+    "bytes": 190,
+    "lines": 1,
+    "skipped": 0
+  },
+  "schema": "claudna.segment/2",
+  "sealed_at": "2026-10-15T21:46:25.248Z",
+  "sealed_by": "session_end",
+  "sid": "00000000-0000-4000-8000-000000000001",
+  "status": "sealed",
+  "summary": {
+    "job_id": "10000000-0000-4000-8000-000000000200",
+    "status": "done"
+  },
+  "transcript": {
+    "path": "/example/transcript.jsonl",
+    "range": {
+      "end": 51621,
+      "start": 0
+    }
+  }
+}

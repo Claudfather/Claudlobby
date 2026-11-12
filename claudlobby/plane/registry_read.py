@@ -146,12 +146,19 @@ def invalid_tombstones(conn) -> list[dict]:
     return _q(conn, REG_INVALID_TOMBSTONES_SQL)
 
 
-def last_scan(conn) -> dict | None:
+def last_scan(conn, *, fleet: str | None = None) -> dict | None:
     """The newest scan_completed declaration, detail parsed — the registry
-    lane's freshness fact (None = no scan has ever completed here)."""
+    lane's freshness fact (None = no scan has ever completed in this scope).
+
+    An explicit fleet selects the scope recorded by the registry emitter;
+    callers omitting it retain the host-wide latest observation. Incomplete
+    scans remain visible with their complete=false provenance.
+    """
+    scope = " AND json_extract(detail, '$.scope') = ?" if fleet is not None else ""
     rows = _q(conn,
               "SELECT occurred_at, detail FROM events WHERE kind='declaration'"
-              " AND event='scan_completed' ORDER BY ingest_seq DESC LIMIT 1")
+              " AND event='scan_completed'" + scope + " ORDER BY ingest_seq DESC LIMIT 1",
+              (f"host+shared+fleet:{fleet}",) if fleet is not None else ())
     if not rows:
         return None
     out = json.loads(rows[0]["detail"])

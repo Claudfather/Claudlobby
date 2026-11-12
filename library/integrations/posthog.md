@@ -108,9 +108,10 @@ layer 2 into one all-tunnelling grant).
    POSTHOG_PROJECT_ID=12345
    ```
 
-5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, `claudlobby generate`
+5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, then the
+   operator applies the reviewed change with `claudlobby host update apply FULL_COMMIT`
    (see *Equipping a bot*). First `npx` run downloads `mcp-remote` into the cache —
-   `claudlobby warm-cache` warms it so the first bot use isn't slow.
+   `claudlobby host cache warm` warms it so the first bot use isn't slow.
 6. **Verify it's connected *and* capturing.** These are two different questions —
    check both:
    - **Connected?** Run a trivial read (e.g. `projects-get`) to confirm auth + project
@@ -180,7 +181,8 @@ Typical flow: `event-definitions-list` / `property-definitions` to find field na
 - **Empty results / wrong project** → `POSTHOG_PROJECT_ID` points at a project the key
   can't see, or the wrong project. Confirm with `projects-get`.
 - **A read tool prompts instead of running** → it isn't in `read_only_tools` /
-  `tool_grants`. Add it to both (mirrored) and regenerate.
+  `tool_grants`. Add it to both (mirrored), then the operator applies the
+  reviewed change with `host update apply FULL_COMMIT`.
 - **Connection refused / transport errors** → `mcp-remote` version or Node issue, or
   the wrong endpoint host. Confirm `POSTHOG_HOST` and that Node is on PATH.
 
@@ -212,6 +214,7 @@ POSTHOG_HOST=mcp.posthog.com
 POSTHOG_PROJECT_ID=12345
 ```
 
-Then `claudlobby generate`. The 13 read-only tools compose in as auto-allowed
+Then the operator applies the reviewed change with `claudlobby host update apply FULL_COMMIT`
+from a shell outside any bot session. The 13 read-only tools compose in as auto-allowed
 `mcp__posthog__*` reads (no write tools, so nothing prompts unattended).
-`claudlobby doctor` flags any of the three `.env` vars if missing.
+`claudlobby host doctor` flags any of the three `.env` vars if missing.

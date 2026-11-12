@@ -14,20 +14,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from claudlobby.config import (
     BotConfig,
     FleetConfig,
+    McpEntry,
     PluginsConfig,
     TelegramConfig,
     ToolPermissionsConfig,
 )
 from claudlobby.freshbox import (
     Finding,
+    _sourced_ask_rules,
     audit_bot,
     audit_fleet,
     classify_grants,
     has_failures,
 )
+from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
 
@@ -41,10 +46,11 @@ def _build_library(root: Path) -> None:
     )
 
 
-def _fleet(bots: dict[str, BotConfig]) -> FleetConfig:
+def _fleet(bots: dict[str, BotConfig], *, manager: str) -> FleetConfig:
     return FleetConfig(
         name="t",
         service_prefix="p",
+        manager=manager,
         plugins=PluginsConfig(
             required=["claudna@Claudfather", "superpowers@claude-plugins-official"]
         ),
@@ -53,17 +59,17 @@ def _fleet(bots: dict[str, BotConfig]) -> FleetConfig:
 
 
 def test_fleet_override_grant_with_no_source_is_flagged_unsourced(tmp_path):
-    """A ``tools.allow`` grant no equipped source declares is reported (drift signal)."""
+    """A ``tool_permissions.allow`` grant no equipped source declares is reported (drift signal)."""
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot = BotConfig(
         bot_id="w",
         name="w",
         expertise=["eng"],
         tool_permissions=ToolPermissionsConfig(allow=["mcp__mystery__*"]),
     )
-    fleet = _fleet({"w": bot})
+    fleet = _fleet({"w": bot}, manager="w")
 
     findings = audit_bot(bot, fleet, paths)
 
@@ -116,16 +122,167 @@ def test_allow_entry_tracing_to_nothing_is_orphan():
     assert ("orphan_grant", "SomethingWeird") in flagged
 
 
+# ── #2476: a fleet grants a rule a skill asks about by naming it ──────────────
+
+_ASKED = "Bash(probe.sh write *)"
+
+
+def test_a_fleet_granted_asked_rule_is_no_finding():
+    """The fleet's ``tool_permissions.allow`` naming a rule an equipped source
+    asks about is how the fleet grants it, so that override has a source."""
+    results = classify_grants(
+        allow=["Read", _ASKED],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override={_ASKED},
+        asked={_ASKED},
+    )
+    assert results == []
+
+
+def test_the_same_fleet_grant_without_a_matching_ask_source_is_still_unsourced():
+    """Control for the test above: only an ask rule naming the same string excuses
+    the override, whether ``asked`` is omitted, empty or names another rule."""
+    for kwargs in ({}, {"asked": set()}, {"asked": {"Bash(probe.sh read *)"}}):
+        results = classify_grants(
+            allow=["Read", _ASKED],
+            deny=[],
+            sourced={"Read"},
+            base={"Read", "Grep", "Glob"},
+            override={_ASKED},
+            **kwargs,
+        )
+        flagged = {(kind, grant) for kind, _sev, grant in results}
+        assert flagged == {("unsourced_grant", _ASKED)}, kwargs
+
+
+def test_an_asked_rule_does_not_excuse_an_allow_entry_the_fleet_did_not_grant():
+    """``asked`` excuses a fleet override and nothing else: an allow entry with no
+    source and no override is an orphan, asked about or not."""
+    results = classify_grants(
+        allow=["Read", _ASKED],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+        asked={_ASKED},
+    )
+    flagged = {(kind, grant) for kind, _sev, grant in results}
+    assert flagged == {("orphan_grant", _ASKED)}
+
+
+def test_an_asked_rule_missing_from_allow_is_not_an_under_grant():
+    """An ask rule is a prompt, not a grant, so allow need not hold it."""
+    results = classify_grants(
+        allow=["Read"],
+        deny=[],
+        sourced={"Read"},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+        asked={_ASKED},
+    )
+    assert results == []
+    # Control: the same rule declared as a grant that never reached allow is the
+    # under-grant, so this fixture does detect one.
+    control = classify_grants(
+        allow=["Read"],
+        deny=[],
+        sourced={"Read", _ASKED},
+        base={"Read", "Grep", "Glob"},
+        override=set(),
+    )
+    assert {(kind, grant) for kind, _sev, grant in control} == {
+        ("under_grant", _ASKED)
+    }
+
+
+def test_sourced_ask_rules_are_the_ask_lists_of_skills_and_integrations(tmp_path):
+    """Not the tool_grants or deny_grants beside them. An integration's mcp rule
+    names each server instance, as the composed ask list does."""
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    skill = root / "library" / "skills" / "probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: probe\n"
+        'tool_grants:\n  - "Bash(probe.sh status *)"\n'
+        f'ask_grants:\n  - "{_ASKED}"\n'
+        'deny_grants:\n  - "Bash(probe.sh raw *)"\n'
+        "---\n\n# probe\n\nbody\n"
+    )
+    integ = root / "library" / "integrations"
+    integ.mkdir(parents=True)
+    (integ / "ledger.md").write_text(
+        "---\ntitle: ledger\n"
+        'ask_grants:\n  - "mcp__ledger__post_entry"\n'
+        'deny_grants:\n  - "mcp__ledger__delete_entry"\n'
+        "---\n\n# ledger\n"
+    )
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    bot = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        skills=["probe"],
+        mcp=[McpEntry(name="ledger", instances=["prod"])],
+    )
+
+    asked = _sourced_ask_rules(bot, _fleet({"w": bot}, manager="w"), paths)
+
+    assert {_ASKED, "mcp__ledger-prod__post_entry"} <= asked
+    assert not asked & {
+        "Bash(probe.sh status *)",
+        "Bash(probe.sh raw *)",
+        "mcp__ledger__post_entry",
+        "mcp__ledger-prod__delete_entry",
+    }
+
+
+def test_audit_bot_accepts_a_fleet_grant_of_a_rule_a_skill_asks_about(tmp_path):
+    """``audit_bot`` hands ``classify_grants`` the bot's ask rules, so the fleet's
+    grant of one is no drift; with no skill asking about it, the same grant is."""
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    skill = root / "library" / "skills" / "probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f'---\nname: probe\nask_grants:\n  - "{_ASKED}"\n---\n\n# probe\n\nbody\n'
+    )
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    granted = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        skills=["probe"],
+        tool_permissions=ToolPermissionsConfig(allow=[_ASKED]),
+    )
+    findings = audit_bot(granted, _fleet({"w": granted}, manager="w"), paths)
+    assert not [f for f in findings if _ASKED in f.detail], findings
+
+    unasked = BotConfig(
+        bot_id="w",
+        name="w",
+        expertise=["eng"],
+        tool_permissions=ToolPermissionsConfig(allow=[_ASKED]),
+    )
+    findings = audit_bot(unasked, _fleet({"w": unasked}, manager="w"), paths)
+    assert [(f.kind, f.severity) for f in findings if _ASKED in f.detail] == [
+        ("unsourced_grant", "warn")
+    ]
+
+
 def test_enabledplugins_absent_is_flagged_missing_tier_a(tmp_path):
     """A fleet composing no ``enabledPlugins`` → the bot inherits plugin
     enablement from the global; a Tier-A self-containment failure."""
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
-    bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
+    bot = BotConfig(bot_id="w", name="w", expertise=["eng"], channels=[])
     fleet = FleetConfig(
         name="t",
         service_prefix="p",
+        manager="w",
         plugins=PluginsConfig(required=[]),
         bots={"w": bot},
     )
@@ -145,9 +302,9 @@ def test_wellformed_scoped_bot_has_no_fail_findings(tmp_path):
     the gate clean (no fail-severity findings)."""
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
-    fleet = _fleet({"w": bot})
+    fleet = _fleet({"w": bot}, manager="w")
 
     findings = audit_bot(bot, fleet, paths)
 
@@ -156,10 +313,10 @@ def test_wellformed_scoped_bot_has_no_fail_findings(tmp_path):
 
 
 def test_audit_fleet_sweeps_every_bot(tmp_path):
-    """The sweep visits all bots; a drifty one surfaces, a clean one stays silent."""
+    """The sweep visits both roles: a drifty worker surfaces, a clean manager stays silent."""
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bots = {
         "clean": BotConfig(bot_id="clean", name="clean", expertise=["eng"]),
         "drifty": BotConfig(
@@ -169,7 +326,7 @@ def test_audit_fleet_sweeps_every_bot(tmp_path):
             tool_permissions=ToolPermissionsConfig(allow=["mcp__mystery__*"]),
         ),
     }
-    fleet = _fleet(bots)
+    fleet = _fleet(bots, manager="clean")
 
     findings = audit_fleet(fleet, paths)
 
@@ -182,33 +339,6 @@ def test_has_failures_true_only_for_fail_severity():
     assert has_failures([Finding("b", "missing_tier_a", "fail", "x")])
     assert not has_failures([Finding("b", "unsourced_grant", "warn", "x")])
     assert not has_failures([])
-
-
-def test_format_report_renders_clean_summary_and_findings(tmp_path):
-    """The report reads as self-contained when clean, and names the drift otherwise."""
-    from claudlobby.freshbox import format_report
-
-    root = tmp_path / "claudlobby"
-    _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
-
-    clean = _fleet({"w": BotConfig(bot_id="w", name="w", expertise=["eng"])})
-    clean_out = format_report(clean, audit_fleet(clean, paths))
-    assert "self-contained" in clean_out.lower()
-
-    drifty = _fleet(
-        {
-            "d": BotConfig(
-                bot_id="d",
-                name="d",
-                expertise=["eng"],
-                tool_permissions=ToolPermissionsConfig(allow=["mcp__x__*"]),
-            )
-        }
-    )
-    drifty_out = format_report(drifty, audit_fleet(drifty, paths))
-    assert "mcp__x__*" in drifty_out
-    assert "d" in drifty_out
 
 
 def test_rich_multisource_bot_audits_clean(tmp_path):
@@ -228,7 +358,7 @@ def test_rich_multisource_bot_audits_clean(tmp_path):
     (guard / "safe.md").write_text(
         '---\ntitle: safe\npermissions:\n  deny: ["Bash(rm *)"]\n---\n\n# safe\n'
     )
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot = BotConfig(
         bot_id="rich",
         name="rich",
@@ -237,7 +367,7 @@ def test_rich_multisource_bot_audits_clean(tmp_path):
         guardrails=["safe"],
         telegram=TelegramConfig(handle="rich_bot"),
     )
-    fleet = _fleet({"rich": bot})
+    fleet = _fleet({"rich": bot}, manager="rich")
 
     findings = audit_bot(bot, fleet, paths)
 
@@ -283,8 +413,8 @@ def test_orphan_short_form_plist_is_flagged_warn(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot})
-    paths = Paths(root=root, fleet_dir=root)
+    fleet = _fleet({"kev": bot}, manager="kev")
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot_dir = _seed_bot_dir(paths)
     (bot_dir / "p.kev.plist").write_text("<plist/>")  # composed long-form — kept
     (bot_dir / "p.kev.service").write_text("[Unit]\n")  # composed long-form — kept
@@ -301,8 +431,8 @@ def test_reap_removes_orphan_keeps_long_form(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot})
-    paths = Paths(root=root, fleet_dir=root)
+    fleet = _fleet({"kev": bot}, manager="kev")
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot_dir = _seed_bot_dir(paths)
     long_form = bot_dir / "p.kev.plist"
     orphan = bot_dir / "kev.plist"
@@ -317,6 +447,69 @@ def test_reap_removes_orphan_keeps_long_form(tmp_path):
     assert [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_unit"] == []
 
 
+def test_selected_orphan_reap_is_operator_only_and_confined_to_declared_fleet(
+    tmp_path, monkeypatch
+):
+    from claudlobby import supervision_reap
+    from claudlobby.activation_state import ActivationError
+    from tests.fixtures.current_runtime import current_runtime
+
+    root, _, _, host = current_runtime.__wrapped__(tmp_path, monkeypatch)
+    for key in ('CLAUDLOBBY_ROOT', 'FLEET_ROOT', 'FLEET_NAME', 'CLAUDLOBBY_FLEET',
+                'BOT_ID', 'BOT_NAME', 'BOT_DIR', 'BOT_SERVICE'):
+        monkeypatch.delenv(key, raising=False)
+    # Use the shared actual checkout, committed roster, origin observation and
+    # runtime-use lock. Reaping takes real admission and reads the real stamp.
+    paths = Paths(root=root, package=host.package)
+    bot_dir = paths.bot_runtime('worker')
+    long_form = bot_dir / 'com.example.worker.plist'
+    stale = bot_dir / 'worker.plist'
+    stale.write_text('<plist/>')
+    foreign_dir = root / 'local/other/runtime/bots/worker'
+    foreign_dir.mkdir(parents=True)
+    foreign_stale = foreign_dir / 'worker.plist'
+    foreign_stale.write_text('<plist/>')
+    with pytest.raises(supervision_reap.SupervisionReapError, match='not declared'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot='other', dry_run=False)
+    assert stale.exists() and foreign_stale.exists()
+
+    preview = supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=True)
+    assert preview.paths == (stale,)
+    assert preview.release_id is None
+    assert (preview.source_revision, preview.config_fingerprint) == (
+        host.snapshot['revision'], host.snapshot['fingerprint'])
+    assert stale.exists() and foreign_stale.exists()
+    applied = supervision_reap.reap_selected_orphans(root=root, fleet='example', bot='worker', dry_run=False)
+    assert applied.paths == (stale,)
+    assert not stale.exists() and long_form.exists() and foreign_stale.exists()
+
+    stale.write_text('<plist/>')
+    monkeypatch.setenv('CLAUDLOBBY_ROOT', str(root))
+    monkeypatch.setenv('FLEET_NAME', 'example')
+    monkeypatch.setenv('FLEET_ROOT', str(root))
+    monkeypatch.setenv('BOT_ID', 'worker')
+    monkeypatch.setenv('BOT_DIR', str(bot_dir))
+    with pytest.raises(supervision_reap.SupervisionReapError, match='operator process'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert stale.exists() and foreign_stale.exists()
+
+    monkeypatch.delenv('BOT_ID')
+    monkeypatch.delenv('BOT_DIR')
+    with pytest.raises(supervision_reap.SupervisionReapError, match='operator process'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert stale.exists() and foreign_stale.exists()
+    monkeypatch.delenv('FLEET_ROOT')
+    monkeypatch.delenv('FLEET_NAME')
+    # Preserve all generated bytes; redirect only the original directory name.
+    # Canonical admission rejects its escaped owned outputs before reaping.
+    retained = bot_dir.with_name('retained-worker')
+    bot_dir.rename(retained)
+    bot_dir.symlink_to(foreign_dir, target_is_directory=True)
+    with pytest.raises(ActivationError, match='ownership escapes generated destinations'):
+        supervision_reap.reap_selected_orphans(root=root, fleet='example', bot=None, dry_run=False)
+    assert foreign_stale.exists() and (retained / stale.name).exists()
+
+
 def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
     import json
 
@@ -325,8 +518,8 @@ def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
     fleet_dir = root / "local" / "home" / "tl"  # nested overlay
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
     bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot})
-    paths = Paths(root=root, fleet_dir=fleet_dir)
+    fleet = _fleet({"kev": bot}, manager="kev")
+    paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
     bot_dir = _seed_bot_dir(paths)
     flat = f"{root}/local/tl/dist/index.js"  # flat husk: local/tl not local/home/tl
     (bot_dir / ".mcp.json").write_text(
@@ -347,11 +540,11 @@ def test_denied_source_value_is_a_fail_finding(tmp_path):
     denied_value FAIL — the L1 complement to the improper_path (L2) check."""
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot = BotConfig(
         bot_id="w", name="w", expertise=["eng"], env={"GA4_KEY": "/Users/x/ga4.json"}
     )
-    fleet = _fleet({"w": bot})
+    fleet = _fleet({"w": bot}, manager="w")
 
     findings = audit_bot(bot, fleet, paths)
 
@@ -363,11 +556,11 @@ def test_denied_source_value_is_a_fail_finding(tmp_path):
 def test_anchored_source_value_has_no_denied_finding(tmp_path):
     root = tmp_path / "claudlobby"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot = BotConfig(
         bot_id="w", name="w", expertise=["eng"], env={"P": "${FLEET_ROOT}/mcp/x.py"}
     )
-    fleet = _fleet({"w": bot})
+    fleet = _fleet({"w": bot}, manager="w")
 
     denied = [f for f in audit_bot(bot, fleet, paths) if f.kind == "denied_value"]
     assert denied == []
@@ -390,7 +583,7 @@ def _nested_paths(root: Path) -> Paths:
     tier from its WARN tier (they collapse to one file when fleet_dir == root)."""
     fleet_dir = root / "local" / "home" / "tl"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir)
+    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
 def _kev(**kw) -> BotConfig:
@@ -410,7 +603,7 @@ def test_env_bot_tier_path_value_is_masked_fail(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     bot_dir.mkdir(parents=True)
     secret = "/Users/x/very-secret-service-account.json"
@@ -432,7 +625,7 @@ def test_env_fleet_overlay_path_value_is_fail(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     (paths.fleet_config_dir / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -450,7 +643,7 @@ def test_env_install_tier_root_env_is_warn(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     (paths.root / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -469,7 +662,7 @@ def test_env_home_tier_scanned_only_when_home_injected(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".env").write_text("KEY=/opt/foreign/x.json\n")
@@ -496,7 +689,7 @@ def test_env_declared_value_is_not_flagged(tmp_path):
     bot = _kev(
         external_paths=[ExternalDecl(path="/opt/printify/**", purpose="printify tree")]
     )
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     bot_dir.mkdir(parents=True)
     (bot_dir / ".env").write_text("PRINTIFY=/opt/printify/data/x\n")
@@ -511,7 +704,7 @@ def test_env_anchored_and_plain_var_values_are_not_flagged(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     bot_dir.mkdir(parents=True)
     (bot_dir / ".env").write_text(
@@ -527,7 +720,7 @@ def test_env_missing_files_no_findings_no_crash(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     assert _env_file_findings(bot, fleet, paths) == []
 
 
@@ -538,9 +731,9 @@ def test_env_root_mode_dedups_to_single_fail(tmp_path):
 
     root = tmp_path / "cl"
     _build_library(root)
-    paths = Paths(root=root, fleet_dir=root)  # fleet_config_dir == root
+    paths = Paths(root=root, fleet_dir=root, package=source_package())  # fleet_config_dir == root
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     (root / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -563,7 +756,7 @@ def test_external_declared_and_used_is_info_not_unused(tmp_path):
         external_paths=[ExternalDecl(path="/opt/printify/bin", purpose="printify cli")],
         env={"PRINTIFY_BIN": "/opt/printify/bin"},
     )
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
 
     findings = _externals_report(bot, fleet, paths)
     refs = [f for f in findings if f.kind == "external_ref"]
@@ -582,7 +775,7 @@ def test_external_declared_unused_is_warn(tmp_path):
     bot = _kev(
         external_paths=[ExternalDecl(path="/opt/ghost/bin", purpose="nothing uses me")]
     )
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
 
     unused = [
         f
@@ -600,7 +793,7 @@ def test_external_mount_and_vault_are_info(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev(mounts={"data": "/mnt/host/data"}, claudron_vault_path="/mnt/vault")
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
 
     refs = [f for f in _externals_report(bot, fleet, paths) if f.kind == "external_ref"]
     details = " ".join(f.detail for f in refs)
@@ -619,7 +812,7 @@ def test_external_default_account_emits_nothing(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})  # accounts defaults to {"default": "~/.claude"}
+    fleet = _fleet({"kev": bot}, manager="kev")  # accounts defaults to {"default": "~/.claude"}
     assert _externals_report(bot, fleet, paths) == []
 
 
@@ -637,7 +830,7 @@ def test_external_overbroad_declaration_shows_both_use_sites(tmp_path):
         external_paths=[ExternalDecl(path="/opt/vendor/**", purpose="vendor tree")],
         env={"A": "/opt/vendor/tool-a", "B": "/opt/vendor/deep/tool-b"},
     )
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
 
     refs = [f for f in _externals_report(bot, fleet, paths) if f.kind == "external_ref"]
     ref = next(f for f in refs if "/opt/vendor/**" in f.detail)
@@ -666,18 +859,6 @@ def test_strict_blocks_warn_but_not_info():
     assert exits_nonzero(fail, strict=False)  # FAIL always blocks
 
 
-def test_format_report_renders_info_lines():
-    from claudlobby.freshbox import INFO, Finding, format_report
-
-    fleet = _fleet({"kev": _kev()})
-    out = format_report(
-        fleet, [Finding("kev", "external_ref", INFO, "mount data → /mnt/x")]
-    )
-    assert "[info]" in out
-    assert "/mnt/x" in out
-    assert "0 fail" in out and "1 fail" not in out
-
-
 def test_clean_bot_with_used_external_has_no_fail(tmp_path):
     """A bot whose externals are all declared + used audits with zero FAIL — the INFO
     report doesn't turn a healthy bot red, and --strict stays green on it."""
@@ -691,7 +872,7 @@ def test_clean_bot_with_used_external_has_no_fail(tmp_path):
         external_paths=[ExternalDecl(path="/opt/printify/bin", purpose="cli")],
         env={"PRINTIFY_BIN": "/opt/printify/bin"},
     )
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     paths.bot_runtime("kev").mkdir(parents=True)
 
     findings = audit_bot(bot, fleet, paths)
@@ -709,7 +890,7 @@ def test_flat_path_in_rendered_tool_is_improper_path_fail(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     (bot_dir / "tools").mkdir(parents=True)
     flat = f"{root}/local/tl/dist/deploy.sh"  # flat husk: local/tl not local/home/tl
@@ -727,7 +908,7 @@ def test_legit_rendered_tool_paths_pass(tmp_path):
     _build_library(root)
     paths = _nested_paths(root)
     bot = _kev()
-    fleet = _fleet({"kev": bot})
+    fleet = _fleet({"kev": bot}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     (bot_dir / "tools").mkdir(parents=True)
     (bot_dir / "tools" / "ok.sh").write_text(
@@ -764,7 +945,7 @@ def test_bot_secret_in_deprecated_root_env_is_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
     secret = "8888888:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     (root / ".env").write_text(
         f"TELEGRAM_TOKEN_KEV={secret}\nSOME_SHARED_SETTING=value\n"
@@ -789,7 +970,7 @@ def test_bot_secret_in_global_home_env_flagged_only_when_home_injected(tmp_path)
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
@@ -811,7 +992,7 @@ def test_bot_secret_in_bots_own_env_is_not_a_leak(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
     bot_dir = paths.bot_runtime("kev")
     bot_dir.mkdir(parents=True)
     (bot_dir / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
@@ -828,7 +1009,8 @@ def test_leak_surfaces_once_through_audit_fleet(tmp_path):
         {
             "kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV"),
             "moe": _token_bot("moe", "TELEGRAM_TOKEN_MOE"),
-        }
+        },
+        manager="moe",
     )
     (root / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
 
@@ -851,7 +1033,7 @@ def test_self_referential_telegram_token_in_shared_tier_is_flagged(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_BOT_TOKEN")})
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_BOT_TOKEN")}, manager="kev")
     (root / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAA\n")
 
     leaks = [
@@ -883,8 +1065,8 @@ def _git_cred_fleet(tmp_path, monkeypatch, *, operator_exists=True, gh="/usr/bin
         expertise=["eng"],
         git_credentials={"OrgA": "ORG_A_PAT"},
     )
-    fleet = _fleet({"kev": bot})
-    paths = Paths(root=root, fleet_dir=root)
+    fleet = _fleet({"kev": bot}, manager="kev")
+    paths = Paths(root=root, fleet_dir=root, package=source_package())
     _seed_bot_dir(paths)
     return bot, fleet, paths, operator
 
@@ -947,7 +1129,7 @@ class TestGithubAppFreshbox:
 
         root = tmp_path / "claudlobby"
         _build_library(root)
-        paths = Paths(root=root, fleet_dir=root)
+        paths = Paths(root=root, fleet_dir=root, package=source_package())
         op = tmp_path / "op.gitconfig"
         if operator:
             op.write_text("[user]\n\temail = o@example.com\n")
@@ -969,7 +1151,7 @@ class TestGithubAppFreshbox:
             }
 
         monkeypatch.setattr(type(paths), "env_resolved", lambda self, bot_name=None: _resolved(bot_name))
-        return audit_bot(bot, _fleet({"ga": bot}), paths)
+        return audit_bot(bot, _fleet({"ga": bot}, manager="ga"), paths)
 
     def test_key_0600_is_info(self, tmp_path, monkeypatch):
         finds = self._audit(tmp_path, self._bot(tmp_path), monkeypatch, key_mode=0o600)
@@ -1007,3 +1189,60 @@ class TestGithubAppFreshbox:
         finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
         include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
         assert include and all(f.severity == "fail" for f in include), finds
+
+
+from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401 — private selected root
+from tests.test_releases import installed  # noqa: F401 — cold dependency
+from tests.test_task_read_cli import active  # noqa: F401 — retained fleet identities
+
+
+@pytest.mark.parametrize("mismatch", [None, "admitted_runtime", "before_effect"])
+def test_git_orphan_reap_uses_current_binding_and_same_confined_predicate(active, monkeypatch, mismatch):
+    from contextlib import contextmanager
+    from dataclasses import replace
+    from claudlobby import active_config, supervision_reap
+    from claudlobby.runtime_admission import GitCurrentRuntime
+    from tests.test_task_read_cli import _use_git_current
+
+    root, package, snapshot = _use_git_current(active, monkeypatch)
+    context = active_config.load_active_context(root, "example", package=package)
+    bot_dir = context.paths.bot_runtime("worker")
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    retained = bot_dir / f"{context.fleet.service_prefix}.worker.plist"
+    retained.write_text("<plist/>")
+    stale = bot_dir / "worker.plist"
+    stale.write_text("<plist/>")
+    foreign = root / "local/other/runtime/bots/worker/worker.plist"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("<plist/>")
+    @contextmanager
+    def admitted(*args, **kwargs):
+        assert kwargs["expected_release"] is None
+        yield GitCurrentRuntime(package.installation, snapshot["revision"],
+                                "f" * 64 if mismatch == "admitted_runtime" else snapshot["fingerprint"], snapshot)
+    monkeypatch.setattr(supervision_reap, "mutation_admission", admitted)
+    monkeypatch.setattr(supervision_reap.RuntimeIdentity, "current", lambda: None)
+    if mismatch == "before_effect":
+        read = supervision_reap.runtime_read_stamp
+        calls = []
+        def changed(*args, **kwargs):
+            stamp = read(*args, **kwargs)
+            calls.append(True)
+            return stamp if len(calls) == 1 else replace(stamp, config_fingerprint="f" * 64)
+        monkeypatch.setattr(supervision_reap, "runtime_read_stamp", changed)
+    if mismatch:
+        with pytest.raises(supervision_reap.SupervisionReapError, match="runtime differs|changed before"):
+            supervision_reap.reap_selected_orphans(root=root, fleet="example", bot="worker", dry_run=False)
+        assert stale.exists() and retained.exists() and foreign.exists()
+        return
+    preview = supervision_reap.reap_selected_orphans(root=root, fleet="example", bot="worker", dry_run=True)
+    assert preview.paths == (stale,) and stale.exists()
+    assert preview.release_id is None and preview.source_revision == snapshot["revision"]
+    assert preview.config_fingerprint == snapshot["fingerprint"]
+    from types import SimpleNamespace
+    from claudlobby.commands import host_supervision
+    applied = host_supervision.dispatch(SimpleNamespace(public_command="host.supervision.reap-orphans",
+        root=root, fleet="example", bot="worker", seed=False, dry_run=False))
+    assert applied.release_id is None and applied.data["count"] == 1
+    assert applied.data["config_fingerprint"] == snapshot["fingerprint"]
+    assert not stale.exists() and retained.exists() and foreign.exists()

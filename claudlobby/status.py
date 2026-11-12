@@ -1,11 +1,10 @@
 """Fleet health dashboard — ``claudlobby status``.
 
-Aggregates live state from four sources:
+Aggregates live state from three sources:
 
-1. **fleet-state.json** — canonical bot status (idle/working/blocked/offline)
-2. **tmux** — session presence (alive or not)
-3. **systemd / launchd** — service supervision state
-4. **the plane** — the newest ``bot.heartbeat`` sample per bot (last heartbeat
+1. **tmux** — session presence (alive or not)
+2. **systemd / launchd** — service supervision state
+3. **the plane** — canonical Task assignments and newest ``bot.heartbeat`` sample (last heartbeat
    + pane state, BUSY/IDLE) and the heartbeat series behind the utilization
    columns (F18 closure R2b; keepalive.log is gone). A plane that cannot answer
    renders those columns ``unknown``, flags health ``?`` and says why under the
@@ -23,13 +22,15 @@ import platform
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import FleetConfig
 from .plane.presence import derive_presence
 from .paths import Paths, tmux_socket_for_bot
+from .stop_record import read_stop, unit_installed
+from .task_work_queries import CurrentWork, read_fleet_work
 from .uptime import _fmt_duration
 
 log = logging.getLogger("claudlobby.status")
@@ -85,10 +86,19 @@ _SVC_UNDETERMINED = "undetermined"
 @dataclass
 class BotStatus:
     name: str
-    # fleet-state.json
-    state: str = "unknown"  # idle/working/blocked/offline/unknown
+    state: str = "unknown"  # idle/working/blocked/offline/unknown/stopped
     current_task: str | None = None
+    # How many assignments are open: more than one means current_task is the
+    # first by state, then latest transition, of several (#2179).
+    open_assignments: int | None = None
     last_completed: str | None = None
+    work_assignments: tuple[CurrentWork, ...] = ()
+    work_issues: tuple[dict, ...] = ()
+    work_unavailable: str = ""
+
+    @property
+    def work_unresolved(self) -> bool:
+        return any(issue["blocking"] for issue in self.work_issues)
     # tmux
     tmux_alive: bool = False
     # systemd/launchd
@@ -106,7 +116,15 @@ class BotStatus:
     # utilization (populated by collect_fleet_status)
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
-    current_task_age_secs: int | None = None
+    busy_age_secs: int | None = None
+    # #2243: a bot the stop door stopped (state "stopped"): when, by whom and why,
+    # from the stop door's record
+    stopped_since: str | None = None
+    stopped_by: str | None = None
+    stop_reason: str | None = None
+    # the live context (#2206): transcript_usage.current_context's answer,
+    # tokens None with its reason when the transcript cannot answer
+    context: dict | None = None
 
     @property
     def service_undetermined(self) -> bool:
@@ -114,22 +132,78 @@ class BotStatus:
         return self.service_sub == _SVC_UNDETERMINED
 
 
-def _check_tmux_sessions(fleet, paths) -> set[str]:
+def _current_service_observations(fleet, paths, bots):
+    """Exact current Git native bindings; missing evidence stays undetermined."""
+    from .active_config import read_current_config
+    from .config_units import current_git_declarations
+    from .supervision_inventory import collect_enrollment
+
+    unknown = {bot: (False, _SVC_UNDETERMINED, None) for bot in bots}
+    try:
+        snapshot = read_current_config(paths.root, installation=paths.package.installation,
+                                       revision=paths.package.source_revision)
+        placement = snapshot.get("supervision")
+        manager = placement["manager"] if placement else platform.system()
+        declarations = current_git_declarations(snapshot, manager)
+        selected = {bot: [row for row in declarations if row.fleet == fleet.name and row.bot == bot
+                         and row.scope == "bot" and row.source.suffix in {".service", ".plist"}]
+                    for bot in bots}
+        if any(len(rows) != 1 for rows in selected.values()):
+            return unknown
+        names = frozenset(rows[0].source.name for rows in selected.values())
+        inventory = collect_enrollment(paths.root, declarations, package=paths.package,
+                                       only_names=names).require_complete()
+        if inventory.manager != manager:
+            return unknown
+        result = dict(unknown)
+        for bot, rows in selected.items():
+            units = [unit for unit in inventory.units if unit.declaration == rows[0]]
+            if len(units) != 1:
+                continue
+            unit = units[0]
+            if placement:
+                expected = str(Path(placement["directory"]) / rows[0].source.name)
+                if any(saved.path != expected for saved in unit.installed):
+                    continue
+                if manager == "Darwin" and unit.target.rsplit("/", 1)[0] != placement["domain"]:
+                    continue
+            props = dict(unit.properties)
+            state = props.get("ActiveState")
+            if state not in {"active", "inactive", "failed", "activating", "deactivating"}:
+                continue
+            result[bot] = (state == "active", state, bool(unit.installed))
+        return result
+    except (OSError, ValueError, RuntimeError):
+        return unknown
+
+
+def _check_tmux_sessions(fleet, paths, bots=None) -> set[str]:
     """Live bot session names across every per-bot tmux server.
 
     Each bot runs its own server (``tmux -L <socket>``, socket == BOT_SERVICE),
     so a single global ``tmux ls`` is blind to every other socket. Query each
-    declared bot's own socket and union the live sessions. Relies on the pinned
-    TMUX_TMPDIR (=/tmp, tmux's own default) so a socket name resolves to the
-    server start-bot.sh created it on.
+    declared bot's own socket (or only ``bots``) and union the live sessions.
+    Relies on the pinned TMUX_TMPDIR (=/tmp, tmux's own default) so a socket
+    name resolves to the server start-bot.sh created it on.
     """
     alive: set[str] = set()
-    for bot_id in fleet.bots:
+    for bot_id in (fleet.bots if bots is None else bots):
+        environment = None
         try:
-            socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
-                f"{fleet.service_prefix}.{bot_id}"
-            )
-        except ValueError:
+            if paths.package.installation is not None:
+                from .supervision import build_supervision_spec
+                spec = build_supervision_spec(fleet.bots[bot_id], fleet, paths)
+                socket = spec.label
+                environment = {**os.environ, "TMUX_TMPDIR": spec.environment["TMUX_TMPDIR"]}
+            else:
+                socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
+                    f"{fleet.service_prefix}.{bot_id}"
+                )
+        except (ValueError, OSError, RuntimeError) as exc:
+            if paths.package.installation is not None:
+                continue  # A missing committed target is not a guessed socket.
+            if not isinstance(exc, ValueError):
+                raise
             # SSOT resolver fail-fasts on a misconfigured bot when FLEET_NAME is
             # set; fall back to the canonical service-name socket so one bad bot
             # doesn't blank the whole dashboard.
@@ -138,7 +212,7 @@ def _check_tmux_sessions(fleet, paths) -> set[str]:
             out = subprocess.run(
                 ["tmux", "-L", socket, "has-session", "-t", bot_id],
                 capture_output=True,
-                timeout=5,
+                timeout=5, **({"env": environment} if environment is not None else {}),
             )
             if out.returncode == 0:
                 alive.add(bot_id)
@@ -202,7 +276,7 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
         return False, _SVC_UNDETERMINED
 
 
-def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
+def _newest_heartbeat_rows(conn, fleet_name: str, names=None) -> dict[str, dict]:
     """``{bot name (lower-cased): winning row}`` — the fleet's newest
     ``bot.heartbeat`` row per bot, with **case-variant alias collision resolved
     once, here**.
@@ -221,6 +295,10 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
     very collision the sibling path had already been fixed for. One scan, one
     rule, two projections below — the divergence is now unavailable rather
     than merely tested against.
+
+    ``names`` (lower-cased bot names) keeps only those bots' rows from the
+    one read; the collision rule is per bot, so this cannot change a kept
+    bot's pick.
     """
     from .plane.queries import LATEST_HEARTBEAT_SQL
     import sqlite3
@@ -232,6 +310,9 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
         alias = str(row["alias"] or "")
         if not alias.lower().startswith(prefix):
             continue
+        key = alias[len(prefix):].lower()
+        if names is not None and key not in names:
+            continue
         stamp = row["occurred_at"] or row["ingested_at"]
         try:
             ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
@@ -239,7 +320,6 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        key = alias[len(prefix):].lower()
         if key not in best or ts > best[key][0]:
             best[key] = (ts, {"alias": alias, "value": row["value"],
                               "ingested_at": row["ingested_at"],
@@ -247,7 +327,7 @@ def _newest_heartbeat_rows(conn, fleet_name: str) -> dict[str, dict]:
     return {k: v[1] for k, v in best.items()}
 
 
-def _presence_rows(conn, fleet_name: str) -> list[dict]:
+def _presence_rows(conn, fleet_name: str, rows: dict | None = None) -> list[dict]:
     """The collision-resolved rows in the shape `derive_presence` documents.
 
     One row per bot, so `derive_presence` cannot emit two `Presence` entries
@@ -261,19 +341,27 @@ def _presence_rows(conn, fleet_name: str) -> list[dict]:
     recorded one `working`, the live-only one `unknown` -- and the collapse
     then picked by `sorted()` order again. Both halves are keyed the same way
     below, so the union is one entry per bot by construction.
+
+    ``rows`` is an already-read `_newest_heartbeat_rows` result, so a caller
+    projecting both digests reads the plane once.
     """
     prefix = f"bot:{fleet_name}/".lower()
-    return [dict(row, alias=prefix + key)
-            for key, row in _newest_heartbeat_rows(conn, fleet_name).items()]
+    if rows is None:
+        rows = _newest_heartbeat_rows(conn, fleet_name)
+    return [dict(row, alias=prefix + key) for key, row in rows.items()]
 
 
-def _latest_heartbeats(conn, fleet_name: str) -> dict[str, tuple[datetime, str]]:
+def _latest_heartbeats(conn, fleet_name: str,
+                       rows: dict | None = None) -> dict[str, tuple[datetime, str]]:
     """``{bot name (lower-cased): (instant, BUSY|IDLE|UNKNOWN)}`` — the digest
     TMUX reads, projected from `_newest_heartbeat_rows` so it shares the
     case-variant collision rule with the presence path rather than repeating
-    it. Presence keeps the ingest clock for freshness; this is the pick."""
+    it. Presence keeps the ingest clock for freshness; this is the pick.
+    ``rows`` as in `_presence_rows`."""
+    if rows is None:
+        rows = _newest_heartbeat_rows(conn, fleet_name)
     out: dict[str, tuple[datetime, str]] = {}
-    for key, row in _newest_heartbeat_rows(conn, fleet_name).items():
+    for key, row in rows.items():
         stamp = row["occurred_at"] or row["ingested_at"]
         try:
             ts = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
@@ -304,16 +392,31 @@ def _read_service_label(bot_dir: Path) -> str:
     return ""
 
 
+def _live_context(paths: Paths, fleet: FleetConfig, bot_id: str) -> dict:
+    """The newest main-chain usage row's context, from the reader `fleet
+    usage` uses; a reader fault costs this field, never the status read."""
+    from .transcript_usage import current_context
+
+    try:
+        return current_context(paths, fleet, bot_id)
+    except Exception as exc:  # noqa: BLE001 - named in the field, not raised
+        return {"tokens": None, "at": None, "reason": f"context_read_failed: {type(exc).__name__}",
+                "session": None, "compacted_after": None, "bytes_read": 0, "cap": None}
+
+
 def collect_fleet_status(
     fleet: FleetConfig,
     paths: Paths,
+    only: str | None = None,
 ) -> list[BotStatus]:
-    """Collect status for all bots in the fleet."""
-    from .utilization import compute_bot_utilization, fleet_heartbeat_series, load_fleet_state
-
-    state_data = load_fleet_state(paths)
-    bots_state = state_data.get("bots", {})
-    tmux_sessions = _check_tmux_sessions(fleet, paths)
+    """Collect status for all bots in the fleet, or for the declared bot
+    ``only``: its native tmux/service probes and its heartbeat alone, while
+    the Task snapshot stays fleet-wide so work facts read the same either way."""
+    from .utilization import compute_bot_utilization, fleet_heartbeat_series
+    bots = list(fleet.bots) if only is None else [only]
+    tmux_sessions = _check_tmux_sessions(fleet, paths, bots)
+    current_services = (_current_service_observations(fleet, paths, bots)
+                        if paths.package.installation is not None else None)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
 
@@ -325,11 +428,14 @@ def collect_fleet_status(
     from .brief import plane_session
     presence: dict = {}
     plane_fleet = ""
+    work = None
+    work_unavailable = ""
     plane, plane_unreachable = plane_session(paths)      # the overlay's fleet, else the manifest's
     if plane is not None:
         try:
-            heartbeats = _latest_heartbeats(plane.conn, plane.fleet)
-            series = fleet_heartbeat_series(plane.conn, plane.fleet, now)
+            newest = _newest_heartbeat_rows(plane.conn, plane.fleet, {b.lower() for b in bots})
+            heartbeats = _latest_heartbeats(plane.conn, plane.fleet, newest)
+            series = fleet_heartbeat_series(plane.conn, plane.fleet, now, only)
             # #1615: STATE comes from the SAME verdict TMUX does, so one row can
             # no longer carry two different "idle"s. derive_presence is the one
             # definition (plane/presence.py); liveness is this command's own
@@ -339,38 +445,48 @@ def collect_fleet_status(
             # recorded one mints a second, heartbeat-less verdict.
             _live = [{"fleet": plane.fleet.lower(), "bot": b.lower(),
                       "status": "up" if b in tmux_sessions else "down"}
-                     for b in fleet.bots]
+                     for b in bots]
             presence = {pz.alias.lower(): pz for pz in derive_presence(
-                _presence_rows(plane.conn, plane.fleet), _live, now=now)}
+                _presence_rows(plane.conn, plane.fleet, newest), _live, now=now)}
             plane_fleet = plane.fleet
         except Exception as exc:                 # a schema the reader cannot use: say so, never blank
             plane_unreachable = f"the plane could not answer: {exc}"
+        try:
+            work = read_fleet_work(plane.conn, fleet_uid=plane.pr.fleet_uid(plane.conn, plane.fleet),
+                                   fleet=plane.fleet, bot_names=list(fleet.bots))
+        except Exception as exc:
+            work_unavailable = f"the Task snapshot could not answer: {exc}"
         finally:
             plane.close()
     plane_unreachable = plane_unreachable or ""
+    work_unavailable = work_unavailable or plane_unreachable
 
     results: list[BotStatus] = []
 
-    for bot_id in fleet.bots:
+    for bot_id in bots:
         bs = BotStatus(name=bot_id)
         bot_dir = paths.bot_runtime(bot_id)
 
-        # fleet-state.json: `last_completed` and `current_task` only. STATE is
-        # the plane's now (#1615) -- the file's status is the last REPORT's
-        # word, frozen until the bot's next report, and rendering it beside a
-        # live pane verdict put two different "idle"s in one row.
-        entry = bots_state.get(bot_id, {})
-        bs.current_task = entry.get("current_task")
-        bs.last_completed = entry.get("last_completed")
-        _reported_blocked = entry.get("status") == "blocked"
+        if work is not None:
+            bot_work = work.bots[bot_id]
+            bs.current_task = bot_work.current_task
+            bs.open_assignments = bot_work.open_assignments
+            bs.last_completed = bot_work.last_completed
+            bs.work_assignments = bot_work.assignments
+            bs.work_issues = tuple(asdict(issue) for issue in work.issues)
+            bs.work_unavailable = bot_work.unavailable
+        else:
+            bs.work_unavailable = work_unavailable
 
         # tmux
         bs.tmux_alive = bot_id in tmux_sessions
 
         # service supervision — key off the BOT_SERVICE label the installer
         # names the unit after (com.<fleet>.<bot>), not the bare bot id.
-        label = _read_service_label(bot_dir)
-        if is_linux:
+        label = _read_service_label(bot_dir) if current_services is None else ""
+        if current_services is not None:
+            bs.service_active, bs.service_sub, _ = current_services[bot_id]
+        elif is_linux:
             bs.service_active, bs.service_sub = _check_systemd_service(bot_id, label)
         elif label:
             bs.service_active, bs.service_sub = _check_launchd_service(bot_id, label)
@@ -380,26 +496,41 @@ def collect_fleet_status(
         if not plane_unreachable:
             bs.last_heartbeat, bs.pane_state = heartbeats.get(bot_id.lower(), (None, ""))
             util = compute_bot_utilization(
-                bot_id, series.get(bot_id.lower(), []), bots_state.get(bot_id, {}), now=now
+                bot_id, series.get(bot_id.lower(), []),
+                work.bots[bot_id] if work is not None else None, now=now
             )
             bs.busy_pct_24h = util.busy_pct_24h
-            bs.current_task_age_secs = util.current_task_age_secs
+            bs.busy_age_secs = util.busy_age_secs
             bs.idle_since = util.idle_since
+        bs.context = _live_context(paths, fleet, bot_id)
+
         # STATE and TMUX now answer the SAME question from the SAME verdict.
-        # `blocked` is the one exception and is NOT a second "idle": it is a
-        # claim the bot made about ITSELF that no pane verdict can express, so
-        # it is honoured only while presence says idle -- a bot that is working
-        # is not blocked, which is what kept a stale `blocked` on screen
-        # indefinitely (#1615's `tom`). It retires with the file (#1504).
+        # A current blocked assignment decorates an observed idle presence;
+        # it cannot turn a BUSY pane into an idle one.
         _pres = presence.get(f"bot:{plane_fleet}/{bot_id}".lower()) if presence else None
         if _pres is not None:
             bs.state = _pres.presence
-            if bs.state == "idle" and _reported_blocked:
+            if bs.state == "idle" and work is not None and work.bots[bot_id].blocked:
                 bs.state = "blocked"
         elif not plane_unreachable:
             bs.state = "unknown"
         else:
-            bs.state = entry.get("status", "unknown")   # plane down: the file is all there is
+            bs.state = "unknown"
+        # #2243 F8: stopped on purpose, not down. fleet-pulse's two facts: no
+        # installed unit file (svc_is_registered) and the stop door's record. A
+        # missing unit with no record is never `stopped` (the sweep calls it
+        # unit_missing), nor is a bot whose session is still up.
+        unenrolled = not bs.tmux_alive and (
+            current_services[bot_id][2] is False if current_services is not None
+            else bool(label) and not unit_installed(label, system=platform.system()))
+        if unenrolled:
+            record = read_stop(bot_dir)
+            if record is not None:
+                bs.state = "stopped"
+                bs.stopped_since, bs.stopped_by, bs.stop_reason = (
+                    value if isinstance(value, str) else None
+                    for value in (record.get("stopped_at"), record.get("by"),
+                                  record.get("reason")))
 
         results.append(bs)
 
@@ -410,7 +541,10 @@ def collect_fleet_status(
 
 
 def _health_indicator(bs: BotStatus) -> str:
-    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known."""
+    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known,
+    - stopped on purpose (#2243)."""
+    if bs.state == "stopped":
+        return _dim("-")
     if not bs.tmux_alive:
         return _red("x")
     if not bs.service_active:
@@ -418,7 +552,7 @@ def _health_indicator(bs: BotStatus) -> str:
         # never undetermined, so the sentinel is only consulted once we know
         # the unit was not reported active.
         return _yellow("?") if bs.service_undetermined else _red("x")
-    if bs.plane_unreachable:
+    if bs.plane_unreachable or bs.work_unavailable or bs.work_unresolved:
         # up by tmux and the service, but the recorded half is unreadable:
         # NOT known healthy (a plane outage read as an all-green fleet is the
         # founding gap of #1361)
@@ -437,7 +571,7 @@ def _health_indicator(bs: BotStatus) -> str:
 def _state_display(bs: BotStatus) -> str:
     """Colorized state string."""
     s = bs.state
-    if s == "idle":
+    if s in {"idle", "stopped"}:
         return _dim(s)
     if s == "working":
         return _green(s)
@@ -490,6 +624,13 @@ def _tmux_display(bs: BotStatus) -> str:
             return _green("busy")
         if bs.pane_state == "IDLE":
             return "idle"
+        if bs.pane_state == "HELD":
+            # #2070: text sits unsubmitted in the input box; an operator Enter
+            # clears it, a restart would discard it.
+            return _yellow("held")
+        if bs.pane_state == "LIMIT":
+            # #996: a claude.ai usage limit stopped it; it waits for the reset.
+            return _yellow("limit")
         return "up"
     return _red("down")
 
@@ -542,14 +683,14 @@ def _idle_since_display(bs: BotStatus, now: datetime) -> str:
     return _fmt_duration(int(age))
 
 
-def _task_age_display(bs: BotStatus) -> str:
-    """Current task age."""
+def _busy_age_display(bs: BotStatus) -> str:
+    """Age of the observed BUSY heartbeat run, not an assignment clock."""
     if bs.plane_unreachable:
         return _yellow("?")
-    if bs.current_task_age_secs is None:
+    if bs.busy_age_secs is None:
         return _dim("--")
-    s = _fmt_duration(bs.current_task_age_secs)
-    if bs.current_task_age_secs > 7200:
+    s = _fmt_duration(bs.busy_age_secs)
+    if bs.busy_age_secs > 7200:
         return _yellow(s)
     return s
 
@@ -572,11 +713,41 @@ def switches_off_note(fleet_name: str, switch_states: list | None) -> str:
     from . import switches as _sw
 
     off = _sw.target_workflow_off(switch_states or [])
-    if not off:
-        return ""
-    return ", ".join(
-        f"{s.switch.key} off on {fleet_name}" for s in off
-    ) + " — this reaction will not happen (claudlobby doctor --switches)"
+    notes = []
+    if off:
+        notes.append(", ".join(f"{s.switch.key} off on {fleet_name}" for s in off)
+                     + " — this reaction will not happen (claudlobby host doctor --switches)")
+    unknown = [s for s in switch_states or [] if s.unknown]
+    if unknown:
+        notes.append("Switch states unknown: " + ", ".join(
+            f"{s.switch.key} ({s.unknown_reason})" for s in unknown)
+            + " — inspect claudlobby host doctor --switches")
+    return "\n".join(notes)
+
+
+def _context_display(bs: BotStatus) -> str:
+    tokens = (bs.context or {}).get("tokens")
+    if tokens is None:
+        return "?"
+    if tokens < 1000:
+        return str(tokens)
+    return f"{tokens / 1000:.0f}k" if tokens < 999_500 else f"{tokens / 1_000_000:.1f}M"
+
+
+def _count(tokens: int | None) -> str:
+    return "unknown" if tokens is None else f"{tokens:,}"
+
+
+def _context_detail(context: dict | None) -> str:
+    context = context or {}
+    if context.get("tokens") is None:
+        return f"unknown ({context.get('reason') or 'not read'})"
+    line = f"{context['tokens']:,} tokens at {context['at']} (the newest main-chain call)"
+    after = context.get("compacted_after")
+    if after:
+        line += (f"; compacted after it at {after['at']}, "
+                 f"{_count(after['pre_tokens'])} -> {_count(after['post_tokens'])}")
+    return line
 
 
 def format_table(statuses: list[BotStatus], fleet_name: str,
@@ -610,7 +781,8 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
         f"{'HEARTBEAT':<10}  "
         f"{'BUSY%':<6}  "
         f"{'IDLE':<8}  "
-        f"{'TASK AGE':<8}  "
+        f"{'BUSY AGE':<8}  "
+        f"{'CONTEXT':<7}  "
         f"ACTIVITY"
     )
     lines.append(_dim(hdr))
@@ -618,9 +790,18 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
 
     for bs in statuses:
         indicator = _health_indicator(bs)
-        activity = bs.current_task or bs.last_completed or ""
-        activity = _truncate(activity, 40)
-        if bs.current_task:
+        activity = ("work unresolved" if bs.work_unresolved else
+                    bs.current_task or _stopped_note(bs) or bs.last_completed or
+                    ("work unknown" if bs.work_unavailable else ""))
+        # Never pick silently (#2179): the count of the other open assignments
+        # is kept clear of the column's truncation.
+        others = ((bs.open_assignments or 1) - 1
+                  if bs.current_task and activity == bs.current_task else 0)
+        more = f" (+{others} open)" if others > 0 else ""
+        activity = _truncate(activity, 40 - len(more)) + more
+        if bs.work_unresolved or bs.work_unavailable:
+            activity_display = _yellow(activity)
+        elif bs.current_task:
             activity_display = activity
         elif bs.last_completed:
             activity_display = _dim(activity)
@@ -636,7 +817,8 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
             f"{_pad(_heartbeat_display(bs), 10)}  "
             f"{_pad(_busy_pct_display(bs), 6)}  "
             f"{_pad(_idle_since_display(bs, now), 8)}  "
-            f"{_pad(_task_age_display(bs), 8)}  "
+            f"{_pad(_busy_age_display(bs), 8)}  "
+            f"{_pad(_context_display(bs), 7)}  "
             f"{activity_display}"
         )
         lines.append(row)
@@ -655,6 +837,13 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
                              f" unreachable ({why}); restore state/plane/plane.db or name the"
                              " right root"))
         lines.append("")
+    work_why = next((bs.work_unavailable for bs in statuses if bs.work_unavailable), "")
+    if work_why and not why:
+        lines.append(_yellow(f"  Task work: unknown ({work_why})"))
+        lines.append("")
+    elif any(bs.work_unresolved for bs in statuses):
+        lines.append(_yellow("  Task work: unresolved reducer issues; inspect JSON or bot detail"))
+        lines.append("")
     summary_parts = [f"{up_count}/{total} up"]
     if undetermined:
         # Without this the shortfall in "N/M up" reads as N-M bots being DOWN.
@@ -668,12 +857,22 @@ def format_table(statuses: list[BotStatus], fleet_name: str,
     return "\n".join(lines) + "\n"
 
 
+def _stopped_note(bs: BotStatus) -> str:
+    """`stopped since <UTC> by <caller>` for a recorded stop, else ""."""
+    if bs.state != "stopped":
+        return ""
+    return f"stopped since {bs.stopped_since or 'unknown'} by {bs.stopped_by or 'unknown'}"
+
+
 def format_bot_detail(bs: BotStatus) -> str:
     """Detailed view for a single bot (claudlobby status --bot <name>)."""
     lines: list[str] = []
     lines.append(_bold(bs.name))
     lines.append("")
     lines.append(f"  State:      {_state_display(bs)}")
+    if bs.state == "stopped":
+        lines.append(f"  Stopped:    {_stopped_note(bs)}"
+                     + (f" ({bs.stop_reason})" if bs.stop_reason else ""))
     lines.append(f"  Service:    {_service_display(bs)} ({bs.service_sub})")
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
     lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}"
@@ -682,12 +881,23 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Busy 24h:   {_busy_pct_display(bs)}")
     now = datetime.now(timezone.utc)
     lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
-    lines.append(f"  Task age:   {_task_age_display(bs)}")
+    lines.append(f"  Busy age:   {_busy_age_display(bs)}")
+    lines.append(f"  Context:    {_context_detail(bs.context)}")
 
     if bs.current_task:
-        lines.append(f"  Task:       {bs.current_task}")
+        of = (f" (1 of {bs.open_assignments} open)"
+              if bs.open_assignments and bs.open_assignments > 1 else "")
+        lines.append(f"  Task:       {bs.current_task}{of}")
+    for assignment in bs.work_assignments:
+        lines.append(f"  Assignment: {assignment.assignment_id} / {assignment.task_id} ({assignment.state})")
     if bs.last_completed:
         lines.append(f"  Last:       {bs.last_completed}")
+    if bs.work_unavailable:
+        lines.append(f"  Work:       unknown ({bs.work_unavailable})")
+    if bs.work_issues:
+        label = "unresolved" if bs.work_unresolved else "issues"
+        codes = ", ".join(sorted({issue["code"] for issue in bs.work_issues}))
+        lines.append(f"  Work:       {label} ({len(bs.work_issues)} Task issue(s): {codes})")
 
     return "\n".join(lines) + "\n"
 
@@ -715,9 +925,22 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 "plane_unreachable": bs.plane_unreachable or None,
                 "busy_pct_24h": bs.busy_pct_24h,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
-                "current_task_age_secs": bs.current_task_age_secs,
+                # The observed BUSY run, separate from assignment state.
+                "busy_age_secs": bs.busy_age_secs,
+                # The newest main-chain usage row (#2206); tokens null with a
+                # reason when the transcript cannot answer, never 0.
+                "context": bs.context,
                 "current_task": bs.current_task,
+                "open_assignments": bs.open_assignments,
                 "last_completed": bs.last_completed,
+                "work_assignments": [asdict(a) for a in bs.work_assignments],
+                "work_issues": list(bs.work_issues),
+                "work_unresolved": bs.work_unresolved,
+                "work_unavailable": bs.work_unavailable or None,
+                # #2243: null unless state is "stopped"
+                "stopped_since": bs.stopped_since,
+                "stopped_by": bs.stopped_by,
+                "stop_reason": bs.stop_reason,
             }
         )
     payload: dict = {"fleet": fleet_name, "bots": bots}
@@ -729,4 +952,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
             s.switch.key for s in switch_states
             if s.switch.target_workflow and not s.on and not s.unknown
         ]
+        payload["switches_unknown"] = [
+            {"key": s.switch.key, "reason": s.unknown_reason}
+            for s in switch_states if s.unknown
+        ]
+        payload["switches_state"] = "unknown" if payload["switches_unknown"] else "read"
     return json.dumps(payload, indent=2) + "\n"

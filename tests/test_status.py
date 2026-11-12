@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from tests.plane_setup import initialize_plane
+
 from pathlib import Path
 
 import json
-import os
 import subprocess
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
@@ -22,12 +23,12 @@ from claudlobby.status import (
     _heartbeat_display,
     _latest_heartbeats,
     _state_display,
+    _tmux_display,
     collect_fleet_status,
     format_bot_detail,
     format_json,
     format_table,
 )
-from claudlobby.utilization import load_fleet_state
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -38,17 +39,18 @@ REPO = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def mock_paths(tmp_path):
     """Create a minimal Paths-like object."""
+    from tests.package_fixtures import source_package
     from claudlobby.paths import Paths
 
     root = tmp_path / "claudlobby"
     root.mkdir()
     (root / "library").mkdir()
-    (root / "lib").symlink_to(REPO / "lib")   # the install's lib/: every reader rides the matcher's session
+    (root / "lib").symlink_to(REPO / "claudlobby/_runtime_scripts")   # the install's claudlobby/_runtime_scripts/: every reader rides the matcher's session
     fleet_dir = root / "local" / "test-fleet"
     fleet_dir.mkdir(parents=True)
     runtime = fleet_dir / "runtime" / "bots"
     runtime.mkdir(parents=True)
-    return Paths(root=root, fleet_dir=fleet_dir)
+    return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
 @pytest.fixture
@@ -58,6 +60,7 @@ def mock_fleet():
 
     return FleetConfig(
         name="test-fleet",
+        manager="bob",
         service_prefix="com.test",
         bots={
             "alice": BotConfig(bot_id="alice", name="alice", expertise=["eng"]),
@@ -81,48 +84,6 @@ class TestCheckTmuxSessions:
         assert alive == set()
 
 
-# -- load_fleet_state (now in utilization.py) --------------------------------
-
-
-class TestLoadFleetState:
-    @pytest.fixture(autouse=True)
-    def _clear_state_env(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FLEET_STATE_PATH", None)
-            yield
-
-    def test_missing_file(self, mock_paths):
-        result = load_fleet_state(mock_paths)
-        assert result == {}
-
-    def test_valid_json(self, mock_paths):
-        state_dir = mock_paths.root / "state"
-        state_dir.mkdir()
-        state_file = state_dir / "fleet-state.json"
-        data = {
-            "updated": "2026-01-01T00:00:00Z",
-            "bots": {"alice": {"status": "idle"}},
-        }
-        state_file.write_text(json.dumps(data))
-        result = load_fleet_state(mock_paths)
-        assert result["bots"]["alice"]["status"] == "idle"
-
-    def test_corrupt_json(self, mock_paths):
-        state_dir = mock_paths.root / "state"
-        state_dir.mkdir()
-        (state_dir / "fleet-state.json").write_text("{bad json")
-        result = load_fleet_state(mock_paths)
-        assert result == {}
-
-    def test_env_override(self, mock_paths, tmp_path):
-        custom = tmp_path / "custom-state.json"
-        data = {"bots": {"alice": {"status": "working"}}}
-        custom.write_text(json.dumps(data))
-        with patch.dict(os.environ, {"FLEET_STATE_PATH": str(custom)}):
-            result = load_fleet_state(mock_paths)
-        assert result["bots"]["alice"]["status"] == "working"
-
-
 # -- _parse_keepalive_log ----------------------------------------------------
 
 
@@ -134,6 +95,7 @@ def _land_heartbeats(root, fleet: str, bot: str, states: list[str]) -> None:
     (root / "state" / "plane").mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     n = len(states)
+    initialize_plane(root)
     out = emit_batch(root, [{"event_type": "metric_sample", "emitter": "keepalive", "fleet": fleet,
                              "occurred_at": (now - timedelta(minutes=n - i)).isoformat(),
                              "payload": {"subject_kind": "bot_instance", "subject": f"bot:{fleet}/{bot}",
@@ -174,6 +136,7 @@ class TestLatestHeartbeats:
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
                                 "metric": "bot.heartbeat", "value": {"state": state}}}
 
+        initialize_plane(mock_paths.root)
         out = emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
         assert all(o.status == "committed" for o in out), out
         with ro(mock_paths.root) as conn:
@@ -223,6 +186,7 @@ class TestLatestHeartbeats:
                     "payload": {"subject_kind": "bot_instance", "subject": f"bot:test-fleet/{bot}",
                                 "metric": "bot.heartbeat", "value": {"state": state}}}
 
+        initialize_plane(mock_paths.root)
         emit_batch(mock_paths.root, [_sample("alex", "UNKNOWN", 30), _sample("ALEX", "UNKNOWN", 30)])
         with ro(mock_paths.root) as conn:
             order = [r["alias"].split("/")[-1] for r in conn.execute(LATEST_HEARTBEAT_SQL)
@@ -474,6 +438,17 @@ class TestStateDisplay:
         assert _state_display(bs) == "working"
 
 
+class TestTmuxDisplay:
+    def test_held(self):
+        # #2070: a box holding unsubmitted text is named, not shown as plain "up".
+        bs = BotStatus(name="x", tmux_alive=True, pane_state="HELD")
+        assert "held" in _tmux_display(bs)
+
+    def test_busy_and_idle_unchanged(self):
+        assert "busy" in _tmux_display(BotStatus(name="x", tmux_alive=True, pane_state="BUSY"))
+        assert _tmux_display(BotStatus(name="x", tmux_alive=True, pane_state="IDLE")) == "idle"
+
+
 class TestHeartbeatDisplay:
     def test_no_heartbeat(self):
         bs = BotStatus(name="x")
@@ -557,7 +532,6 @@ class TestCollectFleetStatus:
                 "claudlobby.status._check_systemd_service",
                 return_value=(True, "exited"),
             ),
-            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         assert len(results) == 2
@@ -579,6 +553,49 @@ class TestCollectFleetStatus:
         assert "plane is unreachable" in table and "restore state/plane/plane.db" in table
         assert "plane unreachable" in format_bot_detail(alice)
 
+    def test_one_bot_probes_and_reads_only_that_bot(self, mock_fleet, mock_paths):
+        """`bot status B` once probed every bot's tmux/service and read the
+        heartbeats twice; now B's probes alone, one heartbeat read, B's row."""
+        import subprocess
+        import claudlobby.status as status_mod
+
+        _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY"])
+        _land_heartbeats(mock_paths.root, "test-fleet", "bob", ["IDLE", "BUSY"])
+        reads, probes = [], []
+        real_rows, real_run = status_mod._newest_heartbeat_rows, subprocess.run
+
+        def _spy(conn, fleet_name, names=None):
+            got = real_rows(conn, fleet_name, names)
+            reads.append(set(got))
+            return got
+
+        def _run(argv, *a, **kw):              # the native probes, recorded at the process boundary
+            if argv and argv[0] in ("tmux", "systemctl", "launchctl"):
+                probes.append(argv)
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout="ActiveState=active\nSubState=running\n", stderr="")
+            return real_run(argv, *a, **kw)
+        with (
+            patch("claudlobby.status.subprocess.run", _run),
+            patch("claudlobby.status.platform.system", return_value="Linux"),
+            patch("claudlobby.status._newest_heartbeat_rows", _spy),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths, only="bob")
+        assert [bs.name for bs in results] == ["bob"]
+        assert {p[0] for p in probes} == {"tmux", "systemctl"}, probes
+        assert all("bob" in " ".join(p) and "alice" not in " ".join(p) for p in probes), probes
+        assert reads == [{"bob"}]                       # ONE read; only bob's row kept
+        assert results[0].tmux_alive and results[0].service_active
+        assert results[0].pane_state == "BUSY" and results[0].state == "working"
+        # the scoped series is exactly the fleet read's bob, matched case-insensitively
+        from claudlobby.utilization import fleet_heartbeat_series
+        from tests.plane_fixtures import ro
+        now = datetime.now(timezone.utc)
+        with ro(mock_paths.root) as conn:
+            full = fleet_heartbeat_series(conn, "test-fleet", now)
+            one = fleet_heartbeat_series(conn, "test-fleet", now, "BOB")
+        assert set(full) == {"alice", "bob"} and one == {"bob": full["bob"]}
+
     def test_the_plane_serves_heartbeat_pane_state_and_utilization(self, mock_fleet, mock_paths):
         """With a plane: alice's newest sample is BUSY (heartbeat + pane state),
         her series rolls up to 100% busy; bob, never recorded, is blank."""
@@ -586,13 +603,13 @@ class TestCollectFleetStatus:
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         alice = next(bs for bs in results if bs.name == "alice")
         bob = next(bs for bs in results if bs.name == "bob")
         assert not alice.plane_unreachable and alice.pane_state == "BUSY" and alice.last_heartbeat is not None
-        assert alice.busy_pct_24h == 100.0 and alice.current_task_age_secs is not None
+        assert alice.busy_pct_24h == 100.0 and alice.busy_age_secs is not None
+        assert "no actor identity" in alice.work_unavailable
         assert bob.last_heartbeat is None and bob.pane_state == "" and bob.busy_pct_24h == 0.0
         assert "plane is unreachable" not in format_table(results, "test-fleet")
 
@@ -603,73 +620,138 @@ class TestCollectFleetStatus:
         rows carried a STATE the pane contradicted, every one of them the
         direction that gets a working bot injected into."""
         _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
+        (mock_paths.root / "state" / "fleet-state.json").write_text(
+            '{"bots":{"alice":{"status":"idle","current_task":"stale task"}}}')
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state",
-                  return_value={"bots": {"alice": {"status": "idle"}}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         alice = next(bs for bs in results if bs.name == "alice")
         # the file says idle; the pane says BUSY. The pane wins.
         assert alice.state == "working", alice.state
         assert alice.pane_state == "BUSY"
+        assert alice.current_task is None
 
     def test_a_stale_working_in_the_file_does_not_survive_an_idle_pane(self, mock_fleet, mock_paths):
         """The inverse direction, and the one that makes a finished bot look
         busy: `ravi` rendered STATE=working off a report while his pane had
         already gone idle."""
         _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
+        (mock_paths.root / "state" / "fleet-state.json").write_text(
+            '{"bots":{"alice":{"status":"working","current_task":"stale task"}}}')
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state",
-                  return_value={"bots": {"alice": {"status": "working"}}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         alice = next(bs for bs in results if bs.name == "alice")
         assert alice.state == "idle", alice.state
+        assert alice.current_task is None
 
-    def test_blocked_is_honoured_only_while_the_pane_is_idle(self, mock_fleet, mock_paths):
-        """`blocked` is NOT a second "idle" -- it is a claim the bot made about
-        ITSELF that no pane verdict can express, so it survives the move to the
-        plane. But a bot that is WORKING is not blocked, which is what kept a
-        stale `blocked` on screen indefinitely (#1615's `tom`)."""
+    def test_canonical_assignment_block_and_return_are_distinct_from_presence(self, mock_fleet, mock_paths):
+        """A queued task is fleet intake; only its current assignment is bot work."""
+        from claudlobby.plane.db import connect, db_file
+        from claudlobby.plane.identity import resolve_party
+        from tests.test_task_state import _insert
+
         _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["BUSY", "BUSY"])
-        blocked_file = {"bots": {"alice": {"status": "blocked"}}}
+        (mock_paths.root / "state" / "fleet-state.json").write_text(
+            '{"bots":{"alice":{"status":"blocked","current_task":"stale task"}}}')
+        conn = connect(db_file(mock_paths.root))
+        fleet_uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet'"
+                                 " AND alias='test-fleet'").fetchone()[0]
+        # The legacy ingest party resolver did not set parent_uid on actors.
+        alice_uid = resolve_party(conn, "bot:test-fleet/alice", now="2026-09-28T00:00:00Z")
+        _insert(conn, "work_items", fleet_uid=fleet_uid, work_item_id="wi_canonical",
+                title="Canonical work", created_by_uid=alice_uid)
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
         ):
-            working = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
-                           if bs.name == "alice")
-        assert working.state == "working", working.state   # busy pane overrides a stale blocked
+            queued = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                          if bs.name == "alice")
+        assert queued.state == "working" and queued.current_task is None
+        assert queued.work_assignments == ()
+        assert not queued.work_unavailable
+
+        _insert(conn, "assignments", fleet_uid=fleet_uid, assignment_id="asg_canonical",
+                work_item_id="wi_canonical", assignee_uid=alice_uid, assigned_by_uid=alice_uid)
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_canonical",
+                assignment_id="asg_canonical", event="blocked_waiting")
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            busy = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                        if bs.name == "alice")
+        assert busy.state == "working" and busy.current_task == "Canonical work"
+        assert [(a.task_id, a.assignment_id, a.state) for a in busy.work_assignments] == [
+            ("wi_canonical", "asg_canonical", "blocked")]
 
         _land_heartbeats(mock_paths.root, "test-fleet", "alice", ["IDLE", "IDLE"])
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state", return_value=blocked_file),
         ):
             idle = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
                         if bs.name == "alice")
-        assert idle.state == "blocked", idle.state         # idle pane: the self-report stands
+        assert idle.state == "blocked" and idle.work_assignments[0].state == "blocked"
 
-    def test_the_file_is_the_fallback_only_when_the_plane_is_unreachable(self, mock_fleet, mock_paths):
-        """No plane under this root. The file is then all there is, and using
-        it is correct -- what is wrong is preferring it while the plane can
-        answer. Unreachable is disclosed separately (plane_unreachable)."""
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_canonical",
+                assignment_id="asg_canonical", event="returned_blocked")
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
             patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
-            patch("claudlobby.utilization.load_fleet_state",
-                  return_value={"bots": {"alice": {"status": "working"}}}),
+        ):
+            returned = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                            if bs.name == "alice")
+        assert returned.state == "idle" and returned.current_task is None
+        assert returned.work_assignments == ()
+
+        _insert(conn, "work_items", fleet_uid=fleet_uid, work_item_id="wi_done",
+                title="Completed work", created_by_uid=alice_uid)
+        _insert(conn, "assignments", fleet_uid=fleet_uid, assignment_id="asg_done",
+                work_item_id="wi_done", assignee_uid=alice_uid, assigned_by_uid=alice_uid)
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_done",
+                assignment_id="asg_done", event="completed")
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            done = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                        if bs.name == "alice")
+        assert done.current_task is None and done.last_completed == "Completed work"
+
+        _insert(conn, "events", fleet_uid=fleet_uid, kind="task", work_item_id="wi_canonical",
+                assignment_id="asg_missing", event="progress")
+        conn.close()
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            unresolved = next(bs for bs in collect_fleet_status(mock_fleet, mock_paths)
+                              if bs.name == "alice")
+        assert any(issue["code"] == "dangling_task_event" for issue in unresolved.work_issues)
+        assert unresolved.work_unavailable and unresolved.work_unresolved
+        assert "work unresolved" in format_table([unresolved], "test-fleet")
+
+    def test_plane_unavailable_never_resurrects_stale_file_work(self, mock_fleet, mock_paths):
+        """An unavailable canonical read is unknown even if a stale file exists."""
+        state = mock_paths.root / "state"
+        state.mkdir()
+        (state / "fleet-state.json").write_text(
+            '{"bots":{"alice":{"status":"working","current_task":"stale task"}}}')
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value={"alice"}),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         alice = next(bs for bs in results if bs.name == "alice")
         assert alice.plane_unreachable
-        assert alice.state == "working", alice.state
+        assert alice.state == "unknown" and alice.current_task is None
+        assert alice.work_unavailable == alice.plane_unreachable
+        assert json.loads(format_json(results, "test-fleet"))["bots"][0]["work_unavailable"]
 
     def test_systemd_check_queries_bot_service_label(self, mock_fleet, mock_paths):
         """#657: on Linux the SVC check must query the BOT_SERVICE unit
@@ -693,7 +775,6 @@ class TestCollectFleetStatus:
             patch("claudlobby.status.platform.system", return_value="Linux"),
             patch("claudlobby.status._check_tmux_sessions", return_value=set()),
             patch("claudlobby.status.subprocess.run", side_effect=fake_run),
-            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
 
@@ -728,6 +809,7 @@ class TestCollectFleetStatus:
 
         fleet = FleetConfig(
             name="test-fleet",
+            manager="Alex",
             service_prefix="com.test",
             bots={"Alex": BotConfig(bot_id="Alex", name="Alex", expertise=["eng"])},
         )
@@ -736,7 +818,6 @@ class TestCollectFleetStatus:
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value=set()),
             patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
-            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             alex = next(bs for bs in collect_fleet_status(fleet, mock_paths)
                         if bs.name == "Alex")
@@ -773,13 +854,15 @@ class TestCollectFleetStatus:
         record-only one: STATE=idle beside TMUX=down.
         """
         from claudlobby.config import BotConfig, FleetConfig
+        from tests.package_fixtures import source_package
         from claudlobby.paths import Paths
 
         fleet_dir = mock_paths.root / "local" / "Test-Fleet"
         (fleet_dir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
-        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir)
+        paths = Paths(root=mock_paths.root, fleet_dir=fleet_dir, package=source_package())
         fleet = FleetConfig(
             name="Test-Fleet",
+            manager="alex",
             service_prefix="com.test",
             bots={"alex": BotConfig(bot_id="alex", name="alex", expertise=["eng"])},
         )
@@ -792,7 +875,6 @@ class TestCollectFleetStatus:
         with (
             patch("claudlobby.status._check_tmux_sessions", return_value=set()),
             patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
-            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             alex = next(bs for bs in collect_fleet_status(fleet, paths)
                         if bs.name == "alex")
@@ -805,3 +887,98 @@ class TestCollectFleetStatus:
         assert alex.tmux_alive is False
         assert alex.state == "down", alex.state
         assert (alex.state == "down") == (not alex.tmux_alive)
+
+
+class TestRecordedStop:
+    """#2243 F8: a bot the stop door stopped reads `stopped`, with who and since, in place of
+    `down`. The facts are fleet-pulse's: no installed unit file, and the stop door's record. A
+    missing unit with no record is never `stopped`."""
+
+    def _stage(self, tmp_path, mock_paths, monkeypatch, *, record, unit):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        alice = mock_paths.bot_runtime("alice")
+        (alice / "data").mkdir(parents=True, exist_ok=True)
+        (alice / "bot.conf").write_text("BOT_SERVICE=com.test.alice\n")
+        if unit:
+            path = home / ".config/systemd/user/com.test.alice.service"
+            path.parent.mkdir(parents=True)
+            path.write_text("[Service]\n")
+        if record:
+            (alice / "data" / ".stopped").write_text(json.dumps({
+                "by": "bot:test-fleet/bob", "reason": "parked", "request_id": "r-1",
+                "stopped_at": "2026-10-09T20:40:00Z", "stopped_epoch": 1791578400},
+                sort_keys=True) + "\n")
+
+    def _alice(self, mock_fleet, mock_paths):
+        with (
+            patch("claudlobby.status.platform.system", return_value="Linux"),
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(False, "dead")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        rows = json.loads(format_json(results, "test-fleet"))["bots"]
+        return next(bs for bs in results if bs.name == "alice"), next(r for r in rows if r["name"] == "alice")
+
+    def test_a_recorded_stop_reads_stopped_with_who_and_since(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=True, unit=False)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state == "stopped"
+        assert (row["state"], row["stopped_by"], row["stopped_since"], row["stop_reason"]) == (
+            "stopped", "bot:test-fleet/bob", "2026-10-09T20:40:00Z", "parked")
+        assert "stopped" in format_table([alice], "test-fleet")
+
+    def test_a_missing_unit_with_no_record_is_not_stopped(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=False, unit=False)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state != "stopped" and row["stopped_by"] is None
+
+    def test_a_record_beside_an_installed_unit_is_stale_not_a_stop(self, tmp_path, mock_fleet, mock_paths, monkeypatch):
+        self._stage(tmp_path, mock_paths, monkeypatch, record=True, unit=True)
+        alice, row = self._alice(mock_fleet, mock_paths)
+        assert alice.state != "stopped" and row["stopped_by"] is None
+
+
+# -- each bot's live context (#2206) -------------------------------------------
+
+
+class TestContextInStatus:
+    """Each bot's live context rides fleet status from the transcript reader
+    `fleet usage` uses: null with the reader's reason when the transcript
+    cannot answer, never 0."""
+
+    def _transcript(self, mock_paths, bot, rows):
+        from claudlobby.isolation import transcript_slug
+        from tests.conftest import write_jsonl
+
+        directory = Path.home() / ".claude" / "projects" / transcript_slug(
+            mock_paths.bot_runtime(bot))
+        directory.mkdir(parents=True)
+        write_jsonl(directory / "s1.jsonl", rows)
+
+    def test_each_bots_context_rides_fleet_status(self, mock_fleet, mock_paths):
+        self._transcript(mock_paths, "alice", [{
+            "type": "assistant", "isSidechain": False, "sessionId": "s1",
+            "timestamp": "2026-10-06T20:31:02Z",
+            "message": {"role": "assistant", "model": "m", "content": [],
+                        "usage": {"input_tokens": 7, "cache_creation_input_tokens": 300,
+                                  "cache_read_input_tokens": 503079, "output_tokens": 9}}}])
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        alice = next(bs for bs in results if bs.name == "alice")
+        bob = next(bs for bs in results if bs.name == "bob")
+        assert alice.context["tokens"] == 503386          # 7 + 300 + 503079
+        assert bob.context["tokens"] is None              # no transcript: unknown, not 0
+        assert bob.context["reason"] == "transcript_directory_missing_or_untrusted"
+        rows = {row["name"]: row for row in json.loads(format_json(results, "f"))["bots"]}
+        assert rows["alice"]["context"]["tokens"] == 503386
+        assert rows["alice"]["context"]["at"] == "2026-10-06T20:31:02+00:00"
+        assert rows["bob"]["context"]["tokens"] is None
+        table = format_table(results, "test-fleet")
+        assert "CONTEXT" in table and "503k" in table
+        assert "Context:    503,386 tokens" in format_bot_detail(alice)
+        assert ("Context:    unknown (transcript_directory_missing_or_untrusted)"
+                in format_bot_detail(bob))

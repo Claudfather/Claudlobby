@@ -53,8 +53,10 @@ It was already fixed twice, differently, and missing three times:
 * ``brief.py`` probes both ledgers, OMITS the section, and lists the reason in
   ``degraded[]`` — the right shape for a *composite* door whose other sections
   stay sound.
-* ``cmd_events`` / ``cmd_uptime`` print to stdout and return 1 when the bots dir
-  is unreachable — the right shape for a *single-source* command.
+* The former ``cmd_events`` / ``cmd_uptime`` routes printed to stdout and
+  returned 1 when the bots dir was unreachable — the right shape for a
+  *single-source* command. Their public replacements now use the common
+  unavailable result when the selected source cannot answer.
 * ``report-back`` (#1216), ``workstreams``, and ``dispatch-overdue --orphans``
   (#1014) did neither, and returned a clean empty answer at rc 0.
 

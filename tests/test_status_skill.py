@@ -69,7 +69,7 @@ def test_degraded_procedure_covers_BOTH_modes_with_worked_examples() -> None:
     text = STATUS.read_text()
     assert "labeled" in text and "omitted" in text
     # each mode needs a real example line, not just a mention of the mode name
-    assert "#903" in text, "no worked example for the labeled mode"
+    assert "#2109" in text, "no worked example for the labeled mode"
     assert "#891" in text, "no worked example for the omitted mode"
 
 
@@ -109,15 +109,6 @@ def test_no_jinja_placeholders_because_skills_are_symlinked_not_rendered(
     """composer.py::link_skills only symlinks -- it never parses or renders SKILL.md.
     A {{BOT_NAME}} here would reach the agent as literal text."""
     assert "{{" not in path.read_text(), f"{path.name}: Jinja placeholder will not be substituted"
-
-
-def test_shared_partial_link_resolves_from_the_skill_directory() -> None:
-    """library/skills/README.md cites status/SKILL.md as THE example of the relative
-    `../_telegram-formatting.md` link working through the symlink. If the link breaks,
-    the README's worked example silently becomes false."""
-    text = STATUS.read_text()
-    for rel in re.findall(r"\]\((\.\./[^)]+)\)", text):
-        assert (STATUS.parent / rel).resolve().is_file(), f"dangling partial link: {rel}"
 
 
 def test_tool_grants_are_wellformed() -> None:

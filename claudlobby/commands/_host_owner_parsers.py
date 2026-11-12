@@ -1,0 +1,90 @@
+"""Host-local owner authority doors; no credential-bearing CLI arguments."""
+
+from importlib import import_module
+from pathlib import Path
+
+from ..command_result import execute
+
+
+def _dispatch(args):
+    return execute(args.public_command,
+                   lambda: import_module(".host_owner", __package__).dispatch(args),
+                   json_output=args.json)
+
+
+def register_host_owner(hosts):
+    owner = hosts.add_parser("owner", help="Locally approve or revoke Plane owner access")
+    actions = owner.add_subparsers(dest="owner_action", required=True)
+    for action, help_text in (
+        ("status", "Inspect this host's owner pairing without changing it"),
+        ("workspace-status", "Inspect retained local workspace binding metadata"),
+        ("initialize-workspace", "Prepare optional workspace authority (interactive)"),
+        ("initialize-connected", "Prepare optional connected read-session storage (interactive)"),
+        ("confirm-workspace", "Bind a verified workspace proposal at this terminal (interactive)"),
+        ("revoke-workspace", "Revoke this host's workspace binding only (interactive)"),
+        ("initialize", "Prepare owner authority on an existing installation (interactive)"),
+        ("bind-source", "Attest that this Plane database belongs to this installation (interactive)"),
+        ("confirm", "Approve a browser's pairing request at this terminal (interactive)"),
+        ("revoke", "Revoke the current pairing and all its sessions (interactive)"),
+    ):
+        route = actions.add_parser(action, help=help_text)
+        route.add_argument("--json", action="store_true", help="Structured result (status only)")
+        if action == "initialize-connected":
+            route.add_argument("--prepare-workspace", action="store_true",
+                help="Also prepare optional workspace storage, with both local confirmations")
+        if action == "initialize":
+            route.add_argument("--before-first-fleet", action="store_true",
+                help="Explicitly prepare host identity and owner authority before first activation")
+        route.set_defaults(func=_dispatch, public_command=f"host.owner.{action}")
+    allow_actions = actions.add_parser("allow-actions",
+        help="Approve selected messages, nudges and feedback for one local human and active fleet (interactive)")
+    allow_actions.add_argument("--target-fleet", required=True, help="Explicit active fleet name")
+    allow_actions.add_argument("--actor", required=True, help="Explicit local human: actor alias")
+    allow_actions.add_argument("--capabilities", required=True, nargs="+", choices=("messages", "nudges", "feedback"),
+                               help="Explicit ordinary actions to approve together; permission decisions use allow-permissions")
+    allow_actions.add_argument("--register-actor", action="store_true",
+                               help="Separately approve first-contact registration if the actor is absent")
+    allow_actions.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+    allow_actions.set_defaults(func=_dispatch, public_command="host.owner.allow-actions")
+    for capability, label in (("messages", "ordinary messages"), ("nudges", "selected-task nudges"),
+                              ("feedback", "task-linked comments"),
+                              ("permissions", "task permission decisions")):
+        allow = actions.add_parser("allow-" + capability,
+            help=f"Allow {label} as a local human in one active fleet (interactive)")
+        allow.add_argument("--target-fleet", required=True, help="Explicit active fleet name")
+        allow.add_argument("--actor", required=True, help="Explicit local human: actor alias")
+        allow.add_argument("--register-actor", action="store_true", help="Separately approve first-contact registration if the actor is absent")
+        allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+        allow.set_defaults(func=_dispatch, public_command="host.owner.allow-" + capability)
+        revoke = actions.add_parser("revoke-" + capability,
+            help=f"Revoke an exact retained {label} fleet grant (interactive)")
+        revoke.add_argument("--fleet-uid", required=True, help="Exact retained fleet UID; active config is not required")
+        revoke.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+        revoke.set_defaults(func=_dispatch, public_command="host.owner.revoke-" + capability)
+    allow = actions.add_parser("allow-setup", help="Approve one connected first-team setup (interactive)")
+    allow.add_argument("--template", required=True, choices=["revenue-web-app"])
+    allow.add_argument("--target-fleet", required=True)
+    allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
+    allow.add_argument("--install-directory", required=True, type=Path)
+    allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
+    allow.set_defaults(func=_dispatch, public_command="host.owner.allow-setup", owner_action="allow-setup")
+    for action in ("setup-status", "revoke-setup"):
+        route = actions.add_parser(action, help="Inspect/revoke the retained first-team setup approval")
+        route.add_argument("--json", action="store_true")
+        route.set_defaults(func=_dispatch, public_command="host.owner." + action, owner_action=action)
+    guided = actions.add_parser("setup", help="Guide fresh local owner preparation and keep its foreground server open")
+    for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
+        guided.add_argument("--" + flag)
+    for flag in ("tailscale", "tailscale-socket", "socket", "install-directory"):
+        guided.add_argument("--" + flag, type=Path)
+    guided.add_argument("--json", action="store_true", help="Not supported for interactive setup")
+    guided.set_defaults(func=_dispatch, public_command="host.owner.setup")
+    serve = actions.add_parser("serve", help="Serve owner Plane on a private Unix socket (foreground)")
+    serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
+    serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")
+    serve.add_argument("--tailscale", type=Path, required=True, help="Absolute path to the native Tailscale executable")
+    serve.add_argument("--tailscale-socket", type=Path, help="Absolute native Tailscale control socket; distinct from --socket")
+    serve.add_argument("--socket", type=Path, help="Private Unix socket path; default DATA_ROOT/state/plane/owner.sock")
+    serve.add_argument("--workspace-issuer", help="Explicit fixed HTTPS website issuer; requires --workspace-origin")
+    serve.add_argument("--workspace-origin", help="Explicit fixed HTTPS operational Origin for bootstrap and connected reads; requires --workspace-issuer")
+    serve.set_defaults(func=_dispatch, public_command="host.owner.serve")
