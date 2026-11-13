@@ -1640,7 +1640,7 @@ svc_job_witness() {
 }
 
 svc_job_stop_exact() {
-    local source="$1" installed="$2" target="$3" expected="$4" pid
+    local source="$1" installed="$2" target="$3" expected="$4" pid remaining=20
     case "$source:$installed" in /*:/*) ;; *) return 3 ;; esac
     [ "${source##*/}" = "${installed##*/}" ] || return 3
     [ -f "$source" ] && [ ! -L "$source" ] && [ -f "$installed" ] && [ ! -L "$installed" ] || return 3
@@ -1657,7 +1657,25 @@ svc_job_stop_exact() {
                 svc_activation_assert_external "$installed" "$target" || return 3
             fi
             printf 'effect-attempted\n'
-            launchctl bootout "$target" || return $? ;;
+            launchctl bootout "$target" || return $?
+            # As in activation pause, acknowledgement can precede unload.
+            # Observe only this target; never repeat the native stop effect.
+            while :; do
+                _svc_activation_read "$installed" "$target" || {
+                    _svc_activation_unknown "$target state after bootout"; return 3;
+                }
+                if [ "$SVC_ACT_LOAD" = unloaded ] && [ "$SVC_ACT_ACTIVE" = inactive ]; then
+                    break
+                fi
+                [ "$remaining" -gt 0 ] || {
+                    _svc_activation_unknown "$target did not unload after bootout"; return 3;
+                }
+                remaining=$((remaining - 1))
+                sleep 0.1 || {
+                    _svc_activation_unknown "$target post-bootout wait interrupted"; return 3;
+                }
+            done
+            ;;
         Linux)
             case "$target" in *.service|*.timer) ;; *) return 3 ;; esac
             svc_activation_assert_external "$installed" "$target" || return 3

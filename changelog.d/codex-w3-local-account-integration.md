@@ -12,3 +12,7 @@ Recognize the observed launchd `keepalive` property when checking owned job chil
 ### Fixed — Resolve managed source for isolated Darwin job cleanup
 
 Bind the child-policy reader to the selected package source before its isolated Python import. Managed Git installations can then perform the existing fail-closed job witness and public cleanup checks without requiring an editable core install or ambient Python paths.
+
+### Fixed — Wait for macOS job unload after public supervision stop
+
+Wait for the exact macOS job to unload after a successful public supervision stop before checking its remaining process and endpoint witnesses. Delayed unload is bounded; an unavailable observation or a job that remains loaded preserves the installed definition and reports an uncertain attempted stop.

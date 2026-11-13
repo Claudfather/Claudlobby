@@ -482,7 +482,7 @@ def test_job_stop_refuses_stale_runtime_before_binding(tmp_path, monkeypatch):
         jobs.stop_job(tmp_path, "plane-daemon")
 
 
-@pytest.mark.parametrize("problem", ["none", "foreign-endpoint", "held-lock", "surviving-group"])
+@pytest.mark.parametrize("problem", ["none", "foreign-endpoint", "held-lock", "surviving-group", "native-observation"])
 def test_darwin_recorder_stop_binds_pid_endpoint_lock_and_group_before_unlink(tmp_path, monkeypatch, problem):
     import fcntl
     import os
@@ -512,6 +512,14 @@ def test_darwin_recorder_stop_binds_pid_endpoint_lock_and_group_before_unlink(tm
             if problem != "surviving-group":
                 table.clear()
     native.failure = stopped
+    if problem == "native-observation":
+        original_call = native.call
+        def refused_after_bootout(function, *args, **kwargs):
+            if function == "svc_job_stop_exact":
+                stopped(function, args)
+                return subprocess.CompletedProcess([], 3, "effect-attempted\n", "state after bootout\n")
+            return original_call(function, *args, **kwargs)
+        native.call = refused_after_bootout
     if problem == "surviving-group":
         monkeypatch.setattr(jobs, "_await_group_quiet", jobs._group_quiet)
     try:
@@ -525,6 +533,11 @@ def test_darwin_recorder_stop_binds_pid_endpoint_lock_and_group_before_unlink(tm
                 jobs._stop(current, "plane-daemon", None, native)
             assert error.value.attempted is (problem != "foreign-endpoint")
             assert (directory / "private-plane-daemon.plist").exists()
+            if problem == "native-observation":
+                member, = error.value.data["members"]
+                assert member["outcome"] == "unknown" and member["returncode"] == 3
+                assert member["stdout"] == "effect-attempted\n"
+                assert endpoint_probes == []
             if problem == "foreign-endpoint":
                 assert calls == []
     finally:
