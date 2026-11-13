@@ -899,6 +899,319 @@ def collect_fleet_usage(paths, fleet, since: datetime, until: datetime) -> dict:
             "quota": {"status": "unavailable", "reason": "no_provider_observation"}}
 
 
+# --- the per-call view: what each call's context held (#2909) ----------------
+
+
+# `bot usage --calls` reads the bot's newest own session back from its end,
+# never past this cap. In one long session (2026-11-13) the newest 100 calls
+# took 4.4 MiB, so the cap holds over three times CALLS_MAX such calls. One line
+# as long as the cap took 5.5 s to read, the join cost #2756 (note 3) names;
+# that review measured real lines at 0.3 MiB at most.
+CALLS_TAIL_BYTES = 16 * 1024 * 1024
+CALLS_DEFAULT = 20
+CALLS_MAX = 100
+# Before each call the view lists this many of its largest row groups and sums
+# the rest, so one call costs a bounded number of lines whatever its step held.
+CALL_GROUPS = 5
+_LABEL_CHARS = 120
+# A tool's target is its name, and for these tools also the input value that
+# names what the call works on. No other input is ever reported: a command or a
+# message body may hold a secret.
+_TOOL_TARGET_KEYS = {"Read": "file_path", "Edit": "file_path", "Write": "file_path",
+                     "MultiEdit": "file_path", "NotebookEdit": "notebook_path",
+                     "Skill": "skill", "Agent": "subagent_type", "Task": "subagent_type"}
+_ATTACHMENT_TARGET_KEYS = ("path", "filename", "file_path", "skillName", "hookName")
+
+
+def _leaf_chars(value) -> int:
+    """The characters of every string inside a JSON value."""
+    total, stack = 0, [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return total
+
+
+def _label(value, limit: int = _LABEL_CHARS) -> str | None:
+    """A kind or target as the view reports it: a non-empty string, cut to its
+    last ``limit`` characters, since a path's end names its file."""
+    if not isinstance(value, str) or not value:
+        return None
+    return value if len(value) <= limit else "…" + value[-(limit - 1):]
+
+
+def _tool_target(name, tool_input) -> str:
+    target = _label(name, 60) or "unnamed"
+    key = _TOOL_TARGET_KEYS.get(target)
+    value = tool_input.get(key) if key and isinstance(tool_input, dict) else None
+    if isinstance(value, str) and value:
+        return f"{target} {_label(value, _LABEL_CHARS - len(target) - 1)}"
+    return target
+
+
+def _fields_chars(block: dict) -> int:
+    """A content block's characters, its ``type`` name aside."""
+    return _leaf_chars([value for key, value in block.items() if key != "type"])
+
+
+def _block_chars(content) -> tuple[int, int]:
+    """A tool result's text characters and its image count."""
+    if isinstance(content, str):
+        return len(content), 0
+    chars = images = 0
+    for block in content if isinstance(content, list) else ():
+        if isinstance(block, dict) and block.get("type") == "image":
+            images += 1
+        elif isinstance(block, dict) and block.get("type") == "text":
+            chars += _leaf_chars(block.get("text"))
+    return chars, images
+
+
+def _row_parts(obj) -> list:
+    """What one transcript row stored, as ``[kind, target, chars, images,
+    tool_use_id]`` parts: one per content block of a message row, one for an
+    attachment or system row. A tool result's target is its tool call's,
+    filled in from the id once the read is done. Any other row (a snapshot, a
+    request record, a mode change) stores no message, and the view lists none
+    of it. An attachment is sized by its ``rendered`` text, the text Claude
+    Code sent; one without it is kind ``unrendered:<type>``, sized by its
+    fields, which ``_step_groups`` tallies apart."""
+    kind = obj.get("type")
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    parts = []
+    if kind == "assistant":
+        for block in message.get("content") or ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                parts.append(["output", _tool_target(block.get("name"), block.get("input")),
+                              len(json.dumps(block.get("input"), ensure_ascii=False)), 0,
+                              block.get("id") if isinstance(block.get("id"), str) else None])
+            elif block.get("type") in ("text", "thinking"):
+                parts.append(["output", block["type"], _leaf_chars(block.get(block["type"])),
+                              0, None])
+            else:
+                parts.append(["output", _label(block.get("type"), 60) or "unknown",
+                              _fields_chars(block), 0, None])
+    elif kind == "user":
+        content = message.get("content")
+        target = ("compaction_summary" if obj.get("isCompactSummary")
+                  else "meta" if obj.get("isMeta") else "text")
+        if isinstance(content, str):
+            parts.append(["user", target, len(content), 0, None])
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                chars, images = _block_chars(block.get("content"))
+                parts.append(["tool_result", None, chars, images, block.get("tool_use_id")])
+            elif block.get("type") == "text":
+                parts.append(["user", target, _leaf_chars(block.get("text")), 0, None])
+            elif block.get("type") == "image":
+                parts.append(["user", "image", 0, 1, None])
+            else:
+                parts.append(["user", _label(block.get("type"), 60) or "unknown",
+                              _fields_chars(block), 0, None])
+    elif kind == "attachment":
+        attachment = obj.get("attachment") if isinstance(obj.get("attachment"), dict) else {}
+        name = _label(attachment.get("type"), 60) or "unknown"
+        target = next((_label(attachment[key]) for key in _ATTACHMENT_TARGET_KEYS
+                       if isinstance(attachment.get(key), str) and attachment[key]), None)
+        if "rendered" in obj:
+            parts.append([f"attachment:{name}", target, _leaf_chars(obj["rendered"]), 0, None])
+        else:
+            fields = {key: value for key, value in attachment.items() if key != "type"}
+            parts.append([f"unrendered:{name}", target, _leaf_chars(fields), 0, None])
+    elif kind == "system":
+        parts.append([f"system:{_label(obj.get('subtype'), 60) or 'none'}", None,
+                      _leaf_chars(obj.get("content")), 0, None])
+    return parts
+
+
+def _call_of(obj) -> tuple | None:
+    """``(message id, context, output tokens, instant, model)`` for a row of a
+    main-chain API call; None for any other row. A row Claude Code writes
+    itself (model <synthetic>, for an error or an interrupt) carries zero
+    usage, so it is no call."""
+    if obj.get("type") != "assistant" or obj.get("isSidechain"):
+        return None
+    values = _row_usage(obj)
+    if values is None:
+        return None
+    message = obj["message"]
+    context = values[0] + values[2] + values[3]
+    if not context or not isinstance(message.get("id"), str) or not message["id"]:
+        return None
+    return message["id"], context, values[1], _row_instant(obj), message.get("model")
+
+
+def _step_groups(parts: list, tools: dict, groups: int) -> dict:
+    """One call's step: its parts grouped by kind and target, the ``groups``
+    largest by characters listed and the rest summed. Attachment rows that
+    store no rendered text (hook records, among others) are tallied apart in
+    ``unrendered``: the transcript does not show that they reach the model."""
+    totals: dict = {}
+    unrendered = [0, 0]
+    for kind, target, chars, images, ref in parts:
+        if kind.startswith("unrendered:"):
+            unrendered[0] += 1
+            unrendered[1] += chars
+            continue
+        if kind == "tool_result":
+            target = tools.get(ref, "unmatched")
+        entry = totals.setdefault((kind, target), [0, 0, 0])
+        entry[0] += 1
+        entry[1] += chars
+        entry[2] += images
+    ranked = sorted(totals.items(), key=lambda item: (-item[1][1], -item[1][2],
+                                                      item[0][0], item[0][1] or ""))
+    cut = ranked[groups:]
+    return {"count": sum(entry[0] for entry in totals.values()),
+            "chars": sum(entry[1] for entry in totals.values()),
+            "images": sum(entry[2] for entry in totals.values()),
+            "groups": [{"kind": kind, "target": target, "count": count, "chars": chars,
+                        "images": images}
+                       for (kind, target), (count, chars, images) in ranked[:groups]],
+            "groups_cut": len(cut), "chars_cut": sum(entry[1] for _key, entry in cut),
+            "unrendered": {"count": unrendered[0], "chars": unrendered[1]}}
+
+
+def _calls_result(limit: int, cap: int, groups: int) -> dict:
+    return {"scope": "newest_own_session", "session": None, "reason": None, "calls": [],
+            "limit": limit, "ended": None, "complete": False, "bytes_read": 0, "cap": cap,
+            "groups_per_call": groups,
+            "diagnostics": {"malformed_lines": 0, "untimed_calls": 0}}
+
+
+def calls_in(directory: Path, since: datetime, until: datetime, *,
+             limit: int = CALLS_DEFAULT, cap: int | None = None,
+             head_cap: int = SESSION_HEAD_BYTES, groups: int = CALL_GROUPS) -> dict:
+    """The per-call view (#2909) for a bot whose transcript directory is known:
+    the newest ``limit`` main-chain API calls of its newest own session
+    (``newest_own_session``) timed within the window, oldest first.
+
+    Each call gives its time, message id, model, context (input + cache read
+    + cache creation tokens, as ``current_context`` reads it), output tokens
+    (the largest its rows record), and its growth over the previous call: None
+    for the first call read and for the first call after a compaction. Its
+    ``step`` is what the transcript stored from the previous call's first row
+    up to its own, which holds the previous call's output; after a compaction
+    it starts at the ``compact_boundary`` row instead, since the rows before
+    it left the context. Rows are counted in characters, never tokens.
+
+    The session is read from its end backwards in 64 KiB blocks, never past
+    ``cap`` bytes (CALLS_TAIL_BYTES), and the read stops at the first row of
+    the call before the previous call of the oldest call shown. ``ended``
+    says how it stopped: ``window_start`` (it passed the window's start),
+    ``call_limit`` (older calls in the window are not shown), ``session_start``
+    or ``byte_cap``. Below ``session_start`` the oldest call read is the
+    previous call only, and after ``byte_cap`` the second oldest too, so every
+    call shown has its whole step. ``complete`` is true when every main-chain
+    call of the session in the window is shown."""
+    cap = CALLS_TAIL_BYTES if cap is None else cap
+    result = _calls_result(limit, cap, groups)
+    sessions, issue = session_transcripts(directory)
+    chosen = None
+    if issue is None:
+        chosen, issue = newest_own_session(directory, sessions, cap=head_cap)
+    if chosen is None:
+        return {**result, "reason": issue or "no_transcript"}
+    name, size, _ = chosen
+    result["session"] = name[:-len(".jsonl")]
+    diagnostics = result["diagnostics"]
+    rows, met, shown, previous, stopped, tail = [], set(), set(), None, False, None
+    try:
+        with open(directory / name, "rb") as fh:
+            tail = _Tail(fh, size, cap)
+            for line in tail.lines():
+                # Decoded as parse_window reads, so a bad byte reads the same in both.
+                obj = _loads(line.decode("utf-8", errors="replace"))
+                if not isinstance(obj, dict):
+                    diagnostics["malformed_lines"] += 1
+                    continue
+                if obj.get("isSidechain"):
+                    continue
+                call = _call_of(obj)
+                if call is not None and call[0] not in met:
+                    if previous is not None:
+                        stopped = True
+                        break
+                    met.add(call[0])
+                    at = call[3]
+                    if at is None:
+                        diagnostics["untimed_calls"] += 1
+                    if at is not None and since <= at <= until and len(shown) < limit:
+                        shown.add(call[0])
+                    elif at is None or at <= until:
+                        previous = call
+                boundary = obj.get("type") == "system" and obj.get("subtype") == "compact_boundary"
+                parts = _row_parts(obj)
+                if call is not None or boundary or parts:
+                    rows.append((call, boundary, parts))
+    except OSError:
+        return {**result, "reason": "unreadable_transcript_file",
+                "bytes_read": tail.bytes_read if tail else 0}
+    rows.reverse()
+    if stopped or not tail.capped:
+        # The oldest call read is whole: a row older than it was read, or the
+        # session's first row was.
+        cut_by_limit = previous is not None and (previous[3] is None or previous[3] >= since)
+        ended = ("call_limit" if cut_by_limit else "window_start" if previous is not None
+                 else "session_start")
+    else:
+        ended = "byte_cap"
+    tools = {part[4]: part[1] for _call, _boundary, parts in rows for part in parts
+             if part[0] == "output" and part[4]}
+    calls, by_id, step, compacted = [], {}, [], False
+    for call, boundary, parts in rows:
+        if boundary:
+            step, compacted = [], True
+            continue
+        if call is not None and call[0] not in by_id:
+            mid, context, output, at, model = call
+            last = calls[-1] if calls else None
+            by_id[mid] = {"at": at.isoformat() if at else None, "message": mid,
+                          "model": _label(model, 60), "context": context,
+                          "growth": (None if last is None or compacted
+                                     else context - last["context"]),
+                          "output_tokens": output, "after_compaction": compacted,
+                          "step": step}
+            calls.append(by_id[mid])
+            step, compacted = [], False
+        elif call is not None:
+            by_id[call[0]]["output_tokens"] = max(by_id[call[0]]["output_tokens"], call[2])
+        step.extend(parts)
+    # A step is whole only from the previous call's first row: the oldest call
+    # read has none unless the read reached the session's start, and after a
+    # byte cap the oldest call's own rows may be cut too.
+    hidden = set()
+    if ended != "session_start" and calls:
+        hidden.add(calls[0]["message"])
+    if ended == "byte_cap" and len(calls) > 1:
+        hidden.add(calls[1]["message"])
+    for record in calls:
+        record["step"] = _step_groups(record["step"], tools, groups)
+    return {**result, "calls": [record for record in calls
+                                if record["message"] in shown and record["message"] not in hidden],
+            "ended": ended, "complete": ended in ("window_start", "session_start"),
+            "bytes_read": tail.bytes_read}
+
+
+def collect_bot_calls(paths, fleet, bot_id: str, since: datetime, until: datetime, *,
+                      limit: int = CALLS_DEFAULT) -> dict:
+    """``calls_in`` for one declared bot: its current-cwd transcripts, found as
+    ``transcript_source`` finds them for ``bot usage`` and ``fleet status``."""
+    source = transcript_source(paths, fleet, bot_id)
+    if source.directory is None:
+        return {**_calls_result(limit, CALLS_TAIL_BYTES, CALL_GROUPS), "reason": source.issue}
+    return calls_in(source.directory, since, until, limit=limit)
+
+
 def _iter_transcripts(paths) -> list:
     """Expand file/dir args into a sorted list of transcript files."""
     files = []

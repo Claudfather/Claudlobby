@@ -885,3 +885,290 @@ class TestWindowRead:
         coverage = tu.collect_bot_usage(paths, fleet, "b", since, until)["coverage"]
         assert coverage["issues"] == ["file_limit_reached"]
         assert coverage["files_read"] == 1 and coverage["additional_files_after_limit"] == "unknown"
+
+
+# --- the per-call view: what each call's context held (#2909) ---------------
+
+
+def _tool_call(ts, mid, inp, cr, blocks, out=9):
+    """One row of call ``mid`` holding ``blocks``: ``_call`` with other content."""
+    row = _call(ts, mid, inp, cr, out)
+    row["message"]["content"] = blocks
+    return row
+
+
+def _result(ts, tool_use_id, text):
+    return {"type": "user", "isSidechain": False, "sessionId": "s1", "timestamp": ts,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_use_id, "content": text}]}}
+
+
+def _attached(ts, attachment, text=None):
+    """An attachment row; ``text`` is what Claude Code rendered for it (row keys
+    and the ``rendered`` shape from a live 2.1 transcript, values invented)."""
+    row = {"type": "attachment", "isSidechain": False, "sessionId": "s1", "timestamp": ts,
+           "attachment": attachment}
+    if text is not None:
+        row["rendered"] = [{"content": text}]
+        row["renderedRole"] = "user"
+    return row
+
+
+def _synthetic(ts, text):
+    """A row Claude Code writes itself for an interrupt: zero usage, so no call."""
+    row = _call(ts, "synthetic1", 0, 0, 0, text=text)
+    row["message"]["model"] = "<synthetic>"
+    return row
+
+
+READ = {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/w/repo/a.py"}}
+BASH = {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "echo SECRET-1234"}}
+
+
+def _view_session():
+    """Five calls of one interactive session, oldest first, with a compaction
+    between the third and the fourth; TestCallView's first test spells out
+    what each call shows."""
+    return _cli([
+        _said(_at(-3), "start"),
+        _attached(_at(-3), {"type": "nested_memory", "path": "/w/repo/CLAUDE.md",
+                            "content": "c"}, "R" * 3000),
+        _tool_call(_at(-2.9), "m1", 100, 1000, [{"type": "text", "text": "plan"}, READ]),
+        _result(_at(-2.9), "t1", "y" * 500),
+        _attached(_at(-2.9), {"type": "hook_success", "hookName": "PreToolUse:Read",
+                              "stdout": "z" * 50}),
+        _tool_call(_at(-2.8), "m2", 20, 3000, [{"type": "text", "text": "x"}], out=5),
+        _tool_call(_at(-2.8), "m2", 20, 3000, [BASH], out=40),
+        _result(_at(-2.8), "t2", "ok"),
+        _call(_at(-2.7), "m3", 30, 3100),
+        _boundary(_at(-2.6), 3130, 900),
+        {**_said(_at(-2.6), "S" * 700), "isCompactSummary": True},
+        _attached(_at(-2.6), {"type": "instructions"}, "I" * 2000),
+        _call(_at(-2.5), "m4", 10, 900),
+        _call(_at(-2.5), "side", 1, 1, sidechain=True),
+        _synthetic(_at(-2.4), "Request interrupted"),
+        _call(_at(-2.3), "m5", 5, 950)])
+
+
+def _group(kind, target, chars, count=1, images=0):
+    return {"kind": kind, "target": target, "count": count, "chars": chars, "images": images}
+
+
+class TestCallView:
+    """`bot usage --calls` (#2909): the newest main-chain calls of a bot's own
+    session, each with its context, its growth over the previous call and the
+    rows the transcript stored before it, bounded by a call limit, a group cap
+    and a byte cap that the result names when it cuts."""
+
+    def test_each_call_shows_its_context_growth_and_the_rows_stored_before_it(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _view_session())
+        since, until = _last_day()
+        view = tu.collect_bot_calls(paths, fleet, "b", since, until)
+        assert (view["session"], view["ended"], view["complete"]) == ("s1", "session_start", True)
+        calls = {call["message"]: call for call in view["calls"]}
+        # Oldest first; the sidechain row and the zero-usage synthetic row are no calls.
+        assert [call["message"] for call in view["calls"]] == ["m1", "m2", "m3", "m4", "m5"]
+        # context = input + cache read + cache write; growth over the call before.
+        assert [(call["context"], call["growth"]) for call in view["calls"]] == [
+            (1100, None), (3020, 1920), (3130, 110), (910, None), (955, 45)]
+        assert calls["m2"]["output_tokens"] == 40  # the largest of m2's two rows (5, 40)
+        assert [call["after_compaction"] for call in view["calls"]] == [
+            False, False, False, True, False]
+        # m1 holds the session's opening rows; the header's record-only
+        # attachment is tallied apart, since it stores no rendered text.
+        assert calls["m1"]["step"]["groups"] == [
+            _group("attachment:nested_memory", "/w/repo/CLAUDE.md", 3000),
+            _group("user", "text", 5)]
+        assert calls["m1"]["step"]["unrendered"] == {"count": 1, "chars": 0}
+        # m2: m1's own output and the Read result, each named by its file; the
+        # hook record is 15 + 50 characters of fields.
+        assert calls["m2"]["step"]["groups"] == [
+            _group("tool_result", "Read /w/repo/a.py", 500),
+            _group("output", "Read /w/repo/a.py", len('{"file_path": "/w/repo/a.py"}')),
+            _group("output", "text", 4)]
+        assert calls["m2"]["step"]["unrendered"] == {"count": 1, "chars": 65}
+        assert (calls["m2"]["step"]["count"], calls["m2"]["step"]["chars"]) == (3, 533)
+        # m3: a Bash call is named by its tool alone; its command is never reported.
+        assert calls["m3"]["step"]["groups"] == [
+            _group("output", "Bash", len('{"command": "echo SECRET-1234"}')),
+            _group("tool_result", "Bash", 2), _group("output", "text", 1)]
+        assert "SECRET-1234" not in json.dumps(view)
+        # m4 follows the compaction: only the rows after its boundary row.
+        assert calls["m4"]["step"]["groups"] == [
+            _group("attachment:instructions", None, 2000),
+            _group("user", "compaction_summary", 700)]
+        # m5: m4's output and the synthetic row's text, one group of two parts.
+        assert calls["m5"]["step"]["groups"] == [_group("output", "text", 21, count=2)]
+        assert (view["limit"], view["cap"], view["groups_per_call"]) == (
+            tu.CALLS_DEFAULT, tu.CALLS_TAIL_BYTES, tu.CALL_GROUPS)
+
+    def test_the_newest_call_reads_as_the_live_context(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _view_session())
+        since, until = _last_day()
+        view = tu.collect_bot_calls(paths, fleet, "b", since, until)
+        assert view["calls"][-1]["context"] == tu.current_context(paths, fleet, "b")["tokens"] == 955
+
+    def test_the_call_limit_keeps_the_newest_and_says_older_calls_are_cut(self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _view_session())
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until, limit=2)
+        assert [call["message"] for call in view["calls"]] == ["m4", "m5"]
+        assert (view["ended"], view["complete"]) == ("call_limit", False)
+        assert [call["growth"] for call in view["calls"]] == [None, 45]
+
+    def test_a_call_before_the_window_is_read_only_as_the_previous_call(self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", _cli([
+            _said(_at(-31), "x" * 200_000),
+            _call(_at(-30), "old1", 1, 100), _said(_at(-30), "x" * 100),
+            _call(_at(-29), "old2", 1, 200), _said(_at(-2), "go"),
+            _call(_at(-2), "new1", 1, 260), _call(_at(-1), "new2", 1, 300)]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        assert [call["message"] for call in view["calls"]] == ["new1", "new2"]
+        assert (view["ended"], view["complete"]) == ("window_start", True)
+        # The read stops at old1, the call before old2, so the older rows are
+        # never read: one 64 KiB block holds everything from old1 on.
+        assert view["bytes_read"] == 64 * 1024 < path.stat().st_size
+        # new1 grew over old2, the call before it, which is older than the window.
+        assert [call["growth"] for call in view["calls"]] == [60, 40]
+        assert view["calls"][0]["step"]["groups"] == [_group("output", "text", 2),
+                                                      _group("user", "text", 2)]
+
+    def test_the_byte_cap_stops_the_read_and_every_call_shown_has_its_whole_step(
+            self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        rows = []
+        for index in range(8):
+            rows += [_call(_at(-3 + index / 10), f"c{index}", 1, 1000 + 100 * index),
+                     _said(_at(-3 + index / 10), "u" * 10_000)]
+        d.mkdir(parents=True)
+        path, starts, cap = d / "s1.jsonl", {}, 64 * 1024
+        with open(path, "wb") as fh:
+            for row in _cli(rows):
+                if row["type"] == "assistant":
+                    starts[row["message"]["id"]] = fh.tell()
+                fh.write((json.dumps(row) + "\n").encode())
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until, cap=cap)
+        assert (view["ended"], view["complete"], view["bytes_read"]) == ("byte_cap", False, cap)
+        # The read takes each whole line inside the last 64 KiB. The two oldest
+        # calls it takes are previous calls only, so each call shown has its
+        # whole step and its growth.
+        taken = [mid for mid, start in starts.items() if start > path.stat().st_size - cap]
+        assert len(taken) > 3
+        assert [call["message"] for call in view["calls"]] == taken[2:]
+        assert {call["growth"] for call in view["calls"]} == {100}
+        assert view["calls"][0]["step"]["groups"] == [_group("user", "text", 10_000),
+                                                      _group("output", "text", 2)]
+
+    def test_groups_past_the_cap_are_summed(self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        files = [{"type": "tool_use", "id": f"r{n}", "name": "Read",
+                  "input": {"file_path": f"/w/{n}.py"}} for n in range(7)]
+        rows = [_tool_call(_at(-2), "m1", 1, 100, files)]
+        rows += [_result(_at(-2), f"r{n}", "q" * (1000 * (n + 1))) for n in range(7)]
+        rows += [_call(_at(-1), "m2", 1, 9000)]
+        _session(d, "s1.jsonl", _cli(rows))
+        since, until = _last_day()
+        step = tu.calls_in(d, since, until)["calls"][-1]["step"]
+        assert [group["chars"] for group in step["groups"]] == [7000, 6000, 5000, 4000, 3000]
+        # Seven results and seven calls make 14 groups: 9 cut, the two
+        # smallest results (2000 + 1000) and every Read call's input among them.
+        reads = sum(len(json.dumps(block["input"])) for block in files)
+        assert (step["groups_cut"], step["chars_cut"]) == (9, 2000 + 1000 + reads)
+        assert step["chars"] == 28_000 + reads and step["count"] == 14
+
+    def test_a_newer_headless_session_is_passed_over(self, tmp_path):
+        import time
+
+        _fleet, _paths, d = _one_bot(tmp_path)
+        _session(d, "own.jsonl", _cli([_call(_at(-2), "m1", 1, 100)]), mtime=time.time() - 60)
+        _session(d, "hook.jsonl", _headless(_at(-1)))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        assert view["session"] == "own"
+        assert [call["message"] for call in view["calls"]] == ["m1"]
+
+    def test_no_transcript_is_a_reason_not_an_empty_view(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        since, until = _last_day()
+        assert tu.collect_bot_calls(paths, fleet, "b", since, until)["reason"] == (
+            "transcript_directory_missing_or_untrusted")
+        d.mkdir(parents=True)
+        view = tu.calls_in(d, since, until)
+        assert (view["reason"], view["calls"], view["ended"]) == ("no_transcript", [], None)
+
+    def test_the_text_lines_say_what_each_call_held_and_where_the_read_stopped(
+            self, tmp_path):
+        from claudlobby.commands.usage_read import call_lines
+
+        _fleet, _paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _view_session())
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        lines = call_lines(view)
+        assert len(lines) == 7
+        assert lines[2].endswith(
+            "context 3020 (+1920), output 40: tool_result Read /w/repo/a.py 500; "
+            "output Read /w/repo/a.py 29; output text 4; unrendered attachment rows x1 65")
+        assert lines[4].endswith("context 910 (after compaction), output 9: "
+                                 "attachment:instructions - 2000; user compaction_summary 700")
+        assert lines[-1] == (f"calls read: ended=session_start, every call in the window is "
+                             f"shown; limit=20, bytes={view['bytes_read']} of "
+                             f"{tu.CALLS_TAIL_BYTES}; reason=-")
+
+    def test_the_flag_is_on_bot_usage_only_and_its_help_names_the_caps(self, capsys):
+        import argparse
+        import pytest
+        from claudlobby.commands._orientation_parsers import register_orientation_subparsers
+
+        parser = argparse.ArgumentParser()
+        register_orientation_subparsers(parser.add_subparsers())
+        assert parser.parse_args(["bot", "usage", "b"]).calls is None
+        assert parser.parse_args(["bot", "usage", "b", "--calls"]).calls == tu.CALLS_DEFAULT
+        assert parser.parse_args(["bot", "usage", "b", "--calls", "7"]).calls == 7
+        with pytest.raises(SystemExit):
+            parser.parse_args(["fleet", "usage", "--calls", "7"])
+        capsys.readouterr()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["bot", "usage", "--help"])
+        text = " ".join(capsys.readouterr().out.split())
+        assert (f"({tu.CALLS_DEFAULT} when N is left out, at most {tu.CALLS_MAX})" in text
+                and f"the {tu.CALL_GROUPS} largest groups" in text
+                and f"most {tu.CALLS_TAIL_BYTES // 2 ** 20} MiB back" in text)
+
+    def test_bot_usage_adds_the_view_and_refuses_a_limit_out_of_range(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import pytest
+        from claudlobby.command_result import CommandFailure
+        from claudlobby.commands import checkin, usage_read
+        from claudlobby import active_config
+        from claudlobby.active_config import RuntimeReadStamp
+        from tests.package_fixtures import git_package
+
+        fleet, paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _view_session())
+        paths.package = git_package(tmp_path)
+        stamp = RuntimeReadStamp("git", source_revision=paths.package.source_revision,
+                                 config_fingerprint="c" * 64)
+        monkeypatch.setattr(checkin, "_scope", lambda _args: (
+            SimpleNamespace(paths=paths, fleet=fleet), None, stamp, None))
+        monkeypatch.setattr(active_config, "runtime_read_stamp", lambda *_args, **_kw: stamp)
+        args = SimpleNamespace(since="24h", public_command="bot.usage", bot_id="b", calls=2)
+        out = usage_read.dispatch(args)
+        assert [call["message"] for call in out.data["calls"]["calls"]] == ["m4", "m5"]
+        # The totals read is unchanged: m1 to m5 and the zero-usage synthetic
+        # row on the main chain, the one sidechain row apart.
+        assert (out.data["main"]["turns"], out.data["sidechain"]["turns"]) == (6, 1)
+        assert out.lines[1].startswith("calls: 2 main-chain calls of session s1")
+        assert "calls" not in usage_read.dispatch(
+            SimpleNamespace(since="24h", public_command="bot.usage", bot_id="b")).data
+        for calls in (0, tu.CALLS_MAX + 1):
+            with pytest.raises(CommandFailure) as caught:
+                usage_read.dispatch(SimpleNamespace(since="24h", public_command="bot.usage",
+                                                    bot_id="b", calls=calls))
+            assert caught.value.error.code == "invalid_argument"
