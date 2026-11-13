@@ -8,6 +8,7 @@ claudlobby config validate  # check fleet.yaml against library
 claudlobby config diff [<FINGERPRINT>]  # current rendered drift, or the pending render
 claudlobby host update apply [FULL_COMMIT]  # fetch the trusted source and apply one host update
 claudlobby host update status  # original operation and consumer progress
+claudlobby host update status --full  # the whole update record, each unit's progress included
 claudlobby host update continue  # continue the same request
 claudlobby library list  # available building blocks
 claudlobby bot create --interactive  # author a bot; this does not start it

@@ -1934,6 +1934,78 @@ def _run_native_update(installation):
                 _notify_unfinished(store, failure)
 
 
+#: The record's collections that grow with the units and files an update touches. On one host with
+#: 136 units they made 1.56 MB of a 1.57 MB status (#2783), so `host update status` leaves them out
+#: unless it is given `--full`, and counts them instead.
+_BULKY = ("candidate_config", "consumers", "publication", "quiet", "scope")
+#: The member collections a compact status counts in the two of them that are not keyed by unit.
+_COUNTED = {"candidate_config": ("fleets", "owned_outputs", "units"), "publication": ("blobs", "rows")}
+
+
+def _left_out(key, value):
+    """What a compact status says about one collection it leaves out: its size and its counts."""
+    row = {"bytes": len(json.dumps(value, sort_keys=True).encode())}
+    if not isinstance(value, dict):
+        return row
+    if key in _COUNTED:
+        row.update((name, len(value[name])) for name in _COUNTED[key] if isinstance(value.get(name), (dict, list)))
+        if key == "publication" and isinstance(value.get("status"), str):
+            row["status"] = value["status"]
+        return row
+    row["units"] = len(value)
+    if key == "consumers":
+        progress = [entry for entry in value.values() if isinstance(entry, dict)]
+        for field in ("park", "stop", "restore", "checkpoint_state"):
+            states = {}
+            for entry in progress:
+                if isinstance(entry.get(field), str):
+                    states[entry[field]] = states.get(entry[field], 0) + 1
+            row[field] = dict(sorted(states.items()))
+        for mark in ("publication_complete", "session_gone"):
+            row[mark] = sum(entry.get(mark) is True for entry in progress)
+        row["restore_error"] = sum("restore_error" in entry for entry in progress)
+    return row
+
+
+def status_view(record, *, action="status", written_at=None):
+    """`host update status` without `--full` (#2783): the record less its bulky collections.
+
+    `update` keeps every other key at its path, led by `phase` and `target`, so a reader that sees
+    only the start of the output sees both. `omitted` sizes and counts what was left out.
+    `record_written_at` is when the record was last saved, not when it reached its phase.
+    """
+    if record is None:
+        return {"read_only": True, "update": None}
+    update = {"phase": record["phase"], "target": record["target"]}
+    update.update((key, record[key]) for key in sorted(record) if key not in update and key not in _BULKY)
+    view = {"update": update, "record_written_at": written_at}
+    omitted = {key: _left_out(key, record[key]) for key in _BULKY if key in record}
+    if omitted:
+        view["omitted"] = omitted
+        view["full_record"] = f"claudlobby host update {action} --full"
+    view["read_only"] = True
+    return view
+
+
+def _record_stamp(path):
+    try:
+        observed = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return observed.st_ino, observed.st_size, observed.st_mtime_ns
+
+
+def _status(installation, action):
+    """The compact status, timed only when the record did not change while it was read."""
+    path = installation.data_root / "state/update.json"
+    before = _record_stamp(path)
+    record = read_update(installation)
+    written_at = None
+    if record is not None and before is not None and _record_stamp(path) == before:
+        written_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(before[2] // 1_000_000_000))
+    return status_view(record, action=action, written_at=written_at)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     directory = Path(__file__).absolute().parent.parent
@@ -1954,14 +2026,22 @@ def main(argv=None):
     parser.add_argument("target", nargs="?")
     parser.add_argument("--convert-sealed", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--full", action="store_true",
+                        help="with status or recovery, print the whole record, each unit's progress included")
     args = parser.parse_args(argv)
     if Path(args.root) != installation.data_root:
         raise UpdateError("updater data root differs from the recorded installation")
     if (args.convert_sealed or args.prepare_only) and (args.action != "apply" or not (args.convert_sealed and args.prepare_only)):
         raise UpdateError("conversion preview requires apply --convert-sealed --prepare-only")
+    if args.full and args.action not in {"status", "recovery"}:
+        raise UpdateError("--full applies only to read-only update inspection")
     if args.action in {"status", "recovery"}:
         if args.target is not None:
             raise UpdateError("read-only update inspection takes no target")
+        if not args.full:
+            # Unsorted, so `phase` and `target` lead what a reader sees first (#2783).
+            print(json.dumps(_status(installation, args.action)))
+            return 0
         result = {"update": read_update(installation), "read_only": True}
     else:
         if args.fleet or args.seed:
