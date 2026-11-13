@@ -901,10 +901,17 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # itself posts nothing to the fleet's channel (#997 posts an alert the
     # manager's own pane cannot act on; this one it can, with /restart).
     # OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's bot.conf stops the push and
-    # says so; the record stays. A live read that gives no verdict ends the
+    # says so; the record stays, and the episode ends, so turning the push back
+    # on pushes at the next sweep. A live read that gives no verdict ends the
     # episode as a kept subreaper does: bot_subreaper_lost prints nothing for
-    # either. A sweep with no live session leaves it as it is, so a restart that
-    # brings no subreaper back is not pushed again before the re-notify window.
+    # either. A sweep with no live session leaves it as it is, so a worker whose
+    # restart brings no subreaper back is not pushed again before the re-notify
+    # window: the push's recipient, its manager's session, is unchanged. The
+    # manager's own restart changes that recipient, so its own episode is pushed
+    # again at the next sweep, and after that at most once per re-arm window
+    # (debounce_notify, #1088). A session that started without its subreaper
+    # reads here as one that lost it, so the push says to read the start's
+    # bot_subreaper_unavailable first: a restart may fail as that start did.
     if [ "$_session_alive" -eq 1 ]; then
         _subreaper_lost=$(bot_subreaper_lost "$_bot_socket")
         if [ -n "$_subreaper_lost" ]; then
@@ -917,9 +924,10 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 _sr_server=${_sr_server%%,*}
                 _sr_parent=${_subreaper_lost#*\"parent\":\"}
                 _sr_parent=${_sr_parent%\"*}
-                _sr_do="Restart it at its next safe point, after the safe-worker-restart checks; it works meanwhile."
+                _sr_read="claudlobby --json event list --bot $bot_id --type bot_subreaper_unavailable"
+                _sr_do="Read its start's bot_subreaper_unavailable first ($_sr_read): if its start recorded one, a restart may fail as its start did. If not, restart it at its next safe point, after the safe-worker-restart checks; it works meanwhile."
                 if bot_is_manager "$bot_dir"; then
-                    _sr_do="This is you: restart yourself with /restart at your next safe point; you work meanwhile."
+                    _sr_do="This is you. Read your start's bot_subreaper_unavailable first ($_sr_read): if your start recorded one, a restart may fail as your start did. If not, restart yourself with /restart at your next safe point; you work meanwhile."
                 fi
                 _push_current_bot "subreaper_alerted" bot_subreaper_missing \
                     "its tmux server (pid $_sr_server) runs under $_sr_parent, not its bot-subreaper, so what the session orphans goes to the user manager that runs every bot. $_sr_do"
