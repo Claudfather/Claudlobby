@@ -45,7 +45,7 @@ Reading events at decision points is the default, but silent stalls — the reas
 [FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
 ```
 
-**An alert about you, the fleet manager, also posts to the fleet's alert channel**, once an episode (#997). Its push lands in your own pane, and when your pane is the one that cannot act, nobody else in the fleet sees it. The post goes through the escalation's chat and sender. The reminder about a bot stopped on purpose posts nothing, and neither does `bot_subreaper_missing` about you: your pane can act on that one, with `/restart`.
+**An alert about you, the fleet manager, also posts to the fleet's alert channel**, once an episode (#997). Its push lands in your own pane, and when your pane is the one that cannot act, nobody else in the fleet sees it. The post goes through the escalation's chat and sender. The reminder about a bot stopped on purpose posts nothing, and neither does `bot_subreaper_missing` about you: your pane can act on that one.
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload.
 
