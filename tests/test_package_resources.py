@@ -620,3 +620,49 @@ assert not list(context.paths.runtime_bots.rglob('*.service'))
 """, data, package, cli, *dependencies], outside)
     assert _asset_hashes(package) == immutable_before
     assert not any((data / name).exists() for name in (".git", "pyproject.toml", "claudlobby", "lib"))
+
+
+def test_public_launcher_foreground_owner_action_uses_positive_operator_proof(tmp_path):
+    """Actual launcher/interpreter/serve dispatch; native ancestry is the fixture seam."""
+    installation = _stable_launcher(tmp_path)
+    shutil.copytree(REPO / "claudlobby", installation.source / "claudlobby", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("_artifact.json", "_resources", "__pycache__"))
+    main = installation.source / "claudlobby/__main__.py"
+    shutil.copy2(main, main.with_name("_test_original_main.py"))
+    main.write_text("""
+import json
+from ._test_original_main import main as original_main
+
+def main(argv):
+    from .commands import operator_context
+    from .plane import owner_server
+    from .plane.owner_service import admitted_action, check_action_process
+    checks = []
+    operator_context.require_operator_context = lambda root: checks.append(root)
+    def serve(root, *, package, **kwargs):
+        class Action:
+            @admitted_action
+            def perform(self):
+                check_action_process(self.root, self.package)
+                assert checks == [root]
+                print(json.dumps({"foreground_action": "admitted", "root": str(root)}))
+        action = Action()
+        action.root, action.package = root, package
+        action.perform()
+    owner_server.serve = serve
+    return original_main(argv)
+""")
+    _run(["git", "-C", installation.source, "add", "."], tmp_path)
+    _run(["git", "-C", installation.source, "-c", "user.name=Example", "-c",
+          "user.email=example@example.invalid", "commit", "--quiet", "-m", "Foreground fixture"], tmp_path)
+    _run([sys.executable, "-m", "venv", "--without-pip", installation.environment], tmp_path)
+    purelib = Path(_run([installation.environment / "bin/python", "-c",
+                        "import sysconfig; print(sysconfig.get_path('purelib'))"], tmp_path).strip())
+    (purelib / "test-dependencies.pth").write_text("\n".join(
+        entry for entry in sys.path if "site-packages" in entry and Path(entry).is_dir()) + "\n")
+    outcome = _launch(installation, "--root", installation.data_root, "host", "owner", "serve",
+                      "--origin", "https://example.invalid", "--tailscale", "/bin/false")
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert json.loads(outcome.stdout.splitlines()[0]) == {
+        "foreground_action": "admitted", "root": str(installation.data_root)}
+    assert "Owner server stopped." in outcome.stdout

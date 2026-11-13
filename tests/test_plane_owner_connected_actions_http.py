@@ -251,3 +251,32 @@ def test_failed_preflight_never_reports_submission_effect(connected_actions, mon
     response = f[1].options(PREFIX + "send", headers=headers)
     assert response.status_code == (503 if timed_out else 403)
     assert response.json() == {"state": "unavailable" if timed_out else "denied"}
+
+
+@pytest.mark.parametrize("identity", ["foreground", "generated", "wrong-root"])
+def test_foreground_launcher_context_preserves_connected_send_and_original_receipt(
+        connected_actions, monkeypatch, identity):
+    from claudlobby.commands import operator_context
+    f = connected_actions
+    allow(f, "message")
+    adapter = f[2]
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(adapter.root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(adapter.package.installation.directory))
+    if identity == "generated":
+        monkeypatch.setenv("BOT_SERVICE", "")
+    elif identity == "wrong-root":
+        monkeypatch.setenv("CLAUDLOBBY_ROOT", "/wrong-root")
+    checks = []
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda root: checks.append(root))
+    calls = receiver(monkeypatch)
+    original = row(f, "message")  # Read/grant access alone does not authorize a send.
+    sent = post(f, "send", {**original, "body": "Review this private draft"})
+    observed = post(f, "receipt", original)
+    if identity == "foreground":
+        assert sent.status_code == observed.status_code == 200
+        assert sent.json()["status"] == observed.json()["status"] == "delivered"
+        # send observes its original receipt internally; explicit receipt observes it again.
+        assert checks == [adapter.root, adapter.root, adapter.root] and len(calls) == 1
+    else:
+        assert sent.status_code == observed.status_code == 403
+        assert checks == [] and calls == []
