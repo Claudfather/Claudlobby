@@ -80,9 +80,10 @@ STAND_IN = textwrap.dedent("""\
 """)
 OFF_LINE = ("fleet-pulse: w1 bot_subreaper_missing push: OFF here (OBSERVABILITY_SUBREAPER_PUSH=0)"
             " -- the sweep still records the event")
-# What the rule text says to do when the start recorded a bot_subreaper_unavailable.
-CLAUSE = ("If it did, don't restart: send the recorded reason to your manager"
-          " (to the operator if you are the fleet manager).")
+# What the rule text says to do when the start recorded a bot_subreaper_unavailable: not to
+# restart, why not, and where to send the recorded reason.
+CLAUSE = ("don't restart: a restart may fail the same way, so send the recorded reason to your"
+          " manager (to the operator if you are the fleet manager).")
 
 
 def parent_comm(pid: int) -> str:
@@ -292,8 +293,8 @@ def test_a_session_without_its_subreaper_is_pushed_once_an_episode_and_recorded_
     assert "runs under plain-tmux, not its bot-subreaper" in pushed[0], pushed
     assert ("Read its start's bot_subreaper_unavailable first (claudlobby --json event list"
             " --bot w1 --type bot_subreaper_unavailable). It lists newest first, and only a row"
-            " from its session's start counts. If its start recorded one, a restart may fail as"
-            f" its start did. {CLAUSE} If not, restart it") in pushed[0], pushed
+            f" from its session's start counts. If its start recorded one, {CLAUSE} If not,"
+            " restart it") in pushed[0], pushed
     assert "If not, restart it at its next safe point, after the safe-worker-restart checks" in pushed[0], pushed
     assert fleet.recorded("w1") == 1
     assert marker.exists()
@@ -410,8 +411,8 @@ def test_the_push_about_the_manager_itself_posts_nothing_to_the_channel(fleet):
     assert len(pushed) == 1, fleet.log.read_text()
     assert ("This is you. Read your start's bot_subreaper_unavailable first (claudlobby --json"
             " event list --bot mgr --type bot_subreaper_unavailable). It lists newest first, and"
-            " only a row from your session's start counts. If your start recorded one, a restart"
-            f" may fail as your start did. {CLAUSE} If not, restart yourself") in pushed[0], pushed
+            f" only a row from your session's start counts. If your start recorded one, {CLAUSE}"
+            " If not, restart yourself") in pushed[0], pushed
     assert "If not, restart yourself with /restart" in pushed[0], pushed
     posts = fleet.posts()
     assert [p for p in posts if "mgr activity_stuck" in p], posts
@@ -435,7 +436,7 @@ def test_a_manager_whose_restart_brings_no_subreaper_back_is_pushed_again_and_th
     fleet.sweep()
     pushed = fleet.pushes("mgr")
     assert len(pushed) == 2, fleet.log.read_text()
-    assert CLAUSE in pushed[1], pushed
+    assert f"If your start recorded one, {CLAUSE}" in pushed[1], pushed
     fleet.restart_box()
     fleet.sweep()
     assert len(fleet.pushes("mgr")) == 2, fleet.log.read_text()

@@ -175,8 +175,8 @@ DECISION = {
     ),
     "bot_subreaper_missing": (
         "Linux: the bot's live session **runs without its own subreaper**, so a process the session orphans goes to the user manager that runs every bot, where a kill aimed at the orphan's parent can stop them all.",
-        "**Read its start's `bot_subreaper_unavailable` first** (`claudlobby --json event list --bot BOT_ID --type bot_subreaper_unavailable`, newest first, and only a row from its session's start counts): a session that started without its subreaper reads the same as one that lost it, and if its start recorded one, with the reason, a restart may fail as its start did.",
-        "If it did, don't restart: send the recorded reason to your manager (to the operator if you are the fleet manager).",
+        "**Read its start's `bot_subreaper_unavailable` first** (`claudlobby --json event list --bot BOT_ID --type bot_subreaper_unavailable`, newest first, and only a row from its session's start counts): a session that started without its subreaper reads the same as one that lost it.",
+        "**If its start recorded one, don't restart it**: a restart may fail the same way, so send the recorded reason to your manager (to the operator if you are the fleet manager).",
         "**If it recorded none, restart it at its next safe point, after the `safe-worker-restart` checks**: the new session gets a subreaper.",
         "When it is about you, restart yourself with `/restart` at a safe point.",
         "A worker whose restart brings no subreaper back is not pushed again before the re-notify window.",

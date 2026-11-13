@@ -927,9 +927,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 _sr_parent=${_subreaper_lost#*\"parent\":\"}
                 _sr_parent=${_sr_parent%\"*}
                 _sr_read="claudlobby --json event list --bot $bot_id --type bot_subreaper_unavailable"
-                _sr_do="Read its start's bot_subreaper_unavailable first ($_sr_read). It lists newest first, and only a row from its session's start counts. If its start recorded one, a restart may fail as its start did. If it did, don't restart: send the recorded reason to your manager (to the operator if you are the fleet manager). If not, restart it at its next safe point, after the safe-worker-restart checks; it works meanwhile."
+                _sr_do="Read its start's bot_subreaper_unavailable first ($_sr_read). It lists newest first, and only a row from its session's start counts. If its start recorded one, don't restart: a restart may fail the same way, so send the recorded reason to your manager (to the operator if you are the fleet manager). If not, restart it at its next safe point, after the safe-worker-restart checks; it works meanwhile."
                 if bot_is_manager "$bot_dir"; then
-                    _sr_do="This is you. Read your start's bot_subreaper_unavailable first ($_sr_read). It lists newest first, and only a row from your session's start counts. If your start recorded one, a restart may fail as your start did. If it did, don't restart: send the recorded reason to your manager (to the operator if you are the fleet manager). If not, restart yourself with /restart at your next safe point; you work meanwhile."
+                    _sr_do="This is you. Read your start's bot_subreaper_unavailable first ($_sr_read). It lists newest first, and only a row from your session's start counts. If your start recorded one, don't restart: a restart may fail the same way, so send the recorded reason to your manager (to the operator if you are the fleet manager). If not, restart yourself with /restart at your next safe point; you work meanwhile."
                 fi
                 _push_current_bot "subreaper_alerted" bot_subreaper_missing \
                     "its tmux server (pid $_sr_server) runs under $_sr_parent, not its bot-subreaper, so what the session orphans goes to the user manager that runs every bot. $_sr_do"
