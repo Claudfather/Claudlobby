@@ -280,6 +280,127 @@ def test_standalone_update_status_needs_neither_source_nor_runtime(update):
     assert json.loads(default_status.stdout)["update"]["target"] == target
 
 
+#: The collections a compact status leaves out (#2783), named here apart from the code's own list.
+BULKY = ("candidate_config", "consumers", "publication", "quiet", "scope")
+#: Small fields, the diagnostics among them. `health_errors` sorts before `phase`, and is long enough
+#: that a sorted status would put `phase` past the first 2 KB.
+STATUS_RECORD = {
+    "schema": 1, "phase": "restore", "target": "a" * 40, "before": "b" * 40, "maintenance": False,
+    "request_id": "00000000-0000-4000-8000-000000000001", "config_fingerprint": SHA, "finalized": True,
+    "health_errors": {f"unit-{index:04d}.service": "restore refused: " + "e" * 300 for index in range(10)},
+    "stage_error": {"stage": "restore", "detail": "interrupted: no unit finished within 1200 s"},
+    "runtime_wait": {"gate": "cutover", "holders": ["example.service (python3 pid 7, running 400 s)"]},
+    "job_dispatch": {"state": "entered", "attempt": 2},
+}
+
+
+def _with_units(record, units):
+    """`record` with each bulky collection holding `units` units, as a large host's record does."""
+    names = [f"unit-{index:04d}.service" for index in range(units)]
+    return {**record,
+            "consumers": {name: {"intent": {"properties": "x" * 2000, "target": name}, "park": "done",
+                                 "stop": "done" if index % 2 else "pending", "restore": "pending",
+                                 "publication_complete": index % 2 == 1,
+                                 **({"session_gone": True} if index == 0 else {}),
+                                 **({"checkpoint_state": "waiting_for_native_idle"} if index < 2 else {})}
+                          for index, name in enumerate(names)},
+            "scope": {name: SHA for name in names},
+            "quiet": {name: {"identity": SHA, "evidence_sha256": "c" * 64} for name in names},
+            "candidate_config": {"units": [{"bot": name, "source": "y" * 500} for name in names],
+                                 "owned_outputs": [{"target": name} for name in names],
+                                 "fleets": {"example": {"fleet": "z" * 1000}}, "revision": record["target"]},
+            "publication": {"rows": [{"target": name, "status": "applied"} for name in names], "blobs": [],
+                            "status": "applied"}}
+
+
+def _bytes(value):
+    return len(json.dumps(value, sort_keys=True).encode())
+
+
+def test_status_view_leads_with_phase_and_target_and_leaves_out_what_grows_with_the_units():
+    """#2783: 1.57 MB put `phase` past character 1.29 million; the default now leads with it."""
+    from claudlobby.git_update import status_view
+    small, large = _with_units(STATUS_RECORD, 3), _with_units(STATUS_RECORD, 1000)
+    texts = [json.dumps(status_view(record, written_at="2026-11-07T18:54:55Z")) for record in (small, large)]
+    for text, record in zip(texts, (small, large)):
+        assert text.startswith('{"update": {"phase": "restore", "target": "' + "a" * 40 + '", ')
+        view = json.loads(text)
+        assert view["update"] == {key: value for key, value in record.items() if key not in BULKY}
+        assert view["record_written_at"] == "2026-11-07T18:54:55Z" and view["read_only"] is True
+        assert view["full_record"] == "claudlobby host update status --full"
+    # 1,000 units make 3 MB of record, and add only the digits of their counts to the status.
+    assert _bytes(large) > 3_000_000 and len(texts[1].encode()) < 6000
+    assert 0 < len(texts[1]) - len(texts[0]) < 64
+    omitted = json.loads(texts[1])["omitted"]
+    assert omitted == {
+        "candidate_config": {"bytes": _bytes(large["candidate_config"]), "fleets": 1, "owned_outputs": 1000,
+                             "units": 1000},
+        "consumers": {"bytes": _bytes(large["consumers"]), "units": 1000, "park": {"done": 1000},
+                      "stop": {"done": 500, "pending": 500}, "restore": {"pending": 1000},
+                      "checkpoint_state": {"waiting_for_native_idle": 2},
+                      "publication_complete": 500, "session_gone": 1, "restore_error": 0},
+        "publication": {"bytes": _bytes(large["publication"]), "blobs": 0, "rows": 1000, "status": "applied"},
+        "quiet": {"bytes": _bytes(large["quiet"]), "units": 1000},
+        "scope": {"bytes": _bytes(large["scope"]), "units": 1000},
+    }
+    assert json.loads(json.dumps(status_view(large, action="recovery")))["full_record"] == (
+        "claudlobby host update recovery --full")
+    assert status_view(STATUS_RECORD) == {"update": {key: STATUS_RECORD[key] for key in (
+        "phase", "target", *sorted(set(STATUS_RECORD) - {"phase", "target"}))},
+        "record_written_at": None, "read_only": True}
+    assert status_view(None) == {"read_only": True, "update": None}
+
+
+def test_status_time_is_the_record_save_only_when_the_record_held_still(update, monkeypatch):
+    """`record_written_at` is the record's save time, left out if the record changed during the read."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+    for stamps, expected in (([(1, 2, 3_999_999_999)] * 2, "1970-01-01T00:00:03Z"),
+                             ([(1, 2, 3_999_999_999), (4, 2, 3_999_999_999)], None)):
+        observed = iter(stamps)
+        monkeypatch.setattr(updater, "_record_stamp", lambda _path: next(observed))
+        view = updater._status(installation, "status")
+        assert view["record_written_at"] == expected and view["update"]["target"] == target
+
+
+def test_status_through_the_stable_cli_is_compact_and_full_prints_the_whole_record(update):
+    """#2783: the door's default stays small, and `--full` prints exactly what the door printed before."""
+    installation, _, target, _ = update
+    interpreter = Path(sys.executable).resolve()
+    install_launcher(installation, interpreter=interpreter)
+    install_updater(installation, interpreter=interpreter)
+
+    def door(*arguments):
+        return subprocess.run([str(installation.cli), "--json", "host", "update", *arguments],
+                              env=constructed_env(), cwd=installation.data_root, capture_output=True,
+                              text=True, timeout=30)
+
+    absent = door("status")
+    assert absent.returncode == 0 and absent.stdout == '{"read_only": true, "update": null}\n', absent.stderr
+    with UpdateStore(installation) as store:
+        prepare(store, target, consumers={f"unit-{index:03d}.service": {"intent": {
+            "installed": [], "bot_binding": None, "properties": "x" * 4000}} for index in range(200)})
+    record = read_update(installation)
+    compact, full, recovery = door("status"), door("status", "--full"), door("recovery")
+    for outcome in (compact, full, recovery):
+        assert outcome.returncode == 0, outcome.stderr
+    assert full.stdout == json.dumps({"update": record, "read_only": True}, sort_keys=True) + "\n"
+    assert len(full.stdout.encode()) > 800_000 and len(compact.stdout.encode()) < 4096
+    assert compact.stdout.startswith('{"update": {"phase": "prepare", "target": "' + target + '", ')
+    view = json.loads(compact.stdout)
+    assert view["update"] == {key: value for key, value in record.items() if key not in BULKY}
+    assert view["omitted"]["consumers"]["units"] == view["omitted"]["scope"]["units"] == 200
+    saved = (installation.data_root / "state/update.json").stat().st_mtime_ns // 1_000_000_000
+    assert view["record_written_at"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(saved))
+    assert json.loads(recovery.stdout) == {**view, "full_record": "claudlobby host update recovery --full"}
+    refused = door("apply", "--full")
+    assert refused.returncode == 6 and refused.stdout == ""
+    assert refused.stderr.endswith("claudlobby update: --full applies only to read-only update inspection\n")
+    assert read_update(installation) == record
+
+
 def _tiny_wheel(directory, version):
     """A real, dependency-free wheel, built locally without a build backend."""
     import base64

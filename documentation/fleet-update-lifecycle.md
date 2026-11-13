@@ -24,6 +24,8 @@ Use the stable installation CLI (`INSTALL/bin/claudlobby`) and the explicit, sep
 
 `apply` is an effectful operator command that prepares and dispatches the update; it is not a preview-only command. Inspect its retained operation and exact pending render fingerprint. First-fleet setup has the explicit `fleet setup --plan-only` preparation gate described in [Getting started](getting-started.md). After interruption, continue the original operation rather than request another target or resend unknown work.
 
+`status` prints the update record's own fields under `update`, led by `phase` and `target`, with every other field at its usual path (`request_id`, `config_fingerprint`, `stage_error`, `runtime_wait`, `health_errors` and the rest). It leaves out the five collections that grow with the units and files an update touches: `consumers`, `scope`, `quiet`, `candidate_config` and `publication`. `omitted` counts them instead: each one's bytes and units or entries, and how many consumers are in each state of `park`, `stop`, `restore` and `checkpoint_state`. `record_written_at` is when the updater last saved the record, not when it reached its phase. `host update status --full` prints the whole record, each unit's progress included (#2783).
+
 `config diff FINGERPRINT` reads the exact retained Git render. `config diff` without a fingerprint compares committed owned generated outputs with current disk state; it does not silently adopt pending authored edits. `--bot` limits that current report to the selected bot. Both reports expose metadata/digests, never secret bytes. `content` means bytes/kind/link/tree entries differ; `mode` means permissions alone differ; `unchanged` means the compared owned state matches. Ensured directories own their mode, not mutable children.
 
 New configuration commits before consumer startup. A failed consumer remains visible in update health without revoking the committed configuration. Existing jobs/starts participate in the runtime-use fence; the updater drains admitted work and preserves stopped/disabled consumers and schedules. A canary needs its own installation/data root and native labels, not another fleet inside a production root.
@@ -48,7 +50,7 @@ Conversion is a one-time mode of the same updater, not a second activation servi
 
 ```bash
 "$CLI" --root "$DATA" host update apply FULL_COMMIT --convert-sealed --prepare-only --json
-"$CLI" --root "$DATA" host update status --json
+"$CLI" --root "$DATA" host update status --full --json
 "$CLI" --root "$DATA" config diff CONFIG_FINGERPRINT --json
 ```
 
@@ -607,7 +609,8 @@ Before a planned stop, the shared owner waits within its existing bounded wait
 for an empty idle prompt, without sending a message. Identity or account drift
 refuses immediately. It retains a bounded transcript prefix proof and rechecks it
 after the native stop has proved quiet. The updater keeps the same request while
-waiting; `host update status` reports its consumer checkpoint state. Deliberately
+waiting; `host update status` counts its consumers in each checkpoint state, and
+`host update status --full` shows each consumer's. Deliberately
 stopped bots and timer schedules retain their original intent.
 
 `start-bot.sh` resumes only the retained UUID with `--resume`, preserving current
