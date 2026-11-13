@@ -4,14 +4,18 @@ Since #2226 the pulse records bot_subreaper_missing on every sweep that reads a 
 session's tmux server outside its bot-subreaper, and nothing read the record: it was
 not pushed, not critical and not in the brief. Now the bot's manager also gets one
 push an episode, through the debounce every alert uses: read the start's
-bot_subreaper_unavailable first, then restart the bot at its next safe point.
+bot_subreaper_unavailable first, newest first and from the session's start. If the
+start recorded one, do not restart: send its reason to the manager (to the operator,
+for the manager itself). If not, restart the bot at its next safe point.
 Recording is unchanged. A sweep that reads the session under its subreaper again ends
 the episode, and one with no live session leaves it open. The re-notify window (#831)
 applies, as it does to every other alert. OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's
 bot.conf stops the push, says so on stderr, leaves the record and ends the episode.
 The push about the manager itself
 posts nothing to the fleet's channel: unlike the alerts #997 posts there, this one
-leaves the manager's own pane able to act on it.
+leaves the manager's own pane able to act on it. Its recipient is that pane's session,
+so the manager's own restart changes it: the first change is pushed at the next sweep,
+and a later one no more than once per re-arm window (#831, #1088).
 
 Each case drives the REAL sweep (the repo's claudlobby/_runtime_scripts/, linked file
 by file) over a fleet of two declared bots with live sessions: the manager, whose pane
@@ -76,6 +80,9 @@ STAND_IN = textwrap.dedent("""\
 """)
 OFF_LINE = ("fleet-pulse: w1 bot_subreaper_missing push: OFF here (OBSERVABILITY_SUBREAPER_PUSH=0)"
             " -- the sweep still records the event")
+# What the rule text says to do when the start recorded a bot_subreaper_unavailable.
+CLAUSE = ("If it did, don't restart: send the recorded reason to your manager"
+          " (to the operator if you are the fleet manager).")
 
 
 def parent_comm(pid: int) -> str:
@@ -164,6 +171,18 @@ class Fleet:
                                f"harness_box_up t2892-mgr mgr {shlex.quote(box)}")
         assert rc == 0 and out.strip().endswith("drawn"), out
         assert self.server_parent("mgr") == "plain-tmux"
+
+    def restart_box(self):
+        """Replace the manager's session, as its own restart does: end its server, wait for
+        the process to go, and start a new box outside any bot-subreaper. The push's
+        recipient, the session's creation time and its pane's pid (#831), is a new one."""
+        server = int(self.tmux_cmd("-L", "t2892-mgr", "display-message", "-p", "#{pid}").stdout)
+        self.tmux_cmd("-L", "t2892-mgr", "kill-server")
+        deadline = time.monotonic() + 10
+        while Path(f"/proc/{server}").exists():
+            assert time.monotonic() < deadline, "the manager's server did not exit"
+            time.sleep(0.05)
+        self.start_box()
 
     def start_worker(self, *, subreaper: bool):
         """w1's session: under its own bot-subreaper, as start-bot.sh starts it, or with
@@ -272,7 +291,9 @@ def test_a_session_without_its_subreaper_is_pushed_once_an_episode_and_recorded_
     assert len(pushed) == 1, fleet.log.read_text()
     assert "runs under plain-tmux, not its bot-subreaper" in pushed[0], pushed
     assert ("Read its start's bot_subreaper_unavailable first (claudlobby --json event list"
-            " --bot w1 --type bot_subreaper_unavailable)") in pushed[0], pushed
+            " --bot w1 --type bot_subreaper_unavailable). It lists newest first, and only a row"
+            " from its session's start counts. If its start recorded one, a restart may fail as"
+            f" its start did. {CLAUSE} If not, restart it") in pushed[0], pushed
     assert "If not, restart it at its next safe point, after the safe-worker-restart checks" in pushed[0], pushed
     assert fleet.recorded("w1") == 1
     assert marker.exists()
@@ -388,12 +409,39 @@ def test_the_push_about_the_manager_itself_posts_nothing_to_the_channel(fleet):
     pushed = fleet.pushes("mgr")
     assert len(pushed) == 1, fleet.log.read_text()
     assert ("This is you. Read your start's bot_subreaper_unavailable first (claudlobby --json"
-            " event list --bot mgr --type bot_subreaper_unavailable)") in pushed[0], pushed
+            " event list --bot mgr --type bot_subreaper_unavailable). It lists newest first, and"
+            " only a row from your session's start counts. If your start recorded one, a restart"
+            f" may fail as your start did. {CLAUSE} If not, restart yourself") in pushed[0], pushed
     assert "If not, restart yourself with /restart" in pushed[0], pushed
     posts = fleet.posts()
     assert [p for p in posts if "mgr activity_stuck" in p], posts
     assert [p for p in posts if "bot_subreaper_missing" in p] == [], posts
     assert not (fleet.state / "mgr.subreaper_alerted.paged").exists()
+
+
+def test_a_manager_whose_restart_brings_no_subreaper_back_is_pushed_again_and_then_held(fleet):
+    """The manager's own session is the push's recipient, so its restart changes it
+    (#831). Its session is replaced between two sweeps, outside a subreaper again, as a
+    restart that brings none back leaves it: the next sweep pushes again, since the
+    first change is free. A second replacement inside the re-arm window (#1088) is held,
+    and once the window has passed the next sweep pushes. Every sweep records it."""
+    fleet.start_box()
+    fleet.idle("mgr")
+    fleet.idle("w1")
+    fleet.start_worker(subreaper=True)
+    fleet.sweep()
+    assert len(fleet.pushes("mgr")) == 1, fleet.log.read_text()
+    fleet.restart_box()
+    fleet.sweep()
+    pushed = fleet.pushes("mgr")
+    assert len(pushed) == 2, fleet.log.read_text()
+    assert CLAUSE in pushed[1], pushed
+    fleet.restart_box()
+    fleet.sweep()
+    assert len(fleet.pushes("mgr")) == 2, fleet.log.read_text()
+    fleet.sweep(FLEET_PULSE_REARM_WINDOW_S="1")
+    assert len(fleet.pushes("mgr")) == 3, fleet.log.read_text()
+    assert fleet.recorded("mgr") == 4
 
 
 def test_a_bot_stopped_on_purpose_closes_the_episode_with_its_session():
