@@ -15,6 +15,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import write_jsonl
 from claudlobby import transcript_usage as tu
 
@@ -1172,3 +1174,127 @@ class TestCallView:
                 usage_read.dispatch(SimpleNamespace(since="24h", public_command="bot.usage",
                                                     bot_id="b", calls=calls))
             assert caught.value.error.code == "invalid_argument"
+
+
+# --- shapes the view and the live context read apart, or alike (#2909) ------
+
+
+def _line(row) -> bytes:
+    return (json.dumps(row) + "\n").encode()
+
+
+def _raw_session(directory, lines, name="s1.jsonl"):
+    """A session written as raw lines, for what no JSON writer produces: a
+    byte that is not UTF-8, a line that is not JSON, a last line cut short."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"".join(lines))
+    return path
+
+
+class TestCallViewShapes:
+    """Transcript shapes pinned as the per-call view (`calls_in`) and the live
+    context (`context_in`, the figure `fleet status` shows) read each today,
+    so a change to either reader shows here."""
+
+    def test_a_bad_byte_in_the_newest_row_is_a_call_but_not_the_live_context(self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        lines = [_line(row) for row in _cli([_call(_at(-2), "m1", 1, 100),
+                                             _call(_at(-1), "m2", 1, 200, text="BAD")])]
+        lines[-1] = lines[-1].replace(b"BAD", b"\xff")
+        _raw_session(d, lines)
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        # The view decodes the line with replacement, as the window totals do,
+        # so m2 is a call; the live context cannot decode it and reads m1.
+        assert [(call["message"], call["context"]) for call in view["calls"]] == [
+            ("m1", 101), ("m2", 201)]
+        assert view["diagnostics"]["malformed_lines"] == 0
+        assert tu.context_in(d)["tokens"] == 101
+
+    def test_a_newest_usage_row_with_no_message_id_is_the_live_context_but_no_call(
+            self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_call(_at(-2), "m1", 1, 100), _usage(_at(-1), 1, 0, 200)]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        # The view groups rows into calls by message id, so the row is no call;
+        # the live context reads its usage alone.
+        assert [(call["message"], call["context"]) for call in view["calls"]] == [("m1", 101)]
+        assert tu.context_in(d)["tokens"] == 201
+
+    def test_a_newest_call_with_no_time_empties_the_view_and_the_live_context_skips_it(
+            self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        untimed = _call(_at(-1), "m2", 1, 200)
+        del untimed["timestamp"]
+        _session(d, "s1.jsonl", _cli([_call(_at(-2), "m1", 1, 100), untimed]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        # The view takes the untimed call for the call before those it shows:
+        # the read stops at the next call, m1, shows nothing and says
+        # call_limit. The live context reads only a timed row: m1.
+        assert (view["calls"], view["ended"], view["complete"]) == ([], "call_limit", False)
+        assert view["diagnostics"]["untimed_calls"] == 1
+        assert tu.context_in(d)["tokens"] == 101
+
+    def test_a_call_whose_rows_disagree_reads_its_first_row_and_the_live_context_its_last(
+            self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        first, last = _at(-1), _at(-0.9)
+        _session(d, "s1.jsonl", _cli([_call(_at(-2), "m1", 1, 100),
+                                     _call(first, "m2", 1, 200), _call(last, "m2", 1, 250)]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        # The view takes a call's context and time from its first row; the
+        # live context takes both from the newest call's last row.
+        assert [(call["message"], call["context"], call["growth"])
+                for call in view["calls"]] == [("m1", 101, None), ("m2", 201, 100)]
+        assert view["calls"][-1]["at"] == first.replace("Z", "+00:00")
+        live = tu.context_in(d)
+        assert (live["tokens"], live["at"]) == (251, last.replace("Z", "+00:00"))
+
+    def test_rows_out_of_time_order_stop_the_view_at_the_first_older_row(self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        _session(d, "s1.jsonl", _cli([_call(_at(-3), "m1", 1, 100), _call(_at(-2), "m2", 1, 200),
+                                     _call(_at(-30), "m3", 1, 300), _call(_at(-1), "m4", 1, 400)]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        # The view trusts time order as the window totals do (#2756): m3, timed
+        # before the window, is read as the call before it, so m1 and m2,
+        # inside the window, are not shown, and the view still says it reached
+        # the window's start with every call shown.
+        assert [(call["message"], call["growth"]) for call in view["calls"]] == [("m4", 100)]
+        assert (view["ended"], view["complete"]) == ("window_start", True)
+        assert tu.context_in(d)["tokens"] == 401
+
+    def test_lines_that_are_not_json_are_counted_and_both_readers_pass_over_them(
+            self, tmp_path):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        lines = [_line(row) for row in _cli([_call(_at(-2), "m1", 1, 100),
+                                             _call(_at(-1), "m2", 1, 200)])]
+        cut = _line(_call(_at(-0.5), "m3", 1, 300))
+        # A line that is not JSON between the calls, and a last row cut short
+        # with no newline, as a write in progress leaves it.
+        _raw_session(d, lines[:-1] + [b"not json\n"] + lines[-1:] + [cut[:len(cut) // 2]])
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        assert [(call["message"], call["context"]) for call in view["calls"]] == [
+            ("m1", 101), ("m2", 201)]
+        assert view["diagnostics"]["malformed_lines"] == 2
+        assert tu.context_in(d)["tokens"] == 201
+
+    @pytest.mark.parametrize("usage", ["absent", "empty"])
+    def test_a_newest_row_with_no_usage_is_no_call_for_either_reader(self, tmp_path, usage):
+        _fleet, _paths, d = _one_bot(tmp_path)
+        newest = _call(_at(-1), "m3", 1, 300)
+        if usage == "absent":
+            del newest["message"]["usage"]
+        else:
+            newest["message"]["usage"] = {}
+        _session(d, "s1.jsonl", _cli([_call(_at(-3), "m1", 1, 100), _call(_at(-2), "m2", 1, 200),
+                                     newest]))
+        since, until = _last_day()
+        view = tu.calls_in(d, since, until)
+        assert [call["message"] for call in view["calls"]] == ["m1", "m2"]
+        assert view["calls"][-1]["context"] == tu.context_in(d)["tokens"] == 201

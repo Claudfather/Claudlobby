@@ -56,6 +56,7 @@ When token counts are needed, run `claudlobby --json bot usage BOT --since 24h`,
 `claudlobby --json brief --usage-since 24h` for the brief viewer's concise
 summary. These on-demand reads cover only configured accounts' current bot
 directory transcripts in the selected window.
+`claudlobby --json bot usage BOT --calls N` also lists the newest N main-chain calls of the bot's newest own session in the window (20 when N is left out, at most 100), each with its context, its growth over the previous call and the rows stored before it; `ended` says where the read stopped.
 
 ## Bot lifecycle
 
