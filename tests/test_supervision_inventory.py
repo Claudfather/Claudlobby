@@ -1264,3 +1264,40 @@ def test_job_stop_effective_launchd_child_policy_uses_captured_properties_only(t
             darwin_native_children_owned(observed, target)
     else:
         assert darwin_native_children_owned(observed, target) is policy.startswith("false-gui")
+
+
+@pytest.mark.parametrize("abandon", [False, True])
+def test_darwin_job_child_policy_imports_exact_source_in_isolated_child(tmp_path, abandon):
+    """A managed dependency-only interpreter has no editable core .pth file."""
+    import sysconfig
+    import venv
+    from tests.conftest import constructed_env
+
+    environment = tmp_path / "dependencies"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    python = environment / "bin/python"
+    site = Path(subprocess.check_output([str(python), "-I", "-c",
+        "import sysconfig;print(sysconfig.get_path('purelib'))"], text=True).strip())
+    for entry in Path(sysconfig.get_path("purelib")).iterdir():
+        if entry.suffix == ".pth" or entry.name.startswith(("claudlobby", "__editable__")):
+            continue
+        (site / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    absent = subprocess.run([str(python), "-I", "-c", "import claudlobby"], capture_output=True)
+    assert absent.returncode != 0 and b"No module named 'claudlobby'" in absent.stderr
+    target = "gui/501/fixture"
+    source = {"Label": "fixture", "ProgramArguments": ["/bin/true"],
+              "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
+    observed = observed_print(target, source, tmp_path / "fixture.plist", active=False)
+    capture = json.loads((FIXTURES / "launchctl-job-child-policy-native.json").read_text())
+    properties = capture["true_system"] if abandon else capture["false_gui"][0]
+    observed = observed.replace("\tproperties = <redacted>", "\tproperties = " + properties)
+    frame = tmp_path / "native-frame"; frame.write_text(observed)
+    native = source_package().native
+    result = subprocess.run(["/bin/bash", "-c",
+        'set -euo pipefail; . "$1/supervisor.sh"; _OS=Darwin; '
+        'frame="$2"; launchctl() { cat "$frame"; }; '
+        '_svc_job_child_policy "$3"',
+        "policy-test", str(native), str(frame), target],
+        env=constructed_env(CLAUDLOBBY_NATIVE_PYTHON=str(python)), capture_output=True, text=True)
+    assert result.returncode == (3 if abandon else 0), result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
