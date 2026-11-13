@@ -2288,7 +2288,7 @@ def create_app(
         diagnostic = _OverviewQueryDiagnostic()
         return JSONResponse(envelope(
             lambda c: _fetch_overview(c, paths, live, live_poll, diagnostic=diagnostic),
-            diagnostic=diagnostic))
+            snapshot=True, diagnostic=diagnostic))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):

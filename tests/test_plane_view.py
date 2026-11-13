@@ -1906,6 +1906,46 @@ def test_overview_aggregate_task_selection_work_is_shared(tmp_path):
     assert after - before < 150
 
 
+def test_local_overview_candidate_page_and_reducer_share_snapshot(tmp_path, monkeypatch):
+    """A committed competing prune must not split selection from reduction."""
+    import sqlite3
+    from claudlobby.plane import view
+
+    _dispatch(tmp_path, "a1", fleet="owned", expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "b1", fleet="other", expected_by=FUTURE, tx_state=None)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    task_id = "wi_" + "a1" * 16
+    with sqlite3.connect(db) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        uid = writer.execute("SELECT fleet_uid FROM work_items WHERE work_item_id=?",
+                             (task_id,)).fetchone()[0]
+    original_pages, original_read = view.task_board_candidate_pages, view.read_tasks
+    retained = []
+    writes = []
+    def concurrent_prune(conn, *, fleet_uids):
+        pages = original_pages(conn, fleet_uids=fleet_uids)
+        assert task_id in {tid for tid, _uid in pages[uid][0]}
+        with sqlite3.connect(db) as writer:
+            writes.append(writer.execute("DELETE FROM work_items WHERE work_item_id=?",
+                                         (task_id,)).rowcount)
+        return pages
+    def observed_read(conn, *, fleet_uid, task_ids=None):
+        snapshot = original_read(conn, fleet_uid=fleet_uid, task_ids=task_ids)
+        if fleet_uid == uid:
+            retained.append(any(task.task_id == task_id for task in snapshot.tasks))
+        return snapshot
+    monkeypatch.setattr(view, "task_board_candidate_pages", concurrent_prune)
+    monkeypatch.setattr(view, "read_tasks", observed_read)
+    # No owner admission callback: this is the ordinary localhost route.
+    result = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
+    assert result["state"] == "ok"
+    assert writes == [1]  # The competing writer actually committed.
+    assert retained == [True]
+    with sqlite3.connect(db) as reader:
+        assert reader.execute("SELECT 1 FROM work_items WHERE work_item_id=?",
+                              (task_id,)).fetchone() is None
+
+
 def test_overview_batched_task_pages_preserve_reducer_and_board_pagination(tmp_path, monkeypatch):
     from claudlobby.plane import view
     _seed_conversation(tmp_path)  # completed task, linked report history
