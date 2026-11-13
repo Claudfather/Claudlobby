@@ -77,3 +77,49 @@ replace a retained pending operation. Do not start another setup or replay an
 unknown response. After successful launch, observe native readiness and useful
 provider behavior separately. Closing the foreground guide disconnects browser
 access; it does not stop bots or revoke approvals.
+
+## Local project without a repository connection
+
+The `local-project` template offers the same three roles for an existing local
+directory. It needs no GitHub account, Git repository, PAT or MCP connection.
+Select one real absolute project directory beneath the native user home locally; do not choose your home,
+data/installation directory, native service directory or an ancestor of those.
+Symlinked paths, authority/provider directories and wildcard path characters are refused. No project files are created or copied by setup.
+
+After managed preparation, stop at the provider credential gate. Complete the
+provider's interactive first-run prompts in the intended private profile before
+activation; sign-in status alone does not establish readiness. Native ingress,
+website login and exact local approvals remain separate prerequisites. This
+option has not yet completed native/browser newcomer acceptance.
+
+For the CLI route, replace each placeholder with its approved value:
+
+```bash
+"$CLI" --root "$DATA" --fleet local-team fleet setup \
+  --template local-project --project-directory "$PROJECT_DIRECTORY" \
+  --goal "Work only on explicitly assigned tasks within this local project" \
+  --install-directory "$NATIVE_DIRECTORY" --plan-only --json
+```
+
+For a fresh browser-first installation, choose this route **instead** of the
+CLI fleet setup above:
+
+```bash
+"$CLI" --root "$DATA" host owner setup --template local-project \
+  --project-directory "$PROJECT_DIRECTORY"
+```
+
+The terminal approves read/write access to that exact local project; the browser
+can describe a bounded goal and review the frozen plan, but cannot select a path
+or supply configuration. Launch starts native services and may use the provider;
+the template waits for explicit task assignment and disables autonomous work
+check-ins. A goal is not task admission. No task, message or feedback is sent by
+setup. Shell/test commands still require ordinary tool approval; these project
+permissions are not an operating-system sandbox. Existing host recorder/health
+policy remains effective and must be reviewed in the native consumer plan.
+
+Keep the original request/fingerprint/source identifiers across interruption.
+Use the same receipt/status/continue procedure above, never a new setup request.
+Closing the guide does not stop agents or revoke local access. Stop the exact
+fleet and owned host/fleet jobs through supported public lifecycle commands;
+cleanup and private network/grant revocation must be scoped before activation.

@@ -385,7 +385,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     # A private local revision lets the real bundle consumer validate its wheel identity.
     _run(["git", "init", "--quiet"], source)
     _run(["git", "add", "."], source)
-    assert "examples/teams/revenue-web-app/fleet.yaml" in _run(["git", "ls-files"], source).splitlines()
+    assert {"examples/teams/revenue-web-app/fleet.yaml", "examples/teams/local-project/fleet.yaml"} <= set(_run(["git", "ls-files"], source).splitlines())
     _run(["git", "-c", "user.name=Build fixture", "-c", "user.email=fixture@example.invalid",
           "commit", "--quiet", "-m", "Record isolated package fixture"], source)
     ignored = ("voices/local/operator.md", "library/skills/printify/config.json",
@@ -433,7 +433,7 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     assert "claudlobby/_resources/library/voices/vito-corleone.md" in payload
     assert not any(name.startswith("claudlobby/_resources/voices/") for name in payload)
     for name in ("fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed", ".env.seed.example",
-                 "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml"):
+                 "missions/fleet.md.seed", "examples/teams/revenue-web-app/fleet.yaml", "examples/teams/local-project/fleet.yaml"):
         assert payload["claudlobby/_resources/seeds/" + name][0] == (source / name).read_bytes()
         source_inputs.add(source / name)
     assert payload["claudlobby/system.yaml"][0] == (source / "claudlobby/system.yaml").read_bytes()
@@ -542,9 +542,18 @@ assert set(fleet.bots) == {'lead', 'engineer', 'reviewer'}
 assert all(bot.scope.repos == ['example-org/shop'] for bot in fleet.bots.values())
 assert 'Improve checkout tests' in fleet.mission
 assert all(not bot.channels and not bot.remote_control for bot in fleet.bots.values())
+import os
+os.environ['HOME'] = str(Path.cwd())
+project = Path.cwd() / 'local-project'
+project.mkdir()
+local = _template_config('local-project', 'local-team', None, 'Review local code', project_directory=str(project))
+local_fleet, _ = load_fleet_snapshot(Path('/unused/fleet.yaml'), local, None)
+assert set(local_fleet.bots) == {'lead', 'engineer', 'reviewer'}
+assert not local_fleet.plugins.required
+assert all(not bot.mcp and (bot.scope is None or not bot.scope.repos) and bot.mounts == {'project': str(project)} for bot in local_fleet.bots.values())
 """], tmp_path)
     template_help = _run([cli, "fleet", "setup", "--help"], tmp_path)
-    assert "--template {revenue-web-app}" in template_help and "--repository OWNER/REPO" in template_help
+    assert "--template {revenue-web-app,local-project}" in template_help and "--repository OWNER/REPO" in template_help
 
     data, outside = tmp_path / "data", tmp_path / "outside"
     data.mkdir()

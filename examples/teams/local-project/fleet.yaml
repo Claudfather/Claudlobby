@@ -1,0 +1,62 @@
+# Package-owned candidate. Local CLI approval supplies one real project mount.
+fleet:
+  name: local-project
+  manager: lead
+  system_defaults:
+    guardrails: false
+    protocols: false
+    skills: false
+  service_prefix: com.example.local-project
+  mission: "Work only within the locally approved project and explicitly assigned task. This scope description is not task admission. Do not seek or invent work, access remote repositories, send external messages, install packages or spawn additional agents. Require separate human approval for additional scope, spending, deployment or destructive changes. Use canonical tasks, assignments and reports for cooperation."
+  accounts:
+    default: ~/.claude
+  plugins:
+    include_defaults: false
+    additional: []
+    startup_policy: verify-existing
+  defaults:
+    account: default
+    model: sonnet
+    channels: []
+    mcp: []
+    remote_control: false
+    permission_mode: default
+    dangerously_skip_permissions: false
+    guardrails: [task-scoped-effects, claudlobby-dev-in-projects, no-destructive-git, pii-protection, no-fabrication, confirm-before-send]
+    protocols: [context-management]
+    tool_permissions:
+      allow: ["Read(./mounts/project/**)", "Edit(./mounts/project/**)", "Write(./mounts/project/**)"]
+      deny: [Agent, WebFetch, WebSearch]
+    jobs:
+      manager-checkin: { enroll: false }
+      reload-fleet: { enroll: false }
+      task-recheck: { enroll: false }
+      weekly-worker-restart: { enroll: false }
+      data-sweep: { enroll: false }
+      creds-check: { enroll: false }
+      session-export: { enroll: false }
+  teams:
+    project:
+      manager: lead
+      workers: [engineer, reviewer]
+  bots:
+    lead:
+      expertise: [local-project]
+      startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."
+      model: opus
+      manages: [engineer, reviewer]
+      skills: [fleet-status]
+      mission: "Coordinate only explicitly admitted local project work. Reassign the same task for implementation and independent review; intermediate phases report progress, not task completion. Verify independent review before final completion. Do not admit new tasks or merge or deploy anything."
+    engineer:
+      expertise: [local-project]
+      startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."
+      reports_to: lead
+      mission: "Implement only the explicitly assigned local project task. Request approval for test commands when needed. Report intermediate progress for review, not final task completion. Do not access remote repositories or create additional tasks."
+    reviewer:
+      expertise: [local-project]
+      startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."
+      reports_to: lead
+      tool_permissions:
+        allow: ["Read(./mounts/project/**)"]
+        deny: [Edit, Write, NotebookEdit, Agent, WebFetch, WebSearch]
+      mission: "Independently review the same local project task without implementation edits. Report the review verdict as assignment progress; only the lead completes the task after review. Do not admit work or access remote repositories."

@@ -104,17 +104,42 @@ def _authored_config(source: Path, fleet: str) -> bytes:
     return content
 
 
-def _template_config(template: str, fleet: str, repository: str | None, goal: str | None) -> bytes:
+def _local_project(value, *, forbidden=()) -> Path:
+    """One locally selected real directory, never a browser-supplied scope."""
+    if (not isinstance(value, str) or not value or len(value) > 2048 or not value.isprintable()
+            or any(char in value for char in "*?[]")):
+        raise CommandFailure("invalid_argument", "local project requires an explicit absolute project directory")
+    path = Path(value)
+    home = Path.home().resolve()
+    protected = [(home / name).resolve() for name in (".claude", ".ssh", ".config", ".local", "Library", ".codex", ".agents", ".aws", ".gnupg")]
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if configured:
+        protected.append(Path(configured).expanduser().resolve())
+    if (not path.is_absolute() or path.resolve() != path or not path.is_dir()
+            or path.is_symlink() or not path.is_relative_to(home) or path == home
+            or any(path.is_relative_to(other) or other.is_relative_to(path) for other in (*forbidden, *protected))):
+        raise CommandFailure("invalid_argument", "local project directory is absent, redirected or overlaps protected scope")
+    return path
+
+
+def _template_config(template: str, fleet: str, repository: str | None, goal: str | None,
+                     *, project_directory: str | None = None) -> bytes:
     """Materialize the one package-owned candidate; never use a source checkout."""
     import yaml
 
     from ..config import ScopeConfig, load_fleet_snapshot
     from ..resources import get_resources
 
-    if template != "revenue-web-app":
+    if template not in ("revenue-web-app", "local-project"):
         raise CommandFailure("invalid_argument", "invalid argument: unsupported team template")
+    if template == "local-project":
+        if repository is not None:
+            raise CommandFailure("invalid_argument", "local-project does not accept --repository")
+        project = _local_project(project_directory)
+    elif project_directory is not None:
+        raise CommandFailure("invalid_argument", "revenue-web-app does not accept --project-directory")
     parts = repository.split("/") if isinstance(repository, str) else []
-    if (len(parts) != 2
+    if template == "revenue-web-app" and (len(parts) != 2
             or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", parts[0])
             or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", parts[1])
             or parts[1] in (".", "..")):
@@ -123,7 +148,7 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
             or goal != goal.strip() or any(ord(char) < 32 or ord(char) == 127 for char in goal)):
         raise CommandFailure("invalid_argument", "invalid argument: --template requires a single-paragraph --goal of 1–2000 characters")
     try:
-        source = get_resources().seeds / "examples/teams/revenue-web-app/fleet.yaml"
+        source = get_resources().seeds / f"examples/teams/{template}/fleet.yaml"
         if source.is_symlink() or not source.is_file():
             raise ValueError("missing template")
         document = yaml.safe_load(source.read_bytes())
@@ -131,8 +156,13 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
         body["name"] = fleet
         body["service_prefix"] = f"com.claudlobby.{fleet}"
         body["mission"] = f"Approved goal: {goal}. {body['mission']}"
-        scope = ScopeConfig(org=parts[0], repos=[repository])
-        body["defaults"]["scope"] = {"org": scope.org, "repos": scope.repos}
+        if template == "revenue-web-app":
+            scope = ScopeConfig(org=parts[0], repos=[repository])
+            body["defaults"]["scope"] = {"org": scope.org, "repos": scope.repos}
+        else:
+            body["defaults"]["external_paths"] = [{"path": str(project) + "/**", "purpose": "Locally approved project"}]
+            for bot in body["bots"].values():
+                bot["mounts"] = {"project": str(project)}
         content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True).encode("utf-8")
         load_fleet_snapshot(source, content, None)
         return content
@@ -269,9 +299,13 @@ def _fleet_setup(args) -> CommandOutput:
                 if template is not None:
                     if args.config is not None:
                         raise CommandFailure("invalid_argument", "invalid argument: --config and --template are mutually exclusive")
-                    content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None))
+                    project = getattr(args, "project_directory", None)
+                    if template == "local-project":
+                        _local_project(project, forbidden=(root, installation.directory, Path(args.install_directory).resolve()))
+                    content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None),
+                                               **({"project_directory": project} if project is not None else {}))
                 else:
-                    if getattr(args, "repository", None) is not None or getattr(args, "goal", None) is not None:
+                    if any(getattr(args, key, None) is not None for key in ("repository", "goal", "project_directory")):
                         raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")
                     source = Path(args.config).expanduser().resolve(strict=True)
                     content = _authored_config(source, args.fleet)
