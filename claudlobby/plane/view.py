@@ -53,7 +53,7 @@ from ..paths import Paths, load_lib_module
 from ..resources import PackageResources
 from ..task_state import TASK_EMITTER, TaskStateError, read_tasks
 from ..report_payload import decode_report_body
-from ..task_queries import TaskQueryError, task_board_candidates, task_escalations_from_snapshot
+from ..task_queries import TaskQueryError, task_board_candidates, task_board_candidate_pages, task_escalations_from_snapshot
 from ..task_permissions import EMITTER as PERMISSION_EMITTER, list_task_permissions
 
 try:  # §14: optional UI features degrade without disabling the core ledger
@@ -1072,7 +1072,8 @@ def _fetch_task_detail(conn, task_id, fleet, names=None, *, root):
 
 
 def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path,
-                 summary_only: bool = False, cursor: str | None = None) -> dict:
+                 summary_only: bool = False, cursor: str | None = None,
+                 _candidate_page=None) -> dict:
     """Recent fleet-owned Tasks, with current-assignment evidence kept separate.
 
     The work-item query enforces the 200-card cap before any board projection;
@@ -1096,7 +1097,8 @@ def _query_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
                     "issue_count": 0, "issue_limit": 50, "issue_scope": "fleet",
                     "limit": 200, "truncated": False}
         try:
-            candidates, next_cursor = task_board_candidates(conn, fleet_uid=selected_uid, cursor=cursor)
+            candidates, next_cursor = (_candidate_page if _candidate_page is not None
+                                       else task_board_candidates(conn, fleet_uid=selected_uid, cursor=cursor))
         except TaskQueryError as exc:
             raise TaskDetailError("invalid", "Task page no longer matches this host and team; refresh tasks.") from exc
         truncated = next_cursor is not None
@@ -1268,8 +1270,10 @@ def _fetch_tasks(conn: sqlite3.Connection, fleet: str | None = None, *, root: Pa
     return _query_tasks(conn, fleet, root=root, cursor=cursor)
 
 
-def _fetch_task_summary(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path) -> dict:
-    return _query_tasks(conn, fleet, root=root, summary_only=True)
+def _fetch_task_summary(conn: sqlite3.Connection, fleet: str | None = None, *, root: Path,
+                        _candidate_page=None) -> dict:
+    return _query_tasks(conn, fleet, root=root, summary_only=True,
+                        _candidate_page=_candidate_page)
 
 
 # The rail renders PARTICIPANTS. The 2b registry scan mints an identity
@@ -1772,6 +1776,9 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
     actors = phase("fleet_actors", lambda: _fleet_actors(conn))
     pr = phase("reader_module", lambda: _plane_readers(paths))
     fl = phase("fleets", lambda: _fetch_fleets(conn, actors))
+    # Same admitted snapshot and canonical first pages; no cross-request cache.
+    task_pages = phase("task_summary", lambda: task_board_candidate_pages(
+        conn, fleet_uids=(f["uid"] for f in fl["fleets"])))
     rows = []
     for f in fl["fleets"]:
         alias = f["alias"]
@@ -1789,7 +1796,8 @@ def _fetch_overview(conn: sqlite3.Connection, paths: Paths, live: list,
         open_n = len(open_rows)
         # Ownership-axis summary shares the board's bounded canonical task and
         # permission reduction, without constructing its cards/evidence.
-        task_summary = phase("task_summary", lambda: _fetch_task_summary(conn, alias, root=root))
+        task_summary = phase("task_summary", lambda: _fetch_task_summary(
+            conn, alias, root=root, _candidate_page=task_pages[f["uid"]]))
         attention = task_summary["attention_count"]
         overdue = task_summary["overdue_count"]
         orphaned: int | None = 0
@@ -2280,7 +2288,7 @@ def create_app(
         diagnostic = _OverviewQueryDiagnostic()
         return JSONResponse(envelope(
             lambda c: _fetch_overview(c, paths, live, live_poll, diagnostic=diagnostic),
-            diagnostic=diagnostic))
+            snapshot=True, diagnostic=diagnostic))
 
     @app.get("/api/inventory")
     def inventory(fleet: str | None = None):

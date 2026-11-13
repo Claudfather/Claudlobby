@@ -243,6 +243,45 @@ def task_board_candidates(conn: sqlite3.Connection, *, fleet_uid: str | None,
     return tuple((row[0], row[1]) for row in page), token
 
 
+def task_board_candidate_pages(conn: sqlite3.Connection, *, fleet_uids) -> dict:
+    """First board pages for one admitted host overview, in its read snapshot.
+
+    Traverse admission order once, retaining at most 201 IDs per selected team.
+    This is request-local selection only: callers still use the canonical task
+    reducer, including the whole-fleet orphan audit for an empty first page.
+    Public board cursors and individual board reads remain unchanged.
+    """
+    uids = tuple(dict.fromkeys(fleet_uids))
+    for uid in uids:
+        _scope(uid)
+    if len(uids) <= 1:
+        return {uid: task_board_candidates(conn, fleet_uid=uid) for uid in uids}
+    hosts = ",".join(row[0] for row in conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind='host' ORDER BY uid"))
+    buckets = {uid: [] for uid in uids}
+    remaining = len(buckets)
+    cursor = conn.execute("SELECT work_item_id, fleet_uid, ingest_seq FROM work_items"
+                          " ORDER BY ingest_seq DESC, work_item_id DESC")
+    try:
+        for row in cursor:
+            bucket = buckets.get(row[1])
+            if bucket is not None and len(bucket) < 201:
+                bucket.append(row)
+                if len(bucket) == 201:
+                    remaining -= 1
+                    if not remaining:
+                        break
+    finally:
+        cursor.close()
+    pages = {}
+    for uid, rows in buckets.items():
+        page = rows[:200]
+        scope = {"query": "task-board-v1", "hosts": hosts, "fleet_uid": uid}
+        token = _cursor(scope, (page[-1][2], page[-1][0])) if len(rows) > 200 else None
+        pages[uid] = (tuple((row[0], row[1]) for row in page), token)
+    return pages
+
+
 def list_task_escalations(conn: sqlite3.Connection, *, fleet_uid: str) -> TaskEscalations:
     """Current fleet-owned raises, oldest event first, with unresolved issues.
 

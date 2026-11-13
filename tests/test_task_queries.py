@@ -314,3 +314,31 @@ def test_assignment_delivery_reads_by_index_never_a_scan(conn):
         walks = [step for step in plan
                  if step.startswith("SCAN") or re.search(r"\((fleet_uid|kind)=\?\)", step)]
         assert plan and not walks, (name, plan)
+
+
+@pytest.mark.parametrize("schema", [1, 9, 14])
+def test_batched_board_first_pages_equal_individual_pages(schema):
+    from contextlib import closing
+    from claudlobby.plane.migrations import _migration_files
+
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
+        for version, script in _migration_files():
+            if version <= schema:
+                conn.executescript(script)
+        for n in range(205):
+            _task(conn, f"wi_a_{n:03}")
+        for n in range(3):
+            _task(conn, f"wi_b_{n}", fleet_uid="fleet_b")
+        expected = {uid: task_queries.task_board_candidates(conn, fleet_uid=uid)
+                    for uid in ("fleet_a", "fleet_b", "fleet_empty")}
+        assert task_queries.task_board_candidate_pages(conn, fleet_uids=expected) == expected
+        assert task_queries.task_board_candidate_pages(conn, fleet_uids=[]) == {}
+        assert task_queries.task_board_candidate_pages(conn, fleet_uids=["fleet_a", "fleet_a"]) == {"fleet_a": expected["fleet_a"]}
+        # Its tokens are real existing board cursors, not a second paging protocol.
+        older, token = task_queries.task_board_candidates(conn, fleet_uid="fleet_a", cursor=expected["fleet_a"][1])
+        assert len(older) == 5 and token is None
+        # A subsequent call sees new admissions: no retained request cache.
+        _task(conn, "wi_new_admission")
+        refreshed = task_queries.task_board_candidate_pages(conn, fleet_uids=expected)
+        assert refreshed["fleet_a"] != expected["fleet_a"]
+        assert refreshed["fleet_a"] == task_queries.task_board_candidates(conn, fleet_uid="fleet_a")
