@@ -1080,7 +1080,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
         "",
         "# Claude Code config dir (multi-account support)",
     ]
-    if bot.account != "default":
+    # A custom default needs the same selector as a named account. Leave the
+    # conventional default unset: Claude distinguishes implicit and explicit dirs.
+    if bot.account != "default" or config_dir != str(Path.home() / ".claude"):
         lines.append(f"CLAUDE_CONFIG_DIR={_shq(config_dir)}")
     else:
         lines.append(f"# CLAUDE_CONFIG_DIR={_shq(config_dir)}  # default account")

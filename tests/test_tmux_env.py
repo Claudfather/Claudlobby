@@ -77,6 +77,7 @@ def _compose_bot(
     chat_id: str = "-100999",
     teams: dict[str, TeamConfig] | None = None,
     env: dict[str, str] | None = None,
+    accounts: dict[str, str] | None = None,
 ) -> tuple[Path, str]:
     """Generate bot.conf for a bot and return (bot_dir, conf_text)."""
     root = tmp_path / "claudlobby"
@@ -105,6 +106,7 @@ def _compose_bot(
         },
         telegram_group_chat_id=chat_id,
         teams=teams or {},
+        accounts=accounts if accounts is not None else {"default": "~/.claude"},
     )
     paths = _make_paths(root)
     conf = compose_bot_conf(bot, fleet, paths)
@@ -141,14 +143,19 @@ def _build_tmux_env(bot_dir: Path, env_files: list[Path] | None = None) -> Path:
     return tmux_env
 
 
-def _source_env_and_dump(tmux_env: Path) -> dict[str, str]:
+def _source_env_and_dump(
+    tmux_env: Path, ambient_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Source .tmux-env in a bash subprocess and return its exported env."""
     result = subprocess.run(
         ["bash", "-c", f"set -euo pipefail; . '{tmux_env}' && env"],
         capture_output=True,
         text=True,
         timeout=5,
-        env={"HOME": str(tmux_env.parent.parent), "PATH": os.environ.get("PATH", "")},
+        env=constructed_env(
+            HOME=str(tmux_env.parent.parent), PATH=os.environ.get("PATH", ""),
+            **(ambient_env or {}),
+        ),
     )
     assert result.returncode == 0, f"source failed: {result.stderr}"
     env = {}
@@ -394,6 +401,24 @@ class TestTierOrdering:
             "bot.conf must override .env tier — got FLEET_NAME="
             + env.get("FLEET_NAME", "<missing>")
         )
+
+    @pytest.mark.parametrize("override", [False, True])
+    @pytest.mark.parametrize("tier", [False, True])
+    def test_custom_default_account_reaches_child(self, tmp_path, override, tier):
+        """The selected account wins over ambient/tier selectors; bot.env wins last."""
+        selected = tmp_path / "selected account"
+        authored_override = str(tmp_path / "authored override")
+        bot_dir, _ = _compose_bot(
+            tmp_path, accounts={"default": str(selected)},
+            env={"CLAUDE_CONFIG_DIR": authored_override} if override else None,
+        )
+        tier_file = bot_dir / ".env"
+        tier_file.write_text('export CLAUDE_CONFIG_DIR="/unselected/tier-account"\n')
+        tmux_env = _build_tmux_env(bot_dir, env_files=[tier_file] if tier else [])
+        env = _source_env_and_dump(
+            tmux_env, {"CLAUDE_CONFIG_DIR": "/unselected/ambient-account"},
+        )
+        assert env["CLAUDE_CONFIG_DIR"] == (authored_override if override else str(selected))
 
     def test_bot_env_overrides_fleet_env(self, tmp_path):
         """Bot-tier .env overrides fleet-tier .env for the same key."""
