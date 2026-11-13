@@ -58,8 +58,9 @@ def darwin_native_children_owned(text: str, target: str) -> bool:
     if (not tokens or len(tokens) != len(set(tokens))
             or "abandon process group" in tokens):
         return False
+    # KeepAlive restarts a resident; it does not abandon its native children.
     # Only the non-abandoning GUI flag vocabulary captured live is accepted.
-    return bool(set(tokens) <= {"runatload", "inferred program"}
+    return bool(set(tokens) <= {"keepalive", "runatload", "inferred program"}
                 and "inferred program" in tokens)
 
 

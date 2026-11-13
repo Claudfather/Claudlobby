@@ -1608,13 +1608,20 @@ EOF
             output=$(launchctl print "$target") || return 3
             printf '%s\n' "$output" | "$python" -I -c '
 import sys
+from pathlib import Path
+native = Path(sys.argv[2]).resolve(strict=True)
+if (native.name != "_runtime_scripts" or native.parent.name != "claudlobby"
+        or not (native.parent / "job_operations.py").is_file()):
+    raise SystemExit(3)
+# The managed interpreter contains dependencies, not an editable core package.
+sys.path.insert(0, str(native.parent.parent))
 from claudlobby.job_operations import darwin_native_children_owned
 try:
     allowed = darwin_native_children_owned(sys.stdin.read(), sys.argv[1])
 except Exception:
     allowed = False
 raise SystemExit(0 if allowed else 3)
-' "$target" || return 3 ;;
+' "$target" "$_SUPERVISOR_LIB_DIR" || return 3 ;;
         *) return 3 ;;
     esac
 }

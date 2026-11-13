@@ -3254,28 +3254,46 @@ class TestPluginsSettingsLocal:
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
 
-    @pytest.mark.parametrize("spelling", ["tilde", "absolute"])
-    def test_named_account_runtime_path_matches_settings_with_spaced_home(self, tmp_path, monkeypatch, spelling):
+    @pytest.mark.parametrize("account", ["native", "default"])
+    @pytest.mark.parametrize("spelling", [
+        "tilde", "absolute", "relative", "conventional-tilde", "conventional-absolute",
+    ])
+    def test_account_runtime_path_matches_settings_with_spaced_home(
+        self, tmp_path, monkeypatch, account, spelling,
+    ):
         import shlex
         from claudlobby.composer import account_settings_path
         from claudlobby.config import PluginsConfig
 
         home = tmp_path / "private home"
-        selected = home / ".claude"
-        selected.mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
+        paths = self._make_paths_with_runtime(tmp_path)
+        conventional = spelling.startswith("conventional-")
+        selected = home / (".claude" if conventional else "custom profile")
+        if spelling == "relative":
+            selected = paths.bot_runtime("worker") / "profiles" / "selected account"
+            configured = "profiles/selected account"
+        elif spelling.endswith("tilde"):
+            configured = "~/.claude" if conventional else "~/custom profile"
+        else:
+            configured = str(selected)
+        selected.mkdir(parents=True)
         (selected / "settings.json").write_text(json.dumps({"enabledPlugins": {
             "selected@market": False, "telegram@claude-plugins-official": True}}))
-        paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], account="native", channels=[])
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], account=account, channels=[])
+        accounts = {"default": str(home / "unselected"), account: configured}
         fleet = FleetConfig(manager="worker", name="t", service_prefix="p", bots={"worker": bot},
-            accounts={"default": str(home / "unselected"),
-                      "native": "~/.claude" if spelling == "tilde" else str(selected)},
+            accounts=accounts,
             plugins=PluginsConfig(required=["selected@market"], include_defaults=False,
                                   startup_policy="verify-existing"))
         conf = compose_bot_conf(bot, fleet, paths)
-        assignment = next(line for line in conf.splitlines() if line.startswith("CLAUDE_CONFIG_DIR="))
-        assert shlex.split(assignment.partition("=")[2]) == [str(selected)]
+        assignments = [line for line in conf.splitlines() if line.startswith("CLAUDE_CONFIG_DIR=")]
+        if account == "default" and conventional:
+            assert assignments == []
+            assert "# CLAUDE_CONFIG_DIR=" in conf
+        else:
+            assert len(assignments) == 1
+            assert shlex.split(assignments[0].partition("=")[2]) == [str(selected)]
         assert account_settings_path(bot, fleet, paths) == selected / "settings.json"
         assert compose_settings_local(bot, fleet, paths)["enabledPlugins"] == {
             "selected@market": True, "telegram@claude-plugins-official": False}
