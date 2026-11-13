@@ -28,12 +28,13 @@
 # Watched set: discover_framework_checkouts (lib-common.sh) — derived from what
 # is installed, not a path list. See that helper for why.
 #
-# WHAT THE DATA ROOT COUNTS FROM (#2322): the release this host runs, never its
-# own checkout. Under sealed releases nothing runs from the root checkout and
-# nothing pulls it, so its HEAD says only how old that checkout is, and an
-# activation never moves it. The root counts from the source revision of the
-# release the host has selected; a sibling still counts from its HEAD, which
-# is what runs. A release that cannot be read is said plainly
+# WHAT THE DATA ROOT COUNTS FROM (#2322, #2886): the source revision this host
+# runs, never the root checkout's own HEAD. The code that runs is the managed
+# Git installation's own checkout, which only the updater moves (host update
+# apply); nothing runs from the data root's checkout and nothing pulls it, so
+# its HEAD says only how old that checkout is. The root counts from the
+# revision the Git runtime reports; a sibling still counts from its HEAD,
+# which is what runs. A revision that cannot be read is said plainly
 # (source_unknown), with no count in its place.
 #
 # Quiet-failure discipline: an offline host or a non-git root logs + exits 0,
@@ -109,53 +110,106 @@ currency_outcome_phrase() {
     esac
 }
 
-# running_release
-# One line naming what this host runs: `selected <release-id> <source-revision>`,
-# or `unknown <reason>`. These are the two reads runtime admission makes before
-# it lets a bot start: the host's release selection, then that release's sealed
-# manifest, its digest checked. The package's own readers make both, under the
-# interpreter beside the composed CLI (as runtime-admission.sh runs it), so no
-# file is parsed here. Not `host status`: before answering, it hashes every
-# file of every installed release, which this answer does not need.
-running_release() {
+# running_revision
+# One line naming the source revision this host runs, `running <revision>`,
+# or `unknown <reason>` with the reason naming the read and how it failed.
+# The read is the Git runtime's own report (#2886). Its committed reads carry
+# data.source_revision, the revision the committed configuration was rendered
+# from, and they refuse unless it is the HEAD of the managed installation's
+# checkout, the code that runs. `config diff` with no fingerprint is such a
+# read that needs neither a bot nor a fleet, and a host job has neither:
+# `bot status` needs a bot, `context show` a fleet once a host has two,
+# `host doctor` loads every fleet's context and env tiers first, and
+# `host update status` prints the update record rather than what runs. It
+# costs one CLI start and a read of the committed outputs, once a day. The
+# composed CLI goes through its launcher, so an update in progress refuses the
+# read (the launcher's own line is the reason) rather than letting it answer
+# from a checkout the updater is moving.
+#
+# No sealed-release reader remains: since ec7cea59 no host runs this script
+# from a sealed release (generated units, bot starts and operational reads all
+# refuse without a managed Git installation), and host activate is gone.
+running_revision() {
     # shellcheck source=cli-context.sh
     . "$LIB_DIR/cli-context.sh"
-    local python="${CLAUDLOBBY_CLI:-}"
-    python="${python%/*}/python"
-    if ! _claudlobby_require_cli 2>>"$LOG" || [ ! -x "$python" ]; then
-        echo "unknown CLAUDLOBBY_CLI names no composed CLI with its interpreter beside it"
-        return 0
-    fi
-    "$python" -I -B - "$CLAUDLOBBY_ROOT" 2>>"$LOG" <<'PY'
+    local json err rc=0
+    json=$(safe_mktemp) && err=$(safe_mktemp) \
+        || { echo "unknown no scratch file for its read, claudlobby config diff"; return 0; }
+    # The read refusing is an answer, not a script error: no ERR breadcrumb.
+    ( trap - ERR; set +e
+      _claudlobby_require_root && _claudlobby_require_cli || exit 127
+      with_timeout 120 "$CLAUDLOBBY_CLI" --root "$CLAUDLOBBY_ROOT" --json config diff ) >"$json" 2>"$err" || rc=$?
+    cat "$err" >> "$LOG" 2>/dev/null || true
+    python3 -I -S - "$json" "$err" "$rc" <<'PY' || echo "unknown its reader did not run"
+import json
+import re
 import sys
-from pathlib import Path
+
+out, err, rc = sys.argv[1], sys.argv[2], int(sys.argv[3])
+READ = "claudlobby config diff"
 
 
-def running(root):
-    from claudlobby.activation_state import read_selection
-    from claudlobby.releases import read_release
-    selected = read_selection(root)
-    if selected is None:
-        return "unknown no release is selected on this host"
-    release_id = selected["release_id"]
+def last_line(path):
     try:
-        release = read_release(root, release_id, verify_files=False)
-    except Exception as exc:
-        return f"unknown release {release_id[:10]}: {exc}"
-    return f"selected {release.release_id} {release.inputs.source_revision}"
+        with open(path, errors="replace") as stream:
+            lines = [line.strip() for line in stream.read(65536).splitlines() if line.strip()]
+    except OSError:
+        return ""
+    return lines[-1][:200] if lines else ""
+
+
+def answer():
+    if rc == 124:
+        return f"unknown {READ} did not answer within 120 s"
+    try:
+        with open(out, encoding="utf-8") as stream:
+            result = json.loads(stream.read(16 << 20) or "null")
+    except (OSError, ValueError):
+        result = None
+    if not isinstance(result, dict) and rc == 127:
+        return f"unknown {READ} did not run: {last_line(err) or 'no composed CLI'}"
+    if not isinstance(result, dict):
+        return f"unknown {READ} printed no result (exit {rc}): {last_line(err) or 'no output'}"
+    if result.get("ok") is not True:
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        return (f"unknown {READ} refused (exit {rc}): {error.get('code', 'no code')}: "
+                f"{error.get('message', 'no message')}")
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    revision = data.get("source_revision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+        return f"unknown {READ} answered with no source revision"
+    return f"running {revision}"
 
 
 try:
-    line = running(Path(sys.argv[1]))
+    line = answer()
 except Exception as exc:
-    line = f"unknown {type(exc).__name__}: {exc}"
+    line = f"unknown its reader failed: {type(exc).__name__}"
 print(" ".join(line.split()))
 PY
+    rm -f "$json" "$err"
+}
+
+# update_hint <repo> <ref>
+# The remedy a source_behind notice names. A sibling runs from its checkout,
+# so it is pulled. The data root's code is the managed installation's
+# checkout, which only the updater moves: the operator applies the commit the
+# count was taken against, the Git update flow in
+# documentation/fleet-update-lifecycle.md ("Managed Git delivery"), and a pull
+# of the data root's checkout changes nothing that runs.
+update_hint() {
+    local commit
+    if [ "$1" != "$root_checkout" ]; then
+        printf 'git -C %s pull --ff-only' "$1"
+        return 0
+    fi
+    commit=$(git -C "$1" rev-parse --verify --quiet "$2^{commit}" 2>/dev/null || true)
+    printf 'as the operator, claudlobby --root %s host update apply %s, then host update status (a pull of this checkout does not update what runs)' \
+        "$CLAUDLOBBY_ROOT" "${commit:-FULL_COMMIT}"
 }
 
 for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
-    apply_hint="git -C $repo pull --ff-only"
 
     if ! with_timeout 120 git -C "$repo" fetch --quiet --tags origin 2>>"$LOG"; then
         log "[$name] FETCH FAILED — source currency unknown (nudge skipped)"
@@ -168,27 +222,26 @@ for repo in "${WATCHED[@]}"; do
     anchor=HEAD
     subject="$name on $host"
     if [ "$repo" = "$root_checkout" ]; then
-        apply_hint="build and seal an immutable Claudlobby release, stage its config plan, then run host activate as the operator; do not pull the running root"
-        running="$(running_release || echo "unknown its reader did not run")"
-        read -r verdict rel_id rel_source <<< "$running"
-        if [ "$verdict" != selected ]; then
+        running="$(running_revision || echo "unknown its reader did not run")"
+        read -r verdict revision _ <<< "$running"
+        if [ "$verdict" != running ]; then
             unknown="${running#unknown }"
-            unknown="${unknown:-its reader printed nothing}"
-        elif ! built="$(git -C "$repo" log -1 --date=short --format=%cd "$rel_source^{commit}" -- 2>/dev/null || exit $?)"; then
-            unknown="release ${rel_id:0:10} was built from ${rel_source:0:8}, a commit this checkout does not have"
+            unknown="the source revision this host runs cannot be read (${unknown:-its reader printed nothing})"
+        elif ! built="$(git -C "$repo" log -1 --date=short --format=%cd "$revision^{commit}" -- 2>/dev/null || exit $?)"; then
+            unknown="it runs ${revision:0:8}, a commit this checkout does not have"
         else
             unknown=""
         fi
         if [ -n "$unknown" ]; then
             notify_currency "$name" "source_unknown" "unreadable" \
-                "$subject: the running release cannot be read ($unknown), so the commits on origin/$branch it lacks are not counted — inspect claudlobby --root $CLAUDLOBBY_ROOT host releases"
-            log "[$name] RUNNING RELEASE UNKNOWN ($unknown) — nothing counted — $(currency_outcome_phrase)"
+                "$subject: $unknown, so the commits on origin/$branch it lacks are not counted — inspect claudlobby --root $CLAUDLOBBY_ROOT host update status"
+            log "[$name] RUNNING REVISION UNKNOWN ($unknown) — nothing counted — $(currency_outcome_phrase)"
             continue
         fi
         currency_clear "$name" "source_unknown"
-        log "[$name] RUNNING release $rel_id, built from $rel_source ($built)"
-        anchor="$rel_source"
-        subject+=" runs release ${rel_id:0:10} (built from ${rel_source:0:8}, $built), which"
+        log "[$name] RUNNING $revision ($built), read with claudlobby config diff"
+        anchor="$revision"
+        subject+=" runs ${revision:0:8} ($built), which"
     fi
     if ! behind="$(git -C "$repo" rev-list --count "$anchor..origin/$branch" 2>>"$LOG" || exit $?)"; then
         log "[$name] SKIP — no origin/$branch to compare against"
@@ -202,7 +255,7 @@ for repo in "${WATCHED[@]}"; do
     if [ -z "$tag" ]; then
         if [ "$behind" -gt 0 ]; then
             notify_currency "$name" "source_behind" "$behind" \
-                "$subject is $behind commit(s) behind origin/$branch — apply with: $apply_hint"
+                "$subject is $behind commit(s) behind origin/$branch — apply with: $(update_hint "$repo" "origin/$branch")"
             log "[$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)"
         else
             log "[$name] IN SYNC with origin/$branch"
@@ -215,7 +268,7 @@ for repo in "${WATCHED[@]}"; do
     if [ "${tag_behind:-0}" -gt 0 ]; then
         # Behind a cut release — the case update-siblings.sh can actually fix.
         notify_currency "$name" "source_behind" "$tag_behind" \
-            "$subject is $tag_behind commit(s) behind release $tag — apply with: $apply_hint"
+            "$subject is $tag_behind commit(s) behind release $tag — apply with: $(update_hint "$repo" "$tag")"
         log "[$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)"
     elif [ "$behind" -gt 0 ]; then
         # On the newest release, but main has moved. Deliberately NOT phrased as

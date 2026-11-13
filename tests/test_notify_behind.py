@@ -16,6 +16,7 @@ import subprocess
 import pytest
 
 from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.fixtures.current_runtime import current_runtime  # noqa: F401
 from tests.test_maintenance_jobs import _native_fixture
 from tests.test_plane_events_door import _serving
 
@@ -59,34 +60,44 @@ def _commit(repo, name):
     _git(repo, "commit", "-m", name)
 
 
-def _seal_release(root, source_revision):
-    """Author archived release evidence for SOURCE_REVISION under ROOT; its ID.
+# On a Git-runtime host the composed CLI is the installation's stable launcher,
+# INSTALL/bin/claudlobby, a script with no interpreter beside it (#2886). This
+# stand-in answers the one read notify-behind makes with what Harness.answer
+# wrote, in the envelope the real read prints (TestTheGitRuntimeRead runs the
+# real one), and records each call.
+CLI_STUB = (
+    "#!/bin/bash\n"
+    'here="${0%/*}/.."\n'
+    'printf "%s\\n" "$*" >> "$here/calls"\n'
+    'cat "$here/answer.err" >&2 2>/dev/null\n'
+    'cat "$here/answer.json" 2>/dev/null\n'
+    'exit "$(cat "$here/answer.rc" 2>/dev/null || echo 0)"\n'
+)
 
-    notify-behind reads only the selection and the archived manifest, never the
-    release's files, so the tree tests/test_releases.py builds is enough.
-    """
-    from tests.test_releases import historical_release, release_tree
-
-    inputs, paths, _, _ = release_tree(root, source_revision, "artifact-" + source_revision[:12])
-    return historical_release(root, inputs, paths).release_id
+# What the real read answers when the committed configuration cannot be
+# verified, its envelope's error (claudlobby/commands/releases.py).
+CONFLICT = {"code": "conflict", "hint": None, "retryable": False,
+            "message": "committed Git configuration drift is unavailable"}
 
 
-def _select(root, release_id):
-    """Write the host's release selection, the record an activation switches."""
-    state = os.path.join(root, "state")
-    os.makedirs(state, exist_ok=True)
-    with open(os.path.join(state, "selected-release.json"), "w") as f:
-        json.dump({"schema": 1, "activation_id": "a-" + release_id[2:14],
-                   "release_id": release_id, "plan_id": "p-fixture"}, f)
+def _envelope(*, revision=None, error=None):
+    """The one-line JSON envelope `claudlobby --json config diff` prints."""
+    data = {"bot": None, "changes": [], "fleet": None, "mode": "current"}
+    if revision is not None:
+        data.update(source_revision=revision, config_fingerprint="f" * 64)
+    return json.dumps({"command": "config.diff", "data": {} if error else data,
+                       "error": error, "ok": error is None, "release_id": None,
+                       "request_id": None, "schema_version": 1},
+                      sort_keys=True, separators=(",", ":"))
 
 
 class Harness:
     """origin repo + a clone acting as CLAUDLOBBY_ROOT (like the shared install).
 
     ``behind`` commits land in origin after the clone, so the root is exactly
-    that many commits behind origin/main, and so is the release the host runs:
-    one sealed from the commit the root was cloned at and selected (``select``
-    selects another, as an activation does). A bot.conf declaring the Telegram
+    that many commits behind origin/main, and so is the revision the host runs:
+    the commit the root was cloned at, as the stand-in CLI reports it (``runs``
+    reports another, as an update does). A bot.conf declaring the Telegram
     chat id (and a sourced-shape literal-$HOME state dir) is planted at
     ``bots_at`` (relative to root) and tg-post.sh is stubbed to capture what
     would have been sent.
@@ -95,8 +106,11 @@ class Harness:
     def __init__(self, tmp_path, behind=0, bots_at="runtime/bots",
                  tag_at_seed=None, tag_after=None, *, scratch_plane_env):
         self.scratch_plane_env = scratch_plane_env
-        # The interpreter beside it reads what the host runs (#2322).
-        self.cli = str(scratch_plane_env.cli)
+        # The installation's launcher, with nothing beside it (#2886).
+        self.installation = tmp_path / "installation"
+        (self.installation / "bin").mkdir(parents=True)
+        self.cli = str(self.installation / "bin" / "claudlobby")
+        _write_exec(self.cli, CLI_STUB)
         self.origin = str(tmp_path / "origin")
         self.root = str(tmp_path / "root")
         self.capture = str(tmp_path / "tg-capture")
@@ -111,7 +125,7 @@ class Harness:
         subprocess.run(
             GIT + ["clone", self.origin, self.root], check=True, capture_output=True
         )
-        self.select(self.head())
+        self.runs(self.head())
         for i in range(behind):
             _commit(self.origin, f"ahead-{i}")
         # A tag landing AFTER the clone is one the root is behind: the
@@ -155,11 +169,19 @@ class Harness:
         )
         return out.stdout.strip()
 
-    def select(self, source_revision):
-        """Author an archived release for SOURCE_REVISION and select it; its ID."""
-        release_id = _seal_release(self.root, source_revision)
-        _select(self.root, release_id)
-        return release_id
+    def runs(self, revision):
+        """The host runs REVISION, as its Git runtime reports it."""
+        self.answer(_envelope(revision=revision))
+
+    def answer(self, stdout, rc=0, stderr=""):
+        """What the stand-in CLI prints and exits with."""
+        (self.installation / "answer.json").write_text(stdout + "\n" if stdout else "")
+        (self.installation / "answer.err").write_text(stderr)
+        (self.installation / "answer.rc").write_text(f"{rc}\n")
+
+    def calls(self):
+        p = self.installation / "calls"
+        return p.read_text().splitlines() if p.exists() else []
 
     def origin_rev(self, ref="HEAD"):
         return _git(self.origin, "rev-parse", ref)
@@ -212,7 +234,7 @@ class TestNotifyBehind:
         assert "FLEET NOTICE [source_behind]:" in msg
         assert "FLEET ALERT" not in msg
         assert "2 commit" in msg
-        assert "host activate" in msg and "git -C " not in msg
+        assert "host update apply" in msg and "git -C " not in msg
 
     def test_never_pulls(self, tmp_path, *, scratch_plane_env):
         # The core F5=c contract: notify-only. HEAD must be untouched and the
@@ -585,99 +607,215 @@ class TestUndeliveredNoticeIsRetried:
         assert h.events().count('"type":"source_behind"') == 1, "a notice with no target was raised again"
 
 
-class TestCountsFromTheRunningRelease:
-    """#2322: the data root counts from the selected release's source revision,
-    never from the root checkout's HEAD. Nothing runs from that checkout under
-    sealed releases and nothing pulls it, so its HEAD measured how old an
-    unused checkout was: 315 commits on one host, where the release it ran
-    lacked 10."""
+class TestCountsFromTheRunningRevision:
+    """#2322, #2886: the data root counts from the source revision the host
+    runs, never from the root checkout's HEAD. Nothing runs from that checkout
+    and nothing pulls it, so its HEAD measured how old an unused checkout was:
+    315 commits on one host, where the code it ran lacked 10. On a Git-runtime
+    host the revision is the one its runtime reports (`config diff`'s
+    data.source_revision); the sealed-release reader before it found no
+    interpreter beside the installation's launcher and counted nothing."""
 
     def _lacks(self, h, ref):
         return int(_git(h.root, "rev-list", "--count", f"{ref}..origin/main"))
 
-    def test_a_stale_root_with_a_current_release_raises_no_source_behind(
+    def test_a_stale_root_with_a_current_revision_raises_no_source_behind(
             self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=3, scratch_plane_env=scratch_plane_env)
-        release = h.select(h.origin_rev())
+        h.runs(h.origin_rev())
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert self._lacks(h, "HEAD") == 3, "control: the root checkout is stale"
         assert h.captured() == []
         log = h.log()
-        assert release in log and "IN SYNC with origin/main" in log, log
+        assert f"RUNNING {h.origin_rev()}" in log and "IN SYNC with origin/main" in log, log
 
-    def test_a_release_behind_main_counts_exactly_the_commits_it_lacks(
+    def test_a_revision_behind_main_counts_exactly_the_commits_it_lacks(
             self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=5, scratch_plane_env=scratch_plane_env)
         source = h.origin_rev("HEAD~3")
-        release = h.select(source)
+        h.runs(source)
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert (self._lacks(h, source), self._lacks(h, "HEAD")) == (3, 5)
         (msg,) = h.messages()
         assert "FLEET NOTICE [source_behind]:" in msg, msg
         assert "is 3 commit(s) behind origin/main" in msg, msg
-        assert f"runs release {release[:10]} (built from {source[:8]}" in msg, msg
+        assert f"runs {source[:8]} (" in msg, msg
         assert "5 commit" not in msg, msg
+        # The one read it made: the Git runtime's own, with neither a bot nor a fleet.
+        assert h.calls() == [f"--root {os.path.realpath(h.root)} --json config diff"]
 
-    def test_the_first_run_after_an_activation_clears_the_notice(
+    @pytest.mark.parametrize("tag", [None, "v2.0.0"])
+    def test_the_notice_names_the_git_update_of_the_commit_it_counted_to(
+            self, tag, tmp_path, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=2, tag_after=tag, scratch_plane_env=scratch_plane_env)
+        if tag:
+            _commit(h.origin, "after-the-tag")  # main moves past the release it counts to
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        (msg,) = h.messages()
+        target = h.origin_rev(tag or "HEAD")
+        assert f"behind {'release ' + tag if tag else 'origin/main'}" in msg, msg
+        assert ("apply with: as the operator, claudlobby --root "
+                f"{os.path.realpath(h.root)} host update apply {target}, then host update status") in msg, msg
+        assert "host activate" not in msg and "seal" not in msg and "config plan" not in msg, msg
+
+    def test_the_first_run_after_an_update_clears_the_notice(
             self, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
         marker = os.path.join(h.root, "state", "currency", "root.source_behind")
         assert h.run().returncode == 0
         assert len(h.captured()) == 1 and os.path.exists(marker), "precondition: notified"
         first = h.log()
-        release = h.select(h.origin_rev())  # an activation of a release built from main
+        h.runs(h.origin_rev())  # an update to main
         r = h.run()
         assert r.returncode == 0, r.stderr
         second = h.log()[len(first):]
-        assert release in second and "IN SYNC with origin/main" in second, second
+        assert f"RUNNING {h.origin_rev()}" in second and "IN SYNC with origin/main" in second, second
         assert not os.path.exists(marker)
         assert len(h.captured()) == 1
         # Cleared, not merely quiet: the first notice's distance is news again,
         # which a marker left from it would hold back for a week.
-        _commit(h.origin, "after-activation-0")
-        _commit(h.origin, "after-activation-1")
+        _commit(h.origin, "after-update-0")
+        _commit(h.origin, "after-update-1")
         assert h.run().returncode == 0
         assert len(h.captured()) == 2
         assert "is 2 commit(s) behind origin/main" in h.messages()[-1]
 
     @pytest.mark.parametrize("case, said", [
-        ("no selection", "no release is selected"),
-        ("no such release", "r-00000000"),
-        ("no interpreter", "CLAUDLOBBY_CLI"),
-        ("source not in history", "cccccccc"),
+        ("refused", "cannot be read (claudlobby config diff refused (exit 4): conflict: "
+                    "committed Git configuration drift is unavailable)"),
+        ("launcher refused", "cannot be read (claudlobby config diff printed no result (exit 6): "
+                             "claudlobby: maintenance is active; use host update status or recovery)"),
+        ("no revision", "cannot be read (claudlobby config diff answered with no source revision)"),
+        ("no CLI", "cannot be read (claudlobby config diff did not run: claudlobby: CLAUDLOBBY_CLI must "
+                   "name the composed absolute executable"),
+        ("revision not in history", "it runs cccccccc, a commit this checkout does not have"),
     ])
-    def test_a_release_it_cannot_read_is_said_and_nothing_is_counted(
+    def test_a_revision_it_cannot_read_is_said_and_nothing_is_counted(
             self, case, said, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
-        if case == "no selection":
-            os.remove(os.path.join(h.root, "state", "selected-release.json"))
-        elif case == "no such release":
-            _select(h.root, "r-" + "0" * 64)
-        elif case == "no interpreter":
+        if case == "refused":
+            h.answer(_envelope(error=CONFLICT), rc=4)
+        elif case == "launcher refused":
+            h.answer("", rc=6, stderr="claudlobby: maintenance is active; use host update status or recovery\n")
+        elif case == "no revision":
+            h.answer(_envelope())
+        elif case == "no CLI":
             h.cli = str(tmp_path / "missing" / "claudlobby")
         else:
-            h.select("c" * 40)
-        serve = case == "no such release"  # one case proves the new type lands
+            h.runs("c" * 40)
+        serve = case == "refused"  # one case proves the type lands
         r = h.run(serve=serve)
         assert r.returncode == 0, r.stderr
         (msg,) = h.messages()
         assert "FLEET NOTICE [source_unknown]:" in msg, msg
-        assert "the running release cannot be read (" in msg and "host releases" in msg, msg
         assert said in msg, msg
+        assert f"not counted — inspect claudlobby --root {os.path.realpath(h.root)} host update status" in msg, msg
         assert "commit(s) behind" not in msg and "2 commit" not in msg, msg
         if serve:
             events = h.events()
             assert '"type":"source_unknown"' in events and "source_behind" not in events
 
+    def test_a_revision_read_again_clears_source_unknown(self, tmp_path, *, scratch_plane_env):
+        # #2384: the clear of source_unknown, pinned. Left in place, its marker
+        # would hold back the next refusal's notice for the re-notify window.
+        h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
+        marker = os.path.join(h.root, "state", "currency", "root.source_unknown")
+        running = h.head()
+        h.answer(_envelope(error=CONFLICT), rc=4)
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 1 and os.path.exists(marker), "precondition: notified"
+        h.runs(running)
+        assert h.run().returncode == 0
+        assert not os.path.exists(marker), "a revision read again left the source_unknown marker"
+        assert len(h.captured()) == 1, "in sync: nothing to send"
+        h.answer(_envelope(error=CONFLICT), rc=4)
+        assert h.run().returncode == 0
+        assert len(h.captured()) == 2, "a refusal after the clear was held back"
+
     @pytest.mark.parametrize("tag", [{"tag_after": "v2.0.0"}, {"tag_at_seed": "v1.0.0"}],
                              ids=["behind-a-tag", "release-gap"])
-    def test_the_tag_counts_start_from_the_running_release_too(
+    def test_the_tag_counts_start_from_the_running_revision_too(
             self, tag, tmp_path, *, scratch_plane_env):
         h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env, **tag)
-        h.select(h.origin_rev())
+        h.runs(h.origin_rev())
         r = h.run()
         assert r.returncode == 0, r.stderr
         assert h.captured() == []
         assert "IN SYNC with origin/main and release v" in h.log()
+
+
+class TestTheGitRuntimeRead:
+    """The read end to end (#2886): the real CLI's `config diff` against a
+    committed Git runtime (tests/fixtures/current_runtime.py), reached through
+    INSTALL/bin/claudlobby with no interpreter beside it, the layout the issue
+    reported. Here the launcher execs the test CLI, so the installation's
+    checkout, its committed configuration and the read are production's; the
+    stand-in CLI of the tests above prints the envelope this read prints.
+
+    The data root is a checkout as well, as on a host converted from sealed
+    releases: origin holds the installation's history and the commits beyond
+    the revision it runs, and the root's files are left as the runtime wrote
+    them."""
+
+    def _host(self, current_runtime, test_cli, tmp_path, *, behind):
+        root, installation, _, _ = current_runtime
+        revision = installation.preflight()
+        branch = _git(installation.source, "symbolic-ref", "--short", "HEAD")
+        origin = tmp_path / "origin"
+        _git(tmp_path, "clone", "--quiet", str(installation.source), str(origin))
+        for i in range(behind):
+            _commit(str(origin), f"ahead-{i}")
+        _git(root, "init", "--quiet")
+        _git(root, "config", "maintenance.auto", "false")
+        _git(root, "remote", "add", "origin", str(origin))
+        _git(root, "fetch", "--quiet", "origin")
+        _git(root, "update-ref", f"refs/heads/{branch}", revision)
+        _git(root, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        _git(root, "remote", "set-head", "origin", branch)
+        _write_exec(installation.cli, f'#!/bin/sh\nexec "{test_cli}" "$@"\n')
+        assert not os.path.exists(installation.bin / "python"), "precondition: no interpreter beside it"
+        native = _native_fixture(tmp_path, "notify-behind.sh")
+        bot = root / "runtime" / "bots" / "tbot"
+        bot.mkdir(parents=True, exist_ok=True)
+        (bot / "bot.conf").write_text('export TELEGRAM_GROUP_CHAT_ID="-100123"\n'
+                                      'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n')
+        return root, installation, revision, branch, origin, native
+
+    def _run(self, root, installation, native, tmp_path, scratch_plane_env):
+        capture = tmp_path / "tg-capture"
+        env = _scrubbed_env(TG_CAPTURE=str(capture), CLAUDLOBBY_CLI=str(installation.cli),
+                            CLAUDLOBBY_INSTALLATION=str(installation.directory),
+                            **scratch_plane_env(root))
+        r = subprocess.run(["bash", str(native / "notify-behind.sh")], env=env,
+                           capture_output=True, text=True, timeout=600)
+        assert r.returncode == 0, r.stderr
+        sent = capture.read_text().splitlines() if capture.exists() else []
+        log = (root / "state" / "notify-behind.log").read_text()
+        return [line.split("|", 2)[2] for line in sent if line.strip()], log
+
+    def test_a_git_runtime_root_counts_the_commits_its_revision_lacks(
+            self, current_runtime, test_cli, tmp_path, *, scratch_plane_env):
+        root, installation, revision, branch, origin, native = self._host(
+            current_runtime, test_cli, tmp_path, behind=3)
+        messages, log = self._run(root, installation, native, tmp_path, scratch_plane_env)
+        assert f"RUNNING {revision}" in log, log
+        (msg,) = messages
+        assert "FLEET NOTICE [source_behind]:" in msg, msg
+        assert f"runs {revision[:8]} (" in msg and f"is 3 commit(s) behind origin/{branch}" in msg, msg
+        assert f"host update apply {_git(origin, 'rev-parse', 'HEAD')}, then host update status" in msg, msg
+
+    def test_an_installation_its_configuration_does_not_match_is_said_and_not_counted(
+            self, current_runtime, test_cli, tmp_path, *, scratch_plane_env):
+        root, installation, revision, branch, origin, native = self._host(
+            current_runtime, test_cli, tmp_path, behind=3)
+        _commit(str(installation.source), "moved-by-hand")  # HEAD is no longer what was committed
+        messages, log = self._run(root, installation, native, tmp_path, scratch_plane_env)
+        (msg,) = messages
+        assert "FLEET NOTICE [source_unknown]:" in msg, msg
+        assert ("the source revision this host runs cannot be read (claudlobby config diff refused "
+                "(exit 4): conflict: committed Git configuration drift is unavailable)") in msg, msg
+        assert "host update status" in msg and "commit(s) behind" not in msg, msg
+        assert "RUNNING REVISION UNKNOWN" in log, log
