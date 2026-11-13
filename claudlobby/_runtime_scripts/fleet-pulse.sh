@@ -899,7 +899,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # bot's manager gets one push an episode (#2892), through the debounce every
     # alert uses, its re-notify window included. The push about the manager
     # itself posts nothing to the fleet's channel (#997 posts an alert the
-    # manager's own pane cannot act on; this one it can, with /restart).
+    # manager's own pane cannot act on; this one it can).
     # OBSERVABILITY_SUBREAPER_PUSH=0 in the bot's bot.conf stops the push and
     # says so; the record stays, and the episode ends, so turning the push back
     # on pushes at the next sweep. A live read that gives no verdict ends the
