@@ -26,9 +26,10 @@ def register_fleet_setup(children):
     parser = children.add_parser("setup", help="Prepare the first authored fleet through the managed Git updater")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--config", metavar="FILE")
-    source.add_argument("--template", choices=["revenue-web-app"],
+    source.add_argument("--template", choices=["revenue-web-app", "local-project"],
                         help="Use the candidate team shipped in the managed source")
     parser.add_argument("--repository", metavar="OWNER/REPO", help="Explicit approved repository for --template")
+    parser.add_argument("--project-directory", metavar="PATH", help="Locally approved existing directory for local-project")
     parser.add_argument("--goal", metavar="TEXT", help="Explicit approved goal for --template")
     parser.add_argument("--plan-only", action="store_true",
                         help="Prepare the same update operation without native updater enrollment or dispatch")

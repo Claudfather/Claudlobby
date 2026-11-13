@@ -67,8 +67,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (operation === 'context') {
         const value = await client.setupContext();
         if (disposed || ticket !== epoch || !active()) return false;
-        if (!value || value.version !== 2 || value.template !== 'revenue-web-app' || !uuid(value.generation)
-            || typeof value.fleet !== 'string' || typeof value.repository !== 'string' || !revision(value.source_revision)
+        if (!value || !(value.version === 2 && value.template === 'revenue-web-app' && typeof value.repository === 'string' && !('project_directory' in value)
+            || value.version === 3 && value.template === 'local-project' && typeof value.project_directory === 'string'
+              && value.project_directory.startsWith('/') && !('repository' in value)) || !uuid(value.generation)
+            || typeof value.fleet !== 'string' || !revision(value.source_revision)
             || 'release_id' in value || 'release_seal' in value || 'plan_id' in value
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
@@ -85,7 +87,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         const selected = context, authored = goal;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
-        if (!value || value.version !== 2 || !request(binding(value)) || value.generation !== selected.generation
+        if (!value || value.version !== selected.version || !request(binding(value)) || value.generation !== selected.generation
             || value.source_revision !== selected.source_revision || 'plan_id' in value || 'release_id' in value || 'release_seal' in value
             || value.fleets?.length !== 1 || value.fleets[0] !== selected.fleet || value.dispatch !== 'prepared' || value.phase !== 'quiesce'
             || !Array.isArray(value.changes) || !value.effects || typeof value.effects !== 'object' || Array.isArray(value.effects)
@@ -119,7 +121,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } finally { busy = false; if (!disposed) changed(); }
   }
   function receipt(value) {
-    if (!value || value.version !== 2 || !pending || !same(value,pending) || !phases.includes(value.state)
+    if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
         || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || typeof value.config_committed !== 'boolean'
         || !value.health_errors || typeof value.health_errors !== 'object' || Array.isArray(value.health_errors)
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
@@ -146,8 +148,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : plan.expires_at <= now() ? 'This preview expired. Inspect the original update locally.'
       : 'Review the configuration, then choose Launch this exact configuration.';
     status.textContent = [note,guard].filter(Boolean).join(' ');
-    declaration.textContent = context ? `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
-    authority.textContent = context ? `Local approval covers ${context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
+    declaration.textContent = context ? context.template === 'local-project'
+      ? `Team ${context.fleet} for local project ${context.project_directory}. Lead, engineer and reviewer; wait for explicitly assigned work.`
+      : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
+    authority.textContent = context ? `Local approval covers ${context.template === 'local-project' ? `read/write access to local project ${context.project_directory}` : context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
     summary.textContent = plan ? `Goal: ${planGoal}. Configuration changes ${plan.changes.length} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review before launch.` : '';
     details.textContent = plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
       historical_identifiers:legacy,...(plan ? {changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at} : {})},null,2) : '';
@@ -161,7 +165,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const declaration = document.createElement('p'); element.append(declaration);
     const authority = document.createElement('p'); element.append(authority);
     const area = document.createElement('textarea'); area.maxLength = 2000; area.value = goal;
-    area.setAttribute('aria-label','Approved repository goal'); area.addEventListener('input',() => { goal = area.value; changed(); }); element.append(area);
+    area.setAttribute('aria-label','Approved project goal'); area.addEventListener('input',() => { goal = area.value; changed(); }); element.append(area);
     const controls = {};
     for (const [operation,title] of [['context','Check setup approval'],['preview','Preview team'],['launch','Launch this exact configuration'],['receipt','Check original update receipt']]) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.className = 'pill ghost';

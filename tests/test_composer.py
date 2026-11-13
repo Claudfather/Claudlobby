@@ -6291,3 +6291,34 @@ def test_no_retired_hook_is_composed(tmp_path):
         (Path(__file__).parent.parent / "claudlobby/system.yaml").read_text()
     )
     assert "SessionEnd" not in package["defaults"]["hooks"]
+
+
+@pytest.mark.parametrize("bot_id", ["lead", "engineer", "reviewer"])
+def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp_path, bot_id, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from claudlobby.commands.setup import _template_config
+    from claudlobby.config import load_fleet_snapshot
+    from claudlobby.composer import compose_claude_md
+    project = tmp_path / "project"; project.mkdir()
+    content = _template_config("local-project", "local-team", None, "Review this project", project_directory=str(project))
+    fleet, defaults = load_fleet_snapshot(tmp_path / "fleet.yaml", content, None)
+    bot = fleet.bots[bot_id]; paths = _make_paths(tmp_path / "data")
+    from claudlobby.composer import resolve_mount_sources
+    assert resolve_mount_sources(bot, paths.bot_runtime(bot_id), lambda _: None) == {"project": project}
+    settings = compose_settings_local(bot, fleet, paths)
+    mcp = compose_mcp_json(bot, paths)
+    assert not mcp.get("mcpServers")
+    assert not fleet.plugins.required and bot.expertise == ["local-project"]
+    allow = settings["permissions"]["allow"]
+    assert "Bash" not in allow and "Bash(*)" not in allow
+    assert not any("gh " in rule or "github" in rule.lower() for rule in allow)
+    assert "Read(./mounts/project/**)" in allow
+    if bot_id == "reviewer":
+        assert "Edit" in settings["permissions"]["deny"] and "Write" in settings["permissions"]["deny"]
+    instructions = compose_claude_md(bot, fleet, paths)
+    assert "Do not seek or invent work" in instructions
+    assert "explicitly assigned task" in instructions
+    assert "All work lands via PR" not in instructions and "gh pr create" not in instructions
+    assert "Do not invent tasks" in instructions
+    assert all(not defaults["jobs"][job]["enroll"] for job in (
+        "manager-checkin", "task-recheck", "reload-fleet", "weekly-worker-restart", "data-sweep", "creds-check", "session-export"))

@@ -714,3 +714,66 @@ def test_locked_dependency_verification_refuses_missing_report_contract(tmp_path
     with pytest.raises(UpdateError, match='supported pip installation report'):
         verify_locked_dependencies(tmp_path / 'python', tmp_path / 'requirements.lock', runner=runner)
     assert len(calls) == 1 and '--find-links' not in calls[0]
+
+
+def test_local_template_is_repo_free_scoped_and_idle(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from claudlobby.config import load_fleet_snapshot
+    project = tmp_path / "project"
+    project.mkdir()
+    content = setup._template_config("local-project", "local-team", None, "Review this local project",
+                                     project_directory=str(project))
+    fleet, defaults = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    assert set(fleet.bots) == {"lead", "engineer", "reviewer"}
+    assert fleet.manager == "lead" and not fleet.plugins.required
+    for bot in fleet.bots.values():
+        assert bot.mounts == {"project": str(project)}
+        assert not bot.mcp and not bot.channels and (bot.scope is None or not bot.scope.repos)
+        assert not bot.remote_control and not bot.dangerously_skip_permissions
+        assert "Wait" in bot.startup_prompt
+        assert "Read(./mounts/project/**)" in bot.tool_permissions.allow
+        assert bot.expertise == ["local-project"]
+    for name in ("manager-checkin", "task-recheck", "reload-fleet", "weekly-worker-restart", "data-sweep", "creds-check", "session-export"):
+        assert defaults["jobs"][name]["enroll"] is False
+    assert b"github" not in content.lower()
+
+
+def test_local_template_refuses_unsafe_or_mixed_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    link = tmp_path / "link"; link.symlink_to(project, target_is_directory=True)
+    for name in (".claude", ".ssh", ".config"):
+        (tmp_path/name).mkdir()
+    outside = tmp_path.parent / (tmp_path.name + "-outside"); outside.mkdir()
+    for path in (None, "relative", "/", str(Path.home()), str(link), str(tmp_path / "missing"),
+                 str(tmp_path/".claude"), str(tmp_path/".ssh"), str(tmp_path/".config"), str(outside), str(tmp_path/"project*")):
+        with pytest.raises(CommandFailure):
+            setup._template_config("local-project", "local-team", None, "Review local code", project_directory=path)
+    with pytest.raises(CommandFailure):
+        setup._template_config("local-project", "local-team", "a/b", "Review local code", project_directory=str(project))
+    with pytest.raises(CommandFailure):
+        setup._template_config("revenue-web-app", "shop", "a/b", "Review checkout", project_directory=str(project))
+
+
+def test_local_template_public_dispatch_prepares_once(team_setup, tmp_path, monkeypatch):
+    from claudlobby.__main__ import main
+    args, root, effects = team_setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    flags = ["--root", str(root), "--fleet", "shop", "fleet", "setup", "--template", "local-project",
+             "--project-directory", str(project), "--goal", "Review local code", "--install-directory", args.install_directory,
+             "--plan-only", "--json"]
+    assert main(flags) == 0
+    assert len(effects) == 1 and not args.dispatches
+    assert main(flags) != 0 and len(effects) == 1
+
+
+@pytest.mark.parametrize("name", [".claude", ".ssh", ".config"])
+def test_local_project_protects_resolved_authority_directories(tmp_path, monkeypatch, name):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path / "profiles" / "private"; target.mkdir(parents=True)
+    child = target / "nested"; child.mkdir()
+    (tmp_path / name).symlink_to(target, target_is_directory=True)
+    for path in (target, child, target.parent):
+        with pytest.raises(CommandFailure):
+            setup._local_project(str(path))

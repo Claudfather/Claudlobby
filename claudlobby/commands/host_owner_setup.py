@@ -59,7 +59,7 @@ def _input(terminal, value, label, default=None, *, optional=False):
 
 def _configuration(args, paths, terminal, cli):
     from ..plane.owner_service import service_command
-    from .setup import _template_config
+    from .setup import _template_config, _local_project
     config = {
         "origin": _input(terminal, args.origin, "This computer's exact private HTTPS origin"),
         "tailscale": _input(terminal, args.tailscale, "Absolute native Tailscale executable"),
@@ -75,8 +75,14 @@ def _configuration(args, paths, terminal, cli):
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "local serving configuration is invalid; review exact HTTPS origins and absolute native paths") from exc
     fleet = _input(terminal, args.target_fleet, "First team name", "web-app")
-    repository = _input(terminal, args.repository, "Approved existing OWNER/REPO")
-    _template_config("revenue-web-app", fleet, repository, "Validate selected repository scope")
+    template = getattr(args, "template", "revenue-web-app")
+    project = getattr(args, "project_directory", None)
+    repository = args.repository
+    if template == "local-project":
+        project = _input(terminal, project, "Approved existing local project directory (read/write)")
+    else:
+        repository = _input(terminal, repository, "Approved existing OWNER/REPO")
+    _template_config(template, fleet, repository, "Validate selected project scope", project_directory=project)
     directories = _native_directories(paths)
     if not directories:
         raise CommandFailure("unavailable", "native user manager has no installation directory; finish native user setup first")
@@ -86,12 +92,14 @@ def _configuration(args, paths, terminal, cli):
     directory = Path(_input(terminal, args.install_directory, "Native installation directory", default))
     if directory not in directories:
         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
+    if template == "local-project":
+        _local_project(project, forbidden=(paths.root, Path(cli).parent.parent, directory))
     terminal.write("Local setup configuration (no credentials): " + json.dumps({**config,
-        "fleet": fleet, "repository": repository, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
-    terminal.write("Provider/repository login, website login and native Tailscale/Serve access must already be ready.\n"
+        "fleet": fleet, "template": template, "repository": repository, "project_directory": project, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
+    terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
                    "This guide does not configure them or enroll an owner service.\n")
-    return config, SimpleNamespace(template="revenue-web-app", target_fleet=fleet,
-        repository=repository, install_directory=directory)
+    return config, SimpleNamespace(template=template, target_fleet=fleet,
+        repository=repository, project_directory=project, install_directory=directory)
 
 
 def _ready(path, origin):
@@ -220,8 +228,8 @@ def run(args, paths, store, terminal):
                 _original_launch(retained)
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
-                        approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
+                if (grant.template, grant.project_directory, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.template, approval.project_directory, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:

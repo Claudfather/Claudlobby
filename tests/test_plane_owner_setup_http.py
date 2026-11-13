@@ -17,9 +17,14 @@ from tests.test_plane_two_fleets import _Sampler
 HOST='https://host.example.test'
 PREFIX='/api/owner/connected/setup/'
 
-@pytest.fixture
-def setup_http(setup_authority,profile,monkeypatch):
+@pytest.fixture(params=["repository", "local"] )
+def setup_http(setup_authority,profile,monkeypatch,request,tmp_path):
     store,access,grant,reader,clock,effects=setup_authority
+    if request.param == "local":
+        monkeypatch.setenv("HOME", str(tmp_path))
+        project=tmp_path/"project"; project.mkdir()
+        grant=store.candidate(OWNER,template="local-project",fleet="shop",repository=None,
+            project_directory=str(project),install_directory=grant.install_directory)
     principal=[OWNER]
     async def verify(scope):return principal[0]
     app=create_owner_browser_app(access.root,verify_principal=verify,expected_origin=HOST,
@@ -57,6 +62,8 @@ def test_setup_only_real_session_no_read_or_action_handle_and_no_http_grant_repa
         app.connected_setup.engine.store.allow(grant)
         context=post(client,'context',s['token'])
         assert context.status_code==200 and context.json()['request'] is None
+        assert context.json()['version'] == (3 if grant.template == 'local-project' else 2)
+        assert context.json()['template'] == grant.template
         assert 'set-cookie' not in context.headers and 'access-control-allow-credentials' not in context.headers
 
 
@@ -106,6 +113,8 @@ def test_strict_unknown_duplicate_json_and_preflight_no_effect_claim(setup_http)
     with TestClient(app,base_url=HOST) as client:
         s=session(client,setup_http)
         assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests','install_directory':'/browser-chosen'}).status_code==403
+        for override in ({'project_directory':'/browser-chosen'}, {'template':'local-project'}, {'repository':'other/repo'}):
+            assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests',**override}).status_code==403
         assert client.post(PREFIX+'preview',content='{"goal":"a","goal":"b"}',headers={**headers(s['token']),'Content-Type':'application/json','X-Claudlobby-Owner':'1'}).status_code==403
         preflight=client.options(PREFIX+'launch',headers={'Origin':ORIGIN,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'Authorization,Content-Type,X-Claudlobby-Owner'})
         assert preflight.status_code==204 and not preflight.content

@@ -39,7 +39,7 @@ def _require_prepared_resources():
             ["git", "ls-files", "-z", "--", "claudlobby/_runtime_scripts", "library",
              "templates", "fleet.yaml.seed", "fleet.yaml.example",
              "projects.yaml.seed", ".env.seed.example", "missions/fleet.md.seed",
-             "examples/teams/revenue-web-app/fleet.yaml"],
+             "examples/teams/revenue-web-app/fleet.yaml", "examples/teams/local-project/fleet.yaml"],
             cwd=_TEST_TREE, timeout=10).decode().split("\0")
         indexed = {name for name in indexed if name and name not in {
             "claudlobby/_runtime_scripts/CLAUDE.md",
@@ -53,7 +53,7 @@ def _require_prepared_resources():
                       else package / "_resources" / "seeds" / name if name in {
                           "fleet.yaml.seed", "fleet.yaml.example", "projects.yaml.seed",
                           ".env.seed.example", "missions/fleet.md.seed",
-                          "examples/teams/revenue-web-app/fleet.yaml"}
+                          "examples/teams/revenue-web-app/fleet.yaml", "examples/teams/local-project/fleet.yaml"}
                       else package / "_resources" / name)
             if (not source.is_file() or not target.is_file()
                     or hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(target.read_bytes()).digest()

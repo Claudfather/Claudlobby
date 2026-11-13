@@ -6,6 +6,7 @@ from uuid import uuid4
 import json
 import pytest
 
+from claudlobby.command_result import CommandFailure
 from claudlobby.plane.owner_access import OwnerAccess, AccessDenied, AccessUnavailable, VerifiedReader
 from claudlobby.plane.owner_setup import OwnerSetup, SetupEngine
 from claudlobby.plane.ids import ensure_host_uid
@@ -213,18 +214,29 @@ def test_historical_sealed_setup_is_retained_never_reinterpreted(setup_authority
     assert access.path.read_bytes()==before
 
 
-def test_local_approval_uses_managed_source_and_observed_directory(setup_authority,monkeypatch):
+@pytest.mark.parametrize("local", [False, True])
+def test_local_approval_uses_managed_source_and_observed_directory(setup_authority,monkeypatch,tmp_path,local):
     from claudlobby.__main__ import main
     from claudlobby import supervision_inventory
     from tests.test_host_owner import terminal
     store,access,grant,*_=setup_authority
+    if local:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        project=tmp_path/"project"; project.mkdir()
+        grant=store.candidate(OWNER,template="local-project",fleet="shop",repository=None,
+            project_directory=str(project),install_directory=grant.install_directory)
     monkeypatch.setattr(supervision_inventory,"Adapter",lambda _:SimpleNamespace(read=lambda _:f"manager\tLinux\ndirectory\t{grant.install_directory}\n"))
     flags=["--root",str(access.root),"host","owner","allow-setup","--template",grant.template,
-        "--target-fleet",grant.fleet,"--repository",grant.repository,"--install-directory",grant.install_directory]
+        "--target-fleet",grant.fleet,"--install-directory",grant.install_directory,
+        *(["--project-directory",grant.project_directory] if local else ["--repository",grant.repository])]
     terminal(monkeypatch,iter(["NO"]))
     assert main(flags)!=0 and store.local() is None
-    terminal(monkeypatch,iter(["ALLOW-SETUP"]))
+    approval_output=terminal(monkeypatch,iter(["ALLOW-SETUP"]))
     assert main(flags)==0 and store.local().source_revision==grant.source_revision
+    if local:
+        assert "Approve read/write access to this exact local project: " + json.dumps(grant.project_directory) in approval_output.getvalue()
+    else:
+        assert "project_directory" not in approval_output.getvalue()
     terminal(monkeypatch,iter(["REVOKE-SETUP"]))
     assert main(["--root",str(access.root),"host","owner","revoke-setup"])==0
     assert store.local() is None
@@ -241,7 +253,8 @@ def test_guide_pending_original_returns_local_continuation_without_serving(setup
     assert "host update continue" in caught.value.error.hint
 
 
-def test_guide_reuses_matching_git_approval_and_stable_cli_without_renewal(setup_authority,monkeypatch):
+@pytest.mark.parametrize("local", [False, True])
+def test_guide_reuses_matching_git_approval_and_stable_cli_without_renewal(setup_authority,monkeypatch,tmp_path,local):
     from contextlib import contextmanager
     import sys
     from claudlobby.commands import host_owner_setup as guide
@@ -249,6 +262,11 @@ def test_guide_reuses_matching_git_approval_and_stable_cli_without_renewal(setup
     from tests.test_host_owner import terminal
     from tests.test_plane_owner_workspace import ISSUER, ORIGIN
     store,access,grant,*_=setup_authority
+    if local:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        project=tmp_path/"project"; project.mkdir()
+        grant=store.candidate(OWNER,template="local-project",fleet="shop",repository=None,
+            project_directory=str(project),install_directory=grant.install_directory)
     store.allow(grant)
     monkeypatch.setattr(guide,"_native_directories",lambda _: (Path(grant.install_directory),))
     commands=[]
@@ -261,7 +279,8 @@ def test_guide_reuses_matching_git_approval_and_stable_cli_without_renewal(setup
     monkeypatch.setattr(guide,"_serving",serving)
     args=SimpleNamespace(origin="https://host.example.test",tailscale=Path(sys.executable),tailscale_socket="",
         socket=access.root/"state/owner/owner.sock",workspace_issuer=ISSUER,workspace_origin=ORIGIN,
-        target_fleet=grant.fleet,repository=grant.repository,install_directory=Path(grant.install_directory))
+        target_fleet=grant.fleet,repository=grant.repository,template=grant.template,project_directory=grant.project_directory,
+        install_directory=Path(grant.install_directory))
     console=terminal(monkeypatch,iter(())); before=access.path.read_bytes()
     result=guide.run(args,resolve_paths(root=access.root),access,console)
     assert result.data["state"]=="serving_stopped" and len(commands)==1
@@ -337,3 +356,80 @@ def test_guide_install_directory_uses_only_observed_persistent_user_default(
         assert error is not None and "explicit printable configuration" in str(error)
         assert "Native installation choices:" in output
     assert not (root / "state").exists()
+
+
+def test_local_grant_preview_recovery_and_launch_keep_original(setup_authority, tmp_path, monkeypatch):
+    store, access, old, reader, *rest = setup_authority
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    grant = store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+                           project_directory=str(project), install_directory=old.install_directory)
+    store.allow(grant)
+    engine = SetupEngine(access)
+    context = engine.context(reader)
+    assert context["version"] == 3 and context["project_directory"] == str(project)
+    assert "repository" not in context
+    monkeypatch.setattr(engine.store, "retain", lambda *_: (_ for _ in ()).throw(RuntimeError("lost preview")))
+    with pytest.raises(RuntimeError, match="lost preview"):
+        engine.preview(reader, grant.generation, "Review local code")
+    recovered = engine.context(reader)
+    request = recovered["request"]
+    assert request and not recovered["launch_reserved"]
+    assert engine.launch(reader, **request)["version"] == 3
+    assert engine.launch(reader, **request)["version"] == 3
+    assert len(setup_authority[-1].dispatches) == 1
+
+
+def test_local_grant_refuses_project_retarget_and_authority_overlap(setup_authority, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store, access, old, *_ = setup_authority
+    for project in (access.root, access.root.parent, Path(old.install_directory)):
+        with pytest.raises((AccessDenied, CommandFailure)):
+            store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+                            project_directory=str(project), install_directory=old.install_directory)
+
+
+def test_repository_snapshot_stays_byte_compatible(setup_authority):
+    from dataclasses import asdict
+    from claudlobby.plane.owner_setup import _snapshot
+    store, _, grant, *_ = setup_authority
+    old = asdict(grant); old.pop("project_directory")
+    expected = json.dumps(old, sort_keys=True, separators=(",", ":"))
+    assert _snapshot(grant) == expected
+    store.allow(grant)
+    assert store.local() == grant
+
+
+def test_local_preview_and_launch_refuse_redirected_project(setup_authority, tmp_path, monkeypatch):
+    store, access, old, reader, *_ = setup_authority
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    other = tmp_path / "other"; other.mkdir()
+    grant = store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+                           project_directory=str(project), install_directory=old.install_directory)
+    store.allow(grant); engine = SetupEngine(access)
+    plan = engine.preview(reader, grant.generation, "Review local code")
+    project.rmdir(); project.symlink_to(other, target_is_directory=True)
+    with pytest.raises(CommandFailure): engine.launch(reader, **binding(plan))
+    assert not setup_authority[-1].dispatches
+    assert engine.context(reader)["request"] == binding(plan)
+
+
+@pytest.mark.parametrize("change", ["expired", "revoked", "mixed"])
+def test_local_authority_changes_refuse_effects(setup_authority, tmp_path, monkeypatch, change):
+    store, access, old, reader, clock, args = setup_authority
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    grant = store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+                           project_directory=str(project), install_directory=old.install_directory)
+    store.allow(grant); engine = SetupEngine(access)
+    if change == "expired": clock[0] = grant.expires_at
+    elif change == "revoked": store.revoke(grant)
+    else:
+        with access._connection(write=True) as conn:
+            value = json.loads(conn.execute("SELECT snapshot FROM setup_grant").fetchone()[0])
+            value["repository"] = "example-org/shop"
+            conn.execute("UPDATE setup_grant SET snapshot=?", (json.dumps(value),))
+    with pytest.raises((AccessDenied, AccessUnavailable)):
+        engine.preview(reader, grant.generation, "Review local code")
+    assert not args.dispatches and args.retained["record"] is None
