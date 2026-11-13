@@ -122,8 +122,24 @@ def _local_project(value, *, forbidden=()) -> Path:
     return path
 
 
+def _account_directory(value: str) -> Path:
+    """An explicit local profile choice; inspect its directory, never credentials."""
+    if (not isinstance(value, str) or not value or len(value) > 2048
+            or not value.isprintable() or any(char in value for char in "*?[]")):
+        raise CommandFailure("invalid_argument", "account directory must be one real absolute owned directory")
+    path = Path(value)
+    try:
+        valid = (path.is_absolute() and path.resolve(strict=True) == path and path.is_dir()
+                 and not path.is_symlink() and path.stat().st_uid == os.getuid())
+    except (OSError, RuntimeError):
+        valid = False
+    if not valid:
+        raise CommandFailure("invalid_argument", "account directory must be one real absolute owned directory")
+    return path
+
+
 def _template_config(template: str, fleet: str, repository: str | None, goal: str | None,
-                     *, project_directory: str | None = None) -> bytes:
+                     *, project_directory: str | None = None, account_directory: str | None = None) -> bytes:
     """Materialize the one package-owned candidate; never use a source checkout."""
     import yaml
 
@@ -138,6 +154,9 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
         project = _local_project(project_directory)
     elif project_directory is not None:
         raise CommandFailure("invalid_argument", "revenue-web-app does not accept --project-directory")
+    elif account_directory is not None:
+        raise CommandFailure("invalid_argument", "revenue-web-app does not accept --account-directory")
+    account = _account_directory(account_directory) if account_directory is not None else None
     parts = repository.split("/") if isinstance(repository, str) else []
     if template == "revenue-web-app" and (len(parts) != 2
             or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", parts[0])
@@ -161,6 +180,8 @@ def _template_config(template: str, fleet: str, repository: str | None, goal: st
             body["defaults"]["scope"] = {"org": scope.org, "repos": scope.repos}
         else:
             body["defaults"]["external_paths"] = [{"path": str(project) + "/**", "purpose": "Locally approved project"}]
+            if account is not None:
+                body["accounts"]["default"] = str(account)
             for bot in body["bots"].values():
                 bot["mounts"] = {"project": str(project)}
         content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True).encode("utf-8")
@@ -303,7 +324,8 @@ def _fleet_setup(args) -> CommandOutput:
                     if template == "local-project":
                         _local_project(project, forbidden=(root, installation.directory, Path(args.install_directory).resolve()))
                     content = _template_config(template, args.fleet, getattr(args, "repository", None), getattr(args, "goal", None),
-                                               **({"project_directory": project} if project is not None else {}))
+                                               **({"project_directory": project} if project is not None else {}),
+                                               **({"account_directory": args.account_directory} if getattr(args, "account_directory", None) is not None else {}))
                 else:
                     if any(getattr(args, key, None) is not None for key in ("repository", "goal", "project_directory")):
                         raise CommandFailure("invalid_argument", "invalid argument: --repository and --goal require --template")

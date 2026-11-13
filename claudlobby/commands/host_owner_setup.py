@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import socket
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -59,7 +60,7 @@ def _input(terminal, value, label, default=None, *, optional=False):
 
 def _configuration(args, paths, terminal, cli):
     from ..plane.owner_service import service_command
-    from .setup import _template_config, _local_project
+    from .setup import _template_config, _local_project, _account_directory
     config = {
         "origin": _input(terminal, args.origin, "This computer's exact private HTTPS origin"),
         "tailscale": _input(terminal, args.tailscale, "Absolute native Tailscale executable"),
@@ -82,7 +83,13 @@ def _configuration(args, paths, terminal, cli):
         project = _input(terminal, project, "Approved existing local project directory (read/write)")
     else:
         repository = _input(terminal, repository, "Approved existing OWNER/REPO")
-    _template_config(template, fleet, repository, "Validate selected project scope", project_directory=project)
+    account = getattr(args, "account_directory", None)
+    if template == "local-project" and account is None:
+        account = os.environ.get("CLAUDE_CONFIG_DIR") or None
+    if account is not None:
+        account = str(_account_directory(account))
+    _template_config(template, fleet, repository, "Validate selected project scope", project_directory=project,
+                     **({"account_directory": account} if account is not None else {}))
     directories = _native_directories(paths)
     if not directories:
         raise CommandFailure("unavailable", "native user manager has no installation directory; finish native user setup first")
@@ -95,11 +102,12 @@ def _configuration(args, paths, terminal, cli):
     if template == "local-project":
         _local_project(project, forbidden=(paths.root, Path(cli).parent.parent, directory))
     terminal.write("Local setup configuration (no credentials): " + json.dumps({**config,
-        "fleet": fleet, "template": template, "repository": repository, "project_directory": project, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
+        "fleet": fleet, "template": template, "repository": repository, "project_directory": project,
+        "account_directory": account, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
     terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
                    "This guide does not configure them or enroll an owner service.\n")
     return config, SimpleNamespace(template=template, target_fleet=fleet,
-        repository=repository, project_directory=project, install_directory=directory)
+        repository=repository, project_directory=project, account_directory=account, install_directory=directory)
 
 
 def _ready(path, origin):
@@ -228,18 +236,46 @@ def run(args, paths, store, terminal):
                 _original_launch(retained)
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.template, grant.project_directory, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
-                        approval.template, approval.project_directory, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
+                if (grant.template, grant.project_directory, grant.account_directory, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.template, approval.project_directory, approval.account_directory, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:
                 approval.install_directory.mkdir(parents=True, exist_ok=True)
                 console._allow_setup(approval, paths, store, terminal, expected_retained=retained)
         terminal.write("Local access prepared. Review and launch the exact prepared request in your browser; keep original receipt IDs.\n"
-                       "Keep this terminal open. Closing it disconnects browser access, not started bots or approvals.\n")
+                       "Keep this terminal open through Preview. After Launch is retained, the guide drains and exits so the updater can proceed.\n")
         terminal.flush()
+        setup = OwnerSetup(store)
+        approved = setup.local() if not selected else None
         try:
-            child.wait()
+            while True:
+                if approved is not None:
+                    retained = setup.retained_state()
+                    if retained.launch_id is not None:
+                        if retained.grant != approved:
+                            raise CommandFailure("conflict", "setup approval changed before handoff; inspect the original receipt")
+                        record = setup.operation(approved)
+                        if (record is None or record["request_id"] != retained.launch_id
+                                or record["config_fingerprint"] != retained.launch_plan):
+                            raise CommandFailure("conflict", "original setup operation changed before handoff")
+                        # Returning leaves _serving through its normal drain. Both
+                        # the child and this guide must exit to release reader
+                        # leases; never let imported owner code survive cutover.
+                        status = shlex.join([str(cli), "--root", str(paths.root), "host", "update", "status", "--json"])
+                        reconnect = shlex.join(service_command(paths.root, cli, config))
+                        return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
+                            "config_fingerprint": retained.launch_plan, "generation": approved.generation,
+                            "source_revision": approved.source_revision}, lines=(
+                                "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
+                                "Inspect the original operation: " + status,
+                                "If interrupted, continue that same operation locally; do not launch again.",
+                                "After DONE, reconnect without another setup: " + reconnect))
+                try:
+                    child.wait(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         except KeyboardInterrupt:
             return CommandOutput({"state": "serving_stopped"}, lines=("Local foreground serving stopped; shutdown did not change approvals or stop the fleet.",))
         raise CommandFailure("unavailable", "local foreground owner stopped unexpectedly; no server or launch was retried")

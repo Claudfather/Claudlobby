@@ -58,14 +58,19 @@ that native configuration separately.
 Choose the approved existing `OWNER/REPO`, a team name and an observed native
 installation directory. The default is the persistent user directory only when
 the native catalog observes it. Review the displayed configuration. Keep this
-terminal open: owner serving stays in the foreground and does not enroll a
+terminal open through Preview: owner serving stays in the foreground and does not enroll a
 persistent owner service.
 
 Follow the terminal prompts to pair the browser locally, prepare connected
 storage, confirm the signed-in workspace proposal and approve the exact first-team
 scope. Each approval is separate. In the browser, save the private computer
 address under **Your computers**, open the workspace, provide the approved goal,
-review the exact prepared plan and launch once. Reading or downloading instructions
+review the exact prepared plan and launch once. The guide then drains admitted
+work and exits, releasing its runtime readers so the original updater can proceed.
+Use the printed stable-CLI `host update status` command to inspect that operation;
+after it reports DONE, run the printed `host owner serve` command to reconnect.
+Do not rerun setup or Launch to restore browser access. A lost browser response
+does not discard the retained original identifiers. Reading or downloading instructions
 has not performed these steps. Local setup approval does not grant ordinary
 messages, task feedback or permission decisions.
 
@@ -76,7 +81,8 @@ request exists, inspect its original receipt and use the returned stable-CLI
 replace a retained pending operation. Do not start another setup or replay an
 unknown response. After successful launch, observe native readiness and useful
 provider behavior separately. Closing the foreground guide disconnects browser
-access; it does not stop bots or revoke approvals.
+access; it does not stop bots or revoke approvals. Stop a standalone foreground
+owner server normally before a later update so it does not retain a runtime reader.
 
 ## Local project without a repository connection
 
@@ -106,8 +112,18 @@ CLI fleet setup above:
 
 ```bash
 "$CLI" --root "$DATA" host owner setup --template local-project \
-  --project-directory "$PROJECT_DIRECTORY"
+  --project-directory "$PROJECT_DIRECTORY" \
+  --account-directory "$CLAUDE_ACCOUNT_DIRECTORY"
 ```
+
+`CLAUDE_ACCOUNT_DIRECTORY` is the real absolute directory of the intended Claude
+profile, not a token. Setup checks directory metadata and never reads or copies
+credentials. If the option is omitted, the local terminal proposes its
+`CLAUDE_CONFIG_DIR` when set; otherwise the conventional default remains unchanged.
+Confirm the displayed account path along with project access. The selected path
+is bound into the approved local template and its native session identity; the
+browser cannot supply or replace it. Existing retained approvals are not silently
+retargeted. Provider authentication and useful native work still require observation.
 
 The terminal approves read/write access to that exact local project; the browser
 can describe a bounded goal and review the frozen plan, but cannot select a path
@@ -123,3 +139,8 @@ Use the same receipt/status/continue procedure above, never a new setup request.
 Closing the guide does not stop agents or revoke local access. Stop the exact
 fleet and owned host/fleet jobs through supported public lifecycle commands;
 cleanup and private network/grant revocation must be scoped before activation.
+Revoke only this trial's message/setup/workspace/owner grants while a bound native
+anchor (normally the recorder) still exists, then stop the recorder last. After
+all current native definitions are removed, local mutation admission deliberately
+refuses an empty inventory; an idle updater is not a substitute ancestry anchor.
+Do not restart workloads or weaken that guard solely to revoke stored offline grants.

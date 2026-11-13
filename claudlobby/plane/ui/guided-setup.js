@@ -132,6 +132,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       ? 'Setup needs attention. Keep the original identifiers and inspect this update; do not launch again.'
       : value.state === 'quiesce' && !value.launch_reserved
       ? `Configuration prepared and not launched. ${localContinue(value)} This browser never resubmits after reconnection.`
+      : value.state === 'quiesce' && value.launch_reserved
+      ? 'Launch retained. Let the local setup guide finish its handoff, then use its original-update status and reconnect commands. Do not launch again.'
       : 'Still checking the original update. Receipt inspection never repeats or resumes setup.';
   }
   function render() {

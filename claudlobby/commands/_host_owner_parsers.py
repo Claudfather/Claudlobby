@@ -66,6 +66,7 @@ def register_host_owner(hosts):
     allow.add_argument("--target-fleet", required=True)
     allow.add_argument("--repository", metavar="OWNER/REPO")
     allow.add_argument("--project-directory", help="Locally approved existing directory for local-project")
+    allow.add_argument("--account-directory", help="Locally approved Claude profile directory for local-project")
     allow.add_argument("--install-directory", required=True, type=Path)
     allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
     allow.set_defaults(func=_dispatch, public_command="host.owner.allow-setup", owner_action="allow-setup")
@@ -76,6 +77,7 @@ def register_host_owner(hosts):
     guided = actions.add_parser("setup", help="Guide fresh local owner preparation and keep its foreground server open")
     guided.add_argument("--template", choices=["revenue-web-app", "local-project"], default="revenue-web-app")
     guided.add_argument("--project-directory")
+    guided.add_argument("--account-directory", help="Claude profile directory; otherwise propose the operator's CLAUDE_CONFIG_DIR")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
         guided.add_argument("--" + flag)
     for flag in ("tailscale", "tailscale-socket", "socket", "install-directory"):
