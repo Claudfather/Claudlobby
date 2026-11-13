@@ -6,7 +6,7 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TEST_DIR/../claudlobby/_runtime_scripts/supervisor.sh"
 T="$(mktemp -d "${TMPDIR:?}/activation-supervisor.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 TRACE="$T/trace"; : > "$TRACE"
-DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0
+DELAY_UNLOAD="$T/delay-unload"; DELAY_ON_BOOTOUT=0; QUERY_FAIL_ON_BOOTOUT=0
 file="$T/worker.service"; target=worker.service; : > "$file"
 CALLER_RC=0; QUERY_FAIL=0; FAIL_ACTION=""; SHADOW=0; TEST_MANAGER=Aqua; JOB_PID=600
 enabled=enabled; load=loaded; active=active; group=/user.slice/worker.service
@@ -72,6 +72,7 @@ launchctl() {
             [ "$1" != "$FAIL_ACTION" ] || return 9
             if [ "$1" = bootout ]; then
                 launched=0
+                QUERY_FAIL="$QUERY_FAIL_ON_BOOTOUT"
                 if [ "$DELAY_ON_BOOTOUT" -gt 0 ]; then
                     printf '%s' "$DELAY_ON_BOOTOUT" > "$DELAY_UNLOAD"
                 fi
@@ -437,4 +438,28 @@ output=$(svc_job_stop_exact "$source" "$file" "$target" 600)
 [ "$output" = $'effect-attempted\nstopped' ]
 [ "$(cat "$TRACE")" = 'bootout gui/501/scoped-job' ]
 [ -f "$file" ] && [ -f "$source" ]
+# Public stop must observe the same delayed unload as activation pause.
+launched=1; : > "$TRACE"; DELAY_ON_BOOTOUT=2
+output=$(svc_job_stop_exact "$source" "$file" "$target" 600)
+[ "$output" = $'effect-attempted\nstopped' ]
+[ "$(cat "$DELAY_UNLOAD")" = 0 ] || { echo 'FAIL: public stop returned before unload'; exit 1; }
+[ "$(cat "$TRACE")" = 'bootout gui/501/scoped-job' ]
+[ -f "$file" ] && [ -f "$source" ]
+# A persistent loaded job or failed observation retains both definitions and
+# reports an attempted effect, without another bootout or a success marker.
+for failure in loaded observation; do
+    launched=1; QUERY_FAIL=0; : > "$TRACE"; rm -f "$DELAY_UNLOAD"
+    DELAY_ON_BOOTOUT=99; QUERY_FAIL_ON_BOOTOUT=0
+    [ "$failure" != observation ] || QUERY_FAIL_ON_BOOTOUT=1
+    rc=0
+    output=$(svc_job_stop_exact "$source" "$file" "$target" 600 2> "$T/job-stop.err") || rc=$?
+    [ "$rc" = 3 ] && [ "$output" = effect-attempted ]
+    [ "$(cat "$TRACE")" = 'bootout gui/501/scoped-job' ]
+    [ -f "$file" ] && [ -f "$source" ]
+    if [ "$failure" = loaded ]; then
+        grep -Fq "$target did not unload after bootout" "$T/job-stop.err"
+    else
+        grep -Fq "$target state after bootout" "$T/job-stop.err"
+    fi
+done
 printf 'scoped job stop adapter: passed\n'

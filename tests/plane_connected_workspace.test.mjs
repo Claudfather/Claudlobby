@@ -1085,3 +1085,35 @@ test(`computer heading describes pending ${operation} and restores the actual re
   assert.match(card.children[0].textContent,/Connection unavailable$/);
   h.api.dispose();
 });
+
+test('local-project approval renders locally bound scope and preserves original request on reload',async()=>{
+  const h=setupHarness();
+  Object.assign(h.context,{version:3,template:'local-project',project_directory:'/example/local-project'});
+  delete h.context.repository;h.preview.version=3;
+  h.client.setupReceipt=async input=>({...input,version:3,state:'done',launch_reserved:true,config_committed:true,health_errors:{}});
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  assert.equal(await h.api.run('context'),true);
+  assert.ok(panel.children.some(e=>e.textContent.includes('/example/local-project')));
+  assert.equal(panel.children.filter(e=>e.tagName==='TEXTAREA').length,1,'only the goal is authored');
+  h.api.setGoal('Review the approved local project');
+  assert.equal(await h.api.run('preview'),true);
+  assert.deepEqual(h.calls.find(c=>c[0]==='preview')[1],{generation:h.context.generation,goal:'Review the approved local project'});
+  await h.api.run('launch');
+  h.api.dispose();
+  const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.equal(await resumed.run('launch'),false);
+  await resumed.run('context');await resumed.run('receipt');
+  assert.match(resumed.snapshot().note,/Configuration committed/);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
+});
+
+test('setup refuses mixed local/repository protocol shapes before preview',async()=>{
+  for(const fields of [{version:2,template:'local-project',project_directory:'/example/project'},
+      {version:3,template:'revenue-web-app'},
+      {version:3,template:'local-project',project_directory:'relative'}]){
+    const h=setupHarness();Object.assign(h.context,fields);
+    assert.equal(await h.api.run('context'),false);
+    h.api.setGoal('Review local project');assert.equal(await h.api.run('preview'),false);
+    assert.equal(h.calls.filter(c=>c[0]==='preview').length,0);h.api.dispose();
+  }
+});

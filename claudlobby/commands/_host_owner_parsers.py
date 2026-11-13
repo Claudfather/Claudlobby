@@ -62,9 +62,10 @@ def register_host_owner(hosts):
         revoke.add_argument("--json", action="store_true", help="Not supported for interactive approval")
         revoke.set_defaults(func=_dispatch, public_command="host.owner.revoke-" + capability)
     allow = actions.add_parser("allow-setup", help="Approve one connected first-team setup (interactive)")
-    allow.add_argument("--template", required=True, choices=["revenue-web-app"])
+    allow.add_argument("--template", required=True, choices=["revenue-web-app", "local-project"])
     allow.add_argument("--target-fleet", required=True)
-    allow.add_argument("--repository", required=True, metavar="OWNER/REPO")
+    allow.add_argument("--repository", metavar="OWNER/REPO")
+    allow.add_argument("--project-directory", help="Locally approved existing directory for local-project")
     allow.add_argument("--install-directory", required=True, type=Path)
     allow.add_argument("--json", action="store_true", help="Not supported for interactive approval")
     allow.set_defaults(func=_dispatch, public_command="host.owner.allow-setup", owner_action="allow-setup")
@@ -73,6 +74,8 @@ def register_host_owner(hosts):
         route.add_argument("--json", action="store_true")
         route.set_defaults(func=_dispatch, public_command="host.owner." + action, owner_action=action)
     guided = actions.add_parser("setup", help="Guide fresh local owner preparation and keep its foreground server open")
+    guided.add_argument("--template", choices=["revenue-web-app", "local-project"], default="revenue-web-app")
+    guided.add_argument("--project-directory")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
         guided.add_argument("--" + flag)
     for flag in ("tailscale", "tailscale-socket", "socket", "install-directory"):

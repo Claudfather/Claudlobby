@@ -87,3 +87,5 @@ projects.yaml
 
 # fleet charter (the .seed beside it is the committed template)
 missions/*.md
+
+!/examples/teams/local-project/fleet.yaml

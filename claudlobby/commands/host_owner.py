@@ -330,11 +330,17 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     if directory not in directories:
         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
-        fleet=args.target_fleet, repository=args.repository, install_directory=str(directory))
+        fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
+        project_directory=getattr(args, "project_directory", None))
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
-    terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
+    if grant.template == "local-project":
+        terminal.write("Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
+    display = asdict(grant)
+    if grant.project_directory is None:
+        display.pop("project_directory")
+    terminal.write(json.dumps(display, ensure_ascii=True) + "\n")
     _approve(terminal, "ALLOW-SETUP")
     fresh_owner_setup(paths.root)
     managed_setup(paths.root, grant)

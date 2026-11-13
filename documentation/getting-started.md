@@ -53,7 +53,7 @@ This is the same preparation helper, plus the public host prerequisite/native ca
 
 On macOS, also retain the observed native domain. A logged-in desktop terminal and an SSH/background session can select different domains (`gui/UID` and `user/UID`). Prepare new updates from the original domain. Continuing an interrupted update keeps its recorded domain, including when continuing a GUI-bound operation from a background session; it never moves the services implicitly. Preparation does not prove the agents will be available after a reboot: verify that separately in the intended login/session arrangement.
 
-**Credential gate:** stop here until provider sign-in and the intended repository/tool access are independently verified for this OS user. Preparation is not authentication or proof of agent readiness. Keep secrets in the appropriate private `.env` tiers, never in Git or command arguments. Teams without channels need no Telegram credentials. The optional `fleet.yaml.seed` is for an operator who explicitly chooses Telegram; complete its placeholders and channel prerequisites before using it.
+**Credential gate:** stop here until provider sign-in and the intended project/tool access are independently verified for this OS user. Preparation is not authentication or proof of agent readiness. Keep secrets in the appropriate private `.env` tiers, never in Git or command arguments. Teams without channels need no Telegram credentials. The optional `fleet.yaml.seed` is for an operator who explicitly chooses Telegram; complete its placeholders and channel prerequisites before using it.
 
 ## 2. Prepare the first fleet
 
@@ -66,7 +66,7 @@ CONFIG="/absolute/private/fleet.yaml"
   --install-directory "$NATIVE_DIRECTORY" --plan-only --json
 ```
 
-Alternatively, the [first-team template](first-team-setup.md) creates a lead, engineer and reviewer for an explicitly approved repository and goal. Choose one fleet setup command, not both.
+Alternatively, the [first-team template](first-team-setup.md) creates a lead, engineer and reviewer for an explicitly approved repository or local project and scope. The local-project option needs no GitHub/PAT; it still requires provider/native approval. Choose one fleet setup command, not both.
 
 `--plan-only` prepares the real update record, candidate configuration and dependencies. It requires the native directory and starts no native updater or agents. Review the returned request ID, target revision, configuration fingerprint, candidate configuration and consumer scope. This is a retained operation, not a disposable preview. Do not rerun fleet setup to replace it.
 
