@@ -416,11 +416,17 @@ def test_job_stop_preserves_unknown_partial_effect_and_changed_node(tmp_path, mo
     assert (directory / "com.private.log-rotation.service").exists()
 
 
-def test_job_stop_does_not_unlink_definition_replaced_during_native_stop(tmp_path, monkeypatch):
+@pytest.mark.parametrize("replacement", ["unlink-recreate", "rename"])
+def test_job_stop_does_not_unlink_definition_replaced_during_native_stop(tmp_path, monkeypatch, replacement):
     jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
     def replace_node(function, args):
         if function == "svc_job_stop_exact":
-            file = Path(args[1]); content = file.read_bytes(); file.unlink(); file.write_bytes(content)
+            file = Path(args[1]); content = file.read_bytes()
+            if replacement == "rename":
+                other = file.with_suffix(".replacement")
+                other.write_bytes(content); other.replace(file)
+            else:
+                file.unlink(); file.write_bytes(content)
     native.failure = replace_node
     with pytest.raises(jobs.JobStopError, match="changed"):
         jobs._stop(current, "log-rotation", fleet, native)
@@ -574,3 +580,104 @@ def test_job_stop_rechecks_enablement_node_after_witness_capture_before_effect(t
         jobs._stop(current, "log-rotation", fleet, native)
     assert not error.value.attempted and calls == []
     assert (directory / "com.private.log-rotation.timer").exists()
+
+
+@pytest.mark.parametrize("failure", [None, "native", "preflight"])
+def test_job_stop_pins_original_definition_nodes_and_closes_on_every_exit(tmp_path, monkeypatch, failure):
+    import os
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    opened = []
+    real_open = os.open
+    def observe_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path).parent == directory:
+            opened.append((fd, os.fstat(fd)))
+        return fd
+    monkeypatch.setattr(jobs.os, "open", observe_open)
+    def check_pins(function, args):
+        if function == "svc_job_stop_exact":
+            assert len(opened) == 2
+            for fd, original in opened:
+                assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (original.st_dev, original.st_ino)
+            if failure == "native":
+                raise OSError("native refusal")
+    native.failure = check_pins
+    if failure == "preflight":
+        (directory / "default.target.wants").mkdir()
+        (directory / "default.target.wants" / "com.private.log-rotation.service").symlink_to(tmp_path / "foreign")
+    if failure:
+        with pytest.raises(jobs.JobStopError):
+            jobs._stop(current, "log-rotation", fleet, native)
+    else:
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert len(opened) == 2
+    for fd, _ in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    if failure == "preflight":
+        assert calls == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "native", "preflight", "unlink-recreate", "rename"])
+def test_job_stop_pins_enablement_symlink_until_exit(tmp_path, monkeypatch, outcome):
+    import os
+    import stat
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    wants = directory / "timers.target.wants"; wants.mkdir()
+    target = directory / "com.private.log-rotation.timer"
+    link = wants / target.name; link.symlink_to(target)
+    original = link.lstat()
+    pinned = []
+    real_open = os.open
+    def observe_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == link:
+            pinned.append(fd)
+            info = os.fstat(fd)
+            assert stat.S_ISLNK(info.st_mode)
+            assert (info.st_dev, info.st_ino) == (original.st_dev, original.st_ino)
+        return fd
+    monkeypatch.setattr(jobs.os, "open", observe_open)
+    def check_pin(function, args):
+        if function != "svc_job_stop_exact":
+            return
+        assert len(pinned) == 1
+        fd = pinned[0]
+        assert os.fstat(fd).st_ino == original.st_ino
+        if outcome == "native":
+            raise OSError("native refusal")
+        if Path(args[1]) == target and outcome in {"unlink-recreate", "rename"}:
+            if outcome == "rename":
+                other = wants / "replacement"; other.symlink_to(target); other.replace(link)
+            else:
+                link.unlink(); link.symlink_to(target)
+            assert os.fstat(fd).st_nlink == 0
+            assert link.lstat().st_ino != original.st_ino
+    native.failure = check_pin
+    if outcome == "preflight":
+        (directory / "default.target.wants").mkdir()
+        (directory / "default.target.wants" / "com.private.log-rotation.service").symlink_to(tmp_path / "foreign")
+    if outcome == "success":
+        jobs._stop(current, "log-rotation", fleet, native)
+        assert not link.is_symlink()
+    else:
+        with pytest.raises(jobs.JobStopError):
+            jobs._stop(current, "log-rotation", fleet, native)
+        assert link.is_symlink()
+    assert len(pinned) == 1
+    with pytest.raises(OSError):
+        os.fstat(pinned[0])
+    if outcome == "preflight":
+        assert calls == []
+
+
+def test_job_stop_refuses_enablement_without_supported_symlink_pin(tmp_path, monkeypatch):
+    jobs, current, native, fleet, directory, calls = _stop_family(tmp_path, monkeypatch)
+    wants = directory / "timers.target.wants"; wants.mkdir()
+    link = wants / "com.private.log-rotation.timer"
+    link.symlink_to(directory / link.name)
+    monkeypatch.delattr(jobs.os, "O_PATH", raising=False)
+    monkeypatch.delattr(jobs.os, "O_SYMLINK", raising=False)
+    with pytest.raises(jobs.JobStopError, match="symlink identity pinning is unsupported"):
+        jobs._stop(current, "log-rotation", fleet, native)
+    assert calls == [] and link.is_symlink()

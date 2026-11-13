@@ -1239,17 +1239,33 @@ def test_native_ignore_missing_working_directory_never_uses_callers_cwd(tmp_path
                 obs.collect().require_complete()
 
 
-@pytest.mark.parametrize("policy", ["false-gui-0", "false-gui-1", "true-system", "missing", "duplicate", "nested", "malformed", "unknown"])
+@pytest.mark.parametrize("policy", ["false-gui-0", "false-gui-1", "true-system", "missing", "duplicate", "nested", "malformed", "unknown",
+                                    "keepalive-gui", "keepalive-abandon", "keepalive-unknown", "keepalive-duplicate",
+                                    "keepalive-no-program", "keepalive-missing"])
 def test_job_stop_effective_launchd_child_policy_uses_captured_properties_only(tmp_path, policy):
     from claudlobby.job_operations import darwin_native_children_owned
     capture = json.loads((FIXTURES / "launchctl-job-child-policy-native.json").read_text())
     target = "gui/501/fixture"
     source = {"Label": "fixture", "ProgramArguments": ["/bin/true"],
               "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
-    observed = observed_print(target, source, tmp_path / "fixture.plist", active=False)
+    if policy.startswith("keepalive"):
+        source["KeepAlive"] = True
+    observed = observed_print(target, source, tmp_path / "fixture.plist", active=policy.startswith("keepalive"))
     value = capture["false_gui"][int(policy[-1])] if policy.startswith("false-gui") else capture["true_system"]
+    if policy.startswith("keepalive"):
+        # Exact top-level properties from the native recorder capture, 2026-11-13.
+        # Keep only its grammar; native labels, paths and process IDs stay private.
+        value = "keepalive | runatload | inferred program"
+        if policy == "keepalive-abandon":
+            value += " | abandon process group"
+        elif policy == "keepalive-unknown":
+            value += " | unfamiliar child policy"
+        elif policy == "keepalive-duplicate":
+            value += " | keepalive"
+        elif policy == "keepalive-no-program":
+            value = "keepalive | runatload"
     observed = observed.replace("\tproperties = <redacted>", "\tproperties = " + value)
-    if policy == "missing":
+    if policy in {"missing", "keepalive-missing"}:
         observed = observed.replace("\tproperties = " + value + "\n", "")
     if policy == "duplicate":
         observed = observed.replace("\tproperties = " + value, ("\tproperties = " + value + "\n") * 2)
@@ -1263,11 +1279,11 @@ def test_job_stop_effective_launchd_child_policy_uses_captured_properties_only(t
         with pytest.raises(InventoryError):
             darwin_native_children_owned(observed, target)
     else:
-        assert darwin_native_children_owned(observed, target) is policy.startswith("false-gui")
+        assert darwin_native_children_owned(observed, target) is (policy.startswith("false-gui") or policy == "keepalive-gui")
 
 
-@pytest.mark.parametrize("abandon", [False, True])
-def test_darwin_job_child_policy_imports_exact_source_in_isolated_child(tmp_path, abandon):
+@pytest.mark.parametrize("policy", ["oneshot", "keepalive", "abandon", "keepalive-abandon"])
+def test_darwin_job_child_policy_imports_exact_source_in_isolated_child(tmp_path, policy):
     """A managed dependency-only interpreter has no editable core .pth file."""
     import sysconfig
     import venv
@@ -1289,7 +1305,12 @@ def test_darwin_job_child_policy_imports_exact_source_in_isolated_child(tmp_path
               "WorkingDirectory": str(tmp_path), "EnvironmentVariables": {}}
     observed = observed_print(target, source, tmp_path / "fixture.plist", active=False)
     capture = json.loads((FIXTURES / "launchctl-job-child-policy-native.json").read_text())
-    properties = capture["true_system"] if abandon else capture["false_gui"][0]
+    properties = capture["true_system"] if policy == "abandon" else capture["false_gui"][0]
+    if policy.startswith("keepalive"):
+        # Live recorder property grammar, retained 2026-11-13; no native identifiers.
+        properties = "keepalive | runatload | inferred program"
+        if policy == "keepalive-abandon":
+            properties += " | abandon process group"
     observed = observed.replace("\tproperties = <redacted>", "\tproperties = " + properties)
     frame = tmp_path / "native-frame"; frame.write_text(observed)
     native = source_package().native
@@ -1299,5 +1320,5 @@ def test_darwin_job_child_policy_imports_exact_source_in_isolated_child(tmp_path
         '_svc_job_child_policy "$3"',
         "policy-test", str(native), str(frame), target],
         env=constructed_env(CLAUDLOBBY_NATIVE_PYTHON=str(python)), capture_output=True, text=True)
-    assert result.returncode == (3 if abandon else 0), result.stderr
+    assert result.returncode == (3 if "abandon" in policy else 0), result.stderr
     assert "ModuleNotFoundError" not in result.stderr
