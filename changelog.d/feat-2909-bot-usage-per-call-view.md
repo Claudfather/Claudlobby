@@ -1,0 +1,5 @@
+### Added — `bot usage --calls`: each call's context, its growth, and the rows stored before it (#2909)
+
+`claudlobby bot usage BOT --calls N` adds a per-call view to the window totals: the newest N main-chain calls of the bot's newest own session in the window, oldest first (20 when N is left out, at most 100). Each call gives its context (input + cache-read + cache-write tokens, the figure `fleet status` shows for the newest call), its growth over the previous call, its output tokens, and the rows the transcript stored before it, grouped by kind and target with their characters: the five largest groups are listed and the rest summed. A tool is named by its name, a file tool by its file as well, and a command or a message body is never printed. Attachment rows that store no rendered text, such as hook records, are counted apart.
+
+The view reads the session back from its end and stops once it holds the calls it shows and the call before them, never past 16 MiB. `ended` says whether it stopped at the window's start, the call limit, the session's start or the byte cap, and `complete` whether every call in the window is shown.

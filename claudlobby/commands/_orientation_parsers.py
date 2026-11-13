@@ -155,6 +155,14 @@ def register_orientation_subparsers(sub):
             usage = children.add_parser("usage", help="Read bounded Claude transcript token counts")
             if domain == "bot":
                 usage.add_argument("bot_id", metavar="BOT", help="Exact selected-fleet bot ID")
+                usage.add_argument("--calls", type=int, nargs="?", const=20, metavar="N",
+                                   help="Also list the newest N main-chain calls (20 when N is "
+                                        "left out, at most 100) of the bot's newest own session "
+                                        "in the window: each call's context, its growth over the "
+                                        "previous call, and the 5 largest groups of rows stored "
+                                        "before it by kind, target and characters. It reads at "
+                                        "most 16 MiB back from the session's end, and the result "
+                                        "says when a limit cut it")
             usage.add_argument("--since", default="24h", metavar="DURATION",
                                help="Positive window up to 7d; default 24h")
             usage.add_argument("--json", action="store_true", help="One schema-1 result object")

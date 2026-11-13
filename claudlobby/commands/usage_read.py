@@ -24,6 +24,39 @@ def _window(raw: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def call_lines(view: dict) -> tuple:
+    """``bot usage --calls`` as text: one line per call, oldest first, then
+    one that says where the read stopped and what it left out."""
+    lines = [f"calls: {len(view['calls'])} main-chain calls of session {view['session'] or '-'}, "
+             "oldest first; context = input + cache-read + cache-write tokens, growth over "
+             f"the previous call, then the {view['groups_per_call']} largest groups of rows "
+             "stored before the call (kind target chars)"]
+    for call in view["calls"]:
+        step = call["step"]
+        growth = ("after compaction" if call["after_compaction"]
+                  else "no previous call" if call["growth"] is None else f"{call['growth']:+d}")
+        groups = "; ".join(
+            f"{group['kind']} {group['target'] or '-'} {group['chars']}"
+            + (f" x{group['count']}" if group["count"] > 1 else "")
+            + (f" +{group['images']} images" if group["images"] else "")
+            for group in step["groups"]) or "nothing stored"
+        more = (f"; {step['groups_cut']} more groups {step['chars_cut']}"
+                if step["groups_cut"] else "")
+        if step["unrendered"]["count"]:
+            more += (f"; unrendered attachment rows x{step['unrendered']['count']} "
+                     f"{step['unrendered']['chars']}")
+        lines.append(f"  {call['at']} context {call['context']} ({growth}), "
+                     f"output {call['output_tokens']}: {groups}{more}")
+    cut = ("older calls in the window are not shown" if view["ended"] == "call_limit"
+           else "the byte cap stopped the read; older calls may not be shown"
+           if view["ended"] == "byte_cap" else "every call in the window is shown"
+           if view["complete"] else "nothing was read")
+    lines.append(f"calls read: ended={view['ended'] or '-'}, {cut}; "
+                 f"limit={view['limit']}, bytes={view['bytes_read']} of {view['cap']}; "
+                 f"reason={view['reason'] or '-'}")
+    return tuple(lines)
+
+
 def dispatch(args) -> CommandOutput:
     from ..active_config import ActivationError
     from ..config_plan import PlanError
@@ -33,13 +66,16 @@ def dispatch(args) -> CommandOutput:
     from ..plane.migrations import DowngradeError
     from ..plane.schema_state import PendingMigrationError
     from ..releases import ReleaseError
-    from ..transcript_usage import collect_bot_usage, collect_fleet_usage
+    from ..transcript_usage import CALLS_MAX, collect_bot_calls, collect_bot_usage, collect_fleet_usage
     from .checkin import _scope
 
     try:
         start, end = _window(args.since)
         destination, _origin, selected, _bindings = _scope(args)
         if args.public_command == "bot.usage":
+            calls = getattr(args, "calls", None)
+            if calls is not None and not 1 <= calls <= CALLS_MAX:
+                raise CommandFailure("invalid_argument", f"--calls takes 1 to {CALLS_MAX} calls")
             if args.bot_id not in destination.fleet.bots:
                 raise CommandFailure("not_found", "bot is not declared in the selected fleet")
             row = collect_bot_usage(destination.paths, destination.fleet, args.bot_id, start, end)
@@ -58,6 +94,10 @@ def dispatch(args) -> CommandOutput:
                      f"scan limits={row['scan_limits']}; "
                      f"shared account peers={','.join(row['shared_account_with_selected_fleet_bots']) or '-'}; "
                      f"quota=unavailable.",)
+            if calls is not None:
+                data["calls"] = collect_bot_calls(destination.paths, destination.fleet,
+                                                  args.bot_id, start, end, limit=calls)
+                lines += call_lines(data["calls"])
         else:
             data = collect_fleet_usage(destination.paths, destination.fleet, start, end)
             lines = (f"{destination.fleet.name} ({args.since}, {data['window']['since']} to "
