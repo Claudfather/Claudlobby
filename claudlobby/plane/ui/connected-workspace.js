@@ -45,7 +45,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   let current = null, transport = null, clients = [], unsubscribes = [], mount = null;
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
-  const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Set();
+  const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Map();
   const snapshot = () => Object.freeze({phase, accountUnavailable,
     computers: clients.map(({reference, client, label}) => ({reference_id:reference.reference_id,
       endpoint_origin:reference.endpoint_origin, label:label || computerLabel(reference), ...client.snapshot()}))});
@@ -316,7 +316,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   async function act(index, operation) {
     if (disposed || phase !== 'ready' || !current) return false;
     const row = clients[index]; if (!row || pending.has(index) || !['connect','check','renew','logout','enroll'].includes(operation) || row.enrollment.snapshot().busy) return false;
-    pending.add(index); changed();
+    pending.set(index, operation); changed();
     try {
       if (operation === 'enroll') {
         if (['ready','setup_only'].includes(row.client.snapshot().state) || !await checkAccount()) return false;
@@ -404,7 +404,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
       const labels = {ready:'Connected',setup_only:'First-team setup',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
-      label.textContent = `${name} · ${expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed'}`;
+      const pendingLabel = {connect:'Connecting',check:'Checking connection'}[pending.get(index)];
+      label.textContent = `${name} · ${pendingLabel || (expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed')}`;
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
