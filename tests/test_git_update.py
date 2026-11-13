@@ -280,14 +280,12 @@ def test_standalone_update_status_needs_neither_source_nor_runtime(update):
     assert json.loads(default_status.stdout)["update"]["target"] == target
 
 
-#: The collections a compact status leaves out (#2783), named here apart from the code's own list.
-BULKY = ("candidate_config", "consumers", "publication", "quiet", "scope")
-#: Small fields, the diagnostics among them. `health_errors` sorts before `phase`, and is long enough
-#: that a sorted status would put `phase` past the first 2 KB.
+#: The collections a compact status leaves out (#2783, #2915), named here apart from the code's own list.
+BULKY = ("candidate_config", "consumers", "health_errors", "publication", "quiet", "scope")
+#: Small fields, the diagnostics among them.
 STATUS_RECORD = {
     "schema": 1, "phase": "restore", "target": "a" * 40, "before": "b" * 40, "maintenance": False,
     "request_id": "00000000-0000-4000-8000-000000000001", "config_fingerprint": SHA, "finalized": True,
-    "health_errors": {f"unit-{index:04d}.service": "restore refused: " + "e" * 300 for index in range(10)},
     "stage_error": {"stage": "restore", "detail": "interrupted: no unit finished within 1200 s"},
     "runtime_wait": {"gate": "cutover", "holders": ["example.service (python3 pid 7, running 400 s)"]},
     "job_dispatch": {"state": "entered", "attempt": 2},
@@ -295,15 +293,22 @@ STATUS_RECORD = {
 
 
 def _with_units(record, units):
-    """`record` with each bulky collection holding `units` units, as a large host's record does."""
+    """`record` with each bulky collection holding `units` units, as a large host's record does.
+
+    Every unit has a health error, the most `health_errors` can hold (#2915), and one consumer carries
+    its `restore_error`, so the count of them is pinned above 0.
+    """
     names = [f"unit-{index:04d}.service" for index in range(units)]
+    error = "restore refused: " + "e" * 300
     return {**record,
             "consumers": {name: {"intent": {"properties": "x" * 2000, "target": name}, "park": "done",
                                  "stop": "done" if index % 2 else "pending", "restore": "pending",
                                  "publication_complete": index % 2 == 1,
                                  **({"session_gone": True} if index == 0 else {}),
+                                 **({"restore_error": error} if index == 1 else {}),
                                  **({"checkpoint_state": "waiting_for_native_idle"} if index < 2 else {})}
                           for index, name in enumerate(names)},
+            "health_errors": {name: error for name in names},
             "scope": {name: SHA for name in names},
             "quiet": {name: {"identity": SHA, "evidence_sha256": "c" * 64} for name in names},
             "candidate_config": {"units": [{"bot": name, "source": "y" * 500} for name in names],
@@ -318,7 +323,10 @@ def _bytes(value):
 
 
 def test_status_view_leads_with_phase_and_target_and_leaves_out_what_grows_with_the_units():
-    """#2783: 1.57 MB put `phase` past character 1.29 million; the default now leads with it."""
+    """#2783: 1.57 MB put `phase` past character 1.29 million; the default now leads with it.
+
+    #2915: a health error for each unit grows with the units too, so the default counts them.
+    """
     from claudlobby.git_update import status_view
     small, large = _with_units(STATUS_RECORD, 3), _with_units(STATUS_RECORD, 1000)
     texts = [json.dumps(status_view(record, written_at="2026-11-07T18:54:55Z")) for record in (small, large)]
@@ -328,8 +336,10 @@ def test_status_view_leads_with_phase_and_target_and_leaves_out_what_grows_with_
         assert view["update"] == {key: value for key, value in record.items() if key not in BULKY}
         assert view["record_written_at"] == "2026-11-07T18:54:55Z" and view["read_only"] is True
         assert view["full_record"] == "claudlobby host update status --full"
-    # 1,000 units make 3 MB of record, and add only the digits of their counts to the status.
-    assert _bytes(large) > 3_000_000 and len(texts[1].encode()) < 6000
+    # 1,000 units make 3 MB of record, a health error each 0.3 MB of it, and add only the digits of
+    # their counts to the status.
+    assert _bytes(large) > 3_000_000 and _bytes(large["health_errors"]) > 300_000
+    assert len(texts[1].encode()) < 6000
     assert 0 < len(texts[1]) - len(texts[0]) < 64
     omitted = json.loads(texts[1])["omitted"]
     assert omitted == {
@@ -338,7 +348,8 @@ def test_status_view_leads_with_phase_and_target_and_leaves_out_what_grows_with_
         "consumers": {"bytes": _bytes(large["consumers"]), "units": 1000, "park": {"done": 1000},
                       "stop": {"done": 500, "pending": 500}, "restore": {"pending": 1000},
                       "checkpoint_state": {"waiting_for_native_idle": 2},
-                      "publication_complete": 500, "session_gone": 1, "restore_error": 0},
+                      "publication_complete": 500, "session_gone": 1, "restore_error": 1},
+        "health_errors": {"bytes": _bytes(large["health_errors"]), "units": 1000},
         "publication": {"bytes": _bytes(large["publication"]), "blobs": 0, "rows": 1000, "status": "applied"},
         "quiet": {"bytes": _bytes(large["quiet"]), "units": 1000},
         "scope": {"bytes": _bytes(large["scope"]), "units": 1000},
@@ -365,9 +376,8 @@ def test_status_time_is_the_record_save_only_when_the_record_held_still(update, 
         assert view["record_written_at"] == expected and view["update"]["target"] == target
 
 
-def test_status_through_the_stable_cli_is_compact_and_full_prints_the_whole_record(update):
-    """#2783: the door's default stays small, and `--full` prints exactly what the door printed before."""
-    installation, _, target, _ = update
+def _installed_door(installation):
+    """`claudlobby --json host update ...` through the installed stable launcher and updater."""
     interpreter = Path(sys.executable).resolve()
     install_launcher(installation, interpreter=interpreter)
     install_updater(installation, interpreter=interpreter)
@@ -376,12 +386,20 @@ def test_status_through_the_stable_cli_is_compact_and_full_prints_the_whole_reco
         return subprocess.run([str(installation.cli), "--json", "host", "update", *arguments],
                               env=constructed_env(), cwd=installation.data_root, capture_output=True,
                               text=True, timeout=30)
+    return door
 
+
+def test_status_through_the_stable_cli_is_compact_and_full_prints_the_whole_record(update):
+    """#2783: the door's default stays small, and `--full` prints exactly what the door printed before."""
+    installation, _, target, _ = update
+    door = _installed_door(installation)
     absent = door("status")
     assert absent.returncode == 0 and absent.stdout == '{"read_only": true, "update": null}\n', absent.stderr
+    errors = {f"unit-{index:03d}.service": "restore refused: example" for index in range(2)}
     with UpdateStore(installation) as store:
-        prepare(store, target, consumers={f"unit-{index:03d}.service": {"intent": {
+        prepared = prepare(store, target, consumers={f"unit-{index:03d}.service": {"intent": {
             "installed": [], "bot_binding": None, "properties": "x" * 4000}} for index in range(200)})
+        store.save({**prepared, "health_errors": errors})
     record = read_update(installation)
     compact, full, recovery = door("status"), door("status", "--full"), door("recovery")
     for outcome in (compact, full, recovery):
@@ -392,12 +410,44 @@ def test_status_through_the_stable_cli_is_compact_and_full_prints_the_whole_reco
     view = json.loads(compact.stdout)
     assert view["update"] == {key: value for key, value in record.items() if key not in BULKY}
     assert view["omitted"]["consumers"]["units"] == view["omitted"]["scope"]["units"] == 200
+    assert view["omitted"]["health_errors"] == {"bytes": _bytes(errors), "units": 2}
     saved = (installation.data_root / "state/update.json").stat().st_mtime_ns // 1_000_000_000
     assert view["record_written_at"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(saved))
     assert json.loads(recovery.stdout) == {**view, "full_record": "claudlobby host update recovery --full"}
     refused = door("apply", "--full")
     assert refused.returncode == 6 and refused.stdout == ""
     assert refused.stderr.endswith("claudlobby update: --full applies only to read-only update inspection\n")
+    assert read_update(installation) == record
+
+
+def test_recovery_full_prints_the_whole_record_through_the_stable_cli(update):
+    """#2915: `recovery --full` prints the whole record, as `status --full` does, not the compact view."""
+    installation, _, target, _ = update
+    door = _installed_door(installation)
+    with UpdateStore(installation) as store:
+        prepare(store, target, consumers={f"unit-{index}.service": {"intent": {
+            "installed": [], "bot_binding": None, "properties": "x" * 100}} for index in range(3)})
+    record = read_update(installation)
+    full, status_full = door("recovery", "--full"), door("status", "--full")
+    assert full.returncode == 0 and status_full.returncode == 0, full.stderr + status_full.stderr
+    assert full.stdout == json.dumps({"update": record, "read_only": True}, sort_keys=True) + "\n"
+    assert full.stdout == status_full.stdout and "omitted" not in json.loads(full.stdout)
+
+
+def test_continue_full_is_refused_before_the_update_continues(update):
+    """#2915: `continue --full` is refused as `apply --full` is, and the pending update is not touched."""
+    installation, _, target, _ = update
+    door = _installed_door(installation)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+    path = installation.data_root / "state/update.json"
+    record, saved = read_update(installation), path.stat()
+    refused = door("continue", "--full")
+    assert refused.returncode == 6 and refused.stdout == "", refused.stderr
+    assert refused.stderr.endswith("claudlobby update: --full applies only to read-only update inspection\n")
+    # The record is saved through a new file each time, so the same inode and time mean no save.
+    after = path.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (saved.st_ino, saved.st_size, saved.st_mtime_ns)
     assert read_update(installation) == record
 
 

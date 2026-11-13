@@ -1936,8 +1936,9 @@ def _run_native_update(installation):
 
 #: The record's collections that grow with the units and files an update touches. On one host with
 #: 136 units they made 1.56 MB of a 1.57 MB status (#2783), so `host update status` leaves them out
-#: unless it is given `--full`, and counts them instead.
-_BULKY = ("candidate_config", "consumers", "publication", "quiet", "scope")
+#: unless it is given `--full`, and counts them instead. `health_errors` is one of them: it holds an
+#: error for each unit that reported one (#2915).
+_BULKY = ("candidate_config", "consumers", "health_errors", "publication", "quiet", "scope")
 #: The member collections a compact status counts in the two of them that are not keyed by unit.
 _COUNTED = {"candidate_config": ("fleets", "owned_outputs", "units"), "publication": ("blobs", "rows")}
 
