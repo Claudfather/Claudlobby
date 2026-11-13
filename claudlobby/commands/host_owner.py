@@ -15,6 +15,7 @@ import getpass
 import io
 import json
 import os
+from pathlib import Path
 import sqlite3
 import sys
 import warnings
@@ -329,17 +330,25 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     directory = args.install_directory
     if directory not in directories:
         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
+    account = getattr(args, "account_directory", None)
+    if args.template == "local-project" and account is None:
+        account = os.environ.get("CLAUDE_CONFIG_DIR") or None
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
         fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
-        project_directory=getattr(args, "project_directory", None))
+        project_directory=getattr(args, "project_directory", None),
+        account_directory=account)
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
     if grant.template == "local-project":
         terminal.write("Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
+        terminal.write("Claude profile directory: " + json.dumps(grant.account_directory or str(Path.home()/".claude"), ensure_ascii=True)
+                       + ". No credentials are read or copied by this approval.\n")
     display = asdict(grant)
     if grant.project_directory is None:
         display.pop("project_directory")
+    if grant.account_directory is None:
+        display.pop("account_directory")
     terminal.write(json.dumps(display, ensure_ascii=True) + "\n")
     _approve(terminal, "ALLOW-SETUP")
     fresh_owner_setup(paths.root)

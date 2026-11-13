@@ -896,6 +896,18 @@ test('preview owns original Git request before one explicit launch; lost respons
   assert.match(resumed.snapshot().note,/Configuration committed.*native health separately/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
 });
+test('retained launch explains local handoff and cannot launch a second time',async()=>{
+  let launches=0;
+  const h=setupHarness({client:{async setupLaunch(input){launches++;
+    return {...input,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}};}}});
+  await h.api.run('context');h.api.setGoal('Review local work');await h.api.run('preview');
+  assert.equal(await h.api.run('launch'),true);
+  assert.match(h.api.snapshot().note,/handoff.*status and reconnect/);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.equal(await h.api.run('launch'),false);
+  assert.equal(launches,1);
+  h.api.dispose();
+});
 test('changed connection fences held preview, preserves goal and never launches',async()=>{
   const held=deferred(),h=setupHarness({client:{setupPreview:()=>held.promise}});
   await h.api.run('context');h.api.setGoal('Improve checkout tests');const reading=h.api.run('preview');

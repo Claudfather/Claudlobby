@@ -274,7 +274,7 @@ def test_guide_reuses_matching_git_approval_and_stable_cli_without_renewal(setup
     def serving(command,*_):
         commands.append(command)
         class Child:
-            def wait(self):raise KeyboardInterrupt
+            def wait(self, timeout=None):raise KeyboardInterrupt
         yield Child()
     monkeypatch.setattr(guide,"_serving",serving)
     args=SimpleNamespace(origin="https://host.example.test",tailscale=Path(sys.executable),tailscale_socket="",
@@ -393,11 +393,199 @@ def test_repository_snapshot_stays_byte_compatible(setup_authority):
     from dataclasses import asdict
     from claudlobby.plane.owner_setup import _snapshot
     store, _, grant, *_ = setup_authority
-    old = asdict(grant); old.pop("project_directory")
+    old = asdict(grant); old.pop("project_directory"); old.pop("account_directory")
     expected = json.dumps(old, sort_keys=True, separators=(",", ":"))
     assert _snapshot(grant) == expected
     store.allow(grant)
     assert store.local() == grant
+
+
+def test_local_account_approval_survives_lost_preview_and_exact_launch(setup_authority, tmp_path, monkeypatch):
+    import yaml
+    store, access, old, reader, *_ = setup_authority
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    account = tmp_path / "private account"; account.mkdir()
+    grant = store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+        project_directory=str(project), account_directory=str(account), install_directory=old.install_directory)
+    store.allow(grant)
+    assert store.local().account_directory == str(account)
+    engine = SetupEngine(access)
+    monkeypatch.setattr(engine.store, "retain", lambda *_: (_ for _ in ()).throw(RuntimeError("lost preview")))
+    with pytest.raises(RuntimeError, match="lost preview"):
+        engine.preview(reader, grant.generation, "Review local work")
+    context = engine.context(reader)
+    assert "account_directory" not in context  # No new browser-controlled path.
+    manifest = access.root / "local/shop/fleet.yaml"
+    assert yaml.safe_load(manifest.read_bytes())["fleet"]["accounts"]["default"] == str(account)
+    request = context["request"]
+    assert engine.launch(reader, **request)["launch_reserved"]
+    assert engine.launch(reader, **request)["launch_reserved"]
+    assert len(setup_authority[-1].dispatches) == 1
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_guide_local_account_choice_is_displayed_and_explicit_choice_wins(tmp_path, monkeypatch, explicit):
+    import io, sys
+    from claudlobby.commands import host_owner_setup as guide
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project=tmp_path/"project"; project.mkdir()
+    ambient=tmp_path/"ambient profile"; ambient.mkdir()
+    selected=tmp_path/"selected profile"; selected.mkdir()
+    units=tmp_path/"units"; units.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
+    monkeypatch.setattr(guide, "_native_directories", lambda _: (units,))
+    args=SimpleNamespace(origin="https://host.example.test",tailscale=Path(sys.executable),tailscale_socket="",
+        socket=tmp_path/"owner.sock",workspace_issuer="https://accounts.example.test",workspace_origin="https://plane.example.test",
+        target_fleet="local-team",repository=None,template="local-project",project_directory=str(project),
+        account_directory=str(selected) if explicit else None,install_directory=units)
+    terminal=io.StringIO()
+    _, approval=guide._configuration(args,SimpleNamespace(root=tmp_path/"data"),terminal,tmp_path/"install/bin/claudlobby")
+    expected=str(selected if explicit else ambient)
+    assert approval.account_directory==expected
+    assert expected in terminal.getvalue()
+
+
+def test_local_account_redirect_after_preview_refuses_without_dispatch(setup_authority, tmp_path, monkeypatch):
+    store, access, old, reader, *_=setup_authority
+    monkeypatch.setenv("HOME",str(tmp_path))
+    project=tmp_path/"project"; project.mkdir()
+    account=tmp_path/"account"; account.mkdir()
+    other=tmp_path/"other account"; other.mkdir()
+    grant=store.candidate(OWNER,template="local-project",fleet="shop",repository=None,
+        project_directory=str(project),account_directory=str(account),install_directory=old.install_directory)
+    store.allow(grant);engine=SetupEngine(access)
+    preview=engine.preview(reader,grant.generation,"Review local work")
+    account.rmdir(); account.symlink_to(other,target_is_directory=True)
+    with pytest.raises(CommandFailure):engine.launch(reader,**binding(preview))
+    assert not setup_authority[-1].dispatches
+
+
+def test_guide_hands_off_original_launch_instead_of_waiting_for_updater(setup_authority, monkeypatch):
+    from contextlib import contextmanager
+    import subprocess, sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    from tests.test_host_owner import terminal
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    store, access, grant, reader, *_ = setup_authority
+    store.allow(grant)
+    engine = SetupEngine(access)
+    monkeypatch.setattr(guide, "_native_directories", lambda _: (Path(grant.install_directory),))
+    original = {}
+    drained = []
+    @contextmanager
+    def serving(*_):
+        class Child:
+            def wait(self, timeout=None):
+                assert timeout is not None, "guide retains its reader indefinitely after Launch"
+                assert not original, "guide waited again after the original Launch was reserved"
+                preview = engine.preview(reader, grant.generation, "Review checkout")
+                original.update(binding(preview))
+                engine.launch(reader, **original)
+                raise subprocess.TimeoutExpired("owner", timeout)
+        try:
+            yield Child()
+        finally:
+            drained.append(True)
+    monkeypatch.setattr(guide, "_serving", serving)
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=Path(sys.executable), tailscale_socket="",
+        socket=access.root/"state/owner/owner.sock", workspace_issuer=ISSUER, workspace_origin=ORIGIN,
+        target_fleet=grant.fleet, repository=grant.repository, template=grant.template,
+        project_directory=None, install_directory=Path(grant.install_directory))
+    result = guide.run(args, resolve_paths(root=access.root), access, terminal(monkeypatch, iter(())))
+    assert drained == [True]
+    assert result.data["state"] == "launch_handoff"
+    assert result.data["request_id"] == original["request_id"]
+    assert result.data["config_fingerprint"] == original["config_fingerprint"]
+    assert len(setup_authority[-1].dispatches) == 1
+    assert any("host update status" in line for line in result.lines)
+    assert any("host owner serve" in line for line in result.lines)
+
+
+def test_guide_handoff_drains_real_child_and_releases_both_runtime_readers(setup_authority, monkeypatch, tmp_path):
+    import fcntl, os, subprocess, sys, threading, time
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    from claudlobby.installation import Installation, _runtime_lock
+    from tests.conftest import constructed_env
+    from tests.test_host_owner import terminal
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    store, access, grant, reader, *_ = setup_authority
+    store.allow(grant)
+    engine = SetupEngine(access)
+    installation = Installation(Path(grant.installation), access.root)
+    lock = access.root / "state/runtime-use.lock"
+    lock.touch(mode=0o600)
+    parent_fd = _runtime_lock(installation)
+    ready, drained = tmp_path/"ready", tmp_path/"drained"
+    child_code = """import fcntl,os,signal,time
+from pathlib import Path
+fd=os.open(os.environ['LOCK_FILE'],os.O_RDONLY)
+fcntl.flock(fd,fcntl.LOCK_SH)
+def stop(*_):
+    time.sleep(.05)
+    Path(os.environ['DRAINED_FILE']).touch()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+Path(os.environ['READY_FILE']).touch()
+while True: time.sleep(.05)
+"""
+    real_popen = subprocess.Popen
+    children, failures, forced = [], [], []
+    def spawn(command, **kwargs):
+        if command[0] == str(installation.cli):
+            kwargs['env'] = constructed_env(LOCK_FILE=str(lock), READY_FILE=str(ready), DRAINED_FILE=str(drained))
+            child = real_popen([sys.executable, '-I', '-B', '-c', child_code], **kwargs)
+            children.append(child)
+            return child
+        return real_popen(command, **kwargs)
+    monkeypatch.setattr(guide.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(guide, '_ready', lambda *_: ready.exists())
+    monkeypatch.setattr(guide, '_native_directories', lambda _: (Path(grant.install_directory),))
+    def launch_from_browser():
+        try:
+            deadline = time.monotonic()+5
+            while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)
+            assert ready.exists()
+            probe = os.open(lock, os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError): fcntl.flock(probe, fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally: os.close(probe)
+            preview = engine.preview(reader, grant.generation, 'Review checkout')
+            engine.launch(reader, **binding(preview))
+            deadline = time.monotonic()+3
+            while not drained.exists() and time.monotonic()<deadline: time.sleep(.01)
+            if not drained.exists():
+                forced.append(True)
+                children[0].terminate()  # Test teardown: old guide otherwise waits forever.
+        except BaseException as exc:
+            failures.append(exc)
+            if children and children[0].poll() is None: children[0].terminate()
+    thread = threading.Thread(target=launch_from_browser)
+    args = SimpleNamespace(origin='https://host.example.test', tailscale=Path(sys.executable), tailscale_socket='',
+        socket=access.root/'state/owner/owner.sock', workspace_issuer=ISSUER, workspace_origin=ORIGIN,
+        target_fleet=grant.fleet, repository=grant.repository, template=grant.template,
+        project_directory=None, install_directory=Path(grant.install_directory))
+    try:
+        thread.start()
+        result = guide.run(args, resolve_paths(root=access.root), access, terminal(monkeypatch, iter(())))
+        thread.join(5)
+        assert not thread.is_alive() and not failures and not forced
+        assert result.data['state']=='launch_handoff' and drained.exists()
+        assert children[0].poll()==0
+        probe = os.open(lock, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError): fcntl.flock(probe, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally: os.close(probe)
+    finally:
+        os.close(parent_fd)  # The stable launcher closes its lease when run returns.
+        if children and children[0].poll() is None:
+            children[0].terminate(); children[0].wait(timeout=5)
+        thread.join(5)
+    probe = os.open(lock, os.O_RDONLY)
+    try: fcntl.flock(probe, fcntl.LOCK_EX|fcntl.LOCK_NB)
+    finally: os.close(probe)
 
 
 def test_local_preview_and_launch_refuse_redirected_project(setup_authority, tmp_path, monkeypatch):

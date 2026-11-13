@@ -41,6 +41,7 @@ class SetupGrant:
     created_at: float
     expires_at: float
     project_directory: str | None = None
+    account_directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ def _snapshot(grant):
     value = asdict(grant)
     if grant.project_directory is None:
         value.pop("project_directory")  # Preserve existing repository snapshots exactly.
+    if grant.account_directory is None:
+        value.pop("account_directory")
     return json.dumps(value,sort_keys=True,separators=(",", ":"))
 
 
@@ -103,12 +106,15 @@ class OwnerSetup:
         conn.execute("SELECT singleton,snapshot,active,launch_id,launch_plan FROM setup_grant LIMIT 0")
         conn.execute("SELECT plan_id,generation,created_at,expires_at,payload FROM setup_previews LIMIT 0")
 
-    def candidate(self, principal, *, template, fleet, repository, install_directory, project_directory=None):
+    def candidate(self, principal, *, template, fleet, repository, install_directory, project_directory=None, account_directory=None):
         # Reuse the installed template's finite repository/fleet policy, with a
         # harmless validation goal; no authoring, registration or staging here.
-        from ..commands.setup import _template_config
+        from ..commands.setup import _template_config, _account_directory
         if not isinstance(fleet,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*",fleet): raise AccessDenied("setup_denied")
-        _template_config(template,fleet,repository,"Validate selected project scope", project_directory=project_directory)
+        if account_directory is not None:
+            account_directory = str(_account_directory(account_directory))
+        _template_config(template,fleet,repository,"Validate selected project scope", project_directory=project_directory,
+                         **({"account_directory":account_directory} if account_directory is not None else {}))
         package=managed_setup(self.access.root)
         directory=Path(install_directory)
         if template == "local-project":
@@ -121,7 +127,7 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,str(package.installation.directory),package.source_revision,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory,account_directory)
 
     def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
@@ -197,8 +203,9 @@ class OwnerSetup:
         if value.get("template") == "revenue-web-app":
             if set(value)!=base or not isinstance(value.get("repository"),str): raise AccessUnavailable()
         elif value.get("template") == "local-project":
-            if (set(value)!=base|{"project_directory"} or value.get("repository") is not None
-                    or not isinstance(value.get("project_directory"),str)): raise AccessUnavailable()
+            if (set(value) not in (base|{"project_directory"},base|{"project_directory","account_directory"})
+                    or value.get("repository") is not None or not isinstance(value.get("project_directory"),str)
+                    or "account_directory" in value and not isinstance(value["account_directory"],str)): raise AccessUnavailable()
         else: raise AccessUnavailable()
         grant=SetupGrant(**value)
         if (not _uuid(grant.generation) or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in (grant.created_at,grant.expires_at))
@@ -292,7 +299,8 @@ class OwnerSetup:
                     or rendered.effects.get("fleet_manifests",{}).get(grant.fleet)!=str(expected)):
                 raise AccessDenied("setup_original_operation_changed")
             if content!=_template_config(grant.template,grant.fleet,grant.repository,payload["goal"],
-                    **({"project_directory": grant.project_directory} if grant.project_directory is not None else {})):
+                    **({"project_directory": grant.project_directory} if grant.project_directory is not None else {}),
+                    **({"account_directory": grant.account_directory} if grant.account_directory is not None else {})):
                 raise AccessDenied("setup_original_operation_changed")
         return actual
 
@@ -380,6 +388,9 @@ class SetupEngine:
         if grant.template == "local-project":
             from ..commands.setup import _local_project
             _local_project(grant.project_directory, forbidden=(self.root, Path(grant.installation), Path(grant.install_directory)))
+            if grant.account_directory is not None:
+                from ..commands.setup import _account_directory
+                _account_directory(grant.account_directory)
 
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
@@ -392,11 +403,12 @@ class SetupEngine:
             self._first_team(grant)
             self._project_scope(grant)
             _template_config(grant.template,grant.fleet,grant.repository,goal,
-                **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}))
+                **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}),
+                **({"account_directory":grant.account_directory} if grant.account_directory is not None else {}))
             self.store.begin_preview(reader,grant,goal)
             output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
                 config=None,repository=grant.repository,project_directory=grant.project_directory,goal=goal,replace_config=False,plan_only=True,
-                install_directory=grant.install_directory))
+                install_directory=grant.install_directory,account_directory=grant.account_directory))
             record=output.data["update"]
             request,expires_at=self.store.retain(reader,grant,record)
             rendered=read_rendered(self.root,request["config_fingerprint"])

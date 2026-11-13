@@ -5,6 +5,35 @@ from types import SimpleNamespace
 
 import pytest
 
+
+def test_local_template_freezes_explicit_account_directory(tmp_path, monkeypatch):
+    import yaml
+    from claudlobby.commands import setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    account = tmp_path / "private account"; account.mkdir()
+    content = setup._template_config("local-project", "local-team", None, "Review local work",
+        project_directory=str(project), account_directory=str(account))
+    fleet = yaml.safe_load(content)["fleet"]
+    assert fleet["accounts"] == {"default": str(account)}
+    assert fleet["defaults"]["account"] == "default"
+
+
+@pytest.mark.parametrize("invalid", ["relative", "file", "link"])
+def test_local_template_refuses_unbound_account_directory(tmp_path, monkeypatch, invalid):
+    from claudlobby.commands import setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "project"; project.mkdir()
+    selected = tmp_path / "selected"; selected.mkdir()
+    if invalid == "relative": account = "relative"
+    elif invalid == "file":
+        account = tmp_path / "file"; account.write_text("not an account")
+    else:
+        account = tmp_path / "link"; account.symlink_to(selected, target_is_directory=True)
+    with pytest.raises(CommandFailure):
+        setup._template_config("local-project", "local-team", None, "Review local work",
+            project_directory=str(project), account_directory=str(account))
+
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import setup
 
