@@ -755,6 +755,13 @@ def test_local_template_is_repo_free_scoped_and_idle(tmp_path, monkeypatch):
     fleet, defaults = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
     assert set(fleet.bots) == {"lead", "engineer", "reviewer"}
     assert fleet.manager == "lead" and not fleet.plugins.required
+    lead = fleet.bots["lead"]
+    assert "explicit delivered human request" in lead.mission
+    assert "Do not admit from the startup goal" in lead.startup_prompt
+    assert "inbound-acknowledgment" in lead.protocols
+    for name in ("engineer", "reviewer"):
+        assert "Wait for an explicit assignment" in fleet.bots[name].startup_prompt
+        assert "do not admit or seek tasks" in fleet.bots[name].startup_prompt
     for bot in fleet.bots.values():
         assert bot.mounts == {"project": str(project)}
         assert not bot.mcp and not bot.channels and (bot.scope is None or not bot.scope.repos)

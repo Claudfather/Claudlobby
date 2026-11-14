@@ -6,9 +6,12 @@ constructor repairs it. Same-UID file mutation remains outside this boundary.
 """
 from dataclasses import asdict, dataclass
 import json
+import hashlib
 import math
+import os
 from pathlib import Path
 import re
+import stat
 from types import SimpleNamespace
 from uuid import uuid4
 import shlex
@@ -42,6 +45,7 @@ class SetupGrant:
     expires_at: float
     project_directory: str | None = None
     account_directory: str | None = None
+    managed_owner: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -59,11 +63,67 @@ def _snapshot(grant):
         value.pop("project_directory")  # Preserve existing repository snapshots exactly.
     if grant.account_directory is None:
         value.pop("account_directory")
+    if grant.managed_owner is None:
+        value.pop("managed_owner")
     return json.dumps(value,sort_keys=True,separators=(",", ":"))
 
 
 def _uuid(value):
     return isinstance(value,str) and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",value) is not None
+
+
+def _managed_owner_shape(value):
+    fields = {"origin", "tailscale", "tailscale_socket", "socket", "workspace_issuer", "workspace_origin"}
+    return (isinstance(value, dict) and set(value) == {"override", "sha256", "config"}
+            and isinstance(value["override"], str) and isinstance(value["sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is not None
+            and isinstance(value["config"], dict) and set(value["config"]) == fields
+            and all(v is None or isinstance(v, str) for v in value["config"].values()))
+
+
+def private_owner_override_parent(path):
+    """No other UID may replace the approved private policy or its ancestors."""
+    parent = path.parent
+    for directory in (parent, *parent.parents):
+        info = directory.lstat()
+        trusted_sticky = bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}
+                or info.st_mode & 0o022 and not trusted_sticky):
+            raise AccessDenied("setup_owner_binding_changed")
+    info = parent.lstat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise AccessDenied("setup_owner_binding_changed")
+
+
+def check_managed_owner(value, root, installation, *, current=True):
+    """Bind local service consent; the browser cannot choose ingress or a file."""
+    if value is None:
+        return
+    from ..config import HOST_OVERRIDE_ENV, host_override_path, load_host_jobs
+    from .owner_service import service_command
+    if not _managed_owner_shape(value):
+        raise AccessDenied("setup_owner_binding_changed")
+    path = Path(value["override"])
+    default = Path.home()/".config/claudlobby/system.yaml"
+    if (not os.environ.get(HOST_OVERRIDE_ENV) or path != host_override_path()
+            or not path.is_absolute() or path.resolve() != path or path == default
+            or path.is_relative_to(Path(installation)) or path.is_relative_to(Path(root)/"state")):
+        raise AccessDenied("setup_owner_binding_changed")
+    private_owner_override_parent(path)
+    config = value["config"]
+    service_command(Path(root), Path(installation)/"bin/claudlobby", config)
+    if not current:
+        return
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+            or info.st_mode & 0o022 or info.st_size > 1048576
+            or hashlib.sha256(path.read_bytes()).hexdigest() != value["sha256"]):
+        raise AccessDenied("setup_owner_binding_changed")
+    job = load_host_jobs()["plane-owner"]
+    if (job.get("enroll") is not True or job.get("unit") != "service"
+            or job.get("script") != "$CLAUDLOBBY_CLI"
+            or any(job.get(key) != selected for key, selected in config.items())):
+        raise AccessDenied("setup_owner_binding_changed")
 
 
 def managed_setup(root, grant=None, *, current=True):
@@ -106,7 +166,8 @@ class OwnerSetup:
         conn.execute("SELECT singleton,snapshot,active,launch_id,launch_plan FROM setup_grant LIMIT 0")
         conn.execute("SELECT plan_id,generation,created_at,expires_at,payload FROM setup_previews LIMIT 0")
 
-    def candidate(self, principal, *, template, fleet, repository, install_directory, project_directory=None, account_directory=None):
+    def candidate(self, principal, *, template, fleet, repository, install_directory, project_directory=None, account_directory=None,
+                  managed_owner=None):
         # Reuse the installed template's finite repository/fleet policy, with a
         # harmless validation goal; no authoring, registration or staging here.
         from ..commands.setup import _template_config, _account_directory
@@ -116,6 +177,7 @@ class OwnerSetup:
         _template_config(template,fleet,repository,"Validate selected project scope", project_directory=project_directory,
                          **({"account_directory":account_directory} if account_directory is not None else {}))
         package=managed_setup(self.access.root)
+        check_managed_owner(managed_owner, self.access.root, package.installation.directory, current=False)
         directory=Path(install_directory)
         if template == "local-project":
             from ..commands.setup import _local_project
@@ -127,10 +189,11 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,str(package.installation.directory),package.source_revision,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory,account_directory)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory,account_directory,managed_owner)
 
     def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
+        check_managed_owner(expected.managed_owner, self.access.root, expected.installation)
         with self.access._connection(write=True) as conn:
             binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
             if OwnerConnected._snapshot(binding)!=expected.binding_snapshot: raise AccessDenied("setup_denied")
@@ -200,10 +263,12 @@ class OwnerSetup:
         base={"binding_snapshot","template","fleet","repository","installation","source_revision",
               "install_directory","generation","created_at","expires_at"}
         if not isinstance(value,dict): raise AccessUnavailable()
+        fields = set(value) - {"managed_owner"}
+        if "managed_owner" in value and not _managed_owner_shape(value["managed_owner"]): raise AccessUnavailable()
         if value.get("template") == "revenue-web-app":
-            if set(value)!=base or not isinstance(value.get("repository"),str): raise AccessUnavailable()
+            if fields!=base or not isinstance(value.get("repository"),str): raise AccessUnavailable()
         elif value.get("template") == "local-project":
-            if (set(value) not in (base|{"project_directory"},base|{"project_directory","account_directory"})
+            if (fields not in (base|{"project_directory"},base|{"project_directory","account_directory"})
                     or value.get("repository") is not None or not isinstance(value.get("project_directory"),str)
                     or "account_directory" in value and not isinstance(value["account_directory"],str)): raise AccessUnavailable()
         else: raise AccessUnavailable()
@@ -284,6 +349,12 @@ class OwnerSetup:
             from ..config_plan import read_rendered
             from ..commands.setup import _template_config
             rendered=read_rendered(self.access.root,record["config_fingerprint"])
+            if grant.managed_owner is not None:
+                frozen = rendered.inputs.get(grant.managed_owner["override"], {}).get("state", {})
+                if (frozen.get("resolved") != grant.managed_owner["override"]
+                        or frozen.get("node", {}).get("kind") != "file"
+                        or frozen["node"].get("sha256") != grant.managed_owner["sha256"]):
+                    raise AccessDenied("setup_owner_binding_changed")
             if rendered.revision!=grant.source_revision or rendered.fleets!=(grant.fleet,):
                 raise AccessDenied("setup_other_fleet")
             sources=rendered.effects.get("fleet_sources")
@@ -381,10 +452,12 @@ class SetupEngine:
         return {"version":3 if grant.template == "local-project" else 2,"template":grant.template,"fleet":grant.fleet,
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
+            **({"managed_owner":True} if grant.managed_owner is not None else {}),
             "request":request,"launch_reserved":reserved,
             **({"continuation":_continuation(self.root,grant)} if request and not reserved else {})}
 
     def _project_scope(self, grant):
+        check_managed_owner(grant.managed_owner, self.root, grant.installation)
         if grant.template == "local-project":
             from ..commands.setup import _local_project
             _local_project(grant.project_directory, forbidden=(self.root, Path(grant.installation), Path(grant.install_directory)))
@@ -447,6 +520,7 @@ class SetupEngine:
         record=self.store.operation(grant)
         _,reserved=self.store.retained_request(reader)
         return {"version":3 if grant.template == "local-project" else 2,**request,"state":record["phase"] if record else "unknown",
+            **({"managed_owner":True} if grant.managed_owner is not None else {}),
             "launch_reserved":reserved,"config_committed":bool(record and record.get("config_committed")),
             "health_errors":record.get("health_errors",{}) if record else {},
             **({"continuation":_continuation(self.root,grant)} if record and not reserved else {})}

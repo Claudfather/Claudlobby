@@ -6338,5 +6338,20 @@ def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp
     assert "explicitly assigned task" in instructions
     assert "All work lands via PR" not in instructions and "gh pr create" not in instructions
     assert "Do not invent tasks" in instructions
+    prose = " ".join(instructions.split())
+    assert "The startup goal is scope, not task admission" in prose
+    assert "If a human request already references a task, reuse that task" in prose
+    assert "retain the original task and request UUID" in prose
+    assert "only the lead completes it after accepting independent review" in prose
+    if bot_id == "lead":
+        assert "explicit delivered human request" in bot.mission
+        assert "The ack precedes the substance" in instructions
+        assert "Bash(claudlobby --json task assign *)" in allow
+        assert "Bash(claudlobby --json assignment deliver *)" in allow
+    else:
+        assert "explicit delivered human request" not in bot.mission
+        assert "do not admit or seek tasks" in bot.startup_prompt
+        assert "Bash(claudlobby --json task assign *)" not in allow
+        assert "Bash(claudlobby --json assignment deliver *)" not in allow
     assert all(not defaults["jobs"][job]["enroll"] for job in (
         "manager-checkin", "task-recheck", "reload-fleet", "weekly-worker-restart", "data-sweep", "creds-check", "session-export"))

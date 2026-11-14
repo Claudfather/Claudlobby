@@ -7,12 +7,14 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import http.client
 import json
+import hashlib
 import os
 from pathlib import Path
 import socket
 import signal
 import shlex
 import subprocess
+import stat
 import sys
 import tempfile
 import time
@@ -20,7 +22,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from ..command_result import CommandFailure, CommandOutput
-from ..plane.owner_access import AccessUnavailable
+from ..plane.owner_access import AccessDenied, AccessUnavailable
 from ..plane.owner_setup import OwnerSetup
 
 
@@ -56,6 +58,139 @@ def _input(terminal, value, label, default=None, *, optional=False):
     if value is None or not str(value) or len(str(value)) > 2048 or not str(value).isprintable():
         raise CommandFailure("invalid_argument", "local setup requires explicit printable configuration")
     return str(value)
+
+
+def _owner_policy_content(before, owner):
+    """Replace only the approved YAML entry; preserve unrelated source bytes."""
+    import yaml
+    text = before.decode("utf-8") if before else ""
+    tree = yaml.compose(text)
+    def indented(value, indent):
+        return "".join(" "*indent+line for line in yaml.safe_dump(value, sort_keys=False, allow_unicode=True).splitlines(True))
+    if tree is None:
+        return (text + ("\n" if text and not text.endswith("\n") else "")
+                + "host:\n  jobs:\n" + indented({"plane-owner": owner}, 4)).encode()
+    def pair(node, name):
+        return next(((key,value) for key,value in node.value if key.value == name), None)
+    def block(node):
+        return isinstance(node, yaml.MappingNode) and not node.flow_style
+    def last_token(node):
+        if isinstance(node, yaml.MappingNode):
+            return max((last_token(child) for entry in node.value for child in entry), default=node.end_mark.index)
+        if isinstance(node, yaml.SequenceNode):
+            return max((last_token(child) for child in node.value), default=node.end_mark.index)
+        return node.end_mark.index
+    def replace_entry(key, node, value):
+        start = key.start_mark.index-key.start_mark.column
+        end = last_token(node)
+        if end < key.start_mark.index:
+            raise CommandFailure("invalid_argument", "aliased owner policy must be made explicit locally")
+        if end and text[end-1:end] != "\n":
+            newline = text.find("\n",end); end = len(text) if newline < 0 else newline+1
+        return (text[:start]+indented(value,key.start_mark.column)+text[end:]).encode()
+    host_pair = pair(tree,"host")
+    if host_pair is None:
+        return (text[:tree.start_mark.index]+"host:\n  jobs:\n"+indented({"plane-owner":owner},4)+text[tree.end_mark.index:]).encode()
+    host_key,host = host_pair
+    if not block(host):
+        if host.value in (None,"",[]) or host.value == "null":
+            return replace_entry(host_key,host,{"host":{"jobs":{"plane-owner":owner}}})
+        raise CommandFailure("invalid_argument", "managed owner requires a block-style private host policy")
+    jobs_pair = pair(host,"jobs")
+    if jobs_pair is None:
+        at = host.end_mark.index-host.end_mark.column
+        return (text[:at]+indented({"jobs":{"plane-owner":owner}},host_key.start_mark.column+2)+text[at:]).encode()
+    jobs_key,jobs = jobs_pair
+    if not block(jobs):
+        if jobs.value in (None,"",[]) or jobs.value == "null":
+            return replace_entry(jobs_key,jobs,{"jobs":{"plane-owner":owner}})
+        raise CommandFailure("invalid_argument", "managed owner requires block-style host jobs")
+    selected = pair(jobs,"plane-owner")
+    if selected:
+        return replace_entry(*selected,{"plane-owner":owner})
+    at = jobs.end_mark.index-jobs.end_mark.column
+    return (text[:at]+indented({"plane-owner":owner},jobs_key.start_mark.column+2)+text[at:]).encode()
+
+
+def _owner_override_plan(root, config):
+    """Plan one locally approved private override; never edit the shared default."""
+    import yaml
+    from ..config import HOST_OVERRIDE_ENV, host_override_path, load_host_jobs
+    from ..plane.owner_setup import private_owner_override_parent
+    path = host_override_path()
+    if (not os.environ.get(HOST_OVERRIDE_ENV) or not path.is_absolute() or path.resolve() != path
+            or path == Path.home()/".config/claudlobby/system.yaml"
+            or path.is_relative_to(root/"state") or path.parent.stat().st_uid != os.getuid()):
+        raise CommandFailure("invalid_argument", "managed connection requires an explicit owned private host override")
+    try:
+        private_owner_override_parent(path)
+    except AccessDenied as exc:
+        raise CommandFailure("invalid_argument", "host override requires a private owned directory and trusted ancestors") from exc
+    before, identity = None, None
+    if os.path.lexists(path):
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or info.st_mode & 0o022 or info.st_size > 1048576):
+            raise CommandFailure("conflict", "private host override is redirected or not exclusively owned")
+        before = path.read_bytes()
+        identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+    # Validate all existing policy, preserving every unrelated job and prefix.
+    existing = load_host_jobs()["plane-owner"]
+    if existing.get("unit") != "service" or existing.get("script") != "$CLAUDLOBBY_CLI":
+        raise CommandFailure("conflict", "configured owner execution is not canonical")
+    if any(existing.get(key) is not None and existing.get(key) != selected for key, selected in config.items()):
+        raise CommandFailure("conflict", "configured owner belongs to different ingress; no policy was replaced")
+    document = yaml.safe_load(before) if before else {}
+    document = document or {}
+    host = document.get("host") or {}; document["host"] = host
+    jobs = host.get("jobs") or {}; host["jobs"] = jobs
+    owner = dict(jobs.get("plane-owner") or {})
+    owner.update(config)
+    owner["enroll"] = True
+    jobs["plane-owner"] = owner
+    content = _owner_policy_content(before, owner)
+    try:
+        valid = yaml.safe_load(content) == document
+    except yaml.YAMLError:
+        valid = False
+    if not valid:
+        raise CommandFailure("conflict", "owner policy cannot preserve unrelated YAML bindings; no file changed")
+    return {"binding": {"override": str(path), "sha256": hashlib.sha256(content).hexdigest(), "config": dict(config)},
+            "before": before, "identity": identity, "content": content}
+
+
+def _commit_owner_override(plan):
+    """Compare before publishing this consented authoring change, not runtime output."""
+    path = Path(plan["binding"]["override"])
+    from ..plane.owner_setup import private_owner_override_parent
+    private_owner_override_parent(path)
+    if plan["before"] is None:
+        unchanged = not os.path.lexists(path)
+    else:
+        info = path.lstat()
+        unchanged = (not path.is_symlink() and info.st_nlink == 1
+                     and (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns) == plan["identity"]
+                     and path.read_bytes() == plan["before"])
+    if not unchanged:
+        raise CommandFailure("conflict", "private host policy changed after approval; no replacement attempted")
+    fd, name = tempfile.mkstemp(prefix=".owner-policy-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(plan["content"]); stream.flush(); os.fchmod(stream.fileno(), 0o600); os.fsync(stream.fileno())
+        if plan["before"] is None:
+            os.link(temporary, path)  # Create-only, never overwrite an unexpected node.
+        else:
+            info = path.lstat()
+            if ((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns) != plan["identity"]
+                    or path.is_symlink() or info.st_nlink != 1 or path.read_bytes() != plan["before"]):
+                raise CommandFailure("conflict", "private host policy changed before publication")
+            os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _configuration(args, paths, terminal, cli):
@@ -105,9 +240,13 @@ def _configuration(args, paths, terminal, cli):
         "fleet": fleet, "template": template, "repository": repository, "project_directory": project,
         "account_directory": account, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
     terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
-                   "This guide does not configure them or enroll an owner service.\n")
+                   "This guide does not configure those prerequisites.\n")
+    terminal.write("Managed owner-service enrollment will require explicit local approval and the original browser Launch.\n"
+                   if getattr(args, "managed_owner", False) else "Owner serving stays foreground-only; no owner service is enrolled.\n")
+    plan = _owner_override_plan(paths.root, config) if getattr(args, "managed_owner", False) else None
     return config, SimpleNamespace(template=template, target_fleet=fleet,
-        repository=repository, project_directory=project, account_directory=account, install_directory=directory)
+        repository=repository, project_directory=project, account_directory=account, install_directory=directory,
+        managed_owner=plan["binding"] if plan else None, managed_owner_plan=plan)
 
 
 def _ready(path, origin):
@@ -203,10 +342,10 @@ def run(args, paths, store, terminal):
         raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
     if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
-    if load_host_jobs()["plane-owner"].get("enroll", True):
-        raise CommandFailure("conflict", "guided setup retains foreground serving; configured owner service enrollment requires separate reviewed handover")
     cli = installation.cli
     config, approval = _configuration(args, paths, terminal, cli)
+    if load_host_jobs()["plane-owner"].get("enroll", True) and approval.managed_owner is None:
+        raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
     # No authority method is reached before the terminal's ancestry check.
     if not os.path.lexists(store.path):
         console._initialize_first_owner(paths, terminal)
@@ -232,12 +371,13 @@ def run(args, paths, store, terminal):
                 raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
             terminal.write("Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
             retained = OwnerSetup(store).retained_state()
-            if retained.launch_id is not None:
-                _original_launch(retained)
+            # A browser may retain this invocation's approved Launch as soon as
+            # serving is ready. Entry checks already refused pre-existing work;
+            # compare the same grant below, then use the normal handoff loop.
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.template, grant.project_directory, grant.account_directory, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
-                        approval.template, approval.project_directory, approval.account_directory, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
+                if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:
@@ -263,14 +403,15 @@ def run(args, paths, store, terminal):
                         # the child and this guide must exit to release reader
                         # leases; never let imported owner code survive cutover.
                         status = shlex.join([str(cli), "--root", str(paths.root), "host", "update", "status", "--json"])
-                        reconnect = shlex.join(service_command(paths.root, cli, config))
+                        reconnect = ("The approved managed connection will return at the same address; keep the original browser view open."
+                                     if approved.managed_owner else "After DONE, reconnect without another setup: " + shlex.join(service_command(paths.root, cli, config)))
                         return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
                             "config_fingerprint": retained.launch_plan, "generation": approved.generation,
                             "source_revision": approved.source_revision}, lines=(
                                 "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",
-                                "After DONE, reconnect without another setup: " + reconnect))
+                                reconnect))
                 try:
                     child.wait(timeout=0.25)
                     break

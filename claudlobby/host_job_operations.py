@@ -74,11 +74,12 @@ def _bind_git_job(current: GitCurrentRuntime, name: str, adapter: Adapter | None
     if len(set(families)) != 1:
         raise HostJobError("host job has no unique committed native family")
     stem = families[0]
-    resident = stop and scope == "host" and name == "plane-daemon"
+    resident = stop and scope == "host" and name in {"plane-daemon", "plane-owner"}
+    phase = "ingest" if resident and name == "plane-daemon" else "producers"
     wanted = ({stem + ".plist"} if manager == "Darwin" else
               {stem + ".service"} if resident else {stem + ".service", stem + ".timer"})
     selected = [declaration for declaration in declarations if declaration.source.name in wanted]
-    if (len(selected) != len(wanted) or any(metadata[str(declaration.source)]["phase"] != ("ingest" if resident else "producers")
+    if (len(selected) != len(wanted) or any(metadata[str(declaration.source)]["phase"] != phase
             or not metadata[str(declaration.source)]["enroll"] for declaration in selected)):
         raise HostJobError("host job is disabled or lacks a complete committed timer family")
     service = next(declaration for declaration in selected if declaration.service is None)

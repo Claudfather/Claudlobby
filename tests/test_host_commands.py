@@ -1,6 +1,7 @@
 """Public host routes with real plans/journals and explicit lifecycle collaborator."""
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -495,3 +496,177 @@ def test_public_fleet_job_stop_preserves_state_and_operator_guards(tmp_path, mon
     body = call(capsys, ["--root", str(tmp_path), "--fleet", "selected",
                         "host", "supervision", "stop", "--fleet-job", "fleet-pulse", "--json"], expected=4)
     assert body["error"]["code"] == "conflict"
+
+
+def _owner_stop_family(tmp_path, monkeypatch, *, manager="Linux", state="ready", problem=None):
+    """Reuse the job-stop native fixture and the real private listener/lease."""
+    from contextlib import ExitStack
+    from dataclasses import replace
+    import os
+    import plistlib
+    import socket
+    from claudlobby.config_units import unit_family
+    from claudlobby.runtime_admission import wrap_unit_argv, unit_systemd_command, unit_systemd_environment
+    from claudlobby.plane.owner_server import private_listener
+    from claudlobby.plane.owner_service import service_command
+    from tests.test_host_override import _stop_family
+
+    jobs, current, native, _, directory, calls = _stop_family(
+        tmp_path, monkeypatch, manager=manager, name="plane-daemon",
+        activity="active" if state == "ready" else "inactive")
+    root = current.installation.data_root
+    sock = root / "owner" / "owner.sock"
+    env = dict(current.snapshot["units"][0]["environment"])
+    command = service_command(root, current.installation.cli, {
+        "origin": "https://owner.example.test", "tailscale": sys.executable, "socket": str(sock),
+        "workspace_issuer": "https://website.example.test", "workspace_origin": "https://plane.example.test"})
+    if problem == "unknown-argument":
+        command += ["--unknown", "value"]
+    elif problem == "duplicate-argument":
+        command += ["--origin", "https://owner.example.test"]
+    elif problem == "noncanonical-order":
+        command[6:10] = command[8:10] + command[6:8]
+    argv = wrap_unit_argv(env, unit="private-plane-owner", phase="producers", mode="exec", argv=command)
+    if problem == "generated-environment":
+        env["BOT_SERVICE"] = ""
+    definition = {"Label": "private-plane-owner", "WorkingDirectory": str(root),
+                  "EnvironmentVariables": env, "ProgramArguments": list(argv), "KeepAlive": True,
+                  "AbandonProcessGroup": problem == "abandon"}
+    if problem == "scheduled":
+        definition["StartInterval"] = 60
+    service = (f"[Service]\nWorkingDirectory={root}\nExecStart={unit_systemd_command(argv)}\n"
+               + "".join(unit_systemd_environment(k, v) + "\n" for k, v in env.items())
+               + ("KillMode=process\n" if problem == "kill-mode" else ""))
+    files = {"private-plane-owner.plist": (plistlib.dumps(definition), 0o644),
+             "private-plane-owner.service": (service.encode(), 0o644)}
+    generated = Path(current.snapshot["units"][0]["source"]).parent
+    rows = unit_family(files, destination=generated, scope="host", phase="producers")
+    for name, (content, mode) in files.items():
+        for folder in (generated, directory):
+            (folder / name).write_bytes(content)
+            (folder / name).chmod(mode)
+    current = replace(current, snapshot={**current.snapshot, "units": current.snapshot["units"] + rows})
+    leases = ExitStack()
+    if state != "never-bound":
+        sock.parent.mkdir(mode=0o700)
+        leases.enter_context(private_listener(sock))
+        if state == "exited":
+            leases.close()
+    if state == "stale":
+        # Emulate a dead socket with its released canonical lease record.
+        leases.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as dead:
+            dead.bind(str(sock)); sock.chmod(0o600)
+            identity = sock.stat()
+        parent = sock.parent.stat()
+        sock.with_name(sock.name + ".lock").write_text(json.dumps({
+            "version": 1, "parent": [parent.st_dev, parent.st_ino],
+            "socket": [identity.st_dev, identity.st_ino]}))
+    table = ({900: (1, 900, os.getuid(), "owner"), 901: (900, 900, os.getuid(), "child")}
+             if state == "ready" else {})
+    monkeypatch.setattr(jobs, "_process_table", lambda: table.copy())
+    monkeypatch.setattr(jobs, "_await_group_quiet", jobs._group_quiet)
+    native.read_original = native.read
+    native.read = lambda function, *args: ("pid\t900\ngroup\t/owned-owner\n" if state == "ready"
+        else "pid\t0\ngroup\t\n") if function == "svc_job_witness" else native.read_original(function, *args)
+    def stopped(function, args):
+        if function != "svc_job_stop_exact":
+            return
+        if problem != "held-listener":
+            leases.close()
+        if problem == "surviving-child":
+            table.pop(900, None)
+        else:
+            table.clear()
+        if problem == "replaced-lock":
+            lock = sock.with_name(sock.name + ".lock")
+            lock.unlink(); lock.write_text(""); lock.chmod(0o600)
+    native.failure = stopped
+    return jobs, current, native, directory, calls, sock, leases
+
+
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+@pytest.mark.parametrize("state", ["ready", "exited", "never-bound", "stale"])
+def test_public_owner_stop_binds_native_unit_and_releases_listener(
+        tmp_path, monkeypatch, capsys, manager, state):
+    from contextlib import contextmanager
+    from claudlobby.commands import host
+    jobs, current, native, directory, calls, sock, leases = _owner_stop_family(
+        tmp_path, monkeypatch, manager=manager, state=state)
+    foreign = {p: p.read_bytes() for p in directory.glob("private-plane-daemon.*")}
+    @contextmanager
+    def admitted(*args, **kwargs):
+        yield current
+    monkeypatch.setattr(jobs, "mutation_admission", admitted)
+    monkeypatch.setattr(jobs.RuntimeIdentity, "current", lambda: object())
+    monkeypatch.setattr(jobs, "Adapter", lambda: native)
+    monkeypatch.setattr(host, "_operator_shell", lambda root: None)
+    try:
+        result = call(capsys, ["--root", str(current.installation.data_root), "host", "supervision",
+                              "stop", "--host-job", "plane-owner", "--json"])
+        member, = result["data"]["members"]
+        assert member["outcome"] == "absent" and member["owner_endpoint_quiet"] is True
+        assert member["owner_lifetime_lock_released"] is True
+        assert member["owner_endpoint_state"] == ("refused" if state == "stale" else "absent")
+        assert not (directory / ("private-plane-owner.plist" if manager == "Darwin" else "private-plane-owner.service")).exists()
+        assert all(path.read_bytes() == content for path, content in foreign.items())
+        assert len([c for c in calls if c[0] == "svc_job_stop_exact"]) == 1
+        if state == "never-bound":
+            assert not sock.parent.exists(), "stop must not create a listener directory or lease"
+        else:
+            assert sock.with_name(sock.name + ".lock").exists(), "the lifetime lock inode is retained"
+    finally:
+        leases.close()
+
+
+@pytest.mark.parametrize("problem", ["unknown-argument", "duplicate-argument", "noncanonical-order",
+                                    "generated-environment", "scheduled", "abandon", "kill-mode"])
+@pytest.mark.parametrize("manager", ["Linux", "Darwin"])
+def test_owner_stop_refuses_noncanonical_committed_policy_before_native_effect(
+        tmp_path, monkeypatch, manager, problem):
+    jobs, current, native, directory, calls, _, leases = _owner_stop_family(
+        tmp_path, monkeypatch, manager=manager, problem=problem)
+    before = {p: p.read_bytes() for p in directory.iterdir()}
+    try:
+        with pytest.raises(jobs.JobStopError):
+            jobs._stop(current, "plane-owner", None, native)
+        assert calls == [] and all(path.read_bytes() == content for path, content in before.items())
+    finally:
+        leases.close()
+
+
+@pytest.mark.parametrize("problem", ["held-listener", "surviving-child", "replaced-lock"])
+def test_owner_stop_retains_definition_on_unknown_post_effect_quiet(tmp_path, monkeypatch, problem):
+    jobs, current, native, directory, calls, _, leases = _owner_stop_family(
+        tmp_path, monkeypatch, manager="Darwin", problem=problem)
+    try:
+        with pytest.raises(jobs.JobStopError) as caught:
+            jobs._stop(current, "plane-owner", None, native)
+        assert caught.value.attempted
+        assert caught.value.data["members"][0]["outcome"] == "unknown"
+        assert (directory / "private-plane-owner.plist").exists()
+        assert len([c for c in calls if c[0] == "svc_job_stop_exact"]) == 1
+    finally:
+        leases.close()
+
+
+@pytest.mark.parametrize("problem", ["malformed-record", "redirected-lock", "linked-lock"])
+def test_owner_stop_refuses_unknown_listener_identity_before_effect(tmp_path, monkeypatch, problem):
+    import os
+    jobs, current, native, directory, calls, sock, leases = _owner_stop_family(tmp_path, monkeypatch)
+    lock = sock.with_name(sock.name + ".lock")
+    try:
+        if problem == "malformed-record":
+            lock.write_text('{"version":1}')
+        elif problem == "redirected-lock":
+            foreign = lock.with_name("foreign.lock")
+            foreign.write_text(""); foreign.chmod(0o600)
+            lock.unlink(); lock.symlink_to(foreign)
+        else:
+            os.link(lock, lock.with_name("other.lock"))
+        with pytest.raises(jobs.JobStopError) as caught:
+            jobs._stop(current, "plane-owner", None, native)
+        assert not caught.value.attempted and calls == []
+        assert (directory / "private-plane-owner.service").exists()
+    finally:
+        leases.close()

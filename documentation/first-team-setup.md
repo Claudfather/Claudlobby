@@ -43,7 +43,7 @@ In an interactive local operator terminal, keep the same `CLI` and `DATA` from
 preparation and run:
 
 ```bash
-"$CLI" --root "$DATA" host owner setup
+"$CLI" --root "$DATA" host owner setup --managed-owner
 ```
 
 The guide asks for this computer's exact private HTTPS origin, the absolute native
@@ -58,8 +58,16 @@ that native configuration separately.
 Choose the approved existing `OWNER/REPO`, a team name and an observed native
 installation directory. The default is the persistent user directory only when
 the native catalog observes it. Review the displayed configuration. Keep this
-terminal open through Preview: owner serving stays in the foreground and does not enroll a
-persistent owner service.
+terminal open through Preview. `--managed-owner` also asks you to approve a
+persistent local connection service in the same browser-created operation.
+Select an owned private host-policy file through `CLAUDLOBBY_HOST_SYSTEM_YAML`
+before running the guide; its owned parent directory must already exist with mode0700 and trusted ancestors. The guide
+does not edit the shared default `~/.config/claudlobby/system.yaml`. It preserves
+your other host jobs and namespace, shows the exact ingress configuration and
+only writes the owner-service entry after `ALLOW-SETUP`. A conflicting existing
+owner or changed file refuses without replacing it. This does not configure
+Tailscale or grant browser messages. Omitting the flag retains foreground-only
+serving and the manual reconnect procedure.
 
 Follow the terminal prompts to pair the browser locally, prepare connected
 storage, confirm the signed-in workspace proposal and approve the exact first-team
@@ -67,8 +75,14 @@ scope. Each approval is separate. In the browser, save the private computer
 address under **Your computers**, open the workspace, provide the approved goal,
 review the exact prepared plan and launch once. The guide then drains admitted
 work and exits, releasing its runtime readers so the original updater can proceed.
-Use the printed stable-CLI `host update status` command to inspect that operation;
-after it reports DONE, run the printed `host owner serve` command to reconnect.
+With managed serving, the updater starts the approved connection at the same
+private address; keep this browser view open while it checks the original
+receipt and existing session. Connection may return while agents are still
+starting. Wait for DONE, empty health errors and actual native readiness before
+asking the team to work. Expired or refused access needs explicit reconnection;
+the guide never issues new authority or repeats Launch. The printed stable-CLI
+status command remains available for local recovery. In foreground-only mode,
+after DONE run the printed `host owner serve` command to reconnect.
 Do not rerun setup or Launch to restore browser access. A lost browser response
 does not discard the retained original identifiers. Reading or downloading instructions
 has not performed these steps. Local setup approval does not grant ordinary
@@ -112,6 +126,7 @@ CLI fleet setup above:
 
 ```bash
 "$CLI" --root "$DATA" host owner setup --template local-project \
+  --managed-owner \
   --project-directory "$PROJECT_DIRECTORY" \
   --account-directory "$CLAUDE_ACCOUNT_DIRECTORY"
 ```
@@ -127,10 +142,13 @@ retargeted. Provider authentication and useful native work still require observa
 
 The terminal approves read/write access to that exact local project; the browser
 can describe a bounded goal and review the frozen plan, but cannot select a path
-or supply configuration. Launch starts native services and may use the provider;
-the template waits for explicit task assignment and disables autonomous work
-check-ins. A goal is not task admission. No task, message or feedback is sent by
-setup. Shell/test commands still require ordinary tool approval; these project
+or supply configuration. Launch starts native services and may use the provider.
+After the team is ready and messages are locally approved, tell the lead what to
+do, for example: “Create TRIAL.md in this project with a short description of the
+team, then have the reviewer check it.” The lead records that explicit human
+request as a canonical task and coordinates implementation and independent
+review. The setup goal does not start a task; setup sends no task, message or
+feedback and does not grant ordinary messages. Shell/test commands still require ordinary tool approval; these project
 permissions are not an operating-system sandbox. Existing host recorder/health
 policy remains effective and must be reviewed in the native consumer plan.
 
@@ -141,6 +159,15 @@ fleet and owned host/fleet jobs through supported public lifecycle commands;
 cleanup and private network/grant revocation must be scoped before activation.
 Revoke only this trial's message/setup/workspace/owner grants while a bound native
 anchor (normally the recorder) still exists, then stop the recorder last. After
+revocation, stop an enrolled connection service with the same stable CLI:
+
+```bash
+"$CLI" --root "$DATA" host supervision stop --host-job plane-owner --json
+```
+
+This stops only the committed owner service and proves its private endpoint and
+lifetime lock quiet; it does not change Tailscale Serve or your other host jobs.
+Retain a refused or unknown result rather than retrying a new action. After
 all current native definitions are removed, local mutation admission deliberately
 refuses an empty inventory; an idle updater is not a substitute ancestry anchor.
 Do not restart workloads or weaken that guard solely to revoke stored offline grants.

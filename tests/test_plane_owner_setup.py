@@ -26,6 +26,8 @@ def setup_authority(team_setup, monkeypatch):
         manifest = root / "local/shop/fleet.yaml"
         projects = manifest.parent / "projects.yaml"
         builder = ConfigPlanBuilder(root, fleets=("shop",), effects={})
+        from claudlobby.config import host_override_path
+        builder.input(host_override_path())  # The actual renderer freezes this host-local input too.
         _, fleet_digest = builder.input_snapshot(manifest)
         _, projects_digest = builder.input_snapshot(projects)
         builder.effects.update(fleet_sources={"shop": {
@@ -393,7 +395,7 @@ def test_repository_snapshot_stays_byte_compatible(setup_authority):
     from dataclasses import asdict
     from claudlobby.plane.owner_setup import _snapshot
     store, _, grant, *_ = setup_authority
-    old = asdict(grant); old.pop("project_directory"); old.pop("account_directory")
+    old = asdict(grant); old.pop("project_directory"); old.pop("account_directory"); old.pop("managed_owner")
     expected = json.dumps(old, sort_keys=True, separators=(",", ":"))
     assert _snapshot(grant) == expected
     store.allow(grant)
@@ -501,6 +503,83 @@ def test_guide_hands_off_original_launch_instead_of_waiting_for_updater(setup_au
     assert len(setup_authority[-1].dispatches) == 1
     assert any("host update status" in line for line in result.lines)
     assert any("host owner serve" in line for line in result.lines)
+
+
+def test_guide_hands_off_launch_retained_as_soon_as_listener_is_ready(setup_authority, monkeypatch):
+    """The browser can launch before the guide's second retained-state read."""
+    from contextlib import contextmanager
+    import sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    from tests.test_host_owner import terminal
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    store, access, grant, reader, *_ = setup_authority
+    store.allow(grant)
+    engine = SetupEngine(access); original = {}; drained = []
+    monkeypatch.setattr(guide, "_native_directories", lambda _: (Path(grant.install_directory),))
+    @contextmanager
+    def serving(*_):
+        original.update(binding(engine.preview(reader, grant.generation, "Review checkout")))
+        engine.launch(reader, **original)
+        class Child:
+            def wait(self, timeout=None): pytest.fail("retained Launch must hand off before waiting")
+        try: yield Child()
+        finally: drained.append(True)
+    monkeypatch.setattr(guide, "_serving", serving)
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=Path(sys.executable), tailscale_socket="",
+        socket=access.root/"state/owner/owner.sock", workspace_issuer=ISSUER, workspace_origin=ORIGIN,
+        target_fleet=grant.fleet, repository=grant.repository, template=grant.template,
+        project_directory=None, install_directory=Path(grant.install_directory))
+    result = guide.run(args, resolve_paths(root=access.root), access, terminal(monkeypatch, iter(())))
+    assert result.data["state"] == "launch_handoff" and drained == [True]
+    assert result.data["request_id"] == original["request_id"]
+    assert len(setup_authority[-1].dispatches) == 1
+
+
+def managed_grant(fixture, tmp_path, monkeypatch):
+    import sys
+    from claudlobby.commands.host_owner_setup import _owner_override_plan, _commit_owner_override
+    store, access, old, reader, *_ = fixture
+    override = tmp_path/"private-host.yaml"
+    override.write_text("host:\n  unit_prefix: ownedtest\n  jobs:\n    plane-owner:\n      enroll: false\n")
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(override))
+    config = dict(origin="https://host.example.test", tailscale=sys.executable, tailscale_socket=None,
+        socket=str(access.root/"state/owner/owner.sock"), workspace_issuer="https://accounts.example.test",
+        workspace_origin="https://plane.example.test")
+    plan = _owner_override_plan(access.root, config)
+    grant = store.candidate(OWNER, template=old.template, fleet=old.fleet, repository=old.repository,
+        install_directory=old.install_directory, managed_owner=plan["binding"])
+    return grant, plan, override, _commit_owner_override
+
+
+def test_managed_owner_requires_consented_override_and_preserves_original_preview(setup_authority, tmp_path, monkeypatch):
+    grant, plan, override, commit = managed_grant(setup_authority, tmp_path, monkeypatch)
+    store, access, _, reader, *_ = setup_authority
+    with pytest.raises(AccessDenied): store.allow(grant)
+    assert "enroll: false" in override.read_text()
+    commit(plan); store.allow(grant)
+    assert store.local() == grant
+    engine = SetupEngine(access)
+    monkeypatch.setattr(engine.store, "retain", lambda *_: (_ for _ in ()).throw(RuntimeError("lost preview")))
+    with pytest.raises(RuntimeError): engine.preview(reader, grant.generation, "Review local work")
+    context = engine.context(reader)
+    assert context["managed_owner"] is True
+    assert "override" not in context and "config" not in context
+    original = context["request"]
+    assert engine.launch(reader, **original)["managed_owner"] is True
+    assert engine.launch(reader, **original)["launch_reserved"] is True
+    assert len(setup_authority[-1].dispatches) == 1
+
+
+def test_managed_owner_change_after_preview_refuses_dispatch(setup_authority, tmp_path, monkeypatch):
+    grant, plan, override, commit = managed_grant(setup_authority, tmp_path, monkeypatch)
+    store, access, _, reader, *_ = setup_authority
+    commit(plan); store.allow(grant)
+    engine = SetupEngine(access)
+    preview = engine.preview(reader, grant.generation, "Review local work")
+    override.write_text(override.read_text().replace("https://host.example.test", "https://other.example.test"))
+    with pytest.raises(AccessDenied): engine.launch(reader, **binding(preview))
+    assert not setup_authority[-1].dispatches
 
 
 def test_guide_handoff_drains_real_child_and_releases_both_runtime_readers(setup_authority, monkeypatch, tmp_path):

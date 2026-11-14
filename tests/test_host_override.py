@@ -12,6 +12,77 @@ from types import SimpleNamespace
 
 import pytest
 
+
+def test_managed_owner_policy_is_unchanged_until_consent_and_preserves_other_jobs(tmp_path, monkeypatch):
+    import sys, yaml
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.host_owner_setup import _owner_override_plan, _commit_owner_override
+    policy = tmp_path / "private-host.yaml"
+    original = "# retained header\nhost:\n  unit_prefix: privateunit\n  jobs:\n    plane-owner:\n      enroll: false\n    # keep this unrelated policy\n    disk-monitor:\n      enroll: false  # retained suffix\n"
+    policy.write_text(original)
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(policy))
+    config = dict(origin="https://host.example.test", tailscale=sys.executable, tailscale_socket=None,
+                  socket=str(tmp_path/"owner.sock"), workspace_issuer="https://account.example.test",
+                  workspace_origin="https://plane.example.test")
+    plan = _owner_override_plan(tmp_path/"data", config)
+    assert policy.read_text() == original
+    _commit_owner_override(plan)
+    body = yaml.safe_load(policy.read_bytes())["host"]
+    assert body["unit_prefix"] == "privateunit" and body["jobs"]["disk-monitor"] == {"enroll": False}
+    assert body["jobs"]["plane-owner"] == {**config, "enroll": True}
+    assert policy.read_text().startswith("# retained header\nhost:\n  unit_prefix: privateunit\n  jobs:\n")
+    assert "    # keep this unrelated policy\n    disk-monitor:\n      enroll: false  # retained suffix\n" in policy.read_text()
+    with pytest.raises(CommandFailure): _commit_owner_override(plan)
+
+
+def test_managed_owner_policy_refuses_a_changed_or_foreign_binding(tmp_path, monkeypatch):
+    import sys
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.host_owner_setup import _owner_override_plan, _commit_owner_override
+    policy = tmp_path/"private-host.yaml"
+    policy.write_text("host:\n  jobs:\n    plane-owner:\n      enroll: false\n")
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML", str(policy))
+    config = dict(origin="https://host.example.test", tailscale=sys.executable, tailscale_socket=None,
+                  socket=str(tmp_path/"owner.sock"), workspace_issuer="https://account.example.test",
+                  workspace_origin="https://plane.example.test")
+    plan = _owner_override_plan(tmp_path/"data", config)
+    changed = "host:\n  jobs:\n    plane-owner:\n      origin: https://foreign.example.test\n"
+    policy.write_text(changed)
+    with pytest.raises(CommandFailure): _commit_owner_override(plan)
+    assert policy.read_text() == changed
+    with pytest.raises(CommandFailure): _owner_override_plan(tmp_path/"data", config)
+    monkeypatch.delenv("CLAUDLOBBY_HOST_SYSTEM_YAML")
+    with pytest.raises(CommandFailure): _owner_override_plan(tmp_path/"data", config)
+
+
+def test_managed_owner_policy_refuses_another_uid_writable_parent(tmp_path, monkeypatch):
+    import sys
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.host_owner_setup import _owner_override_plan
+    directory=tmp_path/"writable"; directory.mkdir(mode=0o777); directory.chmod(0o777)
+    policy=directory/"host.yaml"; policy.write_text("host: {}\n")
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML",str(policy))
+    config=dict(origin="https://host.example.test",tailscale=sys.executable,tailscale_socket=None,
+                socket=str(tmp_path/"owner.sock"),workspace_issuer="https://account.example.test",
+                workspace_origin="https://plane.example.test")
+    with pytest.raises(CommandFailure): _owner_override_plan(tmp_path/"data",config)
+    assert policy.read_text()=="host: {}\n"
+
+
+def test_managed_owner_policy_refuses_replacing_an_anchor_used_by_another_job(tmp_path, monkeypatch):
+    import sys
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands.host_owner_setup import _owner_override_plan
+    policy=tmp_path/"private-host.yaml"
+    original="host:\n  jobs:\n    plane-owner: &base\n      enroll: false\n    disk-monitor: *base\n"
+    policy.write_text(original)
+    monkeypatch.setenv("CLAUDLOBBY_HOST_SYSTEM_YAML",str(policy))
+    config=dict(origin="https://host.example.test",tailscale=sys.executable,tailscale_socket=None,
+                socket=str(tmp_path/"owner.sock"),workspace_issuer="https://account.example.test",
+                workspace_origin="https://plane.example.test")
+    with pytest.raises(CommandFailure): _owner_override_plan(tmp_path/"data",config)
+    assert policy.read_text()==original
+
 from claudlobby import composer as composer_mod
 from claudlobby.config import _load_system_defaults, host_unit_name, load_host_jobs
 from claudlobby import switches as sw
