@@ -98,7 +98,7 @@ def test_provider_signin_rejects_foreign_url_echo_and_ambiguous_tokens():
     screen = TokenScreen()
     screen.feed(b'\x1b]8;;https://evil.example/login\x07open\x1b]8;;\x07')
     assert screen.url is None
-    screen.feed(b'sk-ant-oat01-only-an-echo-not-success\n')
+    screen.feed(b'sk-ant-oat01-example-echo-not-success\n')
     assert screen.token() is None
     with pytest.raises(SigninRefused):
         screen.feed(b'\x1b[999999999A')
