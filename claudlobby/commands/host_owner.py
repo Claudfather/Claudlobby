@@ -19,6 +19,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import warnings
+from types import SimpleNamespace
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import ACTION_DENIALS, AccessDenied, AccessUnavailable, OwnerAccess
@@ -194,6 +195,57 @@ def _approved_action_context(args, paths, store, preview, release):
     return ctx
 
 
+
+def _setup_messages(paths, store, terminal, fleet):
+    """The existing messages-only local consent, not future/browser authority."""
+    terminal.write("Optional: allow ordinary messages to this team. Enter the name you want to use for messages (for example human:me), or press Enter / type skip to finish without a new approval: ")
+    terminal.flush()
+    try:
+        answer = terminal.readline(258)
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    def skipped():
+        terminal.write("No new message approval was completed. Existing approvals were not revoked; actor registration alone grants no messages.\n")
+        return {"state": "skipped"}
+
+    if not answer.endswith("\n") or answer.strip() in ("", "skip"):
+        return skipped()
+    args = SimpleNamespace(target_fleet=fleet, actor=answer.strip(), register_actor=True,
+                           capabilities=("messages",))
+
+    def confirmation(size=-1):
+        try:
+            return terminal.readline(size)
+        except (EOFError, KeyboardInterrupt):
+            raise CommandFailure("conflict", "owner change cancelled") from None
+
+    proxy = SimpleNamespace(write=terminal.write, flush=terminal.flush, readline=confirmation)
+    try:
+        with _grant_errors("actions"):
+            _allow_actions(args, paths, store, proxy)
+    except CommandFailure as exc:
+        # Only a declined/unfinished confirmation is a skip. Storage failures or
+        # interrupted effects remain errors/unknown and are never retried here.
+        if exc.error.code == "conflict" and str(exc) == "owner change cancelled":
+            return skipped()
+        raise
+    terminal.write("Messages approved for this team. Select it in your browser and choose Check action access. Nothing was sent.\n")
+    return {"state": "allowed"}
+
+
+def _post_setup_handoff(paths, result):
+    from ..installation import setup_handoff_argv, InstallationError
+    try:
+        argv = setup_handoff_argv(paths.package.installation, result.data)
+        for line in result.lines:
+            print(line, flush=True)
+        os.execve(argv[0], argv, dict(os.environ))
+    except (OSError, InstallationError):
+        raise CommandFailure("unavailable", "automatic setup completion is unavailable; keep the original operation", data=result.data,
+            hint="Inspect host update status, continue only that original operation if needed, then reopen host owner setup after healthy DONE; do not launch again") from None
+
+
 def _allow_actions(args, paths, store, terminal):
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
@@ -337,7 +389,7 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
         fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
         project_directory=getattr(args, "project_directory", None),
-        account_directory=account, managed_owner=managed)
+        account_directory=account, managed_owner=managed, provider_signin=getattr(args,"provider_signin",None))
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
@@ -345,7 +397,13 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
         terminal.write("Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
         terminal.write("Claude profile directory: " + json.dumps(grant.account_directory or str(Path.home()/".claude"), ensure_ascii=True)
                        + ". No credentials are read or copied by this approval.\n")
+    if grant.provider_signin is not None:
+        terminal.write("Separately approve one Claude subscription sign-in through the bound browser. The official CLI may mint a one-year token; it stays in this host data root only. Cancellation may leave an uncertain provider effect. No model, native start or message approval is included.\n")
+        terminal.write(json.dumps(grant.provider_signin,ensure_ascii=True)+"\n")
+        _approve(terminal,"ALLOW-CLAUDE-SIGNIN")
     display = asdict(grant)
+    if grant.provider_signin is None:
+        display.pop("provider_signin")
     if grant.project_directory is None:
         display.pop("project_directory")
     if grant.account_directory is None:
@@ -461,7 +519,10 @@ def dispatch(args):
         if args.owner_action == "setup":
             from .host_owner_setup import run, interrupted
             with _terminal(paths.root) as terminal, interrupted():
-                return run(args, paths, store, terminal)
+                result = run(args, paths, store, terminal)
+            if result.data.get("state") == "launch_handoff":
+                return _post_setup_handoff(paths, result)
+            return result
         if args.owner_action == "serve":
             from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 

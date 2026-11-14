@@ -666,3 +666,163 @@ def main(argv):
     assert json.loads(outcome.stdout.splitlines()[0]) == {
         "foreground_action": "admitted", "root": str(installation.data_root)}
     assert "Owner server stopped." in outcome.stdout
+
+
+_SETUP_BINDING=['00000000-0000-4000-8000-000000000009','00000000-0000-4000-8000-000000000010','b'*64,'a'*40]
+
+
+def _setup_status_entry(installation,body):
+    # Synthetic independent read-only updater; production launcher/wait/exec are real.
+    target=installation.bin/'claudlobby-update'
+    target.write_text('#!'+str(Path(sys.executable).resolve())+'\n'+body)
+    target.chmod(0o755)
+    return target
+
+
+def _until_file(path,condition=lambda text:bool(text)):
+    import time
+    deadline=time.monotonic()+8
+    while time.monotonic()<deadline:
+        if path.exists() and condition(path.read_text()):return
+        time.sleep(.02)
+    pytest.fail('owned setup fixture did not reach its boundary: '+str(path))
+
+
+def test_setup_continuation_exec_releases_old_lease_waits_without_source_then_loads_new_code(tmp_path):
+    import fcntl,os,time
+    installation=_stable_launcher(tmp_path)
+    _run([sys.executable,'-m','venv','--without-pip',installation.environment],tmp_path)
+    root=installation.data_root;state=root/'state';reads=root/'status-reads'
+    record={'schema':1,'request_id':_SETUP_BINDING[1],'target':_SETUP_BINDING[3],
+        'config_fingerprint':_SETUP_BINDING[2],'phase':'restore','maintenance':True,'health_errors':{},'config_committed':False}
+    status=root/'status.json';status.write_text(json.dumps(record))
+    _setup_status_entry(installation,"""import json,os,sys
+from pathlib import Path
+root=Path(sys.argv[sys.argv.index('--root')+1])
+assert sys.argv[-4:]==['host','update','status','--json']
+assert not any(name.startswith('claudlobby') for name in sys.modules)
+assert sys.flags.isolated and sys.flags.no_site
+with (root/'status-reads').open('a') as f:f.write(str(os.getpid())+'\\n')
+print(json.dumps({'read_only':True,'update':json.loads((root/'status.json').read_text())}))
+""")
+    main=installation.source/'claudlobby/__main__.py'
+    main.write_text("""import os
+from .installation import Installation,setup_handoff_argv
+from pathlib import Path
+def main(argv):
+    installation=Installation(Path(os.environ['CLAUDLOBBY_INSTALLATION']),Path(os.environ['CLAUDLOBBY_ROOT']))
+    data={'state':'launch_handoff',**dict(zip(('generation','request_id','config_fingerprint','source_revision'),"""+repr(_SETUP_BINDING)+"""))}
+    command=setup_handoff_argv(installation,data)
+    os.execve(command[0],command,dict(os.environ))
+""")
+    process=subprocess.Popen([str(installation.cli),'start-handoff'],cwd=root,env=constructed_env(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    saved_source=installation.directory/'offline-src';saved_env=installation.directory/'offline-env';exclusive=None
+    try:
+        _until_file(reads)
+        exclusive=os.open(state/'runtime-use.lock',os.O_RDONLY)
+        fcntl.flock(exclusive,fcntl.LOCK_EX|fcntl.LOCK_NB)  # The old guide's CLOEXEC reader is gone.
+        installation.source.rename(saved_source);installation.environment.rename(saved_env)
+        count=len(reads.read_text().splitlines())
+        _until_file(reads,lambda text:len(text.splitlines())>count)
+        assert process.poll() is None  # Stable wait imported neither unavailable tree.
+        saved_source.rename(installation.source);saved_env.rename(installation.environment)
+        main.write_text("""import fcntl,json,os,sys
+from pathlib import Path
+def main(argv):
+    root=Path(os.environ['CLAUDLOBBY_ROOT']);fd=os.open(root/'state/runtime-use.lock',os.O_RDONLY)
+    try:
+        try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:pass
+        else:raise AssertionError('fresh current admission has no reader')
+    finally:os.close(fd)
+    print(json.dumps({'new_code':True,'argv':argv,'isolated':bool(sys.flags.isolated)}))
+    return 0
+""")
+        os.close(exclusive);exclusive=None
+        record.update(phase='done',maintenance=False,config_committed=True)
+        temporary=root/'next-status';temporary.write_text(json.dumps(record));temporary.replace(status)
+        output,errors=process.communicate(timeout=10)
+        assert process.returncode==0,errors
+        result=json.loads(output)
+        assert result=={'new_code':True,'isolated':True,'argv':['--root',str(root),'host','owner','setup','--_finish-setup',*_SETUP_BINDING]}
+    finally:
+        if exclusive is not None:os.close(exclusive)
+        if saved_source.exists():saved_source.rename(installation.source)
+        if saved_env.exists():saved_env.rename(installation.environment)
+        if process.poll() is None:process.terminate();process.wait(timeout=5)
+
+
+@pytest.mark.parametrize('number',[2,15])
+def test_setup_wait_cancellation_reaps_only_its_read_child_without_importing_runtime(tmp_path,number):
+    import os,time
+    installation=_stable_launcher(tmp_path);root=installation.data_root
+    _setup_status_entry(installation,"""import os,sys,time
+from pathlib import Path
+root=Path(sys.argv[sys.argv.index('--root')+1]);(root/'read-pid').write_text(str(os.getpid()))
+while True:time.sleep(.1)
+""")
+    other=subprocess.Popen([sys.executable,'-I','-S','-c','import time;time.sleep(60)'],env=constructed_env())
+    process=subprocess.Popen([str(installation.cli),'--root',str(root),'_setup-wait',*_SETUP_BINDING],cwd=root,env=constructed_env(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        _until_file(root/'read-pid');child=int((root/'read-pid').read_text())
+        process.send_signal(number);output,errors=process.communicate(timeout=8)
+        assert process.returncode==128+number and _SETUP_BINDING[1] in errors
+        with pytest.raises(ProcessLookupError):os.kill(child,0)
+        assert other.poll() is None
+        assert not installation.environment.exists()
+    finally:
+        if process.poll() is None:process.kill();process.wait(timeout=3)
+        other.terminate();other.wait(timeout=3)
+
+
+@pytest.mark.parametrize('change',['old-launcher','extra-field','bad-binding'])
+def test_setup_handoff_refuses_incompatible_or_unbound_entry_before_exec(tmp_path,change):
+    from claudlobby.installation import setup_handoff_argv,InstallationError
+    installation=_stable_launcher(tmp_path)
+    data={'state':'launch_handoff',**dict(zip(('generation','request_id','config_fingerprint','source_revision'),_SETUP_BINDING))}
+    if change=='old-launcher':installation.cli.write_text('#!'+str(Path(sys.executable).resolve())+'\nraise SystemExit(6)\n')
+    elif change=='extra-field':data['command']='unapproved'
+    else:data['request_id']='wrong'
+    with pytest.raises(InstallationError):setup_handoff_argv(installation,data)
+
+
+@pytest.mark.parametrize("change", ["malformed", "duplicate", "replacement", "health", "maintenance", "refused"])
+def test_setup_wait_refuses_unknown_or_unhealthy_status_without_runtime_import(tmp_path, change):
+    installation = _stable_launcher(tmp_path)
+    record = {"schema": 1, "request_id": _SETUP_BINDING[1], "target": _SETUP_BINDING[3],
+              "config_fingerprint": _SETUP_BINDING[2], "phase": "done", "maintenance": False,
+              "health_errors": {}, "config_committed": True}
+    if change == "replacement":
+        record["request_id"] = _SETUP_BINDING[0]
+    elif change == "health":
+        record["health_errors"] = {"fixture": "not ready"}
+    elif change == "maintenance":
+        record["maintenance"] = True
+    payload = json.dumps({"read_only": True, "update": record})
+    if change == "malformed":
+        payload = "not JSON"
+    elif change == "duplicate":
+        payload = '{"read_only":true,"read_only":true,"update":{}}'
+    _setup_status_entry(installation, "import sys\nprint(" + repr(payload) + ")\nraise SystemExit(" + ("6" if change == "refused" else "0") + ")\n")
+    outcome = _launch(installation, "--root", installation.data_root, "_setup-wait", *_SETUP_BINDING)
+    assert outcome.returncode == 6
+    assert _SETUP_BINDING[1] in outcome.stderr and "inspect the original operation" in outcome.stderr
+    assert not installation.environment.exists()
+
+
+def test_setup_wait_timeout_reaps_owned_status_reader_and_retains_original_refs(tmp_path, capsys):
+    import os
+    from claudlobby.installation import _setup_wait, InstallationError
+    installation = _stable_launcher(tmp_path)
+    _setup_status_entry(installation, """import os,sys,time
+from pathlib import Path
+root=Path(sys.argv[sys.argv.index('--root')+1]);(root/'read-pid').write_text(str(os.getpid()))
+while True:time.sleep(.1)
+""")
+    with pytest.raises(InstallationError, match="original operation"):
+        _setup_wait(installation, _SETUP_BINDING, constructed_env(), seconds=.5, read_seconds=.2)
+    child = int((installation.data_root / "read-pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+    assert _SETUP_BINDING[1] in capsys.readouterr().err
+    assert not installation.environment.exists()

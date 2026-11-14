@@ -9,7 +9,7 @@ from claudlobby.plane.owner_browser import create_owner_browser_app
 from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
 from tests.test_plane_owner_workspace import OWNER, ISSUER, ORIGIN, USER, WORKSPACE
 from tests.test_plane_workspace_assertion import profile
-from tests.test_plane_owner_setup import setup_authority, binding
+from tests.test_plane_owner_setup import setup_authority, binding, synthetic_signin
 from tests.test_setup_commands import team_setup
 from tests.test_plane_owner_connected_http import login, assertion, headers
 from tests.test_plane_two_fleets import _Sampler
@@ -153,6 +153,20 @@ def test_source_classification_and_foreign_recorder_never_recover(setup_http,mon
     assert raised.value is error
 
 
+def test_provider_signin_routes_require_local_scope_and_never_accept_paths(setup_http):
+    app,access,_,_,_,grant=setup_http
+    app.connected_setup.engine.store.allow(grant)
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        args={'generation':grant.generation,'attempt_id':str(uuid4())}
+        for operation in ['signin-begin','signin-status','signin-code','signin-cancel']:
+            body={**args,**({'code':'private-code#private-state'} if operation=='signin-code' else {})}
+            response=post(client,operation,token,body)
+            assert response.status_code==403
+            assert 'private-code' not in response.text
+            assert post(client,operation,token,{**body,'binary':'/browser-choice'}).status_code==403
+
+
 @pytest.mark.parametrize('failure,status', [('generic',503),('foreign',403),('transient',503)])
 def test_ready_never_labels_unadmitted_source_setup_only(setup_http,monkeypatch,failure,status):
     from claudlobby.plane.owner_access import AccessUnavailable
@@ -189,3 +203,47 @@ def test_v2_launch_rejects_mixed_or_missing_provenance_before_engine(setup_http,
         monkeypatch.setattr(app.connected_setup.engine,"launch",lambda *_a,**_k:pytest.fail("entered launch"))
         result=post(client,"launch",token,{**request,**changes})
         assert result.status_code==403
+
+
+@pytest.mark.parametrize('finish',['shutdown','success'])
+def test_provider_signin_real_http_and_shutdown_drain(synthetic_signin,profile,finish):
+    import time
+    engine,grant,_,_,token,env=synthetic_signin
+    access=engine.store.access
+    async def verify(scope):return OWNER
+    app=create_owner_browser_app(access.root,verify_principal=verify,expected_origin=HOST,
+        sampler=_Sampler({}),workspace_bootstrap=WorkspaceBootstrapConfig(ISSUER,ORIGIN))
+    app.access._clock=access._clock
+    async def keys(_):return json.dumps({'keys':[profile[1]]}).encode()
+    app.workspace_bootstrap.keys.get=keys
+    fixture=app,access,[OWNER],[1800000000.0],profile,grant
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        assert post(client,'context',bearer).json()['provider_signin'] is True
+        args={'generation':grant.generation,'attempt_id':str(uuid4())}
+        begin=post(client,'signin-begin',bearer,args)
+        assert begin.status_code==200,begin.text
+        assert post(client,'signin-begin',bearer,{**args,'attempt_id':str(uuid4())}).status_code==403
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            status=post(client,'signin-status',bearer,args)
+            if status.json().get('state')=='waiting':break
+            time.sleep(.025)
+        assert status.json()['state']=='waiting',status.text
+        worker=app.connected_setup.engine.signin._thread
+        for code in ['sensitive#wrong','accepted\n#'+'b'*32,'a'*2306]:
+            rejected=post(client,'signin-code',bearer,{**args,'code':code})
+            assert rejected.status_code==403 and 'sensitive' not in rejected.text
+        assert token not in status.text
+        if finish=='success':
+            assert post(client,'signin-code',bearer,{**args,'code':'accepted#'+'b'*32}).status_code==200
+            deadline=time.monotonic()+8
+            while time.monotonic()<deadline:
+                status=post(client,'signin-status',bearer,args)
+                if status.json().get('state')=='connected':break
+                time.sleep(.025)
+            assert status.json()['state']=='connected',status.text
+            assert token not in status.text
+    assert not worker.is_alive()
+    if finish=='shutdown':assert env.read_text()=='export ROUTE=private\n'
+    else:assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=')==1

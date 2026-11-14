@@ -43,6 +43,7 @@ claudlobby/
   plane/ui/permission-panel.js — Explicit scoped permission decisions and retained receipts in the shared dashboard; no effect execution.
   plane/owner_action_authorization.py — Fixed internal direct/connected action policy selection; connected full-binding scope fence, never browser-selected authority.
   plane/owner_setup.py — Optional local first-team setup grant and retained canonical preview/activation receipt; connected identity is necessary but does not grant setup.
+  plane/provider_signin.py — Exact-artifact Claude setup-token adapter, one locally approved retained attempt, private owned PTY/code/token handling and descriptor-bound host credential storage; no OAuth implementation or generic terminal API.
   plane/owner_setup_http.py — Finite connected first-team context/preview/launch/receipt carrier, bounded owned work, existing setup and activation owners.
   plane/ui/guided-setup.js — Shared first-team plan confirmation and original activation receipt controller; no read admission or automatic launch.
   plane/owner_connected_actions_http.py — Finite connected action HTTP carrier and bounded owned queue; canonical engines and explicit local grants remain the effect owners.

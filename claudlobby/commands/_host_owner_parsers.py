@@ -1,5 +1,6 @@
 """Host-local owner authority doors; no credential-bearing CLI arguments."""
 
+from argparse import SUPPRESS
 from importlib import import_module
 from pathlib import Path
 
@@ -78,6 +79,8 @@ def register_host_owner(hosts):
     guided.add_argument("--template", choices=["revenue-web-app", "local-project"], default="revenue-web-app")
     guided.add_argument("--project-directory")
     guided.add_argument("--account-directory", help="Claude profile directory; otherwise propose the operator's CLAUDE_CONFIG_DIR")
+    guided.add_argument("--_finish-setup", dest="finish_setup",nargs=4,help=SUPPRESS)
+    guided.add_argument("--provider-signin", type=Path, help="Separately approve browser-mediated setup-token using this reviewed Claude executable")
     guided.add_argument("--managed-owner", action="store_true", help="Locally approve a managed connection service in this team's original Launch")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
         guided.add_argument("--" + flag)

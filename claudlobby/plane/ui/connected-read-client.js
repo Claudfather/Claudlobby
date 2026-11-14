@@ -570,6 +570,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     renew, logout,
     setupContext: () => setupRequest('context',{}), setupPreview: input => setupRequest('preview',input),
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
+    setupSignin: (operation,input) => {
+      if (!['begin','status','code','cancel'].includes(operation)) throw new Error('Unsupported sign-in action');
+      return setupRequest('signin-'+operation,input);
+    },
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');
       actionSourceChanged = onSourceChange;

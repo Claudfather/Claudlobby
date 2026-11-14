@@ -743,3 +743,102 @@ def test_fresh_initialize_is_explicit_git_and_cancel_leaves_no_identity(tmp_path
     assert "no activation" in output.getvalue()
     assert store.current_grant() is None
     assert not db_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize('answer',['','skip\n'])
+def test_setup_messages_skip_never_registers_or_grants(message_owner,monkeypatch,answer):
+    from claudlobby.context import resolve_paths
+    store,*_=message_owner
+    output=terminal(monkeypatch,iter([answer]))
+    result=host_owner._setup_messages(resolve_paths(root=store.root),store,output,'example')
+    assert result['state']=='skipped'
+    assert store.local_action_status().message_grants==()
+
+
+def test_setup_messages_uses_only_existing_messages_approval(message_owner,monkeypatch):
+    from claudlobby.context import resolve_paths
+    store,_,_,ctx=message_owner
+    output=terminal(monkeypatch,iter([ctx.caller.alias+'\n','ALLOW-ACTIONS\n']))
+    result=host_owner._setup_messages(resolve_paths(root=store.root),store,output,'example')
+    assert result['state']=='allowed'
+    status=store.local_action_status()
+    assert len(status.message_grants)==1
+    assert status.nudge_grants==status.feedback_grants==status.permission_grants==()
+    assert 'Check action access' in output.getvalue()
+
+
+@pytest.mark.parametrize('answer',['no\n','',KeyboardInterrupt()])
+def test_setup_messages_after_registration_decline_is_not_a_grant(message_owner,monkeypatch,answer):
+    from claudlobby.context import resolve_paths
+    store,*_=message_owner
+    output=terminal(monkeypatch,iter(()));answers=iter(['human:guide-new\n','REGISTER\n',answer])
+    def read(_=-1):
+        result=next(answers)
+        if isinstance(result,BaseException):raise result
+        return result
+    output.readline=read
+    assert host_owner._setup_messages(resolve_paths(root=store.root),store,output,'example')['state']=='skipped'
+    assert store.local_action_status().message_grants==()
+    with sqlite3.connect(db_file(store.root)) as conn:
+        assert conn.execute("SELECT count(*) FROM events WHERE event='operator_first_seen' AND subject_alias='human:guide-new'").fetchone()[0]==1
+
+
+def test_setup_messages_storage_failure_is_error_not_skip_or_retry(message_owner,monkeypatch):
+    from claudlobby.context import resolve_paths
+    from claudlobby.command_result import CommandFailure
+    store,_,_,ctx=message_owner;calls=[]
+    def refused(**kwargs):calls.append(True);raise OSError('synthetic storage unavailable')
+    monkeypatch.setattr(store,'allow_actions',refused)
+    output=terminal(monkeypatch,iter([ctx.caller.alias+'\n','ALLOW-ACTIONS\n']))
+    with pytest.raises(CommandFailure) as caught:host_owner._setup_messages(resolve_paths(root=store.root),store,output,'example')
+    assert caught.value.error.code=='unavailable' and calls==[True]
+    assert 'No new message approval was completed' not in output.getvalue()
+
+
+def test_setup_messages_interrupted_store_keeps_unknown_commit_truth(message_owner,monkeypatch):
+    from claudlobby.context import resolve_paths
+    store,_,_,ctx=message_owner;original=store.allow_actions;calls=[]
+    def interrupted(**kwargs):
+        calls.append(True);original(**kwargs);raise KeyboardInterrupt
+    monkeypatch.setattr(store,'allow_actions',interrupted)
+    output=terminal(monkeypatch,iter([ctx.caller.alias+'\n','ALLOW-ACTIONS\n']))
+    with pytest.raises(KeyboardInterrupt):host_owner._setup_messages(resolve_paths(root=store.root),store,output,'example')
+    assert calls==[True] and len(store.local_action_status().message_grants)==1
+    assert 'No new message approval was completed' not in output.getvalue()
+
+
+def test_setup_dispatch_drains_terminal_before_post_context_exec(tmp_path, monkeypatch):
+    from claudlobby.command_result import CommandOutput
+    from claudlobby.commands import host_owner_setup
+    events = []
+
+    @contextmanager
+    def console(_):
+        events.append("terminal open")
+        try:
+            yield io.StringIO()
+        finally:
+            events.append("terminal closed")
+
+    @contextmanager
+    def interrupted():
+        events.append("signals installed")
+        try:
+            yield
+        finally:
+            events.append("signals restored")
+
+    result = CommandOutput({"state": "launch_handoff"})
+    monkeypatch.setattr(host_owner, "_terminal", console)
+    monkeypatch.setattr(host_owner_setup, "interrupted", interrupted)
+    monkeypatch.setattr(host_owner_setup, "run", lambda *args: result)
+
+    def handoff(paths, actual):
+        assert actual is result
+        assert events == ["terminal open", "signals installed", "signals restored", "terminal closed"]
+        raise OSError("synthetic exec refusal")
+
+    monkeypatch.setattr(host_owner, "_post_setup_handoff", handoff)
+    args = SimpleNamespace(root=str(tmp_path), fleet=None, seed=False, json=False, owner_action="setup")
+    with pytest.raises(OSError, match="synthetic exec refusal"):
+        host_owner.dispatch(args)

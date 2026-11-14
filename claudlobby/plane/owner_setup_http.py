@@ -11,7 +11,7 @@ from .owner_setup import SetupEngine, _uuid
 from .owner_source import source_host_uid
 
 PREFIX="/api/owner/connected/setup/"
-OPERATIONS=frozenset({"context","preview","launch","receipt"})
+OPERATIONS=frozenset({"context","preview","launch","receipt","signin-begin","signin-status","signin-code","signin-cancel"})
 
 class SetupHTTP(ConnectedActionsHTTP):
     def __init__(self, access, *, config, authority, verify_principal):
@@ -41,7 +41,8 @@ class SetupHTTP(ConnectedActionsHTTP):
         binding=await self._blocking(self.workspace.active_binding,principal)
         if binding.issuer!=self.config.issuer or binding.operational_origin!=self.config.operational_origin: raise AccessDenied("setup_denied")
         payload=await asyncio.wait_for(_json(receive,32768),5)
-        expected={"context":set(),"preview":{"generation","goal"},"launch":{"generation","request_id","config_fingerprint","source_revision"},"receipt":{"generation","request_id","config_fingerprint","source_revision"}}[operation]
+        expected={"signin-begin":{"generation","attempt_id"},"signin-status":{"generation","attempt_id"},
+            "signin-code":{"generation","attempt_id","code"},"signin-cancel":{"generation","attempt_id"},"context":set(),"preview":{"generation","goal"},"launch":{"generation","request_id","config_fingerprint","source_revision"},"receipt":{"generation","request_id","config_fingerprint","source_revision"}}[operation]
         if set(payload)!=expected: raise InvalidRequest
         if operation!="context" and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
         if operation=="preview" and (not isinstance(payload["goal"],str) or len(payload["goal"])>2000): raise InvalidRequest
@@ -49,7 +50,10 @@ class SetupHTTP(ConnectedActionsHTTP):
             if (not isinstance(payload["config_fingerprint"],str) or not re.fullmatch(r"[0-9a-f]{64}",payload["config_fingerprint"])
                     or not isinstance(payload["source_revision"],str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",payload["source_revision"])
                     or not _uuid(payload["request_id"])): raise InvalidRequest
-        fn=getattr(self.engine,operation)
+        if operation.startswith("signin-"):
+            if not _uuid(payload["attempt_id"]): raise InvalidRequest
+            if operation=="signin-code" and (not isinstance(payload["code"],str) or not 1<=len(payload["code"])<=2305): raise InvalidRequest
+        fn=getattr(self.engine,operation.replace("-","_"))
         progress[0]=True  # No refusal after engine entry implies no earlier effect.
         try:
             result=await self._blocking(fn,reader,**payload)
@@ -70,7 +74,7 @@ class SetupHTTP(ConnectedActionsHTTP):
         operation=scope["path"][len(PREFIX):]
         if operation not in OPERATIONS:
             await JSONResponse({"state":"denied"},404,headers={"Cache-Control":"private, no-store"})(scope,receive,send);return
-        mapped={"context":"context","preview":"prepare","launch":"send","receipt":"receipt"}[operation]
+        mapped={"signin-begin":"prepare","signin-status":"receipt","signin-code":"prepare","signin-cancel":"receipt","context":"context","preview":"prepare","launch":"send","receipt":"receipt"}[operation]
         # Concurrent requests must never modify an instance callback. Dispatch
         # translation belongs in the protected method using immutable path.
         translated={**scope,"path":"/api/owner/connected/actions/"+mapped,"setup_operation":operation}
@@ -78,3 +82,10 @@ class SetupHTTP(ConnectedActionsHTTP):
 
     async def _response(self,scope,receive,operation,progress):
         return await super()._response(scope,receive,scope["setup_operation"],progress)
+
+    async def shutdown(self):
+        # Stop HTTP admission first, then cancel/drain this exact private CLI
+        # attempt before owner exit or the original Launch source handoff.
+        self._stopping=True
+        await super().shutdown()
+        await asyncio.to_thread(self.engine.signin.shutdown)

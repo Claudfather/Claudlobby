@@ -239,14 +239,23 @@ def _configuration(args, paths, terminal, cli):
     terminal.write("Local setup configuration (no credentials): " + json.dumps({**config,
         "fleet": fleet, "template": template, "repository": repository, "project_directory": project,
         "account_directory": account, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
-    terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
-                   "This guide does not configure those prerequisites.\n")
+    if getattr(args,"provider_signin",None) is not None:
+        terminal.write("Claude sign-in can be completed in the connected setup after separate local approval. Project/repository access, website login and native Tailscale/Serve access must already be ready.\n")
+    else:
+        terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
+                       "This guide does not configure those prerequisites.\n")
     terminal.write("Managed owner-service enrollment will require explicit local approval and the original browser Launch.\n"
                    if getattr(args, "managed_owner", False) else "Owner serving stays foreground-only; no owner service is enrolled.\n")
+    provider=None
+    if getattr(args,"provider_signin",None) is not None:
+        from ..plane.provider_signin import approved_scope, SigninRefused
+        try: provider=approved_scope(args.provider_signin,paths.root,account)
+        except (SigninRefused,OSError):
+            raise CommandFailure("invalid_argument","Claude sign-in requires the reviewed provider artifact and private account/data paths; existing token setup remains available") from None
     plan = _owner_override_plan(paths.root, config) if getattr(args, "managed_owner", False) else None
     return config, SimpleNamespace(template=template, target_fleet=fleet,
         repository=repository, project_directory=project, account_directory=account, install_directory=directory,
-        managed_owner=plan["binding"] if plan else None, managed_owner_plan=plan)
+        managed_owner=plan["binding"] if plan else None, managed_owner_plan=plan, provider_signin=provider)
 
 
 def _ready(path, origin):
@@ -312,6 +321,26 @@ def interrupted():
         signal.signal(signal.SIGTERM, previous)
 
 
+
+def _completed(args, paths, store, terminal, retained, record, package):
+    from ..plane.owner_setup import OwnerSetup
+    from ..installation import _setup_binding
+    from .host_owner import _setup_messages
+    grant = retained.grant
+    actual = (grant.generation,record["request_id"], record["config_fingerprint"], record["target"])
+    expected = getattr(args, "finish_setup", None)
+    if (expected is not None and _setup_binding(expected) != actual
+            or record.get("maintenance") is not False or record.get("config_committed") is not True
+            or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
+            or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
+            or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
+        raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
+    terminal.write("Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
+    consent = _setup_messages(paths, store, terminal, grant.fleet)
+    return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": consent},
+        lines=("Original setup finished; no Launch or message was sent again.",))
+
+
 def run(args, paths, store, terminal):
     from . import host_owner as console
     from ..active_config import read_current_config
@@ -335,11 +364,14 @@ def run(args, paths, store, terminal):
             raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
                 data={"request_id":record["request_id"]},
                 hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
-        snapshot=read_current_config(paths.root,installation=installation,revision=record["target"])
-        if snapshot!=record.get("candidate_config"):
+        snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
+        if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
+        return _completed(args, paths, store, terminal, retained, record, package)
     elif selected or retained and retained.launch_id is not None:
         raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
+    if getattr(args, "finish_setup", None) is not None:
+        raise CommandFailure("conflict", "the original completed setup is unavailable; no replacement will be prepared")
     if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
@@ -376,8 +408,8 @@ def run(args, paths, store, terminal):
             # compare the same grant below, then use the normal handoff loop.
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
-                        approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
+                if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.provider_signin, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.provider_signin, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:
