@@ -114,6 +114,7 @@ def test_strict_unknown_duplicate_json_and_preflight_no_effect_claim(setup_http)
         s=session(client,setup_http)
         assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests','install_directory':'/browser-chosen'}).status_code==403
         for override in ({'project_directory':'/browser-chosen'}, {'account_directory':'/browser-profile'},
+                         {'managed_owner':{'origin':'https://browser.example.test'}},
                          {'template':'local-project'}, {'repository':'other/repo'}):
             assert post(client,'preview',s['token'],{'generation':grant.generation,'goal':'Improve tests',**override}).status_code==403
         assert client.post(PREFIX+'preview',content='{"goal":"a","goal":"b"}',headers={**headers(s['token']),'Content-Type':'application/json','X-Claudlobby-Owner':'1'}).status_code==403

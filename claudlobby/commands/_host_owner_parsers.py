@@ -78,6 +78,7 @@ def register_host_owner(hosts):
     guided.add_argument("--template", choices=["revenue-web-app", "local-project"], default="revenue-web-app")
     guided.add_argument("--project-directory")
     guided.add_argument("--account-directory", help="Claude profile directory; otherwise propose the operator's CLAUDE_CONFIG_DIR")
+    guided.add_argument("--managed-owner", action="store_true", help="Locally approve a managed connection service in this team's original Launch")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
         guided.add_argument("--" + flag)
     for flag in ("tailscale", "tailscale-socket", "socket", "install-directory"):

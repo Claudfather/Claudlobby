@@ -157,7 +157,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         onContinuityChange:changed, monotonicNow, documentOrigin, fetch, setTimeout, clearTimeout})};
         nextClients.push(row);
         row.client.activity?.({visible:mount?.document.visibilityState === 'visible'});
-        row.setup = createGuidedSetup({client:row.client,storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
+        row.setup = createGuidedSetup({client:row.client,setTimeout,clearTimeout,
+          visible:() => !mount || mount.document.visibilityState !== 'hidden',
+          storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -480,7 +482,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const channel = document.getElementById('channel'); if (channel) observer?.observe(channel, {childList:true,subtree:true});
     const active = () => {
       clearTimeout(refreshTimer); refreshTimer = null;
-      for (const {client} of clients) client.activity?.({visible:document.visibilityState === 'visible'});
+      for (const {client,setup} of clients) {
+        client.activity?.({visible:document.visibilityState === 'visible'});
+        if (document.visibilityState !== 'hidden') setup.resumeHandoff();
+      }
       if (document.visibilityState !== 'hidden') void checkAccount();
     };
     let lastReadingInput = null;

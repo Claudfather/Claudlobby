@@ -7,7 +7,7 @@ fleet:
     protocols: false
     skills: false
   service_prefix: com.example.local-project
-  mission: "Work only within the locally approved project and explicitly assigned task. This scope description is not task admission. Do not seek or invent work, access remote repositories, send external messages, install packages or spawn additional agents. Require separate human approval for additional scope, spending, deployment or destructive changes. Use canonical tasks, assignments and reports for cooperation."
+  mission: "Work only within the locally approved project. The startup goal is scope, not task admission. The lead waits for an explicit delivered human request; workers perform only explicitly assigned tasks. Do not seek or invent work, access remote repositories, send external messages, install packages or spawn additional agents. Require separate human approval for additional scope, spending, deployment or destructive changes. Use canonical tasks, assignments and reports for cooperation."
   accounts:
     default: ~/.claude
   plugins:
@@ -42,11 +42,12 @@ fleet:
   bots:
     lead:
       expertise: [local-project]
-      startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."
+      startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit delivered human request or canonical assignment. Do not admit from the startup goal or seek work."
       model: opus
       manages: [engineer, reviewer]
       skills: [fleet-status]
-      mission: "Coordinate only explicitly admitted local project work. Reassign the same task for implementation and independent review; intermediate phases report progress, not task completion. Verify independent review before final completion. Do not admit new tasks or merge or deploy anything."
+      protocols: [context-management, inbound-acknowledgment]
+      mission: "For an explicit delivered human request, verify the recorded human sender, acknowledge with a canonical reply in that same thread and admit only the requested local project work. Reuse an already referenced task; retain original task and request IDs after uncertainty rather than admitting a duplicate. Assign and deliver implementation and independent review on the same task; intermediate phases report progress, not task completion. Complete only after accepting independent review. Never admit from the startup goal, seek background work, merge or deploy anything."
     engineer:
       expertise: [local-project]
       startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."

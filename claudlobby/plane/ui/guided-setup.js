@@ -17,10 +17,51 @@ const localContinue = value => value.continuation ? `Continue locally: ${value.c
   : 'Use this installation’s stable CLI with host update continue.';
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
 
-export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {}}) {
+export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout, visible = () => true}) {
   let context = null, plan = null, pending = null, conflicts = [], legacy = [], incompatible = false;
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
+  let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
+  function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
+  function scheduleHandoff() {
+    if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
+    if (!handoffUntil) handoffUntil = now() + 600;
+    if (now() >= handoffUntil || handoffReads >= 80) {
+      stopHandoff(); note = 'Automatic connection checks paused. Keep the original update and choose Check connection, then Check original update receipt. Do not launch again.'; changed(); return;
+    }
+    if (!visible() || !active()) return; // Resume the same reads when this view/connection returns.
+    handoffTimer = setTimeout(async () => {
+      handoffTimer = null;
+      if (disposed || !managedHandoff || !pending || !visible() || !active()) return;
+      if (now() >= handoffUntil) { scheduleHandoff(); return; }
+      if (busy) { scheduleHandoff(); return; }
+      const original = pending; busy = true; handoffReads++; changed();
+      try {
+        // Only the original receipt and existing session status are checked.
+        // client.check may promote the SAME token from setup-only to readable;
+        // it never invokes Connect, issue or renewal here.
+        const value = await client.setupReceipt(original);
+        if (disposed || !managedHandoff) return;
+        if (!same(original,pending)) { stopHandoff(); return; }
+        try {
+          receipt(value);
+          if (value.managed_owner !== true) throw new Error();
+        } catch {
+          stopHandoff(); note = 'Original update receipt did not match. Inspect access and retained identifiers; do not launch again.'; return;
+        }
+        if (!value.launch_reserved) { stopHandoff(); return; }
+        if (!connectionChecked && typeof client.check === 'function') {
+          await client.check(); connectionChecked = true;
+        }
+        if (value.state === 'done' || value.state === 'unknown' || Object.keys(value.health_errors).length) stopHandoff();
+      } catch (error) {
+        if (!disposed && [400,401,403,409].includes(error?.status)) {
+          stopHandoff(); note = 'Connection access or the original update was refused. Check access explicitly; Launch is not repeated.';
+        } else if (!disposed && managedHandoff) note = 'Starting your managed connection. The original update is retained; Launch is not repeated.';
+      } finally { busy = false; if (!disposed) { changed(); scheduleHandoff(); } }
+    }, handoffReads < 2 ? 1500 : handoffReads < 5 ? 3000 : 10000);
+  }
   function retain(value, collection) {
     if (collection.some(item => request(item) && request(value) ? same(item,value)
         : historical(item) && historical(value) && ['generation','plan_id','request_id'].every(key => item[key] === value[key]))) return;
@@ -57,7 +98,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   function changed() { render(); onChange(); }
   function connectionChanged(next) {
     if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; launchable = false; }
-    state = next; changed();
+    state = next;
+    if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
+      stopHandoff(); note = 'Connection access needs attention. Keep the original update; reconnect explicitly without another Launch.';
+    }
+    changed(); scheduleHandoff();
   }
   async function run(operation) {
     if (disposed || busy || !active()) return false;
@@ -71,6 +116,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             || value.version === 3 && value.template === 'local-project' && typeof value.project_directory === 'string'
               && value.project_directory.startsWith('/') && !('repository' in value)) || !uuid(value.generation)
             || typeof value.fleet !== 'string' || !revision(value.source_revision)
+            || value.managed_owner !== undefined && value.managed_owner !== true
             || 'release_id' in value || 'release_seal' in value || 'plan_id' in value
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
@@ -82,6 +128,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         // A null request or new grant is never proof that an original request vanished.
         note = pending ? `Inspect the original update. ${localContinue(value)} Reconnection never submits launch again.` : 'Local approval found. Author a goal and preview its exact configuration.';
+        if (value.managed_owner && value.launch_reserved) { managedHandoff = true; handoffUntil = now()+600; handoffReads=0; }
       } else if (operation === 'preview') {
         if (!context || context.launch_reserved || pending || legacyBlocked() || !goal.trim() || context.expires_at <= now()) return false;
         const selected = context, authored = goal;
@@ -99,6 +146,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (!context || !plan || !pending || !launchable || legacyBlocked() || !same(plan,pending)
             || planGoal !== goal || plan.expires_at <= now() || context.expires_at <= now()) return false;
         save(pending); launchable = false; // Retain the preview's original identity before the one launch POST.
+        managedHandoff = context.managed_owner === true;
         const result = await client.setupLaunch(pending);
         if (disposed || ticket !== epoch || !active()) return false;
         receipt(result);
@@ -118,22 +166,24 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           : 'Setup unavailable or refused. Check local approval explicitly before another preview; no team readiness is claimed.';
       }
       return false;
-    } finally { busy = false; if (!disposed) changed(); }
+    } finally { busy = false; if (!disposed) { changed(); scheduleHandoff(); } }
   }
   function receipt(value) {
     if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
         || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || typeof value.config_committed !== 'boolean'
         || !value.health_errors || typeof value.health_errors !== 'object' || Array.isArray(value.health_errors)
+        || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
     note = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0
-      ? 'Configuration committed. Check connection to view your team; inspect native health separately.'
+      ? 'Configuration committed. Check native readiness, then open your team and message the lead with one concrete request. Your setup goal does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
       ? 'Setup needs attention. Keep the original identifiers and inspect this update; do not launch again.'
       : value.state === 'quiesce' && !value.launch_reserved
       ? `Configuration prepared and not launched. ${localContinue(value)} This browser never resubmits after reconnection.`
       : value.state === 'quiesce' && value.launch_reserved
-      ? 'Launch retained. Let the local setup guide finish its handoff, then use its original-update status and reconnect commands. Do not launch again.'
+      ? value.managed_owner ? 'Launch retained. Your managed connection is starting; the original update will reconnect here. Do not launch again.'
+        : 'Launch retained. Let the local setup guide finish its handoff, then use its original-update status and reconnect commands. Do not launch again.'
       : 'Still checking the original update. Receipt inspection never repeats or resumes setup.';
   }
   function render() {
@@ -151,7 +201,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : 'Review the configuration, then choose Launch this exact configuration.';
     status.textContent = [note,guard].filter(Boolean).join(' ');
     declaration.textContent = context ? context.template === 'local-project'
-      ? `Team ${context.fleet} for local project ${context.project_directory}. Lead, engineer and reviewer; wait for explicitly assigned work.`
+      ? `Team ${context.fleet} for local project ${context.project_directory}. After the team is ready and messages are locally approved, tell the lead what to do. The lead records the task and coordinates implementation and independent review.`
       : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
     authority.textContent = context ? `Local approval covers ${context.template === 'local-project' ? `read/write access to local project ${context.project_directory}` : context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
     summary.textContent = plan ? `Goal: ${planGoal}. Configuration changes ${plan.changes.length} generated files; ${plan.effects?.restart_bots?.length || 0} bots require starting or restarting. Review before launch.` : '';
@@ -181,5 +231,6 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
-    dispose() { disposed = true; epoch++; mount = null; }});
+    resumeHandoff:() => scheduleHandoff(),
+    dispose() { disposed = true; stopHandoff(); epoch++; mount = null; }});
 }

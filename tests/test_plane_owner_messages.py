@@ -738,3 +738,86 @@ def test_git_owner_message_uses_canonical_request_and_does_not_resend_unknown(gi
         with pytest.raises(CommandFailure):
             send()
         assert len(calls) == 1
+
+
+def test_foreground_launcher_context_sends_and_inspects_with_external_ancestry(gateway, monkeypatch):
+    from claudlobby.commands import operator_context
+    from claudlobby.plane.owner_service import check_action_process
+    adapter, reader, _, _, options = gateway
+    installation = adapter.package.installation
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(adapter.root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
+    checks = []
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda root: checks.append(root))
+    calls = native_receiver(monkeypatch)
+    result = adapter.send(reader, **options, text="Review this private draft")
+    observed = adapter.inspect(reader, **options)
+    assert result.data["integrity_verdict"] == observed.receiver.integrity_verdict == "delivered"
+    assert checks == [adapter.root, adapter.root] and len(calls) == 1
+    # The call-local proof cannot leak into a later authorization.
+    with pytest.raises(AccessDenied, match="generated_context_refused"):
+        check_action_process(adapter.root, adapter.package)
+
+
+@pytest.mark.parametrize("carrier,value", [
+    ("CLAUDLOBBY_ROOT", None), ("CLAUDLOBBY_ROOT", "/wrong-root"),
+    ("CLAUDLOBBY_INSTALLATION", None), ("CLAUDLOBBY_INSTALLATION", "/wrong-installation"),
+    ("CLAUDLOBBY_CLI", ""), ("CLAUDLOBBY_NATIVE_DIR", "/wrong-native"),
+    ("CLAUDLOBBY_LIBRARY_DIR", ""), ("BOT_SERVICE", ""),
+    ("CLAUDLOBBY_TIMER_CONTEXT", ""),
+])
+def test_foreground_context_refuses_partial_tampered_or_generated_identity(gateway, monkeypatch, carrier, value):
+    from claudlobby.commands import operator_context
+    adapter, reader, _, _, options = gateway
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(adapter.root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(adapter.package.installation.directory))
+    if value is None:
+        monkeypatch.delenv(carrier)
+    else:
+        monkeypatch.setenv(carrier, value)
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda root: pytest.fail("invalid context reached ancestry"))
+    calls = native_receiver(monkeypatch)
+    for method, extra in ((adapter.send, {"text": "Must not send"}), (adapter.inspect, {})):
+        with pytest.raises(AccessDenied, match="generated_context_refused"):
+            method(reader, **options, **extra)
+    assert calls == []
+    assert not list((adapter.root / "state/requests").glob("*/*.json"))
+
+
+@pytest.mark.parametrize("code", ["conflict", "unavailable"])
+def test_foreground_context_requires_positive_external_ancestry(gateway, monkeypatch, code):
+    from claudlobby.commands import operator_context
+    adapter, reader, _, _, options = gateway
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(adapter.root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(adapter.package.installation.directory))
+    checks = []
+    def refuse(root):
+        checks.append(root)
+        raise CommandFailure(code, "private native ancestry refusal")
+    monkeypatch.setattr(operator_context, "require_operator_context", refuse)
+    calls = native_receiver(monkeypatch)
+    for method, extra in ((adapter.send, {"text": "Must not send"}), (adapter.inspect, {})):
+        with pytest.raises(AccessDenied, match="generated_context_refused"):
+            method(reader, **options, **extra)
+    assert checks == [adapter.root, adapter.root] and calls == []
+
+
+@pytest.mark.parametrize("failure_type", ["command", "os"])
+def test_foreground_context_preserves_message_failure_and_clears_proof(gateway, monkeypatch, failure_type):
+    from claudlobby.commands import operator_context
+    from claudlobby.plane import owner_messages
+    from claudlobby.plane.owner_service import check_action_process
+    adapter, reader, _, _, options = gateway
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(adapter.root))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(adapter.package.installation.directory))
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda root: None)
+    failure = (CommandFailure("delivery_unknown", "Retain the original request")
+               if failure_type == "command" else OSError("Private transport failed"))
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(owner_messages, "deliver_bound_message", fail)
+    with pytest.raises(type(failure)) as raised:
+        adapter.send(reader, **options, text="Private draft")
+    assert raised.value is failure
+    with pytest.raises(AccessDenied, match="generated_context_refused"):
+        check_action_process(adapter.root, adapter.package)

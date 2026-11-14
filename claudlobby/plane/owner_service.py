@@ -125,16 +125,35 @@ def admitted_action(method):
     def invoke(self, *args, **kwargs):
         from ..config_plan import PlanError
         from ..config_units import current_git_declarations
+        from ..command_result import CommandFailure
         from ..runtime_admission import GitCurrentRuntime, mutation_admission
         from ..installation import parse_git_unit_argv
         from ..supervision_inventory import Adapter, FileSnapshot, InventoryError, _catalog, collect_enrollment
         from .owner_access import AccessDenied
 
         context = _action_context(self.root, self.package)
-        # No environment exception: even matching root/release needs native
-        # enrollment and positive ancestry. Foreground calls keep their contract.
+        # Marker-free imported operators retain their existing contract. The
+        # public launcher also binds foreground commands to root/installation;
+        # those two markers alone do not prove a native owner service.
         if not any(key in os.environ for key in _ACTION_MARKERS):
             return method(self, *args, **kwargs)
+        installation = self.package.installation
+        foreground = (str(self.root), str(installation.directory), None, None, None)
+        if tuple(value for _, value in context[3]) == foreground:
+            from ..commands.operator_context import require_operator_context
+
+            # A bot can clear its selectors. Prove external ancestry just as
+            # local owner approvals do; matching launcher markers do not grant it.
+            try:
+                action_runtime_identity(self.package)
+                require_operator_context(self.root)
+            except (ActivationError, CommandFailure, OSError) as exc:
+                raise AccessDenied('generated_context_refused') from exc
+            token = _ACTION_PROCESS.set(context)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                _ACTION_PROCESS.reset(token)
         try:
             identity = action_runtime_identity(self.package)
             installation = self.package.installation

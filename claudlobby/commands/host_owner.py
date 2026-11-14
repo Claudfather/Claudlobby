@@ -333,10 +333,11 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     account = getattr(args, "account_directory", None)
     if args.template == "local-project" and account is None:
         account = os.environ.get("CLAUDE_CONFIG_DIR") or None
+    managed = getattr(args, "managed_owner", None)
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
         fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
         project_directory=getattr(args, "project_directory", None),
-        account_directory=account)
+        account_directory=account, managed_owner=managed)
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
@@ -349,10 +350,21 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
         display.pop("project_directory")
     if grant.account_directory is None:
         display.pop("account_directory")
+    if grant.managed_owner is None:
+        display.pop("managed_owner")
+    else:
+        terminal.write("Also approve the managed owner connection service in this SAME Preview/Launch. "
+                       "It persists until explicitly stopped; pairing, messages and private ingress remain separate approvals.\n")
     terminal.write(json.dumps(display, ensure_ascii=True) + "\n")
     _approve(terminal, "ALLOW-SETUP")
     fresh_owner_setup(paths.root)
     managed_setup(paths.root, grant)
+    if managed is not None:
+        from .host_owner_setup import _commit_owner_override
+        plan = getattr(args, "managed_owner_plan", None)
+        if plan is None or plan["binding"] != managed:
+            raise CommandFailure("conflict", "managed owner requires the locally reviewed policy change")
+        _commit_owner_override(plan)
     setup.allow(grant, expected_retained=expected_retained)
     return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
 

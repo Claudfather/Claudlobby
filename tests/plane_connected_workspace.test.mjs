@@ -13,6 +13,7 @@ const enrollmentURL = uri(await read('workspace-enrollment.js'));
 const workspaceText = await read('connected-workspace.js');
 const workspaceURL = uri(workspaceText.replace('"./guided-setup.js"',JSON.stringify(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url).href)).replace('"./workspace-enrollment.js"',JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"',JSON.stringify(carrierURL)).replace('"./two-source-read.js"',JSON.stringify(adapterURL)));
 const {createConnectedWorkspace} = await import(workspaceURL);
+const {createConnectedReadClient} = await import(carrierURL);
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const wi = 'wi_'+'1'.repeat(32), fleetUID='fleet_'+'2'.repeat(32);
 const refs = ['a','b'].map((n,i)=>({reference_id:id(i+4),endpoint_origin:`https://${n}.example.test`,revision:1}));
@@ -804,6 +805,17 @@ test('actual host rejection is distinct from a missing computer session',async()
  assert.equal(view.data.sources[0].connection_state,'denied');
  assert.equal(view.data.sources[0].state,'denied');h.api.dispose();
 });
+test('actual setup HTTP denial retains status for managed-handoff classification without new auth',async()=>{
+  const clients=[];
+  const h=harness({count:1,dependencies:{createClient:input=>{const c=createConnectedReadClient(input);clients.push(c);return c;}}});
+  await h.api.checkAccount();await h.api.act(0,'connect');
+  const issued=h.calls.filter(c=>c.url.endsWith('/issue')).length;
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/setup/receipt',()=>reply(403,{state:'denied'}));
+  await assert.rejects(clients[0].setupReceipt({generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)}),
+    error=>error.status===403);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,issued);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/renew')).length,0);h.api.dispose();
+});
 
 test('setup-only computer stays visible without blocking the other admitted dashboard',async()=>{
   const h=harness(),a=refs[0].endpoint_origin,attention=[];
@@ -874,7 +886,7 @@ function setupHarness(options={}) {
     async setupLaunch(input){assert.deepEqual(JSON.parse(saved.get('test')).pending,pending);calls.push(['launch',input]);throw new Error('lost');},
     async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:2,state:'done',launch_reserved:true,config_committed:true,health_errors:{}};},...options.client};
   const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
-  const api=createGuidedSetup({client,storage,storageKey:'test',now:()=>1800000000});
+  const api=createGuidedSetup({client,storage,storageKey:'test',now:()=>1800000000,...options.setupOptions});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
@@ -893,7 +905,7 @@ test('preview owns original Git request before one explicit launch; lost respons
   assert.deepEqual(resumed.snapshot().pending,h.pending);
   assert.equal(await resumed.run('launch'),false);
   await resumed.run('receipt');assert.equal(h.calls.at(-1)[0],'receipt');
-  assert.match(resumed.snapshot().note,/Configuration committed.*native health separately/);
+  assert.match(resumed.snapshot().note,/Configuration committed.*native readiness/);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);resumed.dispose();
 });
 test('retained launch explains local handoff and cannot launch a second time',async()=>{
@@ -907,6 +919,61 @@ test('retained launch explains local handoff and cannot launch a second time',as
   assert.equal(await h.api.run('launch'),false);
   assert.equal(launches,1);
   h.api.dispose();
+});
+test('managed handoff only checks the original receipt and existing connection after socket outage',async()=>{
+  const timers=[];let reads=0,checks=0;
+  const h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+    client:{async check(){checks++;},async setupReceipt(input){reads++;
+      assert.deepEqual(input,h.pending);
+      if(reads===1)throw new Error('owner handoff gap');
+      return {...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}};}}});
+  h.context.managed_owner=true;
+  await h.api.run('context');h.api.setGoal('Review local work');await h.api.run('preview');
+  await h.api.run('launch');
+  assert.equal(timers.length,1);
+  await timers.shift()();await timers.shift()();
+  assert.equal(h.calls.filter(row=>row[0]==='launch').length,1);
+  assert.equal(reads,2);assert.equal(checks,1);
+  assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.match(h.api.snapshot().note,/message the lead.*setup goal does not start a task/);
+  h.api.dispose();
+});
+test('managed handoff stops at denied connection without issuing or replaying effects',async()=>{
+  const timers=[];let reads=0,checks=0;
+  const h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+    client:{async check(){checks++;},async setupReceipt(){reads++;throw new Error();}}});
+  h.context.managed_owner=true;
+  await h.api.run('context');h.api.setGoal('Review local work');await h.api.run('preview');await h.api.run('launch');
+  h.change({state:'denied',epoch:2});await timers.shift()();
+  assert.equal(reads,0);assert.equal(checks,0);
+  assert.equal(h.calls.filter(row=>row[0]==='launch').length,1);
+  h.api.dispose();
+});
+test('managed handoff pauses hidden reads and resumes the same original when visible',async()=>{
+  const timers=[];let visible=true,reads=0;
+  const h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{},visible:()=>visible},
+    client:{async check(){},async setupReceipt(input){reads++;return {...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}};}}});
+  h.context.managed_owner=true;
+  await h.api.run('context');h.api.setGoal('Review work');await h.api.run('preview');await h.api.run('launch');
+  visible=false;await timers.shift()();assert.equal(reads,0);
+  visible=true;h.api.resumeHandoff();await timers.shift()();
+  assert.equal(reads,1);assert.equal(h.calls.filter(row=>row[0]==='launch').length,1);h.api.dispose();
+});
+test('managed handoff reports bounded pause and stops on actual HTTP refusal metadata',async()=>{
+  const timers=[];let time=1800000000,reads=0;
+  const h=setupHarness({setupOptions:{now:()=>time,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+    client:{async setupReceipt(){reads++;const error=new Error('refused');error.status=403;throw error;}}});
+  h.context.managed_owner=true;
+  await h.api.run('context');h.api.setGoal('Review work');await h.api.run('preview');await h.api.run('launch');
+  await timers.shift()();assert.equal(reads,1);assert.equal(timers.length,0);
+  assert.match(h.api.snapshot().note,/refused.*Launch is not repeated/);h.api.dispose();
+  const held=[];
+  const slow=setupHarness({setupOptions:{now:()=>time,setTimeout:fn=>{held.push(fn);return held.length;},clearTimeout:()=>{}},
+    client:{async setupReceipt(){throw new Error('outage');}}});
+  slow.context.managed_owner=true;
+  await slow.api.run('context');slow.api.setGoal('Review work');await slow.api.run('preview');await slow.api.run('launch');
+  time+=601;await held.shift()();
+  assert.match(slow.api.snapshot().note,/Automatic connection checks paused/);slow.api.dispose();
 });
 test('changed connection fences held preview, preserves goal and never launches',async()=>{
   const held=deferred(),h=setupHarness({client:{setupPreview:()=>held.promise}});
