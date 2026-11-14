@@ -46,6 +46,7 @@ class SetupGrant:
     project_directory: str | None = None
     account_directory: str | None = None
     managed_owner: dict | None = None
+    provider_signin: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ def _snapshot(grant):
         value.pop("account_directory")
     if grant.managed_owner is None:
         value.pop("managed_owner")
+    if grant.provider_signin is None:
+        value.pop("provider_signin")
     return json.dumps(value,sort_keys=True,separators=(",", ":"))
 
 
@@ -167,7 +170,7 @@ class OwnerSetup:
         conn.execute("SELECT plan_id,generation,created_at,expires_at,payload FROM setup_previews LIMIT 0")
 
     def candidate(self, principal, *, template, fleet, repository, install_directory, project_directory=None, account_directory=None,
-                  managed_owner=None):
+                  managed_owner=None, provider_signin=None):
         # Reuse the installed template's finite repository/fleet policy, with a
         # harmless validation goal; no authoring, registration or staging here.
         from ..commands.setup import _template_config, _account_directory
@@ -178,6 +181,11 @@ class OwnerSetup:
                          **({"account_directory":account_directory} if account_directory is not None else {}))
         package=managed_setup(self.access.root)
         check_managed_owner(managed_owner, self.access.root, package.installation.directory, current=False)
+        if provider_signin is not None:
+            from .provider_signin import check_scope
+            check_scope(provider_signin,self.access.root)
+            if provider_signin["account_directory"] != str(Path(account_directory or Path.home()/".claude")):
+                raise AccessDenied("signin_profile_changed")
         directory=Path(install_directory)
         if template == "local-project":
             from ..commands.setup import _local_project
@@ -189,7 +197,7 @@ class OwnerSetup:
             _,binding=self.connected._context(conn,principal)
             now=self.access._now()
             return SetupGrant(OwnerConnected._snapshot(binding),template,fleet,repository,str(package.installation.directory),package.source_revision,
-                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory,account_directory,managed_owner)
+                str(directory),str(uuid4()),now,now+GRANT_SECONDS,project_directory,account_directory,managed_owner,provider_signin)
 
     def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
@@ -213,6 +221,9 @@ class OwnerSetup:
                 if row["launch_id"] is not None or conn.execute("SELECT 1 FROM setup_previews LIMIT 1").fetchone():
                     raise AccessDenied("setup_original_request_retained")
             conn.execute("INSERT OR REPLACE INTO setup_grant VALUES(1,?,1,NULL,NULL)",(_snapshot(expected),))
+            if expected.provider_signin is not None:
+                from .provider_signin import ProviderSignin
+                ProviderSignin.initialize(conn)
 
     def retained_state(self):
         """Local observation including withdrawn/expired grants and original launch IDs."""
@@ -263,7 +274,10 @@ class OwnerSetup:
         base={"binding_snapshot","template","fleet","repository","installation","source_revision",
               "install_directory","generation","created_at","expires_at"}
         if not isinstance(value,dict): raise AccessUnavailable()
-        fields = set(value) - {"managed_owner"}
+        fields = set(value) - {"managed_owner","provider_signin"}
+        if "provider_signin" in value:
+            from .provider_signin import scope_shape
+            if not scope_shape(value["provider_signin"]): raise AccessUnavailable()
         if "managed_owner" in value and not _managed_owner_shape(value["managed_owner"]): raise AccessUnavailable()
         if value.get("template") == "revenue-web-app":
             if fields!=base or not isinstance(value.get("repository"),str): raise AccessUnavailable()
@@ -426,6 +440,8 @@ class SetupEngine:
         self.root=access.root
         from threading import Lock
         self._effects_lock=Lock()
+        from .provider_signin import ProviderSignin
+        self.signin=ProviderSignin(self.store)
 
     def _first_team(self,grant):
         from ..context import declared_paths
@@ -453,8 +469,36 @@ class SetupEngine:
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
             **({"managed_owner":True} if grant.managed_owner is not None else {}),
+            **({"provider_signin":True,"signin_attempt":self.signin.summary(reader,grant) if request is None else None} if grant.provider_signin is not None else {}),
             "request":request,"launch_reserved":reserved,
             **({"continuation":_continuation(self.root,grant)} if request and not reserved else {})}
+
+    def _signin_grant(self,reader,generation,attempt_id):
+        grant=self.store.authorize(reader,effects=True)
+        if grant.provider_signin is None or grant.generation!=generation or not _uuid(attempt_id):
+            raise AccessDenied("signin_not_allowed")
+        # Provider credential mutation must finish before the canonical config
+        # snapshot: even a prepared Preview owns its original frozen inputs.
+        request,_=self.store.retained_request(reader)
+        if request is not None: raise AccessDenied("signin_preview_retained")
+        managed_setup(self.root,grant)
+        self._first_team(grant)
+        return grant
+
+    def signin_begin(self,reader,generation,attempt_id):
+        if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
+        try:
+            return self.signin.begin(reader,self._signin_grant(reader,generation,attempt_id),attempt_id)
+        finally: self._effects_lock.release()
+
+    def signin_status(self,reader,generation,attempt_id):
+        return self.signin.status(reader,self._signin_grant(reader,generation,attempt_id),attempt_id)
+
+    def signin_code(self,reader,generation,attempt_id,code):
+        return self.signin.code(reader,self._signin_grant(reader,generation,attempt_id),attempt_id,code)
+
+    def signin_cancel(self,reader,generation,attempt_id):
+        return self.signin.cancel(reader,self._signin_grant(reader,generation,attempt_id),attempt_id)
 
     def _project_scope(self, grant):
         check_managed_owner(grant.managed_owner, self.root, grant.installation)
@@ -473,6 +517,7 @@ class SetupEngine:
             grant=self.store.authorize(reader,effects=True)
             if grant.generation!=generation: raise AccessDenied("setup_denied")
             managed_setup(self.root,grant)
+            if grant.provider_signin is not None: self.signin.ready(reader,grant)
             self._first_team(grant)
             self._project_scope(grant)
             _template_config(grant.template,grant.fleet,grant.repository,goal,
@@ -505,6 +550,7 @@ class SetupEngine:
             self._first_team(grant)
             rendered=read_rendered(self.root,config_fingerprint)
             self._project_scope(grant)
+            if grant.provider_signin is not None: self.signin.ready(reader,grant)
             rendered.check_inputs()
             if self.store.reserve(reader,grant,request):
                 self.store.authorize(reader,expected=grant)

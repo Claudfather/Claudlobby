@@ -239,14 +239,23 @@ def _configuration(args, paths, terminal, cli):
     terminal.write("Local setup configuration (no credentials): " + json.dumps({**config,
         "fleet": fleet, "template": template, "repository": repository, "project_directory": project,
         "account_directory": account, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
-    terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
-                   "This guide does not configure those prerequisites.\n")
+    if getattr(args,"provider_signin",None) is not None:
+        terminal.write("Claude sign-in can be completed in the connected setup after separate local approval. Project/repository access, website login and native Tailscale/Serve access must already be ready.\n")
+    else:
+        terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
+                       "This guide does not configure those prerequisites.\n")
     terminal.write("Managed owner-service enrollment will require explicit local approval and the original browser Launch.\n"
                    if getattr(args, "managed_owner", False) else "Owner serving stays foreground-only; no owner service is enrolled.\n")
+    provider=None
+    if getattr(args,"provider_signin",None) is not None:
+        from ..plane.provider_signin import approved_scope, SigninRefused
+        try: provider=approved_scope(args.provider_signin,paths.root,account)
+        except (SigninRefused,OSError):
+            raise CommandFailure("invalid_argument","Claude sign-in requires the reviewed provider artifact and private account/data paths; existing token setup remains available") from None
     plan = _owner_override_plan(paths.root, config) if getattr(args, "managed_owner", False) else None
     return config, SimpleNamespace(template=template, target_fleet=fleet,
         repository=repository, project_directory=project, account_directory=account, install_directory=directory,
-        managed_owner=plan["binding"] if plan else None, managed_owner_plan=plan)
+        managed_owner=plan["binding"] if plan else None, managed_owner_plan=plan, provider_signin=provider)
 
 
 def _ready(path, origin):
@@ -376,8 +385,8 @@ def run(args, paths, store, terminal):
             # compare the same grant below, then use the normal handoff loop.
             if retained.state == "allowed":
                 grant = retained.grant
-                if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
-                        approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
+                if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.provider_signin, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
+                        approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.provider_signin, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
                 terminal.write("Matching setup approval retained without renewal.\n")
             else:

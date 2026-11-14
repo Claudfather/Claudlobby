@@ -337,7 +337,7 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
         fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
         project_directory=getattr(args, "project_directory", None),
-        account_directory=account, managed_owner=managed)
+        account_directory=account, managed_owner=managed, provider_signin=getattr(args,"provider_signin",None))
     terminal.write("Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
@@ -345,7 +345,13 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
         terminal.write("Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
         terminal.write("Claude profile directory: " + json.dumps(grant.account_directory or str(Path.home()/".claude"), ensure_ascii=True)
                        + ". No credentials are read or copied by this approval.\n")
+    if grant.provider_signin is not None:
+        terminal.write("Separately approve one Claude subscription sign-in through the bound browser. The official CLI may mint a one-year token; it stays in this host data root only. Cancellation may leave an uncertain provider effect. No model, native start or message approval is included.\n")
+        terminal.write(json.dumps(grant.provider_signin,ensure_ascii=True)+"\n")
+        _approve(terminal,"ALLOW-CLAUDE-SIGNIN")
     display = asdict(grant)
+    if grant.provider_signin is None:
+        display.pop("provider_signin")
     if grant.project_directory is None:
         display.pop("project_directory")
     if grant.account_directory is None:

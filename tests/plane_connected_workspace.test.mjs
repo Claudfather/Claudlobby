@@ -1196,3 +1196,50 @@ test('setup refuses mixed local/repository protocol shapes before preview',async
     assert.equal(h.calls.filter(c=>c[0]==='preview').length,0);h.api.dispose();
   }
 });
+
+test('Claude sign-in retains one attempt before effect and never remints after response loss',async()=>{
+  let calls=[];
+  const h=setupHarness({client:{async setupSignin(action,input){calls.push([action,input]);throw new Error('lost');}}});
+  h.context.provider_signin=true;h.context.signin_attempt=null;
+  await h.api.run('context');
+  assert.equal(await h.api.run('signin-begin'),false);
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');
+  const attempt=JSON.parse(h.saved.get('test:claude'));
+  assert.deepEqual(calls[0][1],attempt);
+  await h.api.run('signin-begin');assert.equal(calls.length,1);
+  await h.api.run('signin-status');assert.equal(calls[1][0],'status');assert.deepEqual(calls[1][1],attempt);
+  const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  await resumed.run('context');await resumed.run('signin-begin');assert.equal(calls.length,2);
+  await resumed.run('signin-cancel');assert.equal(calls[2][0],'cancel');
+});
+
+test('Claude sign-in UI accepts only host result with safe manual provider URL',async()=>{
+  const h=setupHarness({client:{async setupSignin(_action,input){return {...input,state:'waiting',reason:null,url:'https://evil.example/steal'};}}});
+  h.context.provider_signin=true;await h.api.run('context');
+  assert.equal(await h.api.run('signin-begin'),false);
+  assert.match(h.api.snapshot().note,/Local approval/);
+  assert.equal(h.saved.size,1);assert.ok(h.saved.has('test:claude'));
+});
+
+test('Claude code goes only to the selected host and never enters retained UI state',async()=>{
+  const clients=[];
+  const network=harness({count:1,dependencies:{createClient:input=>{const c=createConnectedReadClient(input);clients.push(c);return c;}}});
+  await network.api.checkAccount();await network.api.act(0,'connect');
+  const endpoint=refs[0].endpoint_origin+'/api/owner/connected/setup/signin-code';
+  network.overrides.set(endpoint,()=>reply(200,{state:'starting'}));
+  const offset=network.calls.length,code='sensitive-code#'+'b'.repeat(32);
+  await clients[0].setupSignin('code',{generation:id(9),attempt_id:id(12),code});
+  const sent=network.calls.slice(offset);assert.equal(sent.length,1);assert.equal(sent[0].url,endpoint);
+  assert.equal(JSON.parse(sent[0].init.body).code,code);network.api.dispose();
+  const ui=dom(),panel=new ui.Element();let input;
+  const h=setupHarness({client:{async setupSignin(action,body){
+    if(action==='code'){assert.equal(input.value,'');return {generation:body.generation,attempt_id:body.attempt_id,state:'starting',reason:null};}
+    return {...body,state:'waiting',reason:null,url:'https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference'};
+  }}});
+  h.context.provider_signin=true;h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');await h.api.run('signin-begin');
+  input=descendants(panel).find(node=>node.attributes['aria-label']==='Claude sign-in code');
+  input.value=code;await h.api.run('signin-code');
+  assert.equal(input.value,'');assert.ok(!JSON.stringify(h.api.snapshot()).includes(code));
+  assert.ok(!JSON.stringify([...h.saved]).includes(code));h.api.dispose();
+});

@@ -69,6 +69,57 @@ def binding(preview):
     return {key:preview[key] for key in ("generation","request_id","config_fingerprint","source_revision")}
 
 
+def test_provider_signin_without_local_scope_never_starts(setup_authority):
+    engine, grant, reader = allow(setup_authority)
+    with pytest.raises(AccessDenied):
+        engine.signin_begin(reader, grant.generation, str(uuid4()))
+
+
+def test_provider_signin_parser_private_redraw_chunks_and_wrapped_token():
+    from claudlobby.plane.provider_signin import TokenScreen
+    screen = TokenScreen()
+    url = ('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+           '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+           '&scope=user%3Ainference&code_challenge=' + 'a'*43 + '&code_challenge_method=S256&state=' + 'b'*32)
+    token = 'sk-ant-oat01-' + 's'*80
+    stream = ('old waiting text\r\x1b[2K\x1b]8;;' + url + '\x07Open browser\x1b]8;;\x07\n'
+              '✓ Long-lived authentication token created successfully!\n'
+              'Your OAuth token (valid for 1 year):\n' + token[:40] + '\r\n' + token[40:] + '\n'
+              "Store this token securely. You won't be able to see it again.\n"
+              'Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\n').encode()
+    for start in range(0,len(stream),3): screen.feed(stream[start:start+3])
+    assert screen.url == url
+    assert screen.token() == token
+    assert token not in repr(screen)
+
+
+def test_provider_signin_rejects_foreign_url_echo_and_ambiguous_tokens():
+    from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
+    screen = TokenScreen()
+    screen.feed(b'\x1b]8;;https://evil.example/login\x07open\x1b]8;;\x07')
+    assert screen.url is None
+    screen.feed(b'sk-ant-oat01-only-an-echo-not-success\n')
+    assert screen.token() is None
+    with pytest.raises(SigninRefused):
+        screen.feed(b'\x1b[999999999A')
+
+
+def test_provider_signin_env_update_preserves_routing_and_refuses_link(tmp_path):
+    import os
+    from claudlobby.plane.provider_signin import store_token, SigninRefused
+    root=tmp_path/'data'; root.mkdir(mode=0o700)
+    env=root/'.env'; env.write_bytes(b"export CLAUDE_CONFIG_DIR='/approved/profile'\n# retained route\n")
+    env.chmod(0o600)
+    token='sk-ant-oat01-'+'x'*80
+    store_token(root,token,lambda:None)
+    assert env.read_text().startswith("export CLAUDE_CONFIG_DIR='/approved/profile'\n# retained route\n")
+    assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=')==1
+    with pytest.raises(SigninRefused): store_token(root,token,lambda:None)
+    env.unlink(); env.write_text('export ROUTE=local\n'); env.chmod(0o600)
+    os.link(env,root/'alias')
+    with pytest.raises(SigninRefused): store_token(root,token,lambda:None)
+
+
 def test_no_setup_grant_or_optional_schema_never_repairs(setup_authority):
     store,access,grant,reader,*_=setup_authority
     before=access.path.read_bytes()
@@ -395,7 +446,7 @@ def test_repository_snapshot_stays_byte_compatible(setup_authority):
     from dataclasses import asdict
     from claudlobby.plane.owner_setup import _snapshot
     store, _, grant, *_ = setup_authority
-    old = asdict(grant); old.pop("project_directory"); old.pop("account_directory"); old.pop("managed_owner")
+    old = asdict(grant); old.pop("project_directory"); old.pop("account_directory"); old.pop("managed_owner"); old.pop("provider_signin")
     expected = json.dumps(old, sort_keys=True, separators=(",", ":"))
     assert _snapshot(grant) == expected
     store.allow(grant)
@@ -700,3 +751,307 @@ def test_local_authority_changes_refuse_effects(setup_authority, tmp_path, monke
     with pytest.raises((AccessDenied, AccessUnavailable)):
         engine.preview(reader, grant.generation, "Review local code")
     assert not args.dispatches and args.retained["record"] is None
+
+
+@pytest.fixture
+def synthetic_signin(setup_authority,monkeypatch,tmp_path):
+    """Only the external provider is synthetic; real PTY, DB, admission and files."""
+    import hashlib,sys
+    from dataclasses import replace
+    from claudlobby.plane import provider_signin
+    store,access,grant,reader,*_=setup_authority
+    access.root.chmod(0o700)
+    env=access.root/'.env'; env.write_text('export ROUTE=private\n');env.chmod(0o600)
+    lock=access.root/'state/runtime-use.lock';lock.touch(mode=0o600)
+    profile=Path.home()/'.claude';profile.mkdir(mode=0o700)
+    monkeypatch.setenv('HTTPS_PROXY','http://proxy.example.test:8888')
+    program=tmp_path/'synthetic-provider'
+    url=('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+         '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+         '&scope=user%3Ainference&code_challenge='+'a'*43+'&code_challenge_method=S256&state='+'b'*32)
+    token='sk-ant-oat01-'+'s'*80
+    body=f'''#!{sys.executable}
+import os,sys,time
+assert sys.argv[1:]==['setup-token']
+assert os.environ['BROWSER']=='/usr/bin/true'
+assert os.environ['DISABLE_AUTOUPDATER']=='1'
+assert os.environ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']=='1'
+assert os.environ['HTTPS_PROXY']=='http://proxy.example.test:8888'
+assert not any(key in os.environ for key in ['ANTHROPIC_API_KEY','CLAUDE_CODE_OAUTH_TOKEN','SSH_AUTH_SOCK'])
+sys.stdout.write('\\x1b]8;;'+{url!r}+'\\x07Open Claude\\x1b]8;;\\x07\\r\\n');sys.stdout.flush()
+code=sys.stdin.readline().strip()
+assert code=='accepted#'+ 'b'*32
+sys.stdout.write('\\x1b[2K\\r✓ Long-lived authentication token created successfully!\\r\\nYour OAuth token (valid for 1 year):\\r\\n'+{token!r}+'\\r\\nStore this token securely. You won\\\'t be able to see it again.\\r\\nUse this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\\r\\n');sys.stdout.flush()
+'''
+    program.write_text(body);program.chmod(0o700)
+    digest=hashlib.sha256(program.read_bytes()).hexdigest()
+    monkeypatch.setattr(provider_signin,'SUPPORTED',{digest:'2.1.325'})
+    scope=provider_signin.approved_scope(program,access.root,str(profile))
+    grant=replace(grant,provider_signin=scope)
+    store.allow(grant)
+    return SetupEngine(access),grant,reader,program,token,env
+
+
+def _signin_until(engine,grant,reader,attempt,state):
+    import time
+    deadline=time.monotonic()+8
+    while time.monotonic()<deadline:
+        result=engine.signin_status(reader,grant.generation,attempt)
+        if result['state']==state:return result
+        if result['state'] in {'needs_attention','unknown','cancelled'}:pytest.fail(str(result))
+        time.sleep(0.025)
+    pytest.fail('synthetic sign-in did not reach expected finite state')
+
+
+def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synthetic_signin):
+    import time
+    engine,grant,reader,program,token,env=synthetic_signin
+    attempt=str(uuid4())
+    try:
+        first=engine.signin_begin(reader,grant.generation,attempt)
+        assert first['attempt_id']==attempt
+        waiting=_signin_until(engine,grant,reader,attempt,'waiting')
+        assert waiting['url'].startswith('https://claude.com/cai/oauth/authorize?')
+        with pytest.raises(AccessDenied):engine.signin_begin(reader,grant.generation,str(uuid4()))
+        with pytest.raises(AccessDenied):engine.preview(reader,grant.generation,'Do not start while signing in')
+        with pytest.raises(AccessDenied):engine.signin_code(reader,grant.generation,attempt,'accepted#wrong-state')
+        engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        result=_signin_until(engine,grant,reader,attempt,'connected')
+        assert token not in json.dumps(result)
+        assert env.read_text()=='export ROUTE=private\n'+f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n"
+        with engine.store.access._connection() as conn:
+            row=dict(conn.execute('SELECT * FROM setup_provider').fetchone())
+            assert token not in json.dumps(row) and 'accepted#' not in json.dumps(row)
+        assert engine.context(reader)['signin_attempt']['state']=='connected'
+        assert SetupEngine(engine.store.access).signin_status(reader,grant.generation,attempt)['state']=='connected'
+        assert engine.preview(reader,grant.generation,'Requested local work')['dispatch']=='prepared'
+        with pytest.raises(AccessDenied):engine.signin_begin(reader,grant.generation,attempt)
+    finally:engine.signin.shutdown()
+
+
+@pytest.mark.parametrize('stop',['cancel','shutdown','revoke'])
+def test_provider_signin_owned_child_drained_no_replay_and_no_credential(synthetic_signin,stop):
+    import os
+    engine,grant,reader,program,token,env=synthetic_signin
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        if stop=='cancel':engine.signin_cancel(reader,grant.generation,attempt)
+        elif stop=='shutdown':engine.signin.shutdown()
+        else:
+            engine.store.revoke(grant)
+            engine.signin._thread.join(timeout=8)
+        assert not engine.signin._thread.is_alive()
+        assert env.read_text()=='export ROUTE=private\n'
+        if stop!='revoke':
+            result=SetupEngine(engine.store.access).signin_status(reader,grant.generation,attempt)
+            assert result['state'] in {'cancelled','needs_attention','unknown'}
+            assert 'url' not in result
+    finally:engine.signin.shutdown()
+
+
+def test_provider_signin_interrupted_reservation_is_unknown_never_restarted(synthetic_signin):
+    engine,grant,reader,*_=synthetic_signin
+    attempt=str(uuid4())
+    with engine.store.access._connection(write=True) as conn:
+        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,NULL)',(attempt,grant.generation,'starting'))
+    assert engine.signin_begin(reader,grant.generation,attempt)['state']=='unknown'
+    assert engine.signin._thread is None
+    with pytest.raises(AccessDenied):engine.signin_begin(reader,grant.generation,str(uuid4()))
+
+
+@pytest.mark.parametrize('content',["export CLAUDE_CODE_OAUTH_TOKEN='existing'\n",'export ROUTE=$(run-command)\n','source /other/root\n'])
+def test_provider_signin_unsafe_or_existing_environment_never_changes(tmp_path,content):
+    from claudlobby.plane.provider_signin import store_token,SigninRefused
+    root=tmp_path/'private';root.mkdir(mode=0o700)
+    env=root/'.env';env.write_text(content);env.chmod(0o600)
+    with pytest.raises(SigninRefused):store_token(root,'sk-ant-oat01-'+'x'*80,lambda:None)
+    assert env.read_text()==content
+
+
+def test_provider_signin_unknown_or_changed_binary_refuses_before_process(synthetic_signin):
+    engine,grant,reader,program,*_=synthetic_signin
+    program.write_text('#!/bin/sh\nexit 0\n')
+    with pytest.raises(ValueError):engine.signin_begin(reader,grant.generation,str(uuid4()))
+    assert engine.signin._thread is None
+
+
+@pytest.mark.parametrize('case',['ambiguous','limit','unsafe-control'])
+def test_provider_signin_parser_refuses_ambiguous_or_unbounded_stream(case):
+    from claudlobby.plane.provider_signin import TokenScreen,SigninRefused
+    screen=TokenScreen()
+    with pytest.raises(SigninRefused):
+        if case=='limit':screen.feed(b'x'*131073)
+        elif case=='unsafe-control':screen.feed(b'\x1b[1;2;3z')
+        else:
+            for token in ['sk-ant-oat01-'+'a'*80,'sk-ant-oat01-'+'b'*80]:
+                screen.feed(('\r\x1b[2J\x1b[HLong-lived authentication token created successfully!\r\n'
+                    'Your OAuth token (valid for 1 year):\r\n'+token+'\r\n'
+                    "Store this token securely. You won't be able to see it again.\r\n").encode())
+
+
+def test_provider_signin_existing_token_refuses_before_any_child(synthetic_signin):
+    engine,grant,reader,_,_,env=synthetic_signin
+    env.write_text("export CLAUDE_CODE_OAUTH_TOKEN='existing-private-token'\n")
+    with pytest.raises(ValueError):engine.signin_begin(reader,grant.generation,str(uuid4()))
+    assert engine.signin._thread is None
+    assert env.read_text()=="export CLAUDE_CODE_OAUTH_TOKEN='existing-private-token'\n"
+
+
+def test_provider_signin_cutover_fence_refuses_without_starting(synthetic_signin):
+    engine,grant,reader,*_=synthetic_signin
+    (engine.root/'state/update.json').write_text(json.dumps({'schema':1,'phase':'quiesce','maintenance':True}))
+    from claudlobby.installation import InstallationError
+    with pytest.raises(InstallationError):engine.signin_begin(reader,grant.generation,str(uuid4()))
+    assert engine.signin._thread is None
+
+
+def test_provider_signin_staged_bytes_survive_original_path_replacement(synthetic_signin):
+    import hashlib,os
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,program,*_=synthetic_signin
+    fd,before=provider_signin._open_file(program,executable=True)
+    try:
+        copied,pinned,info=provider_signin.stage_binary(engine.store.access.path.parent,grant.provider_signin,str(uuid4()),fd,before)
+        replacement=program.with_name('new-version');replacement.write_bytes(b'#!/bin/sh\nexit 99\n');replacement.chmod(0o700)
+        os.replace(replacement,program)
+        assert hashlib.sha256(copied.read_bytes()).hexdigest()==grant.provider_signin['sha256']
+        assert provider_signin._node(os.fstat(pinned))==provider_signin._node(info)
+        os.close(pinned)
+    finally:os.close(fd)
+
+
+def test_provider_signin_local_approval_is_separate_and_inert(synthetic_signin,monkeypatch):
+    from claudlobby.commands import host_owner
+    from claudlobby.context import resolve_paths
+    from claudlobby import supervision_inventory
+    from tests.test_host_owner import terminal
+    engine,old,_,program,*_=synthetic_signin
+    engine.store.revoke(old)
+    monkeypatch.setattr(supervision_inventory,'Adapter',lambda _:SimpleNamespace(read=lambda _:f'manager\tLinux\ndirectory\t{old.install_directory}\n'))
+    args=SimpleNamespace(template=old.template,target_fleet=old.fleet,repository=old.repository,
+        project_directory=old.project_directory,account_directory=old.account_directory,
+        install_directory=Path(old.install_directory),provider_signin=old.provider_signin)
+    terminal_io=terminal(monkeypatch,iter(['NO']))
+    with pytest.raises(CommandFailure):host_owner._allow_setup(args,resolve_paths(root=engine.root),engine.store.access,terminal_io)
+    assert engine.store.local() is None
+    terminal_io=terminal(monkeypatch,iter(['ALLOW-CLAUDE-SIGNIN','ALLOW-SETUP']))
+    host_owner._allow_setup(args,resolve_paths(root=engine.root),engine.store.access,terminal_io)
+    assert engine.store.local().provider_signin==old.provider_signin
+    assert not list(engine.store.access.path.parent.glob('claude-signin-*'))
+
+
+@pytest.mark.parametrize('race',['replacement','hardlink','admission'])
+def test_provider_signin_environment_commit_race_never_appends(tmp_path,race):
+    import os
+    from claudlobby.plane.provider_signin import store_token,SigninRefused
+    root=tmp_path/'data';root.mkdir(mode=0o700)
+    env=root/'.env';env.write_text('export ROUTE=original\n');env.chmod(0o600)
+    def admission():
+        if race=='replacement':
+            env.rename(root/'retained');env.write_text('export ROUTE=replacement\n');env.chmod(0o600)
+        elif race=='hardlink':os.link(env,root/'alias')
+        else:raise AccessDenied('revoked')
+    with pytest.raises((SigninRefused,AccessDenied)):store_token(root,'sk-ant-oat01-'+'x'*80,admission)
+    assert 'CLAUDE_CODE_OAUTH_TOKEN' not in env.read_text()
+    if race=='replacement':assert (root/'retained').read_text()=='export ROUTE=original\n'
+
+
+@pytest.mark.parametrize('when',['before-thread','staging','ready-token','queued-code','queued-code-revoke'])
+def test_provider_signin_cancel_wins_before_effect_admission(synthetic_signin,monkeypatch,when):
+    import inspect,subprocess,threading
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,_,_,env=synthetic_signin
+    attempt=str(uuid4());entered=threading.Event();release=threading.Event();calls=[]
+    queue_gate=threading.Event();code_writes=[]
+    original_write=provider_signin.os.write
+    def observed_write(fd,data):
+        if data==('accepted#'+'b'*32+'\n').encode():code_writes.append(True)
+        return original_write(fd,data)
+    monkeypatch.setattr(provider_signin.os,'write',observed_write)
+    original_popen=subprocess.Popen
+    def observed_popen(argv,*args,**kwargs):
+        if argv[1:]==['setup-token']:calls.append(argv)
+        return original_popen(argv,*args,**kwargs)
+    monkeypatch.setattr(provider_signin.subprocess,'Popen',observed_popen)
+    if when=='before-thread':
+        original_start=threading.Thread.start
+        def start(thread):
+            if getattr(thread,'_target',None)==engine.signin._run:engine.signin.shutdown()
+            return original_start(thread)
+        monkeypatch.setattr(threading.Thread,'start',start)
+    elif when=='staging':
+        original_stage=provider_signin.stage_binary
+        def stage(*args):
+            result=original_stage(*args);entered.set()
+            assert release.wait(8)
+            return result
+        monkeypatch.setattr(provider_signin,'stage_binary',stage)
+    elif when.startswith('queued-code'):
+        original_select=provider_signin.select.select
+        def selected(*args):
+            if queue_gate.is_set() and not entered.is_set():
+                entered.set();assert release.wait(8)
+            return original_select(*args)
+        monkeypatch.setattr(provider_signin.select,'select',selected)
+    else:
+        original_token=provider_signin.TokenScreen.token
+        def token(screen):
+            result=original_token(screen)
+            if result and inspect.currentframe().f_back.f_code.co_name=='_run':
+                entered.set();assert release.wait(8)
+            return result
+        monkeypatch.setattr(provider_signin.TokenScreen,'token',token)
+    cancel=None
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        if when=='ready-token' or when.startswith('queued-code'):
+            _signin_until(engine,grant,reader,attempt,'waiting')
+            if when.startswith('queued-code'):
+                queue_gate.set();assert entered.wait(8)
+            engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        if when!='before-thread':
+            assert entered.wait(8)
+            if when=='queued-code-revoke':
+                engine.store.revoke(grant);release.set();engine.signin._thread.join(timeout=8)
+            else:
+                cancel=threading.Thread(target=lambda:engine.signin_cancel(reader,grant.generation,attempt))
+                cancel.start();assert engine.signin._cancel.wait(3)
+                release.set();cancel.join(timeout=8);assert not cancel.is_alive()
+        engine.signin.shutdown()
+        assert not engine.signin._thread.is_alive()
+        assert len(calls)==(1 if when=='ready-token' or when.startswith('queued-code') else 0)
+        if when.startswith('queued-code'):assert not code_writes
+        assert env.read_text()=='export ROUTE=private\n'
+    finally:
+        release.set();engine.signin.shutdown()
+        if cancel is not None:cancel.join(timeout=8)
+
+
+def test_provider_signin_admitted_store_serializes_cancel_and_keeps_commit_truth(synthetic_signin,monkeypatch):
+    import threading
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,_,token,env=synthetic_signin
+    attempt=str(uuid4());entered=threading.Event();release=threading.Event()
+    original_store=provider_signin.store_token
+    def store(*args):
+        entered.set();assert release.wait(8)
+        return original_store(*args)
+    monkeypatch.setattr(provider_signin,'store_token',store)
+    cancel=None
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        assert entered.wait(8)
+        acquired=engine.signin._lock.acquire(blocking=False)
+        if acquired:engine.signin._lock.release()
+        assert not acquired,'credential commit was not admitted under the cancellation lock'
+        cancel=threading.Thread(target=lambda:engine.signin_cancel(reader,grant.generation,attempt))
+        cancel.start();release.set();cancel.join(timeout=8);assert not cancel.is_alive()
+        assert engine.signin_status(reader,grant.generation,attempt)['state']=='connected'
+        assert env.read_text().endswith(f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n")
+    finally:
+        release.set();engine.signin.shutdown()
+        if cancel is not None:cancel.join(timeout=8)

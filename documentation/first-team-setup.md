@@ -171,3 +171,52 @@ Retain a refused or unknown result rather than retrying a new action. After
 all current native definitions are removed, local mutation admission deliberately
 refuses an empty inventory; an idle updater is not a substitute ancestry anchor.
 Do not restart workloads or weaken that guard solely to revoke stored offline grants.
+
+### Sign in to Claude from the setup page
+
+Existing privately configured tokens remain supported; omit this option to keep
+that route. For a new subscription sign-in, the local operator can instead add
+`--provider-signin /absolute/path/to/claude` to `host owner setup`. This optional
+route currently accepts only the independently inspected Claude Code 2.1.325
+Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
+Each attempt retains one verified public executable copy (roughly 350 MiB) in
+its private owner state, so an ordinary provider auto-update cannot replace the
+approved executable between verification and launch. A matching version string
+alone is insufficient. An unsupported binary is
+refused before invocation; use your existing private provider setup instead.
+
+Keep the explicitly selected `--account-directory`; create/choose that private
+profile directory before invoking the guide. This filesystem choice does not
+authenticate the provider. The data root must be private
+0700 and its routing `.env` an owned, single-link regular file, mode 0600. The
+operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider authorization
+attempt and storage of its subscription token on this host. This does not grant
+ordinary messages, native activation, or a model turn. Website sign-in is not
+provider consent or local authority.
+
+In the connected setup page choose **Sign in to Claude**, open its Claude link,
+and approve at the provider. If Claude gives a code, paste it into the private
+Claude code field on the connected setup page. It is sent directly to the
+selected host, never through the website server. Choose **Check sign-in
+progress** for the original attempt. **Claude connected** means the token was
+stored in this host's private routing file; it does not mean bots started or
+passed native readiness. Preview and Launch keep their separate approvals.
+
+The official `claude setup-token` process owns OAuth and its browser/code flow.
+The host captures its output privately; token/code/terminal output are never
+shown by Plane, placed in request receipts or sent through Vercel. Only the
+validated provider link and finite progress states are exposed. The credential
+update appends one literal token while preserving unrelated routing bytes and
+refuses existing tokens, unsafe files or unsupported environment syntax. In
+those cases choose local private setup/recovery rather than overwriting another
+credential. Only this child receives the supported process-local auto-update/nonessential
+traffic disables and browser-opener override; standard proxy, CA, temporary and
+cache routing is preserved without exposing values. No global browser or
+provider setting is changed.
+
+Keep the original attempt after a lost response. Cancel or guide shutdown stops
+its owned process, but cannot promise that the provider did not already mint a
+token, and does not revoke one. Interrupted attempts need local attention; setup
+never automatically remints or retries. Provider acceptance and native background
+readiness still require an authorized real trial; synthetic tests are not those
+observations.
