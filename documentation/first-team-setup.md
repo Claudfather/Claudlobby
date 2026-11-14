@@ -74,16 +74,31 @@ storage, confirm the signed-in workspace proposal and approve the exact first-te
 scope. Each approval is separate. In the browser, save the private computer
 address under **Your computers**, open the workspace, provide the approved goal,
 review the exact prepared plan and launch once. The guide then drains admitted
-work and exits, releasing its runtime readers so the original updater can proceed.
+work, releases its runtime readers and waits for that same original update using
+the stable installation entry. The wait imports no changing runtime and holds no
+runtime reader; it is bounded to ten minutes with ten seconds per status read.
+Ctrl-C cancels only waiting and its own status-read child, not the update or team.
 With managed serving, the updater starts the approved connection at the same
 private address; keep this browser view open while it checks the original
 receipt and existing session. Connection may return while agents are still
 starting. Wait for DONE, empty health errors and actual native readiness before
 asking the team to work. Expired or refused access needs explicit reconnection;
-the guide never issues new authority or repeats Launch. The printed stable-CLI
+the guide never silently issues authority or repeats Launch. After healthy DONE,
+the same local guide reenters current source and checks current configuration,
+source and operator ancestry before offering optional message approval. Enter
+your canonical `human:` alias, confirm `REGISTER` if it is new, then explicitly
+confirm `ALLOW-ACTIONS` for messages only. Enter/skip, decline or EOF completes
+without a new message grant; already confirmed registration alone grants none.
+A storage failure or interrupted effect needs inspection, not automatic retry.
+Choose **Check action access** in the browser after approval; nothing is sent by
+the guide. This does not approve nudges, feedback or permission decisions.
+The printed stable-CLI
 status command remains available for local recovery. In foreground-only mode,
 after DONE run the printed `host owner serve` command to reconnect.
-Do not rerun setup or Launch to restore browser access. A lost browser response
+Do not replay Launch to restore browser access. An older copied stable launcher
+that lacks this continuation refuses automatic waiting without repairing itself.
+After inspecting the original operation and healthy DONE, reopen the same guide
+to finish local consent; configuration and serving are not repeated. A lost browser response
 does not discard the retained original identifiers. Reading or downloading instructions
 has not performed these steps. Local setup approval does not grant ordinary
 messages, task feedback or permission decisions.

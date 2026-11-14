@@ -14,10 +14,13 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 class InstallationError(ValueError):
@@ -539,6 +542,176 @@ def _check_maintenance(installation: Installation, *, native=False) -> None:
         raise InstallationError("maintenance record cannot be verified") from exc
 
 
+
+_SETUP_FIELDS = ("generation", "request_id", "config_fingerprint", "source_revision")
+
+
+def _setup_binding(values):
+    uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    if (len(values) != 4 or not all(isinstance(v, str) for v in values)
+            or not all(re.fullmatch(uuid, v) for v in values[:2])
+            or not re.fullmatch(r"[0-9a-f]{64}", values[2])
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", values[3])):
+        raise InstallationError("setup continuation requires the exact original identifiers")
+    return tuple(values)
+
+
+def _entry_python(installation):
+    path = installation.cli
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        content = os.read(fd, 1024 * 1024)
+        linked = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid not in {0, os.getuid()}
+                or info.st_mode & 0o022 or not info.st_mode & 0o111 or info.st_size != len(content)
+                or (info.st_dev, info.st_ino) != (linked.st_dev, linked.st_ino)):
+            raise InstallationError("stable setup launcher is unavailable or redirected")
+    finally:
+        os.close(fd)
+    first, separator, body = content.partition(b"\n")
+    try:
+        host = Path(first[2:].decode("utf-8"))
+    except UnicodeError:
+        raise InstallationError("stable launcher host Python is invalid") from None
+    if (not separator or not first.startswith(b"#!") or not host.is_absolute()
+            or any(c.isspace() for c in str(host)) or host.resolve() != host
+            or not host.is_file() or not os.access(host, os.X_OK)
+            or host.is_relative_to(installation.source) or host.is_relative_to(installation.environment)):
+        raise InstallationError("setup continuation requires its bound host Python")
+    return host, body
+
+
+def setup_handoff_argv(installation, data):
+    """Called only after imported guide/terminal/children have drained.
+
+    An older installed launcher cannot interpret the new private route. Refuse
+    before exec rather than accidentally waiting in imported application code.
+    """
+    if not isinstance(data, dict) or set(data) != {"state", *_SETUP_FIELDS} or data["state"] != "launch_handoff":
+        raise InstallationError("setup handoff has no original operation")
+    original = _setup_binding([data[key] for key in _SETUP_FIELDS])
+    host, body = _entry_python(installation)
+    if body != Path(__file__).read_bytes():
+        raise InstallationError("installed stable launcher cannot finish setup automatically; preserve the original update and reopen host owner setup after DONE")
+    return [str(host), "-I", "-S", "-B", str(installation.cli), "--root",
+            str(installation.data_root), "_setup-wait", *original]
+
+
+def _setup_recovery(installation, original):
+    print("Original setup request: " + original[1] + "; configuration " + original[2] + "; source " + original[3] + ".", file=sys.stderr)
+    print("Inspect with the same installation CLI: host update status --json. Continue only that original operation locally if required; do not launch again.", file=sys.stderr)
+
+
+def _setup_status(installation, environment, cancelled, *, seconds=10):
+    """One owned read-only child of the existing independent update entry."""
+    host, _ = _entry_python(installation)
+    updater = installation.bin / "claudlobby-update"
+    info = updater.lstat()
+    if (updater.resolve() != updater or not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
+            or info.st_mode & 0o022 or info.st_uid not in {0, os.getuid()}):
+        raise InstallationError("independent update status entry is unavailable")
+    process = None
+    try:
+        if cancelled():
+            raise InterruptedError
+        process = subprocess.Popen([str(host), "-I", "-S", "-B", str(updater), "--root", str(installation.data_root),
+                                    "host", "update", "status", "--json"],
+                                   env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        deadline = time.monotonic() + seconds
+        output = bytearray()
+        while True:
+            if cancelled():
+                raise InterruptedError
+            if time.monotonic() >= deadline:
+                raise InstallationError("original update status read timed out")
+            if select.select([process.stdout], [], [], min(.1, max(0, deadline - time.monotonic())))[0]:
+                part = os.read(process.stdout.fileno(), 65536)
+                if not part:
+                    break
+                output.extend(part)
+                if len(output) > 4 * 1024 * 1024:
+                    raise InstallationError("original update status is too large")
+        if process.wait(timeout=max(.1, deadline - time.monotonic())) != 0:
+            raise InstallationError("original update status was refused")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+        try:
+            result = json.loads(output, object_pairs_hook=unique,
+                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        except (ValueError, UnicodeError, RecursionError):
+            raise InstallationError("original update status was malformed") from None
+        if type(result) is not dict or set(result) != {"read_only", "update"} or result["read_only"] is not True or type(result["update"]) is not dict:
+            raise InstallationError("original update status is unavailable")
+        return result["update"]
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()  # ONLY our status-read child, never the updater job/fleet.
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+            if process.stdout is not None:
+                process.stdout.close()
+
+
+def _setup_wait(installation, values, environment, *, seconds=600, read_seconds=10, interval=1):
+    """Stable stdlib-only wait: no source/env import, reader lease or writes."""
+    original = _setup_binding(values)
+    cancelled = [0]
+    def stop(number, _frame):
+        cancelled[0] = number
+    previous = {number: signal.signal(number, stop) for number in (signal.SIGINT, signal.SIGTERM)}
+    deadline = time.monotonic() + seconds
+    try:
+        while time.monotonic() < deadline:
+            if cancelled[0]:
+                raise InterruptedError
+            record = _setup_status(installation, environment, lambda: bool(cancelled[0]),
+                                   seconds=min(read_seconds, max(.1, deadline - time.monotonic())))
+            if (record.get("request_id") != original[1] or record.get("config_fingerprint") != original[2]
+                    or record.get("target") != original[3] or type(record.get("schema")) is not int or record["schema"] != 1
+                    or not isinstance(record.get("phase"), str) or record.get("phase") not in {"prepare","quiesce","git","environment","publish","migrate","commit","restore","done"}):
+                raise InstallationError("the retained setup operation changed; no replacement was followed")
+            if record.get("stage_error") or record.get("health_errors"):
+                raise InstallationError("the original setup needs local attention")
+            if record["phase"] == "done":
+                if (record.get("maintenance") is not False or record.get("config_committed") is not True
+                        or type(record.get("health_errors")) is not dict):
+                    raise InstallationError("the original setup is not healthy DONE")
+                host, _ = _entry_python(installation)
+                if cancelled[0]:
+                    raise InterruptedError
+                # Normal launcher admission reacquires a NEW current reader and
+                # imports current source; no inherited old lease is reused.
+                os.execve(host, [str(host), "-I", "-S", "-B", str(installation.cli), "--root", str(installation.data_root),
+                                 "host", "owner", "setup", "--_finish-setup", *original], environment)
+            until = min(deadline, time.monotonic() + interval)
+            while time.monotonic() < until:
+                if cancelled[0]:
+                    raise InterruptedError
+                time.sleep(min(.1, max(0, until - time.monotonic())))
+        raise InstallationError("waiting for the original setup timed out")
+    except InterruptedError:
+        _setup_recovery(installation, original)
+        print("Setup waiting cancelled; the original update and workloads were not stopped.", file=sys.stderr)
+        return 128 + (cancelled[0] or signal.SIGINT)
+    except (InstallationError, OSError, subprocess.SubprocessError):
+        _setup_recovery(installation, original)
+        raise InstallationError("setup completion could not be observed; inspect the original operation") from None
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
 def _launch(argv: list[str]) -> int:
     # This file is copied outside both changing trees. No application imports
     # occur until the recorded root and current maintenance fence are checked.
@@ -558,6 +731,10 @@ def _launch(argv: list[str]) -> int:
     arguments = _bound_arguments(installation, argv[2:] if runtime else argv)
     environment = {**os.environ, "CLAUDLOBBY_INSTALLATION": str(installation.directory),
                    "CLAUDLOBBY_ROOT": str(installation.data_root), "PYTHONDONTWRITEBYTECODE": "1"}
+    if "_setup-wait" in arguments:
+        if runtime or len(arguments) != 7 or arguments[2] != "_setup-wait":
+            raise InstallationError("setup continuation has an invalid argument vector")
+        return _setup_wait(installation, arguments[3:], environment)
     if _update_route(arguments):
         updater = installation.bin / "claudlobby-update"
         if not updater.is_file() or not os.access(updater, os.X_OK):

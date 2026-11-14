@@ -1055,3 +1055,52 @@ def test_provider_signin_admitted_store_serializes_cancel_and_keeps_commit_truth
     finally:
         release.set();engine.signin.shutdown()
         if cancel is not None:cancel.join(timeout=8)
+
+
+def completed_setup(fixture,monkeypatch):
+    from claudlobby import active_config
+    engine,grant,reader=allow(fixture)
+    request=binding(engine.preview(reader,grant.generation,'Review requested local code'))
+    engine.launch(reader,**request)
+    record=fixture[-1].retained['record']
+    record.update(phase='done',maintenance=False,config_committed=True,health_errors={},candidate_config={'original':'committed'})
+    (engine.root/'state/config.json').write_text(json.dumps(record['candidate_config']))
+    monkeypatch.setattr(active_config,'read_current_config',lambda *a,**k:dict(record['candidate_config']))
+    return engine,grant,request,record
+
+
+def test_completed_guide_skips_configuration_and_serving_even_after_grant_expiry(setup_authority,monkeypatch):
+    from claudlobby.commands import host_owner_setup as guide,host_owner
+    from claudlobby.context import resolve_paths
+    from tests.test_host_owner import terminal
+    engine,grant,request,record=completed_setup(setup_authority,monkeypatch)
+    setup_authority[4][0]=grant.expires_at+1
+    monkeypatch.setattr(guide,'_configuration',lambda *_:pytest.fail('completed guide tried to configure again'))
+    monkeypatch.setattr(guide,'_serving',lambda *_:pytest.fail('completed guide competed with owner socket'))
+    offered=[]
+    monkeypatch.setattr(host_owner,'_setup_messages',lambda paths,store,tty,fleet:offered.append(fleet) or {'state':'skipped'},raising=False)
+    result=guide.run(SimpleNamespace(finish_setup=list(request.values()),target_fleet=None),resolve_paths(root=engine.root),setup_authority[1],terminal(monkeypatch,iter(())))
+    assert result.data['state']=='setup_complete' and offered==[grant.fleet]
+    assert len(setup_authority[-1].dispatches)==1 and record['phase']=='done'
+
+
+@pytest.mark.parametrize('change',['request','fingerprint','source','health','maintenance','committed','expected-generation','config'])
+def test_completed_guide_drift_never_offers_message_consent(setup_authority,monkeypatch,change):
+    from claudlobby.commands import host_owner_setup as guide,host_owner
+    from claudlobby.context import resolve_paths
+    from claudlobby import active_config
+    from tests.test_host_owner import terminal
+    engine,grant,request,record=completed_setup(setup_authority,monkeypatch)
+    expected=list(request.values())
+    if change=='request':record['request_id']=str(uuid4())
+    elif change=='fingerprint':record['config_fingerprint']='f'*64
+    elif change=='source':record['target']='f'*40
+    elif change=='health':record['health_errors']={'lead':'not ready'}
+    elif change=='maintenance':record['maintenance']=True
+    elif change=='committed':record['config_committed']=False
+    elif change=='expected-generation':expected[0]=str(uuid4())
+    else:monkeypatch.setattr(active_config,'read_current_config',lambda *a,**k:{'other':'configuration'})
+    monkeypatch.setattr(host_owner,'_setup_messages',lambda *_:pytest.fail('drift granted consent'),raising=False)
+    monkeypatch.setattr(guide,'_configuration',lambda *_:pytest.fail('drift caused reconfiguration'))
+    with pytest.raises((CommandFailure,ValueError,RuntimeError)):
+        guide.run(SimpleNamespace(finish_setup=expected,target_fleet=None),resolve_paths(root=engine.root),setup_authority[1],terminal(monkeypatch,iter(())))

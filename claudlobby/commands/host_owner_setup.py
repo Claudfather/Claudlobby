@@ -321,6 +321,26 @@ def interrupted():
         signal.signal(signal.SIGTERM, previous)
 
 
+
+def _completed(args, paths, store, terminal, retained, record, package):
+    from ..plane.owner_setup import OwnerSetup
+    from ..installation import _setup_binding
+    from .host_owner import _setup_messages
+    grant = retained.grant
+    actual = (grant.generation,record["request_id"], record["config_fingerprint"], record["target"])
+    expected = getattr(args, "finish_setup", None)
+    if (expected is not None and _setup_binding(expected) != actual
+            or record.get("maintenance") is not False or record.get("config_committed") is not True
+            or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
+            or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
+            or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
+        raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
+    terminal.write("Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
+    consent = _setup_messages(paths, store, terminal, grant.fleet)
+    return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": consent},
+        lines=("Original setup finished; no Launch or message was sent again.",))
+
+
 def run(args, paths, store, terminal):
     from . import host_owner as console
     from ..active_config import read_current_config
@@ -344,11 +364,14 @@ def run(args, paths, store, terminal):
             raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
                 data={"request_id":record["request_id"]},
                 hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
-        snapshot=read_current_config(paths.root,installation=installation,revision=record["target"])
-        if snapshot!=record.get("candidate_config"):
+        snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
+        if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
+        return _completed(args, paths, store, terminal, retained, record, package)
     elif selected or retained and retained.launch_id is not None:
         raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
+    if getattr(args, "finish_setup", None) is not None:
+        raise CommandFailure("conflict", "the original completed setup is unavailable; no replacement will be prepared")
     if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
