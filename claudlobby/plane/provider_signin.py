@@ -61,11 +61,17 @@ def _private_directory(path):
         raise SigninRefused("private_path_changed")
 
 
-def _open_file(path, *, executable=False):
+def _open_file(path, *, executable=False, public_source=False):
+    """Public software may be hard-linked; callers must hash it before use.
+
+    Credential files and the private executable copy always remain single-link.
+    The complete source node, including link count, is still bound through copy.
+    """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink < 1
+                or info.st_nlink != 1 and not (executable and public_source)
                 or info.st_uid not in ({0, os.getuid()} if executable else {os.getuid()})
                 or (info.st_mode & 0o022 if executable else stat.S_IMODE(info.st_mode) != 0o600)
                 or executable and not info.st_mode & 0o111 or not executable and info.st_size > 65536
@@ -86,7 +92,7 @@ def approved_scope(binary, root, account_directory):
     if not profile.is_absolute() or profile.resolve() != profile or not profile.is_dir():
         raise SigninRefused("profile_changed")
     path = Path(binary).resolve(strict=True)
-    fd, before = _open_file(path, executable=True)
+    fd, before = _open_file(path, executable=True, public_source=True)
     try:
         with os.fdopen(os.dup(fd), "rb") as stream:
             hasher=hashlib.sha256()
@@ -466,7 +472,7 @@ class ProviderSignin:
                 if self._cancel.is_set(): raise SigninRefused("effect_uncertain")
             scope=grant.provider_signin
             check_scope(scope,self.store.access.root)
-            binary_fd,before=_open_file(Path(scope['binary']),executable=True)
+            binary_fd,before=_open_file(Path(scope['binary']),executable=True,public_source=True)
             staging=self.store.access.root/'state/provider-signin'
             staging.mkdir(mode=0o700,exist_ok=True)
             staged,staged_fd,staged_info=stage_binary(staging,scope,attempt,binary_fd,before)

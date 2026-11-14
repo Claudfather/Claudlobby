@@ -803,9 +803,14 @@ def _signin_until(engine,grant,reader,attempt,state):
     pytest.fail('synthetic sign-in did not reach expected finite state')
 
 
-def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synthetic_signin):
-    import time
+@pytest.mark.parametrize('source_links', [1, 2])
+def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synthetic_signin, source_links):
+    import os, time
+    from claudlobby.plane import provider_signin
     engine,grant,reader,program,token,env=synthetic_signin
+    if source_links == 2:
+        os.link(program, program.with_name('package-manager-link'))
+    assert provider_signin.approved_scope(program, engine.root, grant.account_directory) == grant.provider_signin
     attempt=str(uuid4())
     try:
         first=engine.signin_begin(reader,grant.generation,attempt)
@@ -817,6 +822,9 @@ def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synt
         with pytest.raises(AccessDenied):engine.signin_code(reader,grant.generation,attempt,'accepted#wrong-state')
         engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
         result=_signin_until(engine,grant,reader,attempt,'connected')
+        staged = engine.root/'state/provider-signin'/('claude-signin-'+attempt)/'claude'
+        assert staged.stat().st_nlink == 1
+        assert staged.read_bytes() == program.read_bytes()
         assert token not in json.dumps(result)
         assert env.read_text()=='export ROUTE=private\n'+f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n"
         with engine.store.access._connection() as conn:
@@ -870,9 +878,14 @@ def test_provider_signin_unsafe_or_existing_environment_never_changes(tmp_path,c
     assert env.read_text()==content
 
 
-def test_provider_signin_unknown_or_changed_binary_refuses_before_process(synthetic_signin):
+@pytest.mark.parametrize('source_links', [1, 2])
+def test_provider_signin_unknown_or_changed_binary_refuses_before_process(synthetic_signin, source_links):
+    import os
     engine,grant,reader,program,*_=synthetic_signin
-    program.write_text('#!/bin/sh\nexit 0\n')
+    changed=program
+    if source_links == 2:
+        changed=program.with_name('package-manager-link');os.link(program,changed)
+    changed.write_text('#!/bin/sh\nexit 0\n')
     with pytest.raises(ValueError):engine.signin_begin(reader,grant.generation,str(uuid4()))
     assert engine.signin._thread is None
 
@@ -919,6 +932,43 @@ def test_provider_signin_staged_bytes_survive_original_path_replacement(syntheti
         assert hashlib.sha256(copied.read_bytes()).hexdigest()==grant.provider_signin['sha256']
         assert provider_signin._node(os.fstat(pinned))==provider_signin._node(info)
         os.close(pinned)
+    finally:os.close(fd)
+
+
+def test_provider_signin_linked_source_alias_write_during_copy_refuses(synthetic_signin, monkeypatch):
+    import os
+    from claudlobby.plane import provider_signin
+    engine,grant,_,program,*_=synthetic_signin
+    alias=program.with_name('package-manager-link');os.link(program,alias)
+    # Approval accepts the reviewed bytes; the alias can still change that inode
+    # before the owned copy completes, so the final source binding must refuse.
+    provider_signin.approved_scope(program,engine.root,grant.account_directory)
+    fd=os.open(program,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    before=os.fstat(fd);original_read=os.read;changed=[]
+    def read(number, count):
+        data=original_read(number,count)
+        if number==fd and data and not changed:
+            changed.append(True);alias.write_bytes(b'#!/bin/sh\nexit 99\n')
+        return data
+    monkeypatch.setattr(provider_signin.os,'read',read)
+    try:
+        with pytest.raises(provider_signin.SigninRefused,match='unsupported_provider'):
+            provider_signin.stage_binary(engine.store.access.path.parent,grant.provider_signin,str(uuid4()),fd,before)
+        assert changed == [True]
+    finally:os.close(fd)
+
+
+def test_provider_signin_private_staged_executable_still_refuses_hardlinks(synthetic_signin):
+    import os
+    from claudlobby.plane import provider_signin
+    engine,grant,_,program,*_=synthetic_signin
+    fd,before=provider_signin._open_file(program,executable=True)
+    try:
+        copied,pinned,_=provider_signin.stage_binary(engine.store.access.path.parent,grant.provider_signin,str(uuid4()),fd,before)
+        os.close(pinned)
+        os.link(copied,copied.with_name('unexpected-link'))
+        with pytest.raises(provider_signin.SigninRefused,match='file_binding_changed'):
+            provider_signin._open_file(copied,executable=True)
     finally:os.close(fd)
 
 

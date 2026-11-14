@@ -11,3 +11,7 @@ After original Launch, the same guide releases its old runtime readers, waits
 read-only for that exact update and reenters current source before optional local
 messages-only approval. Skipping creates no new approval; interrupted or refused
 effects retain their original recovery identity without automatic replay.
+
+Exact supported public Claude artifacts installed with hard links are accepted
+through held-descriptor hash and identity verification. Private credentials and
+per-attempt executable copies retain their single-link requirement.
