@@ -89,15 +89,24 @@ class HandoffDirectoryRefused(BotLifecycleError):
     """A directory on the way to the session's handoff is refused (#2927, #2935).
 
     It is redirected or not this user's own, on the way to the session's own
-    handoff or to .claude/session.md (the bot directory and its .claude), or it
-    is above the session's own directory and cannot be searched or read. The
-    session's own directory is the exception: when it cannot be searched or
-    read, its handoff reads as absent, and the readers read .claude/session.md.
+    handoff below data/ (data/claudna, its sessions/ and the session's own
+    directory) or to .claude/session.md (the bot directory and its .claude), or
+    it is data/claudna or its sessions/ and cannot be searched or read. data/
+    itself is not refused: it holds the native-session receipt that names the
+    session, and when data/ is redirected, not this user's or cannot be
+    searched, that receipt cannot be read, so no session is named. Nor is the
+    session's own directory when it cannot be searched or read: its handoff
+    reads as absent. Either way the readers read .claude/session.md.
+
     The readers refuse such a directory rather than read past it, so `bot
-    handoff --check` cannot read the handoff as saved until it is repaired: it
-    reads unknown (file_unverified), and a redirected bot directory or .claude
-    is refused before that, by the read of the effective configuration. So `bot
-    handoff`, meeting one as it verifies a save, says to repair it first.
+    handoff --check` cannot read the handoff as saved until it is repaired. It
+    reads unknown (file_unverified) for one below data/, and pending or unknown
+    (file_unverified) for a bot directory or .claude that is not this user's.
+    A redirected bot directory or .claude is refused before that, by the read
+    of the effective configuration. For a data/ it cannot search, --check
+    reads unknown (request_unreadable): it reads its request there first. So
+    `bot handoff`, meeting a refused directory as it verifies a save, says to
+    repair it first.
     """
 
 
@@ -277,10 +286,11 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None,
     The session capture's own frontmatter decides. Under the activation's
     reference refresh envelope (#2094) that is the capture below it: the
     activation's own reader finds the envelope, so the two agree on it, and
-    one that reader refuses is refused here by name (#2119). A directory on
-    the way to the session's own file that cannot be read (an I/O error, or no
-    search permission above the session's own directory) is refused the same
-    way as a redirected one, so each door gives its own refusal (#2927).
+    one that reader refuses is refused here by name (#2119). A directory below
+    data/ on the way to the session's own file that cannot be read (an I/O
+    error, or no search permission on data/claudna or its sessions/) is refused
+    the same way as a redirected one, so each door gives its own refusal
+    (#2927). data/ itself is not (`HandoffDirectoryRefused`, #2935).
     """
     try:
         path = handoff_file.resolve(bot_dir) if path is None else path
@@ -506,7 +516,13 @@ def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
 
 def save_planned_checkpoint(bot_dir: Path, label: str, tmpdir: str, adapter: Adapter, *,
                             operation_id: str, context=None) -> dict:
-    """Observe exact durable native continuation; never ask the model to save."""
+    """Observe exact durable native continuation; never ask the model to save.
+
+    While the native session is busy it waits, and says so on stderr every 30 s.
+    A stderr that cannot take that line, closed or broken, loses it and stops
+    nothing (#2935). bot restart's planned checkpoint and a host update's
+    checkpoint both wait here.
+    """
     from .native_session import checkpoint, checkpoint_account, NativeSessionBusy, NativeSessionError
     if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", operation_id):
         raise BotLifecycleError("checkpoint requires one exact operation ID")
@@ -526,8 +542,15 @@ def save_planned_checkpoint(bot_dir: Path, label: str, tmpdir: str, adapter: Ada
                 raise BotLifecycleError("still waiting for native idle; original update is retained and no model request was sent",
                                         unavailable=True, handoff_reason="timeout") from exc
             if now >= next_progress:
-                print(f"waiting for native idle from {label} ({now - started:.0f} s elapsed); no model request",
-                      file=sys.stderr, flush=True)
+                if sys.stderr is not None:  # Closed when Python started: print would write to stdout.
+                    try:
+                        print(f"waiting for native idle from {label} ({now - started:.0f} s elapsed); "
+                              "no model request", file=sys.stderr, flush=True)
+                    except (OSError, ValueError):
+                        # A closed or broken stderr: the line is lost, and the wait goes on. Raised
+                        # here, in the busy session's handler, it would leave the wait raw: the
+                        # handler for an OSError beside it never takes it.
+                        pass
                 next_progress = now + 30
             time.sleep(min(_HANDOFF_CAPTURE_POLL_S, deadline - now))
         except (NativeSessionError, OSError, InventoryError, subprocess.SubprocessError) as exc:
