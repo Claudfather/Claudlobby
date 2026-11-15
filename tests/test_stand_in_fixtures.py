@@ -89,6 +89,24 @@ def test_a_node_stand_in_is_a_script_where_a_link_names_the_process(tmp_path, mo
     assert _copies(bindir) == []
 
 
+def test_a_script_under_nodes_name_keeps_its_link(tmp_path, monkeypatch):
+    """A `#!` script called node, as tests/test_validate_harness_fixture_wait.py
+    writes one, is a link like any other executable: its interpreter reads the
+    link's path as $0, which a script stand-in would replace with its own."""
+    monkeypatch.setattr(stand_in_fixtures, "LINK_NAMES_THE_PROCESS", True)
+    fake = tmp_path / "bin" / "node"
+    fake.parent.mkdir()
+    fake.write_text('#!/bin/bash\necho "$0"\n')
+    fake.chmod(0o755)
+    bindir = tmp_path / "bins"
+    bindir.mkdir()
+    make_stand_ins(bindir, str(fake))
+    for name in ("bun", "claude"):
+        assert (bindir / name).is_symlink()
+        assert (bindir / name).resolve() == fake.resolve()
+    assert not (bindir / stand_in_fixtures.NAME_PRELOAD).exists()
+
+
 def test_a_copy_keeps_homebrews_libnode_beside_it(tmp_path, monkeypatch):
     """A copied node loads libnode through an executable-relative rpath, so the
     library is linked in beside the copies."""

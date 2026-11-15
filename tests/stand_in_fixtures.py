@@ -19,7 +19,10 @@ script's own path as argv[0] (`exec -a`), so its command line is the one a link
 gave, and gives node a preload, last in NODE_OPTIONS, that writes that name back
 to /proc/self/comm before any script runs. That NODE_OPTIONS entry names node
 too, and nothing under test reads it. A stand-in for any other executable, such
-as tests/test_bridge_state.py's bash, is a link, as before.
+as tests/test_bridge_state.py's bash, is a link, as before, and so is one for a
+script under node's name, such as tests/test_validate_harness_fixture_wait.py's
+fake node: the kernel starts a script's interpreter with the path it was run by
+as $0, which a link keeps and `exec -a` cannot set.
 
 Elsewhere each name is a copy, as before: whether a link keeps its own name on
 macOS has not been checked. tests/conftest.py's `native_stand_ins` makes them
@@ -39,6 +42,18 @@ LINK_NAMES_THE_PROCESS = sys.platform == "linux"
 
 # The names under which an executable is node, which renames itself as it starts.
 NODE_NAMES = ("node", "nodejs")
+
+
+def _renames_itself(executable: str, source: Path) -> bool:
+    """Whether `executable` is node's own binary: a file under node's name that
+    is not a `#!` script. One that cannot be read is taken for the binary."""
+    if not {Path(executable).name, source.name} & set(NODE_NAMES):
+        return False
+    try:
+        with open(source, "rb") as fh:
+            return fh.read(2) != b"#!"
+    except OSError:
+        return True
 
 # The preload a node stand-in gives node, written beside the stand-ins. It runs
 # after node has named its main thread and before any script, and writes the
@@ -66,7 +81,7 @@ def _node_script(node: Path, preload: Path) -> str:
 def make_stand_ins(bindir: Path, executable: str, names=("bun", "claude")) -> Path:
     """Give `executable` each of `names` in the existing `bindir`; return `bindir`."""
     source = Path(executable).resolve()
-    node = bool({Path(executable).name, source.name} & set(NODE_NAMES))
+    node = _renames_itself(executable, source)
     if LINK_NAMES_THE_PROCESS and node:
         preload = bindir / NAME_PRELOAD
         preload.write_text(NAME_PRELOAD_SOURCE)
