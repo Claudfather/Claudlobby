@@ -588,6 +588,122 @@ def test_guide_hands_off_original_launch_instead_of_waiting_for_updater(setup_au
     assert any("host owner serve" in line for line in result.lines)
 
 
+def test_typed_guide_preserves_original_launch_and_exits_without_terminal_handoff(setup_authority, monkeypatch):
+    from contextlib import contextmanager
+    import subprocess, sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    store, access, grant, reader, *_ = setup_authority
+    store.allow(grant)
+    engine = SetupEngine(access)
+    config = {"origin": "https://host.example.test", "socket": str(access.root / "state/owner/owner.sock"),
+        "tailscale": sys.executable, "tailscale_socket": None,
+        "workspace_issuer": "https://accounts.example.test", "workspace_origin": "https://plane.example.test"}
+    approval = SimpleNamespace(**{name: getattr(grant, name) for name in ("template", "repository", "project_directory",
+        "account_directory", "managed_owner", "provider_signin")}, target_fleet=grant.fleet,
+        install_directory=Path(grant.install_directory))
+    monkeypatch.setattr(guide, "_configuration", lambda *_: (config, approval))
+    states, original, drained = [], {}, []
+    class Consent:
+        def state(self, state, **data): states.append(state)
+        def check_cancel(self): pass
+        def approve(self, *_args, **_kwargs): pytest.fail("matching grant was renewed")
+    consent = Consent()
+    @contextmanager
+    def serving(*args, **kwargs):
+        assert kwargs["consent"] is consent
+        class Child:
+            def wait(self, timeout):
+                original.update(binding(engine.preview(reader, grant.generation, "Review checkout")))
+                engine.launch(reader, **original)
+                raise subprocess.TimeoutExpired("owner", timeout)
+        try: yield Child()
+        finally: drained.append(True)
+    monkeypatch.setattr(guide, "_serving", serving)
+    profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None, origin=lambda: config["origin"],
+        project=Path("/fixed/project"), account=Path("/fixed/profile"), units=Path(grant.install_directory),
+        provider=Path("/fixed/provider"))
+    result = guide.run(SimpleNamespace(), resolve_paths(root=access.root), access, None, consent=consent, profile=profile)
+    assert result.data == {"state": "launch_handoff", **original}
+    assert drained == [True] and states == ["preview_launch_ready"]
+    assert len(setup_authority[-1].dispatches) == 1
+
+
+def test_typed_completion_reopen_only_offers_optional_messages_for_original_done(setup_authority, monkeypatch):
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby.context import resolve_paths
+    from claudlobby.plane.owner_access import OwnerAccess
+    engine, grant, request, _ = completed_setup(setup_authority, monkeypatch)
+    monkeypatch.setattr(guide, "_configuration", lambda *_: pytest.fail("reopened configuration"))
+    monkeypatch.setattr(guide, "_serving", lambda *_: pytest.fail("reopened competing listener"))
+    seen = []
+    class Consent:
+        def approve(self, action, scope, **kwargs):
+            seen.append(action)
+            raise StdioRefused("declined")
+    result = guide.run(SimpleNamespace(finish_setup=list(request.values()), target_fleet=None),
+        resolve_paths(root=engine.root), OwnerAccess(engine.root), None, consent=Consent())
+    assert result.data["state"] == "setup_complete" and result.data["messages"] == {"state": "skipped"}
+    assert seen == ["actor_alias"] and len(setup_authority[-1].dispatches) == 1
+
+
+def test_typed_fresh_guide_keeps_pairing_before_workspace_storage(team_setup, monkeypatch):
+    from contextlib import contextmanager
+    import sys
+    from claudlobby import resources
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands.owner_setup_consent import StdioGuideConsent
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby.context import resolve_paths
+    from tests.test_plane_owner_workspace import proposed
+    args, root, _ = team_setup
+    package = resources.get_resources()
+    package.installation.bin.mkdir(parents=True)
+    package.installation.cli.write_text("#!/bin/sh\nexit 0\n")
+    package.installation.cli.chmod(0o755)
+    access = OwnerAccess(root)
+    config = {"origin": "https://host.example.test", "socket": str(root / "state/owner/owner.sock"),
+        "tailscale": sys.executable, "tailscale_socket": None,
+        "workspace_issuer": "https://accounts.example.test", "workspace_origin": "https://plane.example.test"}
+    monkeypatch.setattr(guide, "_configuration", lambda *_: (config, SimpleNamespace(managed_owner=None)))
+    codes, seen, servers = {}, [], []
+    class Channel:
+        def approve(self, action, scope, **kwargs):
+            seen.append(action)
+            if action == "bind_workspace":
+                raise StdioRefused("declined")
+            return kwargs.get("original", True)
+        def token(self, kind): return codes[kind]
+        def emit(self, *_args, **_kwargs): pass
+        def check_cancel(self): pass
+    @contextmanager
+    def serving(command, *_args, **_kwargs):
+        servers.append(command)
+        owner = access.current_grant()
+        if len(servers) == 1:
+            assert owner is None and "--bootstrap-pairing-origin" in command
+            with access._connection() as conn:
+                assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'workspace_%'").fetchone()
+            codes["pairing"] = access.begin_pairing(OWNER).token
+        else:
+            assert owner.active and "--bootstrap-pairing-origin" not in command
+            assert access.connected().preparation_state() == "ready"
+            codes["workspace"] = proposed((access, access.workspace(), owner, [access._now()])).nonce
+        yield SimpleNamespace()
+    monkeypatch.setattr(guide, "_serving", serving)
+    profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None, origin=lambda: config["origin"],
+        project=Path("/fixed/project"), account=Path("/fixed/profile"), units=root.parent / "units", provider=Path("/fixed/provider"))
+    with pytest.raises(StdioRefused, match="declined"):
+        guide.run(SimpleNamespace(), resolve_paths(root=root), access, None,
+            consent=StdioGuideConsent(Channel()), profile=profile)
+    assert len(servers) == 2
+    assert seen == ["initialize_owner", "pair_owner", "initialize_workspace", "initialize_connected", "bind_workspace"]
+    assert access.current_grant().active and access.workspace().status() == ("absent", None)
+    with access._connection() as conn:
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+
 def test_guide_hands_off_launch_retained_as_soon_as_listener_is_ready(setup_authority, monkeypatch):
     """The browser can launch before the guide's second retained-state read."""
     from contextlib import contextmanager
@@ -1121,7 +1237,12 @@ def test_provider_signin_admitted_store_serializes_cancel_and_keeps_commit_truth
         entered.set();assert release.wait(8)
         return original_store(*args)
     monkeypatch.setattr(provider_signin,'store_token',store)
-    cancel=None
+    cancel=None;cancel_results=[];cancel_errors=[]
+    def request_cancel():
+        try:
+            cancel_results.append(engine.signin_cancel(reader,grant.generation,attempt))
+        except BaseException as exc:
+            cancel_errors.append(exc)
     try:
         engine.signin_begin(reader,grant.generation,attempt)
         _signin_until(engine,grant,reader,attempt,'waiting')
@@ -1130,8 +1251,13 @@ def test_provider_signin_admitted_store_serializes_cancel_and_keeps_commit_truth
         acquired=engine.signin._lock.acquire(blocking=False)
         if acquired:engine.signin._lock.release()
         assert not acquired,'credential commit was not admitted under the cancellation lock'
-        cancel=threading.Thread(target=lambda:engine.signin_cancel(reader,grant.generation,attempt))
+        cancel=threading.Thread(target=request_cancel)
         cancel.start();release.set();cancel.join(timeout=8);assert not cancel.is_alive()
+        assert not cancel_errors,repr(cancel_errors)
+        assert len(cancel_results)==1
+        assert cancel_results[0]['attempt_id']==attempt
+        assert cancel_results[0]['generation']==grant.generation
+        assert cancel_results[0]['state']=='connected'
         assert engine.signin_status(reader,grant.generation,attempt)['state']=='connected'
         assert env.read_text().endswith(f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n")
     finally:
@@ -1233,3 +1359,62 @@ def test_guide_keeps_serving_for_explicit_workspace_recovery(setup_authority, mo
     assert access.current_grant() == owner
     assert store.local() is None
     assert not setup_authority[-1].dispatches
+
+
+@pytest.mark.parametrize('finish', [None, ['wrong']])
+def test_typed_completion_requires_original_tuple_before_any_message_consent(setup_authority, monkeypatch, finish):
+    from claudlobby.commands import host_owner_setup as guide, host_owner
+    from claudlobby.context import resolve_paths
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.plane.owner_access import OwnerAccess
+    engine, _, _, _ = completed_setup(setup_authority, monkeypatch)
+    monkeypatch.setattr(host_owner, '_setup_messages', lambda *_a, **_k: pytest.fail('unbound reopen offered messages'))
+    with pytest.raises((CommandFailure, ValueError)):
+        guide.run(SimpleNamespace(finish_setup=finish, target_fleet=None),
+                  resolve_paths(root=engine.root), OwnerAccess(engine.root), None, consent=object())
+
+
+@pytest.mark.parametrize('retained_launch', [False, True])
+def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(setup_authority, monkeypatch, retained_launch):
+    from contextlib import contextmanager
+    import sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby.context import resolve_paths
+    store, access, grant, reader, *_ = setup_authority
+    store.allow(grant)
+    engine = SetupEngine(access)
+    config = {'origin': 'https://host.example.test', 'socket': str(access.root / 'state/owner/owner.sock'),
+        'tailscale': sys.executable, 'tailscale_socket': None,
+        'workspace_issuer': 'https://accounts.example.test', 'workspace_origin': 'https://plane.example.test'}
+    approval = SimpleNamespace(**{name: getattr(grant, name) for name in ('template', 'repository', 'project_directory',
+        'account_directory', 'managed_owner', 'provider_signin')}, target_fleet=grant.fleet,
+        install_directory=Path(grant.install_directory))
+    monkeypatch.setattr(guide, '_configuration', lambda *_: (config, approval))
+    original, drained = {}, []
+    class Consent:
+        def state(self, *_a, **_k): pass
+        def check_cancel(self): pass
+        def approve(self, *_a, **_k): pytest.fail('interrupt renewed consent')
+    @contextmanager
+    def serving(*_a, **_k):
+        class Child:
+            def wait(self, timeout):
+                if retained_launch:
+                    original.update(binding(engine.preview(reader, grant.generation, 'Review checkout')))
+                    engine.launch(reader, **original)
+                raise KeyboardInterrupt
+        try: yield Child()
+        finally: drained.append(True)
+    monkeypatch.setattr(guide, '_serving', serving)
+    profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None,
+        origin=lambda: config['origin'], project=Path('/fixed/project'), account=Path('/fixed/profile'),
+        units=Path(grant.install_directory), provider=Path('/fixed/provider'))
+    with pytest.raises(StdioRefused, match='interrupted_unknown'):
+        guide.run(SimpleNamespace(), resolve_paths(root=access.root), access, None, consent=Consent(), profile=profile)
+    assert drained == [True]
+    retained = store.retained_state()
+    assert retained.grant == grant
+    assert len(setup_authority[-1].dispatches) == int(retained_launch)
+    if retained_launch:
+        assert retained.launch_id == original['request_id'] and retained.launch_plan == original['config_fingerprint']

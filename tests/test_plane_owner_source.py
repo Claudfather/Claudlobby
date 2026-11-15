@@ -471,3 +471,128 @@ def test_fresh_owner_refuses_redirected_committed_or_recovery_evidence_without_r
         owner_source.inspect_owner_setup(tmp_path)
     assert access.path.read_bytes() == before and access.first_fleet_pending()
     assert path.is_symlink()
+
+
+@pytest.fixture
+def fresh_owner_storage(tmp_path):
+    from claudlobby.plane.owner_access import OwnerAccess
+    ensure_host_uid(tmp_path / 'state')
+    return OwnerAccess.initialize(tmp_path, before_first_fleet=True)
+
+
+def _at_sidecar_stat(monkeypatch, sidecar, change):
+    """Apply a real filesystem change after enumeration, before the real stat."""
+    from pathlib import Path
+    original = Path.lstat
+    reached = []
+    def lstat(path, *args, **kwargs):
+        if path == sidecar and not reached:
+            reached.append(True)
+            change()
+            assert not sidecar.exists()
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    return reached
+
+
+@pytest.mark.parametrize('suffix', ['-journal', '-wal', '-shm'])
+def test_fresh_owner_admits_sqlite_sidecar_disappearing_after_enumeration(fresh_owner_storage, monkeypatch, suffix):
+    from claudlobby.plane.owner_source import authority_only_plane
+    access = fresh_owner_storage
+    writer = sqlite3.connect(access.path)
+    try:
+        if suffix != '-journal':
+            writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('UPDATE metadata SET version=2')
+        writer.execute('UPDATE metadata SET version=1')
+        if suffix != '-journal':
+            writer.commit()
+        sidecar = access.path.with_name(access.path.name + suffix)
+        assert sidecar.is_file()
+        reached = _at_sidecar_stat(monkeypatch, sidecar,
+                                  writer.commit if suffix == '-journal' else writer.close)
+        authority_only_plane(access.root)
+        assert reached
+        assert access.first_fleet_pending()
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize('defect', [
+    'missing-primary', 'replaced-primary', 'primary-link', 'primary-mode',
+    'replaced-directory', 'directory-link', 'directory-mode', 'foreign-entry',
+    'sidecar-link', 'sidecar-mode', 'foreign-authority', 'invalid-authority',
+])
+def test_sidecar_disappearance_never_masks_changed_or_unsafe_owner_storage(fresh_owner_storage, monkeypatch, defect):
+    from claudlobby.plane.owner_source import authority_only_plane
+    access = fresh_owner_storage
+    directory = access.path.parent
+    writer = sqlite3.connect(access.path)
+    writer.execute('UPDATE metadata SET version=2')
+    writer.execute('UPDATE metadata SET version=1')
+    sidecar = access.path.with_name(access.path.name + '-journal')
+    assert sidecar.is_file()
+    def change():
+        writer.commit()  # SQLite removes the actual, previously enumerated journal.
+        if defect == 'missing-primary':
+            access.path.unlink()
+        elif defect in {'replaced-primary', 'primary-link'}:
+            saved = access.root / 'saved-authority'
+            saved.write_bytes(access.path.read_bytes()); saved.chmod(0o600)
+            access.path.unlink()
+            if defect == 'primary-link':
+                access.path.symlink_to(saved)
+            else:
+                saved.replace(access.path)
+        elif defect == 'primary-mode':
+            access.path.chmod(0o644)
+        elif defect in {'replaced-directory', 'directory-link'}:
+            saved = access.root / 'saved-plane'
+            directory.rename(saved)
+            if defect == 'directory-link':
+                directory.symlink_to(saved, target_is_directory=True)
+            else:
+                directory.mkdir(mode=0o700)
+                access.path.write_bytes((saved / access.path.name).read_bytes())
+                access.path.chmod(0o600)
+        elif defect == 'directory-mode':
+            directory.chmod(0o755)
+        elif defect == 'foreign-entry':
+            (directory / 'plane.db').write_text('retained recorder')
+        elif defect in {'sidecar-link', 'sidecar-mode'}:
+            other = directory / 'owner-access.db-wal'
+            if defect == 'sidecar-link':
+                other.symlink_to(access.path)
+            else:
+                other.write_bytes(b'unsafe sidecar'); other.chmod(0o644)
+        else:
+            with sqlite3.connect(access.path) as conn:
+                if defect == 'foreign-authority':
+                    conn.execute('UPDATE metadata SET host_uid=?', ('host_' + 'f' * 32,))
+                else:
+                    conn.execute('UPDATE metadata SET version=99')
+    reached = _at_sidecar_stat(monkeypatch, sidecar, change)
+    try:
+        with pytest.raises(AccessUnavailable):
+            authority_only_plane(access.root)
+        assert reached
+    finally:
+        writer.close()
+
+
+def test_sidecar_stat_permission_failure_is_not_transient_disappearance(fresh_owner_storage, monkeypatch):
+    from claudlobby.plane.owner_source import authority_only_plane
+    access = fresh_owner_storage
+    writer = sqlite3.connect(access.path)
+    writer.execute('UPDATE metadata SET version=2')
+    writer.execute('UPDATE metadata SET version=1')
+    sidecar = access.path.with_name(access.path.name + '-journal')
+    def denied():
+        raise PermissionError('synthetic stat denial')
+    reached = _at_sidecar_stat(monkeypatch, sidecar, denied)
+    try:
+        with pytest.raises(SourceUnavailable):
+            authority_only_plane(access.root)
+        assert reached
+    finally:
+        writer.close()

@@ -234,16 +234,40 @@ def authority_only_plane(root: Path, *, allow_absent: bool = False) -> None:
             return
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise SourceUnavailable("fresh owner storage unavailable")
-        names = {path.name for path in entries}
-        if ("owner-access.db" not in names or names - {
-                "owner-access.db", "owner-access.db-wal", "owner-access.db-shm", "owner-access.db-journal"}):
-            raise SourceUnavailable("fresh owner storage unavailable")
-        for path in entries:
-            info = path.lstat()
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600):
+        directory_info = info
+        access = OwnerAccess(root)
+        primary_info = access.path.lstat()  # A missing primary is never transient.
+        sidecars = {"owner-access.db-wal", "owner-access.db-shm", "owner-access.db-journal"}
+
+        def check_entries(entries):
+            names = {path.name for path in entries}
+            if "owner-access.db" not in names or names - {"owner-access.db", *sidecars}:
                 raise SourceUnavailable("fresh owner storage unavailable")
-        OwnerAccess(root).validate_storage()
+            disappeared = False
+            for path in entries:
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    if path.name not in sidecars:
+                        raise
+                    disappeared = True
+                    continue
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise SourceUnavailable("fresh owner storage unavailable")
+            return disappeared
+
+        if check_entries(entries):
+            # SQLite may unlink a journal/WAL sidecar during commit/close.
+            # Re-enumerate once to refuse new foreign or unsafe entries; only
+            # permitted sidecars may disappear again. This is not a retry loop.
+            check_entries(list(directory.iterdir()))
+        access.validate_storage()
+        for path, before in ((directory, directory_info), (access.path, primary_info)):
+            after = path.lstat()
+            if ((after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+                    != (before.st_dev, before.st_ino, before.st_uid, before.st_mode)):
+                raise SourceUnavailable("fresh owner storage unavailable")
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise SourceUnavailable("fresh owner storage unavailable") from exc
 

@@ -126,15 +126,19 @@ class UnixHTTP(http.client.HTTPConnection):
 
 
 @contextmanager
-def running_server(root, socket_path, binary, *, origin="https://plane.example.test", pairing_origin=None):
+def running_server(root, socket_path, binary, *, origin="https://plane.example.test", pairing_origin=None,
+                   parent_fd=None):
     with (root / "server.log").open("w+") as log:
         command = [sys.executable, "-m", "claudlobby", "--root", str(root),
             "host", "owner", "serve", "--socket", str(socket_path),
             "--origin", origin, "--tailscale", str(binary)]
         if pairing_origin is not None:
             command += ["--bootstrap-pairing-origin", pairing_origin]
+        if parent_fd is not None:
+            command += ["--_parent-liveness-fd", str(parent_fd)]
         process = subprocess.Popen(command,
-            env=constructed_env(), stdout=log, stderr=subprocess.STDOUT)
+            env=constructed_env(), stdout=log, stderr=subprocess.STDOUT,
+            pass_fds=() if parent_fd is None else (parent_fd,))
         try:
             deadline = time.monotonic() + 10
             ready = False
@@ -163,6 +167,49 @@ def running_server(root, socket_path, binary, *, origin="https://plane.example.t
                 pytest.fail("owner server did not shut down")
         assert process.returncode == 0, (root / "server.log").read_text()
         assert not socket_path.exists()
+
+
+def test_parent_pipe_eof_drains_real_foreground_server(tmp_path, socket_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    reader, writer = os.pipe()
+    try:
+        with running_server(tmp_path, socket_path, sys.executable, parent_fd=reader) as process:
+            os.close(writer)
+            writer = None
+            assert process.wait(timeout=10) == 0
+        assert not socket_path.exists()
+        assert socket_path.with_name(socket_path.name + ".lock").exists()
+    finally:
+        os.close(reader)
+        if writer is not None:
+            os.close(writer)
+
+
+def test_abrupt_guide_process_exit_closes_liveness_and_owned_listener(tmp_path, socket_path):
+    _seed(tmp_path)
+    bind_source(tmp_path)
+    OwnerAccess.initialize(tmp_path)
+    reader, writer = os.pipe()
+    holder = subprocess.Popen([sys.executable, "-I", "-c",
+        "import os,sys;sys.stdout.write('ready\\n');sys.stdout.flush();sys.stdin.buffer.read(1);os._exit(0)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        pass_fds=(writer,), env=constructed_env())
+    os.close(writer)
+    try:
+        assert holder.stdout.readline() == b"ready\n"
+        with running_server(tmp_path, socket_path, sys.executable, parent_fd=reader) as server:
+            holder.stdin.write(b"x"); holder.stdin.flush()
+            assert holder.wait(timeout=5) == 0
+            assert server.wait(timeout=10) == 0
+        assert not socket_path.exists()
+    finally:
+        os.close(reader)
+        if holder.poll() is None:
+            holder.terminate(); holder.wait(timeout=5)
+        for stream in (holder.stdin, holder.stdout, holder.stderr):
+            stream.close()
 
 
 def request(path, route, *, action=False, cookie=None, headers=None):
@@ -532,9 +579,12 @@ def test_fresh_pairing_precursor_uses_real_unix_server_and_native_verifier(tmp_p
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'workspace_%'").fetchone()
 
 
-def test_guided_owner_shutdown_drains_started_workspace_work_without_kill_deadline(tmp_path, socket_path, monkeypatch):
+@pytest.mark.parametrize("typed", [False, True])
+def test_guided_owner_shutdown_drains_started_workspace_work_without_kill_deadline(tmp_path, socket_path, monkeypatch, typed):
     import threading
+    from contextlib import nullcontext
     from claudlobby.commands.host_owner_setup import _serving
+    from claudlobby.commands.owner_stdio import StdioRefused
     from claudlobby.plane.ids import ensure_host_uid
     ensure_host_uid(tmp_path / "state")
     access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
@@ -548,7 +598,7 @@ def test_guided_owner_shutdown_drains_started_workspace_work_without_kill_deadli
 import sys, time
 from pathlib import Path
 from claudlobby.plane import owner_browser, owner_server
-root, path = map(Path, sys.argv[1:])
+root, path = map(Path, sys.argv[1:3])
 original = owner_browser.create_owner_browser_app
 def app(*args, **kwargs):
     browser = original(*args, **kwargs)
@@ -568,7 +618,8 @@ def app(*args, **kwargs):
 owner_browser.create_owner_browser_app = app
 owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=Path(sys.executable),
     socket_path=path, workspace_issuer="https://accounts.example.test",
-    workspace_origin="https://browser.example.test")
+    workspace_origin="https://browser.example.test",
+    **({"parent_liveness_fd": int(sys.argv[-1])} if "--_parent-liveness-fd" in sys.argv else {}))
 '''
     command = [sys.executable, "-c", script, str(tmp_path), str(socket_path)]
     answers = []
@@ -579,7 +630,10 @@ owner_server.serve(root, origin="https://plane.example.test", tailscale_binary=P
     request_thread = None
     original_wait = None
     try:
-        with _serving(command, socket_path, "https://plane.example.test") as child:
+        from types import SimpleNamespace
+        typed_options = {"consent": SimpleNamespace(check_cancel=lambda: None)} if typed else {}
+        outcome = pytest.raises(StdioRefused, match="interrupted_unknown") if typed else nullcontext()
+        with outcome, _serving(command, socket_path, "https://plane.example.test", **typed_options) as child:
             original_wait = child.wait
             assert os.getpgid(child.pid) == child.pid  # Terminal Ctrl-C cannot signal it directly.
             request_thread = threading.Thread(target=work)

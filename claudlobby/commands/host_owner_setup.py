@@ -26,6 +26,11 @@ from ..plane.owner_access import AccessDenied, AccessUnavailable
 from ..plane.owner_setup import OwnerSetup
 
 
+def _say(terminal, text):
+    if terminal is not None:
+        terminal.write(text)
+
+
 def _native_directories(paths):
     from ..supervision_inventory import Adapter, _catalog
     return tuple(_catalog(Adapter(paths.package).read("svc_inventory_catalog"))[2])
@@ -230,21 +235,21 @@ def _configuration(args, paths, terminal, cli):
         raise CommandFailure("unavailable", "native user manager has no installation directory; finish native user setup first")
     default = _default_install_directory(directories)
     if default is None:
-        terminal.write("Native installation choices: " + json.dumps([str(p) for p in directories]) + "\n")
+        _say(terminal, "Native installation choices: " + json.dumps([str(p) for p in directories]) + "\n")
     directory = Path(_input(terminal, args.install_directory, "Native installation directory", default))
     if directory not in directories:
         raise CommandFailure("invalid_argument", "setup directory is not an observed native search path")
     if template == "local-project":
         _local_project(project, forbidden=(paths.root, Path(cli).parent.parent, directory))
-    terminal.write("Local setup configuration (no credentials): " + json.dumps({**config,
+    _say(terminal, "Local setup configuration (no credentials): " + json.dumps({**config,
         "fleet": fleet, "template": template, "repository": repository, "project_directory": project,
         "account_directory": account, "install_directory": str(directory)}, ensure_ascii=True) + "\n")
     if getattr(args,"provider_signin",None) is not None:
-        terminal.write("Claude sign-in can be completed in the connected setup after separate local approval. Project/repository access, website login and native Tailscale/Serve access must already be ready.\n")
+        _say(terminal, "Claude sign-in can be completed in the connected setup after separate local approval. Project/repository access, website login and native Tailscale/Serve access must already be ready.\n")
     else:
-        terminal.write(("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
+        _say(terminal, ("Provider login and local project read/write approval" if template == "local-project" else "Provider/repository login") + ", website login and native Tailscale/Serve access must already be ready.\n"
                        "This guide does not configure those prerequisites.\n")
-    terminal.write("Managed owner-service enrollment will require explicit local approval and the original browser Launch.\n"
+    _say(terminal, "Managed owner-service enrollment will require explicit local approval and the original browser Launch.\n"
                    if getattr(args, "managed_owner", False) else "Owner serving stays foreground-only; no owner service is enrolled.\n")
     provider=None
     if getattr(args,"provider_signin",None) is not None:
@@ -273,34 +278,68 @@ def _ready(path, origin):
 
 
 @contextmanager
-def _serving(command, path, origin):
+def _serving(command, path, origin, *, consent=None):
     from ..plane.owner_server import check_listener_available
     # Never take over an unrelated listener; canonical serve owns socket cleanup.
     if path.parent.exists() or path.parent.is_symlink():
         check_listener_available(path)
     with tempfile.TemporaryFile() as log:
+        reader = writer = None
+        if consent is not None:
+            reader, writer = os.pipe()
+            command = [*command, "--_parent-liveness-fd", str(reader)]
         # Preserve the canonical operator-facing failure; never forward it into JSON.
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, start_new_session=True)
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, start_new_session=True,
+                **({"pass_fds": (reader,), "stderr": log} if consent is not None else {}))
+        except BaseException:
+            if writer is not None:
+                os.close(writer)
+            raise
+        finally:
+            if reader is not None:
+                os.close(reader)
         try:
             deadline = time.monotonic() + 10
             while process.poll() is None and time.monotonic() < deadline:
+                if consent is not None:
+                    consent.check_cancel()
                 if _ready(path, origin):
                     yield process
                     return
                 time.sleep(0.05)
             raise CommandFailure("unavailable", "local owner server did not become ready; inspect serving configuration and private socket")
         finally:
-            if process.poll() is None:
-                print("Stopping local owner serving; waiting for already-started work to finish. Keep this terminal open.", file=sys.stderr)
-                process.terminate()
-            # The canonical app drains admitted synchronous work. Never kill it
-            # on an invented deadline or repeated terminal interrupt.
-            while True:
-                try:
-                    process.wait()
-                    break
-                except KeyboardInterrupt:
-                    continue
+            if consent is not None:
+                import threading
+                from .owner_stdio import _deferred_stops, StdioRefused
+                stopped = threading.Event()
+                with _deferred_stops(stopped):
+                    try:
+                        if writer is not None:
+                            os.close(writer)
+                        if process.poll() is None:
+                            process.terminate()
+                    finally:
+                        while True:
+                            try:
+                                process.wait()
+                                break
+                            except KeyboardInterrupt:
+                                stopped.set()
+                if stopped.is_set():
+                    raise StdioRefused("interrupted_unknown")
+            else:
+                if process.poll() is None:
+                    print("Stopping local owner serving; waiting for already-started work to finish. Keep this terminal open.", file=sys.stderr)
+                    process.terminate()
+                # Preserve terminal behavior; the canonical app drains work.
+                while True:
+                    try:
+                        process.wait()
+                        break
+                    except KeyboardInterrupt:
+                        continue
 
 
 def _original_launch(state):
@@ -314,34 +353,37 @@ def interrupted():
     """A direct SIGTERM follows the same owned cleanup as terminal cancellation."""
     def stop(_signal, _frame):
         raise KeyboardInterrupt
-    previous = signal.signal(signal.SIGTERM, stop)
+    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 
-def _completed(args, paths, store, terminal, retained, record, package):
+def _completed(args, paths, store, terminal, retained, record, package, *, consent=None):
     from ..plane.owner_setup import OwnerSetup
     from ..installation import _setup_binding
     from .host_owner import _setup_messages
     grant = retained.grant
     actual = (grant.generation,record["request_id"], record["config_fingerprint"], record["target"])
     expected = getattr(args, "finish_setup", None)
-    if (expected is not None and _setup_binding(expected) != actual
+    if (consent is not None and expected is None
+            or expected is not None and _setup_binding(expected) != actual
             or record.get("maintenance") is not False or record.get("config_committed") is not True
             or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
             or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
             or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
-    terminal.write("Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
-    consent = _setup_messages(paths, store, terminal, grant.fleet)
-    return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": consent},
+    _say(terminal, "Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
+    messages = _setup_messages(paths, store, terminal, grant.fleet,
+        **({"consent": consent} if consent is not None else {}))
+    return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": messages},
         lines=("Original setup finished; no Launch or message was sent again.",))
 
 
-def run(args, paths, store, terminal):
+def run(args, paths, store, terminal, *, consent=None, profile=None):
     from . import host_owner as console
     from ..active_config import read_current_config
     from ..git_update import read_update
@@ -367,7 +409,8 @@ def run(args, paths, store, terminal):
         snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
         if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
-        return _completed(args, paths, store, terminal, retained, record, package)
+        return _completed(args, paths, store, terminal, retained, record, package,
+                          **({"consent": consent} if consent is not None else {}))
     elif selected or retained and retained.launch_id is not None:
         raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
     if getattr(args, "finish_setup", None) is not None:
@@ -375,33 +418,53 @@ def run(args, paths, store, terminal):
     if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
+    typed = {"consent": consent} if consent is not None else {}
+    if consent is not None:
+        if profile is None:
+            raise CommandFailure("invalid_argument", "typed guide requires its fixed local profile")
+        profile.prepare_directories(consent, paths)
+        profile.prepare_provider(consent, paths)
+        args.origin = profile.origin()
+        args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
+        args.workspace_issuer, args.workspace_origin = "https://claudfather.ai", "https://plane.claudfather.ai"
+        args.socket = paths.root / "state/owner/owner.sock"
+        args.template, args.target_fleet, args.repository = "local-project", "web-app", None
+        args.project_directory, args.account_directory = str(profile.project), str(profile.account)
+        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, True
     config, approval = _configuration(args, paths, terminal, cli)
     if load_host_jobs()["plane-owner"].get("enroll", True) and approval.managed_owner is None:
         raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
     # No authority method is reached before the terminal's ancestry check.
     if not os.path.lexists(store.path):
-        console._initialize_first_owner(paths, terminal)
+        console._initialize_first_owner(paths, terminal, **typed)
     owner = store.current_grant()
     if owner is None or not owner.active:
         direct = {**config, "workspace_issuer": None, "workspace_origin": None}
-        terminal.write("Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
-        with _serving(service_command(paths.root, cli, direct), Path(config["socket"]), config["origin"]):
-            console._confirm_owner(paths, store, terminal)
+        _say(terminal, "Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
+        command = service_command(paths.root, cli, direct)
+        if consent is not None:
+            command += ["--bootstrap-pairing-origin", config["workspace_origin"]]
+        with _serving(command, Path(config["socket"]), config["origin"], **typed):
+            if consent is not None:
+                consent.state("pairing_ready", origin=config["origin"])
+            console._confirm_owner(paths, store, terminal, **typed)
     owner = console._active_owner(store)
     console._describe(terminal, owner)
     if not selected and store.connected().preparation_state() != "ready":
-        console._initialize_connected(store, terminal, prepare_workspace=True)
-    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"]) as child:
+        console._initialize_connected(store, terminal, prepare_workspace=True, **typed)
+    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed) as child:
         if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
-                terminal.write("In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
-                console._confirm_workspace(store, terminal, owner, recover=True)
+                _say(terminal, "In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
+                if consent is not None:
+                    consent.state("workspace_ready", origin=config["origin"])
+                console._confirm_workspace(store, terminal, owner, recover=True, **typed)
                 workspace_state, binding = store.workspace().status()
             if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
                     or binding.operational_origin != config["workspace_origin"]):
                 raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
-            terminal.write("Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
+            _say(terminal, "Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
             retained = OwnerSetup(store).retained_state()
             # A browser may retain this invocation's approved Launch as soon as
             # serving is ready. Entry checks already refused pre-existing work;
@@ -411,17 +474,22 @@ def run(args, paths, store, terminal):
                 if (grant.template, grant.project_directory, grant.account_directory, grant.managed_owner, grant.provider_signin, grant.fleet, grant.repository, grant.installation, grant.source_revision, grant.install_directory) != (
                         approval.template, approval.project_directory, approval.account_directory, approval.managed_owner, approval.provider_signin, approval.target_fleet, approval.repository, str(installation.directory), package.source_revision, str(approval.install_directory)):
                     raise CommandFailure("conflict", "retained setup approval differs; no grant was replaced")
-                terminal.write("Matching setup approval retained without renewal.\n")
+                _say(terminal, "Matching setup approval retained without renewal.\n")
             else:
                 approval.install_directory.mkdir(parents=True, exist_ok=True)
-                console._allow_setup(approval, paths, store, terminal, expected_retained=retained)
-        terminal.write("Local access prepared. Review and launch the exact prepared request in your browser; keep original receipt IDs.\n"
+                console._allow_setup(approval, paths, store, terminal, expected_retained=retained, **typed)
+        _say(terminal, "Local access prepared. Review and launch the exact prepared request in your browser; keep original receipt IDs.\n"
                        "Keep this terminal open through Preview. After Launch is retained, the guide drains and exits so the updater can proceed.\n")
-        terminal.flush()
+        if terminal is not None:
+            terminal.flush()
         setup = OwnerSetup(store)
         approved = setup.local() if not selected else None
+        if consent is not None:
+            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation)
         try:
             while True:
+                if consent is not None:
+                    consent.check_cancel()
                 if approved is not None:
                     retained = setup.retained_state()
                     if retained.launch_id is not None:
@@ -444,11 +512,16 @@ def run(args, paths, store, terminal):
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",
                                 reconnect))
+                    if consent is not None and (retained.grant != approved or not retained.effective_active):
+                        raise CommandFailure("conflict", "setup approval expired or changed; no grant was renewed")
                 try:
                     child.wait(timeout=0.25)
                     break
                 except subprocess.TimeoutExpired:
                     continue
         except KeyboardInterrupt:
+            if consent is not None:
+                from .owner_stdio import StdioRefused
+                raise StdioRefused("interrupted_unknown") from None
             return CommandOutput({"state": "serving_stopped"}, lines=("Local foreground serving stopped; shutdown did not change approvals or stop the fleet.",))
         raise CommandFailure("unavailable", "local foreground owner stopped unexpectedly; no server or launch was retried")

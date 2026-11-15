@@ -15,6 +15,7 @@ from pathlib import Path
 import socket
 import stat
 import signal
+import select
 import threading
 
 
@@ -24,6 +25,37 @@ class OwnerServerConfigurationError(ValueError):
 
 class OwnerServerStartupError(RuntimeError):
     """The server run ended before completing startup."""
+
+
+@contextmanager
+def _parent_liveness(descriptor, stop):
+    """An inherited read-only pipe owns no PID and can only request drain."""
+    if descriptor is None:
+        yield
+        return
+    try:
+        info = os.fstat(descriptor)
+        if (type(descriptor) is not int or descriptor < 3 or not stat.S_ISFIFO(info.st_mode)
+                or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY):
+            raise ValueError
+    except (OSError, ValueError, TypeError):
+        raise OwnerServerConfigurationError("owner parent liveness requires an inherited read-only pipe") from None
+    done, finish = os.pipe()
+    def watch():
+        # Any data is a protocol violation and closes admission too. The guide
+        # holds only the write end, without ever writing a heartbeat or PID.
+        readable = select.select([descriptor, done], [], [])[0]
+        if descriptor in readable:
+            stop()
+    thread = threading.Thread(target=watch, name="owner-parent-liveness")
+    thread.start()
+    try:
+        yield
+    finally:
+        os.close(finish)
+        thread.join()
+        os.close(done)
+        os.close(descriptor)
 
 
 def _private_directory(path: Path):
@@ -190,7 +222,8 @@ def _serve_authority_app(app, authority: str):
 
 def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path | None = None,
           tailscale_socket: Path | None = None,
-          package=None, workspace_issuer=None, workspace_origin=None, pairing_origin=None):
+          package=None, workspace_issuer=None, workspace_origin=None, pairing_origin=None,
+          parent_liveness_fd=None):
     """Foreground server; caller explicitly selects root and local authority."""
     import uvicorn
 
@@ -260,8 +293,12 @@ def serve(root: Path, *, origin: str, tailscale_binary: Path, socket_path: Path 
                                 log_level="warning", access_log=False,
                                 proxy_headers=False, timeout_graceful_shutdown=5)
         server = OwnerServer(config)
+        def parent_gone():
+            begin_shutdown(app)
+            server.should_exit = True
         try:
-            server.run(sockets=[listener])
+            with _parent_liveness(parent_liveness_fd, parent_gone):
+                server.run(sockets=[listener])
         except SystemExit as exc:
             # Recent uvicorn exits during failed startup; older versions return.
             # Both paths must produce the same actionable local CLI failure.

@@ -79,3 +79,32 @@ An opt-in temporary pairing endpoint creates a challenge for a verified native
 Tailscale principal without initializing workspace storage or issuing grants.
 Its separate hidden foreground-server option preserves normal owner routes and
 managed service commands. Browser guide integration and native proof remain pending.
+
+### Added — Typed local owner guide over stdio
+
+The first-team guide supports a hidden finite ASCII stdio profile for an
+authenticated local SSH operator, with separate read-only status. Core-authored
+proposals retain exact workspace objects and require session, sequence, digest
+and expiry checks. Website login grants no host authority. The fixed Linux
+profile uses account-database paths and separately approved directory effects.
+If the reviewed Claude executable is genuinely missing, a separate Install
+Claude proposal may download its exact public bytes into the fixed private
+host directory. Existing canonical bytes are a read-only no-op. Unknown or
+foreign results stop without an automatic or same-invocation retry; a later
+clean missing target requires fresh explicit consent. Installation performs no
+provider sign-in, model work or service start. Native ingress remains a prerequisite.
+
+The guide preserves both temporary servers and existing authority transactions,
+captures child diagnostics, and gives its foreground server an inherited
+parent-liveness pipe. EOF, cancellation and parent death request normal drain.
+After the original Launch it emits only the framed handoff and exits; an exact
+healthy-DONE reopen may offer separate optional message approval. Browser
+transport integration and native/provider/first-team qualification remain open.
+
+The fixed guide environment retains only its admitted installation and data-root
+selectors for uncached source resources. Typed interruption drains owned work and
+reports an uncertain stopped outcome for inspection; interrupted provider install
+never implies rollback or an automatic retry. Completion reopens require the
+original tuple. Retained parent-directory checks allow unrelated activity while
+preserving identity and create-only checks; buffered partial frames expire after
+the existing five-second limit.
