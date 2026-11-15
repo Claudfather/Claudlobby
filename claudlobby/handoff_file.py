@@ -50,7 +50,9 @@ def current_session(bot_dir: Path) -> str | None:
 
     The readers then read .claude/session.md. A receipt that is there and cannot
     be read (malformed, redirected, not this user's) is said on stderr, once a
-    process, since the operator otherwise sees a bot with no receipt (#2927).
+    process, since the operator otherwise sees a bot with no receipt (#2927). A
+    stderr that cannot take that note, closed or broken, loses it and stops
+    nothing (#2935).
     """
     from .native_session import NativeSessionError, read
     try:
@@ -62,7 +64,11 @@ def current_session(bot_dir: Path) -> str | None:
                 f"handoff cannot be named and {legacy(bot_dir)} is read instead")
         if note not in _SAID:
             _SAID.add(note)
-            print(note, file=sys.stderr, flush=True)
+            if sys.stderr is not None:  # Closed when Python started: print would write to stdout.
+                try:
+                    print(note, file=sys.stderr, flush=True)
+                except (OSError, ValueError):
+                    pass  # A closed or broken stderr: the note is lost, and nothing else.
         return None
     return None if value is None else value["session_id"]
 
