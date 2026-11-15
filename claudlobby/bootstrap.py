@@ -75,6 +75,19 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             state = {**binding, 'revision': None, 'lock_sha256': None, 'environment_owned': False,
                      'complete': False}
             _write(receipt, json.dumps(state, sort_keys=True).encode())
+        pinned_revision = ref.lower() if re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', ref) else None
+        def checked_revision(value):
+            if not isinstance(value, str) or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) is None:
+                raise BundleError("preparation revision is not a full Git commit")
+            if pinned_revision is not None and value != pinned_revision:
+                raise BundleError("preparation revision differs from the explicit Git commit")
+            return value
+        if state['revision'] is None:
+            if (state['complete'] is not False or state['environment_owned'] is not False
+                    or state['lock_sha256'] is not None):
+                raise BundleError("unresolved preparation receipt contains retained progress")
+        else:
+            checked_revision(state['revision'])
         write_installation(installation)
         def save():
             _write(receipt, json.dumps(state, sort_keys=True).encode())
@@ -101,14 +114,15 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         if (source / '.git').is_symlink() or not (source / '.git').is_dir():
             raise BundleError("managed source must have its own plain Git directory")
         if state['revision'] is None:
-            # FETCH_HEAD survives a crash after fetching but before recording SHA.
-            fetched = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}', check=False)
-            if fetched.returncode:
+            # An unrecorded FETCH_HEAD has no symbolic-ref provenance. Resolve
+            # that explicit remote/ref again before any dependency effects. A
+            # full commit pin can safely reuse only its exact fetched identity.
+            fetched = (git('rev-parse', '--verify', 'FETCH_HEAD^{commit}', check=False)
+                       if pinned_revision is not None else None)
+            if fetched is None or fetched.returncode:
                 git('fetch', '--no-tags', '--no-recurse-submodules', '--', remote, ref)
                 fetched = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}')
-            revision = fetched.stdout.decode().strip()
-            if re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', revision) is None:
-                raise BundleError("trusted ref did not resolve to a full Git commit")
+            revision = checked_revision(fetched.stdout.decode().strip())
             state['revision'] = revision
             save()
         revision = state['revision']

@@ -47,3 +47,16 @@ The tests workflow pins Ubuntu 24.04, the previously passing qualification
 baseline, after `ubuntu-latest` moved to 26.04 and broke native process and
 command-mirror fixtures. Existing check names and artifact identifiers stay
 stable; Ubuntu 26.04 qualification remains pending.
+
+### Fixed — Bootstrap commit pin and recovery validation
+
+Git preparation now requires an explicit full-commit ref to equal both its
+resolved and retained revision before dependency or stable-entry effects. A
+matching full-pin fetch can recover without another fetch; an unexpected commit
+is refused with its existing receipt and files retained. An unresolved symbolic
+ref is fetched from the explicitly bound remote instead of adopting an unbound
+retained FETCH_HEAD. Once recorded, symbolic-ref resolutions remain frozen on
+retry, including dependency-preparation recovery.
+A receipt with no resolved revision but retained dependency or completion
+progress now refuses before installation writes or Git access, preserving the
+existing evidence instead of attempting a new resolution.
