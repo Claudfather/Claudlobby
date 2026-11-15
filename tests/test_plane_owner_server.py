@@ -508,7 +508,7 @@ def test_fresh_pairing_precursor_uses_real_unix_server_and_native_verifier(tmp_p
     from claudlobby.plane.ids import ensure_host_uid
     ensure_host_uid(tmp_path / "state")
     access = OwnerAccess.initialize(tmp_path, before_first_fleet=True)
-    identity = {"Node": {"User": 1234, "Addresses": ["100.64.0.42/32"]}, "UserProfile": {"ID": 1234}}
+    identity = {"Node": {"User": 1234, "Addresses": ["192.0.2.10/32"]}, "UserProfile": {"ID": 1234}}
     binary = tmp_path / "synthetic-tailscale"
     binary.write_text("#!/bin/sh\ncase \"$1 $2\" in\n"
         "'debug prefs') printf '%s\\n' '{\"ControlURL\":\"https://controlplane.tailscale.com\"}';;\n"
@@ -516,15 +516,15 @@ def test_fresh_pairing_precursor_uses_real_unix_server_and_native_verifier(tmp_p
     binary.chmod(0o700)
     with running_server(tmp_path, socket_path, binary, pairing_origin="https://browser.example.test"):
         status, headers, body = request(socket_path, "/api/owner/bootstrap/pair", action=True,
-            headers={"Origin": "https://browser.example.test"})
+            headers={"Origin": "https://browser.example.test", "X-Forwarded-For": "192.0.2.10"})
         assert status == 202, body
         challenge = json.loads(body)
         assert challenge["principal"] == {"namespace": "tailscale:controlplane.tailscale.com", "subject": "1234"}
         assert "Set-Cookie" not in headers
         assert request(socket_path, "/api/owner/pair", action=True,
-            headers={"Origin": "https://browser.example.test"})[0] == 403
+            headers={"Origin": "https://browser.example.test", "X-Forwarded-For": "192.0.2.10"})[0] == 403
         assert request(socket_path, "/api/owner/bootstrap/pair", action=True,
-            headers={"Origin": "https://browser.example.test", "X-Forwarded-For": "100.64.0.99"})[0] == 403
+            headers={"Origin": "https://browser.example.test", "X-Forwarded-For": "192.0.2.11"})[0] == 403
     assert access.current_grant() is None
     with access._connection() as conn:
         assert conn.execute("SELECT count(*) FROM challenges").fetchone()[0] == 1
