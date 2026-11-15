@@ -23,3 +23,11 @@ RETRY with a new browser proposal, or CANCEL/EOF to stop. Retries preserve the
 original owner and workspace binding, show the verified proposal again, and
 recheck its validity in the authority transaction when BIND-WORKSPACE is entered.
 No proposal, binding, provider attempt or launch is retried automatically.
+
+### Changed — Reusable core workspace approval
+
+Workspace binding now uses a shared read-only preview and explicit presenter
+approval, with terminal rendering kept separate. Hidden codes, approval wording,
+fresh-code retry and transaction checks remain intact. Owner or binding changes
+during code entry now produce a specific conflict. This adds no command,
+endpoint or authorization channel; a presenter does not authenticate its caller.
