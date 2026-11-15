@@ -51,7 +51,9 @@ import xml.etree.ElementTree as ET
 # notice until the ceiling comes down to the count.
 SKIP_CEILINGS = {
     "supported (ubuntu-latest, py3.10)": 17,
-    "supported (macos-latest, py3.11)": 142,
+    # 145 from #2930: three tests in tests/test_stand_in_fixtures.py read a
+    # running stand-in's Linux /proc name, and macOS keeps copies.
+    "supported (macos-latest, py3.11)": 145,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests

@@ -10,12 +10,27 @@ and nothing is copied. Copying node (over 100 MB) for every case cost over a
 gigabyte per run in pytest's tmp_path, which on a Raspberry Pi is the SD card
 (#2239). Only /proc/<pid>/exe still names node, and nothing under test reads it.
 
+Node itself is the exception from Node 24 on. It names its main thread
+`MainThread` as it starts (its src/node.cc calls uv_thread_setname), and on
+Linux the main thread's name is the process's `comm`, so a link to node named
+`bun` ran as `MainThread` and the lineage walk read no `bun` or `claude`
+(#2930). So a stand-in for node is a short bash script: it runs node with the
+script's own path as argv[0] (`exec -a`), so its command line is the one a link
+gave, and gives node a preload, last in NODE_OPTIONS, that writes that name back
+to /proc/self/comm before any script runs. That NODE_OPTIONS entry names node
+too, and nothing under test reads it. A stand-in for any other executable, such
+as tests/test_bridge_state.py's bash, is a link, as before, and so is one for a
+script under node's name, such as tests/test_validate_harness_fixture_wait.py's
+fake node: the kernel starts a script's interpreter with the path it was run by
+as $0, which a link keeps and `exec -a` cannot set.
+
 Elsewhere each name is a copy, as before: whether a link keeps its own name on
 macOS has not been checked. tests/conftest.py's `native_stand_ins` makes them
 once per session.
 """
 
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -25,12 +40,56 @@ NODE = shutil.which("node")
 # Read at each call, so a test can take the other branch on any host.
 LINK_NAMES_THE_PROCESS = sys.platform == "linux"
 
+# The names under which an executable is node, which renames itself as it starts.
+NODE_NAMES = ("node", "nodejs")
+
+
+def _renames_itself(executable: str, source: Path) -> bool:
+    """Whether `executable` is node's own binary: a file under node's name that
+    is not a `#!` script. One that cannot be read is taken for the binary."""
+    if not {Path(executable).name, source.name} & set(NODE_NAMES):
+        return False
+    try:
+        with open(source, "rb") as fh:
+            return fh.read(2) != b"#!"
+    except OSError:
+        return True
+
+# The preload a node stand-in gives node, written beside the stand-ins. It runs
+# after node has named its main thread and before any script, and writes the
+# basename of argv[0] (the script's path, through `exec -a`) as the comm. The
+# kernel keeps 15 bytes of it.
+NAME_PRELOAD = "stand-in-name.cjs"
+NAME_PRELOAD_SOURCE = (
+    "try { require('fs').writeFileSync('/proc/self/comm', "
+    "require('path').basename(process.argv0).slice(0, 15)); } catch (error) {}\n"
+)
+
+
+def _node_script(node: Path, preload: Path) -> str:
+    """A bash script that runs `node` as itself. The preload goes after any
+    NODE_OPTIONS the caller set, so it runs last and its name is the one ps
+    reads; its path is quoted for node's own NODE_OPTIONS parser."""
+    unsafe = set('"\\$`')
+    if unsafe & set(str(preload)):
+        raise ValueError(f"cannot quote {preload} for NODE_OPTIONS: it holds one of {sorted(unsafe)}")
+    return ("#!/bin/bash\n"
+            f'NODE_OPTIONS="${{NODE_OPTIONS:+$NODE_OPTIONS }}--require=\\"{preload}\\"" '
+            f'exec -a "$0" {shlex.quote(str(node))} "$@"\n')
+
 
 def make_stand_ins(bindir: Path, executable: str, names=("bun", "claude")) -> Path:
     """Give `executable` each of `names` in the existing `bindir`; return `bindir`."""
     source = Path(executable).resolve()
+    node = _renames_itself(executable, source)
+    if LINK_NAMES_THE_PROCESS and node:
+        preload = bindir / NAME_PRELOAD
+        preload.write_text(NAME_PRELOAD_SOURCE)
     for name in names:
-        if LINK_NAMES_THE_PROCESS:
+        if LINK_NAMES_THE_PROCESS and node:
+            (bindir / name).write_text(_node_script(source, preload.resolve()))
+            os.chmod(bindir / name, 0o755)
+        elif LINK_NAMES_THE_PROCESS:
             (bindir / name).symlink_to(source)
         else:
             shutil.copy(source, bindir / name)
