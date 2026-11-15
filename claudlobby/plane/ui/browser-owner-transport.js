@@ -10,6 +10,8 @@ const decimal = value => /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger
 const nonce = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const unavailable = () => new Error('Browser owner transport unavailable. Reopen this workspace; inspect the original receipt for uncertain operations.');
 const fields = {
+  'action-context':['room'], 'action-send':['request_id','kind','scope','target','submitted_at','body'],
+  'action-receipt':['request_id','kind','scope','target','submitted_at'],
   pair:[], 'workspace-challenge':[], 'workspace-stage':['nonce','assertion'],
   'session-challenge':[], 'session-issue':['nonce','assertion'], 'session-status':[], 'session-renew':[], 'session-logout':[],
   'setup-context':[], 'setup-signin-begin':['generation','attempt_id'], 'setup-signin-status':['generation','attempt_id'],
@@ -28,11 +30,28 @@ function hostOrigin(value) {
   try { const url = new URL(value); return url.origin === value && url.protocol === 'https:' && !url.port
     && url.hostname.endsWith('.ts.net') && !url.username && !url.password; } catch { return false; }
 }
+const pythonBlank = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u;
+const messageText = (v,max) => typeof v === 'string' && v.isWellFormed() && !v.includes('\0') && [...v].length>0 && [...v].length<=max;
+function submittedAt(v) {
+  if(!messageText(v,240))return false;
+  const m=/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))?)?$/.exec(v);
+  if(!m)return false;const y=Number(m[1]),month=Number(m[2]),day=Number(m[3]);
+  const days=[31,y%4===0&&(y%100!==0||y%400===0)?29:28,31,30,31,30,31,31,30,31,30,31];
+  return y>0&&month>=1&&month<=12&&day>=1&&day<=days[month-1]&&(!m[4]||Number(m[4])<24&&Number(m[5])<60&&Number(m[6])<60)&&(!m[7]||Number(m[7])<24&&Number(m[8])<60);
+}
+function ordinaryMessage(operation,input) {
+  if(operation==='action-context')return messageText(input.room,240);
+  return keys(input.scope,['workspace','host','fleet','viewer'])&&Object.values(input.scope).every(v=>messageText(v,240))
+    &&keys(input.target,['recipient','task_id'])&&/^actor_[a-f0-9]{32}$/.test(input.target.recipient)&&input.target.task_id===null
+    &&uuid(input.request_id)&&input.kind==='message'&&submittedAt(input.submitted_at)
+    &&(operation!=='action-send'||messageText(input.body,2000)&&!pythonBlank.test(input.body));
+}
 function validInput(operation, input) {
   const allowed = fields[operation], read = operation.startsWith('read-');
   if (!allowed || !input || typeof input !== 'object' || Array.isArray(input)
     || Object.keys(input).some(k => !allowed.includes(k)) || (!read && !keys(input,allowed))
     || operation === 'read-task' && !Object.hasOwn(input,'task_id')) return false;
+  if(operation.startsWith('action-'))return ordinaryMessage(operation,input);
   for (const [key,value] of Object.entries(input)) {
     if (typeof value !== 'string' || !value.isWellFormed() || value.includes('\0') || encoder.encode(value).length > 32768) return false;
     if (['generation','attempt_id','request_id'].includes(key) && !uuid(value)) return false;
@@ -61,6 +80,7 @@ function translate(url, options, target) {
   if (url.pathname === '/api/owner/bootstrap/pair') operation = 'pair';
   else if (/^\/api\/owner\/workspace\/(challenge|stage)$/.test(url.pathname)) operation = 'workspace-' + url.pathname.split('/').at(-1);
   else if (/^\/api\/owner\/connected\/(challenge|issue|status|renew|logout)$/.test(url.pathname)) operation = 'session-' + url.pathname.split('/').at(-1);
+  else if (/^\/api\/owner\/connected\/actions\/(context|send|receipt)$/.test(url.pathname)) operation = 'action-' + url.pathname.split('/').at(-1);
   else if (url.pathname.startsWith('/api/owner/connected/setup/')) operation = 'setup-' + url.pathname.slice('/api/owner/connected/setup/'.length);
   else if (url.pathname.startsWith('/api/owner/connected/read/')) {
     const suffix = url.pathname.slice('/api/owner/connected/read/'.length);
@@ -226,12 +246,14 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
     return new Promise((resolve,reject) => {
       const stream=request.operation === 'read-stream';
       const active={id,resolve,reject,stream,signal:options.signal,controller:null,chunks:[],credit:4,total:0,ended:false,
-        limit:stream?Infinity:request.operation.startsWith('read-')?8*1024*1024:request.operation.startsWith('setup-')?131072:16384};
+        limit:stream?Infinity:request.operation==='action-context'?2*1024*1024:request.operation.startsWith('action-')?32768:request.operation.startsWith('read-')?8*1024*1024:request.operation.startsWith('setup-')?131072:16384};
       active.abort=()=>{if(requests.has(id)) fail(active,true);};requests.set(id,active);
       active.signal?.addEventListener('abort',active.abort,{once:true});
-      active.timer=setTimeout(()=>fail(active,true),request.operation === 'setup-launch'?45000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
+      active.timer=setTimeout(()=>fail(active,true),['setup-launch','action-send'].includes(request.operation)?45000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
       try {post('request',{id,request,credit:4});} catch {dispose();}
     });
   }
+  // Cosmetic integration marker: never an action grant or network authority.
+  Object.defineProperty(fetch,'browserOwnerTransport',{value:true});
   return Object.freeze({fetch,dispose,ready});
 }

@@ -1382,3 +1382,29 @@ test('admitted browser bridge survives redemption expiry while canonical account
   assert.equal(await native.api.checkAccount(),false);assert.equal(retired,1);await rejection;
   await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,1);
 });
+
+const ordinaryMetadata=()=>({request_id:id(81),kind:'message',scope:{workspace:'workspace',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'original viewer'},target:{recipient:'actor_'+'c'.repeat(32),task_id:null},submitted_at:'2026-11-15T20:30:00.123Z'});
+test('browser ordinary message facade preserves exact original metadata, finite bounds and unknown receipts',async t=>{
+  const timers=[];const h=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});h.admit();await h.bridge.ready;
+  const context=h.host('/api/owner/connected/actions/context',{room:'team'});await flush();let req=h.frames.filter(f=>f.type==='request').at(-1);assert.equal(req.request.operation,'action-context');assert.equal(timers.at(-1).delay,15000);
+  const large=JSON.stringify({padding:'x'.repeat(32769)});h.send('headers',{id:req.id,status:200,headers:{'content-type':'application/json'}});
+  for(let i=0;i<large.length;i+=16384)h.send('chunk',{id:req.id,data:Buffer.from(large.slice(i,i+16384)).toString('base64')});h.send('end',{id:req.id});assert.equal((await (await context).json()).padding.length,32769);
+  const original=ordinaryMetadata(),body='🙂'.repeat(2000);const sending=h.host('/api/owner/connected/actions/send',{...original,body});await flush();req=h.frames.filter(f=>f.type==='request').at(-1);
+  assert.equal(req.request.operation,'action-send');assert.deepEqual(req.request.input,{...original,body});assert.equal(timers.at(-1).delay,45000);
+  h.send('headers',{id:req.id,status:503,headers:{'content-type':'application/json'}});h.send('chunk',{id:req.id,data:Buffer.from('{"state":"unavailable","effect":"not_started"}').toString('base64')});h.send('end',{id:req.id});const refused=await sending;assert.equal(refused.status,503);assert.deepEqual(await refused.json(),{state:'unavailable',effect:'not_started'});
+  const receipt=h.host('/api/owner/connected/actions/receipt',original);await flush();req=h.frames.filter(f=>f.type==='request').at(-1);assert.equal(req.request.operation,'action-receipt');assert.deepEqual(req.request.input,original);assert.equal(timers.at(-1).delay,15000);
+  h.send('error',{id:req.id,outcome:'unknown'});await assert.rejects(receipt);await flush();assert.equal(h.frames.filter(f=>f.type==='request').length,3,'no automatic retry or replacement UUID');
+  for(const [path,input] of [['prepare',{...original,body}],['context',{room:'team',kind:'nudge'}],['send',{...original,kind:'nudge',body}],['send',{...original,body,version:1}],['send',{...original,target:{...original.target,task_id:wi},body}],['send',{...original,scope:{...original.scope,extra:'no'},body}],['send',{...original,body:'\ud800'}],['send',{...original,body:'\u0085\u001c'}],['receipt',{...original,body}]])await assert.rejects(h.host('/api/owner/connected/actions/'+path,input));
+  await assert.rejects(h.host('/api/owner/connected/actions/send?extra=1',{...original,body}));assert.equal(h.native.length,0);
+});
+test('explicit browser transport shows canonical guide recovery without native terminal enrollment',async t=>{
+  const bridge=await bridgeHarness(t);assert.equal(bridge.bridge.fetch.browserOwnerTransport,true);
+  const h=harness({count:1}),browserFetch=Object.defineProperty((...args)=>h.dependencies.fetch(...args),'browserOwnerTransport',{value:true});
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
+  workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
+  const nodes=descendants(h.ui.get('owner-session')),text=nodes.map(n=>n.textContent).join(' ');
+  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
+  assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
+  assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
+  const native=harness({count:1});native.mount();await native.api.checkAccount();assert.match(descendants(native.ui.get('owner-session')).map(n=>n.textContent).join(' '),/DATA_ROOT/);native.api.dispose();
+});

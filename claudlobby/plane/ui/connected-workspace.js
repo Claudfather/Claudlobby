@@ -35,6 +35,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   createTransport = createWorkspaceReadTransport, createEnrollment = createWorkspaceEnrollment, setTimeout = globalThis.setTimeout,
   clearTimeout = globalThis.clearTimeout, onRetire = () => {}, now = () => Date.now() / 1000,
   monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver } = {}) {
+  const browserTransport = fetch.browserOwnerTransport === true; // Presentation only; core remains the grant authority.
   const validDocument = keys(documentContext, ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'])
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
     && origin(documentContext.shell_origin) && origin(documentContext.operational_origin)
@@ -322,6 +323,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     pending.set(index, operation); changed();
     try {
       if (operation === 'enroll') {
+        if (browserTransport) return false;
         if (['ready','setup_only'].includes(row.client.snapshot().state) || !await checkAccount()) return false;
         return await row.enrollment.start();
       }
@@ -371,7 +373,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const help = document.createElement('details'); help.className = 'connection-approval';
       const summary = document.createElement('summary'); summary.textContent = 'Connection options and first-time setup'; help.append(summary); row.append(help);
       const steps = document.createElement('p');
-      steps.textContent = 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
+      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace. Continue first-team setup below. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
       help.append(steps);
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
@@ -379,7 +381,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       help.append(access);
       const options = document.createElement('div'); options.className = 'connection-actions'; help.append(options);
       const buttons = [];
-      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],['enroll','Prepare local approval']]) {
+      for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],...(!browserTransport ? [['enroll','Prepare local approval']] : [])]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'pill ghost'; button.textContent = title;
         button.dataset.operation = operation;
         button.setAttribute('aria-label', title + ' ' + new URL(reference.endpoint_origin).hostname);
@@ -391,11 +393,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
       const setupPanel = document.createElement("div"); setupPanel.setAttribute("role","group"); setupPanel.setAttribute("aria-label","First-team setup " + new URL(reference.endpoint_origin).hostname); help.append(setupPanel);
       clients[index].setup.mountPanel({document,element:setupPanel});
-      help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
+      if (!browserTransport) {help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
-        } }}); element.append(row);
+        } }}); } element.append(row);
       controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
@@ -423,8 +425,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       if (['awaiting_local_approval','unknown'].includes(approval.state))
         detail.textContent = approval.state === 'unknown'
           ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
-          : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
-      access.hidden = ['ready','setup_only'].includes(status.state);
+          : browserTransport ? 'Return to your workspace’s guided setup to inspect the retained approval, then check this connection.' : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
+      access.hidden = browserTransport || ['ready','setup_only'].includes(status.state);
       // Reveal setup on entry; later paints preserve the chosen disclosure state.
       if (status.state === 'setup_only' && !controls.setupOnly
           || approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
