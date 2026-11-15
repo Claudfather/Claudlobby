@@ -85,6 +85,16 @@ class StaleHandoffError(BotLifecycleError):
         super().__init__("self restart requires a fresh owned session handoff")
 
 
+class HandoffDirectoryRefused(BotLifecycleError):
+    """A directory on the way to the session's own handoff is refused (#2927).
+
+    It is redirected, not this user's own, or cannot be searched or read. The
+    readers refuse it rather than read past it, and `bot handoff --check` reads
+    the handoff as unknown (file_unverified) until the directory is repaired,
+    so `bot handoff`'s answer says to repair it first.
+    """
+
+
 @dataclass(frozen=True)
 class BotLifecycleResult:
     fleet: str
@@ -257,14 +267,14 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None,
     reference refresh envelope (#2094) that is the capture below it: the
     activation's own reader finds the envelope, so the two agree on it, and
     one that reader refuses is refused here by name (#2119). A directory on
-    the way to the session's own file that cannot be read (no search
-    permission, an I/O error) is refused the same way as a redirected one, so
-    each door gives its own refusal (#2927).
+    the way to the session's own file that cannot be read (an I/O error, or no
+    search permission above the session's own directory) is refused the same
+    way as a redirected one, so each door gives its own refusal (#2927).
     """
     try:
         path = handoff_file.resolve(bot_dir) if path is None else path
     except (handoff_file.HandoffFileError, OSError) as exc:
-        raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+        raise HandoffDirectoryRefused("self restart requires a fresh owned session handoff") from exc
     if path == handoff_file.legacy(bot_dir):
         _owned_handoff_dir(bot_dir)
     try:
@@ -456,14 +466,21 @@ def _say_handoff_script_stderr(bot: str, stderr: str | None) -> None:
     door gave no answer in 5 s, or refused) and why a receipt could not be read.
     `bot handoff` printed none of it, so a wait that watched .claude/session.md
     alone read as a slow save. At most _HANDOFF_STDERR_LINES lines, and how many
-    more there were.
+    more there were. A stderr that cannot take them, closed or broken, loses
+    them and stops nothing: the script's result is recorded after this (#2927).
     """
     lines = [line for line in (stderr or "").splitlines() if line.strip()]
-    for line in lines[:_HANDOFF_STDERR_LINES]:
-        print(f"bot handoff {bot}: {line}", file=sys.stderr, flush=True)
+    said = [f"bot handoff {bot}: {line}" for line in lines[:_HANDOFF_STDERR_LINES]]
     if len(lines) > _HANDOFF_STDERR_LINES:
-        print(f"bot handoff {bot}: {len(lines) - _HANDOFF_STDERR_LINES} more lines of the handoff "
-              "script's stderr not shown", file=sys.stderr, flush=True)
+        said.append(f"bot handoff {bot}: {len(lines) - _HANDOFF_STDERR_LINES} more lines of the handoff "
+                    "script's stderr not shown")
+    if sys.stderr is None:  # Closed when Python started: print would write to stdout.
+        return
+    try:
+        for line in said:
+            print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass  # A closed or broken stderr: the lines are lost, and nothing else.
 
 
 def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
@@ -978,9 +995,12 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                     wait_for_handoff(spec.bot_dir, requested=request["requested_ns"],
                                      native_result=request["native_result"], target=entry["target"])
                 except BotLifecycleError as exc:
-                    raise BotLifecycleError("fresh bot handoff file is unverified", effect_attempted=True,
-                                            unavailable=True, release_id=_release_id(release), **_provenance(release),
-                                            target=entry["target"]) from exc
+                    # A refused handoff directory keeps its type: the answer says to repair it (#2927).
+                    refusal = (HandoffDirectoryRefused if isinstance(exc, HandoffDirectoryRefused)
+                               else BotLifecycleError)
+                    raise refusal("fresh bot handoff file is unverified", effect_attempted=True,
+                                  unavailable=True, release_id=_release_id(release), **_provenance(release),
+                                  target=entry["target"]) from exc
                 return _bot_result(BotHandoffResult, release, destination.fleet.name, bot, _release_id(release),
                                         entry["target"], "saved", "fresh_file_verified")
             # A definitive no-send result is not an outstanding request.

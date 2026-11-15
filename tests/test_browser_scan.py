@@ -2,7 +2,8 @@
 
 Each case builds a /proc of its own (stat, exe, cgroup, smaps_rollup per pid) and
 runs the script over it through its --proc seam; one case reads the real /proc,
-with a copy of sleep named chromium standing in for a browser.
+with a copy of the shell named chromium standing in for a browser, waiting in its
+own `read` on a pipe nothing writes to.
 """
 
 from __future__ import annotations

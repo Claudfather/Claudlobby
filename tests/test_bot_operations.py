@@ -3,7 +3,9 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -1138,21 +1140,71 @@ def test_bot_handoff_passes_on_what_its_script_said_on_stderr(cold, monkeypatch,
         "bot handoff worker: 5 more lines of the handoff script's stderr not shown"]
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory without its search bit")
-def test_a_session_directory_bot_handoff_cannot_search_gets_its_own_refusal(
-        cold, monkeypatch, capsys):  # noqa: F811
+class _BrokenStream:
+    """A stderr whose reader has gone: every write and flush raises EPIPE."""
+
+    def write(self, text):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+
+def _closed_stream():
+    stream = io.StringIO()
+    stream.close()
+    return stream
+
+
+@pytest.mark.parametrize("stream", ["broken", "closed", "none"])
+def test_a_stderr_bot_handoff_cannot_write_to_stops_nothing(cold, monkeypatch, capsys, stream):  # noqa: F811
+    """Note 5 of the #2929 review (#2927): bot handoff passes on its script's stderr just
+    before it records the script's result, and a stderr it could not write to raised
+    there, so the result went unrecorded. Broken (its reader gone), closed, or never
+    open (None, where print writes to stdout instead), it loses those lines and nothing
+    else: the result is recorded, and the answer is the one a working stderr gets."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
+    worker.native.handoff_stderr = "line 1\nline 2\n"
+    with monkeypatch.context() as patched:
+        patched.setattr(sys, "stderr", {"broken": _BrokenStream(), "closed": _closed_stream(),
+                                        "none": None}[stream])
+        answered = worker.call("bot", "handoff", "worker")["data"]
+    assert (answered["handoff"], answered["reason"]) == ("saved", "fresh_file_verified"), answered
+    request = json.loads((bot_dir / "data/.handoff-request").read_text())
+    assert request["native_result"] == {"marker": "handoff-saved", "returncode": 0}, request
+
+
+@pytest.mark.parametrize("refused_by", [
+    pytest.param("cannot-search", marks=pytest.mark.skipif(
+        os.geteuid() == 0, reason="root searches a directory without its search bit")),
+    "redirected",
+])
+def test_a_session_directory_bot_handoff_refuses_gets_its_own_refusal(
+        cold, monkeypatch, capsys, tmp_path, refused_by):  # noqa: F811
     """#2927 item 6: bot handoff sent the save, then its verify met a directory on the way
     to the session's own handoff that it cannot search. The PermissionError reached the
     CLI as a native-state refusal that read the effect as unattempted; it is the door's
-    unverified answer now, with its --check hint, and --check reads it unverified."""
+    unverified answer now, and --check reads it unverified. A redirected directory there
+    is refused the same way. Note 3 of the #2929 review (#2927): --check reads unknown
+    (file_unverified) until the directory is repaired, so the hint to read it "until it
+    reads saved" named a wait with no end; the hint says to repair the directory first."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     bot_dir = worker.root / "runtime/bots/worker"
     own = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
-    own.parent.mkdir(parents=True)
+    sessions = own.parent.parent
+    if refused_by == "redirected":  # the session's own directory is a link to one elsewhere
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        sessions.mkdir(parents=True)
+        own.parent.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        own.parent.mkdir(parents=True)
     own.write_text(f"---\nlast_updated: {_stamp(datetime.now(timezone.utc))}\n---\ncontext\n")
     worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
-    sessions = own.parent.parent
-    sessions.chmod(0o600)
+    if refused_by == "cannot-search":
+        sessions.chmod(0o600)
     try:
         refused = worker.call("bot", "handoff", "worker", expected=6)
         checked = worker.call("bot", "handoff", "worker", "--check")["data"]
@@ -1160,7 +1212,9 @@ def test_a_session_directory_bot_handoff_cannot_search_gets_its_own_refusal(
         sessions.chmod(0o700)
     assert (refused["data"].get("handoff"), refused["data"].get("reason")) == ("unknown", "unverified"), refused
     assert refused["data"]["native_outcome"] == "unknown", refused
-    assert "--check" in (refused["error"].get("hint") or ""), refused
+    hint = refused["error"].get("hint") or ""
+    assert "repair it first" in hint and "bot handoff worker --check" in hint, refused
+    assert "until it reads saved" not in hint, refused
     assert (checked["handoff"], checked["reason"]) == ("unknown", "file_unverified")
 
 
@@ -1171,6 +1225,7 @@ def test_a_session_directory_bot_handoff_cannot_search_gets_its_own_refusal(
     pytest.param("symlinked-per-directory-file", "saved", "fresh_file_verified",
                  id="symlinked-per-directory-file"),
     pytest.param("no-answer-from-the-door", "saved", "fresh_file_verified", id="no-answer-from-the-door"),
+    pytest.param("malformed-receipt", "saved", "fresh_file_verified", id="malformed-receipt"),
 ])
 def test_the_door_verifies_the_save_its_script_waited_for(
         cold, monkeypatch, capsys, tmp_path, test_cli, case, handoff, reason):  # noqa: F811
@@ -1184,7 +1239,11 @@ def test_the_door_verifies_the_save_its_script_waited_for(
     and the own file is the one verified (the readers refuse a symlinked one). Item 7:
     with no answer from the CLI's door, the script watches .claude/session.md alone and
     says so on stderr, which bot handoff passes on; the session's compatibility copy
-    there ends the wait, and the session's own file is still the one verified."""
+    there ends the wait, and the session's own file is still the one verified. Note 4 of
+    the #2929 review (#2927): a native-session receipt that cannot be read stops nothing
+    before the request, since nothing reads it there. The script's door says so on
+    stderr, which bot handoff passes on, and every reader then reads .claude/session.md,
+    where the session's compatibility copy is the save verified."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     bot_dir = worker.root / "runtime/bots/worker"
     own = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
@@ -1200,15 +1259,17 @@ def test_the_door_verifies_the_save_its_script_waited_for(
         elsewhere.write_text(f"---\nlast_updated: {_stamp(now)}\n---\nnew context\n")
         legacy.unlink()
         legacy.symlink_to(elsewhere)
+    if case == "malformed-receipt":  # nothing reads it before the request
+        native_session._path(bot_dir).write_text("{\n")
     # The session stamps its capture as it saves, after the request. A stamp taken
     # here can fall in the second before the request's, and the door refuses that.
     stamp = (shlex.quote(_stamp(now - timedelta(seconds=120))) if case == "capture-from-before-the-request"
              else '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"')
     capture = shlex.quote("---\nlast_updated: %s\n---\nnew context\n")
     save = f"printf -- {capture} {stamp} > {shlex.quote(str(own))}"
-    if case == "no-answer-from-the-door":  # and clauDNA's compatibility copy beside it
+    if case in ("no-answer-from-the-door", "malformed-receipt"):  # and clauDNA's compatibility copy
         save += f" && printf -- {capture} {stamp} > {shlex.quote(str(legacy))}"
-    else:
+    if case != "no-answer-from-the-door":
         # The fixture installation's launcher has no runtime environment, so the CLI
         # its composed bot.conf names gives the script no answer. A shim runs this
         # checkout's CLI in its place, as an installation's launcher runs its own.
@@ -1226,6 +1287,10 @@ def test_the_door_verifies_the_save_its_script_waited_for(
     assert (result["data"]["handoff"], result["data"]["reason"]) == (handoff, reason), err
     fell_back = f"bot handoff worker: handoff_files: no answer from _handoff-files watch; reading {legacy} alone"
     assert (fell_back in err.splitlines()) is (case == "no-answer-from-the-door"), err
+    unreadable = (f"bot handoff worker: {bot_dir}: the native session receipt cannot be read "
+                  f"(native session receipt is invalid), so the session's own handoff cannot be "
+                  f"named and {legacy} is read instead")
+    assert err.splitlines().count(unreadable) == (1 if case == "malformed-receipt" else 0), err
     assert legacy.is_symlink() is (case == "symlinked-per-directory-file")
 
 

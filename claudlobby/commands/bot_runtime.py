@@ -74,8 +74,8 @@ def own_compaction_lines(result) -> tuple[str, ...]:
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import (BotLifecycleError, check_handoff, control_bot, handoff_bot,
-                                  set_bot_running)
+    from ..bot_operations import (BotLifecycleError, HandoffDirectoryRefused, check_handoff,
+                                  control_bot, handoff_bot, set_bot_running)
     from ..compact_request import CompactRequestResult
     from ..config_plan import PlanError
     from ..context import resolve_paths
@@ -143,6 +143,14 @@ def dispatch(args) -> CommandOutput:
                     hint = (f"the earlier request resolves once {args.bot_id}'s session saves a handoff: "
                             f"ask it to save one, then read claudlobby --json bot handoff {args.bot_id} "
                             "--check until it reads saved; do not automatically resend the handoff")
+                elif isinstance(exc, HandoffDirectoryRefused):
+                    # #2927: --check reads unknown (file_unverified) until the directory is repaired,
+                    # so "until it reads saved" would name a wait with no end.
+                    hint = (f"a directory on the way to {args.bot_id}'s session handoff is redirected, "
+                            "not this user's, or cannot be searched or read, and --check reads unknown "
+                            "(file_unverified) until it is repaired: repair it first, then read "
+                            f"claudlobby --json bot handoff {args.bot_id} --check; do not automatically "
+                            "resend the handoff")
                 else:
                     hint = (f"the handoff can still land: read claudlobby --json bot handoff {args.bot_id} "
                             "--check until it reads saved; do not automatically resend the handoff")
