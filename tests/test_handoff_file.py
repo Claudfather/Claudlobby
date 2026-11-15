@@ -51,7 +51,8 @@ def test_the_current_sessions_own_handoff_is_read_first(tmp_path):
     # The composed CLAUDNA_STATE_DIR is <bot dir>/data/claudna (composer.CLAUDNA_STATE_SUBDIR).
     assert own == bot / "data/claudna/sessions" / sid / "handoff.md"
     assert handoff_file.resolve(bot) == own
-    assert handoff_file.watch(bot) == [own, legacy]
+    # #2927: the readers read it alone now, so a save beside it ends no wait.
+    assert handoff_file.watch(bot) == [own]
     own.unlink()
     assert handoff_file.resolve(bot) == legacy
     assert handoff_file.watch(bot) == [own, legacy]  # a save can still land in either
@@ -81,6 +82,8 @@ def test_a_redirected_session_directory_is_refused_not_read_past(tmp_path, redir
     (bot / redirected).symlink_to(elsewhere)
     with pytest.raises(handoff_file.HandoffFileError, match="not an owned directory"):
         handoff_file.resolve(bot)
+    with pytest.raises(handoff_file.HandoffFileError, match="not an owned directory"):
+        handoff_file.watch(bot)  # #2927: it decides by the same rule
 
 
 def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):
@@ -91,6 +94,7 @@ def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):
     own.symlink_to(_save(tmp_path / "elsewhere.md"))
     _save(handoff_file.legacy(bot))  # fresh, and never read in its place
     assert handoff_file.resolve(bot) == own
+    assert handoff_file.watch(bot) == [own]  # so the wait refuses it (#2927)
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
         bot_operations._fresh_self_handoff(bot)
 
@@ -149,6 +153,7 @@ def test_the_private_door_prints_the_files_one_per_line(tmp_path, capsys):
     assert _door(capsys, "resume", str(bot), second)[:2] == (0, [str(own)])
     assert _door(capsys, "recent", str(bot))[:2] == (0, [])  # the new session saved nothing yet
     _save(handoff_file.session_owned(bot, second))
+    assert _door(capsys, "watch", str(bot))[:2] == (0, [str(handoff_file.session_owned(bot, second))])
     rc, lines, _ = _door(capsys, "recent", str(bot))
     assert rc == 0 and len(lines) == 1 and 0 <= int(lines[0]) < 300
     _save(handoff_file.session_owned(bot, second), datetime.now(timezone.utc) - timedelta(hours=2))
@@ -187,6 +192,10 @@ def test_the_shell_door_asks_the_cli_and_falls_back_to_the_per_directory_file(tm
     asked = _shell(tmp_path, "watch", str(bot), cli=test_cli)
     assert asked.returncode == 0, asked.stderr
     assert asked.stdout.splitlines() == [str(handoff_file.session_owned(bot, sid)), legacy]
+    own = _save(handoff_file.session_owned(bot, sid))
+    alone = _shell(tmp_path, "watch", str(bot), cli=test_cli)
+    assert (alone.returncode, alone.stdout.splitlines()) == (0, [str(own)]), alone.stderr
+    own.unlink()
     without = _shell(tmp_path, "watch", str(bot))
     assert (without.returncode, without.stdout.splitlines(), without.stderr) == (0, [legacy], "")
     unanswered = _shell(tmp_path, "watch", str(bot), cli=tmp_path / "no-such-cli")
