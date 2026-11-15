@@ -70,7 +70,9 @@ test('default and synthetic transports do not mount session controls or probe ow
     const workspaceURL = moduleURL((await readUI('connected-workspace.js'))
       .replace('"./guided-setup.js"', JSON.stringify(setupURL))
       .replace('"./workspace-enrollment.js"', JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));
-    const normal = await load((await readUI('api-client.js')).replace('"./connected-workspace.js"', JSON.stringify(workspaceURL)));
+    const browserURL = moduleURL(await readUI('browser-owner-transport.js'));
+    const normal = await load((await readUI('api-client.js')).replace('"./connected-workspace.js"', JSON.stringify(workspaceURL))
+      .replace('"./browser-owner-transport.js"', JSON.stringify(browserURL)));
     assert.equal(normal.mountSessionControls, undefined);assert.equal(normal.nudgeContext,undefined);assert.equal(normal.feedbackContext,undefined);assert.equal(normal.prepareAction,undefined);
     await normal.jget('/api/tasks');
     const synthetic = await load(await readFile(new URL('./fixtures/plane_work_loop/api-client.js', import.meta.url), 'utf8'));
