@@ -12,8 +12,10 @@ Graceful self-restart with best-achievable-fidelity context preservation. The ca
 
 Flow: capture a handoff → notify on the channel → `claudlobby --json bot restart YOUR_BOT_ID --fresh` (replace the placeholder with your literal generated bot ID) → a new session resumes from that handoff, when a resume capability is installed. Without `--fresh` a restart continues this same conversation and never reads the handoff.
 
-**This skill names a requirement, not a provider.** It needs *a session handoff at
-`<cwd>/.claude/session.md`*; it does not care which skill produces one. Naming a specific
+**This skill names a requirement, not a provider.** It needs *a fresh session handoff*: the
+current session's own `R/sessions/<native session ID>/handoff.md` (clauDNA 0.35 and later, R
+being the bot's `CLAUDNA_STATE_DIR`) when it has one, else `<cwd>/.claude/session.md`; it does
+not care which skill produces one. Naming a specific
 plugin here would make `plugins.include_defaults: false` — a supported configuration —
 silently unsatisfiable, which is the defect this wording exists to prevent.
 
@@ -24,9 +26,9 @@ Parse `$ARGUMENTS`:
 
 ## Steps
 
-1. **Capture a session handoff to `<cwd>/.claude/session.md`.** It must carry a `last_updated` ISO-8601 UTC timestamp in its frontmatter: the CLI refuses this restart unless that timestamp and the file's mtime are both under 300 s old, and `start-bot.sh` resumes the fresh session from a handoff only while it is under a day old by that field.
+1. **Capture a session handoff.** The CLI reads the current session's own handoff when it has one, else `<cwd>/.claude/session.md`. It must carry a `last_updated` ISO-8601 UTC timestamp in its frontmatter: the CLI refuses this restart unless that timestamp and the file's mtime are both under 300 s old, and `start-bot.sh` resumes the fresh session from a handoff only while it is under a day old by that field.
 
-   **Use your session-handoff skill if you have one** (a skill whose job is capturing session context); pass `--auto` through if `/restart` was called with it and that skill accepts it. **If you have no such skill, write the file yourself** — you are a live agent standing in the bot's own directory with file-write tools, and you know what this session was doing. A handoff you write is better than none, and better than a mechanical snapshot.
+   **Use your session-handoff skill if you have one** (a skill whose job is capturing session context); pass `--auto` through if `/restart` was called with it and that skill accepts it. **If you have no such skill, write `<cwd>/.claude/session.md` yourself** — you are a live agent standing in the bot's own directory with file-write tools, and you know what this session was doing. A handoff you write is better than none, and better than a mechanical snapshot.
 
    Capture it while the session is still alive and responsive. Whichever route you take, do **not** shell out to `pre-stop-handoff.sh`: that script sends the handoff as a tmux keystroke and waits for it, so run from inside this very session it would queue the handoff *behind* the restart and lose it. (`pre-stop-handoff.sh` is what `claudlobby --json bot handoff BOT` runs: the path for a manager acting from *outside* the session.)
 

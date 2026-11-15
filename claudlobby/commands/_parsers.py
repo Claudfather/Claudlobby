@@ -29,6 +29,16 @@ def register_subparsers(sub) -> None:
         return entry(args)
     native_session.set_defaults(func=native_session_entry)
 
+    # The runtime scripts' door to the handoff files a reader checks (#2924).
+    handoff_files = sub.add_parser("_handoff-files", help=argparse.SUPPRESS)
+    handoff_files.add_argument("action", choices=("watch", "resume", "recent"))
+    handoff_files.add_argument("directory")
+    handoff_files.add_argument("session", nargs="?")
+    def handoff_files_entry(args):
+        from ..handoff_file import entry
+        return entry(args)
+    handoff_files.set_defaults(func=handoff_files_entry)
+
     from ._release_parsers import register_release_subparsers
     register_release_subparsers(sub)
     from ._orientation_parsers import register_orientation_subparsers

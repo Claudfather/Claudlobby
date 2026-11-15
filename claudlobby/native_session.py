@@ -18,6 +18,8 @@ from uuid import UUID, uuid4
 
 TAIL_BYTES = 65536
 NAME = "native-session.json"
+# The identity a renewal replaced, beside the receipt (#2924).
+PREDECESSOR = "native-session-predecessor.json"
 
 
 class NativeSessionError(ValueError):
@@ -110,21 +112,49 @@ def _write(bot_dir, value, *, expected=None, allow_checkpoint_change=False):
                 raise NativeSessionError("native session identity changed before receipt publication")
         if os.path.lexists(path):
             _plain(path)
-        fd, name = tempfile.mkstemp(prefix=".native-session-", dir=path.parent)
-        temporary = Path(name)
+        _replace(path, value, ".native-session-")
+
+
+def _replace(path, value, prefix):
+    """Write value as JSON to path by an atomic rename, durably."""
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(json.dumps(value, sort_keys=True).encode())
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(json.dumps(value, sort_keys=True).encode())
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(temporary, path)
-            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            os.fsync(fd)
         finally:
-            temporary.unlink(missing_ok=True)
+            os.close(fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def predecessor(bot_dir, session_id):
+    """The session a renewal replaced with session_id, or None (#2924).
+
+    A fresh session resumes from the handoff the session it replaced saved, and
+    the receipt names only the new one. Only `renew` writes the record, and it
+    names both, so a launch no renewal began (a new bot, a host update's
+    continuation) or one a later renewal replaced reads None.
+    """
+    path = _path(bot_dir).with_name(PREDECESSOR)
+    try:
+        raw = _plain(path).read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        value = json.loads(raw)
+        if (set(value) != {"schema", "session_id", "predecessor"} or value["schema"] != 1
+                or not _uuid(value["session_id"]) or not _uuid(value["predecessor"])):
+            raise ValueError()
+    except (ValueError, TypeError) as exc:
+        raise NativeSessionError("native session predecessor record is invalid") from exc
+    return value["predecessor"] if value["session_id"] == session_id else None
 
 
 def _binding(value, bot_dir, label, tmpdir, account=None):
@@ -349,10 +379,17 @@ def renew(bot_dir, label, tmpdir, account):
 
     The next launch starts it as a fresh session, as it starts any launch that
     never reached SessionStart; the retired transcript stays on disk. The
-    receipt is replaced only if it is still the one read here.
+    receipt is replaced only if it is still the one read here. The identity it
+    replaces is recorded first (`predecessor`), so the fresh session's resume
+    reads the handoff that session saved; a record whose new identity never
+    became current names no launch (#2924).
     """
     current = read(bot_dir)
     value = _new_session(bot_dir, label, tmpdir, account)
+    if current is not None:
+        _replace(_path(bot_dir).with_name(PREDECESSOR),
+                 {"schema": 1, "session_id": value["session_id"], "predecessor": current["session_id"]},
+                 ".native-session-predecessor-")
     _write(bot_dir, value, expected=current)
     return value
 

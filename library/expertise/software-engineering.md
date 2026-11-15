@@ -52,10 +52,12 @@ Use the Agent tool to keep your main context lean:
 Handoff first, then the canonical CLI — never `systemctl` or `launchctl`
 directly. Use `/restart` if it is equipped; otherwise:
 
-1. Save a fresh session handoff to `<cwd>/.claude/session.md` (your
-   session-handoff skill if you have one, else write it yourself) with a
-   `last_updated` ISO-8601 UTC timestamp in its frontmatter — `start-bot.sh`
-   age-gates the resume on that field.
+1. Save a fresh session handoff with a `last_updated` ISO-8601 UTC timestamp
+   in its frontmatter: your session-handoff skill if you have one (clauDNA
+   0.35 and later save it in the session's own
+   `R/sessions/<native session ID>/handoff.md`), else write
+   `<cwd>/.claude/session.md` yourself. `start-bot.sh` age-gates the resume
+   on that field.
 2. Notify on the channel that the handoff is saved and the restart is
    intentional (best-effort).
 3. Request a fresh-session restart with your literal bot ID:

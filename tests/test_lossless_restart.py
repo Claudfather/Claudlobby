@@ -46,6 +46,41 @@ def _session_md(tmp_path: Path, name: str, last_updated: str | None) -> Path:
     return f
 
 
+def _startup_block(tmp_path: Path, bot: Path, account: Path, *, mode: str, command: str,
+                   session_id: str = "00000000-0000-4000-8000-000000000000", cli=None):
+    """Run start-bot.sh from the bridge-readiness wait up to the idle mark, what a
+    session receives once its channel is up; return (payloads, log text, events).
+    The CLI the resume gate asks is ``cli`` alone, never the caller's own."""
+    sends, log, errors, events = (tmp_path / name for name in ("sends", "startup.log", "errors", "events"))
+    source = START_BOT.read_text()
+    start = source.index("esac\n", source.index('emit_fleet_event "rc_timeout"')) + len("esac\n")
+    block = source[start:].split("# Mark bot as idle", 1)[0]
+    script = r'''
+. "$1"
+set -Eeuo pipefail
+trap 'printf "ERR\n" >> "$ERRORS"' ERR
+pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
+inject_stamp() { printf stamp; }
+boot_send_settled() { :; }
+emit_fleet_event() { printf '%s\n' "$1" >> "$EVENTS"; }
+''' + block
+    env = {**os.environ, "BOT_DIR": str(bot), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
+           "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
+           "_native_session_id": session_id, "STARTUP_PROMPT": "Authored startup.",
+           "SESSION_RESUME_COMMAND": command, "CLAUDE_CONFIG_DIR": str(account), "SENDS": str(sends),
+           "ERRORS": str(errors), "EVENTS": str(events)}
+    env.pop("RESUME_MAX_AGE_S", None)
+    env.pop("CLAUDLOBBY_CLI", None)
+    if cli is not None:
+        env["CLAUDLOBBY_CLI"] = str(cli)
+    result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert not errors.exists(), result.stderr
+    payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+    return payloads, (log.read_text() if log.exists() else ""), (events.read_text() if events.exists() else "")
+
+
 class TestNativeStartup:
     """Run the actual startup injection branch without a model or native service."""
 
@@ -104,7 +139,6 @@ emit_fleet_event() { :; }
     def test_a_fresh_session_resumes_from_its_saved_handoff_before_startup(
             self, tmp_path, mode, handoff, command, sent, line):
         """#2696: the resume command precedes the authored startup only in a fresh session."""
-        sends, log, errors, events = (tmp_path / name for name in ("sends", "startup.log", "errors", "events"))
         bot, account = tmp_path / "bot", tmp_path / "account"
         (bot / ".claude").mkdir(parents=True)
         (account / "plugins/cache/Claudfather/claudna").mkdir(parents=True)
@@ -118,37 +152,49 @@ emit_fleet_event() { :; }
             checkpoint.write_text("## State\nno frontmatter, so its mtime dates it\n")
         elif handoff == "garbled":
             checkpoint.write_text("---\nlast_updated: not a time\n---\nits mtime dates it\n")
-        source = START_BOT.read_text()
-        # Everything after the bridge-readiness wait up to the idle mark: what
-        # a session receives once its channel is up.
-        start = source.index("esac\n", source.index('emit_fleet_event "rc_timeout"')) + len("esac\n")
-        block = source[start:].split("# Mark bot as idle", 1)[0]
-        script = r'''
-. "$1"
-set -Eeuo pipefail
-trap 'printf "ERR\n" >> "$ERRORS"' ERR
-pane_send_verified() { printf '%s\0' "$3" >> "$SENDS"; }
-inject_stamp() { printf stamp; }
-boot_send_settled() { :; }
-emit_fleet_event() { printf '%s\n' "$1" >> "$EVENTS"; }
-''' + block
-        env = {**os.environ, "BOT_DIR": str(bot), "TMUX_SOCKET": "private", "TMUX_SESSION": "worker",
-               "LOG": str(log), "_PANE_READY_TICKS_BOOT": "1", "_native_mode": mode,
-               "STARTUP_PROMPT": "Authored startup.", "SESSION_RESUME_COMMAND": command,
-               "CLAUDE_CONFIG_DIR": str(account), "SENDS": str(sends), "ERRORS": str(errors),
-               "EVENTS": str(events)}
-        env.pop("RESUME_MAX_AGE_S", None)
-        result = subprocess.run(["/bin/bash", "-c", script, "_", str(LIB_COMMON)], env=env,
-                                capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, result.stderr
-        assert not errors.exists()
-        payloads = sends.read_bytes().decode().rstrip("\0").split("\0") if sends.exists() else []
+        payloads, text, events = _startup_block(tmp_path, bot, account, mode=mode, command=command)
         startup = ["set +H; Authored startup."] if mode == "fresh" else []
         assert payloads == ([command] if sent else []) + startup
-        text = log.read_text() if log.exists() else ""
         assert (line in text) if line else "RESUME" not in text
         skipped = handoff == "recent" and mode == "fresh" and not sent
-        assert (events.read_text() if events.exists() else "") == ("resume_skipped\n" if skipped else "")
+        assert events == ("resume_skipped\n" if skipped else "")
+
+    @pytest.mark.parametrize("own, legacy, named, sent, line", [
+        pytest.param("recent", "stale", True, True, "RESUME — injecting resume command [available; fresh session]",
+                     id="own-recent-per-directory-stale"),
+        pytest.param("stale", "recent", True, False, "RESUME SKIP — fresh session; handoff older than 86400s",
+                     id="own-stale-per-directory-recent"),
+        pytest.param(None, "recent", True, True, "RESUME — injecting", id="no-own-per-directory-recent"),
+        pytest.param("recent", "stale", False, False, "RESUME SKIP — fresh session; handoff older than 86400s",
+                     id="a-launch-the-record-does-not-name"),
+    ])
+    def test_a_fresh_session_resumes_from_the_handoff_its_replaced_session_saved(
+            self, tmp_path, test_cli, own, legacy, named, sent, line):
+        """#2924: a renewal records the session it replaced, and the gate judges the
+        handoff that session saved: its own file (clauDNA 0.35) when it has one, else
+        .claude/session.md. A launch the record does not name reads .claude/session.md.
+        At main the gate read .claude/session.md alone."""
+        from claudlobby import handoff_file, native_session
+        bot, account = tmp_path / "bot", tmp_path / "account"
+        (bot / ".claude").mkdir(parents=True)
+        (bot / "data").mkdir()
+        (account / "plugins/cache/Claudfather/claudna").mkdir(parents=True)
+        _, replaced = native_session.launch(bot, "com.example.worker", tmp_path / "tmp", account)
+        fresh = native_session.renew(bot, "com.example.worker", tmp_path / "tmp", account)["session_id"]
+        now = datetime.now(timezone.utc)
+        ages = {"recent": now, "stale": now - timedelta(days=2)}
+        saves = [(bot / ".claude/session.md", legacy)]
+        if own is not None:
+            saves.append((handoff_file.session_owned(bot, replaced), own))
+        for path, age in saves:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"---\nlast_updated: {_iso(ages[age])}\n---\ncontext\n")
+        command = "/claudna:session resume --auto"
+        launching = fresh if named else "11111111-1111-4111-8111-111111111111"
+        payloads, text, _ = _startup_block(tmp_path, bot, account, mode="fresh", command=command,
+                                           session_id=launching, cli=test_cli)
+        assert payloads == ([command] if sent else []) + ["set +H; Authored startup."]
+        assert line in text
 
 
 class TestIsoToEpoch:

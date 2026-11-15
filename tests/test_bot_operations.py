@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from claudlobby import bot_operations, context, active_config, native_session
+from claudlobby import bot_operations, context, active_config, handoff_file, native_session
 from claudlobby.__main__ import main
 from claudlobby.supervision_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
@@ -349,6 +349,45 @@ def test_explicit_handoff_is_recent_by_the_capture_below_the_refresh_envelope(
                                        else "handoff-skipped:no-session"), explicit.stderr
 
 
+@pytest.mark.parametrize("own_age, recent", [pytest.param(10, True, id="own-fresh-per-directory-stale"),
+                                             pytest.param(400, False, id="own-stale-per-directory-fresh")])
+def test_explicit_handoff_is_recent_by_the_current_sessions_own_handoff(tmp_path, test_cli, own_age, recent):
+    """#2924: the recent check reads the file the current session saved, its own
+    (clauDNA 0.35) when it has one, through the CLI's private door. At main it read
+    .claude/session.md alone, so each case read the other way."""
+    bot_dir = _worker_bot_dir(tmp_path)
+    (bot_dir / "data").mkdir()
+    _, sid = native_session.launch(bot_dir, "com.example.worker", tmp_path / "tmp", tmp_path / "account")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    _checkpointed(bot_dir, refreshed=now, captured=now - timedelta(seconds=7200 if recent else 10), field=None)
+    own = handoff_file.session_owned(bot_dir, sid)
+    own.parent.mkdir(parents=True)
+    own.write_text(f"---\nlast_updated: {_stamp(now - timedelta(seconds=own_age))}\n---\ncontext\n")
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=test_cli)
+    assert explicit.returncode == 0, explicit.stderr
+    # No session runs here: a handoff not read as recent would be sent to one.
+    assert explicit.stdout.strip() == ("handoff-skipped:recent" if recent
+                                       else "handoff-skipped:no-session"), explicit.stderr
+
+
+def test_the_recent_check_needs_no_interpreter_beside_the_cli(tmp_path, test_cli):
+    """A managed installation's CLI is a launcher in INSTALL/bin with no interpreter
+    beside it that imports the package (#2886), so the check asks the CLI's private
+    door. At main it looked for that interpreter, found none, and never read a
+    handoff as recent there (#2924)."""
+    launcher = tmp_path / "install/bin/claudlobby"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(f'#!/bin/sh\nexec "{test_cli}" "$@"\n')
+    launcher.chmod(0o755)
+    assert not (launcher.parent / "python").exists(), "precondition: no interpreter beside it"
+    bot_dir = _worker_bot_dir(tmp_path)
+    now = datetime.now(timezone.utc)
+    _checkpointed(bot_dir, refreshed=now, captured=now, field=None)
+    explicit = _pre_stop_handoff(tmp_path, bot_dir, "--explicit", cli=launcher)
+    assert explicit.returncode == 0, explicit.stderr
+    assert explicit.stdout.strip() == "handoff-skipped:recent", explicit.stderr
+
+
 def test_stop_skips_by_the_age_of_the_capture_below_the_refresh_envelope(tmp_path, test_cli):
     """The stop path names the capture's age, not the file's: written now, 30 s old."""
     bot_dir = _handoff_below_envelope(tmp_path, "references_refreshed", 30, 0)
@@ -479,6 +518,8 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
             self.handoff_rc = 0
             self.control_rc = 0
             self.explicit_handoff = "handoff-skipped:recent"
+            # Where a saved handoff lands (#2924): "session" is the current session's own file.
+            self.handoff_layout = "legacy"
             self.readiness = "bridge-ready"
             self.fence_args = []
             self.target = "com.example.worker.service"
@@ -512,7 +553,10 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
                 value = self.explicit_handoff if len(args) == 4 else ""
                 if value == "handoff-saved":
                     handoff = Path(args[0]) / ".claude/session.md"
-                    handoff.parent.mkdir(exist_ok=True)
+                    if self.handoff_layout == "session":
+                        handoff = handoff_file.session_owned(
+                            Path(args[0]), native_session.read(Path(args[0]))["session_id"])
+                    handoff.parent.mkdir(parents=True, exist_ok=True)
                     # The real provider saved promptly but invented a future
                     # timestamp. Explicit native capture witnessed this write.
                     now = datetime.now(timezone.utc) + timedelta(minutes=7)
@@ -897,10 +941,31 @@ def test_public_bot_start_stop_decisions_use_selected_placement(cold, monkeypatc
     assert len(native.actions) == before_failed + 1
 
 
-def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold, monkeypatch, capsys):  # noqa: F811
+def test_a_handoff_the_session_saves_in_its_own_file_is_verified(cold, monkeypatch, capsys):  # noqa: F811
+    """#2924: clauDNA 0.35 saves the current session's own file and leaves
+    .claude/session.md as an earlier version wrote it, so the door verifies the
+    session's own file. At main it verified the other one and refused."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    legacy = worker.root / "runtime/bots/worker/.claude/session.md"
+    legacy.write_text("---\nlast_updated: 2020-01-01T00:00:00Z\n---\nolder context\n")
+    older = time.time() - 3600
+    os.utime(legacy, (older, older))
+    worker.native.explicit_handoff, worker.native.handoff_layout = "handoff-saved", "session"
+    saved = worker.call("bot", "handoff", "worker")["data"]
+    assert (saved["handoff"], saved["reason"]) == ("saved", "fresh_file_verified")
+    assert legacy.read_text().endswith("older context\n")
+    checked = worker.call("bot", "handoff", "worker", "--check")["data"]
+    assert (checked["handoff"], checked["reason"]) == ("saved", "written_after_request")
+
+
+@pytest.mark.parametrize("layout", ["session", "legacy"], ids=["session-owned", "per-directory"])
+def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(
+        cold, monkeypatch, capsys, layout):  # noqa: F811
     """#963/#990: a handoff takes minutes and the door waits 30 s. The door
     records its request; `bot handoff BOT --check` reads the handoff file
-    against it later, sends nothing and takes no lifecycle lock."""
+    against it later, sends nothing and takes no lifecycle lock. #2924: in either
+    layout. A session that saves its own file leaves .claude/session.md older than
+    the request, which at main read pending for good and refused every later request."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     root, installation, native, call = worker.root, worker.installation, worker.native, worker.call
     handoff = root / "runtime/bots/worker/.claude/session.md"
@@ -920,8 +985,17 @@ def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(cold
     with bot_operations._operation_lock(root):  # another lifecycle operation is running
         pending = call("bot", "handoff", "worker", "--check")["data"]
     assert (pending["handoff"], pending["reason"]) == ("pending", "not_written_since_request")
+    # Another request is refused while it reads pending, and the refusal says how it resolves.
+    again = call("bot", "handoff", "worker", expected=6)
+    assert again["data"]["reason"] == "pending"
+    assert "resolves once worker's session saves a handoff" in again["error"]["hint"]
+    assert "svc_activation_handoff" not in native.calls
 
     now = datetime.now(timezone.utc)
+    if layout == "session":
+        bot_dir = handoff.parents[1]
+        handoff = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
+        handoff.parent.mkdir(parents=True)
     handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\nnew context\n")
     saved = call("bot", "handoff", "worker", "--check")["data"]
     assert (saved["handoff"], saved["reason"]) == ("saved", "written_after_request")

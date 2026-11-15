@@ -17,7 +17,7 @@ Your tool-call activity is observed by the fleet pulse. If your session is alive
 
 In the last sentence below, "the discipline above" means the protocol's rule to keep work committed and report at lifecycle boundaries.
 
-A plain restart continues your exact conversation. A fresh session (`bot restart BOT --fresh`) preserves context at **best-achievable fidelity, not zero loss**: it starts empty and resumes from your saved `session.md` handoff, but that handoff is a *summary*, not the live conversation. Committed work and reported state are what survive a fresh session intact — so the discipline above is exactly what makes the resume reliable.
+A plain restart continues your exact conversation. A fresh session (`bot restart BOT --fresh`) preserves context at **best-achievable fidelity, not zero loss**: it starts empty and resumes from your saved session handoff, but that handoff is a *summary*, not the live conversation. Committed work and reported state are what survive a fresh session intact — so the discipline above is exactly what makes the resume reliable.
 
 ## Step 1
 
