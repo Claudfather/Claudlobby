@@ -42,12 +42,27 @@ def session_owned(bot_dir: Path, session_id: str) -> Path:
     return Path(bot_dir) / CLAUDNA_STATE_SUBDIR / "sessions" / session_id / SESSION_HANDOFF
 
 
+_SAID: set[str] = set()
+
+
 def current_session(bot_dir: Path) -> str | None:
-    """The bot's current native session ID, from its receipt; None without a readable one."""
+    """The bot's current native session ID, from its receipt; None without a readable one.
+
+    The readers then read .claude/session.md. A receipt that is there and cannot
+    be read (malformed, redirected, not this user's) is said on stderr, once a
+    process, since the operator otherwise sees a bot with no receipt (#2927).
+    """
     from .native_session import NativeSessionError, read
     try:
         value = read(Path(bot_dir))
-    except (NativeSessionError, OSError):
+    except FileNotFoundError:
+        return None
+    except (NativeSessionError, OSError) as exc:
+        note = (f"{bot_dir}: the native session receipt cannot be read ({exc}), so the session's own "
+                f"handoff cannot be named and {legacy(bot_dir)} is read instead")
+        if note not in _SAID:
+            _SAID.add(note)
+            print(note, file=sys.stderr, flush=True)
         return None
     return None if value is None else value["session_id"]
 

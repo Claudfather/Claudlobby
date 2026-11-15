@@ -327,12 +327,12 @@ queued_evidence() {
 # seed_resume_handoff <bot_dir> — a fresh session handoff for a --resume boot.
 # Its last_updated is now, which start-bot's age gate (should_resume_session)
 # reads, so start-bot sends the resume command and then types STARTUP_PROMPT
-# It is the per-directory .claude/session.md: the gate reads a session's own
-# R/sessions/<ID>/handoff.md only for a session a renewal (`bot restart --fresh`)
-# recorded as replaced, and the boot resets remove that record (#2924).
 # into the turn that command starts. It never carries the probe marker: the
 # resume turn reads this file, and a tool result must not look like the prompt.
 # Written to a temp file and moved, so start-bot never reads half of it.
+# It is the per-directory .claude/session.md: the gate reads a session's own
+# R/sessions/<ID>/handoff.md only for a session a renewal (`bot restart --fresh`)
+# recorded as replaced, and the boot resets remove that record (#2924).
 seed_resume_handoff() {
     local bot_dir="$1" now
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

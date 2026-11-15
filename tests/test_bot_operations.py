@@ -587,6 +587,10 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
             self.explicit_handoff = "handoff-skipped:recent"
             # Where a saved handoff lands (#2924): "session" is the current session's own file.
             self.handoff_layout = "legacy"
+            # What the explicit handoff script says on stderr, which the adapter captures (#2927).
+            self.handoff_stderr = ""
+            # A callable that runs the real pre-stop-handoff.sh for the explicit handoff (#2927).
+            self.run_script = None
             self.readiness = "bridge-ready"
             self.fence_args = []
             self.target = "com.example.worker.service"
@@ -598,6 +602,8 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
         def call(self, function, *args, timeout=30):
             self.calls.append(function)
             target = self.target
+            if function == "svc_activation_handoff" and self.run_script is not None:
+                return self.run_script(*args)
             if function == "svc_inventory_catalog":
                 value=f"manager\tLinux\ndirectory\t{host.directory}\n"
                 value+="".join(f"installed\t{path.name}\n" for path in sorted(host.directory.iterdir()))
@@ -658,7 +664,8 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
             return subprocess.CompletedProcess([function],
                                                self.handoff_rc if function == "svc_activation_handoff" else
                                                self.control_rc if function == "svc_bot_control_exact" else 0,
-                                               value + "\n", "")
+                                               value + "\n",
+                                               self.handoff_stderr if function == "svc_activation_handoff" else "")
 
         def read(self, function, *args):
             return self.call(function, *args).stdout
@@ -1107,6 +1114,119 @@ def test_a_save_beside_the_sessions_own_handoff_does_not_resolve_its_request(
     requested = datetime.strptime(checked["requested_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     assert legacy.stat().st_mtime >= requested.timestamp(), "precondition: written after the request"
     assert (checked["handoff"], checked["reason"]) == ("pending", "not_written_since_request")
+
+
+def _handoff_with_stderr(worker, capsys, *argv, expected=0):
+    """worker.call, keeping what the CLI said on stderr."""
+    actual = main(["--root", str(worker.root), "--json", "bot", "handoff", "worker", *argv])
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert actual == expected, json.dumps(result, indent=2) + "\nstderr:\n" + captured.err
+    return result, captured.err
+
+
+def test_bot_handoff_passes_on_what_its_script_said_on_stderr(cold, monkeypatch, capsys):  # noqa: F811
+    """#2927 item 7: the adapter captures the explicit handoff script's stderr, and bot
+    handoff printed none of it. It passes it on, at most 20 lines, and says how many
+    more there were."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.native.handoff_stderr = "".join(f"line {n}\n" for n in range(1, 26))
+    result, err = _handoff_with_stderr(worker, capsys)
+    assert (result["data"]["handoff"], result["data"]["reason"]) == ("skipped", "recent")
+    said = [line for line in err.splitlines() if line.startswith("bot handoff worker: ")]
+    assert said == [f"bot handoff worker: line {n}" for n in range(1, 21)] + [
+        "bot handoff worker: 5 more lines of the handoff script's stderr not shown"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory without its search bit")
+def test_a_session_directory_bot_handoff_cannot_search_gets_its_own_refusal(
+        cold, monkeypatch, capsys):  # noqa: F811
+    """#2927 item 6: bot handoff sent the save, then its verify met a directory on the way
+    to the session's own handoff that it cannot search. The PermissionError reached the
+    CLI as a native-state refusal that read the effect as unattempted; it is the door's
+    unverified answer now, with its --check hint, and --check reads it unverified."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    own = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
+    own.parent.mkdir(parents=True)
+    own.write_text(f"---\nlast_updated: {_stamp(datetime.now(timezone.utc))}\n---\ncontext\n")
+    worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
+    sessions = own.parent.parent
+    sessions.chmod(0o600)
+    try:
+        refused = worker.call("bot", "handoff", "worker", expected=6)
+        checked = worker.call("bot", "handoff", "worker", "--check")["data"]
+    finally:
+        sessions.chmod(0o700)
+    assert (refused["data"].get("handoff"), refused["data"].get("reason")) == ("unknown", "unverified"), refused
+    assert refused["data"]["native_outcome"] == "unknown", refused
+    assert "--check" in (refused["error"].get("hint") or ""), refused
+    assert (checked["handoff"], checked["reason"]) == ("unknown", "file_unverified")
+
+
+@pytest.mark.parametrize("case, handoff, reason", [
+    pytest.param("own-file-saved", "saved", "fresh_file_verified", id="own-file-saved"),
+    pytest.param("capture-from-before-the-request", "unknown", "unverified",
+                 id="capture-from-before-the-request"),
+    pytest.param("symlinked-per-directory-file", "saved", "fresh_file_verified",
+                 id="symlinked-per-directory-file"),
+    pytest.param("no-answer-from-the-door", "saved", "fresh_file_verified", id="no-answer-from-the-door"),
+])
+def test_the_door_verifies_the_save_its_script_waited_for(
+        cold, monkeypatch, capsys, tmp_path, test_cli, case, handoff, reason):  # noqa: F811
+    """#2927 items 9 and 10: bot handoff runs the real pre-stop-handoff.sh --explicit,
+    whose session saves through a fake pane (_pane_that_saves), and then verifies the
+    file its readers read, in one run. The session had its own file, an hour old, at
+    the request. A save the script saw reads saved only when the file holds a capture
+    written for the request: one stamped two minutes before it is fresh by age, and
+    the door refuses it. Item 10: a symlinked .claude/session.md beside the
+    session's own file refuses nothing, since only the session's own file is watched,
+    and the own file is the one verified (the readers refuse a symlinked one). Item 7:
+    with no answer from the CLI's door, the script watches .claude/session.md alone and
+    says so on stderr, which bot handoff passes on; the session's compatibility copy
+    there ends the wait, and the session's own file is still the one verified."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    own = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
+    legacy = handoff_file.legacy(bot_dir)
+    hour_ago = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    own.parent.mkdir(parents=True)
+    for path in (own, legacy):  # saved an hour ago: not recent
+        path.write_text(f"---\nlast_updated: {_stamp(hour_ago)}\n---\nolder context\n")
+        os.utime(path, (hour_ago.timestamp(), hour_ago.timestamp()))
+    now = datetime.now(timezone.utc)
+    if case == "symlinked-per-directory-file":
+        elsewhere = tmp_path / "elsewhere.md"
+        elsewhere.write_text(f"---\nlast_updated: {_stamp(now)}\n---\nnew context\n")
+        legacy.unlink()
+        legacy.symlink_to(elsewhere)
+    # The session stamps its capture as it saves, after the request. A stamp taken
+    # here can fall in the second before the request's, and the door refuses that.
+    stamp = (shlex.quote(_stamp(now - timedelta(seconds=120))) if case == "capture-from-before-the-request"
+             else '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"')
+    capture = shlex.quote("---\nlast_updated: %s\n---\nnew context\n")
+    save = f"printf -- {capture} {stamp} > {shlex.quote(str(own))}"
+    if case == "no-answer-from-the-door":  # and clauDNA's compatibility copy beside it
+        save += f" && printf -- {capture} {stamp} > {shlex.quote(str(legacy))}"
+    else:
+        # The fixture installation's launcher has no runtime environment, so the CLI
+        # its composed bot.conf names gives the script no answer. A shim runs this
+        # checkout's CLI in its place, as an installation's launcher runs its own.
+        worker.installation.cli.write_text(f'#!/bin/sh\nexec {shlex.quote(str(test_cli))} "$@"\n')
+        worker.installation.cli.chmod(0o755)
+    pane = tmp_path / "pane"
+    pane.mkdir()
+    tmux = _pane_that_saves(pane, save)
+    worker.native.run_script = lambda directory, *_: _pre_stop_handoff(
+        pane, Path(directory), "--explicit", TMUX_BIN=str(tmux),
+        SESSION_HANDOFF_COMMAND="/handoff-save --auto",  # a bare command: unverifiable, so sent
+        PANE_SEND_SETTLE_S="0", PANE_SEND_SHOWN_TICKS="2", PANE_SEND_VERIFY_TICKS="1")
+    result, err = _handoff_with_stderr(worker, capsys, expected=0 if handoff == "saved" else 6)
+    assert (pane / "submitted").exists(), err
+    assert (result["data"]["handoff"], result["data"]["reason"]) == (handoff, reason), err
+    fell_back = f"bot handoff worker: handoff_files: no answer from _handoff-files watch; reading {legacy} alone"
+    assert (fell_back in err.splitlines()) is (case == "no-answer-from-the-door"), err
+    assert legacy.is_symlink() is (case == "symlinked-per-directory-file")
 
 
 def test_live_restart_refuses_unconfirmed_native_identity(cold, monkeypatch, capsys):

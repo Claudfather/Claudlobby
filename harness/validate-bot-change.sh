@@ -1904,11 +1904,45 @@ _bmunk="$(grep 'BRIDGE_MISSING' "$RB_DIR/logs/startup.log" 2>/dev/null | tail -1
 case "$_bmunk" in *"could NOT be determined"*) r=yes ;; *) r=no ;; esac
 harness_check "#1358 undetermined cache -> BRIDGE_MISSING withholds the keepalive promise" "$r"
 
+# --- #2927: the resume gate reads the handoff in both layouts #2924 names ---
+# The runs above seeded the per-directory .claude/session.md (2020), and with
+# no renewal recorded the gate read it there. Here a renewal has recorded the
+# session this start replaces, as `bot restart --fresh` does, and that
+# session's own handoff under the bot's clauDNA state directory
+# (data/claudna/sessions/<ID>/handoff.md) is saved now, beside the 2020 file.
+# The harness composes no session provider, so a fresh handoff makes the gate
+# name the file it read and send nothing, where the 2020 file makes it start
+# clean: the two layouts read differently.
+grep -q 'RESUME SKIP — fresh session; handoff older than' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "#2927 no renewal recorded -> the gate read the per-directory 2020 handoff and started clean" "$r"
+_rs_lines="$(wc -l < "$RB_DIR/logs/startup.log" 2>/dev/null || echo 0)"
+_rs_sid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["session_id"])' \
+    "$RB_DIR/data/native-session.json" 2>/dev/null || true)"
+_rs_prev="11111111-1111-4111-8111-111111111111"  # a placeholder: the replaced session's ID
+_rs_own="$RB_DIR/data/claudna/sessions/$_rs_prev/handoff.md"
+mkdir -p "$RB_DIR/data/claudna/sessions/$_rs_prev"
+printf '{"schema":1,"session_id":"%s","predecessor":"%s"}\n' "$_rs_sid" "$_rs_prev" \
+    > "$RB_DIR/data/native-session-predecessor.json"
+printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$_rs_own"
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" CLAUDE_CONFIG_DIR='' \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" PLANE_SOCKET="$RB_PLANE_SOCKET" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.ownhandoff.out" 2>&1 || true
+sleep 1
+_rs_line="$(tail -n "+$((_rs_lines + 1))" "$RB_DIR/logs/startup.log" 2>/dev/null | grep 'RESUME SKIP' | tail -1 || true)"
+case "$_rs_line" in *"no resume command"*"it stays at $_rs_own") r=yes ;; *) r=no ;; esac
+harness_check "#2927 a renewal recorded -> the gate read the replaced session's own handoff, not the 2020 file beside it" "$r"
+rm -rf "$RB_DIR/data/native-session-predecessor.json" "$RB_DIR/data/claudna"
+
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
     echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
     echo "  [events]"; val_diag val_events "$RB_ROOT" "$FLEET" valrb; echo "    (end of plane events)"
     echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
+    echo "  [start-bot own-handoff stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.ownhandoff.out" 2>/dev/null || echo "    (none)"
 fi
 
 # === Scenario 2b-bis: readiness is SESSION-scoped, not bot-scoped (#1530) ===
