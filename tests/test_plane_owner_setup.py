@@ -1154,3 +1154,50 @@ def test_completed_guide_drift_never_offers_message_consent(setup_authority,monk
     monkeypatch.setattr(guide,'_configuration',lambda *_:pytest.fail('drift caused reconfiguration'))
     with pytest.raises((CommandFailure,ValueError,RuntimeError)):
         guide.run(SimpleNamespace(finish_setup=expected,target_fleet=None),resolve_paths(root=engine.root),setup_authority[1],terminal(monkeypatch,iter(())))
+
+
+def test_guide_keeps_serving_for_explicit_workspace_recovery(setup_authority, monkeypatch):
+    from contextlib import contextmanager
+    import sqlite3
+    import sys
+    from claudlobby.commands import host_owner_setup as guide, host_owner
+    from claudlobby.context import resolve_paths
+    from tests.test_host_owner import terminal
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    store, access, grant, _, clock, _ = setup_authority
+    owner = access.current_grant()
+    # Synthetic fresh-workspace fixture; the existing connected storage stays prepared.
+    with sqlite3.connect(access.path) as conn:
+        conn.execute("DELETE FROM workspace_bindings")
+    workspace = access.workspace()
+    old = proposed((access, workspace, owner, clock))
+    clock[0] = old.expires_at
+    monkeypatch.setattr(guide, "_native_directories", lambda _: (Path(grant.install_directory),))
+    serving = []
+    @contextmanager
+    def serve(*args):
+        serving.append(True)
+        try:
+            yield object()
+        finally:
+            serving.pop()
+    monkeypatch.setattr(guide, "_serving", serve)
+    codes = [old.nonce]
+    def read_code(*args, **kwargs):
+        assert serving == [True]
+        if codes:
+            return codes.pop()
+        return proposed((access, workspace, owner, clock)).nonce
+    monkeypatch.setattr(host_owner, "_challenge", read_code)
+    args = SimpleNamespace(origin="https://host.example.test", tailscale=Path(sys.executable), tailscale_socket="",
+        socket=access.root/"state/owner/owner.sock", workspace_issuer=ISSUER, workspace_origin=ORIGIN,
+        target_fleet=grant.fleet, repository=grant.repository, template=grant.template,
+        project_directory=grant.project_directory, install_directory=Path(grant.install_directory))
+    tty = terminal(monkeypatch, iter(["RETRY\n", "BIND-WORKSPACE\n", "CANCEL\n"]))
+    with pytest.raises(CommandFailure, match="setup directory is not an observed native search path"):
+        guide.run(args, resolve_paths(root=access.root), access, tty)
+    assert not serving
+    assert workspace.status()[0] == "active"
+    assert access.current_grant() == owner
+    assert store.local() is None
+    assert not setup_authority[-1].dispatches

@@ -15,3 +15,11 @@ effects retain their original recovery identity without automatic replay.
 Exact supported public Claude artifacts installed with hard links are accepted
 through held-descriptor hash and identity verification. Private credentials and
 per-attempt executable copies retain their single-link requirement.
+### Fixed — Local workspace approval recovery
+
+The first-team guide identifies rejected workspace approval codes without asking
+users to pair the owner again. It keeps local serving available for an explicit
+RETRY with a new browser proposal, or CANCEL/EOF to stop. Retries preserve the
+original owner and workspace binding, show the verified proposal again, and
+recheck its validity in the authority transaction when BIND-WORKSPACE is entered.
+No proposal, binding, provider attempt or launch is retried automatically.

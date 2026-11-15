@@ -396,7 +396,7 @@ def run(args, paths, store, terminal):
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
                 terminal.write("In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
-                console._confirm_workspace(store, terminal, owner)
+                console._confirm_workspace(store, terminal, owner, recover=True)
                 workspace_state, binding = store.workspace().status()
             if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
                     or binding.operational_origin != config["workspace_origin"]):

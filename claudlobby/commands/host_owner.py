@@ -446,26 +446,66 @@ def _initialize_connected(store, terminal, *, prepare_workspace=False):
     return CommandOutput({"state": "initialized"}, lines=(line,))
 
 
-def _confirm_workspace(store, terminal, owner):
+def _confirm_workspace(store, terminal, owner, *, recover=False):
     workspace = store.workspace()
-    proposal = workspace.inspect(_challenge(terminal, label="workspace approval"))
-    if proposal.owner != owner:
-        raise CommandFailure("conflict", "owner changed; inspect and retry")
-    a = proposal.attestation
-    terminal.write("Previous workspace binding: " + json.dumps({
-        "state": proposal.previous_state,
-        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
-        ensure_ascii=True) + "\n")
-    terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
-    terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
-        "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
-        ensure_ascii=True) + "\n")
-    terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
-    terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
-    _approve(terminal, "BIND-WORKSPACE")
-    binding = workspace.confirm(expected_proposal=proposal)
-    return CommandOutput({"state": "active", "binding": asdict(binding)},
-                         lines=("Local workspace bound. No connected session was issued.",))
+    original_binding = workspace.status()
+    attempted_codes = set()
+    recoverable = {
+        "invalid_credential": "The workspace approval code has an invalid format.",
+        "workspace_request_expired": "The workspace approval code is not recognized or has expired.",
+        "workspace_proposal_missing": "The workspace approval proposal has not been staged.",
+        "workspace_code_reused": "A retry requires a NEW browser workspace approval code.",
+    }
+    while True:
+        if store.current_grant() != owner:
+            raise CommandFailure("conflict", "workspace approval owner changed; inspect host owner status")
+        if workspace.status() != original_binding:
+            raise CommandFailure("conflict", "workspace binding changed; inspect host owner workspace-status")
+        try:
+            code = _challenge(terminal, label="workspace approval")
+            if code in attempted_codes:
+                raise AccessDenied("workspace_code_reused")
+            attempted_codes.add(code)
+            proposal = workspace.inspect(code)
+            if proposal.owner != owner:
+                raise CommandFailure("conflict", "workspace approval owner changed; inspect host owner status")
+            if (proposal.previous_state, proposal.previous_binding) != original_binding:
+                raise CommandFailure("conflict", "workspace binding changed; inspect host owner workspace-status")
+            a = proposal.attestation
+            terminal.write("Previous workspace binding: " + json.dumps({
+                "state": proposal.previous_state,
+                "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
+                ensure_ascii=True) + "\n")
+            terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
+            terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
+                "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
+                ensure_ascii=True) + "\n")
+            terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
+            terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
+            _approve(terminal, "BIND-WORKSPACE")
+            binding = workspace.confirm(expected_proposal=proposal)
+            return CommandOutput({"state": "active", "binding": asdict(binding)},
+                                 lines=("Local workspace bound. No connected session was issued.",))
+        except EOFError:
+            raise CommandFailure("conflict", "workspace approval cancelled") from None
+        except AccessDenied as exc:
+            message = recoverable.get(exc.code)
+            if message is None:
+                raise CommandFailure("conflict", "workspace request or binding changed; inspect host owner "
+                                     "workspace-status; no owner pairing was replaced") from exc
+            guidance = (message + " Inspect host owner workspace-status. Obtain a fresh verified proposal "
+                        "in this browser: forget the old approval code if still shown, then choose Prepare local approval. "
+                        "The existing owner pairing remains; no workspace binding was approved by this attempt.")
+            if not recover:
+                raise CommandFailure("conflict", guidance) from exc
+            terminal.write(guidance + "\nType RETRY to paste a NEW browser code, or CANCEL to stop: ")
+            terminal.flush()
+            try:
+                answer = terminal.readline(32).strip()
+            except (EOFError, OSError):
+                answer = ""
+            if answer != "RETRY":
+                raise CommandFailure("conflict", "workspace approval cancelled") from None
 
 
 def _initialize_first_owner(paths, terminal):
