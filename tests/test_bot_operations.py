@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import socket
 import stat
 import subprocess
@@ -21,7 +22,7 @@ from claudlobby.__main__ import main
 from claudlobby.supervision_runtime import RuntimeEvidenceError
 from claudlobby.config_plan import ConfigPlanBuilder
 from claudlobby.config_units import current_git_declarations
-from tests.conftest import constructed_env
+from tests.conftest import constructed_env, fake_tmux_input_box
 from tests.package_fixtures import source_package
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_self_restart_handoff import _checkpointed, _stamp
@@ -268,11 +269,12 @@ def _worker_bot_dir(tmp_path):
     return bot_dir
 
 
-def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None):
+def _pre_stop_handoff(tmp_path, bot_dir, *mode, cli=None, **extra_env):
     script = Path(__file__).resolve().parents[1] / "claudlobby/_runtime_scripts/pre-stop-handoff.sh"
     env = constructed_env(PATH="/usr/bin:/bin", HOME=tmp_path, TMPDIR=tmp_path, CLAUDLOBBY_ROOT=tmp_path)
     if cli:
         env["CLAUDLOBBY_CLI"] = str(cli)
+    env.update(extra_env)
     return subprocess.run(["/bin/bash", str(script), str(bot_dir), *mode],
                           env=env, capture_output=True, text=True, timeout=60)
 
@@ -349,17 +351,26 @@ def test_explicit_handoff_is_recent_by_the_capture_below_the_refresh_envelope(
                                        else "handoff-skipped:no-session"), explicit.stderr
 
 
-@pytest.mark.parametrize("own_age, recent", [pytest.param(10, True, id="own-fresh-per-directory-stale"),
-                                             pytest.param(400, False, id="own-stale-per-directory-fresh")])
-def test_explicit_handoff_is_recent_by_the_current_sessions_own_handoff(tmp_path, test_cli, own_age, recent):
+@pytest.mark.parametrize("own_age, per_directory, recent", [
+    pytest.param(10, True, True, id="own-fresh-per-directory-stale"),
+    pytest.param(400, True, False, id="own-stale-per-directory-fresh"),
+    pytest.param(10, False, True, id="own-fresh-no-per-directory-file")])
+def test_explicit_handoff_is_recent_by_the_current_sessions_own_handoff(
+        tmp_path, test_cli, own_age, per_directory, recent):
     """#2924: the recent check reads the file the current session saved, its own
     (clauDNA 0.35) when it has one, through the CLI's private door. At main it read
-    .claude/session.md alone, so each case read the other way."""
+    .claude/session.md alone, so each case read the other way. #2927: in the first
+    two cases the per-directory file, written now, passes the script's own pre-check
+    (a file written in the last 300 s) before the door is asked; with no such file
+    only the session's own file can pass it."""
     bot_dir = _worker_bot_dir(tmp_path)
     (bot_dir / "data").mkdir()
     _, sid = native_session.launch(bot_dir, "com.example.worker", tmp_path / "tmp", tmp_path / "account")
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    _checkpointed(bot_dir, refreshed=now, captured=now - timedelta(seconds=7200 if recent else 10), field=None)
+    if per_directory:
+        _checkpointed(bot_dir, refreshed=now, captured=now - timedelta(seconds=7200 if recent else 10),
+                      field=None)
+    assert handoff_file.legacy(bot_dir).exists() == per_directory
     own = handoff_file.session_owned(bot_dir, sid)
     own.parent.mkdir(parents=True)
     own.write_text(f"---\nlast_updated: {_stamp(now - timedelta(seconds=own_age))}\n---\ncontext\n")
@@ -368,6 +379,62 @@ def test_explicit_handoff_is_recent_by_the_current_sessions_own_handoff(tmp_path
     # No session runs here: a handoff not read as recent would be sent to one.
     assert explicit.stdout.strip() == ("handoff-skipped:recent" if recent
                                        else "handoff-skipped:no-session"), explicit.stderr
+
+
+def _pane_that_saves(tmp_path, save):
+    """The bot's pane is the shared idle input box (conftest.fake_tmux_input_box);
+    the first Enter, which submits the handoff command, first runs the shell
+    line `save`: the session's save, before the box empties."""
+    box = fake_tmux_input_box(tmp_path / "box-tmux", tmp_path / "box")
+    submitted = shlex.quote(str(tmp_path / "submitted"))
+    tmux = tmp_path / "tmux"
+    tmux.write_text("#!/bin/bash\n"
+                    f'if [ "${{@: -1}}" = Enter ] && [ ! -e {submitted} ]; then : > {submitted}; {save}; fi\n'
+                    f'exec {shlex.quote(str(box))} "$@"\n')
+    tmux.chmod(0o755)
+    return tmux
+
+
+@pytest.mark.parametrize("own_at_request, saved_to, said", [
+    pytest.param(True, "own", "handoff-saved", id="own-file-saved"),
+    pytest.param(True, "per-directory", "handoff-timeout", id="saved-beside-the-own-file"),
+    pytest.param(True, "own-symlink", "handoff-unavailable", id="own-file-redirected"),
+    pytest.param(False, "own", "handoff-saved", id="first-own-file"),
+    pytest.param(False, "per-directory", "handoff-saved", id="per-directory-file-saved"),
+])
+def test_the_wait_ends_on_a_save_in_the_file_the_readers_read(
+        tmp_path, test_cli, own_at_request, saved_to, said):
+    """#2927 item 3(c): the explicit handoff's wait loop over the watched files,
+    driven through a fake pane. Once the session has its own file the readers read
+    it alone, so the wait watches it alone: a save beside it in .claude/session.md
+    runs the wait out (30 s), the way --check reads pending, where at main it ended
+    the wait as a save. Until the session has a file of its own a save in either
+    ends it, and a watched file replaced by a symlink is refused."""
+    bot_dir = _worker_bot_dir(tmp_path)
+    (bot_dir / "data").mkdir()
+    _, sid = native_session.launch(bot_dir, "com.example.worker", tmp_path / "tmp", tmp_path / "account")
+    legacy, own = handoff_file.legacy(bot_dir), handoff_file.session_owned(bot_dir, sid)
+    hour_ago = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    for path in ([own] if own_at_request else []) + [legacy]:  # saved an hour ago: not recent
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nlast_updated: {_stamp(hour_ago)}\n---\nolder context\n")
+        os.utime(path, (hour_ago.timestamp(), hour_ago.timestamp()))
+    fresh = f"---\nlast_updated: {_stamp(datetime.now(timezone.utc))}\n---\nnew context\n"
+    if saved_to == "own-symlink":
+        elsewhere = tmp_path / "elsewhere.md"
+        elsewhere.write_text(fresh)
+        save = f"ln -sfn {shlex.quote(str(elsewhere))} {shlex.quote(str(own))}"
+    else:
+        target = own if saved_to == "own" else legacy
+        save = (f"mkdir -p {shlex.quote(str(target.parent))} && "
+                f"printf %s {shlex.quote(fresh)} > {shlex.quote(str(target))}")
+    explicit = _pre_stop_handoff(
+        tmp_path, bot_dir, "--explicit", cli=test_cli, TMUX_BIN=str(_pane_that_saves(tmp_path, save)),
+        SESSION_HANDOFF_COMMAND="/handoff-save --auto",  # a bare command: unverifiable, so sent
+        PANE_SEND_SETTLE_S="0", PANE_SEND_SHOWN_TICKS="2", PANE_SEND_VERIFY_TICKS="1")
+    assert (tmp_path / "submitted").exists(), explicit.stderr
+    assert explicit.stdout.strip() == said, explicit.stderr
+    assert explicit.returncode == (0 if said == "handoff-saved" else 3), explicit.stderr
 
 
 def test_the_recent_check_needs_no_interpreter_beside_the_cli(tmp_path, test_cli):
@@ -1010,6 +1077,36 @@ def test_a_handoff_that_lands_after_the_door_timed_out_reads_saved_on_check(
     monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(installation.directory))
     refused = call("bot", "handoff", "manager", "--check", expected=4)
     assert refused["error"]["code"] == "conflict"
+
+
+@pytest.mark.parametrize("marker", ["handoff-saved", "handoff-timeout"], ids=["wait-ended", "wait-ran-out"])
+def test_a_save_beside_the_sessions_own_handoff_does_not_resolve_its_request(
+        cold, monkeypatch, capsys, marker):  # noqa: F811
+    """#2927 item 3(b): the session's own handoff is older than the request and
+    .claude/session.md is written after it. The readers read the session's own
+    file alone, so the door does not read saved and --check reads pending, whether
+    the wait ended on that write (a wait that watched .claude/session.md: before
+    #2927, or after its watch read fell back to that file) or ran out (#2927)."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    own = handoff_file.session_owned(bot_dir, native_session.read(bot_dir)["session_id"])
+    own.parent.mkdir(parents=True)
+    hour_ago = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    own.write_text(f"---\nlast_updated: {_stamp(hour_ago)}\n---\nolder context\n")
+    os.utime(own, (hour_ago.timestamp(), hour_ago.timestamp()))
+    assert handoff_file.resolve(bot_dir) == own
+    worker.native.explicit_handoff = marker  # "handoff-saved" writes .claude/session.md
+    worker.native.handoff_rc = 3 if marker == "handoff-timeout" else 0
+    answered = worker.call("bot", "handoff", "worker", expected=6)["data"]
+    assert (answered["handoff"], answered["reason"]) == (
+        "unknown", "unverified" if marker == "handoff-saved" else "timeout")
+    legacy = handoff_file.legacy(bot_dir)
+    if marker == "handoff-timeout":  # the save lands after the wait ran out
+        legacy.write_text(f"---\nlast_updated: {_stamp(datetime.now(timezone.utc))}\n---\nnew context\n")
+    checked = worker.call("bot", "handoff", "worker", "--check")["data"]
+    requested = datetime.strptime(checked["requested_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    assert legacy.stat().st_mtime >= requested.timestamp(), "precondition: written after the request"
+    assert (checked["handoff"], checked["reason"]) == ("pending", "not_written_since_request")
 
 
 def test_live_restart_refuses_unconfirmed_native_identity(cold, monkeypatch, capsys):

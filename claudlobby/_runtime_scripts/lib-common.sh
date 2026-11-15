@@ -4509,8 +4509,9 @@ session_md_handoff_epoch() {
 # the shared resolver, claudlobby/handoff_file.py (#2924). clauDNA 0.35 and
 # later save each session's own R/sessions/<native session ID>/handoff.md;
 # earlier versions and other providers save <bot_dir>/.claude/session.md.
-# `watch` names both for the bot's current session, its own first; `resume`
-# names the one a fresh session resumes from. It asks the CLI's private
+# `watch` names the current session's own file alone once it exists, and
+# both, its own first, until then (#2927); `resume` names the one a fresh
+# session resumes from. It asks the CLI's private
 # _handoff-files door, since a script cannot import the package a managed
 # installation loads from its source. Without CLAUDLOBBY_CLI, or with no answer
 # in 5 s (said on stderr), it prints <bot_dir>/.claude/session.md alone: the

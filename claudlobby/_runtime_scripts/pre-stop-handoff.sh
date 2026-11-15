@@ -36,9 +36,10 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
 # session's own R/sessions/<native session ID>/handoff.md, R being the bot's
 # composed CLAUDNA_STATE_DIR; earlier versions and other providers save
 # <cwd>/.claude/session.md, where cwd is the bot's runtime dir (start-bot.sh
-# `cd "$BOT_DIR"` before tmux). handoff_files names both, the session's own
-# first. A change to either is a save; the shared verifier then judges the
-# file the session saved.
+# `cd "$BOT_DIR"` before tmux). handoff_files names the session's own file
+# alone once it exists, since the readers then read it alone, and both, its
+# own first, until it does (#2927). A change to a named file is a save; the
+# shared verifier then judges the file the readers read.
 HANDOFF_FILES="$(handoff_files watch "$BOT_DIR")"
 
 # rc 0 when a watched file is a symlink.
@@ -94,8 +95,9 @@ if [ "$MODE" = --explicit ]; then
 fi
 
 # The shared capture verifier judges both the file write and last_updated,
-# in the file the current session saved (#2924). A recently written file can
-# contain older context, with or without the activation reference envelope.
+# in the current session's own file when it has one, else .claude/session.md
+# (#2924). A recently written file can contain older context, with or without
+# the activation reference envelope.
 # It is asked through the CLI's private _handoff-files door: a managed
 # installation has no interpreter beside its CLI that imports the package.
 # No CLI, refusal or timeout means not recent; the normal handoff path follows.

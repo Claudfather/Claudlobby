@@ -80,19 +80,31 @@ def resolve(bot_dir: Path, session_id: str | None = None) -> Path:
     sid = current_session(bot_dir) if session_id is None else session_id
     if sid is not None:
         path = session_owned(bot_dir, sid)
-        if _directories_present(bot_dir, path) and os.path.lexists(path):
+        if _has_own(bot_dir, path):
             return path
     return legacy(bot_dir)
 
 
-def watch(bot_dir: Path) -> list[Path]:
-    """Every file a handoff the current session saves can land in, its own first.
+def _has_own(bot_dir: Path, path: Path) -> bool:
+    """Whether the session's own handoff file exists, so the readers read it alone."""
+    return _directories_present(bot_dir, path) and os.path.lexists(path)
 
-    `bot handoff` watches both for a change, since a session saves either one,
-    or both while clauDNA keeps its compatibility copy.
+
+def watch(bot_dir: Path) -> list[Path]:
+    """The files `bot handoff` watches for the current session's save, its own first.
+
+    While the session has its own file the readers read that file alone, so it
+    is named alone: a save beside it in the per-directory file does not end the
+    wait, which times out, and `--check` reads pending (#2927). Until it has
+    one, a session saves either file, or both while clauDNA keeps its
+    compatibility copy, so both are named. A redirected directory on the way
+    to its own file is refused, as `resolve` refuses it.
     """
     sid = current_session(bot_dir)
-    return ([session_owned(bot_dir, sid)] if sid is not None else []) + [legacy(bot_dir)]
+    if sid is None:
+        return [legacy(bot_dir)]
+    own = session_owned(bot_dir, sid)
+    return [own] if _has_own(bot_dir, own) else [own, legacy(bot_dir)]
 
 
 def resume(bot_dir: Path, session_id: str) -> Path:

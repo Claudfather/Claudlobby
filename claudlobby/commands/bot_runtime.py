@@ -138,7 +138,8 @@ def dispatch(args) -> CommandOutput:
                 data["reason"] = exc.handoff_reason or "unverified"
                 message = str(exc) if exc.handoff_reason else "bot handoff outcome is unverified; inspect its private session"
                 if exc.handoff_reason == "pending":
-                    # #2924: whichever file the session saves resolves the earlier request.
+                    # #2924, #2927: a save in the file the readers read resolves the earlier
+                    # request: the session's own file when it has one, else .claude/session.md.
                     hint = (f"the earlier request resolves once {args.bot_id}'s session saves a handoff: "
                             f"ask it to save one, then read claudlobby --json bot handoff {args.bot_id} "
                             "--check until it reads saved; do not automatically resend the handoff")
