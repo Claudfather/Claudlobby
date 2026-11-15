@@ -60,3 +60,15 @@ retry, including dependency-preparation recovery.
 A receipt with no resolved revision but retained dependency or completion
 progress now refuses before installation writes or Git access, preserving the
 existing evidence instead of attempting a new resolution.
+
+### Added — Fixed user preparation and retained status
+
+A package-owned, bounded Ubuntu 24.04 regular-user payload prepares an exact
+core commit and dependencies in private fixed account paths without activation.
+Standalone status inspects matching retained preparation under the existing lock
+without importing installed code or creating state. Foreign data, changed pins
+and uncertain leftovers stop for inspection. Browser transport integration and
+cold native qualification remain pending.
+
+The exact public Linux x64 GNU Claude artifact is admitted for the existing
+provider sign-in path; native Linux provider qualification remains pending.

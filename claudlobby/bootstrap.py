@@ -10,6 +10,8 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
+import configparser
 from pathlib import Path
 import re
 import stat
@@ -29,8 +31,153 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+_BROWSER_REMOTE = "https://github.com/Claudfather/Claudlobby.git"
+_PREPARATION_FIELDS = {"schema", "purpose", "installation", "data_root", "remote", "ref",
+                       "interpreter", "interpreter_sha256", "revision", "lock_sha256",
+                       "environment_owned", "complete"}
+_GIT_SAFETY = ("--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+               "-c", "credential.helper=", "-c", "core.askPass=/bin/false", "-c", "http.sslVerify=true",
+               "-c", "maintenance.auto=false", "-c", "gc.auto=0")
+
+
+def _checked_lock(descriptor, path):
+    """An inherited integer is never authority to skip the canonical flock."""
+    import fcntl
+    if type(descriptor) is not int or descriptor < 0:
+        raise BundleError("preparation lock descriptor is invalid")
+    observed, canonical = os.fstat(descriptor), path.lstat()
+    if (not stat.S_ISREG(observed.st_mode) or canonical.st_dev != observed.st_dev
+            or canonical.st_ino != observed.st_ino or not stat.S_ISREG(canonical.st_mode)
+            or observed.st_uid != os.geteuid() or observed.st_nlink != 1
+            or stat.S_IMODE(observed.st_mode) != 0o600 or observed.st_size != 0
+            or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDWR):
+        raise BundleError("canonical preparation lock is redirected or unsafe")
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _checked_git_config(source):
+    """Fresh bootstrap repos need only init-generated core configuration."""
+    config = source / ".git/config"
+    if not config.exists() and not config.is_symlink():
+        return
+    info = config.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or info.st_mode & 0o022 or info.st_size > 65536):
+        raise BundleError("browser Git configuration is unsafe")
+    parser = configparser.RawConfigParser(strict=True)
+    try:
+        parser.read_string(config.read_text())
+        values = dict(parser.items("core"))
+        allowed = {"repositoryformatversion": {"0"}, "filemode": {"true"}, "bare": {"false"},
+                   "logallrefupdates": {"true"}, "ignorecase": {"true", "false"},
+                   "precomposeunicode": {"true", "false"}}
+        if (parser.sections() != ["core"] or not values or parser.defaults()
+                or any(key not in allowed or value not in allowed[key] for key, value in values.items())):
+            raise ValueError()
+    except (ValueError, configparser.Error) as exc:
+        raise BundleError("browser Git configuration is not the fixed profile") from exc
+    if any((source / ".git" / name).exists() for name in ("commondir", "objects/info/alternates")):
+        raise BundleError("browser Git storage is redirected")
+
+
+def _browser_receipt(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536):
+            raise BundleError("browser preparation receipt is unsafe")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            raw = stream.read(65537)
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError()
+                value[key] = item
+            return value
+        state = json.loads(raw, object_pairs_hook=unique)
+        if (len(raw) > 65536 or not isinstance(state, dict) or set(state) != _PREPARATION_FIELDS
+                or type(state["schema"]) is not int or state["schema"] != 1
+                or type(state["complete"]) is not bool or type(state["environment_owned"]) is not bool):
+            raise ValueError()
+        return state
+    except (ValueError, TypeError) as exc:
+        raise BundleError("browser preparation receipt is invalid") from exc
+    finally:
+        os.close(fd)
+
+
+def _browser_environment(installation):
+    home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    family = home / ".local/share/claudlobby-browser"
+    if installation.directory != family / "install" or installation.data_root != family / "data":
+        raise BundleError("browser preparation requires the fixed account paths")
+    return {"PATH": "/usr/bin:/bin", "HOME": str(home), "LANG": "C.UTF-8",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
+            "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1",
+            "TMPDIR": str(home / ".local/share/claudlobby-browser/staging")}
+
+
+def _browser_startup_files_safe(environment):
+    # Narrow admission for retained incomplete environments, not a general
+    # defense against arbitrary same-UID/root modification. Preserve the known
+    # ensurepip setuptools shim used by CPython 3.10/3.11; unknown hooks stop.
+    lib = environment / "lib"
+    def private_directory(path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+                and stat.S_IMODE(info.st_mode) == 0o700)
+    if not private_directory(lib):
+        return False
+    expected = "python" + str(sys.version_info.major) + "." + str(sys.version_info.minor)
+    if {path.name for path in lib.iterdir()} != {expected}:
+        return False
+    version = lib / expected
+    site = version / "site-packages"
+    if not private_directory(version) or not private_directory(site):
+        return False
+    for path in site.iterdir():
+        if (path.name in {"sitecustomize", "usercustomize"}
+                or path.name.startswith(("sitecustomize.", "usercustomize.")) or path.suffix == ".pth"):
+            if (path.name != "distutils-precedence.pth" or path.is_symlink()
+                    or not path.is_file() or path.stat().st_size > 4096
+                    or _digest(path) != "2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224"):
+                return False
+    return True
+
+
+def _browser_data_preflight(data_root):
+    """Only install_launcher own inactive skeleton can precede fleet setup."""
+    info = data_root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise BundleError("browser data root is unsafe")
+    if set(path.name for path in data_root.iterdir()) - {"state"}:
+        raise BundleError("browser data root contains existing state")
+    state = data_root / "state"
+    if state.exists() or state.is_symlink():
+        info = state.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or set(path.name for path in state.iterdir()) - {"runtime-use.lock"}):
+            raise BundleError("browser data root contains existing state")
+        lock = state / "runtime-use.lock"
+        if lock.exists() or lock.is_symlink():
+            info = lock.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size):
+                raise BundleError("browser runtime lock is unsafe")
+
+
 def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, ref: str,
-                             interpreter: Path) -> dict:
+                             interpreter: Path, _preparation_lock_fd=None, _browser_runner=None) -> dict:
     """Prepare explicit owned code/dependencies only; never initialize a fleet.
 
     The small preparation receipt freezes a first-install Git resolution. It is
@@ -53,14 +200,23 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             or remote != remote.strip() or not isinstance(ref, str) or not ref or ref.startswith('-')
             or not ref.isprintable() or any(char.isspace() for char in ref)):
         raise BundleError("Git preparation requires an explicit trusted remote and ref")
+    isolated = _browser_runner is not None
+    if isolated and (not callable(_browser_runner) or _preparation_lock_fd is None
+                     or remote != _BROWSER_REMOTE or re.fullmatch(r"[0-9a-f]{40}", ref) is None):
+        raise BundleError("browser preparation requires its fixed pinned profile and canonical lock")
+    clean_environment = _browser_environment(installation) if isolated else None
+    if isolated:
+        _browser_data_preflight(installation.data_root)
     installation.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     receipt = installation.directory / 'preparation.json'
     if not receipt.exists() and set(path.name for path in installation.directory.iterdir()) - {
             'installation.json', 'preparation.lock'}:
         raise BundleError("Git preparation refuses an unowned installation directory")
-    descriptor = os.open(installation.directory / 'preparation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    owns_descriptor = _preparation_lock_fd is None
+    descriptor = (os.open(installation.directory / 'preparation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                  if owns_descriptor else _preparation_lock_fd)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _checked_lock(descriptor, installation.directory / "preparation.lock")
         binding = {'schema': 1, 'purpose': 'installation-preparation-only',
                    'installation': str(installation.directory), 'data_root': str(installation.data_root),
                    'remote': remote, 'ref': ref, 'interpreter': str(interpreter),
@@ -68,7 +224,7 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         if receipt.is_symlink():
             raise BundleError("Git preparation receipt is redirected")
         if receipt.exists():
-            state = json.loads(receipt.read_bytes())
+            state = _browser_receipt(receipt) if isolated else json.loads(receipt.read_bytes())
             if not isinstance(state, dict) or any(state.get(key) != value for key, value in binding.items()):
                 raise BundleError("existing preparation belongs to different explicit inputs")
         else:
@@ -91,7 +247,34 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         write_installation(installation)
         def save():
             _write(receipt, json.dumps(state, sort_keys=True).encode())
+        def isolated_command(arguments, *, timeout=300):
+            return _browser_runner([str(value) for value in arguments],
+                                   env=clean_environment, timeout=timeout)
+        def policy_git(command):
+            _checked_git_config(installation.source)
+            return isolated_command(["/usr/bin/git", *_GIT_SAFETY, *command[2:]], timeout=15)
+        def preflight():
+            if isolated:
+                return installation.preflight(expected_revision=revision, _run_git=policy_git)
+            return installation.preflight(expected_revision=revision)
+        def dependency(arguments):
+            if not isolated:
+                return run_dependency_command(arguments)
+            arguments = [str(value) for value in arguments]
+            if "pip" in arguments:
+                arguments.insert(arguments.index("pip") + 1, "--no-cache-dir")
+            result = isolated_command(arguments)
+            if result.returncode:
+                raise BundleError("browser dependency preparation refused")
+            return result.stdout
         def git(*arguments, check=True):
+            if isolated:
+                _checked_git_config(installation.source)
+                result = isolated_command(["/usr/bin/git", *_GIT_SAFETY,
+                                           "-C", str(installation.source), *arguments])
+                if check and result.returncode:
+                    raise BundleError("managed Git preparation refused; existing files were retained")
+                return result
             environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
             try:
                 result = subprocess.run(['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
@@ -129,7 +312,7 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         head = git('rev-parse', '--verify', 'HEAD^{commit}', check=False)
         if head.returncode:
             git('checkout', '--detach', revision)
-        installation.preflight(expected_revision=revision)
+        preflight()
         lock = source / 'requirements-runtime.lock'
         content = git('show', revision + ':requirements-runtime.lock').stdout
         validate_dependency_lock(content)
@@ -145,6 +328,10 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             raise BundleError("managed environment is redirected")
         if environment.exists() and not state['environment_owned']:
             raise BundleError("Git preparation refuses an unowned Python environment")
+        if isolated and ((environment / "pip.conf").exists() or (environment / "pip.conf").is_symlink()):
+            raise BundleError("browser environment contains local pip configuration")
+        if isolated and environment.exists() and not _browser_startup_files_safe(environment):
+            raise BundleError("browser environment contains unknown Python startup files")
         if not state['complete']:
             state['environment_owned'] = True
             save()
@@ -164,16 +351,19 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
                 _write(frozen_lock, content)
             # Re-running venv without --clear preserves unrelated files. This path
             # is receipt-owned, final and never moved (its shebangs remain correct).
-            run_dependency_command([interpreter, '-I', '-m', 'venv', environment])
+            dependency([interpreter, '-I', '-m', 'venv', environment])
             python = environment / 'bin/python'
-            run_dependency_command([python, '-I', '-m', 'pip', '--isolated', 'download',
+            dependency([python, '-I', '-m', 'pip', '--isolated', 'download',
                 '--disable-pip-version-check', '--only-binary=:all:', '--require-hashes', '--no-deps',
                 '--dest', wheels, '-r', frozen_lock])
-            install_locked_dependencies(python, frozen_lock, wheels)
+            if isolated:
+                install_locked_dependencies(python, frozen_lock, wheels, runner=dependency)
+            else:
+                install_locked_dependencies(python, frozen_lock, wheels)
         python = environment / 'bin/python'
         if not python.is_file() or not os.access(python, os.X_OK):
             raise BundleError("prepared environment is unavailable; use the update recovery owner")
-        observed = run_dependency_command([python, '-I', '-c',
+        observed = dependency([python, '-I', '-c',
             'import json,sys; print(json.dumps({"prefix":sys.prefix,'
             '"base_prefix":sys.base_prefix,"executable":sys.executable,'
             '"version":list(sys.version_info[:2])}))'])
@@ -190,8 +380,11 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         wheels = installation.directory / 'cache/bootstrap-wheels'
         if wheels.is_symlink() or wheels.resolve() != wheels or wheels.exists() and not wheels.is_dir():
             raise BundleError("dependency preparation cache is redirected")
-        verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None)
-        installation.preflight(expected_revision=revision)
+        if isolated:
+            verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None, runner=dependency)
+        else:
+            verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None)
+        preflight()
         for name in ('installation.py', 'git_update.py'):
             target = source / 'claudlobby' / name
             if target.is_symlink() or target.read_bytes() != git('show', revision + ':claudlobby/' + name).stdout:
@@ -217,6 +410,8 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         if state['complete']:
             return {'installation': str(installation.directory), 'data_root': str(data_root),
                     'source_revision': revision, 'cli': str(installation.cli), 'prepared': True, 'activated': False}
+        if isolated:
+            _browser_data_preflight(installation.data_root)
         namespace = runpy.run_path(str(source / 'claudlobby/installation.py'), run_name='_prepared_installation')
         target_installation = namespace['Installation'](installation.directory, installation.data_root)
         namespace['install_launcher'](target_installation, interpreter=interpreter)
@@ -226,7 +421,8 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         return {'installation': str(installation.directory), 'data_root': str(data_root),
                 'source_revision': revision, 'cli': str(installation.cli), 'prepared': True, 'activated': False}
     finally:
-        os.close(descriptor)
+        if owns_descriptor:
+            os.close(descriptor)
 
 
 

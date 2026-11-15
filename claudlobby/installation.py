@@ -44,7 +44,7 @@ def _path(value: Path) -> Path:
     return path
 
 
-def checkout_revision(checkout: Path, *, clean: bool = False) -> str:
+def checkout_revision(checkout: Path, *, clean: bool = False, _run_git=None) -> str:
     """Read only this explicit Git worktree; dirty scans are update preflight."""
     checkout = _path(checkout)
     # Ambient Git selectors must not redirect a check to another repository.
@@ -52,11 +52,17 @@ def checkout_revision(checkout: Path, *, clean: bool = False) -> str:
 
     def git(*args):
         try:
-            result = subprocess.run(["git", "--no-optional-locks", "-C", str(checkout), *args],
-                                    env=env, capture_output=True, text=True, timeout=15, check=True)
+            command = ["git", "--no-optional-locks", "-C", str(checkout), *args]
+            if _run_git is None:
+                result = subprocess.run(command, env=env, capture_output=True,
+                                        text=True, timeout=15, check=True)
+            else:
+                result = _run_git(command)
+                if result.returncode:
+                    raise subprocess.CalledProcessError(result.returncode, command)
         except (OSError, subprocess.SubprocessError) as exc:
             raise InstallationError("explicit installation Git checkout is unavailable") from exc
-        return result.stdout.strip()
+        return (result.stdout.decode() if isinstance(result.stdout, bytes) else result.stdout).strip()
 
     if Path(git("rev-parse", "--show-toplevel")) != checkout:
         raise InstallationError("source must be the exact Git checkout root")
@@ -104,9 +110,9 @@ class Installation:
     def native(self) -> Path:
         return self.source / "claudlobby/_runtime_scripts"
 
-    def preflight(self, *, expected_revision: str | None = None) -> str:
+    def preflight(self, *, expected_revision: str | None = None, _run_git=None) -> str:
         """Verify the managed checkout before effects; never repair local edits."""
-        revision = checkout_revision(self.source, clean=True)
+        revision = checkout_revision(self.source, clean=True, _run_git=_run_git)
         if expected_revision is not None and expected_revision != revision:
             raise InstallationError("managed source revision differs from the expected revision")
         return revision
