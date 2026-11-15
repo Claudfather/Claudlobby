@@ -33,7 +33,7 @@ const failure = (state = 'unavailable', remediation = 'Open this workspace again
 export function createConnectedWorkspace({ documentContext, documentOrigin = globalThis.location?.origin,
   fetch = globalThis.fetch.bind(globalThis), createClient = createConnectedReadClient,
   createTransport = createWorkspaceReadTransport, createEnrollment = createWorkspaceEnrollment, setTimeout = globalThis.setTimeout,
-  clearTimeout = globalThis.clearTimeout, now = () => Date.now() / 1000,
+  clearTimeout = globalThis.clearTimeout, onRetire = () => {}, now = () => Date.now() / 1000,
   monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver } = {}) {
   const validDocument = keys(documentContext, ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'])
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
@@ -56,6 +56,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   }
   function retire(next) {
     phase = next; current = null; sequence++;
+    invoke(onRetire);
     clearTimeout(refreshTimer); refreshTimer = null;
     for (const request of requests) request.abort();
     for (const stop of unsubscribes) stop(); unsubscribes = [];

@@ -2454,7 +2454,7 @@ def create_app(
     # per page load — index() already reads the file per request.
     _UI_FILES = ("index.html", "app.js", "panel-state.js", "api-client.js",
                  "work-loop.js", "permission-panel.js", "action-state.js", "owner-api-client.js", "two-source-read.js", "connected-read-client.js", "connected-actions.js", "connected-workspace.js", "workspace-enrollment.js",
-                 "style.css", "workspace.css", "workspace-display.js")
+                 "style.css", "workspace.css", "workspace-display.js", "browser-owner-transport.js")
 
     def asset_token() -> str:
         stamp = ":".join(
@@ -2523,12 +2523,12 @@ def create_app(
 
     @app.get("/api-client.js")
     def api_client_js():
-        return _busted_js("api-client.js", ("connected-workspace.js",))
+        return _busted_js("api-client.js", ("connected-workspace.js", "browser-owner-transport.js"))
 
     @app.head("/api-client.js")
     def api_client_head():
         # Preserve the former static asset HEAD door and its GET headers.
-        response = _busted_js("api-client.js", ("connected-workspace.js",))
+        response = _busted_js("api-client.js", ("connected-workspace.js", "browser-owner-transport.js"))
         response.body = b""
         return response
 
