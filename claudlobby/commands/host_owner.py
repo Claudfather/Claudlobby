@@ -549,13 +549,17 @@ def dispatch(args):
         if args.owner_action == "serve":
             from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 
+            pairing_origin = getattr(args, "bootstrap_pairing_origin", None)
+            if pairing_origin is not None and (args.workspace_issuer is not None or args.workspace_origin is not None):
+                raise CommandFailure("invalid_argument", "pairing mode cannot include workspace bootstrap")
             if (args.workspace_issuer is None) != (args.workspace_origin is None):
                 raise CommandFailure("invalid_argument", "workspace issuer and origin must be supplied together")
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
                       socket_path=args.socket, tailscale_socket=args.tailscale_socket,
                       package=paths.package, workspace_issuer=args.workspace_issuer,
-                      workspace_origin=args.workspace_origin)
+                      workspace_origin=args.workspace_origin,
+                      **({"pairing_origin": pairing_origin} if pairing_origin is not None else {}))
             except OwnerServerStartupError as exc:
                 raise CommandFailure("unavailable", "owner server startup failed; inspect local server logs") from exc
             except OwnerServerConfigurationError as exc:

@@ -73,6 +73,34 @@ def test_status_does_not_initialize_or_mint_identity(tmp_path, capsys):
     assert not list(tmp_path.iterdir())
 
 
+def test_hidden_pairing_serve_flag_dispatches_only_to_foreground_server(tmp_path, monkeypatch, capsys):
+    from claudlobby.plane import owner_server
+    calls = []
+    monkeypatch.setattr(owner_server, "serve", lambda *args, **kwargs: calls.append((args, kwargs)))
+    argv = ["--root", str(tmp_path), "host", "owner", "serve", "--origin", "https://host.example.test",
+            "--tailscale", "/synthetic/tailscale", "--bootstrap-pairing-origin", "https://plane.example.test"]
+    assert main(argv) == 0
+    assert calls[0][1]["pairing_origin"] == "https://plane.example.test"
+    assert not list(tmp_path.iterdir())
+    calls.clear()
+    assert main(argv + ["--workspace-issuer", "https://site.example.test", "--workspace-origin", "https://plane.example.test"]) == 2
+    assert not calls and not list(tmp_path.iterdir())
+    with pytest.raises(SystemExit) as stopped:
+        main(["host", "owner", "serve", "--help"])
+    assert stopped.value.code == 0
+    assert "--bootstrap-pairing-origin" not in capsys.readouterr().out
+
+
+def test_pairing_flag_never_enters_managed_service_command(tmp_path):
+    import sys
+    from claudlobby.plane.owner_service import service_command
+    command = service_command(tmp_path, tmp_path / "claudlobby", {
+        "origin": "https://host.example.test", "tailscale": sys.executable,
+        "bootstrap_pairing_origin": "https://plane.example.test"})
+    assert "--bootstrap-pairing-origin" not in command
+    assert "https://plane.example.test" not in command
+
+
 def test_status_reports_pairing_then_revocation_without_secret(owner, capsys):
     challenge = owner.begin_pairing(PRINCIPAL)
     grant = owner.confirm_pairing(challenge.token, expected_principal=PRINCIPAL)

@@ -72,3 +72,10 @@ cold native qualification remain pending.
 
 The exact public Linux x64 GNU Claude artifact is admitted for the existing
 provider sign-in path; native Linux provider qualification remains pending.
+
+### Added — Pairing before workspace preparation
+
+An opt-in temporary pairing endpoint creates a challenge for a verified native
+Tailscale principal without initializing workspace storage or issuing grants.
+Its separate hidden foreground-server option preserves normal owner routes and
+managed service commands. Browser guide integration and native proof remain pending.
