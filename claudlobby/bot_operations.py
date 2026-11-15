@@ -256,11 +256,14 @@ def _handoff_capture(bot_dir: Path, *, not_before: int | None = None,
     The session capture's own frontmatter decides. Under the activation's
     reference refresh envelope (#2094) that is the capture below it: the
     activation's own reader finds the envelope, so the two agree on it, and
-    one that reader refuses is refused here by name (#2119).
+    one that reader refuses is refused here by name (#2119). A directory on
+    the way to the session's own file that cannot be read (no search
+    permission, an I/O error) is refused the same way as a redirected one, so
+    each door gives its own refusal (#2927).
     """
     try:
         path = handoff_file.resolve(bot_dir) if path is None else path
-    except handoff_file.HandoffFileError as exc:
+    except (handoff_file.HandoffFileError, OSError) as exc:
         raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
     if path == handoff_file.legacy(bot_dir):
         _owned_handoff_dir(bot_dir)
@@ -441,6 +444,26 @@ def _new_handoff_request(bot_dir: Path, **fields) -> dict:
     if not _write_handoff_request(bot_dir, record):
         raise BotLifecycleError("cannot record handoff intent; no handoff was sent", unavailable=True)
     return record
+
+
+_HANDOFF_STDERR_LINES = 20
+
+
+def _say_handoff_script_stderr(bot: str, stderr: str | None) -> None:
+    """Pass on what the explicit handoff script said on stderr, which the adapter captures (#2927).
+
+    It says there when its file list fell back to .claude/session.md (the CLI's
+    door gave no answer in 5 s, or refused) and why a receipt could not be read.
+    `bot handoff` printed none of it, so a wait that watched .claude/session.md
+    alone read as a slow save. At most _HANDOFF_STDERR_LINES lines, and how many
+    more there were.
+    """
+    lines = [line for line in (stderr or "").splitlines() if line.strip()]
+    for line in lines[:_HANDOFF_STDERR_LINES]:
+        print(f"bot handoff {bot}: {line}", file=sys.stderr, flush=True)
+    if len(lines) > _HANDOFF_STDERR_LINES:
+        print(f"bot handoff {bot}: {len(lines) - _HANDOFF_STDERR_LINES} more lines of the handoff "
+              "script's stderr not shown", file=sys.stderr, flush=True)
 
 
 def _record_native_handoff(bot_dir: Path, record: dict, outcome) -> list[str]:
@@ -938,6 +961,7 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                 raise BotLifecycleError("bot handoff outcome is unavailable", effect_attempted=True,
                                         unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"]) from exc
+            _say_handoff_script_stderr(bot, outcome.stderr)
             marker = _record_native_handoff(spec.bot_dir, request, outcome)
             skipped = (["handoff-skipped:recent"], ["handoff-skipped:capability"],
                        ["handoff-skipped:no-session"])

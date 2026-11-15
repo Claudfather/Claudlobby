@@ -7,6 +7,7 @@ file when it exists, and the per-directory file otherwise.
 """
 
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import subprocess
 
@@ -59,13 +60,25 @@ def test_the_current_sessions_own_handoff_is_read_first(tmp_path):
 
 
 @pytest.mark.parametrize("receipt", ["absent", "malformed"])
-def test_a_bot_without_a_readable_receipt_reads_the_per_directory_file(tmp_path, receipt):
+def test_a_bot_without_a_readable_receipt_reads_the_per_directory_file(tmp_path, capsys, receipt):
+    """#2927 item 7: a receipt that is there and cannot be read reads as no receipt,
+    so the per-directory file is read, and that is said on stderr, once a process.
+    A bot with no receipt at all says nothing."""
     bot = _bot(tmp_path)
+    legacy = handoff_file.legacy(bot)
     if receipt == "malformed":
         (bot / "data/native-session.json").write_text("{not json\n")
+    rc, lines, err = _door(capsys, "watch", str(bot))
+    assert (rc, lines) == (0, [str(legacy)])
+    if receipt == "malformed":
+        assert f"{bot}: the native session receipt cannot be read (native session receipt is invalid)" in err
+        assert err.rstrip().endswith(f"{legacy} is read instead"), err
+    else:
+        assert err == ""
     assert handoff_file.current_session(bot) is None
-    assert handoff_file.resolve(bot) == handoff_file.legacy(bot)
-    assert handoff_file.watch(bot) == [handoff_file.legacy(bot)]
+    assert handoff_file.resolve(bot) == legacy
+    assert handoff_file.watch(bot) == [legacy]
+    assert capsys.readouterr().err == ""  # said once a process
 
 
 @pytest.mark.parametrize("redirected", ["data/claudna", "data/claudna/sessions"])
@@ -84,6 +97,30 @@ def test_a_redirected_session_directory_is_refused_not_read_past(tmp_path, redir
         handoff_file.resolve(bot)
     with pytest.raises(handoff_file.HandoffFileError, match="not an owned directory"):
         handoff_file.watch(bot)  # #2927: it decides by the same rule
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory without its search bit")
+@pytest.mark.parametrize("unsearchable", ["data/claudna", "data/claudna/sessions"])
+def test_a_session_directory_that_cannot_be_searched_is_refused_by_every_reader(
+        tmp_path, capsys, unsearchable):
+    """#2927 item 6: a directory on the way to the session's own handoff that cannot be
+    searched made the walk raise PermissionError. --check and the private door refused
+    it, but the self restart's check, which bot handoff's verify also runs, let it out
+    raw, where a redirected directory is refused. It refuses it the same way now."""
+    bot = _bot(tmp_path)
+    sid = _launch(bot)
+    _save(handoff_file.legacy(bot))
+    _save(handoff_file.session_owned(bot, sid))
+    assert bot_operations._write_handoff_request(bot, {"requested_at": "2026-01-01T00:00:00Z"})
+    (bot / unsearchable).chmod(0o600)
+    try:
+        with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned session handoff"):
+            bot_operations._fresh_self_handoff(bot)
+        assert bot_operations.handoff_state(bot)[:2] == ("unknown", "file_unverified")
+        rc, lines, err = _door(capsys, "watch", str(bot))
+        assert (rc, lines) == (3, []) and "the session handoff cannot be named" in err
+    finally:
+        (bot / unsearchable).chmod(0o700)
 
 
 def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):
