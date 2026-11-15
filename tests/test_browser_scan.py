@@ -156,9 +156,13 @@ def test_a_malformed_unit_pair_is_a_usage_error(tmp_path):
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="reads a Linux /proc")
 def test_it_reads_the_real_proc_and_signals_nothing(tmp_path):
+    # The browser is a copy of the shell, waiting in its own `read` on a pipe
+    # nothing writes to. A copy of sleep is no browser where coreutils is one
+    # binary that picks its program by the name it runs as: on Ubuntu 26.04 it
+    # exits at once with "coreutils: unknown program 'chromium'" (#2930).
     browser = tmp_path / "chromium"
-    shutil.copy("/bin/sleep", browser)
-    child = subprocess.Popen([str(browser), "60"])
+    shutil.copy("/bin/sh", browser)
+    child = subprocess.Popen([str(browser), "-c", "read -r line"], stdin=subprocess.PIPE)
     try:
         time.sleep(0.3)
         rows = _scan(Path("/proc"), "--min-age", "0")
@@ -167,3 +171,4 @@ def test_it_reads_the_real_proc_and_signals_nothing(tmp_path):
     finally:
         child.kill()
         child.wait()
+        child.stdin.close()

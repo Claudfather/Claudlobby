@@ -105,11 +105,15 @@ assert_eq "fleet-PATH resolution prefers the system-first binary (1.1.1, not 2.2
 #     this job's missing prerequisite, not a binary that cannot run. The run skips
 #     distinctly: no false "CANNOT RUN", no failure alert, and nothing installed.
 mkdir -p "$_T/notimeout" "$_T/root3"
+# A name already linked is skipped, a link to nothing included. Where /bin is
+# /usr/bin each name comes twice, and `-e` is false for a link to nothing, so
+# on the Ubuntu 26.04 runner image the second `ln` of grub-ntldr-img failed
+# with "Already exists" (#2930).
 for _d in /usr/bin /bin; do
     for _f in "$_d"/*; do
         _n="${_f##*/}"
         case "$_n" in timeout|gtimeout) continue ;; esac
-        [ -e "$_T/notimeout/$_n" ] || ln -s "$_f" "$_T/notimeout/$_n"
+        [ -e "$_T/notimeout/$_n" ] || [ -L "$_T/notimeout/$_n" ] || ln -s "$_f" "$_T/notimeout/$_n"
     done
 done
 : > "$_T/npm.calls"
