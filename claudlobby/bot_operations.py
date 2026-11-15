@@ -86,12 +86,18 @@ class StaleHandoffError(BotLifecycleError):
 
 
 class HandoffDirectoryRefused(BotLifecycleError):
-    """A directory on the way to the session's own handoff is refused (#2927).
+    """A directory on the way to the session's handoff is refused (#2927, #2935).
 
-    It is redirected, not this user's own, or cannot be searched or read. The
-    readers refuse it rather than read past it, and `bot handoff --check` reads
-    the handoff as unknown (file_unverified) until the directory is repaired,
-    so `bot handoff`'s answer says to repair it first.
+    It is redirected or not this user's own, on the way to the session's own
+    handoff or to .claude/session.md (the bot directory and its .claude), or it
+    is above the session's own directory and cannot be searched or read. The
+    session's own directory is the exception: when it cannot be searched or
+    read, its handoff reads as absent, and the readers read .claude/session.md.
+    The readers refuse such a directory rather than read past it, so `bot
+    handoff --check` cannot read the handoff as saved until it is repaired: it
+    reads unknown (file_unverified), and a redirected bot directory or .claude
+    is refused before that, by the read of the effective configuration. So `bot
+    handoff`, meeting one as it verifies a save, says to repair it first.
     """
 
 
@@ -173,7 +179,12 @@ def _owned_handoff_dir(bot_dir: Path) -> Path:
         raise BotLifecycleError("self restart requires an owned handoff directory") from exc
     if (not stat.S_ISDIR(bot_info.st_mode) or bot_info.st_uid != os.getuid()
             or not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_uid != os.getuid()):
-        raise BotLifecycleError("self restart requires an owned handoff directory")
+        # Refused as a redirected session directory is, so bot handoff says to repair it
+        # (#2935). bot handoff meets a redirected one here only when it was redirected after
+        # the request: the read of the effective configuration refuses it before that. One
+        # the lstat above cannot read is not refused so: a missing one reads pending in
+        # --check, and a save can still land there.
+        raise HandoffDirectoryRefused("self restart requires an owned handoff directory")
     return handoff_dir
 
 

@@ -190,7 +190,8 @@ def dispatch(args) -> CommandOutput:
     except CommandFailure:
         raise
     except ReportPayloadError as exc:
-        raise CommandFailure("invalid_argument", "invalid report fields; inspect command help",
+        # The payload's own reason names the field and the rule, never the value (#2935).
+        raise CommandFailure("invalid_argument", f"invalid report fields: {exc}",
                              release_id=release_id) from exc
     except ReceiptBusy as exc:
         raise CommandFailure("conflict", "another invocation holds this request",

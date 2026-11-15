@@ -144,13 +144,16 @@ def dispatch(args) -> CommandOutput:
                             f"ask it to save one, then read claudlobby --json bot handoff {args.bot_id} "
                             "--check until it reads saved; do not automatically resend the handoff")
                 elif isinstance(exc, HandoffDirectoryRefused):
-                    # #2927: --check reads unknown (file_unverified) until the directory is repaired,
-                    # so "until it reads saved" would name a wait with no end.
-                    hint = (f"a directory on the way to {args.bot_id}'s session handoff is redirected, "
-                            "not this user's, or cannot be searched or read, and --check reads unknown "
-                            "(file_unverified) until it is repaired: repair it first, then read "
-                            f"claudlobby --json bot handoff {args.bot_id} --check; do not automatically "
-                            "resend the handoff")
+                    # #2927: --check cannot read saved until the directory is repaired, so "until it
+                    # reads saved" would name a wait with no end. It reads a refused directory unknown
+                    # (file_unverified), and is itself refused while .claude is redirected, at its read
+                    # of the effective configuration (#2935). The session's own directory is refused
+                    # only when it is redirected or not this user's.
+                    hint = (f"a directory on the way to {args.bot_id}'s session handoff is redirected "
+                            "or not this user's, or one above the session's own directory cannot be "
+                            "searched or read, and --check cannot read the handoff as saved until it "
+                            "is repaired: repair it first, then read claudlobby --json bot handoff "
+                            f"{args.bot_id} --check; do not automatically resend the handoff")
                 else:
                     hint = (f"the handoff can still land: read claudlobby --json bot handoff {args.bot_id} "
                             "--check until it reads saved; do not automatically resend the handoff")

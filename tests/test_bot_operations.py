@@ -1176,6 +1176,35 @@ def test_a_stderr_bot_handoff_cannot_write_to_stops_nothing(cold, monkeypatch, c
     assert request["native_result"] == {"marker": "handoff-saved", "returncode": 0}, request
 
 
+@pytest.mark.parametrize("stream", ["broken", "closed", "none"])
+def test_an_unreadable_receipt_bot_handoff_cannot_say_stops_nothing(cold, monkeypatch, capsys, stream):  # noqa: F811
+    """Item 2 of #2935: the check of the save reads the native session receipt, and says on
+    stderr when it cannot be read. That note had no guard: with a stderr that could not take
+    it, a broken one made the check refuse a handoff directory that is fine, and a closed one
+    raised a bare ValueError past every handler; --check did the same. Broken, closed or
+    never open (None, where print writes to stdout instead), the note is lost and nothing
+    else: the readers read .claude/session.md, and bot handoff and --check answer what they
+    answer with a working stderr."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    native_session._path(bot_dir).write_text("{\n")  # a receipt that cannot be read
+    worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
+    said = {"handoff": set(), "check": set()}  # the note is said once a process: each run says it
+    monkeypatch.setattr(handoff_file, "_SAID", said["handoff"])
+    with monkeypatch.context() as patched:
+        patched.setattr(sys, "stderr", {"broken": _BrokenStream(), "closed": _closed_stream(),
+                                        "none": None}[stream])
+        answered = worker.call("bot", "handoff", "worker")["data"]
+        patched.setattr(handoff_file, "_SAID", said["check"])
+        checked = worker.call("bot", "handoff", "worker", "--check")["data"]
+    assert all(any("native session receipt cannot be read" in note for note in notes)
+               for notes in said.values()), said
+    assert (answered["handoff"], answered["reason"]) == ("saved", "fresh_file_verified"), answered
+    assert (checked["handoff"], checked["reason"]) == ("saved", "written_after_request"), checked
+    request = json.loads((bot_dir / "data/.handoff-request").read_text())
+    assert request["native_result"] == {"marker": "handoff-saved", "returncode": 0}, request
+
+
 @pytest.mark.parametrize("refused_by", [
     pytest.param("cannot-search", marks=pytest.mark.skipif(
         os.geteuid() == 0, reason="root searches a directory without its search bit")),
@@ -1216,6 +1245,41 @@ def test_a_session_directory_bot_handoff_refuses_gets_its_own_refusal(
     assert "repair it first" in hint and "bot handoff worker --check" in hint, refused
     assert "until it reads saved" not in hint, refused
     assert (checked["handoff"], checked["reason"]) == ("unknown", "file_unverified")
+
+
+def test_a_claude_directory_redirected_after_the_request_gets_the_directory_refusal(
+        cold, monkeypatch, capsys, tmp_path):  # noqa: F811
+    """Item 3 of #2935: while the session has no handoff of its own, the check of the save
+    reads .claude/session.md, and it refused a .claude that is redirected or not this user's
+    with the answer whose hint says to read --check "until it reads saved". It gets the hint a
+    refused session directory gets now: repair it first. Here the save lands, and then .claude
+    is redirected, before the check. --check is refused until the repair, by the read of the
+    effective configuration; once repaired, it reads the save."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    claude, elsewhere = worker.root / "runtime/bots/worker/.claude", tmp_path / "elsewhere"
+    worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
+    save = worker.native.call
+
+    def save_then_redirect(function, *args, timeout=30):
+        outcome = save(function, *args, timeout=timeout)
+        if function == "svc_activation_handoff":  # .claude moves elsewhere, and a link replaces it
+            claude.rename(elsewhere)
+            claude.symlink_to(elsewhere, target_is_directory=True)
+        return outcome
+
+    monkeypatch.setattr(worker.native, "call", save_then_redirect)
+    refused = worker.call("bot", "handoff", "worker", expected=6)
+    assert (refused["data"].get("handoff"), refused["data"].get("reason")) == ("unknown", "unverified"), refused
+    assert refused["data"]["native_outcome"] == "unknown", refused
+    hint = refused["error"].get("hint") or ""
+    assert "repair it first" in hint and "bot handoff worker --check" in hint, refused
+    assert "until it reads saved" not in hint, refused
+    unrepaired = worker.call("bot", "handoff", "worker", "--check", expected=4)
+    assert unrepaired["error"]["message"] == "selected bot configuration or activation is incomplete", unrepaired
+    claude.unlink()
+    elsewhere.rename(claude)  # repaired
+    repaired = worker.call("bot", "handoff", "worker", "--check")["data"]
+    assert (repaired["handoff"], repaired["reason"]) == ("saved", "written_after_request"), repaired
 
 
 @pytest.mark.parametrize("case, handoff, reason", [
