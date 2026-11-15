@@ -1918,7 +1918,7 @@ harness_check "#2927 no renewal recorded -> the gate read the per-directory 2020
 _rs_lines="$(wc -l < "$RB_DIR/logs/startup.log" 2>/dev/null || echo 0)"
 _rs_sid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["session_id"])' \
     "$RB_DIR/data/native-session.json" 2>/dev/null || true)"
-_rs_prev="3d2f1c4b-5a69-4f87-9e01-2b3c4d5e6f70"
+_rs_prev="11111111-1111-4111-8111-111111111111"  # a placeholder: the replaced session's ID
 _rs_own="$RB_DIR/data/claudna/sessions/$_rs_prev/handoff.md"
 mkdir -p "$RB_DIR/data/claudna/sessions/$_rs_prev"
 printf '{"schema":1,"session_id":"%s","predecessor":"%s"}\n' "$_rs_sid" "$_rs_prev" \
