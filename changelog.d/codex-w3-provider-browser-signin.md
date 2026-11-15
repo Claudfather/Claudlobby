@@ -40,3 +40,10 @@ prerequisites. Python features, provider sign-in, Tailscale access and native
 user-manager readiness remain explicitly unknown. It lives under `preinstall/`
 because initial inventory cannot depend on installed runtime helpers; no SSH
 transport, setup action or bot-runtime wiring is added.
+
+### Fixed — Stable Ubuntu test qualification
+
+The tests workflow pins Ubuntu 24.04, the previously passing qualification
+baseline, after `ubuntu-latest` moved to 26.04 and broke native process and
+command-mirror fixtures. Existing check names and artifact identifiers stay
+stable; Ubuntu 26.04 qualification remains pending.
