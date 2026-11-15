@@ -148,6 +148,16 @@ One line per script, for routing; operators use the public CLI. **Before changin
 - `public-write-guard.sh` — PreToolUse hook: refuses a GitHub-bound write that would put a term from the host's list into a public repository (opt-in)
 - `public-write-guard.py` — the decision half of `public-write-guard.sh`
 
+## Preinstall boundary
+
+`claudlobby/preinstall/linux-system-v1.sh` is the sole root-native exception to the
+bot `supervisor.sh` door: a pinned standalone stdlib bundle cannot execute an
+ordinary-user installation as root. Its fixed Ubuntu24 apt/system-manager/linger
+and native Serve CAS operations use root-owned immutable proposals and mutable retained state receipts;
+it never imports user code or supervises bots. Native/cold qualification remains
+open. The existing bot/lifecycle adapter policy is unchanged. Tests fence this
+exception in `tests/test_supervisor_ratchet.py`.
+
 ## Repository Hygiene — MANDATORY
 
 ### What goes in git (shared, reusable, generalized)

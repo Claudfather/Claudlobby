@@ -441,6 +441,8 @@ def test_installed_resources_match_direct_and_sdist_wheels(tmp_path):
     assert payload["claudlobby/preinstall/host-readiness-probe.sh"] == (probe.read_bytes(), 0o111)
     installer = source / "claudlobby/preinstall/host-install-v1.sh"
     assert payload["claudlobby/preinstall/host-install-v1.sh"] == (installer.read_bytes(), 0o111)
+    entry = source / "claudlobby/preinstall/linux-system-entry-v1.sh"
+    assert payload["claudlobby/preinstall/linux-system-entry-v1.sh"] == (entry.read_bytes(), 0o111)
 
     native = {name.removeprefix("claudlobby/_runtime_scripts/") for name in payload
               if name.startswith("claudlobby/_runtime_scripts/")}

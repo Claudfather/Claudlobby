@@ -206,3 +206,32 @@ def test_allowlist_has_no_zero_count_entries():
         f"{ALLOWLIST_PATH.name} carries a non-positive count for: {zeroed} "
         f"-- remove the entry instead of leaving it at 0"
     )
+
+
+def test_preinstall_native_calls_have_one_fixed_root_exception():
+    """A pre-install root must never execute the user-owned bot adapter."""
+    adapter = REPO_DIR / "claudlobby/preinstall/linux-system-v1.sh"
+    native = re.compile(r"(?<![A-Za-z_$-])(?:/(?:usr/)?bin/)?(?:systemctl|launchctl|systemd-run|loginctl)(?=[\s\";]|$)")
+    unexpected = []
+    for path in (REPO_DIR / "claudlobby/preinstall").glob("*.sh"):
+        if path == adapter:
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if not native.search(line):
+                continue
+            # Existing inventory asks shell command lookup only; no invocation.
+            if path.name == "host-readiness-probe.sh" and (line == "systemctl=false; launchctl=false"
+                    or re.fullmatch(r"if command -v (systemctl|launchctl) >/dev/null 2>&1; then \1=true; fi", line)):
+                continue
+            unexpected.append(f"{path.name}:{number}")
+    assert not unexpected, f"new preinstall native door outside the fixed root bundle: {unexpected}"
+
+
+def test_fixed_root_exception_does_not_grow_into_bot_supervision():
+    path = REPO_DIR / "claudlobby/preinstall/linux-system-v1.sh"
+    if not path.exists():
+        return  # before-export baseline predates the exception
+    source = path.read_text()
+    # Occurrence ratchet, deliberately including comments like the bot ratchet.
+    current = {name: source.count(f'"/usr/bin/{name}"') for name in ("systemctl", "systemd-run", "loginctl", "launchctl")}
+    assert current == {"systemctl": 2, "systemd-run": 1, "loginctl": 1, "launchctl": 0}

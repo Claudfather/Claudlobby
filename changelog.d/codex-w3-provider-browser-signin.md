@@ -108,3 +108,19 @@ never implies rollback or an automatic retry. Completion reopens require the
 original tuple. Retained parent-directory checks allow unrelated activity while
 preserving identity and create-only checks; buffered partial frames expire after
 the existing five-second limit.
+
+### Added — Bounded root preparation source candidate
+
+A standalone Ubuntu 24 root bundle retains immutable, expiring proposals and
+one-shot request receipts for fixed package prerequisites, separately approved
+index refresh, selected-account lingering and independent private ingress CAS.
+Native apt owns the transaction; a version3 pre-install verifier rejects exact
+action/version/architecture drift. Existing root hooks and possible service
+changes are disclosed, with local conffiles preserved. A fixed transient worker
+retains boot/invocation identity across frontend disconnection; uncertain work is
+never replayed or automatically repaired. Serve publication preserves other
+routes and Funnel settings with the original nonempty ETag and whole afterstate
+comparison. The root-native exception does not change bot supervision or the
+mode-specific owner-socket defaults. Browser/root transport integration, native
+apt/systemd/LocalAPI compatibility and cold-host proof remain unqualified gates;
+this source candidate does not establish usable onboarding or host authority.
