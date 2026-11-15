@@ -70,12 +70,13 @@ def test_each_name_is_the_executable_as_a_link_or_as_exactly_one_copy(tmp_path, 
     assert _copies(bindir) == ([] if links else ["bun", "claude"])
 
 
-def test_a_node_stand_in_is_a_script_where_a_link_names_the_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize("node_name", ["node", "nodejs"])
+def test_a_node_stand_in_is_a_script_where_a_link_names_the_process(tmp_path, monkeypatch, node_name):
     """Where a link would name the process, node gets a script instead: it runs
     node by its resolved path as itself, with the preload beside it, and nothing
-    is copied."""
+    is copied. The same holds under node's other name, `nodejs` (#2932)."""
     monkeypatch.setattr(stand_in_fixtures, "LINK_NAMES_THE_PROCESS", True)
-    node, bindir = _build(tmp_path)
+    node, bindir = _build(tmp_path, node_name)
     preload = bindir / stand_in_fixtures.NAME_PRELOAD
     assert preload.read_text() == stand_in_fixtures.NAME_PRELOAD_SOURCE
     for name in ("bun", "claude"):
@@ -105,6 +106,41 @@ def test_a_script_under_nodes_name_keeps_its_link(tmp_path, monkeypatch):
         assert (bindir / name).is_symlink()
         assert (bindir / name).resolve() == fake.resolve()
     assert not (bindir / stand_in_fixtures.NAME_PRELOAD).exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_a_node_it_cannot_read_is_taken_for_nodes_binary(tmp_path, monkeypatch):
+    """Whether node is its binary or a `#!` script under its name is read from
+    the file's first two bytes. A file under node's name that cannot be read is
+    taken for the binary, so its stand-ins are scripts that keep their names
+    (#2932). Read, this script would get links, as the test above shows."""
+    monkeypatch.setattr(stand_in_fixtures, "LINK_NAMES_THE_PROCESS", True)
+    fake = tmp_path / "bin" / "node"
+    fake.parent.mkdir()
+    fake.write_text('#!/bin/bash\necho "$0"\n')
+    fake.chmod(0)
+    bindir = tmp_path / "bins"
+    bindir.mkdir()
+    make_stand_ins(bindir, str(fake))
+    for name in ("bun", "claude"):
+        stand_in = bindir / name
+        assert not stand_in.is_symlink()
+        assert f'exec -a "$0" {shlex.quote(str(fake.resolve()))} "$@"' in stand_in.read_text()
+    assert (bindir / stand_in_fixtures.NAME_PRELOAD).exists()
+
+
+@pytest.mark.parametrize("char", ['"', "\\", "$", "`"], ids=["quote", "backslash", "dollar", "backtick"])
+def test_a_preload_path_node_options_cannot_quote_is_refused(char):
+    """The preload's path goes into the stand-in script inside a double-quoted
+    NODE_OPTIONS value, where bash ends the quoting at `"`, takes `\\` as an
+    escape and expands `$` and a backtick, so a path that holds one of them is
+    refused with a ValueError (#2932). The same path without it is written as
+    it is."""
+    node = Path("/opt/node/bin/node")
+    with pytest.raises(ValueError, match="cannot quote"):
+        stand_in_fixtures._node_script(node, Path(f"/stand-ins/a{char}b") / stand_in_fixtures.NAME_PRELOAD)
+    plain = Path("/stand-ins/ab") / stand_in_fixtures.NAME_PRELOAD
+    assert f'--require=\\"{plain}\\"' in stand_in_fixtures._node_script(node, plain)
 
 
 def test_a_copy_keeps_homebrews_libnode_beside_it(tmp_path, monkeypatch):

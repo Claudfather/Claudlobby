@@ -1968,7 +1968,10 @@ mkdir -p "$_SC_BIN"
 # The tests' native stand-ins (tests/stand_in_fixtures.py) are node: framework
 # Python re-execs as Python on macOS, so not even a symlink named bun passes
 # the real classifier there, while node keeps its stand-in's name and exposes
-# its launch environment. On Linux each stand-in is a link to node.
+# its launch environment. On Linux each stand-in is a short bash script that
+# runs node under the stand-in's own name (`exec -a`), with a preload that
+# writes that name back to /proc/self/comm: from Node 24 on, node names its
+# main thread `MainThread` as it starts, and a link to node ran as that (#2930).
 "$VAL_PY" -I -B - "$VAL_REPO" "$(command -v node)" "$_SC_BIN" <<'BINS'
 import sys
 from pathlib import Path

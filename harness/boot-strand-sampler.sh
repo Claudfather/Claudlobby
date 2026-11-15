@@ -325,7 +325,7 @@ queued_evidence() {
 }
 
 # seed_resume_handoff <bot_dir> — a fresh session handoff for a --resume boot.
-# Its last_updated is now, which start-bot's age gate (should_resume_session)
+# Its last_updated is now, which start-bot's age gate (fresh_session_resume)
 # reads, so start-bot sends the resume command and then types STARTUP_PROMPT
 # into the turn that command starts. It never carries the probe marker: the
 # resume turn reads this file, and a tool result must not look like the prompt.

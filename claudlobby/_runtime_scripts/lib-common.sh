@@ -5138,7 +5138,7 @@ _bots_from_manifest() {
 #
 # Only the PROSE half is asserted, and that asymmetry is forced rather than
 # chosen: start-bot.sh sends the prose whenever STARTUP_PROMPT is non-empty, so
-# its absence is decidable. The slash half is gated on should_resume_session,
+# its absence is decidable. The slash half is gated on fresh_session_resume,
 # which depends on checkpoint freshness AT BOOT and is not recoverable
 # afterwards — so a missing slash command cannot be distinguished from one that
 # was correctly never sent, and claiming otherwise would manufacture defects.

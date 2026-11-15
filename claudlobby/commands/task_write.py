@@ -127,7 +127,8 @@ def _inputs(args) -> dict:
                                    artifacts=tuple(args.artifact), issues=tuple(args.issue),
                                    skill=args.skill)
         except ReportPayloadError as exc:
-            raise CommandFailure("invalid_argument", "invalid linked report fields") from exc
+            # The payload's own reason names the field and the rule, never the value (#2933).
+            raise CommandFailure("invalid_argument", f"invalid linked report fields: {exc}") from exc
         return {"assignment_id": _reference(args.assignment_id, "ASSIGNMENT_ID"),
                 "report": report}
     return {"assignment_id": _reference(args.assignment_id, "ASSIGNMENT_ID")}
