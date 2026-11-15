@@ -327,6 +327,9 @@ queued_evidence() {
 # seed_resume_handoff <bot_dir> — a fresh session handoff for a --resume boot.
 # Its last_updated is now, which start-bot's age gate (should_resume_session)
 # reads, so start-bot sends the resume command and then types STARTUP_PROMPT
+# It is the per-directory .claude/session.md: the gate reads a session's own
+# R/sessions/<ID>/handoff.md only for a session a renewal (`bot restart --fresh`)
+# recorded as replaced, and the boot resets remove that record (#2924).
 # into the turn that command starts. It never carries the probe marker: the
 # resume turn reads this file, and a tool result must not look like the prompt.
 # Written to a temp file and moved, so start-bot never reads half of it.
@@ -1162,6 +1165,9 @@ YAML
         # gets a freshly seeded handoff instead of whatever the last one left;
         # a boot that cannot be seeded starts clean and is classified
         # other:resume_not_injected below, never as a resume boot.
+        # A renewal record would point the gate at a replaced session's own
+        # handoff instead of the seeded file, in either layout (#2924).
+        rm -f "$BOT_DIR/data/native-session-predecessor.json" 2>/dev/null || true
         if [ -n "$RESUME" ]; then
             seed_resume_handoff "$BOT_DIR" || {
                 rm -f "$BOT_DIR/.claude/session.md" 2>/dev/null || true

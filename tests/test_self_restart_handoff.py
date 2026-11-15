@@ -14,21 +14,42 @@ from pathlib import Path
 
 import pytest
 
-from claudlobby import bot_operations
+from claudlobby import bot_operations, handoff_file, native_session
 
 
 def _stamp(moment: datetime) -> str:
     return f"{moment:%Y-%m-%dT%H:%M:%SZ}"
 
 
+def _session_owned(bot_dir: Path) -> Path:
+    """The file clauDNA 0.35 saves for the bot's current session (#2924), whose ID
+    the production launch owner retains in the receipt."""
+    (bot_dir / "data").mkdir(parents=True, exist_ok=True)
+    current = handoff_file.current_session(bot_dir)
+    if current is None:
+        _, current = native_session.launch(bot_dir, "com.example.worker", bot_dir / "tmp",
+                                           bot_dir.parent / "account")
+    return handoff_file.session_owned(bot_dir, current)
+
+
+# Where a handoff is saved (#2924): clauDNA 0.35 saves the current session's own
+# file, and earlier versions and other providers the bot's .claude/session.md.
+LAYOUTS = [pytest.param("session", id="session-owned"), pytest.param("legacy", id="per-directory")]
+
+
 def _checkpointed(bot_dir: Path, *, refreshed: datetime, captured: datetime,
-                  field: str | None = "references_refreshed") -> tuple[Path, bytes]:
+                  field: str | None = "references_refreshed", layout: str = "legacy") -> tuple[Path, bytes]:
     """A handoff as an activation leaves it, after a checkpoint below its envelope.
 
     The envelope is the activation's own rendering (``field=None`` writes none,
     and ``last_updated`` is its shape before #2094), the capture keeps its own
-    frontmatter, and the canonical section closes the file."""
-    handoff = bot_dir / ".claude" / "session.md"
+    frontmatter, and the canonical section closes the file. ``layout="session"``
+    saves it in the current session's own file, which no activation envelope
+    ever topped, so it takes none."""
+    if layout == "session":
+        field, handoff = None, _session_owned(bot_dir)
+    else:
+        handoff = bot_dir / ".claude" / "session.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     envelope = (b"" if field is None
                 else bot_operations._refresh_envelope(bot_dir, _stamp(refreshed), field=field))
@@ -113,19 +134,23 @@ def test_a_malformed_envelope_refuses_and_the_refusal_names_it(tmp_path):
         bot_operations._strip_envelope(handoff.read_bytes(),bot_dir,handoff)
 
 
-def test_a_character_cut_by_the_read_limit_does_not_refuse(tmp_path):
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_character_cut_by_the_read_limit_does_not_refuse(tmp_path, layout):
     """The check reads the first 8 KiB and decodes only the frontmatter it parses.
     At main it decoded the whole read, so a fresh handoff whose 8,192nd byte fell
     inside a multi-byte character refused."""
-    handoff_dir = tmp_path / "bot" / ".claude"
-    handoff_dir.mkdir(parents=True)
+    bot_dir = tmp_path / "bot"
+    (bot_dir / ".claude").mkdir(parents=True)
+    handoff = _session_owned(bot_dir) if layout == "session" else bot_dir / ".claude" / "session.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
     head = f"---\nlast_updated: {_stamp(datetime.now(timezone.utc))}\n---\n".encode()
     content = head + b"x" * (8191 - len(head)) + "→ the next note\n".encode()
     assert content[8191:8194] == "→".encode()
-    (handoff_dir / "session.md").write_bytes(content)
-    bot_operations._fresh_self_handoff(tmp_path / "bot")
+    handoff.write_bytes(content)
+    bot_operations._fresh_self_handoff(bot_dir)
 
 
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("mtime_delta_ns,capture_delta_s,accepted", [
     pytest.param(0, 0, True, id="exact-file-bound-and-floored-capture-second"),
     pytest.param(1, 0, True, id="capture-in-request-second"),
@@ -133,12 +158,12 @@ def test_a_character_cut_by_the_read_limit_does_not_refuse(tmp_path):
     pytest.param(1, -1, False, id="fresh-touch-with-pre-request-capture"),
 ])
 def test_request_bound_requires_both_file_write_and_capture_timestamp(
-        tmp_path, mtime_delta_ns, capture_delta_s, accepted):
+        tmp_path, mtime_delta_ns, capture_delta_s, accepted, layout):
     bot_dir = tmp_path / "bot"
     second = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=2)
     requested_ns = int(second.timestamp()) * 1_000_000_000 + 765_432_109
     handoff, _ = _checkpointed(bot_dir, refreshed=second,
-        captured=second + timedelta(seconds=capture_delta_s))
+        captured=second + timedelta(seconds=capture_delta_s), layout=layout)
     written_ns = requested_ns + mtime_delta_ns
     os.utime(handoff, ns=(written_ns, written_ns))
     if accepted:
@@ -151,19 +176,48 @@ def test_request_bound_requires_both_file_write_and_capture_timestamp(
     bot_operations._fresh_self_handoff(bot_dir)
 
 
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("stale", ["capture", "file"])
-def test_request_bound_does_not_replace_existing_freshness_window(tmp_path, stale):
+def test_request_bound_does_not_replace_existing_freshness_window(tmp_path, stale, layout):
     bot_dir = tmp_path / "bot"
     now = datetime.now(timezone.utc).replace(microsecond=0)
     requested_ns = int((now - timedelta(seconds=600)).timestamp()) * 1_000_000_000
     handoff, _ = _checkpointed(bot_dir, refreshed=now,
-        captured=now - timedelta(seconds=400) if stale == "capture" else now)
+        captured=now - timedelta(seconds=400) if stale == "capture" else now, layout=layout)
     written = now - timedelta(seconds=400) if stale == "file" else now
     written_ns = int(written.timestamp()) * 1_000_000_000
     os.utime(handoff, ns=(written_ns, written_ns))
     with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
         bot_operations._fresh_self_handoff(bot_dir, not_before=requested_ns)
     assert str(refused.value.__cause__) == "handoff is stale"
+
+
+@pytest.mark.parametrize("own, legacy, accepted", [
+    pytest.param("fresh", "stale", True, id="own-fresh-per-directory-stale"),
+    pytest.param("stale", "fresh", False, id="own-stale-per-directory-fresh"),
+    pytest.param(None, "fresh", True, id="no-own-per-directory-fresh"),
+    pytest.param(None, "stale", False, id="no-own-per-directory-stale"),
+])
+def test_the_current_sessions_own_handoff_decides_over_the_per_directory_file(
+        tmp_path, own, legacy, accepted):
+    """#2924: clauDNA 0.35 saves the current session's own file and leaves the
+    per-directory one as 0.34 last wrote it, so the session's own file decides when
+    it exists, and the per-directory file only when it does not. At main a fresh own
+    file with a stale per-directory one refused, and the reverse passed."""
+    bot_dir = tmp_path / "bot"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    ages = {"fresh": now, "stale": now - timedelta(hours=25)}
+    _checkpointed(bot_dir, refreshed=now, captured=ages[legacy], field=None)
+    if own is not None:
+        _checkpointed(bot_dir, refreshed=now, captured=ages[own], layout="session")
+    else:
+        _session_owned(bot_dir)  # the receipt names a session that saved no file of its own
+    if accepted:
+        assert isinstance(bot_operations._fresh_self_handoff(bot_dir), float)
+    else:
+        with pytest.raises(bot_operations.BotLifecycleError, match="fresh owned") as refused:
+            bot_operations._fresh_self_handoff(bot_dir)
+        assert str(refused.value.__cause__) == "handoff is stale"
 
 
 def test_handoff_clock_reads_the_clock_that_stamps_the_handoff_and_leaves_no_file(tmp_path):

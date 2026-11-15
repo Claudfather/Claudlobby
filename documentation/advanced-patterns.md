@@ -97,7 +97,7 @@ Same as the alert sweep: declare the fleet job and apply it through the managed 
 
 ## 4. Graceful Restart & Pre-Stop Handoff
 
-A planned restart continues the bot's exact session and needs no handoff: `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation. `claudlobby bot restart BOT --fresh` starts a new session with an empty context that resumes from the bot's saved handoff (`.claude/session.md`), so capture the handoff first. The capture mechanism (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`) is real and current, but it is *not* wired to systemd `ExecStop`.
+A planned restart continues the bot's exact session and needs no handoff: `claudlobby bot restart BOT` waits for an idle prompt, proves the transcript retained, restarts the unit and resumes the same conversation. `claudlobby bot restart BOT --fresh` starts a new session with an empty context that resumes from the bot's saved handoff (the session's own `R/sessions/<native session ID>/handoff.md` under clauDNA 0.35 and later, R being the bot's `CLAUDNA_STATE_DIR`, else `.claude/session.md`), so capture the handoff first. The capture mechanism (`claudlobby/_runtime_scripts/pre-stop-handoff.sh`) is real and current, but it is *not* wired to systemd `ExecStop`.
 
 ### Why
 

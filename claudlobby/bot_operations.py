@@ -28,6 +28,7 @@ import time
 from typing import NamedTuple
 from uuid import uuid4
 
+from . import handoff_file
 from .supervision_inventory import _target
 from .supervision_runtime import RuntimeEvidenceError, assert_quiescent, unit_start_budget
 from .config_plan import path_state
@@ -246,15 +247,23 @@ def _strip_envelope(previous: bytes, bot_dir: Path, path: Path) -> bytes:
     raise ValueError(f"existing canonical reference refresh is malformed: {path}")
 
 
-def _handoff_capture(bot_dir: Path, *, not_before: int | None = None) -> tuple[float, datetime]:
+def _handoff_capture(bot_dir: Path, *, not_before: int | None = None,
+                     path: Path | None = None) -> tuple[float, datetime]:
     """The owned handoff file's mtime and its session capture's last_updated.
 
+    The file is the current session's own when it has one, else the bot's
+    .claude/session.md (`handoff_file.resolve`, #2924), unless a caller names it.
     The session capture's own frontmatter decides. Under the activation's
     reference refresh envelope (#2094) that is the capture below it: the
     activation's own reader finds the envelope, so the two agree on it, and
     one that reader refuses is refused here by name (#2119).
     """
-    path = _owned_handoff_dir(bot_dir) / "session.md"
+    try:
+        path = handoff_file.resolve(bot_dir) if path is None else path
+    except handoff_file.HandoffFileError as exc:
+        raise BotLifecycleError("self restart requires a fresh owned session handoff") from exc
+    if path == handoff_file.legacy(bot_dir):
+        _owned_handoff_dir(bot_dir)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
@@ -527,7 +536,9 @@ def verify_checkpoint_after_stop(bot_dir: Path, proof: dict) -> None:
         return
     _checkpoint_request(bot_dir, proof)
     image = _checkpoint_image(bot_dir)
-    _, stamp = _handoff_capture(bot_dir, not_before=_handoff_boundary(proof["requested_ns"], proof["native_result"]))
+    # A proof from before native sessions hashed .claude/session.md, so it is read there (#2924).
+    _, stamp = _handoff_capture(bot_dir, not_before=_handoff_boundary(proof["requested_ns"], proof["native_result"]),
+                                path=handoff_file.legacy(bot_dir))
     if (image != {key: proof[key] for key in ("capture_sha256", "capture_mtime_ns")}
             or stamp.isoformat() != proof["last_updated"] or _checkpoint_image(bot_dir) != image):
         raise BotLifecycleError("checkpoint capture differs from its saved proof", unavailable=True)
@@ -559,6 +570,9 @@ def _planned_restart_handoff(bot_dir: Path, label: str, tmpdir: str,
 def handoff_state(bot_dir: Path) -> HandoffState:
     """What came of the door's last recorded handoff request, from files only (#990).
 
+    The handoff file is the current session's own when it has one, else
+    .claude/session.md (`handoff_file.resolve`, #2924), so a request the
+    per-directory reader left pending reads saved once the session saved its own.
     saved: the handoff file was written after the request, and its capture's
     own last_updated is no older than the request less the 300 s
     `_fresh_self_handoff` allows a model's timestamp, so a rewrite with no new
@@ -581,16 +595,17 @@ def handoff_state(bot_dir: Path) -> HandoffState:
         return HandoffState("unknown", "request_unreadable")
     pending = HandoffState("pending", "not_written_since_request", requested_at)
     try:
-        info = (bot_dir / ".claude" / "session.md").lstat()
+        path = handoff_file.resolve(bot_dir)
+        info = path.lstat()
     except FileNotFoundError:
         return pending
-    except OSError:
+    except (OSError, handoff_file.HandoffFileError):
         return HandoffState("unknown", "file_unverified", requested_at)
     if stat.S_ISREG(info.st_mode) and (info.st_mtime_ns < requested_ns if requested_ns is not None
                                       else info.st_mtime < requested):
         return pending
     try:
-        mtime, stamp = _handoff_capture(bot_dir)
+        mtime, stamp = _handoff_capture(bot_dir, path=path)
     except BotLifecycleError:
         return HandoffState("unknown", "file_unverified", requested_at)
     if mtime < requested:
@@ -908,7 +923,8 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
             if (prior_request is not None and (prior_request.get("operation_id") is not None
                                               or handoff_state(spec.bot_dir).state != "saved")):
                 raise BotLifecycleError("existing handoff request is unresolved; inspect with --check; "
-                                        "it is never automatically resent", effect_attempted=True,
+                                        "it is never automatically resent, and it resolves once the "
+                                        "bot's session saves a handoff", effect_attempted=True,
                                         unavailable=True, release_id=_release_id(release), **_provenance(release),
                                         target=entry["target"], handoff_reason="pending")
             try:

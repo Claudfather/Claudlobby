@@ -137,8 +137,14 @@ def dispatch(args) -> CommandOutput:
                 data["handoff"] = "unknown"
                 data["reason"] = exc.handoff_reason or "unverified"
                 message = str(exc) if exc.handoff_reason else "bot handoff outcome is unverified; inspect its private session"
-                hint = (f"the handoff can still land: read claudlobby --json bot handoff {args.bot_id} "
-                        "--check until it reads saved; do not automatically resend the handoff")
+                if exc.handoff_reason == "pending":
+                    # #2924: whichever file the session saves resolves the earlier request.
+                    hint = (f"the earlier request resolves once {args.bot_id}'s session saves a handoff: "
+                            f"ask it to save one, then read claudlobby --json bot handoff {args.bot_id} "
+                            "--check until it reads saved; do not automatically resend the handoff")
+                else:
+                    hint = (f"the handoff can still land: read claudlobby --json bot handoff {args.bot_id} "
+                            "--check until it reads saved; do not automatically resend the handoff")
             else:
                 message = "bot lifecycle effect is unverified; inspect native state"
                 hint = "inspect the exact bot's native unit and private session before retrying"

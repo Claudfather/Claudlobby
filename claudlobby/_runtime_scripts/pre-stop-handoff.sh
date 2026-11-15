@@ -32,48 +32,85 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
     exit 1
 }
 
-# clauDNA's /claudna:session handoff writes to <cwd>/.claude/session.md,
-# where cwd is the bot's runtime dir (start-bot.sh `cd "$BOT_DIR"` before tmux).
-HANDOFF_FILE="$BOT_DIR/.claude/session.md"
+# Where the handoff lands (#2924). clauDNA 0.35 and later save the current
+# session's own R/sessions/<native session ID>/handoff.md, R being the bot's
+# composed CLAUDNA_STATE_DIR; earlier versions and other providers save
+# <cwd>/.claude/session.md, where cwd is the bot's runtime dir (start-bot.sh
+# `cd "$BOT_DIR"` before tmux). handoff_files names both, the session's own
+# first. A change to either is a save; the shared verifier then judges the
+# file the session saved.
+HANDOFF_FILES="$(handoff_files watch "$BOT_DIR")"
+
+# rc 0 when a watched file is a symlink.
+_handoff_redirected() {
+    local file
+    while IFS= read -r file; do
+        if [ -L "$file" ]; then return 0; fi
+    done <<EOF
+$HANDOFF_FILES
+EOF
+    return 1
+}
+
+# Each watched file's checksum, else `absent`, one line per file; `unreadable`
+# for a file it cannot read, which the caller refuses.
+_handoff_sums() {
+    local file
+    while IFS= read -r file; do
+        if [ -e "$file" ]; then cksum 2>/dev/null < "$file" || echo unreadable; else echo absent; fi
+    done <<EOF
+$HANDOFF_FILES
+EOF
+}
+
+# rc 0 when a watched file was written under $1 seconds ago.
+_handoff_written_within() {
+    local file age
+    while IFS= read -r file; do
+        [ -f "$file" ] || continue
+        age=$(( $(date +%s) - $(stat_mtime "$file" 2>/dev/null || echo 0) ))
+        if [ "$age" -lt "$1" ]; then return 0; fi
+    done <<EOF
+$HANDOFF_FILES
+EOF
+    return 1
+}
+
+# The handoff the messages below name: the first watched file that exists.
+_handoff_last() {
+    local file
+    while IFS= read -r file; do
+        if [ -e "$file" ]; then printf '%s' "$file"; return 0; fi
+    done <<EOF
+$HANDOFF_FILES
+EOF
+    printf '%s' "$BOT_DIR/.claude/session.md"
+}
+
 if [ "$MODE" = --explicit ]; then
-    [ ! -L "$HANDOFF_FILE" ] || { echo "handoff-unavailable"; exit 3; }
-    _handoff_before=""
-    if [ -e "$HANDOFF_FILE" ]; then
-        _handoff_before=$(cksum < "$HANDOFF_FILE") || { echo "handoff-unavailable"; exit 3; }
-    fi
+    ! _handoff_redirected || { echo "handoff-unavailable"; exit 3; }
+    _handoff_before="$(_handoff_sums)"
+    case "$_handoff_before" in *unreadable*) echo "handoff-unavailable"; exit 3 ;; esac
 fi
 
-# The shared capture verifier judges both the file write and last_updated.
-# A recently written file can contain older context, with or without the
-# activation reference envelope. No interpreter, refusal or timeout means
-# not recent; the normal handoff path follows.
+# The shared capture verifier judges both the file write and last_updated,
+# in the file the current session saved (#2924). A recently written file can
+# contain older context, with or without the activation reference envelope.
+# It is asked through the CLI's private _handoff-files door: a managed
+# installation has no interpreter beside its CLI that imports the package.
+# No CLI, refusal or timeout means not recent; the normal handoff path follows.
 _capture_recent_age() {
-    local python=""
-    case "${CLAUDLOBBY_CLI:-}" in /*) python="${CLAUDLOBBY_CLI%/*}/python" ;; esac
-    if [ ! -x "$python" ]; then
-        echo "pre-stop-handoff.sh: no interpreter beside CLAUDLOBBY_CLI to read the capture; not recent" >&2
-        return 0
-    fi
-    with_timeout 5 "$python" -I -B - "$BOT_DIR" <<'PY'
-import sys
-from pathlib import Path
-
-from claudlobby.bot_operations import BotLifecycleError, _fresh_self_handoff
-
-try:
-    print(max(0, int(_fresh_self_handoff(Path(sys.argv[1])))))
-except BotLifecycleError:
-    pass
-PY
+    case "${CLAUDLOBBY_CLI:-}" in
+        /*) ;;
+        *) echo "pre-stop-handoff.sh: no CLAUDLOBBY_CLI to read the capture; not recent" >&2; return 0 ;;
+    esac
+    with_timeout 5 "$CLAUDLOBBY_CLI" _handoff-files recent "$BOT_DIR"
 }
 
 _recent_age=""
-if [ -f "$HANDOFF_FILE" ]; then
-    AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
-    if [ "$AGE" -lt 300 ]; then
-        _recent_age="$(_capture_recent_age || true)"
-        case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac
-    fi
+if _handoff_written_within 300; then
+    _recent_age="$(_capture_recent_age || true)"
+    case "$_recent_age" in *[!0-9]*) _recent_age="" ;; esac
 fi
 if [ -n "$_recent_age" ]; then
     if [ "$MODE" = --explicit ]; then echo "handoff-skipped:recent";
@@ -123,31 +160,29 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         if [ "$MODE" = --explicit ]; then
             echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]" >&2
         else
-            echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $HANDOFF_FILE" >&2
+            echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $(_handoff_last)" >&2
         fi
         if [ -z "$MODE" ]; then
             emit_fleet_event "handoff_skipped" "pre-stop" \
-                "{\"reason\":\"$_handoff_status\",\"handoff\":\"$HANDOFF_FILE\"}" || true
+                "{\"reason\":\"$_handoff_status\",\"handoff\":\"$(_handoff_last)\"}" || true
         fi
         [ "$MODE" != --explicit ] || echo "handoff-skipped:capability"
         exit 0
     fi
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
-        if [ -f "$HANDOFF_FILE" ]; then
-            AGE=$(( $(date +%s) - $(stat_mtime "$HANDOFF_FILE" 2>/dev/null || echo 0) ))
-            if [ "$AGE" -lt 60 ]; then
-                if [ "$MODE" = --explicit ]; then
-                    [ ! -L "$HANDOFF_FILE" ] || { echo "handoff-unavailable"; exit 3; }
-                    _handoff_after=$(cksum < "$HANDOFF_FILE") || { echo "handoff-unavailable"; exit 3; }
-                    if [ "$_handoff_after" != "$_handoff_before" ]; then
-                        echo "handoff-saved"
-                        exit 0
-                    fi
-                else
-                    echo "Handoff completed"
+        if _handoff_written_within 60; then
+            if [ "$MODE" = --explicit ]; then
+                ! _handoff_redirected || { echo "handoff-unavailable"; exit 3; }
+                _handoff_after="$(_handoff_sums)"
+                case "$_handoff_after" in *unreadable*) echo "handoff-unavailable"; exit 3 ;; esac
+                if [ "$_handoff_after" != "$_handoff_before" ]; then
+                    echo "handoff-saved"
                     exit 0
                 fi
+            else
+                echo "Handoff completed"
+                exit 0
             fi
         fi
         sleep 1

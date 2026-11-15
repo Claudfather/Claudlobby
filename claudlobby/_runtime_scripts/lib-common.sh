@@ -4504,6 +4504,41 @@ session_md_handoff_epoch() {
     stat_mtime "$file" 2>/dev/null
 }
 
+# handoff_files watch <bot_dir> | resume <bot_dir> <session_id>
+# The session handoff files a reader checks, one absolute path per line, from
+# the shared resolver, claudlobby/handoff_file.py (#2924). clauDNA 0.35 and
+# later save each session's own R/sessions/<native session ID>/handoff.md;
+# earlier versions and other providers save <bot_dir>/.claude/session.md.
+# `watch` names both for the bot's current session, its own first; `resume`
+# names the one a fresh session resumes from. It asks the CLI's private
+# _handoff-files door, since a script cannot import the package a managed
+# installation loads from its source. Without CLAUDLOBBY_CLI, or with no answer
+# in 5 s (said on stderr), it prints <bot_dir>/.claude/session.md alone: the
+# one file these readers read before #2924.
+handoff_files() {
+    local bot_dir="${2:?Usage: handoff_files watch|resume <bot_dir> [session_id]}"
+    local out="" line="" kept=""
+    case "${CLAUDLOBBY_CLI:-}" in
+        /*) out="$(with_timeout 5 "$CLAUDLOBBY_CLI" _handoff-files "$@" || true)" ;;
+    esac
+    while IFS= read -r line; do
+        case "$line" in
+            /*) kept="$kept$line"$'\n' ;;
+            '') ;;
+            *) kept=""; break ;;
+        esac
+    done <<EOF
+$out
+EOF
+    if [ -n "$kept" ]; then
+        printf '%s' "$kept"
+    else
+        [ -z "${CLAUDLOBBY_CLI:-}" ] || printf 'handoff_files: no answer from _handoff-files %s; reading %s alone\n' \
+            "$1" "$bot_dir/.claude/session.md" >&2
+        printf '%s\n' "$bot_dir/.claude/session.md"
+    fi
+}
+
 # --- Session-resume capability (#1163) ---------------------------------------
 # start-bot injects a resume keystroke on EVERY start of EVERY bot. The command
 # it sends is CONFIGURATION, not a literal in the boot path: a fleet running
@@ -4584,19 +4619,27 @@ session_command_status() {
     return "$rc"
 }
 
-# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks>
+# fresh_session_resume <mode> <bot_dir> <socket> <session> <log> <ticks> [<session_id>]
 # A fresh native session (`bot restart --fresh`, or any launch that mints a new
 # UUID) first restores the bot's saved handoff, so a fresh session means an
 # empty context, not a lost one (#2696). It sends SESSION_RESUME_COMMAND (empty
 # sends nothing) as its own submission before the authored startup, while the
 # handoff's last_updated, else its mtime, is under RESUME_MAX_AGE_S (86400) old.
+# The handoff is the one the session this fresh one replaced saved (#2924):
+# handoff_files names that session's own file when it has one, else
+# .claude/session.md, which is also the file read with no session ID.
 # Exact continuation already holds the conversation and sends nothing. Success
 # is submission evidence only, never a completed resume.
 fresh_session_resume() {
-    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6"
+    local mode="$1" bot_dir="$2" socket="$3" session="$4" log="$5" ticks="$6" sid="${7:-}"
     local handoff="$2/.claude/session.md" max_age="${RESUME_MAX_AGE_S:-86400}" epoch=""
     local command="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
-    [ "$mode" = fresh ] && [ -f "$handoff" ] || return 0
+    [ "$mode" = fresh ] || return 0
+    if [ -n "$sid" ]; then
+        handoff="$(handoff_files resume "$bot_dir" "$sid" || true)"
+        handoff="${handoff%%$'\n'*}"
+    fi
+    [ -f "$handoff" ] || return 0
     case "$max_age" in ''|*[!0-9]*) max_age=86400 ;; esac
     epoch="$(session_md_handoff_epoch "$handoff" || true)"
     case "$epoch" in ''|*[!0-9]*) return 0 ;; esac

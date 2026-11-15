@@ -627,8 +627,11 @@ place of the current one. The launch starts it with `--session-id`, as it retrie
 any launch that never reached SessionStart; the retired process cannot claim it,
 and its transcript stays on disk. The restart succeeds only once SessionStart
 has confirmed the new UUID. Every fresh UUID, this one included, first submits
-`SESSION_RESUME_COMMAND` when `.claude/session.md` is under `RESUME_MAX_AGE_S`
-(86400 s) old, then the authored startup prompt. A self restart into a fresh
+`SESSION_RESUME_COMMAND` when the handoff is under `RESUME_MAX_AGE_S` (86400 s)
+old, then the authored startup prompt. The handoff is the one the replaced
+session saved (the renewal records which session it replaced): its own
+`R/sessions/<native session ID>/handoff.md` when it has one, else
+`.claude/session.md`. A self restart into a fresh
 session also requires a handoff under 300 s old, when it is requested and again
 after the idle wait. If the unit restart fails after the new UUID is retained,
 the old session runs on and a restart that would continue it refuses; `bot

@@ -527,7 +527,8 @@ esac
 
 # A fresh native session first resumes from the saved handoff, ahead of the
 # authored startup below; exact continuation sends nothing here (#2696).
-fresh_session_resume "$_native_mode" "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT"
+fresh_session_resume "$_native_mode" "$BOT_DIR" "$TMUX_SOCKET" "$TMUX_SESSION" "$LOG" "$_PANE_READY_TICKS_BOOT" \
+    "$_native_session_id"
 
 # No sleep here, and no readiness assumption either. The bridge-readiness wait
 # above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn

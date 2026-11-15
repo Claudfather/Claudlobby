@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby import bot_operations, native_session
+from claudlobby import bot_operations, handoff_file, native_session
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
 from tests.test_bot_operations import _worker_cli
 
@@ -76,15 +76,24 @@ os._exit(0)  # the requesting CLI exits, which releases the child
 """
 
 
+@pytest.mark.parametrize("layout", ["session", "legacy"], ids=["session-owned", "per-directory"])
 @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "plain"])
-def test_a_self_restart_carries_its_session_choice_into_the_forked_child(tmp_path, fresh):
-    """The child that outlives the requesting pane makes the restart that was asked for."""
+def test_a_self_restart_carries_its_session_choice_into_the_forked_child(tmp_path, fresh, layout):
+    """The child that outlives the requesting pane makes the restart that was asked for,
+    from a handoff in either layout (#2924): clauDNA 0.35 saves the current session's
+    own file and leaves .claude/session.md as an earlier version wrote it."""
     bot_dir = tmp_path / "bot"
     (bot_dir / ".claude").mkdir(parents=True)
     (bot_dir / "logs").mkdir()
+    (bot_dir / "data").mkdir()
     now = datetime.now(timezone.utc)
-    (bot_dir / ".claude/session.md").write_text(
-        f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
+    handoff = bot_dir / ".claude/session.md"
+    if layout == "session":
+        _, sid = native_session.launch(bot_dir, "com.example.bot", tmp_path / "tmp", tmp_path / "account")
+        handoff.write_text("---\nlast_updated: 2020-01-01T00:00:00Z\n---\nan earlier version's context\n")
+        handoff = handoff_file.session_owned(bot_dir, sid)
+        handoff.parent.mkdir(parents=True)
+    handoff.write_text(f"---\nlast_updated: {now:%Y-%m-%dT%H:%M:%SZ}\n---\ncontext\n")
     process = subprocess.run([sys.executable, "-c", _REQUESTING_CLI, str(tmp_path), str(bot_dir),
                               "1" if fresh else "0"], capture_output=True, text=True, timeout=10)
     assert process.returncode == 0, process.stderr
@@ -119,6 +128,24 @@ def test_a_fresh_restart_of_a_bot_with_no_live_session_renews_its_receipt(
 
 
 _DOMAIN = "linux:00000000000000000000000000000000:pid:[4026531836]"
+
+
+def test_a_fresh_restart_records_the_session_it_replaced(cold, monkeypatch, capsys):  # noqa: F811
+    """#2924: the receipt names only the new identity, so the renewal records the one
+    it replaced, whose handoff the fresh session's resume gate reads."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    worker.native.session = "absent"  # as above: no live session to retire
+    bot_dir = worker.root / "runtime/bots/worker"
+    replaced = native_session.read(bot_dir)["session_id"]
+    fresh = worker.call("bot", "restart", "worker", "--fresh")["data"]
+    assert fresh["handoff"] == "fresh_session"
+    renewed = native_session.read(bot_dir)["session_id"]
+    assert renewed != replaced and native_session.predecessor(bot_dir, renewed) == replaced
+    own = handoff_file.session_owned(bot_dir, replaced)
+    assert handoff_file.resume(bot_dir, renewed) == handoff_file.legacy(bot_dir)
+    own.parent.mkdir(parents=True)
+    own.write_text("---\nlast_updated: 2026-01-01T00:00:00Z\n---\ncontext\n")
+    assert handoff_file.resume(bot_dir, renewed) == own
 
 
 def _provider_starts(monkeypatch, worker):

@@ -1773,6 +1773,9 @@ printf 'VALRB_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n' > "$RB_DIR/.env"
 mkdir -p "$RB_DIR/state"   # exists, but no bot.pid -> bridge_state no_bridge
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
+# A 2020 handoff keeps the fresh start clean. The gate reads .claude/session.md
+# here: no renewal recorded a replaced session, whose own
+# R/sessions/<ID>/handoff.md it would read instead (#2924).
 printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
     > "$RB_DIR/.claude/session.md"
 # CLAUDE_CONFIG_DIR= is load-bearing, not tidiness (#1358): HOME is already
