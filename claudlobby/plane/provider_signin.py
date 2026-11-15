@@ -33,6 +33,7 @@ from .owner_access import AccessDenied, AccessUnavailable
 SUPPORTED = {
     "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2": "2.1.325",  # Darwin arm64
     "7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67": "2.1.325",  # Linux arm64 glibc
+    "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf": "2.1.325",  # Linux x86_64 glibc
 }
 SECONDS = 300
 MAX_OUTPUT = 131072

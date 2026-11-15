@@ -75,6 +75,38 @@ def test_provider_signin_without_local_scope_never_starts(setup_authority):
         engine.signin_begin(reader, grant.generation, str(uuid4()))
 
 
+@pytest.mark.parametrize("digest,version,accepted", [
+    pytest.param("84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2", "2.1.325", True, id="darwin-arm64"),
+    pytest.param("7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67", "2.1.325", True, id="linux-arm64-glibc"),
+    pytest.param("0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf", "2.1.325", True, id="linux-x64-glibc"),
+    pytest.param("0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0c0", "2.1.325", False, id="changed-x64-bytes"),
+    pytest.param("a5e3bd36dce97db0429705aa5c3573eea346a77938a89104b9c28fce409b20cd", "2.1.325", False, id="unreviewed-linux-x64-musl"),
+    pytest.param("0" * 64, "2.1.325", False, id="unrecognized-same-version"),
+    pytest.param("0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf", "2.1.326", False, id="different-version"),
+])
+def test_provider_signin_scope_requires_reviewed_exact_artifact(digest, version, accepted):
+    from claudlobby.plane.provider_signin import scope_shape
+    # Public vendor artifact identities, independently inspected per platform;
+    # none of these executables is invoked by this scope-admission test.
+    scope = {"binary": "/synthetic/claude", "sha256": digest, "version": version,
+             "home": "/synthetic/home", "account_directory": "/synthetic/profile",
+             "environment": "/synthetic/root/.env"}
+    assert scope_shape(scope) is accepted
+
+
+def test_provider_signin_same_version_label_does_not_admit_unreviewed_bytes(tmp_path):
+    from claudlobby.plane.provider_signin import approved_scope, SigninRefused
+    root = tmp_path / "private"; root.mkdir(mode=0o700)
+    profile = tmp_path / "synthetic-profile"; profile.mkdir(mode=0o700)
+    program = tmp_path / "unreviewed-provider"
+    program.write_text("#!/bin/sh\n# Claude Code 2.1.325 linux-x64 glibc\nexit 99\n")
+    program.chmod(0o700)
+    # Missing .env is intentional: reject the actual software bytes before
+    # opening a credential destination, irrespective of the version label.
+    with pytest.raises(SigninRefused, match="unsupported_provider"):
+        approved_scope(program, root, str(profile))
+
+
 def test_provider_signin_parser_private_redraw_chunks_and_wrapped_token():
     from claudlobby.plane.provider_signin import TokenScreen
     screen = TokenScreen()
