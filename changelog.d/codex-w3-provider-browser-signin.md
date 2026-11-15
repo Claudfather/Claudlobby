@@ -31,3 +31,12 @@ approval, with terminal rendering kept separate. Hidden codes, approval wording,
 fresh-code retry and transaction checks remain intact. Owner or binding changes
 during code entry now produce a specific conflict. This adds no command,
 endpoint or authorization channel; a presenter does not authenticate its caller.
+
+### Added — Passive preinstall host inventory
+
+A standalone, package-owned POSIX `host-readiness-v1` payload reports bounded
+OS/account facts and prerequisite executable presence without executing those
+prerequisites. Python features, provider sign-in, Tailscale access and native
+user-manager readiness remain explicitly unknown. It lives under `preinstall/`
+because initial inventory cannot depend on installed runtime helpers; no SSH
+transport, setup action or bot-runtime wiring is added.
