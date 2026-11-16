@@ -1712,7 +1712,7 @@ class TestCoRequisiteCrossReference:
         that order for both surfaces."""
         detail = _doctor_rungs(tmp_path, monkeypatch, _fleet_yaml())["ignition"].detail
         assert detail.index("co-requisite") < detail.index("Cheapest to arm:")
-        assert detail.rstrip().endswith("host activate PLAN_ID --install-directory <native-user-unit-dir>"), detail
+        assert detail.rstrip().endswith("host update apply FULL_COMMIT_SHA"), detail
 
 
 class TestIgnitionGapIsTheRungsOwnPredicate:

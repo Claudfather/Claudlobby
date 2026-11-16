@@ -581,7 +581,7 @@ def test_bot_create_json_requires_complete_flags_and_only_authors_source(
     assert "newbie:" in (tmp_path / "fleet.yaml").read_text()
     assert not (tmp_path / "runtime" / "bots" / "newbie").exists()
     assert "telegram:" not in created["data"]["stanza"]
-    assert "config plan" in created["data"]["next_step"]
+    assert "host update apply FULL_COMMIT_SHA" in created["data"]["next_step"] and "config plan" not in created["data"]["next_step"]
     with pytest.raises(SystemExit) as retired:
         main(["new-bot"])
     assert retired.value.code == 2

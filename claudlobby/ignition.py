@@ -82,7 +82,7 @@ def ignition_doors(fleet: "FleetConfig", paths: "Paths") -> list["Door"]:
         Door(
             "briefing.slots",
             briefing_armed,
-            "bots.<bot>.briefing.slots in fleet.yaml, then config plan, config diff PLAN_ID, and claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>",
+            "bots.<bot>.briefing.slots in fleet.yaml, then claudlobby --root <data-root> host update apply FULL_COMMIT_SHA",
         )
     )
 

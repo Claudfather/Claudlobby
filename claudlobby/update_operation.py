@@ -20,6 +20,7 @@ from .activation_identity import (read_registry_identity_bindings, identity_bind
                                   preflight_registry_scan, scan_registry)
 from .config_install import prepare_publication, apply_publication
 from .config_plan import read_rendered
+from .config_units import UnitDriftError
 from .git_update import UpdateError, _git, _head, _sync, assert_conversion_retired
 from .installation import install_launcher, install_updater
 from .plane.db import db_file, connect_ro
@@ -226,8 +227,12 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
         if record["candidate_config"] != candidate or record["previous_config"] != previous:
             raise UpdateError("prepared effective configuration changed")
     else:
-        rows = freeze_service_intent(current, adapter, install_directory,
-                                     candidate_snapshot=candidate, rendered=rendered, baseline=baseline)
+        try:
+            rows = freeze_service_intent(current, adapter, install_directory,
+                                         candidate_snapshot=candidate, rendered=rendered, baseline=baseline)
+        except UnitDriftError as exc:
+            # Each drifted unit, and whether this candidate keeps it (#2945).
+            raise exc.against(candidate, platform.system()) from exc
         scope = consumer_scope(rows)
         record = store.prepare(rendered.revision, config_fingerprint=rendered.fingerprint,
                                scope=scope, request_id=request_id)
