@@ -46,6 +46,22 @@ SHIPPED_SCRIPTS = sorted(set(LIB_SCRIPTS) | set((REPO_DIR / "library").rglob("*.
                          | set((REPO_DIR / "harness").rglob("*.sh"))
                          | set((REPO_DIR / "claudlobby/preinstall").glob("*.sh")))
 
+PREINSTALL_SCRIPTS = sorted((REPO_DIR / "claudlobby/preinstall").glob("*.sh"))
+
+
+def _declared_posix_shell_scripts() -> list[Path]:
+    """Preinstall scripts with an explicit POSIX /bin/sh interpreter."""
+    result = []
+    for path in PREINSTALL_SCRIPTS:
+        try:
+            with path.open("rt", errors="ignore") as source:
+                first = source.readline().strip()
+        except OSError:
+            continue
+        if first == "#!/bin/sh":
+            result.append(path)
+    return result
+
 
 def _script_id(p: Path) -> str:
     # Repo-relative: bare names now collide across claudlobby/_runtime_scripts/ and library/.
@@ -58,7 +74,7 @@ def test_shipped_script_parses_under_system_bash(script):
     assert r.returncode == 0, f"/bin/bash -n {_script_id(script)} failed:\n{r.stderr}"
 
 
-@pytest.mark.parametrize("script", sorted((REPO_DIR / "claudlobby/preinstall").glob("*.sh")), ids=_script_id)
+@pytest.mark.parametrize("script", _declared_posix_shell_scripts(), ids=_script_id)
 def test_preinstall_script_parses_under_posix_shell(script):
     r = subprocess.run(["/bin/sh", "-n", str(script)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

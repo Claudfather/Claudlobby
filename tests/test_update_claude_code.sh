@@ -39,16 +39,21 @@ assert_eq "download-only (no bot restart)" "false" "$(grep -q 'spin-up-bot.sh' "
 echo ""
 echo "=== #635: targets the binary the FLEET launches, not this script's PATH ==="
 
+# Source the real resolver with a private HOME and an empty environment. The
+# default fleet PATH must keep system binaries ahead of user-installed copies;
+# managed-install prefixes are absent here, and no Claude/npm command is run.
+_T="$(mktemp -d)"; trap 'rm -rf "$_T"' EXIT
+mkdir -p "$_T/home"
+_fleet_path="$(env -i HOME="$_T/home" bash -c '. "$1"; fleet_launch_path' _ "$LIB_DIR/lib-common.sh")"
+_usr_pos="$(awk -v s="$_fleet_path" 'BEGIN{print index(s, "/usr/bin")}')"
+_npm_pos="$(awk -v s="$_fleet_path" 'BEGIN{print index(s, ".npm-global")}')"
+assert_eq "fleet PATH default orders /usr/bin before ~/.npm-global" "true" \
+    "$([ "$_usr_pos" -gt 0 ] && [ "$_npm_pos" -gt 0 ] && [ "$_usr_pos" -lt "$_npm_pos" ] && echo true || echo false)"
+
 # The fleet PATH default orders SYSTEM dirs before the user prefixes — the bug
 # was resolving via this script's npm-first PATH (~/.npm-global) while the fleet
 # runs /usr/bin/claude, so the update maintained a shadow the fleet never ran.
-# (Cheap structural guard; the behavioral ordering proof is (b) below.) The order
-# lives in lib-common's fleet_launch_path, which this job and start-bot.sh share.
-_fleet_line="$(grep -A2 '^fleet_launch_path()' "$LIB_DIR/lib-common.sh" | grep -m1 printf)"
-_usr_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, "/usr/bin")}')"
-_npm_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, ".npm-global")}')"
-assert_eq "fleet PATH default orders /usr/bin before ~/.npm-global" "true" \
-    "$([ "$_usr_pos" -gt 0 ] && [ "$_npm_pos" -gt 0 ] && [ "$_usr_pos" -lt "$_npm_pos" ] && echo true || echo false)"
+# The resolver is shared by this job and start-bot.sh.
 
 # --- hermetic behavioral harness --------------------------------------------
 # TWO layers of containment (review finding 1 — the old test had exactly one, so
@@ -62,7 +67,6 @@ assert_eq "fleet PATH default orders /usr/bin before ~/.npm-global" "true" \
 #      nothing and the run fails CLOSED (no real claude → no sudo → no real npm),
 #      instead of falling through to whatever host runs the suite.
 # HOME is the throwaway, so both layers are self-contained.
-_T="$(mktemp -d)"; trap 'rm -rf "$_T"' EXIT
 mkdir -p "$_T/root" "$_T/root2" "$_T/home/.local/bin" "$_T/empty" "$_T/sysbin" "$_T/userbin"
 cat > "$_T/home/.local/bin/npm" <<EOF
 #!/bin/bash
