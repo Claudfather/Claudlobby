@@ -56,4 +56,4 @@ gates and threads in the SSH API tests are now released and joined on failure.
 Under output backpressure the sign-in reply writer uses nonblocking steps, so a
 peer that stops reading cannot hold the carrier's I/O owner. A cancel or lost
 channel halts the reply write, starts the full drain and joins the writer; a
-half-written reply ends as `response_incomplete`, never as a successful `end`.
+truncated replies never produce a successful `end`; cancellation during delivery is incomplete and earlier carrier errors remain preserved.

@@ -67,15 +67,17 @@ owned component shutdown is attempted and the control reader is always stopped a
 joined; a cleanup failure never replaces an earlier carrier or operation failure
 (an incomplete response included), and surfaces only when there is none. A
 handler that returns is not by itself a response: a normal `end` needs the final
-body (`more_body` false) acknowledged, or an explicit caller `cancel`. A caller `cancel` stays `cancelled: true` even
-after the final body was acknowledged (completion and cancellation are independent;
-this never makes a dispatched mutation safe to replay). A response
-a canonical finite read abandoned, or a started response with no final body that
-nobody cancelled, refuses with `response_incomplete` and sends no `end`. A normal
-`end`, cancelled or not, exits 0. `end` alone releases nothing: the runtime lease
-is released only by the process exit that follows. A refusal sends `error` and exits 4. A cancel that arrives before any
-response headers ends with `status: 0, bytes_sent: 0, cancelled: true` and exits
-0; the operation never reaches a policy handler if the cancel arrived first.
+body (`more_body` false) acknowledged, or an explicit caller `cancel`. A caller
+`cancel` stays `cancelled: true` even after the final body was acknowledged
+(completion and cancellation are independent; this never makes a dispatched
+mutation safe to replay). A response a canonical finite read abandoned, or a
+started response with no final body that nobody cancelled, refuses with
+`response_incomplete` and sends no `end`. A normal `end`, cancelled or not,
+exits 0. `end` alone releases nothing: the runtime lease is released only by the
+process exit that follows. A refusal sends `error` and exits 4. A cancel that
+arrives before any response headers ends with `status: 0, bytes_sent: 0,
+cancelled: true` and exits 0; the operation never reaches a policy handler if
+the cancel arrived first.
 
 A channel that closes without a complete `end` and a process exit is unknown to
 the caller. Nothing is replayed: a mutation keeps its original request ID and is
