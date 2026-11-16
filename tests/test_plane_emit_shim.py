@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,24 @@ def test_a_step_that_fails_outside_a_check_is_named(tmp_path, step, where):
     call = next(n for n, text in enumerate(lines, 1) if text.startswith("start_daemon "))
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    _write_exec(stubs / step.split()[0], "#!/bin/sh\nexit 1\n")
+    if step == "sleep 0.05":
+        # Let the first fake-daemon launcher exit without publishing .ready.
+        # The first wait in start_daemon must then execute the failing sleep.
+        real_python = shutil.which("python3")
+        assert real_python is not None
+        python_stub = stubs / "python3"
+        _write_exec(
+            python_stub,
+            f"#!{sys.executable}\n"
+            "import os, sys\n"
+            f"real_python = {real_python!r}\n"
+            "if len(sys.argv) > 1 and os.path.basename(sys.argv[1]) == 'faked.py':\n"
+            "    raise SystemExit(0)\n"
+            "os.execv(real_python, [real_python, *sys.argv[1:]])\n",
+        )
+        _write_exec(stubs / "sleep", "#!/bin/sh\nexit 1\n")
+    else:
+        _write_exec(stubs / step.split()[0], "#!/bin/sh\nexit 1\n")
     env = constructed_env(PATH=f"{stubs}{os.pathsep}{os.environ['PATH']}")
     run = subprocess.run(
         ["bash", str(SUITE)],

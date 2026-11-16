@@ -140,3 +140,8 @@ is not completed onboarding.
 The POSIX parse check now targets only preinstall scripts declaring `#!/bin/sh`,
 while all shipped scripts retain the system Bash parse check. The Claude update
 test checks `fleet_launch_path` output in a private HOME with an empty environment.
+
+### Fixed — Deterministic shell ERR-trap test injection
+
+The `start_daemon` failure test keeps its fake daemon from becoming ready, so
+the injected first wait failure consistently exercises the intended caller.
