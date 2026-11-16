@@ -74,11 +74,27 @@ def _plain(path: Path) -> Path:
     return path
 
 
+def _installation_policy():
+    # The copied updater must also work without mutable src/env or a package.
+    if __package__:
+        return importlib.import_module(__package__ + ".installation")
+    return types.SimpleNamespace(**runpy.run_path(
+        str(Path(__file__).absolute().parent / "claudlobby"), run_name="_stable_installation_policy"))
+
+
 def _git(installation, *args, check=True):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    policy = _installation_policy()
     try:
-        result = subprocess.run(["git", "--no-optional-locks", "-c", "core.hooksPath=/dev/null",
-                                 "-C", str(installation.source), *args], env=env,
+        profile = policy.managed_browser_runtime(installation)
+    except policy.InstallationError as exc:
+        raise UpdateError(str(exc)) from None
+    command = ["git", "--no-optional-locks", "-c", "core.hooksPath=/dev/null"]
+    if profile is not None:
+        env = policy._managed_environment(profile)
+        command = [str(profile.git), *policy._managed_git_flags()]
+    try:
+        result = subprocess.run([*command, "-C", str(installation.source), *args], env=env,
                                 capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError("Git observation or cutover did not complete; inspect actual HEAD") from exc
@@ -124,6 +140,12 @@ def _fetch_prepared_target(installation, target):
         if interpreter.is_relative_to(installation.directory) or interpreter.is_relative_to(installation.data_root):
             raise ValueError()
         remote, ref = receipt["remote"], receipt["ref"]
+        profile = _installation_policy().managed_browser_runtime(installation)
+        if profile is not None and (interpreter != profile.python
+                or receipt["interpreter_sha256"] != _digest(profile.python.read_bytes())
+                or remote != "https://github.com/Claudfather/Claudlobby.git"
+                or re.fullmatch(r"[0-9a-f]{40}", ref) is None):
+            raise ValueError()
         if (not remote or not remote.isprintable() or remote != remote.strip() or remote.startswith("-")
                 or not ref or not ref.isprintable() or ref.startswith("-")
                 or any(char.isspace() for char in ref) or any(char in ref for char in ":*")):
@@ -181,10 +203,12 @@ def validate_dependency_lock(content: bytes) -> None:
         raise UpdateError("dependency lock is empty")
 
 
-def run_dependency_command(arguments) -> bytes:
+def run_dependency_command(arguments, *, _managed_environment=None) -> bytes:
     """Execute the fixed dependency tools without ambient pip/Python selectors."""
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("PIP_", "PYTHON"))}
+    if _managed_environment is not None:
+        environment = dict(_managed_environment)
     environment["PIP_CONFIG_FILE"] = os.devnull
     try:
         result = subprocess.run([str(arg) for arg in arguments], env=environment,
@@ -585,7 +609,15 @@ class UpdateStore:
                 raise UpdateError("frozen dependency input changed")
 
     def _dependency_run(self, arguments):
-        return run_dependency_command(arguments)
+        policy = _installation_policy()
+        environment = policy.managed_browser_environment(self.installation)
+        if environment is None:
+            return run_dependency_command(arguments)
+        arguments = [str(value) for value in arguments]
+        if "pip" in arguments:
+            position = arguments.index("pip") + 1
+            arguments[position:position] = ["--cert", environment["SSL_CERT_FILE"]]
+        return run_dependency_command(arguments, _managed_environment=environment)
 
     def _dependency_inventory(self, directory):
         directory = _plain(directory)
@@ -600,6 +632,9 @@ class UpdateStore:
 
     def _dependency_binding(self, record, interpreter):
         interpreter = _plain(Path(interpreter))
+        profile = _installation_policy().managed_browser_runtime(self.installation)
+        if profile is not None and interpreter != profile.python:
+            raise UpdateError("dependency rebuild requires the exact managed Darwin Python")
         if (not interpreter.is_file() or not os.access(interpreter, os.X_OK)
                 or interpreter.is_relative_to(self.installation.source)
                 or interpreter.is_relative_to(self.installation.environment)):
@@ -851,6 +886,9 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
     python = python if python is not None else store.installation.environment / "bin/python"
     if not python.is_file() or not os.access(python, os.X_OK):
         raise UpdateError("application stage interpreter is unavailable")
+    profile = _installation_policy().managed_browser_runtime(store.installation)
+    if profile is not None and python.resolve() != profile.python:
+        raise UpdateError("application stage requires the exact managed Darwin Python")
     inherited = [store._fd]
     args = [str(store.installation.directory), stage, str(store._fd), str(os.getpid()), record["request_id"] if record is not None else "-"]
     if runtime_fd is not None:
@@ -867,6 +905,13 @@ def _application_stage(store, stage, *, source=None, python=None, runtime_fd=Non
         args.append('--convert-sealed')
     clean = {key: value for key, value in os.environ.items()
              if not key.startswith(("PYTHON", "GIT_", "BASH_FUNC_")) and key not in {"BASH_ENV", "ENV"}}
+    managed = _installation_policy().managed_browser_environment(store.installation)
+    if managed is not None:
+        clean = {key: value for key, value in clean.items()
+                 if not key.startswith(("DYLD_", "LD_")) and key not in {
+                     "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                     "https_proxy", "http_proxy", "all_proxy"}}
+        clean.update(managed)
     clean.update(CLAUDLOBBY_INSTALLATION=str(store.installation.directory),
                  CLAUDLOBBY_ROOT=str(store.root), PYTHONDONTWRITEBYTECODE="1")
     try:
@@ -956,6 +1001,9 @@ def prepare_application_operation(store, *, install_directory, interpreter):
     if (record.get("initialization_scope") is not None
             and record["initialization_scope"]["directory"] != str(install_directory)):
         raise UpdateError("native directory differs from original initialization scope")
+    profile = _installation_policy().managed_browser_runtime(store.installation)
+    if profile is not None and Path(interpreter) != profile.python:
+        raise UpdateError("application preparation requires the exact managed Darwin Python")
     record["native_install_directory"] = str(_plain(Path(install_directory)))
     record["host_interpreter"] = str(_plain(Path(interpreter)))
     store.save(record)

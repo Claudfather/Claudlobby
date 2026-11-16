@@ -98,6 +98,12 @@ def build_supervision_spec(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     label = f"{fleet.service_prefix}.{bot.bot_id}"
     log_dir = paths.assert_writable(bot_dir / "logs")
     environment = native_environment(paths)
+    launchd_extra = {"PATH": _LAUNCHD_PATH, "HOME": str(Path.home())}
+    if "PATH" in environment:
+        # Only canonical managed admission adds a tool PATH to native context.
+        # profile.bin has no provider executable; retain its historical order.
+        environment["PATH"] = environment["PATH"].split(":", 1)[0] + ":" + _LAUNCHD_PATH
+        launchd_extra = {"HOME": environment["HOME"]}
     argv = wrap_unit_argv(environment, unit=label, phase="bots", mode="exec",
                           argv=(str(paths.package.runtime_native / "start-bot.sh"), str(bot_dir)))
     return SupervisionSpec(
@@ -111,10 +117,7 @@ def build_supervision_spec(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
             **environment,
             "TMUX_TMPDIR": _TMUX_TMPDIR,
         },
-        launchd_environment_extra={
-            "PATH": _LAUNCHD_PATH,
-            "HOME": str(Path.home()),
-        },
+        launchd_environment_extra=launchd_extra,
         stop_command=f"tmux -L {label} kill-server 2>/dev/null || true",
         stop_post_command=f"rm -f {bot_dir}/.tmux-env",
         stdout_log=log_dir / f"{bot.bot_id}.out.log",

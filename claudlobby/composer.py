@@ -1613,8 +1613,12 @@ def _scheduler_tool_path(paths: Paths | None = None) -> str:
     The selected release console directory comes first; ambient executables
     cannot override its CLI. Other tool directories preserve their ordering.
     """
-    home = Path.home()
     installation = paths.package.installation if paths is not None else None
+    managed = None
+    if installation is not None:
+        from .installation import managed_browser_environment
+        managed = managed_browser_environment(installation)
+    home = Path(managed["HOME"]) if managed is not None else Path.home()
     cli = selected_cli(installation=installation) if installation is not None else selected_cli()
     segments = [
         str(cli.parent),
@@ -1629,6 +1633,9 @@ def _scheduler_tool_path(paths: Paths | None = None) -> str:
         segments.append(
             "/opt/homebrew/bin" if Path("/opt/homebrew").is_dir() else "/usr/local/bin"
         )
+    if managed is not None:
+        # This directory contains only Python/Git/tmux/jq, never claude.
+        segments.insert(1, managed["PATH"].split(":", 1)[0])
     return ":".join(segments)
 
 
@@ -4437,6 +4444,7 @@ def _write_job_failed_template(timers_dir: Path, prefix: str, fleet_name: str, p
     no [Install] section: only OnFailure= starts it.
     """
     environment = native_environment(paths)
+    environment.pop("PATH", None)
     argv = [environment["CLAUDLOBBY_CLI"], "--root", environment["CLAUDLOBBY_ROOT"],
             "--fleet", fleet_name, "fleet", "notify", "--level", "alert",
             "--event", JOB_FAILED_EVENT]
@@ -4525,6 +4533,7 @@ def _write_service_units(
         raise source_findings_error(_svc_id, _svc_findings)
 
     environment = native_environment(paths)
+    environment.pop("PATH", None)
     command = None
     resident_cli = {
         "plane-daemon": ("plane-daemon.sh", "serve", (("PLANE_SOCKET", "--socket"),
@@ -4699,6 +4708,7 @@ def _write_timer_units(
 
     scope = fleet_name if fleet_name is not None else "host"
     environment = native_environment(paths)
+    environment.pop("PATH", None)
     script_expanded = script
     for key, value in environment.items():
         script_expanded = script_expanded.replace("${" + key + "}", value)

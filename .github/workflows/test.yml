@@ -26,12 +26,14 @@ env:
 # ran the suite they collected, each test once (tests/ci_shards.py). The harness
 # runs in a job of its own on each platform. Linux with Python 3.11 runs on push
 # to main only. Every lane excludes quarantine; tests/test_ci_lanes.py pins them.
+# Ubuntu qualification stays on 24.04 until newer images pass the native process
+# fixtures. Keep check names and artifact identifiers stable for existing gates.
 jobs:
   pytest:
     # Push to main only: a pull request runs the Linux suite on 3.10 and runs
     # 3.11 on macOS (#1945).
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,7 +99,7 @@ jobs:
   # in. A shard that lists or runs nothing fails, and the gate below fails with it.
   supported-ubuntu-shard:
     name: supported (ubuntu-latest, py3.10) shard ${{ matrix.group }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A shard runs about a quarter of the suite (around ten minutes): a hung
     # one fails here instead of holding the gate below for an hour.
     timeout-minutes: 30
@@ -217,7 +219,7 @@ jobs:
     name: supported (ubuntu-latest, py3.10)
     needs: [supported-ubuntu-shard]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Require every shard to have passed
@@ -343,7 +345,7 @@ jobs:
     name: supported (macos-latest, py3.11)
     needs: [supported-macos-shard]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Require every shard to have passed
@@ -387,7 +389,7 @@ jobs:
           retention-days: 30
 
   harness:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

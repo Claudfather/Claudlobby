@@ -9,7 +9,7 @@ explicit local actor/fleet approval separate from read pairing.
 """
 
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import getpass
 import io
@@ -19,11 +19,16 @@ from pathlib import Path
 import sqlite3
 import sys
 import warnings
+from types import SimpleNamespace
 
 from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import ACTION_DENIALS, AccessDenied, AccessUnavailable, OwnerAccess
+from ..plane.owner_consent import (WorkspaceConsentChanged, WorkspaceConsentDeclined,
+                                   apply_workspace_binding, preview_workspace_binding,
+                                   require_workspace_expectation)
 from ..plane.owner_source import SourceDenied, SourceUnavailable
 from ..plane.owner_observation import owner_pairing_state, source_refusal
+from .owner_terminal_consent import TerminalWorkspacePresenter, approve as _approve
 
 _GENERATED = ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE", "FLEET_ROOT",
               "FLEET_NAME", "CLAUDLOBBY_FLEET", "CLAUDLOBBY_TIMER_CONTEXT")
@@ -33,6 +38,19 @@ _ACTION_LABELS = {
     "feedback": ("task feedback", "task-feedback", "ALLOW-FEEDBACK", "REVOKE-FEEDBACK"),
     "permission": ("permission decisions", "permission-decision", "ALLOW-PERMISSIONS", "REVOKE-PERMISSIONS"),
 }
+
+
+def _say(terminal, text):
+    if terminal is not None:
+        terminal.write(text)
+
+
+def _consent(terminal, word, consent, action, scope, *, expires_at=None):
+    if consent is None:
+        _approve(terminal, word)
+    else:
+        scope = {key: asdict(value) if is_dataclass(value) else value for key, value in scope.items()}
+        consent.approve(action, scope, expires_at=expires_at)
 
 
 @contextmanager
@@ -62,19 +80,6 @@ def _terminal(root):
         raise CommandFailure("conflict", "owner confirmation did not complete; inspect owner status") from exc
 
 
-def _approve(terminal, word):
-    try:
-        terminal.write(f"Type {word} to continue: ")
-        terminal.flush()
-        answer = terminal.readline(32).strip()
-    except OSError as exc:
-        # Preserve the confirmation failure before the grant storage handler
-        # sees it; a hung-up terminal is not an authority persistence outage.
-        raise CommandFailure("conflict", "owner confirmation did not complete; inspect owner status") from exc
-    if answer != word:
-        raise CommandFailure("conflict", "owner change cancelled")
-
-
 def _challenge(terminal, *, label="browser pairing"):
     # getpass must never fall back to echoing a challenge into redirected input.
     with warnings.catch_warnings():
@@ -87,9 +92,9 @@ def _challenge(terminal, *, label="browser pairing"):
 
 def _describe(terminal, grant):
     # JSON escapes terminal control characters, bidi controls and non-ASCII.
-    terminal.write("Host: " + json.dumps(grant.host_uid) + "\n")
-    terminal.write("Principal: " + json.dumps(asdict(grant.principal), ensure_ascii=True) + "\n")
-    terminal.write(f"Owner revision: {grant.revision}\n")
+    _say(terminal, "Host: " + json.dumps(grant.host_uid) + "\n")
+    _say(terminal, "Principal: " + json.dumps(asdict(grant.principal), ensure_ascii=True) + "\n")
+    _say(terminal, f"Owner revision: {grant.revision}\n")
 
 
 def _active_owner(store):
@@ -138,14 +143,14 @@ def _grant_preview(paths, store, fleet, actor_alias, release):
 
 
 def _describe_binding(terminal, fleet_uid, actor_alias, actor_uid):
-    terminal.write("Fleet UID: " + json.dumps(fleet_uid) + "\n")
-    terminal.write("Actor: " + json.dumps(actor_alias, ensure_ascii=True) + "\n")
-    terminal.write("Actor UID: " + json.dumps(actor_uid) + "\n")
+    _say(terminal, "Fleet UID: " + json.dumps(fleet_uid) + "\n")
+    _say(terminal, "Actor: " + json.dumps(actor_alias, ensure_ascii=True) + "\n")
+    _say(terminal, "Actor UID: " + json.dumps(actor_uid) + "\n")
 
 
 def _describe_action(terminal, preview):
     _describe(terminal, preview["owner"])
-    terminal.write("Fleet: " + json.dumps(preview["fleet"]) + "\n")
+    _say(terminal, "Fleet: " + json.dumps(preview["fleet"]) + "\n")
     _describe_binding(terminal, preview["bindings"]["fleet_uid"], preview["actor_alias"], preview["actor_uid"])
 
 
@@ -154,7 +159,7 @@ def _unchanged(before, after):
         raise CommandFailure("conflict", "displayed owner or actor identities changed; inspect and retry")
 
 
-def _prepare_action_approval(args, paths, store, terminal):
+def _prepare_action_approval(args, paths, store, terminal, *, consent=None):
     from ..operation_context import _valid_human_alias, resolve_task_mutation_context
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
@@ -166,9 +171,9 @@ def _prepare_action_approval(args, paths, store, terminal):
         if not args.register_actor:
             raise CommandFailure("conflict", "human actor is not registered; explicitly use --register-actor")
         _describe_action(terminal, preview)
-        terminal.write("Register this local actor's first contact. Its UID is allocated only after approval.\n"
+        _say(terminal, "Register this local actor's first contact. Its UID is allocated only after approval.\n"
                        "Registration alone does not grant owner actions.\n")
-        _approve(terminal, "REGISTER")
+        _consent(terminal, "REGISTER", consent, "register_actor", preview)
         with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
                                 expected_release=preview.get("release")) as release:
             _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
@@ -194,23 +199,94 @@ def _approved_action_context(args, paths, store, preview, release):
     return ctx
 
 
-def _allow_actions(args, paths, store, terminal):
+
+def _setup_messages(paths, store, terminal, fleet, *, consent=None):
+    """The existing messages-only local consent, not future/browser authority."""
+    if consent is not None:
+        from .owner_stdio import StdioRefused
+        try:
+            alias = consent.approve("actor_alias", {"fleet": fleet,
+                "effects": ["select a local human alias; no grant or message"]})
+        except StdioRefused as exc:
+            if exc.code == "declined":
+                return {"state": "skipped"}
+            raise
+        args = SimpleNamespace(target_fleet=fleet, actor=alias, register_actor=True, capabilities=("messages",))
+        try:
+            with _grant_errors("actions"):
+                _allow_actions(args, paths, store, None, consent=consent)
+        except StdioRefused as exc:
+            if exc.code == "declined":
+                return {"state": "skipped"}
+            raise
+        return {"state": "allowed"}
+    terminal.write("Optional: allow ordinary messages to this team. Enter the name you want to use for messages (for example human:me), or press Enter / type skip to finish without a new approval: ")
+    terminal.flush()
+    try:
+        answer = terminal.readline(258)
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    def skipped():
+        terminal.write("No new message approval was completed. Existing approvals were not revoked; actor registration alone grants no messages.\n")
+        return {"state": "skipped"}
+
+    if not answer.endswith("\n") or answer.strip() in ("", "skip"):
+        return skipped()
+    args = SimpleNamespace(target_fleet=fleet, actor=answer.strip(), register_actor=True,
+                           capabilities=("messages",))
+
+    def confirmation(size=-1):
+        try:
+            return terminal.readline(size)
+        except (EOFError, KeyboardInterrupt):
+            raise CommandFailure("conflict", "owner change cancelled") from None
+
+    proxy = SimpleNamespace(write=terminal.write, flush=terminal.flush, readline=confirmation)
+    try:
+        with _grant_errors("actions"):
+            _allow_actions(args, paths, store, proxy)
+    except CommandFailure as exc:
+        # Only a declined/unfinished confirmation is a skip. Storage failures or
+        # interrupted effects remain errors/unknown and are never retried here.
+        if exc.error.code == "conflict" and str(exc) == "owner change cancelled":
+            return skipped()
+        raise
+    terminal.write("Messages approved for this team. Select it in your browser and choose Check action access. Nothing was sent.\n")
+    return {"state": "allowed"}
+
+
+def _post_setup_handoff(paths, result):
+    from ..installation import setup_handoff_argv, InstallationError
+    try:
+        argv = setup_handoff_argv(paths.package.installation, result.data)
+        for line in result.lines:
+            print(line, flush=True)
+        os.execve(argv[0], argv, dict(os.environ))
+    except (OSError, InstallationError):
+        raise CommandFailure("unavailable", "automatic setup completion is unavailable; keep the original operation", data=result.data,
+            hint="Inspect host update status, continue only that original operation if needed, then reopen host owner setup after healthy DONE; do not launch again") from None
+
+
+def _allow_actions(args, paths, store, terminal, *, consent=None):
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
     if len(set(args.capabilities)) != len(args.capabilities):
         raise CommandFailure("invalid_argument", "--capabilities must name each selected action only once")
-    preview = _prepare_action_approval(args, paths, store, terminal)
+    preview = _prepare_action_approval(args, paths, store, terminal, consent=consent)
     _describe_action(terminal, preview)
-    terminal.write("Approve only these capabilities for this actor and fleet:\n")
+    _say(terminal, "Approve only these capabilities for this actor and fleet:\n")
     descriptions = {"messages": "ordinary messages to this fleet",
                     "nudges": "selected-task nudges that ask this fleet's manager to act",
                     "feedback": "task-linked comments to this fleet's configured lead"}
     for capability in args.capabilities:
-        terminal.write(f"- {capability}: {descriptions[capability]}\n")
-    terminal.write("These capabilities may be used through direct owner access or its explicitly bound connected workspace.\n"
+        _say(terminal, f"- {capability}: {descriptions[capability]}\n")
+    _say(terminal, "These capabilities may be used through direct owner access or its explicitly bound connected workspace.\n"
                    "Permission decisions require separate local approval through allow-permissions.\n"
                    "The selected approvals are saved together; matching approvals and prepared requests stay valid.\n")
-    _approve(terminal, "ALLOW-ACTIONS")
+    if consent is not None and args.capabilities != ("messages",):
+        raise CommandFailure("invalid_argument", "guided consent supports ordinary messages only")
+    _consent(terminal, "ALLOW-ACTIONS", consent, "allow_messages", preview)
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
                             expected_release=preview.get("release")) as release:
         ctx = _approved_action_context(args, paths, store, preview, release)
@@ -315,7 +391,7 @@ def _grant_errors(action):
                              "active configuration and Plane storage") from exc
 
 
-def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
+def _allow_setup(args, paths, store, terminal, *, expected_retained=None, consent=None):
     from ..plane.owner_setup import OwnerSetup
     from ..plane.owner_source import fresh_owner_setup
     from ..plane.owner_setup import managed_setup
@@ -337,15 +413,23 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     grant = setup.candidate(_active_owner(store).principal, template=args.template,
         fleet=args.target_fleet, repository=args.repository, install_directory=str(directory),
         project_directory=getattr(args, "project_directory", None),
-        account_directory=account, managed_owner=managed)
-    terminal.write("Approve one first-team setup from the bound connected workspace.\n"
+        account_directory=account, managed_owner=managed, provider_signin=getattr(args,"provider_signin",None))
+    _say(terminal, "Approve one first-team setup from the bound connected workspace.\n"
         "The browser may author its goal, inspect a frozen configuration and explicitly launch it.\n"
         "This can enroll/start native services and consume provider usage. No GitHub access is granted.\n")
     if grant.template == "local-project":
-        terminal.write("Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
-        terminal.write("Claude profile directory: " + json.dumps(grant.account_directory or str(Path.home()/".claude"), ensure_ascii=True)
+        _say(terminal, "Approve read/write access to this exact local project: " + json.dumps(grant.project_directory, ensure_ascii=True) + "\n")
+        _say(terminal, "Claude profile directory: " + json.dumps(grant.account_directory or str(Path.home()/".claude"), ensure_ascii=True)
                        + ". No credentials are read or copied by this approval.\n")
+    if grant.provider_signin is not None:
+        _say(terminal, "Separately approve one Claude subscription sign-in through the bound browser. The official CLI may mint a one-year token; it stays in this host data root only. Cancellation may leave an uncertain provider effect. No model, native start or message approval is included.\n")
+        _say(terminal, json.dumps(grant.provider_signin,ensure_ascii=True)+"\n")
+        _consent(terminal,"ALLOW-CLAUDE-SIGNIN", consent, "provider_signin",
+                 {"grant": asdict(grant), "effects": ["one subscription sign-in; no model, service start or messages"]},
+                 expires_at=grant.expires_at)
     display = asdict(grant)
+    if grant.provider_signin is None:
+        display.pop("provider_signin")
     if grant.project_directory is None:
         display.pop("project_directory")
     if grant.account_directory is None:
@@ -353,10 +437,12 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     if grant.managed_owner is None:
         display.pop("managed_owner")
     else:
-        terminal.write("Also approve the managed owner connection service in this SAME Preview/Launch. "
+        _say(terminal, "Also approve the managed owner connection service in this SAME Preview/Launch. "
                        "It persists until explicitly stopped; pairing, messages and private ingress remain separate approvals.\n")
-    terminal.write(json.dumps(display, ensure_ascii=True) + "\n")
-    _approve(terminal, "ALLOW-SETUP")
+    _say(terminal, json.dumps(display, ensure_ascii=True) + "\n")
+    _consent(terminal, "ALLOW-SETUP", consent, "allow_setup", {"grant": display,
+        "effects": ["one browser Preview/Launch, local project read/write, native service enrollment/start, provider usage",
+                    "no messages or GitHub access"]}, expires_at=grant.expires_at)
     fresh_owner_setup(paths.root)
     managed_setup(paths.root, grant)
     if managed is not None:
@@ -369,48 +455,85 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None):
     return CommandOutput({"state": "allowed"}, lines=("One first-team setup approved.",))
 
 
-def _initialize_connected(store, terminal, *, prepare_workspace=False):
+def _initialize_connected(store, terminal, *, prepare_workspace=False, consent=None):
     owner = _active_owner(store)
     _describe(terminal, owner)
     if prepare_workspace:
-        terminal.write("Prepare optional local workspace authority and connected read-session storage "
+        _say(terminal, "Prepare optional local workspace authority and connected read-session storage "
                        "together in this authority database.\n"
                        "Both local confirmations are required before storage changes. "
                        "No binding, session or action grant is issued.\n")
-        _approve(terminal, "INITIALIZE-WORKSPACE")
+        _consent(terminal, "INITIALIZE-WORKSPACE", consent, "initialize_workspace",
+                 {"owner": asdict(owner), "effects": ["prepare workspace storage; no binding or grant"]})
     else:
-        terminal.write("Prepare optional connected read-session storage in this authority database.\n"
+        _say(terminal, "Prepare optional connected read-session storage in this authority database.\n"
                        "Workspace authority must already be initialized. No binding, session or action grant is issued.\n")
-    _approve(terminal, "INITIALIZE-CONNECTED")
+    _consent(terminal, "INITIALIZE-CONNECTED", consent, "initialize_connected",
+             {"owner": asdict(owner), "effects": ["prepare connected storage; no session or grant"]})
     store.connected().initialize(expected_owner=owner, prepare_workspace=prepare_workspace)
     line = ("Local workspace authority and connected read-session storage initialized."
             if prepare_workspace else "Connected read-session storage initialized.")
     return CommandOutput({"state": "initialized"}, lines=(line,))
 
 
-def _confirm_workspace(store, terminal, owner):
+def _confirm_workspace(store, terminal, owner, *, recover=False, consent=None):
     workspace = store.workspace()
-    proposal = workspace.inspect(_challenge(terminal, label="workspace approval"))
-    if proposal.owner != owner:
-        raise CommandFailure("conflict", "owner changed; inspect and retry")
-    a = proposal.attestation
-    terminal.write("Previous workspace binding: " + json.dumps({
-        "state": proposal.previous_state,
-        "binding": asdict(proposal.previous_binding) if proposal.previous_binding else None},
-        ensure_ascii=True) + "\n")
-    terminal.write("Verified proposal metadata (compare with your intended workspace):\n")
-    terminal.write(json.dumps({"issuer": a.issuer, "app_user_id": a.subject,
-        "workspace_id": a.workspace_id, "operational_origin": a.operational_origin},
-        ensure_ascii=True) + "\n")
-    terminal.write("Expires: " + datetime.fromtimestamp(proposal.expires_at, timezone.utc).isoformat() + "\n")
-    terminal.write("This binds one workspace locally; it issues no session or fleet action grant.\n")
-    _approve(terminal, "BIND-WORKSPACE")
-    binding = workspace.confirm(expected_proposal=proposal)
-    return CommandOutput({"state": "active", "binding": asdict(binding)},
-                         lines=("Local workspace bound. No connected session was issued.",))
+    original_binding = workspace.status()
+    attempted_codes = set()
+    recoverable = {
+        "invalid_credential": "The workspace approval code has an invalid format.",
+        "workspace_request_expired": "The workspace approval code is not recognized or has expired.",
+        "workspace_proposal_missing": "The workspace approval proposal has not been staged.",
+        "workspace_code_reused": "A retry requires a NEW browser workspace approval code.",
+    }
+    changed = {
+        "owner": "workspace approval owner changed; inspect host owner status",
+        "binding": "workspace binding changed; inspect host owner workspace-status",
+    }
+    presenter = consent if consent is not None else TerminalWorkspacePresenter(terminal)
+    while True:
+        try:
+            require_workspace_expectation(store, expected_owner=owner, expected_binding=original_binding)
+        except WorkspaceConsentChanged as exc:
+            raise CommandFailure("conflict", changed[exc.subject]) from None
+        try:
+            code = consent.code("workspace") if consent is not None else _challenge(terminal, label="workspace approval")
+            if code in attempted_codes:
+                raise AccessDenied("workspace_code_reused")
+            attempted_codes.add(code)
+            proposal = preview_workspace_binding(store, code, expected_owner=owner,
+                                                 expected_binding=original_binding)
+            binding = apply_workspace_binding(store, proposal, presenter=presenter)
+            return CommandOutput({"state": "active", "binding": asdict(binding)},
+                                 lines=("Local workspace bound. No connected session was issued.",))
+        except (EOFError, WorkspaceConsentDeclined):
+            raise CommandFailure("conflict", "workspace approval cancelled") from None
+        except WorkspaceConsentChanged as exc:
+            raise CommandFailure("conflict", changed[exc.subject]) from None
+        except AccessDenied as exc:
+            message = recoverable.get(exc.code)
+            if message is None:
+                raise CommandFailure("conflict", "workspace request or binding changed; inspect host owner "
+                                     "workspace-status; no owner pairing was replaced") from exc
+            guidance = (message + " Inspect host owner workspace-status. Obtain a fresh verified proposal "
+                        "in this browser: forget the old approval code if still shown, then choose Prepare local approval. "
+                        "The existing owner pairing remains; no workspace binding was approved by this attempt.")
+            if not recover:
+                raise CommandFailure("conflict", guidance) from exc
+            if consent is not None:
+                consent.state("workspace_refused", code=exc.code)
+                continue
+            _say(terminal, guidance + "\nType RETRY to paste a NEW browser code, or CANCEL to stop: ")
+            terminal.flush()
+            try:
+                answer = terminal.readline(32).strip()
+            except (EOFError, OSError):
+                answer = ""
+            if answer != "RETRY":
+                raise CommandFailure("conflict", "workspace approval cancelled") from None
 
 
-def _initialize_first_owner(paths, terminal):
+def _initialize_first_owner(paths, terminal, *, consent=None):
     from ..plane.owner_setup import managed_setup
     from ..plane.owner_source import fresh_owner_setup
     try:
@@ -418,9 +541,12 @@ def _initialize_first_owner(paths, terminal):
     except AccessDenied as exc:
         raise CommandFailure("release_mismatch", "fresh owner preparation requires this data root's managed Git CLI") from exc
     fresh_owner_setup(paths.root, allow_absent=True)
-    terminal.write("Prepare a new host identity and owner authority before its first team.\n"
+    _say(terminal, "Prepare a new host identity and owner authority before its first team.\n"
                    "This grants no activation, private reads or fleet actions.\n")
-    _approve(terminal, "INITIALIZE")
+    _consent(terminal, "INITIALIZE", consent, "initialize_owner", {
+        "installation": str(package.installation.directory), "data_root": str(paths.root),
+        "source_revision": package.source_revision,
+        "effects": ["create host identity and owner authority; no activation, reads or fleet actions"]})
     if managed_setup(paths.root) != package:
         raise CommandFailure("conflict", "managed installation changed during approval")
     fresh_owner_setup(paths.root, allow_absent=True)
@@ -430,15 +556,18 @@ def _initialize_first_owner(paths, terminal):
     return CommandOutput({"state": "initialized"}, lines=("First-team owner authority is initialized.",))
 
 
-def _confirm_owner(paths, store, terminal):
+def _confirm_owner(paths, store, terminal, *, consent=None):
     from ..plane.ids import read_host_uid
-    challenge = store.inspect_pairing(_challenge(terminal))
-    terminal.write("Compare this principal with the request shown in your browser:\n")
-    terminal.write(json.dumps(asdict(challenge.principal), ensure_ascii=True) + "\n")
-    terminal.write("Host: " + json.dumps(read_host_uid(paths.root / "state")) + "\n")
-    terminal.write("Expires: " + datetime.fromtimestamp(challenge.expires_at, timezone.utc).isoformat() + "\n")
-    terminal.write("Approval permits private reads across this host's fleets.\n")
-    _approve(terminal, "PAIR")
+    challenge = store.inspect_pairing(consent.code("pairing") if consent is not None else _challenge(terminal))
+    _say(terminal, "Compare this principal with the request shown in your browser:\n")
+    _say(terminal, json.dumps(asdict(challenge.principal), ensure_ascii=True) + "\n")
+    _say(terminal, "Host: " + json.dumps(read_host_uid(paths.root / "state")) + "\n")
+    _say(terminal, "Expires: " + datetime.fromtimestamp(challenge.expires_at, timezone.utc).isoformat() + "\n")
+    _say(terminal, "Approval permits private reads across this host's fleets.\n")
+    _consent(terminal, "PAIR", consent, "pair_owner", {"principal": asdict(challenge.principal),
+        "host_uid": read_host_uid(paths.root / "state"), "expires_at": challenge.expires_at,
+        "effects": ["private reads across this host's fleets; no messages or setup grant"]},
+        expires_at=challenge.expires_at)
     grant = store.confirm_pairing(challenge.token, expected_principal=challenge.principal)
     return CommandOutput({"state": "paired", "revision": grant.revision},
                          lines=("Owner paired. Return to your browser and sign in.",))
@@ -461,17 +590,26 @@ def dispatch(args):
         if args.owner_action == "setup":
             from .host_owner_setup import run, interrupted
             with _terminal(paths.root) as terminal, interrupted():
-                return run(args, paths, store, terminal)
+                result = run(args, paths, store, terminal)
+            if result.data.get("state") == "launch_handoff":
+                return _post_setup_handoff(paths, result)
+            return result
         if args.owner_action == "serve":
             from ..plane.owner_server import OwnerServerConfigurationError, OwnerServerStartupError, serve
 
+            pairing_origin = getattr(args, "bootstrap_pairing_origin", None)
+            if pairing_origin is not None and (args.workspace_issuer is not None or args.workspace_origin is not None):
+                raise CommandFailure("invalid_argument", "pairing mode cannot include workspace bootstrap")
             if (args.workspace_issuer is None) != (args.workspace_origin is None):
                 raise CommandFailure("invalid_argument", "workspace issuer and origin must be supplied together")
             try:
                 serve(paths.root, origin=args.origin, tailscale_binary=args.tailscale,
                       socket_path=args.socket, tailscale_socket=args.tailscale_socket,
                       package=paths.package, workspace_issuer=args.workspace_issuer,
-                      workspace_origin=args.workspace_origin)
+                      workspace_origin=args.workspace_origin,
+                      **({"parent_liveness_fd": args._parent_liveness_fd}
+                         if getattr(args, "_parent_liveness_fd", None) is not None else {}),
+                      **({"pairing_origin": pairing_origin} if pairing_origin is not None else {}))
             except OwnerServerStartupError as exc:
                 raise CommandFailure("unavailable", "owner server startup failed; inspect local server logs") from exc
             except OwnerServerConfigurationError as exc:

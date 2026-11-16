@@ -1,5 +1,6 @@
 """Host-local owner authority doors; no credential-bearing CLI arguments."""
 
+from argparse import SUPPRESS
 from importlib import import_module
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from ..command_result import execute
 
 
 def _dispatch(args):
+    if args.owner_action == "setup" and (getattr(args, "stdio", False) or getattr(args, "stdio_status", False)):
+        return import_module(".owner_stdio", __package__).dispatch(args)
     return execute(args.public_command,
                    lambda: import_module(".host_owner", __package__).dispatch(args),
                    json_output=args.json)
@@ -78,6 +81,11 @@ def register_host_owner(hosts):
     guided.add_argument("--template", choices=["revenue-web-app", "local-project"], default="revenue-web-app")
     guided.add_argument("--project-directory")
     guided.add_argument("--account-directory", help="Claude profile directory; otherwise propose the operator's CLAUDE_CONFIG_DIR")
+    guided.add_argument("--_finish-setup", dest="finish_setup",nargs=4,help=SUPPRESS)
+    mode = guided.add_mutually_exclusive_group()
+    mode.add_argument("--stdio", action="store_true", help=SUPPRESS)
+    mode.add_argument("--stdio-status", action="store_true", help=SUPPRESS)
+    guided.add_argument("--provider-signin", type=Path, help="Separately approve browser-mediated setup-token using this reviewed Claude executable")
     guided.add_argument("--managed-owner", action="store_true", help="Locally approve a managed connection service in this team's original Launch")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
         guided.add_argument("--" + flag)
@@ -93,4 +101,6 @@ def register_host_owner(hosts):
     serve.add_argument("--socket", type=Path, help="Private Unix socket path; default DATA_ROOT/state/plane/owner.sock")
     serve.add_argument("--workspace-issuer", help="Explicit fixed HTTPS website issuer; requires --workspace-origin")
     serve.add_argument("--workspace-origin", help="Explicit fixed HTTPS operational Origin for bootstrap and connected reads; requires --workspace-issuer")
+    serve.add_argument("--bootstrap-pairing-origin", help=SUPPRESS)
+    serve.add_argument("--_parent-liveness-fd", type=int, help=SUPPRESS)
     serve.set_defaults(func=_dispatch, public_command="host.owner.serve")

@@ -22,6 +22,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let context = null, plan = null, pending = null, conflicts = [], legacy = [], incompatible = false;
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
+  let signinAttempt=null, signinState=null, signinUrl=null, signinNotice='', signinBlocked=false;
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
   function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
   function scheduleHandoff() {
@@ -70,6 +71,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   try {
     if (storage === undefined) storage = globalThis.localStorage;
+    try {
+    const text=storage?.getItem(storageKey+':claude');
+    if (text) { const value=JSON.parse(text); if (!keys(value,['generation','attempt_id']) || !uuid(value.generation) || !uuid(value.attempt_id)) throw new Error(); signinAttempt=Object.freeze(value); }
+    } catch { signinBlocked=true; }
     const text = storage?.getItem(storageKey);
     if (text) {
       if (text.length >= 8192) throw new Error();
@@ -97,7 +102,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   function changed() { render(); onChange(); }
   function connectionChanged(next) {
-    if (next.epoch !== state.epoch || next.state !== state.state) { epoch++; context = null; plan = null; launchable = false; }
+    if (next.epoch !== state.epoch || next.state !== state.state) {
+      epoch++; context = null; plan = null; launchable = false; signinUrl=null;
+      if (mount) mount.code.value='';
+    }
     state = next;
     if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
       stopHandoff(); note = 'Connection access needs attention. Keep the original update; reconnect explicitly without another Launch.';
@@ -122,6 +130,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
               || value.request.source_revision !== value.source_revision)) throw new Error();
         context = Object.freeze({...value}); plan = null;
+        if (value.provider_signin === true && value.signin_attempt) signinReceipt(value.signin_attempt);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
@@ -129,6 +138,26 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         // A null request or new grant is never proof that an original request vanished.
         note = pending ? `Inspect the original update. ${localContinue(value)} Reconnection never submits launch again.` : 'Local approval found. Author a goal and preview its exact configuration.';
         if (value.managed_owner && value.launch_reserved) { managedHandoff = true; handoffUntil = now()+600; handoffReads=0; }
+      } else if (operation.startsWith('signin-')) {
+        if (!context?.provider_signin || pending || signinBlocked) return false;
+        const action=operation.slice(7);
+        if (action==='begin') {
+          if (signinAttempt) return false;
+          const value={generation:context.generation,attempt_id:globalThis.crypto.randomUUID()};
+          storage.setItem(storageKey+':claude',JSON.stringify(value));
+          signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
+        }
+        if (!signinAttempt || signinAttempt.generation!==context.generation) return false;
+        let input={...signinAttempt};
+        if (action==='code') {
+          const code=mount?.code.value || '';
+          if (mount) mount.code.value=''; // Never retain in model/storage/debug output.
+          if (!code || code.length>2305 || /[\r\n\x00]/.test(code)) return false;
+          input.code=code;
+        }
+        const result=await client.setupSignin(action,input); input=null;
+        if (disposed || ticket!==epoch || !active()) return false;
+        signinReceipt(result);
       } else if (operation === 'preview') {
         if (!context || context.launch_reserved || pending || legacyBlocked() || !goal.trim() || context.expires_at <= now()) return false;
         const selected = context, authored = goal;
@@ -161,12 +190,35 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (!disposed && ticket === epoch) {
         if (operation === 'preview') { context = null; launchable = false; }
         if (operation === 'receipt') launchable = false;
+        if (operation.startsWith('signin-')) { signinNotice='Sign-in needs attention. Check the original attempt; nothing is repeated.'; signinUrl=null; return false; }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'Update outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.'
           : 'Setup unavailable or refused. Check local approval explicitly before another preview; no team readiness is claimed.';
       }
       return false;
     } finally { busy = false; if (!disposed) { changed(); scheduleHandoff(); } }
+  }
+  function signinReceipt(value) {
+    if (!context || !keys(value,['attempt_id','generation','state','reason',...('url' in value?['url']:[])])
+        || !uuid(value.attempt_id) || value.generation!==context.generation
+        || signinAttempt && (value.attempt_id!==signinAttempt.attempt_id || value.generation!==signinAttempt.generation)
+        || !['starting','waiting','connected','needs_attention','cancelled','unknown'].includes(value.state)
+        || value.reason!==null && (typeof value.reason!=='string' || !/^[a-z_]{1,64}$/.test(value.reason))) throw new Error();
+    let url=null;
+    if (value.url!==undefined) {
+      const selected=new URL(value.url);
+      if (value.state!=='waiting' || selected.origin!=='https://claude.com' || selected.pathname!=='/cai/oauth/authorize'
+          || selected.hash || selected.searchParams.get('redirect_uri')!=='https://platform.claude.com/oauth/code/callback'
+          || selected.searchParams.get('scope')!=='user:inference' || value.url.length>8192) throw new Error();
+      url=value.url;
+    }
+    signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
+    storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
+    signinState=value.state; signinUrl=url;
+    signinNotice=value.state==='connected' ? 'Claude connected for this host. This does not start your team.'
+      : value.state==='waiting' ? 'Sign in to Claude in the link below. If Claude shows a code, paste it here.'
+      : value.state==='starting' ? 'Waiting for Claude… Check sign-in progress.'
+      : 'Sign-in needs attention. Keep the original attempt; cancellation does not revoke a token.';
   }
   function receipt(value) {
     if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
@@ -188,7 +240,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   function render() {
     if (!mount) return;
-    const {area,status,declaration,authority,controls,details,summary} = mount;
+    const {area,status,declaration,authority,controls,details,summary,signinBox,signinStatus,signinLink,code,signinControls} = mount;
+    signinBox.hidden=!context?.provider_signin || !!pending;
+    signinStatus.textContent=signinNotice;
+    signinLink.hidden=!signinUrl; if (signinUrl) signinLink.setAttribute('href',signinUrl); else signinLink.removeAttribute?.('href');
+    code.disabled=!active() || busy || signinState!=='waiting';
+    for (const [operation,button] of Object.entries(signinControls)) button.disabled=!active() || busy || signinBlocked
+      || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
+      || operation==='code' && signinState!=='waiting';
     area.disabled = !active() || busy || !!pending || legacyBlocked();
     const guard = legacyBlocked() ? 'Incompatible historical setup identifiers are retained. Inspect them locally; this browser cannot launch a replacement.'
       : !active() ? 'Connect this computer before setup.' : busy ? 'Checking setup…'
@@ -223,14 +282,22 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       const button = document.createElement('button'); button.type = 'button'; button.textContent = title; button.className = 'pill ghost';
       button.addEventListener('click',() => { if (!button.disabled) void run(operation); }); element.append(button); controls[operation] = button;
     }
+    const signinBox=document.createElement('section'); element.append(signinBox);
+    const signinStatus=document.createElement('p'); signinStatus.setAttribute('role','status'); signinBox.append(signinStatus);
+    const signinLink=document.createElement('a'); signinLink.textContent='Open Claude sign-in'; signinLink.setAttribute('target','_blank'); signinLink.setAttribute('rel','noreferrer noopener'); signinBox.append(signinLink);
+    const code=document.createElement('input'); code.type='password'; code.maxLength=2305; code.setAttribute('aria-label','Claude sign-in code'); code.setAttribute('autocomplete','off'); signinBox.append(code);
+    const signinControls={};
+    for (const [operation,label] of [['begin','Sign in to Claude'],['status','Check sign-in progress'],['code','Submit Claude code'],['cancel','Cancel sign-in']]) {
+      const button=document.createElement('button'); button.type='button'; button.textContent=label; button.addEventListener('click',()=>{if(!button.disabled) void run('signin-'+operation);}); signinBox.append(button); signinControls[operation]=button;
+    }
     const summary = document.createElement('p'); element.append(summary);
     const disclosure = document.createElement('details'), title = document.createElement('summary'); title.textContent = 'Configuration changes and recovery identifiers'; disclosure.append(title);
     const details = document.createElement('pre'); disclosure.append(details); element.append(disclosure);
     const status = document.createElement('p'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); element.append(status);
-    mount = {area,status,declaration,authority,details,controls,summary}; render();
+    mount = {area,status,declaration,authority,details,controls,summary,signinBox,signinStatus,signinLink,code,signinControls}; render();
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
     resumeHandoff:() => scheduleHandoff(),
-    dispose() { disposed = true; stopHandoff(); epoch++; mount = null; }});
+    dispose() { disposed = true; stopHandoff(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
 }

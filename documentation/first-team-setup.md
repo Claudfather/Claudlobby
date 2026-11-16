@@ -74,16 +74,31 @@ storage, confirm the signed-in workspace proposal and approve the exact first-te
 scope. Each approval is separate. In the browser, save the private computer
 address under **Your computers**, open the workspace, provide the approved goal,
 review the exact prepared plan and launch once. The guide then drains admitted
-work and exits, releasing its runtime readers so the original updater can proceed.
+work, releases its runtime readers and waits for that same original update using
+the stable installation entry. The wait imports no changing runtime and holds no
+runtime reader; it is bounded to ten minutes with ten seconds per status read.
+Ctrl-C cancels only waiting and its own status-read child, not the update or team.
 With managed serving, the updater starts the approved connection at the same
 private address; keep this browser view open while it checks the original
 receipt and existing session. Connection may return while agents are still
 starting. Wait for DONE, empty health errors and actual native readiness before
 asking the team to work. Expired or refused access needs explicit reconnection;
-the guide never issues new authority or repeats Launch. The printed stable-CLI
+the guide never silently issues authority or repeats Launch. After healthy DONE,
+the same local guide reenters current source and checks current configuration,
+source and operator ancestry before offering optional message approval. Enter
+your canonical `human:` alias, confirm `REGISTER` if it is new, then explicitly
+confirm `ALLOW-ACTIONS` for messages only. Enter/skip, decline or EOF completes
+without a new message grant; already confirmed registration alone grants none.
+A storage failure or interrupted effect needs inspection, not automatic retry.
+Choose **Check action access** in the browser after approval; nothing is sent by
+the guide. This does not approve nudges, feedback or permission decisions.
+The printed stable-CLI
 status command remains available for local recovery. In foreground-only mode,
 after DONE run the printed `host owner serve` command to reconnect.
-Do not rerun setup or Launch to restore browser access. A lost browser response
+Do not replay Launch to restore browser access. An older copied stable launcher
+that lacks this continuation refuses automatic waiting without repairing itself.
+After inspecting the original operation and healthy DONE, reopen the same guide
+to finish local consent; configuration and serving are not repeated. A lost browser response
 does not discard the retained original identifiers. Reading or downloading instructions
 has not performed these steps. Local setup approval does not grant ordinary
 messages, task feedback or permission decisions.
@@ -171,3 +186,52 @@ Retain a refused or unknown result rather than retrying a new action. After
 all current native definitions are removed, local mutation admission deliberately
 refuses an empty inventory; an idle updater is not a substitute ancestry anchor.
 Do not restart workloads or weaken that guard solely to revoke stored offline grants.
+
+### Sign in to Claude from the setup page
+
+Existing privately configured tokens remain supported; omit this option to keep
+that route. For a new subscription sign-in, the local operator can instead add
+`--provider-signin /absolute/path/to/claude` to `host owner setup`. This optional
+route currently accepts only the independently inspected Claude Code 2.1.325
+Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
+Each attempt retains one verified public executable copy (roughly 350 MiB) in
+its private owner state, so an ordinary provider auto-update cannot replace the
+approved executable between verification and launch. A matching version string
+alone is insufficient. An unsupported binary is
+refused before invocation; use your existing private provider setup instead.
+
+Keep the explicitly selected `--account-directory`; create/choose that private
+profile directory before invoking the guide. This filesystem choice does not
+authenticate the provider. The data root must be private
+0700 and its routing `.env` an owned, single-link regular file, mode 0600. The
+operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider authorization
+attempt and storage of its subscription token on this host. This does not grant
+ordinary messages, native activation, or a model turn. Website sign-in is not
+provider consent or local authority.
+
+In the connected setup page choose **Sign in to Claude**, open its Claude link,
+and approve at the provider. If Claude gives a code, paste it into the private
+Claude code field on the connected setup page. It is sent directly to the
+selected host, never through the website server. Choose **Check sign-in
+progress** for the original attempt. **Claude connected** means the token was
+stored in this host's private routing file; it does not mean bots started or
+passed native readiness. Preview and Launch keep their separate approvals.
+
+The official `claude setup-token` process owns OAuth and its browser/code flow.
+The host captures its output privately; token/code/terminal output are never
+shown by Plane, placed in request receipts or sent through Vercel. Only the
+validated provider link and finite progress states are exposed. The credential
+update appends one literal token while preserving unrelated routing bytes and
+refuses existing tokens, unsafe files or unsupported environment syntax. In
+those cases choose local private setup/recovery rather than overwriting another
+credential. Only this child receives the supported process-local auto-update/nonessential
+traffic disables and browser-opener override; standard proxy, CA, temporary and
+cache routing is preserved without exposing values. No global browser or
+provider setting is changed.
+
+Keep the original attempt after a lost response. Cancel or guide shutdown stops
+its owned process, but cannot promise that the provider did not already mint a
+token, and does not revoke one. Interrupted attempts need local attention; setup
+never automatically remints or retries. Provider acceptance and native background
+readiness still require an authorized real trial; synthetic tests are not those
+observations.

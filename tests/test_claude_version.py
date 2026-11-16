@@ -84,7 +84,7 @@ def _run(tmp_path: Path, argv: list[str], *, _timeout=120, **env) -> subprocess.
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        env=constructed_env(HOME=tmp_path / "home", CLAUDLOBBY_ROOT=root, **env),
+        env=constructed_env(**{"HOME": tmp_path / "home", "CLAUDLOBBY_ROOT": root, **env}),
     )
     try:
         stdout, stderr = process.communicate(timeout=_timeout)
@@ -463,12 +463,16 @@ def test_the_ladder_records_the_version_or_why_there_is_none(tmp_path):
 def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
     tmp = tmp_path / "tmp"
     tmp.mkdir()
+    marker = tmp_path / "tool-executed"
+    for tool in ("tmux", "jq"):
+        _stub(tmp_path, tool, f'#!/bin/sh\nprintf invoked > "{marker}"\nexit 97\n')
     r = subprocess.run(
         ["bash", str(HARNESS / "send-size-probe.sh"), "--n", "1"],
         capture_output=True,
         text=True,
         timeout=120,
         env=constructed_env(
+            PATH=str(tmp_path / "bin") + ":" + os.environ["PATH"],
             SEND_PROBE_REAL="1",
             CLAUDE_BIN=_stub(tmp_path, "broken", broken_stub("stderr")),
             HOME=tmp_path / "home",
@@ -478,6 +482,7 @@ def test_the_send_size_probe_refuses_before_building_anything(tmp_path):
     assert r.returncode == 3, (r.stdout, r.stderr)
     assert "cannot run" in r.stderr and "claude native binary not installed" in r.stderr
     assert list(tmp.iterdir()) == [], "the probe built scratch state before refusing"
+    assert not marker.exists(), "refusal must precede even fixture tool execution"
 
 
 def _eval(tmp_path, claude: str, *args, **env):
@@ -687,3 +692,125 @@ def test_explicit_launch_path_bounds_the_actual_version_door_under_minimal_updat
     result = claude_version.measure(_paths(tmp_path), str(binary), launch_path=canonical)
     assert (result.version, result.why) == ("2.1.318", None)
     assert os.environ["PATH"] == "/usr/bin:/bin"
+
+
+def _managed_shell_context(tmp_path):
+    import sys
+    home = tmp_path / "home"
+    family = home / ".local/share/claudlobby-browser"
+    python = family / "runtime/profile/python/bin/python3.12"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    return {"HOME": home, "CLAUDLOBBY_ROOT": family / "data",
+            "CLAUDLOBBY_INSTALLATION": family / "install",
+            "CLAUDLOBBY_NATIVE_PYTHON": python}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_managed_python_bounds_existing_version_door(tmp_path, shape):
+    context = _managed_shell_context(tmp_path)
+    binary = _stub(tmp_path, shape, SHAPES[shape][0])
+    code = f'_OS=Darwin; _TIMEOUT_BIN=""; if measure_claude_version "{binary}"; then printf "V=%s" "$CLAUDE_VERSION"; else printf "W=%s" "$CLAUDE_VERSION_WHY"; fi'
+    r = _run(tmp_path, ["bash", "-c", f'. "{LIB}/lib-common.sh"; {code}'], **context)
+    verdict = SHAPES[shape][1]
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "V=" + verdict if re.fullmatch(VERSION_PATTERN, verdict) else verdict in r.stdout
+
+
+def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path):
+    context = _managed_shell_context(tmp_path)
+    marker = tmp_path / "late-child"
+    hangs = _stub(tmp_path, "hangs-child", f'#!/bin/bash\n(sleep 2; touch "{marker}") &\nread -r data && exit 9\nsleep 30\n')
+    prefix = f'. "{LIB}/lib-common.sh"; _OS=Darwin; _TIMEOUT_BIN=""; '
+    eof = _stub(tmp_path, "stdin-closed", '#!/bin/bash\nif read -r data; then exit 8; fi\necho 2.1.281\n')
+    r = _run(tmp_path, ["bash", "-c", prefix + f'printf "input\\n" | measure_claude_version "{eof}"; printf "%s" "$?"'], **context)
+    assert r.stdout == "0", (r.stdout, r.stderr)
+    started = time.monotonic()
+    r = _run(tmp_path, ["bash", "-c", prefix + f'measure_claude_version "{hangs}" || printf "%s" "$CLAUDE_VERSION_WHY"'], CLAUDE_VERSION_TIMEOUT_S="0.2", **context)
+    assert "did not finish within 0.2s" in r.stdout, (r.stdout, r.stderr)
+    assert time.monotonic() - started < 4
+    time.sleep(2.2)
+    assert not marker.exists()
+    flood = _stub(tmp_path, "flood", '#!/bin/bash\nwhile :; do printf "%01000d" 0; printf "%01000d" 0 >&2; done\n')
+    r = _run(tmp_path, ["bash", "-c", prefix + f'measure_claude_version "{flood}" || printf "%s" "$CLAUDE_VERSION_WHY"'], CLAUDE_VERSION_TIMEOUT_S="2", _timeout=8, **context)
+    assert "exited 125" in r.stdout, (r.stdout, r.stderr)
+    assert len(r.stdout) < 600
+
+
+def test_managed_context_propagates_without_changing_provider_precedence(tmp_path, monkeypatch):
+    import plistlib
+    import claudlobby.composer as composer
+    import claudlobby.installation as installation
+    from claudlobby.config import BotConfig, FleetConfig
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import git_package
+    context = _managed_shell_context(tmp_path)
+    profile = Path(context["CLAUDLOBBY_NATIVE_PYTHON"]).parents[2]
+    managed = {"HOME": str(context["HOME"]), "PATH": f"{profile}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+               "CLAUDLOBBY_NATIVE_PYTHON": str(context["CLAUDLOBBY_NATIVE_PYTHON"]),
+               "TMUX_BIN": str(profile / "tmux/bin/tmux"), "GIT_CONFIG_GLOBAL": "/dev/null"}
+    monkeypatch.setattr(installation, "managed_browser_environment", lambda selected: managed.copy())
+    root = Path(context["CLAUDLOBBY_ROOT"])
+    paths = Paths(root=root, package=git_package(root))
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = FleetConfig(name="fixture", service_prefix="fixture", manager="worker", bots={"worker": bot})
+    env = plistlib.loads(composer.compose_launchd_plist(bot, fleet, paths).encode())["EnvironmentVariables"]
+    assert env["TMUX_BIN"] == managed["TMUX_BIN"]
+    assert env["PATH"].split(":")[0] == str(profile / "bin")
+    conf = composer.compose_bot_conf(bot, fleet, paths)
+    for key in ("TMUX_BIN", "CLAUDLOBBY_NATIVE_PYTHON", "GIT_CONFIG_GLOBAL"):
+        assert f"export {key}=" in conf
+    timer = tmp_path / "timers"; timer.mkdir()
+    composer._write_timer_units(timer, "fixture.probe", "probe", {"type": "interval", "seconds": 60, "startup": 10},
+                                "$CLAUDLOBBY_NATIVE_DIR/keepalive-all.sh", "oneshot", "fixture", paths)
+    timer_env = plistlib.loads((timer / "fixture.probe.plist").read_bytes())["EnvironmentVariables"]
+    assert timer_env["TMUX_BIN"] == managed["TMUX_BIN"]
+    assert timer_env["CLAUDLOBBY_NATIVE_PYTHON"] == managed["CLAUDLOBBY_NATIVE_PYTHON"]
+    assert timer_env["PATH"].split(":")[:2] == [str(paths.package.installation.cli.parent), str(profile / "bin")]
+    r = _run(tmp_path, ["bash", "-c", f'. "{LIB}/lib-common.sh"; _OS=Darwin; fleet_launch_path'], **context)
+    assert r.stdout.startswith(str(profile / "bin") + ":/usr/local/bin:/usr/bin:/bin:")
+    # A context drift must not admit a guessed profile or its Python bounder.
+    context["CLAUDLOBBY_INSTALLATION"] = tmp_path / "other-install"
+    r = _run(tmp_path, ["bash", "-c", f'. "{LIB}/lib-common.sh"; _OS=Darwin; _TIMEOUT_BIN=""; measure_claude_version /must-not-exec || printf "%s" "$CLAUDE_VERSION_WHY"'], **context)
+    assert "unavailable" in r.stdout
+
+
+def test_managed_current_reentry_keeps_python_and_installed_cli(tmp_path, monkeypatch):
+    import claudlobby.active_config as active
+    import claudlobby.installation as policy
+    import claudlobby.runtime_admission as admission
+    from claudlobby.context import native_environment
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import git_package
+    context = _managed_shell_context(tmp_path)
+    root = Path(context["CLAUDLOBBY_ROOT"])
+    root.mkdir(parents=True)
+    package = git_package(root)
+    _write_exec(package.installation.cli, '#!/bin/sh\nprintf "installed-cli"\n')
+    paths = Paths(root, package=package)
+    managed = {"HOME": str(context["HOME"]), "PATH": str(Path(context["CLAUDLOBBY_NATIVE_PYTHON"]).parents[2] / "bin") + ":/usr/bin:/bin",
+               "CLAUDLOBBY_NATIVE_PYTHON": str(context["CLAUDLOBBY_NATIVE_PYTHON"])}
+    monkeypatch.setattr(policy, "managed_browser_environment", lambda installation: managed.copy())
+    monkeypatch.setattr(active, "runtime_read_stamp", lambda *args, **kwargs: object())
+    monkeypatch.setattr(admission, "runtime_route_matches", lambda *args, **kwargs: True)
+    current = admission.GitCurrentRuntime(package.installation, "a" * 40, "fixture", {})
+    env = native_environment(paths, current=current)
+    assert env["CLAUDLOBBY_NATIVE_PYTHON"] == managed["CLAUDLOBBY_NATIVE_PYTHON"]
+    assert env["CLAUDLOBBY_NATIVE_ADMITTED"] == "1"
+    assert env["CLAUDLOBBY_CLI"] == str(package.installation.cli)
+    r = _run(tmp_path, ["bash", "-c", f'. "{LIB}/lib-common.sh"; claudlobby_cli --fixture'], **env)
+    assert (r.returncode, r.stdout) == (0, "installed-cli"), r.stderr
+    monkeypatch.setattr(policy, "managed_browser_environment", lambda installation: {"CLAUDLOBBY_ROOT": "/invented"})
+    with pytest.raises(ValueError, match="conflicts with native identity"):
+        native_environment(paths, current=current)
+
+
+def test_managed_tools_do_not_select_runtime_emission_policy(tmp_path, monkeypatch):
+    from claudlobby.context import native_environment
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import git_package
+    monkeypatch.setattr("claudlobby.installation.managed_browser_environment",
+                        lambda installation: {"PLANE_EMIT_DISABLED": "1", "TMUX_BIN": "/fixed/tmux"})
+    env = native_environment(Paths(tmp_path, package=git_package(tmp_path)))
+    assert env["TMUX_BIN"] == "/fixed/tmux"
+    assert "PLANE_EMIT_DISABLED" not in env

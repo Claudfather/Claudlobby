@@ -1,5 +1,6 @@
 // The same renderer consumes either native host reads or an admitted workspace.
 import { createConnectedWorkspace, MAX_WORKSPACE_CONTEXT_BYTES } from "./connected-workspace.js";
+import { createBrowserOwnerTransport } from "./browser-owner-transport.js";
 
 const contextElement = globalThis.document?.getElementById('workspace-document-context');
 let context;
@@ -9,7 +10,10 @@ if (contextElement) {
   contextElement.remove();
 }
 // Invalid connected metadata must never fall back to unauthenticated host reads.
-const connected = contextElement ? createConnectedWorkspace({documentContext:context}) : null;
+const selection = new URLSearchParams(globalThis.location?.search || '').getAll('owner_transport');
+const browser = selection.length ? createBrowserOwnerTransport({documentContext:context,selection}) : null;
+const connected = contextElement || browser ? createConnectedWorkspace({documentContext:context,
+  ...(browser ? {fetch:browser.fetch,onRetire:browser.dispose} : {})}) : null;
 export const mountSessionControls = connected?.mountSessionControls;
 export const dispose = connected?.dispose;
 export const roomLabel = connected?.roomLabel;

@@ -89,6 +89,18 @@ def native_environment(paths: Paths, *, current=None) -> dict[str, str]:
     if current is not None:
         import sys
         result.update(CLAUDLOBBY_NATIVE_ADMITTED="1", CLAUDLOBBY_NATIVE_PYTHON=sys.executable)
+    if installation is not None:
+        from .installation import managed_browser_environment
+        managed = managed_browser_environment(installation)
+        if managed is not None:
+            # Tool admission never replaces host/CLI/native routing identity.
+            # Only Python deliberately supersedes the generic current marker.
+            if set(managed).intersection(result) - {"CLAUDLOBBY_NATIVE_PYTHON"}:
+                raise ValueError("managed tool environment conflicts with native identity")
+            # The preparation environment silences incidental recording; that
+            # switch is lifecycle policy, not part of managed tool selection.
+            result.update((key, value) for key, value in managed.items()
+                          if key != "PLANE_EMIT_DISABLED")
     return result
 
 

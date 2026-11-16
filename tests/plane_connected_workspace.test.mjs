@@ -383,7 +383,8 @@ test('controls retain focus across state updates and disable unsupported navigat
 
 test('api-client selects only an existing marker; absent marker preserves legacy same-origin reads and zero owner probes',async()=>{
   const original={document:globalThis.document,location:globalThis.location,fetch:globalThis.fetch,EventSource:globalThis.EventSource};
-  const apiText=(await read('api-client.js')).replace('"./connected-workspace.js"',JSON.stringify(workspaceURL));
+  const apiText=(await read('api-client.js')).replace('"./connected-workspace.js"',JSON.stringify(workspaceURL))
+    .replace('"./browser-owner-transport.js"',JSON.stringify(uri(await read('browser-owner-transport.js'))));
   try {
     const calls=[];globalThis.location={origin:documentContext.operational_origin};globalThis.document={getElementById:()=>null};globalThis.fetch=async(url)=>{calls.push(url);return reply(200,{legacy:true});};globalThis.EventSource=class{constructor(url){calls.push(url);}};
     const legacy=await import(uri(apiText+'\n//legacy'));assert.equal(legacy.mountSessionControls,undefined);assert.equal(legacy.dispose,undefined);assert.deepEqual(await legacy.jget('/api/tasks'),{legacy:true});legacy.createEventSource('/api/stream');assert.deepEqual(calls,['/api/tasks','/api/stream']);
@@ -1195,4 +1196,215 @@ test('setup refuses mixed local/repository protocol shapes before preview',async
     h.api.setGoal('Review local project');assert.equal(await h.api.run('preview'),false);
     assert.equal(h.calls.filter(c=>c[0]==='preview').length,0);h.api.dispose();
   }
+});
+
+test('Claude sign-in retains one attempt before effect and never remints after response loss',async()=>{
+  let calls=[];
+  const h=setupHarness({client:{async setupSignin(action,input){calls.push([action,input]);throw new Error('lost');}}});
+  h.context.provider_signin=true;h.context.signin_attempt=null;
+  await h.api.run('context');
+  assert.equal(await h.api.run('signin-begin'),false);
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');
+  const attempt=JSON.parse(h.saved.get('test:claude'));
+  assert.deepEqual(calls[0][1],attempt);
+  await h.api.run('signin-begin');assert.equal(calls.length,1);
+  await h.api.run('signin-status');assert.equal(calls[1][0],'status');assert.deepEqual(calls[1][1],attempt);
+  const resumed=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  await resumed.run('context');await resumed.run('signin-begin');assert.equal(calls.length,2);
+  await resumed.run('signin-cancel');assert.equal(calls[2][0],'cancel');
+});
+
+test('Claude sign-in UI accepts only host result with safe manual provider URL',async()=>{
+  const h=setupHarness({client:{async setupSignin(_action,input){return {...input,state:'waiting',reason:null,url:'https://evil.example/steal'};}}});
+  h.context.provider_signin=true;await h.api.run('context');
+  assert.equal(await h.api.run('signin-begin'),false);
+  assert.match(h.api.snapshot().note,/Local approval/);
+  assert.equal(h.saved.size,1);assert.ok(h.saved.has('test:claude'));
+});
+
+test('Claude code goes only to the selected host and never enters retained UI state',async()=>{
+  const clients=[];
+  const network=harness({count:1,dependencies:{createClient:input=>{const c=createConnectedReadClient(input);clients.push(c);return c;}}});
+  await network.api.checkAccount();await network.api.act(0,'connect');
+  const endpoint=refs[0].endpoint_origin+'/api/owner/connected/setup/signin-code';
+  network.overrides.set(endpoint,()=>reply(200,{state:'starting'}));
+  const offset=network.calls.length,code='sensitive-code#'+'b'.repeat(32);
+  await clients[0].setupSignin('code',{generation:id(9),attempt_id:id(12),code});
+  const sent=network.calls.slice(offset);assert.equal(sent.length,1);assert.equal(sent[0].url,endpoint);
+  assert.equal(JSON.parse(sent[0].init.body).code,code);network.api.dispose();
+  const ui=dom(),panel=new ui.Element();let input;
+  const h=setupHarness({client:{async setupSignin(action,body){
+    if(action==='code'){assert.equal(input.value,'');return {generation:body.generation,attempt_id:body.attempt_id,state:'starting',reason:null};}
+    return {...body,state:'waiting',reason:null,url:'https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference'};
+  }}});
+  h.context.provider_signin=true;h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');await h.api.run('signin-begin');
+  input=descendants(panel).find(node=>node.attributes['aria-label']==='Claude sign-in code');
+  input.value=code;await h.api.run('signin-code');
+  assert.equal(input.value,'');assert.ok(!JSON.stringify(h.api.snapshot()).includes(code));
+  assert.ok(!JSON.stringify([...h.saved]).includes(code));h.api.dispose();
+});
+
+// Browser carrier exercises the real Fetch facade and MessagePort boundary.
+const bridgeModule = async () => import(uri(await read('browser-owner-transport.js')));
+function browserDocument() {
+  return {...documentContext,shell_origin:'https://claudfather.ai',operational_origin:'https://plane.claudfather.ai',
+    references:[{...refs[0],endpoint_origin:'https://first.example.ts.net'}],expires_at:Math.floor(Date.now()/1000)+90};
+}
+async function bridgeHarness(t, options={}) {
+  const {createBrowserOwnerTransport}=await bridgeModule(), doc=browserDocument(), listeners=new Map(),sent=[],native=[];
+  const parent={postMessage(data,origin){sent.push({data,origin});}};
+  const window={parent,location:{origin:doc.operational_origin},addEventListener(k,v){listeners.set(k,v);},removeEventListener(k){listeners.delete(k);}};
+  const bridge=createBrowserOwnerTransport({documentContext:doc,window,
+    nativeFetch:async(...args)=>{native.push(args);return reply(200,{account:true});},...options});
+  t.after(()=>bridge.dispose());
+  const channel=new MessageChannel(), frames=[]; let seq=0;
+  channel.port1.onmessage=event=>frames.push(event.data);channel.port1.start();
+  t.after(()=>{channel.port1.close();channel.port2.close();});
+  const hello=sent[0].data;
+  const offer={type:'claudfather.owner-transport.offer',version:1,channelId:hello.channelId,document:hello.document,
+    sessionId:'a'.repeat(64),reference:doc.references[0],targetHandle:'target-'+'b'.repeat(32)+'-1'};
+  function admit(patch={},event={}) {listeners.get('message')?.({source:parent,origin:doc.shell_origin,data:{...offer,...patch},ports:[channel.port2],...event});}
+  function send(type,body={}) {channel.port1.postMessage({version:1,channelId:offer.channelId,sessionId:offer.sessionId,seq:++seq,type,...body});}
+  const host=(path,body,token=true)=>bridge.fetch(doc.references[0].endpoint_origin+path,{method:body===undefined?'GET':'POST',
+    credentials:'omit',cache:'no-store',redirect:'error',headers:{...(token?{Authorization:'Bearer '+'A'.repeat(43)}:{}),
+      ...(body===undefined?{}:{'Content-Type':'application/json','X-Claudlobby-Owner':'1'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  return {bridge,doc,listeners,sent,native,frames,admit,send,host,offer,parent};
+}
+test('browser bridge binds current parent document and separates shell Fetch from finite host requests',async t=>{
+  const h=await bridgeHarness(t);
+  assert.equal(h.sent[0].origin,h.doc.shell_origin);assert.match(h.offer.channelId,/^[0-9a-f]{64}$/);
+  h.admit({sessionId:'c'.repeat(64)},{origin:'https://wrong.example.test'});
+  h.admit({document:{...h.offer.document,context_generation:id(9)}});
+  h.admit({targetHandle:'target-'+'b'.repeat(32)+'-1'+'0'.repeat(65536)});
+  await flush();assert.equal(h.frames.length,0);
+  h.admit();await h.bridge.ready;await flush();assert.equal(h.frames[0].type,'ready');
+  const account=await h.bridge.fetch(h.doc.shell_origin+'/api/plane/context?workspace_id='+h.doc.workspace_id+'&include=computer_names',{credentials:'include'});
+  assert.deepEqual(await account.json(),{account:true});assert.equal(h.native.length,1);
+  const pending=h.host('/api/owner/connected/setup/preview',{generation:id(8),goal:'One useful team'});
+  await flush();const request=h.frames.find(f=>f.type==='request');
+  assert.equal(request.credit,4);assert.deepEqual(request.request,{targetHandle:h.offer.targetHandle,operation:'setup-preview',
+    input:{generation:id(8),goal:'One useful team'},token:'A'.repeat(43)});
+  assert.equal('url' in request.request,false);assert.equal('headers' in request.request,false);
+  h.send('headers',{id:request.id,status:200,headers:{'content-type':'application/json'}});
+  h.send('chunk',{id:request.id,data:Buffer.from('{"ok":true}').toString('base64')});h.send('end',{id:request.id});
+  assert.deepEqual(await (await pending).json(),{ok:true});assert.equal(h.native.length,1);
+});
+test('browser bridge rejects arbitrary URL/header/action/input and never falls back after retirement',async t=>{
+  const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+  for(const [path,body] of [['/api/owner/connected/actions/context',{room:'team'}],['/api/owner/connected/setup/preview',{generation:id(8),goal:'g',env:{}}],
+    ['/api/owner/connected/read/summary?extra=1',undefined],['/api/owner/connected/read/stream?cursor=01',undefined],['/api/owner/connected/read/tasks/wi_no',undefined]])
+    await assert.rejects(h.host(path,body));
+  await assert.rejects(h.bridge.fetch('https://other.example.ts.net/api/owner/connected/status'));
+  await assert.rejects(h.bridge.fetch(h.doc.references[0].endpoint_origin+'/api/owner/connected/status',{headers:{Authorization:'Bearer '+'A'.repeat(43),Cookie:'bad'}}));
+  h.bridge.dispose();await assert.rejects(h.host('/api/owner/connected/status'));
+  assert.equal(h.native.length,0);
+});
+test('browser bridge cancellation makes late replies inert and preserves other request identity',async t=>{
+  const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+  const abort=new AbortController();const cancelled=h.bridge.fetch(h.doc.references[0].endpoint_origin+'/api/owner/connected/read/summary',
+    {signal:abort.signal,credentials:'omit',redirect:'error',headers:{Authorization:'Bearer '+'A'.repeat(43)}});
+  await flush();const first=h.frames.find(f=>f.type==='request');abort.abort();await assert.rejects(cancelled);await flush();
+  assert.ok(h.frames.some(f=>f.type==='cancel'&&f.id===first.id));
+  h.send('headers',{id:first.id,status:200,headers:{'content-type':'application/json'}});h.send('chunk',{id:first.id,data:'e30='});h.send('end',{id:first.id});
+  const live=h.host('/api/owner/connected/status');await flush();const second=h.frames.filter(f=>f.type==='request').at(-1);assert.ok(second.id>first.id);
+  h.send('headers',{id:second.id,status:200,headers:{'content-type':'application/json'}});h.send('chunk',{id:second.id,data:'e30='});h.send('end',{id:second.id});
+  assert.deepEqual(await (await live).json(),{});assert.equal(h.native.length,0);
+});
+test('browser bridge bounds chunks, sequence and streaming credit and retires every active response',async t=>{
+  const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+  const pending=h.host('/api/owner/connected/read/stream?cursor=0&once=0');await flush();const request=h.frames.find(f=>f.type==='request');
+  h.send('headers',{id:request.id,status:200,headers:{'content-type':'text/event-stream'}});const response=await pending;
+  const reader=response.body.getReader();h.send('chunk',{id:request.id,data:Buffer.from('id: 1\ndata: {}\n\n').toString('base64')});
+  assert.match(new TextDecoder().decode((await reader.read()).value),/id: 1/);await flush();assert.ok(h.frames.some(f=>f.type==='pull'&&f.credit===1));
+  h.send('chunk',{id:request.id,data:Buffer.alloc(16385).toString('base64')});await assert.rejects(reader.read());
+  await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,0);
+});
+test('browser bridge explicit missing offer and wrong origins fail closed without native host Fetch',async t=>{
+  const timers=[];const h=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});
+  const ready=assert.rejects(h.bridge.ready);timers.find(t=>t.delay===8000).fn();await ready;
+  await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,0);
+});
+test('browser bridge maps exact carrier operation names, read task and canonical stream cursor',async t=>{
+  const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+  const promise=h.host('/api/owner/connected/read/tasks/'+wi+'?fleet=team');await flush();let req=h.frames.find(f=>f.type==='request');
+  assert.deepEqual(req.request.input,{task_id:wi,fleet:'team'});assert.equal(req.request.operation,'read-task');
+  h.send('headers',{id:req.id,status:200,headers:{'content-type':'application/json'}});h.send('end',{id:req.id});await (await promise).text();
+  const pair=h.host('/api/owner/bootstrap/pair',{},false);await flush();req=h.frames.filter(f=>f.type==='request').at(-1);
+  assert.equal(req.request.operation,'pair');assert.equal('token' in req.request,false);
+  h.send('error',{id:req.id,outcome:'unknown'});await assert.rejects(pair);assert.equal(h.native.length,0);
+});
+
+test('explicit invalid browser selection cannot use legacy native reads without a document marker',async()=>{
+  const original={document:globalThis.document,location:globalThis.location,fetch:globalThis.fetch};
+  const apiText=(await read('api-client.js')).replace('"./connected-workspace.js"',JSON.stringify(workspaceURL))
+    .replace('"./browser-owner-transport.js"',JSON.stringify(uri(await read('browser-owner-transport.js'))));
+  try {
+    let native=0;globalThis.document={getElementById:()=>null};globalThis.location={origin:'https://plane.claudfather.ai',search:'?owner_transport=invalid'};
+    globalThis.fetch=async()=>{native++;return reply(200,{unexpected:true});};
+    const api=await import(uri(apiText+'\n//invalid-explicit-browser'));
+    assert.equal((await api.jget('/api/tasks')).state,'denied');assert.equal(native,0);api.dispose();
+  } finally {for(const [k,v]of Object.entries(original)){if(v===undefined)delete globalThis[k];else globalThis[k]=v;}}
+});
+for (const corruption of ['sequence','session','headers','credit','early-end']) test('browser bridge retires on '+corruption,async t=>{
+  const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+  const pending=h.host('/api/owner/connected/read/stream');await flush();const req=h.frames.find(f=>f.type==='request');
+  if(corruption==='early-end') {h.send('end',{id:req.id});await assert.rejects(pending);}
+  else if(corruption==='sequence'||corruption==='session') {
+    const rejection=assert.rejects(pending);
+    h.send('headers',{id:req.id,status:200,headers:{'content-type':'application/json'},...(corruption==='sequence'?{seq:99}:{sessionId:'f'.repeat(64)})});await rejection;
+  } else if(corruption==='headers') {
+    const rejection=assert.rejects(pending);h.send('headers',{id:req.id,status:200,headers:{'set-cookie':'secret'}});await rejection;
+  } else {
+    h.send('headers',{id:req.id,status:200,headers:{'content-type':'text/event-stream'}});const response=await pending;
+    for(let i=0;i<5;i++)h.send('chunk',{id:req.id,data:'e30='});await flush();await assert.rejects(response.text());
+  }
+  await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,0);
+});
+test('admitted browser bridge survives redemption expiry while canonical account retirement cancels live work',async t=>{
+  let clock=Date.now()/1000;
+  const timers=[];const h=await bridgeHarness(t,{now:()=>clock,setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});
+  h.admit();await h.bridge.ready;
+  clock=h.doc.expires_at+120;
+  const account=await h.bridge.fetch(h.doc.shell_origin+'/api/plane/context?workspace_id='+h.doc.workspace_id,{credentials:'include'});
+  assert.deepEqual(await account.json(),{account:true});assert.equal(h.native.length,1);
+  assert.equal(timers.some(timer=>timer.delay>45000),false,'redemption expiry is not an active workspace timer');
+  const original={generation:id(11),request_id:id(12),config_fingerprint:'d'.repeat(64),source_revision:'e'.repeat(40)};
+  const receipt=h.host('/api/owner/connected/setup/receipt',original);await flush();let req=h.frames.find(f=>f.type==='request');
+  assert.deepEqual(req.request.input,original);
+  h.send('headers',{id:req.id,status:200,headers:{'content-type':'application/json'}});h.send('chunk',{id:req.id,data:'e30='});h.send('end',{id:req.id});
+  assert.deepEqual(await (await receipt).json(),{});
+  const pending=h.host('/api/owner/connected/setup/receipt',original);await flush();req=h.frames.filter(f=>f.type==='request').at(-1);
+  assert.deepEqual(req.request.input,original);const rejection=assert.rejects(pending);
+  let retired=0;
+  const native=harness({count:1,dependencies:{onRetire:()=>{retired++;h.bridge.dispose();}}});t.after(()=>native.api.dispose());
+  await native.api.checkAccount();native.metadata={...native.metadata,context_generation:id(99)};
+  assert.equal(await native.api.checkAccount(),false);assert.equal(retired,1);await rejection;
+  await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,1);
+});
+
+const ordinaryMetadata=()=>({request_id:id(81),kind:'message',scope:{workspace:'workspace',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'original viewer'},target:{recipient:'actor_'+'c'.repeat(32),task_id:null},submitted_at:'2026-11-15T20:30:00.123Z'});
+test('browser ordinary message facade preserves exact original metadata, finite bounds and unknown receipts',async t=>{
+  const timers=[];const h=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});h.admit();await h.bridge.ready;
+  const context=h.host('/api/owner/connected/actions/context',{room:'team'});await flush();let req=h.frames.filter(f=>f.type==='request').at(-1);assert.equal(req.request.operation,'action-context');assert.equal(timers.at(-1).delay,15000);
+  const large=JSON.stringify({padding:'x'.repeat(32769)});h.send('headers',{id:req.id,status:200,headers:{'content-type':'application/json'}});
+  for(let i=0;i<large.length;i+=16384)h.send('chunk',{id:req.id,data:Buffer.from(large.slice(i,i+16384)).toString('base64')});h.send('end',{id:req.id});assert.equal((await (await context).json()).padding.length,32769);
+  const original=ordinaryMetadata(),body='🙂'.repeat(2000);const sending=h.host('/api/owner/connected/actions/send',{...original,body});await flush();req=h.frames.filter(f=>f.type==='request').at(-1);
+  assert.equal(req.request.operation,'action-send');assert.deepEqual(req.request.input,{...original,body});assert.equal(timers.at(-1).delay,45000);
+  h.send('headers',{id:req.id,status:503,headers:{'content-type':'application/json'}});h.send('chunk',{id:req.id,data:Buffer.from('{"state":"unavailable","effect":"not_started"}').toString('base64')});h.send('end',{id:req.id});const refused=await sending;assert.equal(refused.status,503);assert.deepEqual(await refused.json(),{state:'unavailable',effect:'not_started'});
+  const receipt=h.host('/api/owner/connected/actions/receipt',original);await flush();req=h.frames.filter(f=>f.type==='request').at(-1);assert.equal(req.request.operation,'action-receipt');assert.deepEqual(req.request.input,original);assert.equal(timers.at(-1).delay,15000);
+  h.send('error',{id:req.id,outcome:'unknown'});await assert.rejects(receipt);await flush();assert.equal(h.frames.filter(f=>f.type==='request').length,3,'no automatic retry or replacement UUID');
+  for(const [path,input] of [['prepare',{...original,body}],['context',{room:'team',kind:'nudge'}],['send',{...original,kind:'nudge',body}],['send',{...original,body,version:1}],['send',{...original,target:{...original.target,task_id:wi},body}],['send',{...original,scope:{...original.scope,extra:'no'},body}],['send',{...original,body:'\ud800'}],['send',{...original,body:'\u0085\u001c'}],['receipt',{...original,body}]])await assert.rejects(h.host('/api/owner/connected/actions/'+path,input));
+  await assert.rejects(h.host('/api/owner/connected/actions/send?extra=1',{...original,body}));assert.equal(h.native.length,0);
+});
+test('explicit browser transport shows canonical guide recovery without native terminal enrollment',async t=>{
+  const bridge=await bridgeHarness(t);assert.equal(bridge.bridge.fetch.browserOwnerTransport,true);
+  const h=harness({count:1}),browserFetch=Object.defineProperty((...args)=>h.dependencies.fetch(...args),'browserOwnerTransport',{value:true});
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
+  workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
+  const nodes=descendants(h.ui.get('owner-session')),text=nodes.map(n=>n.textContent).join(' ');
+  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
+  assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
+  assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
+  const native=harness({count:1});native.mount();await native.api.checkAccount();assert.match(descendants(native.ui.get('owner-session')).map(n=>n.textContent).join(' '),/DATA_ROOT/);native.api.dispose();
 });

@@ -386,3 +386,106 @@ def test_final_write_time_cannot_precede_delayed_assertion_issue(local, monkeypa
     monkeypatch.setattr(access, "_now", lambda: clock[0])
     assert workspace.status() == ("absent", None)
     assert workspace.inspect(p.nonce) == p
+
+
+@pytest.mark.parametrize("rejection", ["expired", "unknown", "malformed", "unstaged", "expires-at-bind"])
+def test_guided_workspace_recovery_requires_new_code_and_fresh_bind(local, monkeypatch, rejection):
+    access, workspace, owner, clock = local
+    first = proposed(local)
+    if rejection == "expired":
+        clock[0] = first.expires_at
+    elif rejection == "unknown":
+        first = replace(first, nonce="A" * 43)
+    elif rejection == "malformed":
+        first = replace(first, nonce="not a code")
+    elif rejection == "unstaged":
+        first = replace(first, nonce=workspace.begin(OWNER, issuer=ISSUER, operational_origin=ORIGIN).nonce)
+    codes = iter([first.nonce, first.nonce, "new"])
+    fresh = []
+    reads = []
+    def read_code(*args, **kwargs):
+        code = next(codes)
+        reads.append(code)
+        if rejection == "unstaged" and len(reads) == 2:
+            workspace.stage(replace(first.attestation, nonce=code), OWNER)
+        if code == "new":
+            fresh.append(proposed(local))
+            return fresh[-1].nonce
+        return code
+    monkeypatch.setattr(host_owner, "_challenge", read_code)
+    answers = iter((["BIND-WORKSPACE\n"] if rejection == "expires-at-bind" else []) +
+                   ["RETRY\n", "RETRY\n", "BIND-WORKSPACE\n"])
+    tty = terminal(monkeypatch, answers)
+    original_read = tty.readline
+    def answer(size=-1):
+        value = original_read(size)
+        if rejection == "expires-at-bind" and value == "BIND-WORKSPACE\n" and not fresh:
+            clock[0] = first.expires_at
+        return value
+    tty.readline = answer
+    result = host_owner._confirm_workspace(access, tty, owner, recover=True)
+    assert result.data["state"] == "active"
+    state, binding = workspace.status()
+    assert state == "active" and binding.owner == owner and binding.revision == 1
+    assert binding.changed_at >= fresh[-1].created_at
+    assert access.current_grant() == owner
+    assert "pairing again" not in tty.getvalue()
+    assert first.nonce not in tty.getvalue() and fresh[-1].nonce not in tty.getvalue()
+
+
+@pytest.mark.parametrize("answer", ["CANCEL\n", "", "anything\n"])
+def test_guided_workspace_recovery_cancel_never_binds(local, monkeypatch, answer):
+    from claudlobby.command_result import CommandFailure
+    access, workspace, owner, clock = local
+    p = proposed(local)
+    clock[0] = p.expires_at
+    monkeypatch.setattr(host_owner, "_challenge", lambda *a, **k: p.nonce)
+    tty = terminal(monkeypatch, iter([answer]))
+    with pytest.raises(CommandFailure, match="cancelled"):
+        host_owner._confirm_workspace(access, tty, owner, recover=True)
+    assert workspace.status() == ("absent", None)
+    assert access.current_grant() == owner
+
+
+def test_guided_workspace_hidden_input_eof_cancels(local, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    access, workspace, owner, _ = local
+    def eof(*args, **kwargs):
+        raise EOFError
+    monkeypatch.setattr(host_owner, "_challenge", eof)
+    with pytest.raises(CommandFailure, match="cancelled"):
+        host_owner._confirm_workspace(access, terminal(monkeypatch, iter([])), owner, recover=True)
+    assert workspace.status() == ("absent", None)
+
+
+def test_guided_workspace_retry_refuses_changed_owner(local, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    access, workspace, owner, clock = local
+    p = proposed(local)
+    clock[0] = p.expires_at
+    monkeypatch.setattr(host_owner, "_challenge", lambda *a, **k: p.nonce)
+    tty = terminal(monkeypatch, iter([]))
+    def changed(size=-1):
+        access.revoke_owner(expected_revision=owner.revision)
+        return "RETRY\n"
+    tty.readline = changed
+    with pytest.raises(CommandFailure, match="owner changed"):
+        host_owner._confirm_workspace(access, tty, owner, recover=True)
+    assert workspace.status() == ("absent", None)
+
+
+def test_guided_workspace_retry_refuses_changed_binding(local, monkeypatch):
+    from claudlobby.command_result import CommandFailure
+    access, workspace, owner, clock = local
+    p = proposed(local)
+    clock[0] = p.expires_at
+    monkeypatch.setattr(host_owner, "_challenge", lambda *a, **k: p.nonce)
+    tty = terminal(monkeypatch, iter([]))
+    changed_binding = []
+    def changed(size=-1):
+        changed_binding.append(workspace.confirm(expected_proposal=proposed(local)))
+        return "RETRY\n"
+    tty.readline = changed
+    with pytest.raises(CommandFailure, match="binding changed"):
+        host_owner._confirm_workspace(access, tty, owner, recover=True)
+    assert workspace.status() == ("active", changed_binding[0])

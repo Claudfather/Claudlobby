@@ -176,7 +176,9 @@ async def _action_json(receive: Receive) -> dict:
 
 class _OwnerBrowser:
     def __init__(self, root: Path, verify_principal: PrincipalVerifier, expected_origin: str,
-                 *, sampler=None, package=None, workspace_bootstrap=None):
+                 *, sampler=None, package=None, workspace_bootstrap=None, pairing_origin=None):
+        if pairing_origin is not None and workspace_bootstrap is not None:
+            raise ValueError("pairing mode cannot include workspace bootstrap")
         self.origin, self.authority = _origin(expected_origin)
         if not callable(verify_principal):
             raise ValueError("an explicit trusted principal verifier is required")
@@ -199,6 +201,11 @@ class _OwnerBrowser:
         self.connected_reads = None
         self.connected_actions = None
         self.connected_setup = None
+        self.pairing_bootstrap = None
+        if pairing_origin is not None:
+            from .owner_pairing_http import PairingBootstrapHTTP
+            self.pairing_bootstrap = PairingBootstrapHTTP(self.access,
+                origin=pairing_origin, authority=self.authority, verify_principal=self.verify_principal)
         if workspace_bootstrap is not None:
             from .owner_workspace_http import WorkspaceBootstrapHTTP
             self.workspace_bootstrap = WorkspaceBootstrapHTTP(self.access,
@@ -327,6 +334,10 @@ class _OwnerBrowser:
         return response
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (scope["type"] == "http" and self.pairing_bootstrap is not None
+                and scope["path"] == "/api/owner/bootstrap/pair"):
+            await self.pairing_bootstrap(scope, receive, send)
+            return
         if (scope["type"] == "http" and self.connected_setup is not None
                 and scope["path"].startswith("/api/owner/connected/setup/")):
             await self.connected_setup(scope, receive, send)
@@ -340,15 +351,18 @@ class _OwnerBrowser:
             await self.connected_reads(scope, receive, send)
             return
         if scope["type"] != "http":
-            if scope["type"] == "lifespan" and self.workspace_bootstrap is not None:
+            if scope["type"] == "lifespan" and (self.workspace_bootstrap is not None or self.pairing_bootstrap is not None):
                 original_receive = receive
                 async def receive():
                     message = await original_receive()
                     if message["type"] == "lifespan.shutdown":
-                        await self.connected_setup.shutdown()
-                        await self.connected_actions.shutdown()
-                        await self.connected_reads.shutdown()
-                        await self.workspace_bootstrap.shutdown()
+                        if self.pairing_bootstrap is not None:
+                            await self.pairing_bootstrap.shutdown()
+                        if self.workspace_bootstrap is not None:
+                            await self.connected_setup.shutdown()
+                            await self.connected_actions.shutdown()
+                            await self.connected_reads.shutdown()
+                            await self.workspace_bootstrap.shutdown()
                     return message
             await self.read_app(scope, receive, send)
             return
@@ -521,7 +535,8 @@ class _OwnerBrowser:
 
 
 def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
-                             expected_origin: str, sampler=None, package=None, workspace_bootstrap=None):
+                             expected_origin: str, sampler=None, package=None, workspace_bootstrap=None,
+                             pairing_origin=None):
     """Internal same-origin lifecycle plus protected canonical reads.
 
     Never initializes authority or exposes local pairing confirmation, grants,
@@ -531,4 +546,4 @@ def create_owner_browser_app(root: Path, *, verify_principal: PrincipalVerifier,
     HTTPS origin is explicit even when the trusted proxy forwards local HTTP.
     """
     return _OwnerBrowser(root, verify_principal, expected_origin, sampler=sampler,
-                         package=package, workspace_bootstrap=workspace_bootstrap)
+                         package=package, workspace_bootstrap=workspace_bootstrap, pairing_origin=pairing_origin)

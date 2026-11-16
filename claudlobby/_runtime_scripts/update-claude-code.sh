@@ -90,14 +90,14 @@ update_failed() {
 fleet_claude() { fleet_claude_path "${CLAUDE_UPDATE_FLEET_PATH:-}"; }
 
 # --- Every verdict below is a BOUNDED --version measurement -------------------
-# Without timeout/gtimeout, measure_claude_version refuses to run the binary at
-# all. That is this job's missing prerequisite, not a binary that cannot run:
+# Without timeout/gtimeout or the admitted managed Mac Python, the version
+# reader refuses to run the binary at all. That is this job's missing prerequisite, not a binary that cannot run:
 # never raise binary_unrunnable/binary_update_failed for it, and never install
 # a binary this run could not verify. Skip, and say why distinctly.
-if [ -z "$_TIMEOUT_BIN" ]; then
-    log "UPDATE skipped — the claude version probe cannot be bounded here: timeout/gtimeout unavailable. Install coreutils (macOS: brew install coreutils) to enable verified updates; nothing was measured or installed."
+if ! claude_version_bounder_available; then
+    log "UPDATE skipped — the claude version probe cannot be bounded here: timeout/gtimeout unavailable and no admitted managed Python. Restore the admitted runtime to enable verified updates; nothing was measured or installed."
     emit_fleet_notice "$BOTS_DIR" "binary_update_skipped" \
-        "claude updates are skipped on this host: timeout/gtimeout is unavailable, so the installed binary cannot be verified (this does not mean it cannot run). Install coreutils (macOS: brew install coreutils); nothing was installed"
+        "claude updates are skipped on this host: timeout/gtimeout and admitted managed Python are unavailable, so the installed binary cannot be verified (this does not mean it cannot run); nothing was installed"
     exit 0
 fi
 

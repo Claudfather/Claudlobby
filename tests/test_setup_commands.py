@@ -584,6 +584,216 @@ def git_preparation(tmp_path, monkeypatch):
     return bootstrap, tmp_path / 'managed', tmp_path / 'data', kwargs, git, revision, calls
 
 
+
+def _interrupt_preparation_after_fetch(git_preparation, monkeypatch):
+    """Leave a real fetched commit, but no recorded resolution or dependencies."""
+    import json
+    import subprocess
+    bootstrap, directory, data, kwargs, _git, _revision, calls = git_preparation
+    original = subprocess.run
+
+    def interrupted(arguments, *args, **options):
+        result = original(arguments, *args, **options)
+        if 'fetch' in arguments and result.returncode == 0:
+            raise subprocess.TimeoutExpired(arguments, 300)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, 'run', interrupted)
+        with pytest.raises(bootstrap.BundleError, match='did not complete'):
+            bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert json.loads((directory / 'preparation.json').read_bytes())['revision'] is None
+    assert not calls and not (directory / 'env').exists() and not (directory / 'bin').exists()
+
+
+def _managed_preparation_git(directory, *arguments):
+    import subprocess
+    from tests.conftest import constructed_env
+    return subprocess.run(['git', '-C', str(directory / 'src'), *arguments],
+        env=constructed_env(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
+                            GIT_TERMINAL_PROMPT='0'),
+        capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+
+
+@pytest.mark.parametrize('retained', ['stale-requested-ref', 'different-ref'])
+def test_unfrozen_symbolic_preparation_resolves_explicit_ref_instead_of_retained_fetch(
+        git_preparation, monkeypatch, retained):
+    import json
+    bootstrap, directory, data, kwargs, git, first, calls = git_preparation
+    _interrupt_preparation_after_fetch(git_preparation, monkeypatch)
+    if retained == 'different-ref':
+        git('checkout', '--quiet', '-b', 'other')
+    (Path(kwargs['remote']) / 'new-file').write_text('another commit')
+    git('add', '.')
+    git('commit', '--quiet', '-m', 'advance fixture ref')
+    another = git('rev-parse', 'HEAD')
+    if retained == 'different-ref':
+        _managed_preparation_git(directory, 'fetch', '--no-tags', '--', kwargs['remote'], 'other')
+        expected = first
+    else:
+        expected = another
+    fetched_before = _managed_preparation_git(directory, 'rev-parse', 'FETCH_HEAD^{commit}')
+    assert fetched_before != expected
+    result = bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert result['source_revision'] == expected
+    assert json.loads((directory / 'preparation.json').read_bytes())['revision'] == expected
+    assert _managed_preparation_git(directory, 'rev-parse', 'FETCH_HEAD^{commit}') == expected
+    assert calls
+    assert not (data / 'state/config.json').exists() and not (data / 'state/update.json').exists()
+
+
+def test_full_commit_preparation_recovers_matching_unrecorded_fetch_without_refetch(
+        git_preparation, monkeypatch):
+    import subprocess
+    bootstrap, directory, data, kwargs, _git, revision, _calls = git_preparation
+    kwargs['ref'] = revision
+    _interrupt_preparation_after_fetch(git_preparation, monkeypatch)
+    fetched = (directory / 'src/.git/FETCH_HEAD').read_bytes()
+    original = subprocess.run
+
+    def no_refetch(arguments, *args, **options):
+        assert 'fetch' not in arguments, 'matching pinned fetch must recover without a new fetch'
+        return original(arguments, *args, **options)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, 'run', no_refetch)
+        result = bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert result['source_revision'] == revision
+    assert (directory / 'src/.git/FETCH_HEAD').read_bytes() == fetched
+
+
+def test_full_commit_preparation_refuses_different_retained_fetch_before_effects(
+        git_preparation, monkeypatch):
+    bootstrap, directory, data, kwargs, git, revision, calls = git_preparation
+    kwargs['ref'] = revision
+    _interrupt_preparation_after_fetch(git_preparation, monkeypatch)
+    (Path(kwargs['remote']) / 'new-file').write_text('unexpected fetched commit')
+    git('add', '.')
+    git('commit', '--quiet', '-m', 'advance fixture ref')
+    _managed_preparation_git(directory, 'fetch', '--no-tags', '--', kwargs['remote'], 'main')
+    receipt = (directory / 'preparation.json').read_bytes()
+    fetched = (directory / 'src/.git/FETCH_HEAD').read_bytes()
+    assert _managed_preparation_git(directory, 'rev-parse', 'FETCH_HEAD^{commit}') != revision
+    with pytest.raises(bootstrap.BundleError, match='explicit Git commit'):
+        bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert not calls and not (directory / 'env').exists() and not (directory / 'bin').exists()
+    assert (directory / 'preparation.json').read_bytes() == receipt
+    assert (directory / 'src/.git/FETCH_HEAD').read_bytes() == fetched
+
+
+def test_full_commit_preparation_refuses_unexpected_new_fetch_resolution_before_effects(
+        git_preparation, monkeypatch):
+    import json
+    import subprocess
+    from tests.conftest import constructed_env
+    bootstrap, directory, data, kwargs, git, revision, calls = git_preparation
+    kwargs['ref'] = revision
+    (Path(kwargs['remote']) / 'new-file').write_text('different available commit')
+    git('add', '.')
+    git('commit', '--quiet', '-m', 'advance fixture ref')
+    another = git('rev-parse', 'HEAD')
+    original = subprocess.run
+
+    def replaced_fetch(arguments, *args, **options):
+        result = original(arguments, *args, **options)
+        if 'fetch' in arguments and result.returncode == 0:
+            # Model FETCH_HEAD replacement after the requested fetch completes,
+            # before the caller records its resolution. Both commits are real.
+            original(['git', '-C', str(directory / 'src'), 'fetch', '--no-tags', '--',
+                      kwargs['remote'], another],
+                     env=constructed_env(GIT_CONFIG_GLOBAL='/dev/null',
+                         GIT_CONFIG_SYSTEM='/dev/null', GIT_TERMINAL_PROMPT='0'),
+                     capture_output=True, check=True, timeout=30)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, 'run', replaced_fetch)
+        with pytest.raises(bootstrap.BundleError, match='explicit Git commit'):
+            bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert json.loads((directory / 'preparation.json').read_bytes())['revision'] is None
+    assert not calls and not (directory / 'env').exists() and not (directory / 'bin').exists()
+    assert _managed_preparation_git(directory, 'rev-parse', 'FETCH_HEAD^{commit}') == another
+
+
+@pytest.mark.parametrize('completed', [False, True], ids=['dependency-interrupted', 'completed'])
+def test_full_commit_preparation_refuses_different_recorded_revision_without_effects(
+        git_preparation, monkeypatch, completed):
+    import json
+    from claudlobby import git_update
+    bootstrap, directory, data, kwargs, git, revision, calls = git_preparation
+    kwargs['ref'] = revision
+    if completed:
+        bootstrap.prepare_git_installation(directory, data, **kwargs)
+    else:
+        with monkeypatch.context() as patch:
+            def interrupted(_arguments):
+                raise RuntimeError('fixture dependency interruption')
+            patch.setattr(git_update, 'run_dependency_command', interrupted)
+            with pytest.raises(RuntimeError, match='fixture dependency interruption'):
+                bootstrap.prepare_git_installation(directory, data, **kwargs)
+    (Path(kwargs['remote']) / 'new-file').write_text('different retained source commit')
+    git('add', '.')
+    git('commit', '--quiet', '-m', 'advance fixture ref')
+    another = git('rev-parse', 'HEAD')
+    _managed_preparation_git(directory, 'fetch', '--no-tags', '--', kwargs['remote'], 'main')
+    _managed_preparation_git(directory, 'checkout', '--quiet', '--detach', another)
+    receipt_path = directory / 'preparation.json'
+    state = json.loads(receipt_path.read_bytes())
+    state['revision'] = another
+    receipt_path.write_text(json.dumps(state, sort_keys=True))
+    receipt = receipt_path.read_bytes()
+    entries = {entry.name: (entry.read_bytes(), entry.stat().st_mode)
+               for entry in (directory / 'bin').iterdir()} if (directory / 'bin').exists() else {}
+    before_calls = list(calls)
+    data_before = {str(path.relative_to(data)): (path.read_bytes(), path.stat().st_mode)
+                   for path in data.rglob('*') if path.is_file()}
+    with pytest.raises(bootstrap.BundleError, match='explicit Git commit'):
+        bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert calls == before_calls and receipt_path.read_bytes() == receipt
+    assert _managed_preparation_git(directory, 'rev-parse', 'HEAD^{commit}') == another
+    if entries:
+        assert {entry.name: (entry.read_bytes(), entry.stat().st_mode)
+                for entry in (directory / 'bin').iterdir()} == entries
+    else:
+        assert not (directory / 'bin').exists()
+    assert {str(path.relative_to(data)): (path.read_bytes(), path.stat().st_mode)
+            for path in data.rglob('*') if path.is_file()} == data_before
+    assert not (data / 'state/config.json').exists() and not (data / 'state/update.json').exists()
+
+
+
+@pytest.mark.parametrize('progress', ['complete', 'environment_owned', 'lock_sha256'])
+def test_unresolved_preparation_refuses_retained_progress_before_writes_or_git(
+        git_preparation, monkeypatch, progress):
+    import json
+    from claudlobby import installation
+    bootstrap, directory, data, kwargs, _git, _revision, calls = git_preparation
+    _interrupt_preparation_after_fetch(git_preparation, monkeypatch)
+    receipt_path = directory / 'preparation.json'
+    state = json.loads(receipt_path.read_bytes())
+    state[progress] = 'a' * 64 if progress == 'lock_sha256' else True
+    receipt_path.write_text(json.dumps(state, sort_keys=True))
+    retained = {path: path.read_bytes() for path in (
+        receipt_path, directory / 'installation.json', directory / 'src/.git/FETCH_HEAD')}
+    effects = []
+
+    def unexpected_write(*_args, **_kwargs):
+        effects.append('installation-write')
+        pytest.fail('inconsistent unresolved receipt reached installation writing')
+
+    def unexpected_git(*_args, **_kwargs):
+        effects.append('git')
+        pytest.fail('inconsistent unresolved receipt reached Git')
+
+    monkeypatch.setattr(installation, 'write_installation', unexpected_write)
+    monkeypatch.setattr(bootstrap.subprocess, 'run', unexpected_git)
+    with pytest.raises(bootstrap.BundleError, match='unresolved.*retained progress'):
+        bootstrap.prepare_git_installation(directory, data, **kwargs)
+    assert not effects and not calls
+    assert {path: path.read_bytes() for path in retained} == retained
+    assert not (directory / 'env').exists() and not (directory / 'bin').exists()
+
+
 def test_git_preparation_uses_final_paths_without_activation_and_verifies_retry(git_preparation):
     bootstrap, directory, data, kwargs, git, revision, calls = git_preparation
     result = bootstrap.prepare_git_installation(directory, data, **kwargs)
