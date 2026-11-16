@@ -124,8 +124,9 @@ def installed(tmp_path, monkeypatch):
     body = ("import json,os,sys\n"
             "assert sys.flags.isolated and sys.flags.no_site\n"
             "assert os.environ['BOT_UNKNOWN_FIXTURE']=='preserved'\n"
-            "assert sys.argv[1:]==['--root',os.environ['CLAUDLOBBY_ROOT'],'host','owner','setup',os.environ['EXPECTED_MODE']]\n"
+            "assert sys.argv[1:]==['--root',os.environ['CLAUDLOBBY_ROOT'],'host','owner',*os.environ['EXPECTED_MODE'].split()]\n"
             "os.write(1,b'{\"type\":\"hello\",\"fixture\":true}\\n')\n"
+            "if 'EXPECTED_SOURCE' in os.environ: assert os.environ['SSH_CONNECTION']==os.environ['EXPECTED_SOURCE']\n"
             "os.write(1,sys.stdin.buffer.readline())\n")
     (source / "claudlobby/installation.py").write_text(body)
     (source / "requirements-runtime.lock").write_text("# public fixture\n")
@@ -236,7 +237,11 @@ def test_original_finish_preserves_historical_preparation_without_installer_reco
     assert snapshot(home) == before
 
 
-@pytest.mark.parametrize("action,flag", [("setup", "--stdio"), ("status", "--stdio-status")])
+SOURCE = "100.64.0.42 4242 100.64.0.7 22"
+
+
+@pytest.mark.parametrize("action,flag", [("setup", "setup --stdio"), ("status", "setup --stdio-status"),
+                                         ("api", "api --stdio")])
 def test_actual_fixed_exec_preserves_normal_hello_and_following_guide_input(installed, tmp_path, action, flag):
     module, home, _install, value, python = installed
     driver = tmp_path / "public-fixture-driver.py"
@@ -253,11 +258,47 @@ def test_actual_fixed_exec_preserves_normal_hello_and_following_guide_input(inst
     result = subprocess.run([str(python), "-I", "-S", "-B", str(driver), str(SCRIPT), str(home), str(python), action],
         input=module.wire(value) + following,
         env=constructed_env(BOT_UNKNOWN_FIXTURE="preserved", EXPECTED_MODE=flag,
+            **({"SSH_CONNECTION": SOURCE, "EXPECTED_SOURCE": SOURCE} if action == "api" else {}),
             HOME=str(tmp_path / "untrusted-home"), GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="alias.status",
             GIT_CONFIG_VALUE_0="!false"), capture_output=True, timeout=15)
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout == b'{"type":"hello","fixture":true}\n' + following and result.stderr == b""
     assert snapshot(home) == before
+
+
+def test_api_mode_refuses_without_a_server_source_before_reading_admission(installed, monkeypatch):
+    module, home, *_ = installed
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setattr(module, "request", lambda *_a: pytest.fail("read admission without an SSH source"))
+    monkeypatch.setattr(module.os, "execve", lambda *_a: pytest.fail("executed the CLI"))
+    reader, writer = os.pipe()
+    observer, output = os.pipe()
+    saved = os.dup(1)
+    before = snapshot(home)
+    try:
+        os.dup2(output, 1)
+        code = module.main("api", reader)
+    finally:
+        os.dup2(saved, 1)
+        for fd in (saved, reader, writer, output):
+            os.close(fd)
+    try:
+        value = json.loads(os.read(observer, 4096))
+    finally:
+        os.close(observer)
+    assert code == 4 and snapshot(home) == before
+    assert value == {"schema_version": 1, "operation": "owner-api-v1", "state": "refused",
+                     "code": "ssh_source_missing", "retry": False}
+
+
+@pytest.mark.parametrize("arguments,operation", [(["api", "extra"], "owner-guide-v1"), (["api --stdio"], "owner-guide-v1"),
+                                                 (["API"], "owner-guide-v1")])
+def test_shell_api_mode_is_one_exact_word(arguments, operation):
+    result = subprocess.run(["/bin/sh", str(SCRIPT), *arguments], input=frame(),
+                            env=constructed_env(SSH_CONNECTION=SOURCE), capture_output=True, timeout=5)
+    assert result.returncode == 2 and result.stderr == b""
+    assert json.loads(result.stdout) == {"schema_version": 1, "operation": operation, "state": "refused",
+                                         "code": "invalid_request", "retry": False}
 
 
 def test_generated_selector_list_stays_with_canonical_owner():

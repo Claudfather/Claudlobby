@@ -351,6 +351,17 @@ def dispatch(args):
         request = channel.start()
         paths = _admit(args, request)
         profile = FixedOwnerProfile(paths, request)
+        # The managed Mac runtime has no admitted HTTPS ingress: its guide is
+        # the explicit SSH-controlled lifecycle. Capture the server tuple here,
+        # before the fixed profile replaces the environment; a missing or
+        # ambiguous one refuses rather than falling back to another transport.
+        ssh = None
+        if profile.runtime is not None and not args.stdio_status:
+            from ..plane.owner_ssh import SSHSessionSource
+            try:
+                ssh = SSHSessionSource.capture()
+            except AccessDenied:
+                raise StdioRefused("owner_ssh_source_refused") from None
         with profile.environment(), interrupted():
             store = OwnerAccess(paths.root)
             if args.stdio_status:
@@ -359,7 +370,8 @@ def dispatch(args):
             configured = SimpleNamespace(**vars(args))
             configured.finish_setup = request["finish_setup"]
             consent = StdioGuideConsent(channel)
-            result = run(configured, paths, store, None, consent=consent, profile=profile)
+            result = run(configured, paths, store, None, consent=consent, profile=profile,
+                         **({"ssh": ssh} if ssh is not None else {}))
             channel.emit("result", **result.data)
         return 0
     except StdioRefused as exc:

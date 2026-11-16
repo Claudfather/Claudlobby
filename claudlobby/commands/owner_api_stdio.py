@@ -9,7 +9,6 @@ import asyncio
 import base64
 import json
 import os
-from pathlib import Path
 import re
 import select
 import time
@@ -17,6 +16,9 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 from .owner_stdio import StdioRefused, _unique, _wire
+
+WEBSITE_ISSUER = 'https://claudfather.ai'
+OPERATIONAL_ORIGIN = 'https://plane.claudfather.ai'
 
 _BASE = {'version', 'type', 'seq', 'session_id'}
 _START = {'profile', 'expected_uid', 'source_revision', 'binding_sha256',
@@ -40,6 +42,13 @@ _FIELDS = {
     'read-equipment': ('alias',), 'read-search': ('q', 'fleet', 'limit'),
     'read-grid': ('fleet', 'focus'), 'read-stream': ('cursor', 'once'),
 }
+# The provider sign-in attempt lives in one process: its worker thread, PTY child,
+# URL and code hand-off are ProviderSignin instance state, and the retained row
+# admits exactly one original attempt. A one-operation exec would start that
+# attempt and cancel it in its own mandatory drain, or deliver a code to a
+# process that never owned the child. These stay refused here until a reviewed
+# owner for that attempt exists; signin-status remains a read-only observation.
+_PROCESS_BOUND = frozenset({'setup-signin-begin', 'setup-signin-code', 'setup-signin-cancel'})
 _SECRET = re.compile(r'[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]')
 _UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}')
 
@@ -131,6 +140,7 @@ class APIChannel:
         self.input_seq = self.output_seq = self.input_bytes = 0
         self.buffer = bytearray()
         self.partial_since = None
+        self.interrupted = False
 
     def emit(self, kind, **values):
         self.output_seq += 1
@@ -147,6 +157,8 @@ class APIChannel:
             raw = raw[count:]
 
     def read(self, allowed, timeout=.25):
+        if self.interrupted:
+            raise StdioRefused('interrupted')
         if b'\n' not in self.buffer:
             if not select.select([self.incoming], [], [], timeout)[0]:
                 if self.partial_since is not None and time.monotonic() - self.partial_since >= 15:
@@ -181,7 +193,17 @@ class APIChannel:
         except (ValueError, TypeError, AttributeError, RecursionError):
             raise StdioRefused('invalid_request') from None
 
+    def interrupt(self):
+        """A stop signal joins the same owned drain as a lost channel."""
+        self.interrupted = True
+
+    def pending_cancel(self):
+        """One non-blocking look for a cancel that arrived during admission."""
+        value = self.read({'cancel'}, 0)
+        return value is not None
+
     async def start(self):
+        """Return the admitted start frame, or None for a normal early cancel."""
         self.emit('hello', profile='owner-api-v1')
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -189,15 +211,25 @@ class APIChannel:
             if value is None:
                 continue
             if value['type'] == 'cancel':
-                raise StdioRefused('cancelled')
+                return None
             if (value['profile'] != 'owner-api-v1' or type(value['expected_uid']) is not int
                     or not 0 < value['expected_uid'] < 2**32 - 1
                     or not isinstance(value['source_revision'], str) or re.fullmatch('[a-f0-9]{40}', value['source_revision']) is None
                     or not isinstance(value['binding_sha256'], str) or re.fullmatch('[a-f0-9]{64}', value['binding_sha256']) is None):
                 raise StdioRefused('invalid_request')
-            operation_request(value['operation'], value['input'], value['token'], value['last_event_id'])
+            try:
+                operation_request(value['operation'], value['input'], value['token'], value['last_event_id'])
+            except ValueError:
+                raise StdioRefused('invalid_request') from None
+            if value['operation'] in _PROCESS_BOUND:
+                # Refused before any engine entry: the one retained attempt is untouched.
+                raise StdioRefused('operation_requires_persistent_owner')
             return value
         raise StdioRefused('expired')
+
+    def end_cancelled(self):
+        """The published normal cancellation before headers: healthy release."""
+        self.emit('end', status=0, bytes_sent=0, cancelled=True)
 
 
 async def shutdown_app(app):
@@ -216,19 +248,30 @@ async def shutdown_app(app):
 
 
 async def run_operation(channel, app, operation, payload, token, last_event_id, *, origin):
+    """Carry one compiled operation; end only follows the complete owned drain."""
     method, path, query, body, headers = operation_request(operation, payload, token, last_event_id)
     authority = origin.removeprefix('https://')
     headers = [(b'host', authority.encode('ascii')), *headers]
     if operation != 'status':
-        headers.append((b'origin', b'https://plane.claudfather.ai'))
+        headers.append((b'origin', OPERATIONAL_ORIGIN.encode('ascii')))
     scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': method,
         'scheme': 'https', 'path': path, 'raw_path': path.encode('ascii'), 'query_string': query,
         'headers': headers, 'client': ('ssh-session', 0), 'server': ('ssh-carrier', 0)}
     ack = asyncio.Queue(maxsize=1)
     cancelled, stop = asyncio.Event(), asyncio.Event()
-    control_error = []
+    # Carrier faults are kept apart from policy outcomes: a handler that turns
+    # an exception into a response cannot hide a broken or expired channel.
+    carrier_error = []
     status = sent = chunk_id = 0
     received = False
+
+    def carrier(code):
+        error = StdioRefused(code)
+        if not carrier_error:
+            carrier_error.append(error)
+        cancelled.set()
+        return error
+
     async def controls():
         try:
             while not stop.is_set():
@@ -241,9 +284,11 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
                 if type(frame['chunk_id']) is not int or ack.full():
                     raise StdioRefused('invalid_request')
                 ack.put_nowait(frame['chunk_id'])
-        except (StdioRefused, OSError) as exc:
-            control_error.append(exc)
-            cancelled.set()
+        except StdioRefused as exc:
+            carrier(exc.code)
+        except OSError:
+            carrier('disconnected')
+
     async def receive():
         nonlocal received
         if not received:
@@ -251,128 +296,235 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
             return {'type': 'http.request', 'body': body, 'more_body': False}
         await cancelled.wait()
         return {'type': 'http.disconnect'}
+
     async def send(message):
         nonlocal status, sent, chunk_id
         if cancelled.is_set():
             raise asyncio.CancelledError
-        if message['type'] == 'http.response.start':
-            if status:
-                raise StdioRefused('invalid_response')
-            status = message['status']
-            selected = {}
-            for key, value in message.get('headers', ()):
-                name = key.decode('ascii').lower()
-                if name in {'content-type', 'cache-control', 'retry-after'}:
-                    if name in selected or len(value) > 1024:
-                        raise StdioRefused('invalid_response')
-                    selected[name] = value.decode('ascii')
-            channel.emit('headers', status=status, headers=selected)
-        elif message['type'] == 'http.response.body':
-            if not status:
-                raise StdioRefused('invalid_response')
-            value = message.get('body', b'')
-            for offset in range(0, len(value), 16384):
-                part = value[offset:offset + 16384]
-                sent += len(part)
-                if sent > (8388608 if operation == 'read-stream' else 2097152):
-                    raise StdioRefused('output_limit')
-                chunk_id += 1
-                channel.emit('chunk', chunk_id=chunk_id, data=base64.b64encode(part).decode('ascii'))
-                if await asyncio.wait_for(ack.get(), 15) != chunk_id:
-                    raise StdioRefused('invalid_request')
-        else:
-            raise StdioRefused('invalid_response')
-    reader = asyncio.create_task(controls())
-    request = asyncio.create_task(app(scope, receive, send))
-    cancellation = asyncio.create_task(cancelled.wait())
+        try:
+            if message['type'] == 'http.response.start':
+                if status or type(message.get('status')) is not int or not 100 <= message['status'] <= 599:
+                    raise carrier('invalid_response')
+                selected = {}
+                for key, value in message.get('headers', ()):
+                    name = key.decode('ascii').lower()
+                    if name in {'content-type', 'cache-control', 'retry-after'}:
+                        if name in selected or len(value) > 1024:
+                            raise carrier('invalid_response')
+                        selected[name] = value.decode('ascii')
+                channel.emit('headers', status=message['status'], headers=selected)
+                status = message['status']
+            elif message['type'] == 'http.response.body':
+                if not status:
+                    raise carrier('invalid_response')
+                value = message.get('body', b'')
+                for offset in range(0, len(value), 16384):
+                    part = value[offset:offset + 16384]
+                    if sent + len(part) > (8388608 if operation == 'read-stream' else 2097152):
+                        raise carrier('output_limit')
+                    sent += len(part)
+                    chunk_id += 1
+                    channel.emit('chunk', chunk_id=chunk_id, data=base64.b64encode(part).decode('ascii'))
+                    try:
+                        acknowledged = await asyncio.wait_for(ack.get(), 15)
+                    except asyncio.TimeoutError:
+                        raise carrier('expired') from None
+                    if acknowledged != chunk_id:
+                        raise carrier('invalid_request')
+            else:
+                raise carrier('invalid_response')
+        except StdioRefused as exc:
+            raise carrier(exc.code) from None
+        except (OSError, UnicodeError):
+            raise carrier('output_unavailable') from None
+
+    reader = request = None
     failed = None
     try:
-        done, _ = await asyncio.wait({request, cancellation},
-            timeout=300 if operation == 'read-stream' else 45, return_when=asyncio.FIRST_COMPLETED)
-        if request in done:
-            await request
-        elif cancellation in done:
-            request.cancel()
-            await asyncio.gather(request, return_exceptions=True)
+        # A cancel that arrived during admission never reaches a policy handler.
+        # This single look completes before the control reader owns the channel.
+        if not await asyncio.to_thread(_pending_cancel, channel, carrier):
+            reader = asyncio.create_task(controls())
+            request = asyncio.create_task(app(scope, receive, send))
+            cancellation = asyncio.create_task(cancelled.wait())
+            try:
+                done, _ = await asyncio.wait({request, cancellation},
+                    timeout=300 if operation == 'read-stream' else 45, return_when=asyncio.FIRST_COMPLETED)
+                if request in done:
+                    # Read the outcome without awaiting it: a handler unwound by
+                    # the caller's own cancel is a normal end, not an interruption.
+                    if not request.cancelled() and request.exception() is not None:
+                        failed = request.exception()
+                elif cancellation not in done:
+                    carrier('expired')
+            finally:
+                cancellation.cancel()
+                await asyncio.gather(cancellation, return_exceptions=True)
         else:
-            raise StdioRefused('expired')
+            cancelled.set()
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
     except BaseException as exc:
         failed = exc
     finally:
-        if not request.done():
-            request.cancel()
-        await asyncio.gather(request, return_exceptions=True)
+        cancelled.set()  # wakes a handler waiting in receive(); no further send is accepted
+        from ..plane.view import begin_shutdown
+        begin_shutdown(app)  # held streams finish through their own gate first
+        if request is not None:
+            if not request.done() and operation == 'read-stream':
+                await asyncio.wait({request}, timeout=1)  # its own shutdown gate, briefly
+            if not request.done():
+                # Handlers shield and drain work they already started; this only
+                # stops waiting for a response nobody will read.
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
         await shutdown_app(app)
         stop.set()
-        await reader  # its bounded polling read joins before end/process exit
-        cancellation.cancel()
-        await asyncio.gather(cancellation, return_exceptions=True)
-    if control_error:
-        raise control_error[0]
-    if failed is not None:
+        if reader is not None:
+            await reader  # its bounded polling read joins before end/process exit
+    if carrier_error:
+        raise carrier_error[0]
+    if failed is not None and not isinstance(failed, asyncio.CancelledError):
         raise failed
-    channel.emit('end', status=status, bytes_sent=sent, cancelled=cancelled.is_set())
+    channel.emit('end', status=status, bytes_sent=sent,
+                 cancelled=bool(request is None or failed is not None or not request_completed(request)))
 
 
-async def _dispatch(args, channel):
-    from .owner_stdio import _admit, _selectors
+def request_completed(request):
+    return request.done() and not request.cancelled() and request.exception() is None
+
+
+def _pending_cancel(channel, carrier):
+    try:
+        return channel.pending_cancel()
+    except StdioRefused as exc:
+        carrier(exc.code)
+        return True
+    except OSError:
+        carrier('disconnected')
+        return True
+
+
+def _selectors(args):
+    """Reject inherited selectors before input, environment scrubbing or reads."""
+    from .host_owner import _GENERATED
+    if any(name in os.environ for name in _GENERATED):
+        raise StdioRefused('operator_required')
+    if (args.root is None or getattr(args, 'fleet', None) or getattr(args, 'seed', None)
+            or getattr(args, 'json', False) or getattr(args, 'stdio', False) is not True
+            or os.isatty(0) or os.isatty(1)):
+        raise StdioRefused('invalid_request')
+
+
+def admit(args, request, source):
+    """Account/root/source admission shared with the guide; SSH is not a grant."""
+    from types import SimpleNamespace
+    from .owner_stdio import _admit
     from .owner_setup_consent import FixedOwnerProfile
-    from ..plane.owner_ssh import SSHSessionSource, SSHSessionVerifier
-    from ..plane.owner_ingress import NativePrincipalResolver
-    from ..plane.owner_access import OwnerAccess
+    from ..plane.owner_ssh import SSHSessionSource
+    if type(source) is not SSHSessionSource:
+        raise StdioRefused('owner_ssh_source_refused')
+    # The guide's selector check covers its own flags; this route has none.
+    guide = SimpleNamespace(root=args.root, fleet=None, seed=None, json=False, template='revenue-web-app')
+    # No finish tuple crosses this wire. Current-source binding is still exact:
+    # the profile compares the installed revision, preparation receipt and preflight.
+    paths = _admit(guide, request)
+    profile = FixedOwnerProfile(paths, {**request, 'finish_setup': None}, updated_source=True)
+    if profile.runtime is None:
+        raise StdioRefused('unsupported_ssh_profile')
+    return paths, profile
+
+
+def owner_app(paths, verifier, origin):
+    """The existing policy app; pairing before an owner, workspace doors after."""
+    from ..plane.owner_access import OwnerAccess, AccessUnavailable
     from ..plane.owner_source import inspect_owner_setup
     from ..plane.owner_browser import create_owner_browser_app
     from ..plane.owner_workspace_http import WorkspaceBootstrapConfig
-    _selectors(args)
-    source = SSHSessionSource.capture()  # before any profile/environment scrub
-    request = await channel.start()
-    request['finish_setup'] = None  # internal existing profile consistency field, never a wire escape
-    paths = _admit(args, request)
-    profile = FixedOwnerProfile(paths, request)
-    if profile.runtime is None:
-        raise StdioRefused('unsupported_ssh_profile')
-    with profile.environment():
-        resolver = NativePrincipalResolver(tailscale_binary=Path('/Applications/Tailscale.app/Contents/MacOS/Tailscale'))
-        verifier = SSHSessionVerifier(source, resolver)
-        origin = await verifier.origin()
-        await verifier({})  # even the public status op must prove the captured native principal
-        access = OwnerAccess(paths.root)
-        inspect_owner_setup(paths.root)
-        owner = access.current_grant()
-        options = ({'workspace_bootstrap': WorkspaceBootstrapConfig('https://claudfather.ai', 'https://plane.claudfather.ai')}
-                   if owner is not None and owner.active else {'pairing_origin': 'https://plane.claudfather.ai'})
-        app = create_owner_browser_app(paths.root, expected_origin=origin, verify_principal=verifier,
-                                      package=paths.package, **options)
-        # Lifespan owns existing finite-read/stream state. It is always closed
-        # before this stable-CLI process can release its runtime-use reader.
-        incoming, started, stopped = asyncio.Queue(), asyncio.Event(), asyncio.Event()
-        async def lifecycle_send(message):
-            if message['type'] == 'lifespan.startup.complete': started.set()
-            elif message['type'] == 'lifespan.shutdown.complete': stopped.set()
-            else: raise StdioRefused('unavailable')
-        lifecycle = asyncio.create_task(app({'type': 'lifespan', 'asgi': {'version': '3.0'}}, incoming.get, lifecycle_send))
+    access = OwnerAccess(paths.root)
+    owner = access.current_grant()  # validates existing authority; never initializes
+    inspect_owner_setup(paths.root)
+    common = {'expected_origin': origin, 'verify_principal': verifier, 'package': paths.package}
+    if owner is None or not owner.active:
+        return create_owner_browser_app(paths.root, pairing_origin=OPERATIONAL_ORIGIN, **common)
+    try:
+        return create_owner_browser_app(paths.root, **common,
+            workspace_bootstrap=WorkspaceBootstrapConfig(WEBSITE_ISSUER, OPERATIONAL_ORIGIN))
+    except AccessUnavailable:
+        # Workspace authority is not prepared yet: only the status observation
+        # is reachable; every connected route stays behind the existing gate.
+        return create_owner_browser_app(paths.root, **common)
+
+
+async def serve(channel, app, request, *, origin):
+    """Own the app lifespan around exactly one operation."""
+    incoming, started, stopped = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+    async def lifecycle_send(message):
+        if message['type'] == 'lifespan.startup.complete': started.set()
+        elif message['type'] == 'lifespan.shutdown.complete': stopped.set()
+        else: raise StdioRefused('unavailable')
+    lifecycle = asyncio.create_task(app({'type': 'lifespan', 'asgi': {'version': '3.0'}}, incoming.get, lifecycle_send))
+    try:
+        await incoming.put({'type': 'lifespan.startup'})
+        ready = asyncio.create_task(started.wait())
         try:
-            await incoming.put({'type': 'lifespan.startup'})
-            await asyncio.wait_for(started.wait(), 10)
-            await run_operation(channel, app, request['operation'], request['input'], request['token'],
-                                request['last_event_id'], origin=origin)
+            done, _ = await asyncio.wait({ready, lifecycle}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
+        if not started.is_set():
+            raise StdioRefused('unavailable')
+        await run_operation(channel, app, request['operation'], request['input'], request['token'],
+                            request['last_event_id'], origin=origin)
+    finally:
+        # Lifespan owns finite-read/stream state. It is always closed before
+        # this stable-CLI process can release its runtime-use reader.
+        if not lifecycle.done():
             await incoming.put({'type': 'lifespan.shutdown'})
-            try:
-                await asyncio.wait_for(stopped.wait(), 10)
-            finally:
-                if not lifecycle.done(): lifecycle.cancel()
-                await asyncio.gather(lifecycle, return_exceptions=True)
+            await asyncio.wait({lifecycle}, timeout=10)
+        if not lifecycle.done():
+            lifecycle.cancel()
+        await asyncio.gather(lifecycle, return_exceptions=True)
+
+
+async def _dispatch(args, channel):
+    from ..plane.owner_ssh import SSHSessionSource, SSHSessionVerifier, MAC_TAILSCALE
+    from ..plane.owner_ingress import NativePrincipalResolver
+    import signal
+    _selectors(args)
+    source = SSHSessionSource.capture()  # before any profile/environment replacement
+    loop = asyncio.get_running_loop()
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        loop.add_signal_handler(number, channel.interrupt)
+    request = await channel.start()
+    if request is None:
+        channel.end_cancelled()
+        return 0
+    paths, profile = admit(args, request, source)
+    with profile.environment():
+        verifier = SSHSessionVerifier(source, NativePrincipalResolver(tailscale_binary=MAC_TAILSCALE))
+        origin = await verifier.origin()
+        # Even the public status operation must prove the captured native principal.
+        await verifier.resolver.resolve(source.client_ip)
+        app = owner_app(paths, verifier, origin)
+        await serve(channel, app, request, origin=origin)
+    return 0
 
 
 def dispatch(args):
+    """Own stdout completely: one operation, then exit after its drain."""
     channel = APIChannel(0, 1)
     try:
-        asyncio.run(_dispatch(args, channel))
-        return 0
-    except Exception as exc:
+        return asyncio.run(_dispatch(args, channel))
+    except BaseException as exc:
         from ..plane.owner_access import AccessDenied
-        code = exc.code if isinstance(exc, (StdioRefused, AccessDenied)) else 'unavailable'
+        from ..command_result import CommandFailure
+        code = (exc.code if isinstance(exc, (StdioRefused, AccessDenied)) else
+                exc.error.code if isinstance(exc, CommandFailure) else
+                'interrupted' if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)) else 'unavailable')
+        if not isinstance(code, str) or re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code) is None:
+            code = 'unavailable'
         try: channel.emit('error', code=code, retry=False)
         except (OSError, StdioRefused): pass
         return 4

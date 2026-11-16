@@ -10,10 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import os
+from pathlib import Path
 import re
 
 from .owner_access import AccessDenied
 from .owner_ingress import NativePrincipalResolver
+
+# The explicit persisted transport discriminator for a computer reached this way.
+TRANSPORT = "mac_openssh"
+# The standalone/App Store client's own CLI; an absolute operator-authority path.
+MAC_TAILSCALE = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
 
 _V4 = ipaddress.ip_network('100.64.0.0/10')
 _V6 = ipaddress.ip_network('fd7a:115c:a1e0::/48')

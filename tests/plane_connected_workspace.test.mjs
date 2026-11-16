@@ -1252,7 +1252,8 @@ function browserDocument() {
     references:[{...refs[0],endpoint_origin:'https://first.example.ts.net'}],expires_at:Math.floor(Date.now()/1000)+90};
 }
 async function bridgeHarness(t, options={}) {
-  const {createBrowserOwnerTransport}=await bridgeModule(), doc=browserDocument(), listeners=new Map(),sent=[],native=[];
+  const {document:selected,...rest}=options;options=rest;
+  const {createBrowserOwnerTransport}=await bridgeModule(), doc=selected??browserDocument(), listeners=new Map(),sent=[],native=[];
   const parent={postMessage(data,origin){sent.push({data,origin});}};
   const window={parent,location:{origin:doc.operational_origin},addEventListener(k,v){listeners.set(k,v);},removeEventListener(k){listeners.delete(k);}};
   const bridge=createBrowserOwnerTransport({documentContext:doc,window,
@@ -1407,4 +1408,69 @@ test('explicit browser transport shows canonical guide recovery without native t
   assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
   assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
   const native=harness({count:1});native.mount();await native.api.checkAccount();assert.match(descendants(native.ui.get('owner-session')).map(n=>n.textContent).join(' '),/DATA_ROOT/);native.api.dispose();
+});
+
+// Saved-reference transport: absent is the historical HTTPS reference, the
+// explicit SSH value is carried only by the browser owner transport.
+const sshReference={...refs[0],endpoint_origin:'https://first.example.ts.net',transport:'mac_openssh'};
+const sshDocument=()=>({...browserDocument(),references:[sshReference]});
+test('browser bridge carries an explicit SSH reference only through its port, never a native fetch',async t=>{
+  const h=await bridgeHarness(t,{document:sshDocument()});
+  assert.deepEqual(h.sent[0].data.document.references,[sshReference],'the request names the exact saved transport');
+  h.admit({reference:{...refs[0],endpoint_origin:sshReference.endpoint_origin}});await flush();
+  assert.equal(h.frames.length,0,'an HTTPS-shaped offer cannot satisfy an SSH reference');
+  h.admit();await h.bridge.ready;await flush();assert.equal(h.frames[0].type,'ready');
+  const pending=h.host('/api/owner/connected/status');await flush();
+  const request=h.frames.find(f=>f.type==='request');
+  assert.deepEqual(request.request,{targetHandle:h.offer.targetHandle,operation:'session-status',input:{},token:'A'.repeat(43)});
+  h.send('headers',{id:request.id,status:200,headers:{'content-type':'application/json'}});
+  h.send('chunk',{id:request.id,data:Buffer.from('{"ok":true}').toString('base64')});h.send('end',{id:request.id});
+  assert.deepEqual(await (await pending).json(),{ok:true});assert.equal(h.native.length,0);
+  h.bridge.dispose();await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,0,'no HTTPS fallback after retirement');
+});
+test('browser bridge keeps a legacy reference HTTPS-shaped and refuses an SSH offer for it',async t=>{
+  const h=await bridgeHarness(t);
+  h.admit({reference:{...h.doc.references[0],transport:'mac_openssh'}});await flush();assert.equal(h.frames.length,0);
+  h.admit();await h.bridge.ready;await flush();assert.equal(h.frames[0].type,'ready');
+});
+for(const transport of ['https','ssh','MAC_OPENSSH','',null,1])
+  test(`browser bridge refuses unknown saved transport ${JSON.stringify(transport)}`,async t=>{
+    const {createBrowserOwnerTransport}=await bridgeModule(),doc={...browserDocument(),references:[{...sshReference,transport}]},sent=[],native=[];
+    const parent={postMessage(data){sent.push(data);}};
+    const window={parent,location:{origin:doc.operational_origin},addEventListener(){},removeEventListener(){}};
+    const bridge=createBrowserOwnerTransport({documentContext:doc,window,nativeFetch:async(...args)=>{native.push(args);return reply(200,{});}});
+    t.after(()=>bridge.dispose());
+    assert.equal(sent.length,0,'no transport request is made for an unknown reference');
+    await assert.rejects(bridge.ready);
+    await assert.rejects(bridge.fetch(doc.references[0].endpoint_origin+'/api/owner/connected/status',{headers:{Authorization:'Bearer '+'A'.repeat(43)}}));
+    assert.equal(native.length,0);
+  });
+test('connected workspace refuses an SSH computer without the browser carrier and labels it with one',async t=>{
+  const references=[{...refs[0],transport:'mac_openssh'}];
+  const native=harness({references});native.mount();
+  assert.equal(native.api.snapshot().phase,'denied');await native.api.checkAccount();await flush();
+  assert.equal(native.calls.length,0,'an SSH reference never reaches a native HTTPS fetch');native.api.dispose();
+  for(const transport of ['https','ssh',null]){
+    const unknown=harness({references:[{...refs[0],transport}]});assert.equal(unknown.api.snapshot().phase,'denied');unknown.api.dispose();
+  }
+  const h=harness({references}),browserFetch=Object.defineProperty((...args)=>h.dependencies.fetch(...args),'browserOwnerTransport',{value:true});
+  h.api.dispose();
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
+  workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
+  const computer=workspace.snapshot().computers[0];
+  assert.equal(computer.transport,'mac_openssh');assert.equal(computer.label,'a.example.test (SSH)');
+  assert.equal(descendants(h.ui.get('owner-session')).some(node=>String(node.href||'').startsWith(refs[0].endpoint_origin)),false,'no HTTPS page is offered for an SSH computer');
+  h.metadata=context([refs[0]]);await workspace.checkAccount();await flush();
+  assert.notEqual(workspace.snapshot().phase,'ready','a saved reference that lost its transport is not the same computer');
+});
+test('connected read client admits an SSH reference only with the browser carrier',()=>{
+  const reference={...refs[0],transport:'mac_openssh'};
+  const base={reference,documentContext:{issuer:documentContext.shell_origin,operational_origin:documentContext.operational_origin,
+    subject:id(1),workspace_id:id(2),context_generation:id(3)},documentOrigin:documentContext.operational_origin,
+    currentContext:()=>null,obtainSessionAssertion:async()=>{throw new Error('unused');},monotonicNow:()=>0,setTimeout(){},clearTimeout(){}};
+  const nativeFetch=async()=>{throw new Error('native fetch reached');};
+  assert.throws(()=>createConnectedReadClient({...base,fetch:nativeFetch}));
+  assert.throws(()=>createConnectedReadClient({...base,reference:{...refs[0],transport:'https'},fetch:Object.defineProperty(async()=>{},'browserOwnerTransport',{value:true})}));
+  const client=createConnectedReadClient({...base,fetch:Object.defineProperty(async()=>{throw new Error('unused');},'browserOwnerTransport',{value:true})});
+  assert.equal(typeof client.snapshot().state,'string');client.dispose();
 });

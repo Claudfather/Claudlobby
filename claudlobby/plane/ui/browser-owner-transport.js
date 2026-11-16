@@ -24,8 +24,16 @@ const fields = {
   'read-search':['q','fleet','limit'], 'read-grid':['fleet','focus'], 'read-stream':['cursor','once']
 };
 const publicOps = new Set(['pair','workspace-challenge','workspace-stage','session-challenge','session-issue']);
-const sameReference = (a,b) => keys(a,['reference_id','endpoint_origin','revision']) && keys(b,['reference_id','endpoint_origin','revision'])
-  && a.reference_id === b.reference_id && a.endpoint_origin === b.endpoint_origin && a.revision === b.revision;
+// Saved-reference transport: an absent field is the historical HTTPS reference,
+// 'mac_openssh' is an explicit SSH computer, and any other value refuses. The
+// endpoint origin stays the logical authority key either way; for SSH it is not
+// a claim that HTTPS is reachable, and nothing here ever fetches it natively.
+const transports = ['mac_openssh'];
+const referenceShape = value => keys(value,['reference_id','endpoint_origin','revision'])
+  || keys(value,['reference_id','endpoint_origin','revision','transport']) && transports.includes(value.transport);
+const sameReference = (a,b) => referenceShape(a) && referenceShape(b)
+  && a.reference_id === b.reference_id && a.endpoint_origin === b.endpoint_origin && a.revision === b.revision
+  && a.transport === b.transport;
 function hostOrigin(value) {
   try { const url = new URL(value); return url.origin === value && url.protocol === 'https:' && !url.port
     && url.hostname.endsWith('.ts.net') && !url.username && !url.password; } catch { return false; }
@@ -216,7 +224,7 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
       || d.version !== 1 || d.shell_origin !== SHELL || d.operational_origin !== PLANE || window?.location?.origin !== PLANE
       || !window.parent || window.parent === window || ![d.user_id,d.workspace_id,d.context_generation].every(uuid)
       || !Number.isSafeInteger(d.expires_at) || d.expires_at <= 0 || !Array.isArray(d.references) || d.references.length > 8
-      || d.references.some(r=>!keys(r,['reference_id','endpoint_origin','revision']) || !uuid(r.reference_id)
+      || d.references.some(r=>!referenceShape(r) || !uuid(r.reference_id)
         || !Number.isSafeInteger(r.revision) || r.revision < 1 || typeof r.endpoint_origin !== 'string')
       || new Set(d.references.map(r=>r.reference_id)).size !== d.references.length
       || new Set(d.references.map(r=>r.endpoint_origin)).size !== d.references.length

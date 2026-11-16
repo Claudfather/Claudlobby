@@ -1,14 +1,16 @@
 #!/bin/sh
 # Immutable non-PTY admission prelude, then the ordinary installed owner guide.
 # One canonical <=1024-byte admission line; no EOF and no success prefix.
-# Only setup/status. Trusted authenticated account; no same-UID/root sandbox.
+# Only setup/status/api. Trusted authenticated account; no same-UID/root sandbox.
+# api: one typed owner operation; the server SSH_CONNECTION passes through unread.
 operation=owner-guide-v1
 if [ "$#" -eq 1 ] && [ "$1" = status ]; then operation=owner-guide-status-v1; fi
+if [ "$#" -eq 1 ] && [ "$1" = api ]; then operation=owner-api-v1; fi
 refuse() {
     printf '{"code":"%s","operation":"%s","retry":false,"schema_version":1,"state":"refused"}\n' "$1" "$operation"
 }
 if [ "$#" -ne 1 ]; then refuse invalid_request; exit 2; fi
-case "$1" in setup|status) ;; *) refuse invalid_request; exit 2 ;; esac
+case "$1" in setup|status|api) ;; *) refuse invalid_request; exit 2 ;; esac
 exec 3<<'FIXED_OPERATION_PYTHON'
 # BEGIN EMBEDDED PYTHON
 import configparser
@@ -1082,22 +1084,28 @@ def validate(value, deadline):
 
 
 def main(action, fd=0):
-    operation = "owner-guide-status-v1" if action == "status" else "owner-guide-v1"
+    operation = {"status": "owner-guide-status-v1", "api": "owner-api-v1"}.get(action, "owner-guide-v1")
     deadline = time.monotonic() + 15
     def interrupted(_number, _frame):
         raise Refusal("inspection_unavailable")
     signal.signal(signal.SIGALRM, interrupted)
     signal.setitimer(signal.ITIMER_REAL, 15)
     try:
-        if action not in {"setup", "status"} or os.isatty(fd) or os.isatty(1):
+        if action not in {"setup", "status", "api"} or os.isatty(fd) or os.isatty(1):
             raise Refusal("invalid_request", 2)
+        if action == "api" and not os.environ.get("SSH_CONNECTION"):
+            # Presence only. The admitted CLI alone parses and binds the server
+            # tuple; nothing here supplies, rewrites or defaults it.
+            raise Refusal("ssh_source_missing")
         value = request(fd, deadline)
         python, launcher, data, environment = validate(value, deadline)
         # Exec the canonical stable launcher normally: its existing reader
         # lock, maintenance fence, parser and operator-context checks all run.
         signal.setitimer(signal.ITIMER_REAL, 0)
+        route = (["api", "--stdio"] if action == "api" else
+                 ["setup", "--stdio-status" if action == "status" else "--stdio"])
         os.execve(python, [str(python), "-I", "-S", "-B", str(launcher), "--root", str(data),
-            "host", "owner", "setup", "--stdio-status" if action == "status" else "--stdio"], environment)
+            "host", "owner", *route], environment)
     except Refusal as error:
         code, exit_code = error.code, error.exit_code
     except (Exception, KeyboardInterrupt):
@@ -1210,6 +1218,7 @@ darwin_existing_python() {
 # END DARWIN EXISTING PYTHON SHELL
 operation=owner-guide-v1
 [ "$1" != status ] || operation=owner-guide-status-v1
+[ "$1" != api ] || operation=owner-api-v1
 if ! darwin_existing_python "$(/usr/bin/id -u)"; then
     printf '{"code":"runtime_not_admitted","operation":"%s","retry":false,"schema_version":1,"state":"refused"}\n' "$operation"
     exit 6

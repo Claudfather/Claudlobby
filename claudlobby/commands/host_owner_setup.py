@@ -342,6 +342,32 @@ def _serving(command, path, origin, *, consent=None):
                         continue
 
 
+@contextmanager
+def _ssh_waiting():
+    """No listener: typed operations arrive on their own admitted SSH channels."""
+    class Waiting:
+        @staticmethod
+        def wait(timeout):
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired("owner-ssh-guide", timeout)
+    yield Waiting()
+
+
+def _ssh_origin(source):
+    """The server's own logical authority key, bound to the captured destination."""
+    import asyncio
+    from ..plane.owner_ssh import MAC_TAILSCALE, SSHSessionVerifier
+    from ..plane.owner_ingress import NativePrincipalResolver
+    from .owner_stdio import StdioRefused
+    try:
+        verifier = SSHSessionVerifier(source, NativePrincipalResolver(tailscale_binary=MAC_TAILSCALE))
+        async def inspect():
+            return await asyncio.wait_for(verifier.origin(), 15)
+        return asyncio.run(inspect())
+    except (AccessDenied, AccessUnavailable, ValueError, OSError, asyncio.TimeoutError):
+        raise StdioRefused("ssh_identity_prerequisite_missing") from None
+
+
 def _original_launch(state):
     raise CommandFailure("conflict", "a first-team launch is already retained; inspect its original receipt before continuing",
                          data={"launch_id": state.launch_id, "launch_plan": state.launch_plan,
@@ -383,7 +409,10 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         lines=("Original setup finished; no Launch or message was sent again.",))
 
 
-def run(args, paths, store, terminal, *, consent=None, profile=None):
+def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
+    """``ssh`` is the captured server SSH source of an explicit SSH-controlled
+    guide: no listener, no owner service, and typed operations on sibling
+    channels. It is never inferred from a frame or from the platform alone."""
     from . import host_owner as console
     from ..active_config import read_current_config
     from ..git_update import read_update
@@ -419,18 +448,31 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
     typed = {"consent": consent} if consent is not None else {}
+    if ssh is not None and consent is None:
+        raise CommandFailure("invalid_argument", "SSH-controlled setup is the typed guide only")
+    carrier = {}
+    if ssh is not None:
+        from ..plane.owner_ssh import TRANSPORT
+        carrier = {"transport": TRANSPORT}
     if consent is not None:
         if profile is None:
             raise CommandFailure("invalid_argument", "typed guide requires its fixed local profile")
-        profile.prepare_directories(consent, paths)
+        if ssh is not None and profile.runtime is None:
+            raise CommandFailure("invalid_argument", "SSH-controlled setup requires the managed Mac runtime profile")
+        profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))
         profile.prepare_provider(consent, paths)
-        args.origin = profile.origin()
-        args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
+        if ssh is not None:
+            from ..plane.owner_ssh import MAC_TAILSCALE
+            args.origin = _ssh_origin(ssh)  # logical key; never a claim of reachable HTTPS
+            args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
+        else:
+            args.origin = profile.origin()
+            args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
         args.workspace_issuer, args.workspace_origin = "https://claudfather.ai", "https://plane.claudfather.ai"
         args.socket = paths.root / "state/owner/owner.sock"
         args.template, args.target_fleet, args.repository = "local-project", "web-app", None
         args.project_directory, args.account_directory = str(profile.project), str(profile.account)
-        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, True
+        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, ssh is None
     config, approval = _configuration(args, paths, terminal, cli)
     if load_host_jobs()["plane-owner"].get("enroll", True) and approval.managed_owner is None:
         raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
@@ -438,7 +480,12 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     if not os.path.lexists(store.path):
         console._initialize_first_owner(paths, terminal, **typed)
     owner = store.current_grant()
-    if owner is None or not owner.active:
+    if (owner is None or not owner.active) and ssh is not None:
+        # The browser begins pairing through its own typed SSH operation; the
+        # same local confirmation as every other transport follows here.
+        consent.state("pairing_ready", origin=config["origin"], **carrier)
+        console._confirm_owner(paths, store, terminal, **typed)
+    elif owner is None or not owner.active:
         direct = {**config, "workspace_issuer": None, "workspace_origin": None}
         _say(terminal, "Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
         command = service_command(paths.root, cli, direct)
@@ -452,13 +499,14 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     console._describe(terminal, owner)
     if not selected and store.connected().preparation_state() != "ready":
         console._initialize_connected(store, terminal, prepare_workspace=True, **typed)
-    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed) as child:
+    with (_ssh_waiting() if ssh is not None else
+          _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)) as child:
         if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
                 _say(terminal, "In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
                 if consent is not None:
-                    consent.state("workspace_ready", origin=config["origin"])
+                    consent.state("workspace_ready", origin=config["origin"], **carrier)
                 console._confirm_workspace(store, terminal, owner, recover=True, **typed)
                 workspace_state, binding = store.workspace().status()
             if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
@@ -485,7 +533,7 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         setup = OwnerSetup(store)
         approved = setup.local() if not selected else None
         if consent is not None:
-            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation)
+            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation, **carrier)
         try:
             while True:
                 if consent is not None:
@@ -503,11 +551,13 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
                         # the child and this guide must exit to release reader
                         # leases; never let imported owner code survive cutover.
                         status = shlex.join([str(cli), "--root", str(paths.root), "host", "update", "status", "--json"])
-                        reconnect = ("The approved managed connection will return at the same address; keep the original browser view open."
+                        reconnect = ("No owner service is enrolled. After DONE, open a fresh authenticated SSH connection to this computer; do not launch again."
+                                     if ssh is not None else
+                                     "The approved managed connection will return at the same address; keep the original browser view open."
                                      if approved.managed_owner else "After DONE, reconnect without another setup: " + shlex.join(service_command(paths.root, cli, config)))
                         return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
                             "config_fingerprint": retained.launch_plan, "generation": approved.generation,
-                            "source_revision": approved.source_revision}, lines=(
+                            "source_revision": approved.source_revision, **carrier}, lines=(
                                 "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",

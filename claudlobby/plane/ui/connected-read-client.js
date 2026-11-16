@@ -14,6 +14,11 @@ const keys = (v, fields) => v !== null && typeof v === 'object' && !Array.isArra
 const uuid = v => typeof v === 'string' && v.length === 36 && UUID.test(v);
 const host = v => typeof v === 'string' && v.length === 37 && HOST.test(v);
 const positive = v => Number.isSafeInteger(v) && v > 0;
+// Absent transport is the historical HTTPS reference; 'mac_openssh' is explicit;
+// anything else refuses. An SSH reference is only ever carried by the browser
+// owner transport, never by a native HTTPS fetch.
+const referenceShape = v => keys(v, ['reference_id', 'endpoint_origin', 'revision'])
+  || keys(v, ['reference_id', 'endpoint_origin', 'revision', 'transport']) && v.transport === 'mac_openssh';
 const RENEW_WINDOW = 120000, ACTIVITY_WINDOW = 300000;
 function origin(v) {
   if (typeof v !== 'string' || v.length > 2048) return false;
@@ -66,7 +71,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   monotonicNow = () => globalThis.performance.now(),
   onContinuityChange = () => {},
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout } = {}) {
-  if (!keys(reference, ['reference_id', 'endpoint_origin', 'revision']) || !uuid(reference.reference_id)
+  if (!referenceShape(reference) || reference.transport !== undefined && fetch.browserOwnerTransport !== true
+      || !uuid(reference.reference_id)
       || !origin(reference.endpoint_origin) || !positive(reference.revision)
       || !keys(documentContext, ['issuer', 'operational_origin', 'subject', 'workspace_id', 'context_generation'])
       || !origin(documentContext.issuer) || !origin(documentContext.operational_origin)
@@ -117,8 +123,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         || c.user.id !== doc.subject || c.workspace.id !== doc.workspace_id
         || c.context_generation !== doc.context_generation || !Array.isArray(c.references) || c.references.length > MAX_SAVED_COMPUTERS) return false;
     const matches = c.references.filter(r => r?.reference_id === ref.reference_id);
-    return matches.length === 1 && keys(matches[0], ['reference_id', 'endpoint_origin', 'revision'])
-      && matches[0].endpoint_origin === ref.endpoint_origin && matches[0].revision === ref.revision;
+    return matches.length === 1 && referenceShape(matches[0])
+      && matches[0].endpoint_origin === ref.endpoint_origin && matches[0].revision === ref.revision
+      && matches[0].transport === ref.transport;
   }
   function valid(requireToken = false) {
     if (disposed || ended) return false;

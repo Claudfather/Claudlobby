@@ -18,15 +18,19 @@ function origin(value) {
   catch { return false; }
 }
 function references(value) {
-  return Array.isArray(value) && value.length <= MAX_SAVED_COMPUTERS && value.every(ref => keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
+  return Array.isArray(value) && value.length <= MAX_SAVED_COMPUTERS && value.every(ref => (keys(ref, ['reference_id', 'endpoint_origin', 'revision'])
+      || keys(ref, ['reference_id', 'endpoint_origin', 'revision', 'transport']) && ref.transport === 'mac_openssh')
     && uuid(ref.reference_id) && origin(ref.endpoint_origin) && Number.isSafeInteger(ref.revision) && ref.revision > 0)
     && new Set(value.map(ref => ref.reference_id)).size === value.length
     && new Set(value.map(ref => ref.endpoint_origin)).size === value.length;
 }
-const referenceKey = refs => JSON.stringify(refs.map(ref => [ref.reference_id, ref.endpoint_origin, ref.revision]).sort());
+// Legacy references keep their historical key; an explicit transport is part of identity.
+const referenceKey = refs => JSON.stringify(refs.map(ref => [ref.reference_id, ref.endpoint_origin, ref.revision,
+  ...(ref.transport === undefined ? [] : [ref.transport])]).sort());
 const computerLabel = reference => {
   const name = new URL(reference.endpoint_origin).hostname;
-  return name.length <= 80 ? name : name.slice(0, 77) + '…';
+  const label = name.length <= 80 ? name : name.slice(0, 77) + '…';
+  return reference.transport === 'mac_openssh' ? label + ' (SSH)' : label;
 };
 const failure = (state = 'unavailable', remediation = 'Open this workspace again to check its connection.') => ({state, provenance:null, remediation});
 
@@ -40,7 +44,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
     && origin(documentContext.shell_origin) && origin(documentContext.operational_origin)
     && documentContext.operational_origin === documentOrigin && documentContext.shell_origin !== documentOrigin
-    && references(documentContext.references) && Number.isSafeInteger(documentContext.expires_at) && documentContext.expires_at > 0;
+    && references(documentContext.references) && Number.isSafeInteger(documentContext.expires_at) && documentContext.expires_at > 0
+    // An SSH computer has no HTTPS door: without the browser carrier it is refused, never fetched.
+    && (browserTransport || documentContext.references.every(ref => ref.transport === undefined));
   // Copy before asynchronous work; callers cannot retarget a live document.
   const doc = validDocument ? JSON.parse(JSON.stringify(documentContext)) : null;
   let current = null, transport = null, clients = [], unsubscribes = [], mount = null;
@@ -49,7 +55,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Map();
   const snapshot = () => Object.freeze({phase, accountUnavailable,
     computers: clients.map(({reference, client, label}) => ({reference_id:reference.reference_id,
-      endpoint_origin:reference.endpoint_origin, label:label || computerLabel(reference), ...client.snapshot()}))});
+      endpoint_origin:reference.endpoint_origin, ...(reference.transport === undefined ? {} : {transport:reference.transport}),
+      label:label || computerLabel(reference), ...client.snapshot()}))});
   const invoke = (fn, ...args) => { try { fn?.(...args); } catch { /* consumer callbacks cannot change admission */ } };
   function changed() {
     render();
@@ -378,7 +385,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
       access.setAttribute('aria-label','Set up access on ' + new URL(reference.endpoint_origin).hostname + ' (opens in a new tab)');
-      help.append(access);
+      if (reference.transport === undefined) help.append(access); // An SSH computer has no HTTPS page to open.
       const options = document.createElement('div'); options.className = 'connection-actions'; help.append(options);
       const buttons = [];
       for (const [operation, title] of [['connect','Connect'],['check','Check connection'],['renew','Keep connected'],['logout','Disconnect'],...(!browserTransport ? [['enroll','Prepare local approval']] : [])]) {
