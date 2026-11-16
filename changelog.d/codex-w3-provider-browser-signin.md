@@ -134,3 +134,9 @@ environment source integrate that exact profile; owner/provider source uses it
 with separate consents and adds no executable, sign-in or service authority.
 Private HTTPS Unix Serve and a useful native first team remain unqualified; this
 is not completed onboarding.
+
+### Fixed — CI shell guards follow declared interpreters
+
+The POSIX parse check now targets only preinstall scripts declaring `#!/bin/sh`,
+while all shipped scripts retain the system Bash parse check. The Claude update
+test checks `fleet_launch_path` output in a private HOME with an empty environment.
