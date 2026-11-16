@@ -57,9 +57,15 @@ Frames are canonical sorted ASCII JSON, one per line, with `version`, `type`,
 | server | `error` | `code`, `retry: false` |
 
 The server sends one chunk and waits for its `ack`. `end` is sent only after the
-policy handler has returned or been cancelled and drained, the application has
-shut down and the control reader has joined. A normal `end`, cancelled or not,
-exits 0. A refusal sends `error` and exits 4. A cancel that arrives before any
+policy handler has returned or been cancelled and drained, the owned components
+and the application lifespan have shut down successfully and the control reader
+has joined. A failed or timed-out shutdown is an `error`, never an `end`. A
+handler that returns is not by itself a response: a normal `end` needs the final
+body (`more_body` false) acknowledged, or an explicit caller `cancel`. A response
+a canonical finite read abandoned, or a started response with no final body that
+nobody cancelled, refuses with `response_incomplete` and sends no `end`. A normal
+`end`, cancelled or not, exits 0. `end` alone releases nothing: the runtime lease
+is released only by the process exit that follows. A refusal sends `error` and exits 4. A cancel that arrives before any
 response headers ends with `status: 0, bytes_sent: 0, cancelled: true` and exits
 0; the operation never reaches a policy handler if the cancel arrived first.
 

@@ -266,6 +266,62 @@ def test_actual_fixed_exec_preserves_normal_hello_and_following_guide_input(inst
     assert snapshot(home) == before
 
 
+def advance_source(module, install, python, home):
+    """An ordinary source advance: new commit and matching launcher, same preparation receipt."""
+    source = install / "src"
+    installation = source / "claudlobby/installation.py"
+    installation.write_text(installation.read_text() + "# ordinary source advance\n")
+    env = constructed_env(GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    for args in (["add", "--all"], ["commit", "--quiet", "-m", "advance"]):
+        subprocess.run(["/usr/bin/git", "-C", str(source), *args], env=env, check=True,
+                       capture_output=True, timeout=10)
+    launcher = install / "bin/claudlobby"
+    launcher.write_text("#!" + str(python) + "\n" + installation.read_text())
+    launcher.chmod(0o755)
+    return subprocess.check_output(["/usr/bin/git", "-C", str(source), "rev-parse", "HEAD"], env=env).decode().strip()
+
+
+def run_prelude(module, tmp_path, home, python, action, value):
+    driver = tmp_path / "advance-driver.py"
+    driver.write_text("import pathlib,sys,types,platform\n"
+        "platform.system=lambda: 'Linux'\n"
+        "script,home,python,action=sys.argv[1:]\n"
+        "body=pathlib.Path(script).read_text().split('# BEGIN EMBEDDED PYTHON\\n',1)[1].split('# END EMBEDDED PYTHON\\n',1)[0]\n"
+        "m=types.ModuleType('fixture');exec(compile(body,script,'exec'),m.__dict__)\n"
+        "m.account_profile=lambda uid:pathlib.Path(home)\n"
+        "m.independent_python=lambda:pathlib.Path(python)\n"
+        "raise SystemExit(m.main(action))\n")
+    return subprocess.run([str(python), "-I", "-S", "-B", str(driver), str(SCRIPT), str(home), str(python), action],
+        input=module.wire(value) + b'{"retained":"following"}\n',
+        env=constructed_env(BOT_UNKNOWN_FIXTURE="preserved", SSH_CONNECTION=SOURCE, EXPECTED_SOURCE=SOURCE,
+            EXPECTED_MODE="api --stdio" if action == "api" else "setup --stdio"),
+        capture_output=True, timeout=15)
+
+
+def test_actual_api_prelude_admits_current_source_after_advance_without_finish_tuple(installed, tmp_path):
+    module, home, install, value, python = installed
+    current = advance_source(module, install, python, home)
+    assert current != value["source_revision"]
+    # The preparation receipt (and so the binding) keeps the historical ref.
+    assert json.loads((install / "preparation.json").read_text())["ref"] == value["source_revision"]
+    value["source_revision"], value["finish_setup"] = current, None
+    before = snapshot(home)
+    result = run_prelude(module, tmp_path, home, python, "api", value)
+    # The fixed CLI was reached with its exact api route and received the following input.
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout == b'{"type":"hello","fixture":true}\n{"retained":"following"}\n'
+    assert snapshot(home) == before
+    # Guide mode keeps its finish rule: no finish tuple after an advance is refused.
+    refused = run_prelude(module, tmp_path, home, python, "setup", value)
+    assert refused.returncode != 0 and json.loads(refused.stdout)["state"] == "refused"
+    # Binding and exact installed-source verification are retained in api mode.
+    stale = dict(value, source_revision=json.loads((install / "preparation.json").read_text())["ref"])
+    assert run_prelude(module, tmp_path, home, python, "api", stale).returncode != 0
+    forged = dict(value, binding_sha256="0" * 64)
+    assert run_prelude(module, tmp_path, home, python, "api", forged).returncode != 0
+
+
 def test_api_mode_refuses_without_a_server_source_before_reading_admission(installed, monkeypatch):
     module, home, *_ = installed
     monkeypatch.delenv("SSH_CONNECTION", raising=False)

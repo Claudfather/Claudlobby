@@ -23,3 +23,9 @@ attempt cannot outlive a one-operation process. A setup approved with browser
 sign-in therefore cannot reach Launch this way yet. This is checked with
 synthetic fixtures only: real Remote Login, source-address and principal
 behavior on a Mac have not been observed. Linux and HTTPS behavior is unchanged.
+
+The `api` prelude mode admits the exact current installed source after an
+ordinary source advance without a finish tuple, keeping the original preparation
+binding and source verification. `end` now waits for successful lifespan
+shutdown, and a returned handler without a complete final body (or an explicit
+cancel) is refused as `response_incomplete` instead of ending normally.

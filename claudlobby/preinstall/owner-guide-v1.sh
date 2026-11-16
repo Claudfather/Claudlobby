@@ -1025,7 +1025,7 @@ def environment_check(environment, python):
         raise Refusal()
 
 
-def validate(value, deadline):
+def validate(value, deadline, action="setup"):
     home = account_profile(value["expected_uid"])
     inherited = selectors(home)  # Preserve evidence before any normalization.
     python = independent_python()
@@ -1055,7 +1055,10 @@ def validate(value, deadline):
                 or not isinstance(state["lock_sha256"], str) or not re.fullmatch(DIGEST, state["lock_sha256"])
                 or state["interpreter"] != str(python) or state["interpreter_sha256"] != digest(python)
                 or hashlib.sha256(json.dumps({key: state[key] for key in BINDING_FIELDS}, sort_keys=True).encode()).hexdigest() != value["binding_sha256"]
-                or value["finish_setup"] is None and state["ref"] != value["source_revision"]):
+                or value["finish_setup"] is None and action != "api" and state["ref"] != value["source_revision"]):
+            # Only the fixed api mode carries no finish tuple: it is admitted at the
+            # exact current installed source (source_check below) while the original
+            # preparation binding, ref and receipt above stay verified unchanged.
             raise Refusal()
         identity = read_json(install / "installation.json", 4096)
         if identity != {"schema": 1, "data_root": str(data)} or type(identity.get("schema")) is not int:
@@ -1098,7 +1101,7 @@ def main(action, fd=0):
             # tuple; nothing here supplies, rewrites or defaults it.
             raise Refusal("ssh_source_missing")
         value = request(fd, deadline)
-        python, launcher, data, environment = validate(value, deadline)
+        python, launcher, data, environment = validate(value, deadline, action)
         # Exec the canonical stable launcher normally: its existing reader
         # lock, maintenance fence, parser and operator-context checks all run.
         signal.setitimer(signal.ITIMER_REAL, 0)

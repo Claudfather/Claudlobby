@@ -247,8 +247,13 @@ async def shutdown_app(app):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def run_operation(channel, app, operation, payload, token, last_event_id, *, origin):
-    """Carry one compiled operation; end only follows the complete owned drain."""
+async def run_operation(channel, app, operation, payload, token, last_event_id, *, origin, emit_end=True):
+    """Carry one compiled operation and return its (status, bytes, cancelled) outcome.
+
+    The end frame follows the complete owned component drain. ``serve`` passes
+    ``emit_end=False`` and emits it only after the application lifespan has also
+    shut down successfully.
+    """
     method, path, query, body, headers = operation_request(operation, payload, token, last_event_id)
     authority = origin.removeprefix('https://')
     headers = [(b'host', authority.encode('ascii')), *headers]
@@ -259,6 +264,10 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
         'headers': headers, 'client': ('ssh-session', 0), 'server': ('ssh-carrier', 0)}
     ack = asyncio.Queue(maxsize=1)
     cancelled, stop = asyncio.Event(), asyncio.Event()
+    # Explicit caller cancellation and a complete final body are tracked apart
+    # from task cancellation/return: a handler may unwind normally in either
+    # case, or abandon a started response (canonical finite reads do).
+    caller_cancelled, complete = asyncio.Event(), asyncio.Event()
     # Carrier faults are kept apart from policy outcomes: a handler that turns
     # an exception into a response cannot hide a broken or expired channel.
     carrier_error = []
@@ -279,6 +288,7 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
                 if frame is None:
                     continue
                 if frame['type'] == 'cancel':
+                    caller_cancelled.set()
                     cancelled.set()
                     return
                 if type(frame['chunk_id']) is not int or ack.full():
@@ -331,6 +341,8 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
                         raise carrier('expired') from None
                     if acknowledged != chunk_id:
                         raise carrier('invalid_request')
+                if not message.get('more_body', False):
+                    complete.set()  # only after every chunk of the final body was acknowledged
             else:
                 raise carrier('invalid_response')
         except StdioRefused as exc:
@@ -361,6 +373,8 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
                 cancellation.cancel()
                 await asyncio.gather(cancellation, return_exceptions=True)
         else:
+            if not carrier_error:
+                caller_cancelled.set()
             cancelled.set()
     except asyncio.CancelledError:
         cancelled.set()
@@ -387,12 +401,17 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
         raise carrier_error[0]
     if failed is not None and not isinstance(failed, asyncio.CancelledError):
         raise failed
-    channel.emit('end', status=status, bytes_sent=sent,
-                 cancelled=bool(request is None or failed is not None or not request_completed(request)))
-
-
-def request_completed(request):
-    return request.done() and not request.cancelled() and request.exception() is None
+    if request is None or not complete.is_set() and caller_cancelled.is_set():
+        was_cancelled = True  # the published normal cancellation, even if the handler unwound normally
+    elif complete.is_set():
+        was_cancelled = False
+    else:
+        # A returned task is not a response: a started or absent body that nobody
+        # cancelled stays unknown, never a successful end.
+        raise StdioRefused('response_incomplete')
+    if emit_end:
+        channel.emit('end', status=status, bytes_sent=sent, cancelled=was_cancelled)
+    return status, sent, was_cancelled
 
 
 def _pending_cancel(channel, carrier):
@@ -458,34 +477,51 @@ def owner_app(paths, verifier, origin):
 
 
 async def serve(channel, app, request, *, origin):
-    """Own the app lifespan around exactly one operation."""
+    """Own the app lifespan around exactly one operation.
+
+    End is emitted only after the operation drain and a successful lifespan
+    shutdown. It still never releases the runtime lease: process exit does.
+    """
     incoming, started, stopped = asyncio.Queue(), asyncio.Event(), asyncio.Event()
     async def lifecycle_send(message):
         if message['type'] == 'lifespan.startup.complete': started.set()
         elif message['type'] == 'lifespan.shutdown.complete': stopped.set()
         else: raise StdioRefused('unavailable')
     lifecycle = asyncio.create_task(app({'type': 'lifespan', 'asgi': {'version': '3.0'}}, incoming.get, lifecycle_send))
+    outcome = original = None
     try:
         await incoming.put({'type': 'lifespan.startup'})
         ready = asyncio.create_task(started.wait())
         try:
-            done, _ = await asyncio.wait({ready, lifecycle}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({ready, lifecycle}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
         finally:
             ready.cancel()
             await asyncio.gather(ready, return_exceptions=True)
         if not started.is_set():
             raise StdioRefused('unavailable')
-        await run_operation(channel, app, request['operation'], request['input'], request['token'],
-                            request['last_event_id'], origin=origin)
-    finally:
-        # Lifespan owns finite-read/stream state. It is always closed before
-        # this stable-CLI process can release its runtime-use reader.
-        if not lifecycle.done():
-            await incoming.put({'type': 'lifespan.shutdown'})
-            await asyncio.wait({lifecycle}, timeout=10)
-        if not lifecycle.done():
-            lifecycle.cancel()
-        await asyncio.gather(lifecycle, return_exceptions=True)
+        outcome = await run_operation(channel, app, request['operation'], request['input'], request['token'],
+                                      request['last_event_id'], origin=origin, emit_end=False)
+    except BaseException as exc:
+        original = exc  # the meaningful outcome is kept; shutdown still runs below
+    # Lifespan owns finite-read/stream state. It is always closed before this
+    # stable-CLI process can release its runtime-use reader.
+    shutdown_failure = None
+    if not lifecycle.done():
+        await incoming.put({'type': 'lifespan.shutdown'})
+        await asyncio.wait({lifecycle}, timeout=10)
+    if not lifecycle.done():
+        lifecycle.cancel()
+        shutdown_failure = StdioRefused('shutdown_timeout')
+    result, = await asyncio.gather(lifecycle, return_exceptions=True)
+    if shutdown_failure is None and (isinstance(result, BaseException) or not stopped.is_set()):
+        shutdown_failure = StdioRefused('shutdown_failed')
+    if original is not None:
+        if shutdown_failure is not None and original.__context__ is None:
+            original.__context__ = shutdown_failure
+        raise original
+    if shutdown_failure is not None:
+        raise shutdown_failure
+    channel.emit('end', status=outcome[0], bytes_sent=outcome[1], cancelled=outcome[2])
 
 
 async def _dispatch(args, channel):

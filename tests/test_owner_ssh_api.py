@@ -415,6 +415,167 @@ def test_lifespan_closes_after_the_operation_and_before_return(client):
     assert outcome == [None] and events == ['startup', 'request', 'shutdown', 'lifespan-shutdown']
 
 
+class CanonicalReads:
+    """The actual finite read owner around an inner handler, as the policy app mounts it."""
+    def __init__(self, inner):
+        from claudlobby.plane.finite_reads import FiniteReads
+        self.owner, self.inner, self.events = FiniteReads(), inner, []
+
+    async def __call__(self, scope, receive, send):
+        self.events.append('request')
+        await self.owner.run(self.inner, scope, receive, send)
+        self.events.append('returned')
+
+    async def shutdown(self):
+        await self.owner.shutdown()
+        self.events.append('shutdown')
+
+
+async def _until_disconnect(receive):
+    while (await receive())['type'] != 'http.disconnect':
+        pass
+
+
+def test_canonical_read_owner_abandoned_partial_response_is_never_a_successful_end(client, monkeypatch):
+    from claudlobby.plane import finite_reads
+    from claudlobby.commands.owner_stdio import StdioRefused
+    monkeypatch.setattr(finite_reads, 'READ_SECONDS', .3)
+    async def inner(scope, receive, send):
+        assert scope['path'] == '/api/owner/connected/status'
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'{"part', 'more_body': True})
+        await _until_disconnect(receive)  # the owner abandons delivery at its deadline
+    app = CanonicalReads(inner)
+    thread, outcome = run_in_thread(client, app)
+    assert client.frame()['type'] == 'headers'
+    chunk = client.frame()
+    client.send('ack', chunk_id=chunk['chunk_id'])
+    thread.join(10)
+    assert app.events == ['request', 'returned', 'shutdown'], 'the owner returned normally'
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'response_incomplete'
+    assert client.quiet(), 'no end frame for an abandoned response'
+
+
+def test_canonical_read_owner_complete_response_still_ends_normally(client):
+    async def inner(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'{}', 'more_body': False})
+    app = CanonicalReads(inner)
+    thread, outcome = run_in_thread(client, app)
+    assert client.frame()['type'] == 'headers'
+    client.send('ack', chunk_id=client.frame()['chunk_id'])
+    end = client.frame()
+    thread.join(5)
+    assert outcome == [None] and (end['status'], end['bytes_sent'], end['cancelled']) == (200, 2, False)
+
+
+def test_headers_only_or_absent_response_that_returns_is_unknown_not_successful(client):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    async def body(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+    thread, outcome = run_in_thread(client, Recorder(body))
+    assert client.frame()['type'] == 'headers'
+    thread.join(5)
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'response_incomplete' and client.quiet()
+
+
+def test_caller_cancel_that_unwinds_normally_stays_cancelled(client):
+    """A handler that swallows the disconnect and returns must not read as success or refusal."""
+    started = threading.Event()
+    async def body(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'x', 'more_body': True})
+        started.set()
+        await _until_disconnect(receive)  # returns normally on protocol cancel
+    thread, outcome = run_in_thread(client, Recorder(body))
+    assert client.frame()['type'] == 'headers'
+    client.send('ack', chunk_id=client.frame()['chunk_id'])
+    assert started.wait(5)
+    client.send('cancel')
+    end = client.frame(10)
+    thread.join(10)
+    assert outcome == [None] and (end['type'], end['cancelled']) == ('end', True)
+
+
+def lifespan_app(events, *, shutdown=None, finish=True, hold=False):
+    class App:
+        async def __call__(self, scope, receive, send):
+            if scope['type'] == 'lifespan':
+                assert (await receive())['type'] == 'lifespan.startup'
+                await send({'type': 'lifespan.startup.complete'})
+                assert (await receive())['type'] == 'lifespan.shutdown'
+                events.append('lifespan-shutdown')
+                if shutdown is not None:
+                    await shutdown()
+                if finish:
+                    await send({'type': 'lifespan.shutdown.complete'})
+                return
+            await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+            if hold:
+                await _until_disconnect(receive)
+                return
+            await send({'type': 'http.response.body', 'body': b''})
+        async def shutdown(self):
+            events.append('shutdown')
+    return App()
+
+
+def run_serve(client, app):
+    from claudlobby.commands.owner_api_stdio import serve
+    outcome = []
+    def work():
+        try:
+            outcome.append(asyncio.run(serve(client.channel, app, start_frame(), origin=ORIGIN)))
+        except BaseException as exc:
+            outcome.append(exc)
+    thread = threading.Thread(target=work)
+    thread.start()
+    return thread, outcome
+
+
+def test_end_is_emitted_only_after_lifespan_shutdown_completes(client):
+    events, release = [], threading.Event()
+    async def slow_shutdown():
+        while not release.is_set():
+            await asyncio.sleep(.02)
+    thread, outcome = run_serve(client, lifespan_app(events, shutdown=slow_shutdown))
+    assert client.frame()['type'] == 'headers'
+    deadline = time.monotonic() + 5
+    while 'lifespan-shutdown' not in events and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert events == ['shutdown', 'lifespan-shutdown'], 'components drain before the lifespan'
+    assert client.quiet(), 'no end while the lifespan is still shutting down'
+    release.set()
+    assert client.frame()['type'] == 'end'
+    thread.join(5)
+    assert outcome == [None]
+
+
+@pytest.mark.parametrize('mode', ['raises', 'never-completes'])
+def test_lifespan_shutdown_failure_is_surfaced_and_emits_no_end(client, mode):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    events = []
+    async def failing():
+        raise RuntimeError('lifespan cleanup failed')
+    app = lifespan_app(events, shutdown=failing if mode == 'raises' else None, finish=False)
+    thread, outcome = run_serve(client, app)
+    assert client.frame()['type'] == 'headers'
+    thread.join(15)
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'shutdown_failed'
+    assert client.quiet(), 'a failed shutdown never reports a normal end'
+
+
+def test_original_operation_failure_is_kept_when_shutdown_also_fails(client):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    events = []
+    thread, outcome = run_serve(client, lifespan_app(events, finish=False, hold=True))
+    assert client.frame()['type'] == 'headers'
+    client.hang_up()
+    thread.join(15)
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'disconnected'
+    assert isinstance(outcome[0].__context__, StdioRefused) and outcome[0].__context__.code == 'shutdown_failed'
+
+
 # --- process entry: parser, dispatch and exit status ------------------------
 
 def api_process(tmp_path, **env):
