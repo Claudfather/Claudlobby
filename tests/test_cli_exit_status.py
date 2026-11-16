@@ -12,7 +12,8 @@ no /dev/full, so it would skip there, and a new macOS skip needs the skip ceilin
 tests/ci_shards.py raised.
 
 Items 15 and 17: the cases after them leave main by its other two ways, a SystemExit (a
-usage refusal) and an exception, while stderr cannot be written.
+usage refusal) and an exception, while stderr cannot be written. Item 21: the last case is
+a usage refusal by a subcommand's own parser.
 """
 
 import contextlib
@@ -144,3 +145,22 @@ def test_an_exception_that_leaves_main_with_stderr_unwritable_exits_1_not_120():
     with _unwritable("pipe") as (stderr, fd2):
         run = _cli(["_handoff-files", "watch", "bot"], stderr, fd2=fd2)
     assert (run.returncode, run.stdout) == (1, b""), run
+
+
+def test_a_sub_parsers_own_refusal_exits_2_when_stderr_cannot_be_written():
+    """Item 21: the usage refusals above are the CLI parser's own (an unknown command). A
+    subcommand's parser takes the same guard only because add_subparsers builds it from the
+    CLI parser's own class, argparse's default, since no call passes parser_class. Here
+    `_handoff-files watch` with no directory, which that subcommand's parser refuses for a
+    required argument. `_handoff-files` is a private door, not a migrated route: command_result
+    takes a command line for a migrated route only by the first word of a public operation
+    (`_command_from_argv`), and `_handoff-files` is none, so ResultArgumentParser.error leaves
+    the refusal to argparse, which writes it through the guarded `_print_message`. With the
+    sub-parsers built from a class without the guard (ResultArgumentParser itself), that write
+    raised on such a stderr and the refusal exited 1."""
+    run = _cli(["_handoff-files", "watch"], subprocess.PIPE)
+    assert (run.returncode, run.stderr.decode().splitlines()[-1]) == (
+        2, "claudlobby _handoff-files: error: the following arguments are required: directory"), run
+    with _unwritable("pipe") as (stderr, fd2):
+        run = _cli(["_handoff-files", "watch"], stderr, fd2=fd2)
+    assert (run.returncode, run.stdout) == (2, b""), run  # 1 without the guard

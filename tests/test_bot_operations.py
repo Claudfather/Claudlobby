@@ -1289,6 +1289,7 @@ def test_a_claude_directory_redirected_after_the_request_gets_the_directory_refu
         os.geteuid() == 0, reason="root searches a directory without its search bit")),
     ("data", "is redirected (a link)"),
     ("data", "is not a directory"),
+    ("data", "is not this user's"),
     (".claude", "is not this user's"),
     (".claude", "is not a directory"),
     pytest.param(".claude", "cannot be searched", marks=pytest.mark.skipif(
@@ -1303,8 +1304,9 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     nor the repair. Item 3, the half before the request: a .claude that is not this user's was
     refused the same way, at the file clock that stamps the request. Each answer names the
     directory, the cause and the repair now, and says nothing was sent: the handoff is asked
-    again once the directory is repaired, not read with --check. Another user's .claude is
-    stood in for by its lstat, which names another owner."""
+    again once the directory is repaired, not read with --check. Another user's directory is
+    stood in for by its lstat, which names another owner: .claude, the bot directory and, for
+    item 22, data/, which the request read refuses."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     bot_dir = worker.root / "runtime/bots/worker"
     path = bot_dir if directory == "bot" else bot_dir / directory
