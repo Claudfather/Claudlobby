@@ -28,6 +28,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // conversation, so manual checks beside it stay far inside the 256-call bound.
   const SIGNIN_POLL_MS=2000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
   const signinOpen = () => context?.provider_signin===true && !!signinAttempt && !SIGNIN_TERMINAL.includes(signinState);
+  // Provider-required Preview/Launch needs this context's own attempt confirmed connected; a
+  // missing, unknown, cancelled or needs_attention attempt is not readiness. Not required: no guard.
+  const signinReady = () => context?.provider_signin!==true
+    || !!signinAttempt && signinAttempt.generation===context.generation && signinState==='connected';
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
   function clearSignin(notice) {
     signinUrl=null; if (mount) mount.code.value='';
@@ -125,7 +129,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } catch { throw Object.assign(new Error('This browser could not retain the original update identifiers. No launch was sent. Restore site storage; keep the original identifiers for local recovery.'), {code:'setup_storage_unavailable'}); }
   }
   function changed() { render(); onChange(); }
+  const RENEWAL_STATES=['renewing','ready','setup_only'];
   function connectionChanged(next) {
+    // The client's own pre-begin renewal of a still-valid session rotates the epoch but is not
+    // a loss: the approved context and its effect survive it. Any other state (expired, denied,
+    // signed out, unavailable, disposed) still takes the full path below.
+    if (next.signinRenewal===true && RENEWAL_STATES.includes(next.state) && RENEWAL_STATES.includes(state.state)) {
+      state = next; changed(); return;
+    }
     if (next.epoch !== state.epoch || next.state !== state.state) {
       epoch++; context = null; plan = null; launchable = false; stopSigninPoll();
       clearSignin(signinAttempt && !SIGNIN_TERMINAL.includes(signinState) ? lostNotice : undefined);
@@ -183,7 +194,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (disposed || ticket!==epoch || !active()) return false;
         signinReceipt(result);
       } else if (operation === 'preview') {
-        if (!context || context.launch_reserved || pending || legacyBlocked() || signinOpen() || !goal.trim() || context.expires_at <= now()) return false;
+        if (!context || context.launch_reserved || pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= now()) return false;
         const selected = context, authored = goal;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
@@ -196,7 +207,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         save(pending); launchable = true;
         note = 'Configuration prepared. Review the frozen goal and changes before one explicit launch.';
       } else if (operation === 'launch') {
-        if (!context || !plan || !pending || !launchable || legacyBlocked() || signinOpen() || !same(plan,pending)
+        if (!context || !plan || !pending || !launchable || legacyBlocked() || !signinReady() || !same(plan,pending)
             || planGoal !== goal || plan.expires_at <= now() || context.expires_at <= now()) return false;
         save(pending); launchable = false; // Retain the preview's original identity before the one launch POST.
         managedHandoff = context.managed_owner === true;
@@ -282,6 +293,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : pending && !launchable ? 'Use Check original update receipt; launch is not repeated.'
       : !context ? 'Choose Check setup approval before previewing a team.'
       : context.expires_at <= now() ? 'Local setup approval expired. Choose Check setup approval.'
+      : !signinReady() ? 'Sign in to Claude (connected) before previewing or launching. A cancelled or unfinished attempt is not readiness.'
       : !goal.trim() ? 'Enter a goal to enable Preview team.'
       : !plan ? 'Choose Preview team before launching this goal.'
       : plan.expires_at <= now() ? 'This preview expired. Inspect the original update locally.'
@@ -295,8 +307,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     details.textContent = plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
       historical_identifiers:legacy,...(plan ? {changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at} : {})},null,2) : '';
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
-      || operation === 'preview' && (!context || !!pending || legacyBlocked() || signinOpen() || !goal.trim() || context.expires_at <= now())
-      || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || signinOpen() || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
+      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= now())
+      || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || !signinReady() || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
       || operation === 'receipt' && !pending;
   }
   function mountPanel({document,element}) {

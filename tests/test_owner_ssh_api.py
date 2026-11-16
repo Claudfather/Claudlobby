@@ -919,29 +919,55 @@ def test_signin_call_frames_are_refused_before_any_canonical_entry(client, monke
     assert client.quiet(), 'no reply and no end after a refused frame'
 
 
-def test_signin_call_sent_while_the_reply_is_still_being_written_is_refused_not_deferred(client, monkeypatch):
-    """The next call is admitted only after the reply's final byte: output blocked mid-reply
-    keeps it early, and releasing the output never turns it into a valid later call."""
+@pytest.mark.parametrize('mode', ['late-release', 'quick-release', 'cancel', 'after-commit'])
+def test_signin_call_sent_while_the_reply_is_still_being_written_is_refused_not_deferred(client, monkeypatch, mode):
+    """The next call is admitted only after the reply's final byte is written and committed:
+    a frame read while output is stalled stays early however soon the output is released,
+    a cancel read during backpressure is still acted on, and a call after the whole reply
+    is ordinary. No lock time or sleep is the criterion; the writer stalls waiting for
+    writability, outside the channel's one I/O lock."""
     from claudlobby.commands import owner_api_stdio
     from claudlobby.commands.owner_stdio import StdioRefused
-    reached, release, writes = threading.Event(), threading.Event(), [0]
+    reached, release, waits = threading.Event(), threading.Event(), [0]
     client.gates.append(release)
-    class StalledOS:
+    real_select = owner_api_stdio.select.select
+    class StalledSelect:
         def __getattr__(self, name):
-            return getattr(os, name)
-        def write(self, fd, data):
-            if fd == client.outgoing:
-                writes[0] += 1
-                if writes[0] == 2:  # the first 4096 bytes are out; the rest of the reply is not
+            return getattr(owner_api_stdio.select, name)
+        def select(self, readable, writable, errored, timeout=None):
+            if writable == [client.outgoing]:
+                waits[0] += 1
+                if waits[0] == 2:  # the first 4096 bytes are out; the rest of the reply is not
                     reached.set()
                     release.wait(10)
-            return os.write(fd, data)
-    monkeypatch.setattr(owner_api_stdio, 'os', StalledOS())
-    app = SigninApp(attempt('starting', padding='x' * 9000), attempt('waiting'))
+            return real_select(readable, writable, errored, timeout)
+    monkeypatch.setattr(owner_api_stdio, 'select', StalledSelect())
+    app = SigninApp(attempt('starting', padding='x' * 9000), attempt('waiting'), attempt('waiting'))
     thread, outcome = run_conversation(client, app)
     assert reached.wait(5), 'the reply output is blocked part way'
+    if mode == 'cancel':
+        client.send('cancel')
+        time.sleep(.8)  # the cancel is read while output is blocked
+        release.set()
+        thread.join(10)
+        assert not thread.is_alive()
+        assert not isinstance(outcome[0], StdioRefused) or outcome[0].code != 'invalid_request', outcome
+        assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown']
+        return
+    if mode == 'after-commit':
+        release.set()
+        first = client.frame()
+        assert (first['type'], first['call_id']) == ('reply', 1)
+        call(client, 2)  # sent after the whole reply: an ordinary next call
+        second = client.frame()
+        assert (second['type'], second['call_id']) == ('reply', 2)
+        client.send('cancel')
+        thread.join(10)
+        assert not thread.is_alive()
+        assert app.events[:2] == ['signin-begin', 'signin-status']
+        return
     call(client, 2)  # valid in itself, but call 1 has not been fully answered
-    time.sleep(.8)  # longer than one reader poll: the frame was read and judged while output is blocked
+    time.sleep(.8 if mode == 'late-release' else .35)  # the frame is read while output is blocked
     assert thread.is_alive() and app.events == ['signin-begin']
     release.set()
     thread.join(10)

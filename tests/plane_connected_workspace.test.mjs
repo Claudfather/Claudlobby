@@ -1322,6 +1322,60 @@ test('Preview and Launch wait for an open provider sign-in; setups without one a
   assert.equal(await plain.api.run('preview'),true);
 });
 
+test('mounted ready session renews before begin and keeps the approved context, link and one serialized poll',async()=>{
+  const store=new Map(),previousStorage=Object.getOwnPropertyDescriptor(globalThis,'localStorage');
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)}});
+  try {
+  const h=harness({count:1}),origin=refs[0].endpoint_origin+'/api/owner/connected/setup/',ROTATED_TOKEN='R'.repeat(42)+'A';
+  await h.api.checkAccount();h.mount();await h.api.act(0,'connect');
+  const body={version:2,template:'revenue-web-app',repository:'example-org/shop',fleet:'shop',source_revision:'b'.repeat(40),
+    generation:id(9),expires_at:1800003600,request:null,launch_reserved:false,provider_signin:true,signin_attempt:null};
+  const seen=[];let attemptId=null;
+  h.overrides.set(origin+'context',()=>{seen.push('context');return reply(200,body);});
+  h.overrides.set(origin+'signin-begin',init=>{
+    seen.push('begin');assert.equal(init.headers.Authorization,'Bearer '+ROTATED_TOKEN,'begin used the rotated bearer');
+    attemptId=JSON.parse(init.body).attempt_id;
+    return reply(200,{generation:id(9),attempt_id:attemptId,state:'waiting',reason:null,url:authorizeURL});});
+  h.overrides.set(origin+'signin-status',init=>{
+    seen.push('status');assert.equal(JSON.parse(init.body).attempt_id,attemptId);
+    return reply(200,{generation:id(9),attempt_id:attemptId,state:'connected',reason:null});});
+  h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/renew',()=>{seen.push('renew');
+    return reply(200,{version:1,state:'ready',expires_in:900,token:ROTATED_TOKEN,read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},
+      session_context:{issuer:documentContext.shell_origin,subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}});});
+  const nodes=()=>descendants(h.ui.get('owner-session')),button=text=>nodes().find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  button('Check setup approval').click();await flush();
+  assert.deepEqual(seen,['context']);
+  h.time=600000; // 300 seconds left of 900: begin must renew first
+  button('Sign in to Claude').click();await flush();
+  assert.deepEqual(seen,['context','renew','begin'],'renewal precedes begin, and no second approval check ran');
+  const link=nodes().find(n=>n.tagName==='A'&&n.textContent==='Open Claude sign-in');
+  assert.equal(link.hidden,false,'the mounted panel shows the waiting link');
+  assert.equal(link.attributes.href,authorizeURL);
+  const polls=()=>h.timers.filter(t=>t.active&&t.ms===2000);
+  assert.equal(polls().length,1,'exactly one serialized poll is scheduled');
+  h.timer(2000);await flush();
+  assert.deepEqual(seen,['context','renew','begin','status']);
+  assert.equal(polls().length,0,'the same-ID connected result stops polling');
+  assert.equal(link.hidden,true);
+  h.api.dispose();
+  } finally { if(previousStorage)Object.defineProperty(globalThis,'localStorage',previousStorage);else delete globalThis.localStorage; }
+});
+
+test('provider-required Preview needs this context\'s attempt confirmed connected; recovery states are not readiness',async()=>{
+  const states=[['none',null],['unknown','unknown'],['cancelled','cancelled'],['needs_attention','needs_attention'],['connected','connected']];
+  for(const [name,state] of states){
+    const h=setupHarness();h.context.provider_signin=true;
+    h.context.signin_attempt=state===null?null:{generation:id(9),attempt_id:id(12),state,reason:null};
+    h.api.setGoal('Ship it');await h.api.run('context');
+    assert.equal(await h.api.run('preview'),state==='connected',name);
+    assert.equal(h.calls.some(c=>c[0]==='preview'),state==='connected',name+' reached the host');
+    h.api.dispose();
+  }
+  const retained=setupHarness();retained.saved.set('test:claude',JSON.stringify({generation:id(9),attempt_id:id(12)}));
+  retained.context.provider_signin=true;retained.api.setGoal('Ship it');await retained.api.run('context');
+  assert.equal(await retained.api.run('preview'),false,'a retained attempt with unknown state is not readiness');retained.api.dispose();
+});
+
 // Browser carrier exercises the real Fetch facade and MessagePort boundary.
 const bridgeModule = async () => import(uri(await read('browser-owner-transport.js')));
 function browserDocument() {

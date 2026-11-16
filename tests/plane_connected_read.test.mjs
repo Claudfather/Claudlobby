@@ -836,6 +836,30 @@ test('begin renews first only when the session cannot cover the bounded attempt,
   failed.api.dispose();
 });
 
+test('a redundant renewal neither erases nor replaces the admitted one; begin still waits for it', async () => {
+  const h = signinHarness(); await h.api.connect();
+  const held = deferred(); h.overrides.set('renew', () => held.promise);
+  const first = h.api.renew(); await flush();
+  assert.equal(await h.api.renew(), false, 'a redundant renewal is refused without touching the tracked one');
+  const beginning = h.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(h, 'begin').length, 0, 'begin does not run on the old token');
+  held.resolve(reply(200, ready(ROTATED))); await first;
+  assert.equal((await beginning).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(renewals(h), 1, 'one renewal only'); h.api.dispose();
+  const s = signinHarness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  s.overrides.set('issue', () => reply(200, setup(TOKEN))); s.overrides.set('status', () => reply(200, setup()));
+  assert.equal(await s.api.connect(), true);
+  const gate = deferred(); s.overrides.set('renew', () => gate.promise);
+  const r1 = s.api.renew(); await flush(); assert.equal(await s.api.renew(), false);
+  const b = s.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(s, 'begin').length, 0, 'setup-only begin waits for the admitted renewal');
+  gate.resolve(reply(200, setup(ROTATED))); await r1; await b;
+  assert.equal(signinCalls(s, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  s.api.dispose();
+});
+
 test('sign-in admission waits for a renewal already in flight and then uses the rotated bearer', async () => {
   const h = signinHarness(); await h.api.connect();
   const held = deferred(); h.overrides.set('renew', () => held.promise);

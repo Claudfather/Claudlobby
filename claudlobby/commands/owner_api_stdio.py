@@ -158,12 +158,15 @@ class APIChannel:
         self.partial_since = None
         self.interrupted = False
         self.admitted = None  # monotonic time of an admitted conversation start
-        # Held around each output write so a reader can tell whether a frame
-        # arrived before or after the final byte of a reply was written.
-        self.write_lock = threading.Lock()
+        # The one ordering owner: each output write step (and, after a reply's
+        # final byte, its commit) and each input read step run under it, one
+        # short step at a time. Waiting for readiness happens outside it.
+        self.io_lock = threading.Lock()
+        self.commits = 0  # replies whose final byte was written and committed
+        self.observed_commits = 0  # commits already counted when the last bytes were read
 
-    def emit(self, kind, _committed=None, **values):
-        """Write one frame; ``_committed`` runs under the write lock right after its final byte."""
+    def emit(self, kind, _commit=False, **values):
+        """Write one frame; the commit is counted under the I/O lock right after its final byte."""
         self.output_seq += 1
         raw = _wire({**values, 'version': 1, 'type': kind, 'seq': self.output_seq, 'session_id': self.session_id})
         if len(raw) > 32768 or self.output_seq > 4096:
@@ -172,13 +175,13 @@ class APIChannel:
         while raw:
             if not select.select([], [self.outgoing], [], max(0, deadline - time.monotonic()))[1]:
                 raise StdioRefused('output_unavailable')
-            with self.write_lock:
+            with self.io_lock:
                 count = os.write(self.outgoing, raw[:4096])
                 if not count:
                     raise StdioRefused('output_unavailable')
                 raw = raw[count:]
-                if not raw and _committed is not None:
-                    _committed()
+                if not raw and _commit:
+                    self.commits += 1
 
     def read(self, allowed, timeout=.25):
         if self.interrupted:
@@ -188,7 +191,9 @@ class APIChannel:
                 if self.partial_since is not None and time.monotonic() - self.partial_since >= 15:
                     raise StdioRefused('expired')
                 return None
-            part = os.read(self.incoming, 4096)
+            with self.io_lock:
+                part = os.read(self.incoming, 4096)
+                self.observed_commits = self.commits
             if not part:
                 raise StdioRefused('disconnected')
             self.buffer.extend(part)
@@ -498,13 +503,11 @@ async def converse(channel, app, request, *, origin):
     calls = asyncio.Queue(maxsize=1)
     abort, stop, caller_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     carrier_error = []
-    # A call is outstanding until its reply's final byte is written. The reader
-    # thread compares the counts under the channel's write lock the moment a frame
-    # is parsed, so a call that arrived before that byte is refused, never queued.
-    state = {'admitted': 1, 'replied': 0, 'next': 2, 'open': True}
-
-    def committed():
-        state['replied'] += 1  # runs under channel.write_lock, right after the final byte
+    # A call is outstanding until its reply's final byte is written and committed.
+    # Bytes are read under the channel's one I/O lock, which also covers the final
+    # write and its commit; the commit count seen by that read is the frame's
+    # permanent classification. Nothing is re-evaluated after a wait.
+    state = {'admitted': 1, 'next': 2, 'open': True}
     status = sent = 0
     current = None
 
@@ -519,15 +522,7 @@ async def converse(channel, app, request, *, origin):
         frame = channel.read({'call', 'cancel'})
         if frame is None:
             return None, False
-        # A write lock still held after a short wait means a reply write is stalled:
-        # the final byte has not been written, so this frame is early. It is never
-        # parked until the write ends, which would turn it into a valid later call.
-        held = not channel.write_lock.acquire(timeout=.05)
-        try:
-            return frame, held or state['replied'] < state['admitted']
-        finally:
-            if not held:
-                channel.write_lock.release()
+        return frame, channel.observed_commits < state['admitted']
 
     async def controls():
         try:
@@ -650,8 +645,10 @@ async def converse(channel, app, request, *, origin):
                     state['open'] = False  # no later call is admitted
                 try:
                     # The next call is admissible only once the reply's final byte is written.
-                    channel.emit('reply', _committed=committed, call_id=call_id, status=code,
-                                 headers=selected, data=base64.b64encode(data).decode('ascii'))
+                    # Off the event loop: output backpressure must not stop the control
+                    # reader's cancellation or fault from being acted on.
+                    await asyncio.to_thread(channel.emit, 'reply', _commit=True, call_id=call_id, status=code,
+                                            headers=selected, data=base64.b64encode(data).decode('ascii'))
                 except StdioRefused as exc:
                     raise carrier(exc.code) from None
                 except OSError:

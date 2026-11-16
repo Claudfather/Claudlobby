@@ -41,8 +41,12 @@ replaces an earlier failure (an incomplete response included) nor skips the
 remaining drains or the control-reader join.
 
 A call is now admitted only after the final byte of the previous reply is
-written, so a call sent while a reply is blocked or partly written is refused as
-`invalid_request` instead of being queued. The setup panel follows the original
+written and committed, so a call read while a reply is blocked or partly written
+is refused as `invalid_request` and never promoted, whatever the timing (input
+reads and the final write share one short-step I/O owner; no lock-time threshold).
+Begin waits for the renewal actually in flight, the guided panel survives the
+confirmed pre-begin renewal, and provider-required Preview/Launch need a matching
+connected attempt. The setup panel follows the original
 sign-in attempt with one serialized status check about every two seconds, holds
 Preview and Launch while it is open, and the connected client holds session
 renewal (renewing first only when the session would end inside the attempt)

@@ -91,7 +91,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let accessRejected = false, connectIncomplete = false;
   // While a sign-in conversation is admitted or live, no renewal may rotate the begin-time
   // bearer. ``renewalRun`` lets begin wait for a renewal already in flight.
-  let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null;
+  let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null, signinRenewing = false;
   const signinHeld = () => signinAdmitting || signinLive;
   const trackRenewal = run => {
     const clear = () => { if (renewalRun === run) renewalRun = null; };
@@ -100,8 +100,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   const readFailures = new Map();
   const requests = new Set(), cursors = new Map();
   let setupOnly = false, setupSignedOut = false; const setupListeners = new Set();
-  const snapshot = () => setupOnly ? Object.freeze({...handle.snapshot(),state:"setup_only",epoch,remediation:"First-team setup only; dashboard reads are not admitted."})
-    : setupSignedOut ? Object.freeze({...handle.snapshot(),state:"signed_out",epoch}) : handle.snapshot();
+  // While begin's own preflight renewal runs, snapshots say so, so the panel keeps its approved context.
+  const renewalNote = signinRenewing => signinRenewing ? {signinRenewal:true} : {};
+  const snapshot = () => setupOnly ? Object.freeze({...handle.snapshot(),state:"setup_only",epoch,remediation:"First-team setup only; dashboard reads are not admitted.",...renewalNote(signinRenewing)})
+    : setupSignedOut ? Object.freeze({...handle.snapshot(),state:"signed_out",epoch}) : signinRenewing ? Object.freeze({...handle.snapshot(),...renewalNote(true)}) : handle.snapshot();
   const notify = () => { for (const listener of setupListeners) { try { listener(snapshot()); } catch {} } };
   let owner, handle, actions = null, actionEpoch = 0, actionSourceChanged = () => {}, unsubscribe = () => {};
   function now() {
@@ -518,6 +520,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   async function renew(internal = false) {
     if (!internal && signinHeld()) { continuityChanged(); return false; }
+    // A redundant request while a call holds the session is refused here, so it can never
+    // replace the promise of the renewal actually in flight (begin waits on that one).
+    if (busy) return false;
     return trackRenewal(renewOnce(internal));
   }
   async function renewOnce(internal) {
@@ -587,10 +592,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       if (!valid(true)) throw new Error('Sign-in was not started. Connect again first.');
       if (expires - now() < SIGNIN_LIFETIME) {
         // Not enough session left for the whole attempt: renew once, now, before begin.
-        renewalPermit = true;
+        renewalPermit = true; signinRenewing = true;
         let renewed = false;
-        try { renewed = (await (setupOnly ? lifecycle('renew', true) : renew(true))) === true; }
-        catch { renewed = false; } finally { renewalPermit = false; }
+        try { renewed = (await renew(true)) === true; }
+        catch { renewed = false; } finally { renewalPermit = false; signinRenewing = false; }
         if (!renewed || !valid(true) || expires - now() < SIGNIN_LIFETIME)
           throw new Error('Sign-in was not started. The session could not be renewed first.');
       }

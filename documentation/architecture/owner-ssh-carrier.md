@@ -109,8 +109,13 @@ run over SSH has not been observed.
 `setup-signin-code` or `setup-signin-cancel`, with `call_id` 2, 3, … up to 256
 and the generation and attempt ID of the start. One call is outstanding at a
 time, and a call is outstanding until the final byte of its `reply` has been
-written: the output write and the arrival check share one lock, so a frame read
-while a reply is blocked or half written is early. A `call` that arrives before
+written and committed. Input reads and the final output write with its commit run
+as short steps under one I/O owner (never held while waiting for readiness), and a
+frame is classified once, by the commits that owner had counted when its bytes were
+read. A frame already read while a reply is blocked or half written stays early,
+however soon the write finishes; no timing threshold decides it. Order is defined by
+complete frames observed and writes committed, not by packet arrival, and a cancel or
+fault stays readable during output backpressure. A `call` that arrives before
 the previous `reply` is complete, repeats or skips an ID,
 names another operation or identity, or follows the closing reply is refused as
 `invalid_request` when it is read; it is never held for later and never reaches
@@ -124,7 +129,10 @@ keeps nothing from an earlier call as authority, and adds no session renewal.
 The canonical browser client therefore holds its own renewal while a conversation
 is admitted or live (explicit, automatic and setup-only alike), renews once
 before begin only if the session would end inside the bounded attempt, and does
-not begin if that renewal is not confirmed. It never extends a session locally;
+not begin if that renewal is not confirmed. Begin waits for any renewal already in
+flight (a redundant request never replaces it), and the guided panel keeps its
+approved context across that confirmed pre-begin renewal; real expiry, sign-out,
+reference change or disposal still clear it. It never extends a session locally;
 disconnect, expiry or disposal ends the hold, an unknown answer does not.
 The attempt's worker keeps the reader it was started with: a renewed, revoked or
 expired session stops the attempt, and its final state may then be unreadable.
@@ -192,7 +200,8 @@ drain remain the authority.
 `owner-api-v1` with the original generation and attempt ID reads the retained
 record. An attempt still owned by a live conversation reads there as `unknown`,
 which is an observation, not proof that the child stopped. Preview stays blocked
-by the website while a conversation is live.
+by the website while a conversation is live, and while a provider-requiring context
+has no attempt confirmed connected (none, unknown, cancelled or needs_attention).
 
 ## The guide on an SSH-controlled Mac
 
