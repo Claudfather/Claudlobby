@@ -464,7 +464,7 @@ def test_new_bot_materializes_pending_voice_only_after_confirmation(
     backup = root / "fleet.yaml.bak"
     token_file = root / ".env"
     if mode == "confirm":
-        assert "config plan" in output.out
+        assert "host update apply FULL_COMMIT_SHA" in output.out and "config plan" not in output.out
         assert "Terse and blunt." in voice.read_text()
         assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
         assert backup.read_text() == FLEET_WITH_BOTS
