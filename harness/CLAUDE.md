@@ -40,7 +40,7 @@ the index and the rules.
 
 What each script does and how, its flags, outputs and measurements, and its history are in
 [`documentation/harness-script-reference.md`](../documentation/harness-script-reference.md), row by
-row in this table's order.
+row in this table's order. `ab-coverage-verdict.py` has no row there: its row here is all of it.
 
 A script indexed above without a row documents itself in its header.
 

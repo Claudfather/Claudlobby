@@ -8,7 +8,7 @@ Compositor for agent-CLI fleets — Claude Code today, Codex through the executi
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
-**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (each runtime script in depth, the contracts of the public-CLI commands that replaced scripts, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
+**This file is an index.** Detail lives beside what it describes: [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) (the runtime scripts in depth, the contracts of the public-CLI commands that replaced scripts, and the shell authoring rules), [`harness/CLAUDE.md`](harness/CLAUDE.md) (validation and measurement instruments), the other nested `CLAUDE.md` files, script headers, and `documentation/`. Read "Instruction files" below before adding to this one.
 
 ## Ecosystem boundary
 
@@ -45,7 +45,7 @@ The template `claude.md.j2` owns all top-level structure — library files suppl
 
 ### Runtime scripts (`claudlobby/_runtime_scripts/`)
 
-One line per script, for routing; operators use the public CLI. **Before changing one, read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md)**: the shell authoring rules and each script's full reference. Validation and measurement instruments live in `harness/`, indexed in [`harness/CLAUDE.md`](harness/CLAUDE.md).
+One line per script, for routing; operators use the public CLI. **Before changing one, read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md)**: the shell authoring rules and the script reference. Validation and measurement instruments live in `harness/`, indexed in [`harness/CLAUDE.md`](harness/CLAUDE.md).
 
 **Bot lifecycle and supervision**
 - `start-bot.sh` — launch a bot's tmux session on its own socket and wait until ready
@@ -235,7 +235,7 @@ Each library category has its own format. Check the category's `README.md` for s
 
 ### Adding or modifying claudlobby/_runtime_scripts/ scripts
 
-Read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) first: the authoring rules and each script's full reference. Two rules reach beyond it: no apostrophes in comments inside `$( )` (bash 3.2; `tests/test_bash_parse.py` also checks `library/**/*.sh`), and an empty roster must never license a write or delete: there use `declared_bots_strict`, never `parse_fleet_bots` or `bot_in_fleet` (#1146). A new script gets one line in the index above; its detail goes in its own header.
+Read [`claudlobby/_runtime_scripts/CLAUDE.md`](claudlobby/_runtime_scripts/CLAUDE.md) first: the authoring rules and the script reference. Two rules reach beyond it: no apostrophes in comments inside `$( )` (bash 3.2; `tests/test_bash_parse.py` also checks `library/**/*.sh`), and an empty roster must never license a write or delete: there use `declared_bots_strict`, never `parse_fleet_bots` or `bot_in_fleet` (#1146). A new script gets one line in the index above; its detail goes in its own header.
 
 ### Validating changes to how a bot behaves — MANDATORY
 
