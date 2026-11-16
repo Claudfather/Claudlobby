@@ -6,6 +6,10 @@ failed too, and the process exited 120 after a correct answer. Each case runs a 
 process, since a call in this process never ends the interpreter. The command is the
 private handoff door over a bot whose native-session receipt is malformed, which says
 so on stderr through #2936's guarded note and answers on stdout.
+
+A stderr on /dev/full (ENOSPC) fails the same way. That case waits on #2935: macOS has
+no /dev/full, so it would skip there, and a new macOS skip needs the skip ceiling in
+tests/ci_shards.py raised.
 """
 
 import io
@@ -13,8 +17,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-
-import pytest
 
 from claudlobby.__main__ import main
 from tests.conftest import constructed_env
@@ -50,13 +52,6 @@ def test_a_working_stderr_gets_the_line_and_the_answer_exits_0(tmp_path):
     assert (run.returncode, run.stdout.decode().splitlines()) == (0, answer), run
 
 
-@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="no /dev/full (Linux has one)")
-def test_a_full_stderr_loses_the_line_and_the_status_is_the_answers(tmp_path):
-    with open("/dev/full", "wb") as full:  # every write fails: ENOSPC
-        run, answer = _door(tmp_path, full)
-    assert (run.returncode, run.stdout.decode().splitlines()) == (0, answer), run  # 120 before
-
-
 def test_a_pipe_whose_reader_has_exited_loses_the_line_and_the_status_is_the_answers(tmp_path):
     read, write = os.pipe()
     os.close(read)  # every write fails: EPIPE, as a broken pipe (the interpreter ignores SIGPIPE)
@@ -76,7 +71,7 @@ def test_a_stderr_closed_before_the_start_writes_nothing_and_the_answer_exits_0(
 def test_a_stderr_open_only_for_reading_loses_the_line_and_the_status_is_the_answers(tmp_path):
     """The installation launcher leaves fd 2 so when fd 2 was closed at its start: its runtime
     lock is opened read-only on the free fd 2, and the interpreter it starts takes that for
-    stderr, so every write fails (EBADF). 120 before, as on a full device."""
+    stderr, so every write fails (EBADF). 120 before, as for a pipe whose reader has exited."""
     run, answer = _door(tmp_path, subprocess.DEVNULL, fd2="2</dev/null")
     assert (run.returncode, run.stdout.decode().splitlines()) == (0, answer), run
 
