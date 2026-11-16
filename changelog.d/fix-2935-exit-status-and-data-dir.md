@@ -1,0 +1,7 @@
+### Fixed — a stderr that cannot be written no longer turns a command's answer into exit status 120 (#2935)
+
+When stderr could not be written, on a full device, a pipe whose reader had exited or, under the installation launcher, a closed fd 2 (the launcher then hands the interpreter its runtime lock, open only for reading, as stderr), a command that dropped a line it could not write still exited 120 after printing a correct answer: the interpreter flushed stderr once more as it ended, and that flush failed too. A caller that read the status instead of the answer read a failure. Every command now closes such a stderr before it ends, so the exit status is the command's own, 0 for an answer that reads `ok: true`. A stderr closed before Python itself starts was already passed over.
+
+### Fixed — `bot handoff` names a directory it cannot record its request through (#2935)
+
+When the bot's `data/`, which holds the handoff request, was a link, was not a directory, was not this user's or could not be searched, or its bot directory or `.claude`, whose file clock stamps the request, was not this user's, `bot handoff` refused before it recorded a request, with `bot native or session readiness cannot be established` and a hint to inspect the private session. It names the directory, the cause and the repair now, and says that nothing was sent, so the handoff is asked again once the directory is repaired; there is no request for `--check` to read. The exit status (6) and `native_outcome` (`unattempted`) are unchanged.

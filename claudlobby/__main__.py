@@ -13,6 +13,44 @@ log = logging.getLogger("claudlobby")
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run one command, and exit with the status it answers (#2935).
+
+    Every way in comes here: the installation launcher, a native unit and
+    `python -m claudlobby`. So this is where a stderr that could not take a
+    line is settled, for every command (`_close_unwritable_stderr`).
+    """
+    try:
+        return _run(argv)
+    finally:
+        _close_unwritable_stderr()
+
+
+def _close_unwritable_stderr() -> None:
+    """Close the interpreter's stderr when it cannot take what it holds (#2935).
+
+    A line whose write raised (a pipe whose reader has exited, a full device)
+    stays in the stream's buffer: the guards that drop such a line (#2934, #2936,
+    #2937) leave it there. As the interpreter ends it flushes stderr once more,
+    that flush fails too, and the exit status becomes 120, though the answer on
+    stdout reads ok. The interpreter passes over a closed stream at that flush,
+    so this closes the stream, and the status is the command's. The close raises
+    the same failure but closes the stream all the same. Only the interpreter's
+    own stderr: never a stream put in its place (a test's capture), and nothing
+    when it is None (fd 2 was closed when Python started, so nothing is written).
+    """
+    stream = sys.stderr
+    if stream is None or stream is not sys.__stderr__:
+        return
+    try:
+        stream.flush()
+    except (OSError, ValueError):  # A ValueError: already closed, so passed over at exit.
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass  # The stream is closed, though its last flush failed.
+
+
+def _run(argv: list[str] | None) -> int:
     parser = ResultArgumentParser(
         prog="claudlobby",
         description="Compositor for Claude Code agent fleets.",

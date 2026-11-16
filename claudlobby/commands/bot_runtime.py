@@ -74,7 +74,7 @@ def own_compaction_lines(result) -> tuple[str, ...]:
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import (BotLifecycleError, HandoffDirectoryRefused, check_handoff,
+    from ..bot_operations import (BotLifecycleError, HandoffDirectoryRefused, HandoffRequestRefused, check_handoff,
                                   control_bot, handoff_bot, set_bot_running)
     from ..compact_request import CompactRequestResult
     from ..config_plan import PlanError
@@ -162,6 +162,14 @@ def dispatch(args) -> CommandOutput:
                 hint = "inspect the exact bot's native unit and private session before retrying"
             raise CommandFailure("unavailable", message, data=data, release_id=exc.release_id,
                                  hint=hint) from exc
+        if isinstance(exc, HandoffRequestRefused):
+            # #2935: nothing was recorded or sent, so --check has nothing to read. The answer
+            # names the directory and its repair, and the handoff is asked again after it.
+            raise CommandFailure(
+                "unavailable", str(exc), data=data,
+                hint=(f"{exc.repair} ({args.bot_id}'s {exc.directory} directory), then ask for the "
+                      f"handoff again: claudlobby --json bot handoff {args.bot_id}. Nothing was sent, "
+                      "so --check has no request to read")) from exc
         if exc.unavailable:
             # A refused stop or restart says why (#2748): a restart refusal is often a
             # checkpoint refusal, and the generic line hid which.

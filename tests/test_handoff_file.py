@@ -146,6 +146,46 @@ def test_the_sessions_own_directory_that_cannot_be_searched_is_not_refused(tmp_p
         own.parent.chmod(0o700)
 
 
+@pytest.mark.parametrize("data_dir", [
+    pytest.param("cannot-search", marks=pytest.mark.skipif(
+        os.geteuid() == 0, reason="root searches a directory without its search bit")),
+    "redirected",
+])
+def test_a_data_directory_that_cannot_be_searched_or_is_redirected_is_not_refused(
+        tmp_path, capsys, data_dir):
+    """#2935 item 10: data/ itself is not refused, as data/claudna and its sessions/ are (the
+    test two above). It holds the native-session receipt, which names the session. When
+    data/ cannot be searched, or is a link to a directory elsewhere, that receipt cannot be
+    read: the readers say so on stderr, name no session, and read .claude/session.md, as
+    HandoffDirectoryRefused says. --check reads unknown (request_unreadable) for the data/ it
+    cannot search, since it reads the request there first. Through the link it reads the
+    request where the link points, which this test does not pin."""
+    bot = _bot(tmp_path)
+    sid = _launch(bot)
+    legacy = _save(handoff_file.legacy(bot))
+    _save(handoff_file.session_owned(bot, sid))
+    assert bot_operations._write_handoff_request(bot, {"requested_at": "2026-01-01T00:00:00Z"})
+    data = bot / "data"
+    if data_dir == "redirected":
+        elsewhere = tmp_path / "elsewhere"
+        data.rename(elsewhere)
+        data.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        data.chmod(0o600)
+    try:
+        assert handoff_file.resolve(bot) == legacy
+        assert handoff_file.watch(bot) == [legacy]
+        assert bot_operations._fresh_self_handoff(bot) >= 0
+        if data_dir == "cannot-search":
+            assert bot_operations.handoff_state(bot)[:2] == ("unknown", "request_unreadable")
+        rc, lines, err = _door(capsys, "watch", str(bot))
+        assert (rc, lines) == (0, [str(legacy)]), (rc, lines, err)
+        assert "the native session receipt cannot be read" in err, err
+    finally:
+        if data_dir == "cannot-search":
+            data.chmod(0o700)
+
+
 def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):
     bot = _bot(tmp_path)
     sid = _launch(bot)

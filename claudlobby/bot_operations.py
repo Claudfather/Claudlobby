@@ -110,6 +110,67 @@ class HandoffDirectoryRefused(BotLifecycleError):
     """
 
 
+class HandoffRequestRefused(BotLifecycleError):
+    """`bot handoff` refused before it recorded a request or sent anything (#2935).
+
+    A directory the request needs is redirected (a link), is not a directory,
+    is not this user's or cannot be searched: data/, which holds the request,
+    or the bot directory or its .claude, whose file clock stamps it. The answer
+    names the directory, the cause and the repair. Nothing was sent, so the
+    handoff is asked again once the directory is repaired: there is no request
+    for --check to read. One that fails after the request, as the save is
+    verified, is HandoffDirectoryRefused.
+    """
+
+    def __init__(self, bot: str, directory: str, cause: str, repair: str):
+        self.directory, self.cause, self.repair = directory, cause, repair
+        super().__init__(f"{bot}'s {directory} directory {cause}, so bot handoff recorded no "
+                         "request and sent nothing", unavailable=True)
+
+
+# A cause _unusable_directory names, and its repair.
+_DIRECTORY_REPAIRS = {
+    "is redirected (a link)": "put the directory itself back in place of the link",
+    "is not a directory": "put the directory itself back in its place",
+    "is not this user's": "give it back to this user",
+    "cannot be searched": "give this user search permission on it",
+}
+
+
+def _unusable_directory(path: Path) -> str | None:
+    """Why `bot handoff` cannot record its request through this directory, or None (#2935).
+
+    None also when it cannot tell: a directory that is not there, or one whose
+    own entry cannot be read, leaves the refusal that met it as it was.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return "is redirected (a link)"
+    if not stat.S_ISDIR(info.st_mode):
+        return "is not a directory"
+    if info.st_uid != os.getuid():
+        return "is not this user's"
+    if not os.access(path, os.X_OK):
+        return "cannot be searched"
+    return None
+
+
+def _refuse_unusable_directory(bot: str, bot_dir: Path, names: tuple[str, ...],
+                               exc: BotLifecycleError) -> None:
+    """Raise HandoffRequestRefused for the first of names (below bot_dir) that is unusable.
+
+    Called once a step before the request has refused: it names what refused
+    it, and returns when none of them is unusable (#2935).
+    """
+    for name in names:
+        cause = _unusable_directory(bot_dir / name if name != "bot" else bot_dir)
+        if cause is not None:
+            raise HandoffRequestRefused(bot, name, cause, _DIRECTORY_REPAIRS[cause]) from exc
+
+
 @dataclass(frozen=True)
 class BotLifecycleResult:
     fleet: str
@@ -993,7 +1054,13 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
                                         entry["target"], "skipped", "no_session")
             if session != "ready":
                 raise BotLifecycleError("private bot session is unverified", unavailable=True)
-            prior_request = _read_handoff_request(spec.bot_dir)
+            try:
+                prior_request = _read_handoff_request(spec.bot_dir)
+            except BotLifecycleError as exc:
+                # #2935: a data/ that is redirected, not this user's or cannot be searched
+                # is named, with its repair; nothing has been recorded or sent.
+                _refuse_unusable_directory(bot, spec.bot_dir, ("data",), exc)
+                raise
             if (prior_request is not None and (prior_request.get("operation_id") is not None
                                               or handoff_state(spec.bot_dir).state != "saved")):
                 raise BotLifecycleError("existing handoff request is unresolved; inspect with --check; "
@@ -1004,6 +1071,9 @@ def handoff_bot(*, root: Path, fleet: str | None, bot: str,
             try:
                 request = _new_handoff_request(spec.bot_dir)
             except BotLifecycleError as exc:
+                # #2935: so is a bot directory or .claude that is not this user's, whose
+                # file clock the request is stamped by (item 3 of #2935, before the request).
+                _refuse_unusable_directory(bot, spec.bot_dir, ("bot", ".claude"), exc)
                 raise BotLifecycleError(str(exc), unavailable=True) from exc
             try:
                 outcome = adapter.call("svc_activation_handoff", spec.bot_dir, spec.label,
