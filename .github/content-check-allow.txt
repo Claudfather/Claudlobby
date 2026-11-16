@@ -6,3 +6,6 @@
 # request, so an entry takes effect only once it is merged: land it in a pull
 # request of its own first. The private list has no allowlist.
 library/skills/network/SKILL.md email LinkedIn's own sender addresses, which the skill sorts mail by
+claudlobby/plane/owner_ssh.py ip-address Canonical shared tailnet (CGNAT) IPv4 network constant used for admission, not an individual host identifier
+tests/test_owner_guide_preinstall.py ip-address Synthetic tailnet SSH connection tuple fixture, not a real host identifier
+tests/test_owner_ssh_api.py ip-address Synthetic allowed and refused tailnet-address fixtures with matching expected values, not real host identifiers
