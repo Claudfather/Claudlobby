@@ -59,9 +59,14 @@ Frames are canonical sorted ASCII JSON, one per line, with `version`, `type`,
 The server sends one chunk and waits for its `ack`. `end` is sent only after the
 policy handler has returned or been cancelled and drained, the owned components
 and the application lifespan have shut down successfully and the control reader
-has joined. A failed or timed-out shutdown is an `error`, never an `end`. A
+has joined. A failed or timed-out shutdown is an `error`, never an `end`. Every
+owned component shutdown is attempted and the control reader is always stopped and
+joined; a cleanup failure never replaces an earlier carrier or operation failure,
+and surfaces only when there is none. A
 handler that returns is not by itself a response: a normal `end` needs the final
-body (`more_body` false) acknowledged, or an explicit caller `cancel`. A response
+body (`more_body` false) acknowledged, or an explicit caller `cancel`. A caller `cancel` stays `cancelled: true` even
+after the final body was acknowledged (completion and cancellation are independent;
+this never makes a dispatched mutation safe to replay). A response
 a canonical finite read abandoned, or a started response with no final body that
 nobody cancelled, refuses with `response_incomplete` and sends no `end`. A normal
 `end`, cancelled or not, exits 0. `end` alone releases nothing: the runtime lease

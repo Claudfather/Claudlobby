@@ -233,18 +233,32 @@ class APIChannel:
 
 
 async def shutdown_app(app):
+    """Attempt every owned shutdown; raise the first failure only after all ran."""
     from ..plane.view import begin_shutdown
-    begin_shutdown(app)
+    failures = []
+
+    async def attempt(step):
+        try:
+            await step()
+        except Exception as exc:
+            failures.append(exc)
+
+    try:
+        begin_shutdown(app)
+    except Exception as exc:
+        failures.append(exc)
     method = getattr(app, 'shutdown', None)
     if method is not None:
-        await method()
+        await attempt(method)
     for name in ('pairing_bootstrap', 'connected_setup', 'connected_actions', 'connected_reads', 'workspace_bootstrap'):
         component = getattr(app, name, None)
         if component is not None:
-            await component.shutdown()
+            await attempt(component.shutdown)
     tasks = list(getattr(app, '_inflight', ()))
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    if failures:
+        raise failures[0]
 
 
 async def run_operation(channel, app, operation, payload, token, last_event_id, *, origin, emit_end=True):
@@ -351,7 +365,7 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
             raise carrier('output_unavailable') from None
 
     reader = request = None
-    failed = None
+    failed = cleanup_failure = None
     try:
         # A cancel that arrived during admission never reaches a policy handler.
         # This single look completes before the control reader owns the channel.
@@ -393,15 +407,22 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
                 # stops waiting for a response nobody will read.
                 request.cancel()
             await asyncio.gather(request, return_exceptions=True)
-        await shutdown_app(app)
-        stop.set()
-        if reader is not None:
-            await reader  # its bounded polling read joins before end/process exit
+        try:
+            await shutdown_app(app)
+        except Exception as exc:
+            cleanup_failure = exc  # never replaces an earlier outcome; the join below still runs
+        finally:
+            stop.set()
+            if reader is not None:
+                await reader  # its bounded polling read joins before end/process exit
     if carrier_error:
         raise carrier_error[0]
     if failed is not None and not isinstance(failed, asyncio.CancelledError):
         raise failed
-    if request is None or not complete.is_set() and caller_cancelled.is_set():
+    if cleanup_failure is not None:
+        raise cleanup_failure
+    if request is None or caller_cancelled.is_set():
+        # Completion and caller cancellation are independent; this never implies safe replay.
         was_cancelled = True  # the published normal cancellation, even if the handler unwound normally
     elif complete.is_set():
         was_cancelled = False

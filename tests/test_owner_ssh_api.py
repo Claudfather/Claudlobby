@@ -497,6 +497,66 @@ def test_caller_cancel_that_unwinds_normally_stays_cancelled(client):
     assert outcome == [None] and (end['type'], end['cancelled']) == ('end', True)
 
 
+def test_caller_cancel_after_final_body_stays_cancelled(client):
+    """Completion and cancellation are independent; never a successful end, never a replay licence."""
+    finished = threading.Event()
+    async def body(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'x', 'more_body': False})
+        finished.set()
+        await _until_disconnect(receive)  # still active after the final body; unwinds normally on cancel
+    thread, outcome = run_in_thread(client, Recorder(body))
+    assert client.frame()['type'] == 'headers'
+    client.send('ack', chunk_id=client.frame()['chunk_id'])
+    assert finished.wait(5)
+    client.send('cancel')
+    end = client.frame(10)
+    thread.join(10)
+    assert outcome == [None] and (end['type'], end['cancelled']) == ('end', True)
+
+
+def test_component_shutdown_failure_keeps_original_outcome_and_drains_the_rest(client):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    drained = []
+    class Component:
+        def __init__(self, name, fail=False):
+            self.name, self.fail = name, fail
+        async def shutdown(self):
+            drained.append(self.name)
+            if self.fail:
+                raise RuntimeError('component cleanup failed')
+    async def body(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await _until_disconnect(receive)
+    app = Recorder(body)
+    app.pairing_bootstrap = Component('pairing', fail=True)
+    app.connected_setup = Component('setup')
+    app.workspace_bootstrap = Component('workspace')
+    thread, outcome = run_in_thread(client, app)
+    assert client.frame()['type'] == 'headers'
+    client.hang_up()
+    thread.join(15)
+    assert not thread.is_alive(), 'the control reader was stopped and joined'
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'disconnected', 'the original outcome survives'
+    assert drained == ['pairing', 'setup', 'workspace'] and 'shutdown' in app.events
+
+
+def test_component_shutdown_failure_alone_is_surfaced(client):
+    async def body(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'{}', 'more_body': False})
+    app = Recorder(body)
+    class Bad:
+        async def shutdown(self):
+            raise RuntimeError('component cleanup failed')
+    app.connected_reads = Bad()
+    thread, outcome = run_in_thread(client, app)
+    assert client.frame()['type'] == 'headers'
+    client.send('ack', chunk_id=client.frame()['chunk_id'])
+    thread.join(10)
+    assert isinstance(outcome[0], RuntimeError) and client.quiet(), 'cleanup failure surfaces; no end frame'
+
+
 def lifespan_app(events, *, shutdown=None, finish=True, hold=False):
     class App:
         async def __call__(self, scope, receive, send):
@@ -563,6 +623,19 @@ def test_lifespan_shutdown_failure_is_surfaced_and_emits_no_end(client, mode):
     thread.join(15)
     assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'shutdown_failed'
     assert client.quiet(), 'a failed shutdown never reports a normal end'
+
+
+def test_pending_lifespan_reaches_the_actual_shutdown_timeout(client):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    events = []
+    async def pending():
+        await asyncio.Event().wait()  # genuinely pending: never returns, never completes
+    thread, outcome = run_serve(client, lifespan_app(events, shutdown=pending, finish=False))
+    assert client.frame()['type'] == 'headers'
+    thread.join(30)
+    assert not thread.is_alive() and 'lifespan-shutdown' in events
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'shutdown_timeout'
+    assert client.quiet(), 'a timed-out shutdown never reports an end'
 
 
 def test_original_operation_failure_is_kept_when_shutdown_also_fails(client):
