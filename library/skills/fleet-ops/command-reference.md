@@ -21,9 +21,19 @@ claudlobby --json fleet inbox
 claudlobby --json task list
 claudlobby --json task show TASK_ID
 claudlobby --json task reviews OWNER/REPO --pr N
+claudlobby --json pr holders PATH... --repo OWNER/REPO
 claudlobby --json assignment show ASSIGNMENT_ID
 claudlobby --json workstream list
 ```
+
+On `pr holders`:
+It lists each open PR that changes a PATH, matched on each changed file's path
+and, for a rename, its previous path, with the PR's number, draft state, base
+branch and last update. PRs that change a file with the same file name at
+another path are listed separately and are not counted as holders. It exits 6
+and names each PR whose file list cannot be read in full. When the open-PR
+listing itself cannot be read in full, it exits 6 and names no PR, only the
+repository and the reason. Either way, no path's holders are known.
 
 On the brief's `work`:
 Each item names its task's workstream (`workstream_id`, null for a task in no
