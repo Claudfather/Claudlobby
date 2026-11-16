@@ -10,13 +10,19 @@ so on stderr through #2936's guarded note and answers on stdout.
 A stderr on /dev/full (ENOSPC) fails the same way. That case waits on #2935: macOS has
 no /dev/full, so it would skip there, and a new macOS skip needs the skip ceiling in
 tests/ci_shards.py raised.
+
+Items 15 and 17: the cases after them leave main by its other two ways, a SystemExit (a
+usage refusal) and an exception, while stderr cannot be written.
 """
 
+import contextlib
 import io
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
 
 from claudlobby.__main__ import main
 from tests.conftest import constructed_env
@@ -36,14 +42,32 @@ def _bot(tmp_path):
     return bot
 
 
-def _door(tmp_path, stderr, *, fd2=None):
-    bot = _bot(tmp_path)
-    argv = [sys.executable, "-I", "-c", ENTRY, str(REPO), "_handoff-files", "watch", str(bot)]
+def _cli(args, stderr, *, fd2=None):
+    argv = [sys.executable, "-I", "-c", ENTRY, str(REPO), *args]
     if fd2 is not None:  # fd 2 set up by the shell before the interpreter starts
         argv = ["/bin/sh", "-c", f'exec {fd2}; exec "$@"', "sh", *argv]
-    run = subprocess.run(argv, stdout=subprocess.PIPE, stderr=stderr, env=constructed_env(),
-                         timeout=120)
-    return run, [str(bot / ".claude/session.md")]
+    return subprocess.run(argv, stdout=subprocess.PIPE, stderr=stderr, env=constructed_env(),
+                          timeout=120)
+
+
+def _door(tmp_path, stderr, *, fd2=None):
+    bot = _bot(tmp_path)
+    return _cli(["_handoff-files", "watch", str(bot)], stderr, fd2=fd2), [str(bot / ".claude/session.md")]
+
+
+@contextlib.contextmanager
+def _unwritable(kind):
+    """stderr and fd2 for _cli: a pipe whose reader has exited, a stream open only for
+    reading (the launcher's read-only lock, below), or fd 2 closed before the start."""
+    if kind == "pipe":
+        read, write = os.pipe()
+        os.close(read)
+        try:
+            yield write, None
+        finally:
+            os.close(write)
+    else:
+        yield subprocess.DEVNULL, {"read-only": "2</dev/null", "closed": "2>&-"}[kind]
 
 
 def test_a_working_stderr_gets_the_line_and_the_answer_exits_0(tmp_path):
@@ -90,3 +114,33 @@ def test_a_stream_put_in_stderrs_place_is_left_open(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stderr", broken)
     assert main(["_handoff-files", "watch", str(_bot(tmp_path))]) == 0
     assert not broken.closed
+
+
+@pytest.mark.parametrize("kind", ["pipe", "read-only", "closed"])
+def test_a_usage_refusal_exits_2_when_stderr_cannot_be_written(kind):
+    """Item 17: argparse's usage write raised on such a stderr, and the refusal exited 1 (the
+    exception's status), where a stderr on /dev/null gives 2. The CLI's parser drops the
+    write now, so it exits 2. Item 15, the SystemExit leg: for a pipe or a read-only stream
+    the dropped lines stay in the buffer, and main closes the stream on this way out too;
+    left open, its last flush fails and the status is 120."""
+    with _unwritable(kind) as (stderr, fd2):
+        run = _cli(["_no-such-door"], stderr, fd2=fd2)
+    assert run.returncode == 2, run  # 1 before
+
+
+def test_a_usage_refusal_on_a_working_stderr_is_unchanged():
+    run = _cli(["_no-such-door"], subprocess.PIPE)
+    lines = run.stderr.decode().splitlines()
+    assert (run.returncode, run.stdout, lines[0].split()[:2]) == (2, b"", ["usage:", "claudlobby"]), run
+    assert lines[-1].startswith("claudlobby: error: argument cmd: invalid choice: '_no-such-door'"), run
+
+
+def test_an_exception_that_leaves_main_with_stderr_unwritable_exits_1_not_120():
+    """Item 15, the exception leg, with no test-only hook: a command's own stderr line that is
+    not guarded raises when stderr cannot take it. Here the handoff door's usage line, for a
+    directory that is not absolute (a refusal that exits 2 on a stderr that works). The
+    exception ends the process with status 1, its traceback lost. main closes the stream on
+    this way out too; left open, its last flush fails and the status is 120."""
+    with _unwritable("pipe") as (stderr, fd2):
+        run = _cli(["_handoff-files", "watch", "bot"], stderr, fd2=fd2)
+    assert (run.returncode, run.stdout) == (1, b""), run
