@@ -119,9 +119,11 @@ however soon the write finishes; no timing threshold decides it. Order is define
 complete frames observed and writes committed, not by packet arrival. A cancel or
 fault stays readable during output backpressure and halts the reply write in its own
 thread, so the drain starts while the peer is still not reading; the writer is joined
-before return. A reply left half written leaves the channel torn: it ends as
-`response_incomplete`, nothing further is written, and there is never a successful
-`end`. A `call` that arrives before
+before return. A reply left half written leaves the channel torn: a truncated reply never produces a
+successful `end`, and nothing further is written. Cancellation during delivery is
+incomplete, and earlier carrier errors remain preserved: a disconnect or
+`invalid_request` already seen keeps its precedence, and a write failure or timeout
+can be `output_unavailable`. A `call` that arrives before
 the previous `reply` is complete, repeats or skips an ID,
 names another operation or identity, or follows the closing reply is refused as
 `invalid_request` when it is read; it is never held for later and never reaches
