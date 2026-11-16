@@ -1491,8 +1491,11 @@ def blocked_reply(client, monkeypatch, *answers):
     end = time.monotonic() + 10
     while not written:
         assert time.monotonic() < end, "no reply byte was written once room was freed"
-        drain_output(client, 1024)
-        freed += 1024
+        # Only the known filler may be read: never block on an empty pipe.
+        if freed < junk:
+            step = min(1024, junk - freed)
+            drain_output(client, step)
+            freed += step
         probe_end = time.monotonic() + 0.3
         while not written and time.monotonic() < probe_end:
             time.sleep(0.01)  # a poll of an observed condition, never an ordering criterion
