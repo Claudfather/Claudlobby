@@ -1244,6 +1244,8 @@ def test_a_session_directory_bot_handoff_refuses_gets_its_own_refusal(
     hint = refused["error"].get("hint") or ""
     assert "repair it first" in hint and "bot handoff worker --check" in hint, refused
     assert "until it reads saved" not in hint, refused
+    # #2935 item 8: the session's own directory is not refused for want of a search.
+    assert "or one above the session's own directory cannot be searched or read" in hint, refused
     assert (checked["handoff"], checked["reason"]) == ("unknown", "file_unverified")
 
 
@@ -1391,6 +1393,42 @@ def test_planned_restart_waits_for_native_idle_and_resumes_exact_session(cold, m
     assert worker.native.actions == ["start"]
     assert "svc_activation_handoff" not in worker.native.calls
     assert not (bot_dir / "data/.handoff-request").exists()
+
+
+@pytest.mark.parametrize("stream", ["working", "broken", "closed", "none"])
+def test_a_stderr_the_idle_wait_cannot_write_to_stops_no_restart(cold, monkeypatch, capsys, stream):  # noqa: F811
+    """Item 9 of #2935: bot restart's planned checkpoint waits for the native session to go
+    idle, and says so on stderr every 30 s. That line had no guard, and it is printed in the
+    wait's handler for a busy session, where the handler beside it does not take what it
+    raises: a broken stderr ended the wait with a BrokenPipeError, which bot restart answered
+    as native state that cannot be established, and a closed one with a bare ValueError.
+    Broken, closed or never open (None, where print writes to stdout instead), the line is
+    lost, and the restart waits, then resumes the same session, as it does with a working
+    stderr, which gets the line. A host update's checkpoint waits in the same function."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    original = native_session.read(bot_dir)
+    worker.native.native_idle = False
+    waits = []
+    def become_idle(seconds):
+        waits.append(seconds)
+        worker.native.native_idle = True
+    monkeypatch.setattr(bot_operations.time, "sleep", become_idle)
+    worker.native.calls.clear()
+    stderr = {"working": io.StringIO(), "broken": _BrokenStream(), "closed": _closed_stream(),
+              "none": None}[stream]
+    with monkeypatch.context() as patched:
+        patched.setattr(sys, "stderr", stderr)
+        restarted = worker.call("bot", "restart", "worker")["data"]
+    assert waits and worker.native.native_idle, "the restart never waited for native idle"
+    if stream == "working":
+        assert "waiting for native idle from com.example.worker" in stderr.getvalue()
+    assert (restarted["state"], restarted["handoff"]) == ("running", "native_session"), restarted
+    current = native_session.read(bot_dir)
+    assert current["session_id"] == original["session_id"]
+    assert current["process"] != original["process"] and current["pending"] is False
+    assert worker.native.actions == ["start"]
+    assert "svc_activation_handoff" not in worker.native.calls
 
 
 @pytest.mark.parametrize("receipt_state", ["pending", "unknown", "malformed", pytest.param(

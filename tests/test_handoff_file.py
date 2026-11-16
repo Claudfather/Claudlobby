@@ -123,6 +123,29 @@ def test_a_session_directory_that_cannot_be_searched_is_refused_by_every_reader(
         (bot / unsearchable).chmod(0o700)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory without its search bit")
+def test_the_sessions_own_directory_that_cannot_be_searched_is_not_refused(tmp_path, capsys):
+    """#2935 item 8: the session's own directory is not refused when it cannot be searched,
+    as the two above it are (the test above). Its handoff reads as absent, as if the session
+    had saved none of its own, so every reader reads .claude/session.md: the self restart's
+    check, --check and the private door. The hint, HandoffDirectoryRefused and the
+    changelog say so."""
+    bot = _bot(tmp_path)
+    sid = _launch(bot)
+    legacy = _save(handoff_file.legacy(bot))
+    own = _save(handoff_file.session_owned(bot, sid))
+    assert bot_operations._write_handoff_request(bot, {"requested_at": "2026-01-01T00:00:00Z"})
+    own.parent.chmod(0o600)
+    try:
+        assert handoff_file.resolve(bot) == legacy
+        assert handoff_file.watch(bot) == [own, legacy]  # as for a session with no file of its own
+        assert bot_operations._fresh_self_handoff(bot) >= 0
+        assert bot_operations.handoff_state(bot)[:2] == ("saved", "written_after_request")
+        assert _door(capsys, "watch", str(bot)) == (0, [str(own), str(legacy)], "")
+    finally:
+        own.parent.chmod(0o700)
+
+
 def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):
     bot = _bot(tmp_path)
     sid = _launch(bot)
