@@ -18,11 +18,18 @@ Saved computer references may carry `transport`. An absent field is the
 historical HTTPS reference, `mac_openssh` is an SSH computer, and any other
 value is refused. The Plane UI never fetches an SSH computer over HTTPS.
 
-Provider sign-in operations are refused over this carrier, because one sign-in
-attempt cannot outlive a one-operation process. A setup approved with browser
-sign-in therefore cannot reach Launch this way yet. This is checked with
-synthetic fixtures only: real Remote Login, source-address and principal
-behavior on a Mac have not been observed. Linux and HTTPS behavior is unchanged.
+Provider sign-in has its own profile, `owner-signin-v1`: one process keeps one
+policy app and one attempt for a bounded conversation. Begin is the first call;
+status, code and cancel follow as numbered `call` frames, each checked afresh by
+the same policy route and answered by one `reply` holding the whole response. A
+reply is a receipt for one call only. `end` still means the complete drain,
+including the joined sign-in worker, and is sent once. A conversation lasts at
+most 330 seconds, with 20 seconds observed per call and 45 seconds idle; an
+expired bound starts the drain and is not proof that anything stopped. Ordinary
+one-operation processes still refuse begin, code and cancel, and still read
+status. This is checked with synthetic fixtures only: a real sign-in over SSH,
+real Remote Login, source-address and principal behavior on a Mac have not been
+observed. Linux and HTTPS behavior is unchanged.
 
 The `api` prelude mode admits the exact current installed source after an
 ordinary source advance without a finish tuple, keeping the original preparation
@@ -30,4 +37,5 @@ binding and source verification. `end` now waits for successful lifespan
 shutdown, and a returned handler without a complete final body (or an explicit
 cancel) is refused as `response_incomplete` instead of ending normally. An explicit caller cancel stays
 cancelled even after the final body, and a component shutdown failure neither
-replaces an earlier failure nor skips the remaining drains or the control-reader join.
+replaces an earlier failure (an incomplete response included) nor skips the
+remaining drains or the control-reader join.

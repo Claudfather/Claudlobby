@@ -649,6 +649,474 @@ def test_original_operation_failure_is_kept_when_shutdown_also_fails(client):
     assert isinstance(outcome[0].__context__, StdioRefused) and outcome[0].__context__.code == 'shutdown_failed'
 
 
+def test_abandoned_response_keeps_its_outcome_when_a_component_also_fails_and_the_reader_joins(client, monkeypatch):
+    """Incomplete delivery outranks the cleanup failure; the open-input reader is joined in the drain."""
+    from claudlobby.plane import finite_reads
+    from claudlobby.commands.owner_api_stdio import run_operation
+    from claudlobby.commands.owner_stdio import StdioRefused
+    monkeypatch.setattr(finite_reads, 'READ_SECONDS', .3)
+    async def inner(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'{"part', 'more_body': True})
+        await _until_disconnect(receive)
+    app = CanonicalReads(inner)
+    drained = []
+    class Bad:
+        async def shutdown(self):
+            drained.append('bad')
+            raise RuntimeError('component cleanup failed')
+    class Good:
+        async def shutdown(self):
+            drained.append('good')
+    app.pairing_bootstrap, app.workspace_bootstrap = Bad(), Good()
+    reads, original, seen = [0], client.channel.read, []
+    def read(allowed, timeout=.25):
+        reads[0] += 1
+        try:
+            return original(allowed, timeout)
+        finally:
+            reads[0] -= 1
+    client.channel.read = read
+    async def main():
+        try:
+            await run_operation(client.channel, app, 'session-status', {}, TOKEN, None, origin=ORIGIN)
+        except BaseException as exc:
+            # Observed inside the loop, before asyncio.run cancels or joins anything itself.
+            seen.append((exc, reads[0], len(asyncio.all_tasks()) - 1))
+    thread = threading.Thread(target=lambda: asyncio.run(main()))
+    thread.start()
+    assert client.frame()['type'] == 'headers'
+    client.send('ack', chunk_id=client.frame()['chunk_id'])
+    thread.join(10)
+    assert not thread.is_alive() and client.client is not None, 'the input stayed open throughout'
+    error, active_reads, other_tasks = seen[0]
+    assert isinstance(error, StdioRefused) and error.code == 'response_incomplete', 'the original outcome survives'
+    assert isinstance(error.__context__, RuntimeError), 'the cleanup failure is kept beside it'
+    assert (active_reads, other_tasks) == (0, 0), 'the control reader had stopped and joined'
+    assert drained == ['bad', 'good'] and app.events == ['request', 'returned', 'shutdown']
+    assert client.quiet(), 'no end frame'
+
+
+# --- owner-signin-v1: one retained attempt, one bounded conversation --------
+
+IDENTITY = {'generation': '11111111-1111-4111-8111-111111111111',
+            'attempt_id': '22222222-2222-4222-8222-222222222222'}
+
+
+def signin_frame(**changes):
+    return start_frame(**{'profile': 'owner-signin-v1', 'operation': 'setup-signin-begin',
+                          'input': dict(IDENTITY), **changes})
+
+
+def call(client, call_id, operation='setup-signin-status', token=TOKEN, **changes):
+    client.send('call', call_id=call_id, operation=operation, input={**IDENTITY, **changes}, token=token)
+
+
+def attempt(state, **more):
+    return 200, {**IDENTITY, 'state': state, 'reason': None, **more}
+
+
+class SigninApp:
+    """A stand-in policy app for framing cases: scripted answers, recorded lifecycle."""
+    def __init__(self, *answers, gate=None):
+        self.answers, self.events, self.gate = list(answers), [], gate
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'lifespan':
+            assert (await receive())['type'] == 'lifespan.startup'
+            await send({'type': 'lifespan.startup.complete'})
+            assert (await receive())['type'] == 'lifespan.shutdown'
+            self.events.append('lifespan-shutdown')
+            await send({'type': 'lifespan.shutdown.complete'})
+            return
+        assert scope['path'].startswith('/api/owner/connected/setup/signin-') and scope['client'] == ('ssh-session', 0)
+        operation = scope['path'].rsplit('/', 1)[1]
+        assert {k: v for k, v in json.loads((await receive())['body']).items() if k != 'code'} == IDENTITY
+        self.events.append(operation)
+        answer = self.answers.pop(0)
+        if answer == 'hold':
+            try:
+                await _until_disconnect(receive)
+            finally:
+                self.events.append('unwound')
+            return
+        status, body = answer
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        await send({'type': 'http.response.start', 'status': status, 'headers': [
+            (b'content-type', b'application/json'), (b'cache-control', b'private, no-store'), (b'set-cookie', b'never')]})
+        await send({'type': 'http.response.body', 'body': raw})
+
+    async def shutdown(self):
+        while self.gate is not None and not self.gate.is_set():
+            await asyncio.sleep(.02)
+        self.events.append('shutdown')
+
+
+def run_conversation(client, app, request=None, origin=ORIGIN):
+    from claudlobby.commands.owner_api_stdio import serve
+    outcome = []
+    def work():
+        try:
+            outcome.append(asyncio.run(serve(client.channel, app, request or signin_frame(), origin=origin)))
+        except BaseException as exc:
+            outcome.append(exc)
+    thread = threading.Thread(target=work)
+    thread.start()
+    return thread, outcome
+
+
+def body_of(reply):
+    assert reply['type'] == 'reply', reply
+    return json.loads(base64.b64decode(reply['data'], validate=True))
+
+
+@pytest.mark.parametrize('change,admitted', [
+    ({}, True), ({'operation': 'setup-signin-status'}, False), ({'operation': 'session-status', 'input': {}}, False),
+    ({'operation': 'setup-signin-code', 'input': {**IDENTITY, 'code': 'c#s'}}, False),
+    ({'last_event_id': '5'}, False), ({'token': None}, False), ({'input': {'generation': IDENTITY['generation']}}, False),
+    ({'profile': 'owner-signin-v2'}, False), ({'call_id': 1}, False)])
+def test_signin_profile_starts_only_with_begin_and_the_same_closed_start(client, change, admitted):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    outcome = []
+    def work():
+        try:
+            outcome.append(asyncio.run(client.channel.start()))
+        except StdioRefused as exc:
+            outcome.append(exc.code)
+    thread = threading.Thread(target=work)
+    thread.start()
+    assert client.frame()['profile'] == 'owner-api-v1', 'the hello bytes are unchanged'
+    client.send('start', **signin_frame(**change))
+    thread.join(5)
+    if admitted:
+        assert outcome[0]['operation'] == 'setup-signin-begin' and client.channel.admitted is not None
+    else:
+        assert outcome == ['invalid_request'] and client.channel.admitted is None
+
+
+def test_signin_conversation_replies_per_call_and_ends_only_after_the_whole_drain(client):
+    gate = threading.Event()
+    app = SigninApp(attempt('starting'), attempt('waiting', url='https://claude.com/x'), (403, {'state': 'denied'}),
+                    attempt('waiting', url='https://claude.com/x'), attempt('connected'), gate=gate)
+    thread, outcome = run_conversation(client, app)
+    first = client.frame()
+    raw = json.dumps(attempt('starting')[1]).encode()
+    assert first == {'version': 1, 'type': 'reply', 'seq': 1, 'session_id': client.channel.session_id,
+        'call_id': 1, 'status': 200, 'data': base64.b64encode(raw).decode(),
+        'headers': {'content-type': 'application/json', 'cache-control': 'private, no-store'}}
+    assert client.quiet(), 'a reply is a call receipt: no end, chunk or ack follows it'
+    call(client, 2)
+    assert body_of(client.frame())['url'] == 'https://claude.com/x'
+    call(client, 3, 'setup-signin-code', code='wrong#state')
+    denied = client.frame()
+    assert (denied['call_id'], denied['status'], body_of(denied)) == (3, 403, {'state': 'denied'})
+    call(client, 4, 'setup-signin-code', code='right#state')
+    assert client.frame()['status'] == 200, 'a refused code leaves the same conversation open'
+    call(client, 5)
+    last = client.frame()
+    assert (last['call_id'], body_of(last)['state']) == (5, 'connected')
+    assert client.quiet() and thread.is_alive(), 'the terminal reply is not the end: the drain is still running'
+    assert 'shutdown' not in app.events
+    gate.set()
+    end = client.frame()
+    thread.join(5)
+    sent = sum(len(json.dumps(x[1]).encode())
+               for x in (attempt('starting'), attempt('waiting', url='https://claude.com/x'), (403, {'state': 'denied'}),
+                         attempt('waiting', url='https://claude.com/x'), attempt('connected')))
+    assert end == {'version': 1, 'type': 'end', 'seq': 6, 'session_id': client.channel.session_id,
+                   'status': 200, 'bytes_sent': sent, 'cancelled': False}
+    assert outcome == [None] and app.events == ['signin-begin', 'signin-status', 'signin-code', 'signin-code',
+        'signin-status', 'shutdown', 'lifespan-shutdown']
+
+
+@pytest.mark.parametrize('case', ['pipelined', 'duplicate', 'skipped', 'attempt', 'generation', 'begin-again',
+    'foreign', 'ack', 'extra-field', 'boolean-id', 'bad-token', 'beyond-limit', 'after-closing'])
+def test_signin_call_frames_are_refused_before_any_canonical_entry(client, monkeypatch, case):
+    from claudlobby.commands import owner_api_stdio
+    from claudlobby.commands.owner_stdio import StdioRefused
+    gate = threading.Event()
+    other = '33333333-3333-4333-8333-333333333333'
+    entered = ['signin-begin']
+    if case == 'pipelined':
+        app = SigninApp('hold')
+    elif case == 'after-closing':
+        app = SigninApp(attempt('cancelled'), gate=gate)
+    else:
+        app = SigninApp(attempt('starting'), attempt('waiting'), attempt('waiting'))
+    if case == 'beyond-limit':
+        monkeypatch.setattr(owner_api_stdio, 'CALL_LIMIT', 2)
+    thread, outcome = run_conversation(client, app)
+    if case == 'pipelined':
+        deadline = time.monotonic() + 5
+        while not app.events and time.monotonic() < deadline:
+            time.sleep(.01)
+        call(client, 2)  # valid in itself, but begin has no reply yet: never queued for later
+    else:
+        assert client.frame()['call_id'] == 1
+        if case in {'duplicate', 'beyond-limit'}:
+            call(client, 2)
+            assert client.frame()['call_id'] == 2
+            entered.append('signin-status')
+            call(client, 2 if case == 'duplicate' else 3)
+        elif case == 'skipped':
+            call(client, 3)
+        elif case == 'attempt':
+            call(client, 2, attempt_id=other)
+        elif case == 'generation':
+            call(client, 2, generation=other)
+        elif case == 'begin-again':
+            call(client, 2, 'setup-signin-begin')
+        elif case == 'foreign':
+            client.send('call', call_id=2, operation='session-status', input={}, token=TOKEN)
+        elif case == 'ack':
+            client.send('ack', chunk_id=1)
+        elif case == 'extra-field':
+            client.send('call', call_id=2, operation='setup-signin-status', input=dict(IDENTITY), token=TOKEN,
+                        last_event_id=None)
+        elif case == 'boolean-id':
+            call(client, True)
+        elif case == 'bad-token':
+            call(client, 2, token='short')
+        else:
+            call(client, 2)  # the closing reply was sent; the drain is held open
+    if case == 'after-closing':
+        time.sleep(.6)  # more than one reader poll
+    gate.set()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'invalid_request'
+    assert [e for e in app.events if e.startswith('signin-')] == entered, 'the refused frame never reached policy'
+    assert app.events[-2:] == ['shutdown', 'lifespan-shutdown'], 'the drain still completed'
+    assert client.quiet(), 'no reply and no end after a refused frame'
+
+
+@pytest.mark.parametrize('mode', ['cancel-idle', 'cancel-in-call', 'eof-idle', 'eof-in-call', 'signal', 'idle',
+    'call-observation', 'clock', 'oversize', 'denied-begin', 'unavailable-status', 'unnamed-attempt', 'cancel-call'])
+def test_signin_conversation_closes_through_the_same_full_drain(client, monkeypatch, mode):
+    from claudlobby.commands import owner_api_stdio
+    from claudlobby.commands.owner_stdio import StdioRefused
+    held = mode in {'cancel-in-call', 'eof-in-call', 'call-observation'}
+    begin = {'oversize': (200, b'x' * 16385), 'denied-begin': (403, {'state': 'denied'}),
+             'unnamed-attempt': (200, {**IDENTITY, 'attempt_id': '33333333-3333-4333-8333-333333333333',
+                                       'state': 'connected', 'reason': None})}.get(mode, attempt('starting'))
+    answers = [begin] + (['hold'] if held else [])
+    answers += {'unavailable-status': [(503, {'state': 'unavailable'})], 'cancel-call': [attempt('waiting')],
+                'clock': [attempt('waiting')] * 300}.get(mode, [])
+    app = SigninApp(*answers)
+    if mode == 'idle':
+        monkeypatch.setattr(owner_api_stdio, 'IDLE_SECONDS', .4)
+    if mode == 'call-observation':
+        monkeypatch.setattr(owner_api_stdio, 'CALL_SECONDS', .4)
+    if mode == 'clock':
+        client.channel.admitted = time.monotonic() - owner_api_stdio.CONVERSATION_SECONDS + 1.2
+    started = time.monotonic()
+    thread, outcome = run_conversation(client, app)
+    replies = []
+    if mode not in {'oversize', 'unnamed-attempt'}:
+        replies.append(client.frame())
+    if held or mode in {'unavailable-status', 'cancel-call'}:
+        call(client, 2, 'setup-signin-cancel' if mode == 'cancel-call' else 'setup-signin-status')
+        if held:
+            deadline = time.monotonic() + 5
+            while len(app.events) < 2 and time.monotonic() < deadline:
+                time.sleep(.01)
+        else:
+            replies.append(client.frame())
+    if mode.startswith('cancel-i'):
+        client.send('cancel')
+    elif mode.startswith('eof'):
+        client.hang_up()
+    elif mode == 'signal':
+        client.channel.interrupt()
+    elif mode == 'clock':
+        # Status frames keep arriving and being answered; none renews the conversation clock.
+        number = 1
+        while thread.is_alive() and time.monotonic() - started < 10:
+            number += 1
+            call(client, number)
+            import select
+            if not select.select([client.observer], [], [], 1)[0]:
+                break
+            replies.append(client.frame())
+            time.sleep(.05)
+        assert number > 3 and all(body_of(x)['state'] in {'starting', 'waiting'} for x in replies)
+    thread.join(10)
+    assert not thread.is_alive()
+    assert app.events[-2:] == ['shutdown', 'lifespan-shutdown'], 'every close runs the complete drain'
+    if held:
+        assert 'unwound' in app.events, 'the handler in flight was drained first'
+    normal = {'cancel-idle': (200, True), 'cancel-in-call': (200, True), 'denied-begin': (403, False),
+              'unavailable-status': (503, False), 'cancel-call': (200, False)}
+    refused = {'eof-idle': 'disconnected', 'eof-in-call': 'disconnected', 'signal': 'interrupted', 'idle': 'expired',
+               'call-observation': 'expired', 'clock': 'expired', 'oversize': 'output_limit',
+               'unnamed-attempt': 'invalid_response'}
+    if mode in normal:
+        end = client.frame()
+        assert outcome == [None] and (end['type'], end['status'], end['cancelled']) == ('end', *normal[mode])
+        assert end['bytes_sent'] == sum(len(base64.b64decode(x['data'])) for x in replies)
+        if mode == 'denied-begin':
+            assert time.monotonic() - started < 5, 'no idle wait when there is no owned attempt'
+    else:
+        assert isinstance(outcome[0], StdioRefused) and outcome[0].code == refused[mode], outcome
+        assert client.quiet(), 'never a normal end'
+    if mode == 'clock':
+        assert 1 <= time.monotonic() - started < 6
+
+
+# The actual policy app, setup door, engine and provider owner; only the provider CLI is synthetic.
+from tests.test_plane_owner_setup import setup_authority, synthetic_signin  # noqa: E402,F401  (fixtures)
+from tests.test_setup_commands import team_setup  # noqa: E402,F401  (fixture)
+
+HOST = 'https://host.example.test'
+
+
+def canonical_app(access, monkeypatch):
+    from claudlobby.commands import owner_api_stdio
+    from claudlobby.plane.owner_browser import create_owner_browser_app
+    from claudlobby.plane.owner_workspace_http import WorkspaceBootstrapConfig
+    from tests.test_plane_owner_workspace import OWNER, ISSUER, ORIGIN as PLANE
+    from tests.test_plane_two_fleets import _Sampler
+    monkeypatch.setattr(owner_api_stdio, 'OPERATIONAL_ORIGIN', PLANE)
+    async def verify(scope):
+        assert scope['client'] == ('ssh-session', 0)
+        return OWNER
+    app = create_owner_browser_app(access.root, verify_principal=verify, expected_origin=HOST,
+        sampler=_Sampler({}), workspace_bootstrap=WorkspaceBootstrapConfig(ISSUER, PLANE))
+    app.access._clock = access._clock
+    return app
+
+
+def poll_until(client, number, payload, bearer, wanted):
+    """Status calls on the open conversation until the canonical state appears."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        number += 1
+        client.send('call', call_id=number, operation='setup-signin-status', input=payload, token=bearer)
+        reply = client.frame(10)
+        assert reply['call_id'] == number and reply['status'] == 200, reply
+        value = body_of(reply)
+        if value['state'] == wanted:
+            return number, value
+        assert value['state'] in {'starting', 'waiting'}, value
+        time.sleep(.025)
+    pytest.fail('the synthetic attempt never reached ' + wanted)
+
+
+def ordinary_status(access, monkeypatch, payload, bearer):
+    """A later one-operation process: a new app that never owned the attempt."""
+    from claudlobby.commands.owner_api_stdio import serve
+    other = Client()
+    try:
+        request = start_frame(operation='setup-signin-status', input=payload, token=bearer)
+        thread = threading.Thread(target=lambda: asyncio.run(
+            serve(other.channel, canonical_app(access, monkeypatch), request, origin=HOST)))
+        thread.start()
+        head = other.frame(10)
+        chunk = other.frame(10)
+        other.send('ack', chunk_id=chunk['chunk_id'])
+        assert other.frame(10)['type'] == 'end'
+        thread.join(10)
+        return head['status'], json.loads(base64.b64decode(chunk['data']))
+    finally:
+        other.close()
+
+
+def test_one_canonical_app_owns_the_attempt_from_begin_to_connected(client, synthetic_signin, monkeypatch):
+    from uuid import uuid4
+    engine, grant, reader, _program, secret, env = synthetic_signin
+    access, bearer = engine.store.access, reader.token
+    payload = {'generation': grant.generation, 'attempt_id': str(uuid4())}
+    app = canonical_app(access, monkeypatch)
+    owner = app.connected_setup.engine.signin
+    thread, outcome = run_conversation(client, app, start_frame(profile='owner-signin-v1',
+        operation='setup-signin-begin', input=payload, token=bearer), origin=HOST)
+    begin = client.frame(10)
+    assert (begin['call_id'], begin['status']) == (1, 200), begin
+    assert body_of(begin)['state'] in {'starting', 'waiting'} and body_of(begin)['attempt_id'] == payload['attempt_id']
+    worker = owner._thread
+    assert worker.is_alive()
+    number, waiting = poll_until(client, 1, payload, bearer, 'waiting')
+    assert waiting['url'].startswith('https://claude.com/')
+    client.send('call', call_id=number + 1, operation='setup-signin-code',
+                input={**payload, 'code': 'sensitive#wrong'}, token=bearer)
+    refused = client.frame(10)
+    assert (refused['status'], body_of(refused)) == (403, {'state': 'denied'}), 'the canonical generic refusal'
+    client.send('call', call_id=number + 2, operation='setup-signin-code',
+                input={**payload, 'code': 'accepted#' + 'b' * 32}, token=bearer)
+    assert client.frame(10)['status'] == 200
+    assert app.connected_setup.engine.signin is owner and owner._thread is worker, 'the same original attempt'
+    number, connected = poll_until(client, number + 2, payload, bearer, 'connected')
+    end = client.frame(15)
+    assert end['type'] == 'end' and (end['status'], end['cancelled']) == (200, False)
+    assert not worker.is_alive(), 'end follows the joined worker, not just the terminal row'
+    thread.join(10)
+    assert outcome == [None]
+    assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=') == 1
+    assert ordinary_status(access, monkeypatch, payload, bearer) == (200, {**payload, 'state': 'connected', 'reason': None})
+
+
+@pytest.mark.parametrize('loss', ['eof', 'expiry', 'worker-exit'])
+def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replacement(client, synthetic_signin, monkeypatch, loss):
+    from uuid import uuid4
+    from claudlobby.commands.owner_stdio import StdioRefused
+    engine, grant, reader, _program, _secret, env = synthetic_signin
+    access, bearer = engine.store.access, reader.token
+    payload = {'generation': grant.generation, 'attempt_id': str(uuid4())}
+    app = canonical_app(access, monkeypatch)
+    thread, outcome = run_conversation(client, app, start_frame(profile='owner-signin-v1',
+        operation='setup-signin-begin', input=payload, token=bearer), origin=HOST)
+    assert client.frame(10)['status'] == 200
+    worker = app.connected_setup.engine.signin._thread
+    number, _ = poll_until(client, 1, payload, bearer, 'waiting')
+    if loss == 'eof':
+        client.hang_up()
+        thread.join(15)
+        assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'disconnected'
+    elif loss == 'worker-exit':
+        # The worker finishes between calls. Its absence ends nothing: only the next
+        # canonical status, naming the original attempt as terminal, closes the conversation.
+        app.connected_setup.engine.signin._cancel.set()
+        worker.join(10)
+        assert not worker.is_alive() and client.quiet() and thread.is_alive()
+        client.send('call', call_id=number + 1, operation='setup-signin-status', input=payload, token=bearer)
+        final = client.frame(10)
+        assert final['status'] == 200 and body_of(final)['state'] == 'cancelled'
+        end = client.frame(15)
+        thread.join(15)
+        assert outcome == [None] and (end['type'], end['status'], end['cancelled']) == ('end', 200, False)
+    else:
+        # The setup approval lapses between calls: the next call is the canonical generic denial.
+        now = access._clock()
+        app.access._clock = access._clock = lambda: now + 10 ** 7
+        client.send('call', call_id=number + 1, operation='setup-signin-status', input=payload, token=bearer)
+        denied = client.frame(10)
+        assert (denied['status'], body_of(denied)) == (403, {'state': 'denied'}), 'no hidden state is disclosed'
+        end = client.frame(15)
+        thread.join(15)
+        assert outcome == [None] and (end['type'], end['status'], end['cancelled']) == ('end', 403, False)
+        app.access._clock = access._clock = lambda: now
+    assert not thread.is_alive() and not worker.is_alive(), 'the owned worker was joined in the drain'
+    assert env.read_text() == 'export ROUTE=private\n'
+    status, retained = ordinary_status(access, monkeypatch, payload, bearer)
+    assert status == 200 and retained['attempt_id'] == payload['attempt_id']
+    assert retained['state'] in {'cancelled', 'needs_attention'}, retained
+    # A new process: the retained original ends at once without a worker; a new identity is denied.
+    for changed, expected in ((payload, 200), ({**payload, 'attempt_id': str(uuid4())}, 403)):
+        again, fresh = Client(), canonical_app(access, monkeypatch)
+        try:
+            second, result = run_conversation(again, fresh, start_frame(profile='owner-signin-v1',
+                operation='setup-signin-begin', input=changed, token=bearer), origin=HOST)
+            reply = again.frame(10)
+            end = again.frame(15)
+            second.join(10)
+            assert (reply['status'], end['type'], end['status']) == (expected, 'end', expected) and result == [None]
+            if expected == 200:
+                assert body_of(reply) == retained
+            assert fresh.connected_setup.engine.signin._thread is None, 'no replacement attempt was started'
+        finally:
+            again.close()
+
+
 # --- process entry: parser, dispatch and exit status ------------------------
 
 def api_process(tmp_path, **env):

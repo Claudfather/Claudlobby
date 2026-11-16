@@ -2,6 +2,10 @@
 
 There is no HTTP/command proxy on the wire. Policy remains the existing ASGI
 app; principal and invariant authority originate outside request frames.
+
+Profile ``owner-signin-v1`` keeps the same process, app and lifespan for one
+bounded provider sign-in conversation (``converse``); every call in it is still
+one compiled operation through the same canonical route.
 """
 from __future__ import annotations
 
@@ -46,9 +50,20 @@ _FIELDS = {
 # URL and code hand-off are ProviderSignin instance state, and the retained row
 # admits exactly one original attempt. A one-operation exec would start that
 # attempt and cancel it in its own mandatory drain, or deliver a code to a
-# process that never owned the child. These stay refused here until a reviewed
-# owner for that attempt exists; signin-status remains a read-only observation.
+# process that never owned the child. These stay refused on owner-api-v1, where
+# signin-status remains a read-only observation; the one owner of an attempt is
+# an owner-signin-v1 conversation.
 _PROCESS_BOUND = frozenset({'setup-signin-begin', 'setup-signin-code', 'setup-signin-cancel'})
+SIGNIN_PROFILE = 'owner-signin-v1'
+_CALL = {'call_id', 'operation', 'input', 'token'}
+_SIGNIN_CALLS = frozenset({'setup-signin-status', 'setup-signin-code', 'setup-signin-cancel'})
+# Admission and observation bounds for one conversation. None of them proves
+# that a process or thread stopped: every expiry still runs the full drain.
+CALL_LIMIT = 256             # begin is call 1
+REPLY_BYTES = 16384          # one complete decoded body
+CALL_SECONDS = 20            # carrier observation; the canonical handler keeps its own 15 s
+IDLE_SECONDS = 45            # between a reply and the next call
+CONVERSATION_SECONDS = 330   # from the admitted start; no frame renews it
 _SECRET = re.compile(r'[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]')
 _UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}')
 
@@ -141,6 +156,7 @@ class APIChannel:
         self.buffer = bytearray()
         self.partial_since = None
         self.interrupted = False
+        self.admitted = None  # monotonic time of an admitted conversation start
 
     def emit(self, kind, **values):
         self.output_seq += 1
@@ -182,7 +198,8 @@ class APIChannel:
             value = json.loads(raw, object_pairs_hook=_unique,
                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             kind = value.get('type')
-            extra = _START if kind == 'start' else {'chunk_id'} if kind == 'ack' else set()
+            extra = (_START if kind == 'start' else {'chunk_id'} if kind == 'ack'
+                     else _CALL if kind == 'call' else set())
             if (kind not in allowed or set(value) != _BASE | extra or _wire(value) != raw + b'\n'
                     or value['session_id'] != self.session_id or type(value['version']) is not int or value['version'] != 1
                     or type(value['seq']) is not int or value['seq'] != self.input_seq + 1
@@ -212,7 +229,7 @@ class APIChannel:
                 continue
             if value['type'] == 'cancel':
                 return None
-            if (value['profile'] != 'owner-api-v1' or type(value['expected_uid']) is not int
+            if (value['profile'] not in ('owner-api-v1', SIGNIN_PROFILE) or type(value['expected_uid']) is not int
                     or not 0 < value['expected_uid'] < 2**32 - 1
                     or not isinstance(value['source_revision'], str) or re.fullmatch('[a-f0-9]{40}', value['source_revision']) is None
                     or not isinstance(value['binding_sha256'], str) or re.fullmatch('[a-f0-9]{64}', value['binding_sha256']) is None):
@@ -221,6 +238,12 @@ class APIChannel:
                 operation_request(value['operation'], value['input'], value['token'], value['last_event_id'])
             except ValueError:
                 raise StdioRefused('invalid_request') from None
+            if value['profile'] == SIGNIN_PROFILE:
+                # A conversation starts only with begin; nothing else selects it.
+                if value['operation'] != 'setup-signin-begin' or value['last_event_id'] is not None:
+                    raise StdioRefused('invalid_request')
+                self.admitted = time.monotonic()
+                return value
             if value['operation'] in _PROCESS_BOUND:
                 # Refused before any engine entry: the one retained attempt is untouched.
                 raise StdioRefused('operation_requires_persistent_owner')
@@ -261,6 +284,32 @@ async def shutdown_app(app):
         raise failures[0]
 
 
+def _scope(operation, payload, token, last_event_id, origin):
+    """The fixed internal ASGI scope and body of one compiled operation."""
+    method, path, query, body, headers = operation_request(operation, payload, token, last_event_id)
+    authority = origin.removeprefix('https://')
+    headers = [(b'host', authority.encode('ascii')), *headers]
+    if operation != 'status':
+        headers.append((b'origin', OPERATIONAL_ORIGIN.encode('ascii')))
+    return {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': method,
+        'scheme': 'https', 'path': path, 'raw_path': path.encode('ascii'), 'query_string': query,
+        'headers': headers, 'client': ('ssh-session', 0), 'server': ('ssh-carrier', 0)}, body
+
+
+def _response_start(message, started):
+    """Status and the closed response header allowlist of one response start."""
+    if started or type(message.get('status')) is not int or not 100 <= message['status'] <= 599:
+        raise StdioRefused('invalid_response')
+    selected = {}
+    for key, value in message.get('headers', ()):
+        name = key.decode('ascii').lower()
+        if name in {'content-type', 'cache-control', 'retry-after'}:
+            if name in selected or len(value) > 1024:
+                raise StdioRefused('invalid_response')
+            selected[name] = value.decode('ascii')
+    return message['status'], selected
+
+
 async def run_operation(channel, app, operation, payload, token, last_event_id, *, origin, emit_end=True):
     """Carry one compiled operation and return its (status, bytes, cancelled) outcome.
 
@@ -268,14 +317,7 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
     ``emit_end=False`` and emits it only after the application lifespan has also
     shut down successfully.
     """
-    method, path, query, body, headers = operation_request(operation, payload, token, last_event_id)
-    authority = origin.removeprefix('https://')
-    headers = [(b'host', authority.encode('ascii')), *headers]
-    if operation != 'status':
-        headers.append((b'origin', OPERATIONAL_ORIGIN.encode('ascii')))
-    scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': method,
-        'scheme': 'https', 'path': path, 'raw_path': path.encode('ascii'), 'query_string': query,
-        'headers': headers, 'client': ('ssh-session', 0), 'server': ('ssh-carrier', 0)}
+    scope, body = _scope(operation, payload, token, last_event_id, origin)
     ack = asyncio.Queue(maxsize=1)
     cancelled, stop = asyncio.Event(), asyncio.Event()
     # Explicit caller cancellation and a complete final body are tracked apart
@@ -327,17 +369,9 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
             raise asyncio.CancelledError
         try:
             if message['type'] == 'http.response.start':
-                if status or type(message.get('status')) is not int or not 100 <= message['status'] <= 599:
-                    raise carrier('invalid_response')
-                selected = {}
-                for key, value in message.get('headers', ()):
-                    name = key.decode('ascii').lower()
-                    if name in {'content-type', 'cache-control', 'retry-after'}:
-                        if name in selected or len(value) > 1024:
-                            raise carrier('invalid_response')
-                        selected[name] = value.decode('ascii')
-                channel.emit('headers', status=message['status'], headers=selected)
-                status = message['status']
+                code, selected = _response_start(message, status)
+                channel.emit('headers', status=code, headers=selected)
+                status = code
             elif message['type'] == 'http.response.body':
                 if not status:
                     raise carrier('invalid_response')
@@ -419,8 +453,8 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
         raise carrier_error[0]
     if failed is not None and not isinstance(failed, asyncio.CancelledError):
         raise failed
-    if cleanup_failure is not None:
-        raise cleanup_failure
+    # The operation outcome is derived before cleanup is considered: an
+    # incomplete response keeps its own identity when cleanup also failed.
     if request is None or caller_cancelled.is_set():
         # Completion and caller cancellation are independent; this never implies safe replay.
         was_cancelled = True  # the published normal cancellation, even if the handler unwound normally
@@ -429,10 +463,223 @@ async def run_operation(channel, app, operation, payload, token, last_event_id, 
     else:
         # A returned task is not a response: a started or absent body that nobody
         # cancelled stays unknown, never a successful end.
-        raise StdioRefused('response_incomplete')
+        incomplete = StdioRefused('response_incomplete')
+        incomplete.__context__ = cleanup_failure
+        raise incomplete
+    if cleanup_failure is not None:
+        raise cleanup_failure  # no normal end, cancelled or complete, after a failed cleanup
     if emit_end:
         channel.emit('end', status=status, bytes_sent=sent, cancelled=was_cancelled)
     return status, sent, was_cancelled
+
+
+async def converse(channel, app, request, *, origin):
+    """Own one provider sign-in attempt for one bounded conversation.
+
+    Begin is call 1; later ``call`` frames (status, code, cancel) reach the same
+    app instance, each compiled by ``operation_request`` and admitted afresh by
+    the canonical route. Nothing is retained as authority between calls. A reply
+    is a call receipt only. The (status, bytes, cancelled) outcome is returned
+    after the full owned drain; ``serve`` emits ``end`` once the lifespan has
+    also shut down. A fault, an expiry or a failed drain returns no outcome.
+    """
+    from ..plane.provider_signin import _TERMINAL
+    from ..plane.view import begin_shutdown
+    identity = {name: request['input'][name] for name in ('generation', 'attempt_id')}
+    clock = (channel.admitted if channel.admitted is not None else time.monotonic()) + CONVERSATION_SECONDS
+    calls = asyncio.Queue(maxsize=1)
+    abort, stop, caller_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    carrier_error = []
+    # ``busy`` is read by the reader thread at the moment a frame is parsed, so a
+    # call that arrived before the previous reply is refused, never queued.
+    state = {'busy': True, 'next': 2, 'open': True}
+    status = sent = 0
+    current = None
+
+    def carrier(code):
+        error = StdioRefused(code)
+        if not carrier_error:
+            carrier_error.append(error)
+        abort.set()
+        return error
+
+    def read_one():
+        frame = channel.read({'call', 'cancel'})
+        return frame, state['busy']
+
+    async def controls():
+        try:
+            while not stop.is_set():
+                frame, outstanding = await asyncio.to_thread(read_one)
+                if frame is None:
+                    continue
+                if frame['type'] == 'cancel':
+                    caller_cancelled.set()
+                    abort.set()
+                    return
+                # Refused here, before any canonical entry: pipelined, duplicate,
+                # skipped, late, foreign-operation or changed-identity calls.
+                if (outstanding or not state['open'] or type(frame['call_id']) is not int
+                        or frame['call_id'] != state['next'] or frame['call_id'] > CALL_LIMIT
+                        or not isinstance(frame['operation'], str) or frame['operation'] not in _SIGNIN_CALLS
+                        or type(frame['input']) is not dict
+                        or {name: frame['input'].get(name) for name in identity} != identity):
+                    raise StdioRefused('invalid_request')
+                try:
+                    operation_request(frame['operation'], frame['input'], frame['token'], None)
+                except ValueError:
+                    raise StdioRefused('invalid_request') from None
+                state['busy'] = True
+                state['next'] += 1
+                calls.put_nowait(frame)
+        except StdioRefused as exc:
+            carrier(exc.code)
+        except OSError:
+            carrier('disconnected')
+
+    async def first(waiting, seconds):
+        """Wait for one task, the abort or the smaller of a bound and the clock."""
+        aborted = asyncio.create_task(abort.wait())
+        try:
+            done, _ = await asyncio.wait({waiting, aborted}, return_when=asyncio.FIRST_COMPLETED,
+                timeout=max(0, min(seconds, clock - time.monotonic())))
+        finally:
+            aborted.cancel()
+            await asyncio.gather(aborted, return_exceptions=True)
+        if abort.is_set():
+            return False
+        if waiting not in done:
+            carrier('expired')  # observation only; the drain below still joins everything
+            return False
+        return True
+
+    async def perform(operation, payload, token):
+        """One canonical invocation: (status, headers, body), or None once aborted."""
+        nonlocal current
+        scope, body = _scope(operation, payload, token, None, origin)
+        code, selected, data = 0, {}, bytearray()
+        received = complete = False
+
+        async def receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {'type': 'http.request', 'body': body, 'more_body': False}
+            await abort.wait()
+            return {'type': 'http.disconnect'}
+
+        async def send(message):
+            nonlocal code, selected, complete
+            if abort.is_set():
+                raise asyncio.CancelledError
+            try:
+                if message['type'] == 'http.response.start':
+                    code, selected = _response_start(message, code)
+                elif message['type'] == 'http.response.body' and code and not complete:
+                    data.extend(message.get('body', b''))
+                    if len(data) > REPLY_BYTES:
+                        raise StdioRefused('output_limit')
+                    complete = not message.get('more_body', False)
+                else:
+                    raise StdioRefused('invalid_response')
+            except StdioRefused as exc:
+                raise carrier(exc.code) from None
+            except UnicodeError:
+                raise carrier('output_unavailable') from None
+
+        current = asyncio.create_task(app(scope, receive, send))
+        if not await first(current, CALL_SECONDS):
+            return None
+        if not current.cancelled() and current.exception() is not None:
+            raise current.exception()
+        if current.cancelled() or not complete:
+            raise carrier('response_incomplete')  # a returned handler is not a response
+        return code, selected, bytes(data)
+
+    reader = None
+    failed = cleanup_failure = None
+    try:
+        # A cancel that arrived during admission never reaches a policy handler.
+        if await asyncio.to_thread(_pending_cancel, channel, carrier):
+            if not carrier_error:
+                caller_cancelled.set()
+        else:
+            reader = asyncio.create_task(controls())
+            call_id, operation, payload, token = 1, request['operation'], request['input'], request['token']
+            while True:
+                reply = await perform(operation, payload, token)
+                if reply is None:
+                    break
+                code, selected, data = reply
+                closing = operation != 'setup-signin-code'  # a refused code is the one retry
+                if code == 200:
+                    # Only the canonical body says whether the pinned attempt is
+                    # terminal; worker liveness never ends a conversation.
+                    try:
+                        value = json.loads(data)
+                        named = (type(value) is dict and isinstance(value['state'], str)
+                                 and {name: value[name] for name in identity} == identity)
+                    except (ValueError, KeyError, RecursionError):
+                        named = False
+                    if not named:
+                        raise carrier('invalid_response')
+                    closing = operation == 'setup-signin-cancel' or value['state'] in _TERMINAL
+                if closing:
+                    state['open'] = False  # no later call is admitted
+                else:
+                    state['busy'] = False  # this call is answered once its reply is committed
+                try:
+                    channel.emit('reply', call_id=call_id, status=code, headers=selected,
+                                 data=base64.b64encode(data).decode('ascii'))
+                except StdioRefused as exc:
+                    raise carrier(exc.code) from None
+                except OSError:
+                    raise carrier('output_unavailable') from None
+                status, sent = code, sent + len(data)
+                if closing:
+                    break
+                waiting = asyncio.create_task(calls.get())
+                try:
+                    arrived = await first(waiting, IDLE_SECONDS)
+                finally:
+                    waiting.cancel()
+                    await asyncio.gather(waiting, return_exceptions=True)
+                if not arrived:
+                    break
+                frame = waiting.result()
+                call_id, operation, payload, token = (frame['call_id'], frame['operation'],
+                                                      frame['input'], frame['token'])
+    except asyncio.CancelledError:
+        abort.set()
+        raise
+    except BaseException as exc:
+        failed = exc
+    finally:
+        abort.set()  # wakes a handler waiting in receive(); no further send is accepted
+        state['open'] = False
+        begin_shutdown(app)
+        if current is not None:
+            if not current.done():
+                # The canonical handler shields and drains work it already started.
+                current.cancel()
+            await asyncio.gather(current, return_exceptions=True)
+        try:
+            # Cancels and joins the owned attempt, however long that takes: no
+            # timer abandons its thread or lets this process release early.
+            await shutdown_app(app)
+        except Exception as exc:
+            cleanup_failure = exc
+        finally:
+            stop.set()
+            if reader is not None:
+                await reader
+    if carrier_error:
+        raise carrier_error[0]
+    if failed is not None and not isinstance(failed, asyncio.CancelledError):
+        raise failed
+    if cleanup_failure is not None:
+        raise cleanup_failure
+    return status, sent, caller_cancelled.is_set()
 
 
 def _pending_cancel(channel, carrier):
@@ -498,7 +745,7 @@ def owner_app(paths, verifier, origin):
 
 
 async def serve(channel, app, request, *, origin):
-    """Own the app lifespan around exactly one operation.
+    """Own the app lifespan around exactly one operation or one sign-in conversation.
 
     End is emitted only after the operation drain and a successful lifespan
     shutdown. It still never releases the runtime lease: process exit does.
@@ -520,8 +767,11 @@ async def serve(channel, app, request, *, origin):
             await asyncio.gather(ready, return_exceptions=True)
         if not started.is_set():
             raise StdioRefused('unavailable')
-        outcome = await run_operation(channel, app, request['operation'], request['input'], request['token'],
-                                      request['last_event_id'], origin=origin, emit_end=False)
+        if request['profile'] == SIGNIN_PROFILE:
+            outcome = await converse(channel, app, request, origin=origin)
+        else:
+            outcome = await run_operation(channel, app, request['operation'], request['input'], request['token'],
+                                          request['last_event_id'], origin=origin, emit_end=False)
     except BaseException as exc:
         original = exc  # the meaningful outcome is kept; shutdown still runs below
     # Lifespan owns finite-read/stream state. It is always closed before this
@@ -570,7 +820,7 @@ async def _dispatch(args, channel):
 
 
 def dispatch(args):
-    """Own stdout completely: one operation, then exit after its drain."""
+    """Own stdout completely: one operation or conversation, then exit after its drain."""
     channel = APIChannel(0, 1)
     try:
         return asyncio.run(_dispatch(args, channel))

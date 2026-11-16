@@ -21,7 +21,8 @@ prelude passes the server's `SSH_CONNECTION` through without reading it for
 identity. The browser sends a fixed command with no environment requests.
 
 One `api` process carries exactly one operation and exits after its drain. It
-holds the stable launcher's runtime reader for that time only.
+holds the stable launcher's runtime reader for that time only. The one exception
+is a provider sign-in conversation (below): one process, one bounded attempt.
 
 ## Who is asking
 
@@ -53,6 +54,8 @@ Frames are canonical sorted ASCII JSON, one per line, with `version`, `type`,
 | server | `chunk` | `chunk_id`, `data` (base64, at most 16384 decoded bytes) |
 | client | `ack` | `chunk_id` |
 | client | `cancel` | none |
+| client | `call` | `call_id`, `operation`, `input`, `token` (sign-in conversation only) |
+| server | `reply` | `call_id`, `status`, `headers`, `data` (sign-in conversation only) |
 | server | `end` | `status`, `bytes_sent`, `cancelled` |
 | server | `error` | `code`, `retry: false` |
 
@@ -61,8 +64,8 @@ policy handler has returned or been cancelled and drained, the owned components
 and the application lifespan have shut down successfully and the control reader
 has joined. A failed or timed-out shutdown is an `error`, never an `end`. Every
 owned component shutdown is attempted and the control reader is always stopped and
-joined; a cleanup failure never replaces an earlier carrier or operation failure,
-and surfaces only when there is none. A
+joined; a cleanup failure never replaces an earlier carrier or operation failure
+(an incomplete response included), and surfaces only when there is none. A
 handler that returns is not by itself a response: a normal `end` needs the final
 body (`more_body` false) acknowledged, or an explicit caller `cancel`. A caller `cancel` stays `cancelled: true` even
 after the final body was acknowledged (completion and cancellation are independent;
@@ -83,19 +86,95 @@ routes (`operation_request` in `claudlobby/commands/owner_api_stdio.py`). There
 is no caller-selected method, path, header, command or environment. Cookies do
 not cross this transport.
 
-## Operations this carrier refuses
+## Provider sign-in: one conversation per attempt
 
-`setup-signin-begin`, `setup-signin-code` and `setup-signin-cancel` refuse with
-`operation_requires_persistent_owner` before any policy code runs. The provider
-sign-in attempt lives inside one process: its worker thread, its terminal child,
-the sign-in link and the code hand-off are held in memory, and the retained
-record admits exactly one original attempt. A one-operation process would start
-that attempt and then cancel it in its own mandatory drain, leaving the single
-attempt spent. `setup-signin-status` remains available as a read.
+The provider sign-in attempt lives inside one process: its worker thread, its
+terminal child, the sign-in link and the code hand-off are held in memory, and
+the retained record admits exactly one original attempt. A one-operation process
+would start that attempt and then cancel it in its own mandatory drain. So on
+profile `owner-api-v1`, `setup-signin-begin`, `setup-signin-code` and
+`setup-signin-cancel` still refuse with `operation_requires_persistent_owner`
+before any policy code runs, and `setup-signin-status` stays a read.
 
-Until a reviewed owner for that attempt exists, a setup that was approved with
-browser sign-in cannot reach Preview or Launch over this carrier. That is an
-open gap in this path, not a supported flow.
+Profile `owner-signin-v1` is the owner of one attempt. The prelude, the fixed
+command, the `hello` bytes and the `start` fields are the same; only the
+`profile` value differs. Such a start must carry `setup-signin-begin` with a null
+`last_event_id`, and anything else is `invalid_request`. A core that predates
+this profile refuses it the same way, before any policy code. The process then
+keeps one policy app (and so one setup door, engine and attempt owner) until it
+exits. This has been checked with synthetic fixtures only; a real `setup-token`
+run over SSH has not been observed.
+
+**Calls.** Begin is call 1. Each later `call` names `setup-signin-status`,
+`setup-signin-code` or `setup-signin-cancel`, with `call_id` 2, 3, … up to 256
+and the generation and attempt ID of the start. One call is outstanding at a
+time. A `call` that arrives before the previous `reply`, repeats or skips an ID,
+names another operation or identity, or follows the closing reply is refused as
+`invalid_request` when it is read; it is never held for later and never reaches
+policy code. There are no `headers`, `chunk` or `ack` frames on this profile.
+
+Every call is compiled by the same `operation_request` and sent through the same
+policy route as any other operation, so the principal, bearer token, workspace
+binding, grant, generation and expiry are checked again each time. The carrier
+keeps nothing from an earlier call as authority, and adds no session renewal.
+The attempt's worker keeps the reader it was started with: a renewed, revoked or
+expired session stops the attempt, and its final state may then be unreadable.
+
+**Replies.** `reply` carries the call's status, the same three allowed headers
+and `data`: the base64 of the whole response body, at most 16384 decoded bytes
+(a larger body is `output_limit`). The carrier never writes a body of its own.
+A reply is a receipt for one call. It says nothing about the process: a caller
+must keep its channel slot, job and lease, record a live reply as
+`call_complete` with the remote state unknown, and treat the conversation as
+finished only after `end`, end of output and the process exit.
+
+**When the conversation closes.** The carrier reads this from the reply it just
+sent, never from whether the worker is alive:
+
+| Reply | What follows |
+|---|---|
+| 200 naming the original attempt as `starting` or `waiting` | the next call is awaited |
+| 200 naming it as `connected`, `needs_attention`, `cancelled` or `unknown` | drain, then `end` |
+| any reply to `setup-signin-cancel` | drain, then `end` |
+| not 200, to `setup-signin-code` | the next call is awaited (the one retry) |
+| not 200, to begin or `setup-signin-status` | drain, then `end` carrying that status |
+| 200 that does not name the original attempt | `invalid_response`, no reply, no `end` |
+
+A refused code and a refused authorization are the same `403` with
+`{"state": "denied"}`; the carrier does not tell them apart. Sign-in succeeded
+only when a 200 reply says `connected`. A begin that is refused, or that finds an
+attempt retained by an earlier process (read as `unknown`, reason `interrupted`,
+or as its recorded final state), closes at once and starts no worker. Nothing
+here creates, resets or replaces an attempt, and a new setup approval does not
+either: a retained unresolved or cancelled attempt needs owner recovery.
+
+**Drain and `end`.** Closing always runs the same drain: no more calls, the
+handler in flight is cancelled and awaited, the owned components shut down
+(which cancels the attempt and joins its worker and child), the lifespan shuts
+down, and the reader joins. `end` has its usual shape, with the status of the
+last reply and the total reply bytes, and is sent only after all of that
+succeeded. It is never a per-call receipt. A caller `cancel` frame closes the
+same way with `cancelled: true`. End of input, a signal, a malformed frame, an
+expired bound or a failed drain sends `error`, exits 4 and sends no `end`.
+
+| Bound | Value |
+|---|---|
+| Start frame | 15 s |
+| One call, observed by the carrier | 20 s (the policy route keeps its own 15 s) |
+| Idle between a reply and the next call | 45 s |
+| Whole conversation, from the admitted start | 330 s; no frame renews it |
+| Provider attempt | 300 s, unchanged |
+
+These bound what the carrier admits and waits for. They are not proof that a
+process stopped: an expired bound starts the drain, and the drain still joins
+the worker without a timeout of its own. The process never exits, and so never
+releases its runtime reader, while that worker is alive.
+
+**Afterwards.** Once the process has exited, `setup-signin-status` on
+`owner-api-v1` with the original generation and attempt ID reads the retained
+record. An attempt still owned by a live conversation reads there as `unknown`,
+which is an observation, not proof that the child stopped. Preview stays blocked
+by the website while a conversation is live.
 
 ## The guide on an SSH-controlled Mac
 
@@ -119,8 +198,10 @@ handoff means a fresh authenticated SSH connection.
 ## Launch
 
 The updater cannot advance while any process still holds a runtime reader. The
-website stops admitting sibling operations, cancels each active one, and waits
-for its `end` and process exit before sending `setup-launch`. The launch
+website stops admitting sibling operations, cancels each active one (a live
+sign-in conversation included), and waits for its `end` and process exit before
+sending `setup-launch`. A wait that runs out is not a completed drain and does
+not permit Launch. The launch
 operation returns the original receipt and exits. The guide observes that
 retained original Launch, returns `launch_handoff` and exits. A lost reply is
 unknown; recovery inspects the original tuple and never sends Launch again.
