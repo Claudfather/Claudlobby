@@ -757,3 +757,94 @@ test('current account metadata accepts eight exact references and retires a nint
   assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,before);
   h.api.dispose();
 });
+
+// A live provider sign-in is authorized by the bearer admitted at begin: no renewal path may rotate it.
+const attemptInput = { generation: uuid(9), attempt_id: uuid(12) };
+const signinBody = (state, extra = {}) => ({ ...attemptInput, state, reason: null, ...extra });
+const renewals = h => h.calls.filter(c => c.url.endsWith('/renew')).length;
+const signinCalls = (h, name) => h.calls.filter(c => c.url.endsWith('/setup/signin-' + name));
+function signinHarness(state = 'waiting') {
+  const h = harness();
+  h.overrides.set('setup/signin-begin', () => reply(200, signinBody(state)));
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('waiting')));
+  return h;
+}
+
+test('a live sign-in defers explicit and automatic renewal until a terminal result, then renewal works', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.api.activity({ visible: true, userInput: true });
+  assert.equal((await h.api.setupSignin('begin', attemptInput)).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + TOKEN, 'begin used the issued bearer');
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'explicit renewal is deferred');
+  h.time = 780000; h.api.activity({ visible: true, userInput: true });
+  await flush();
+  assert.equal(renewals(h), 0, 'no automatic renewal while live and the one automatic attempt is not consumed');
+  assert.equal((await h.api.setupSignin('status', attemptInput)).state, 'waiting');
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'a nonterminal status releases nothing');
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('connected')));
+  assert.equal((await h.api.setupSignin('status', attemptInput)).state, 'connected');
+  await h.api.renew(); assert.equal(renewals(h), 1, 'the terminal result releases the hold');
+  h.api.dispose();
+});
+
+test('setup-only sessions hold lifecycle renewal the same way', async () => {
+  const h = signinHarness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  h.overrides.set('issue', () => reply(200, setup(TOKEN))); h.overrides.set('status', () => reply(200, setup()));
+  h.overrides.set('renew', () => reply(200, setup(ROTATED)));
+  assert.equal(await h.api.connect(), true); assert.equal(h.api.snapshot().state, 'setup_only');
+  await h.api.setupSignin('begin', attemptInput);
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0);
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('cancelled')));
+  await h.api.setupSignin('status', attemptInput);
+  assert.equal(await h.api.renew(), true); assert.equal(renewals(h), 1);
+  h.api.dispose();
+});
+
+test('an unknown begin result keeps the hold; only a completed refusal, disconnect or disposal ends it', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
+  await assert.rejects(h.api.setupSignin('begin', attemptInput));
+  assert.equal(signinCalls(h, 'begin').length, 1);
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'a lost answer proves no cleanup');
+  assert.equal(signinCalls(h, 'begin').length, 1, 'nothing replays or begins again');
+  await h.api.logout();
+  assert.equal(await h.api.connect(), true); await h.api.renew(); assert.equal(renewals(h), 1, 'disconnect ended the hold');
+  h.api.dispose();
+  const refused = signinHarness(); await refused.api.connect();
+  refused.overrides.set('setup/signin-begin', () => reply(403, { state: 'denied' }));
+  await assert.rejects(refused.api.setupSignin('begin', attemptInput));
+  await refused.api.renew(); assert.equal(renewals(refused), 1, 'a completed refusal admitted no attempt');
+  refused.api.dispose();
+});
+
+test('begin renews first only when the session cannot cover the bounded attempt, and refuses if that fails', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.time = 600000; // 300 seconds left: not enough for a 330-second attempt
+  await h.api.setupSignin('begin', attemptInput);
+  const order = h.calls.map(c => new URL(c.url).pathname.split('/').pop()).filter(x => ['renew', 'signin-begin'].includes(x));
+  assert.deepEqual(order, ['renew', 'signin-begin']);
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(h.api.continuity().remainingSeconds, 900, 'the host lifetime was not extended locally');
+  await h.api.renew(); assert.equal(renewals(h), 1, 'no further rotation while live');
+  h.api.dispose();
+  const failed = signinHarness(); await failed.api.connect();
+  failed.overrides.set('renew', () => { throw new Error('lost renewal'); });
+  failed.time = 600000;
+  await assert.rejects(failed.api.setupSignin('begin', attemptInput), /not started/);
+  assert.equal(signinCalls(failed, 'begin').length, 0, 'no begin without a confirmed renewal');
+  failed.api.dispose();
+});
+
+test('sign-in admission waits for a renewal already in flight and then uses the rotated bearer', async () => {
+  const h = signinHarness(); await h.api.connect();
+  const held = deferred(); h.overrides.set('renew', () => held.promise);
+  const renewing = h.api.renew(); await flush();
+  const beginning = h.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(h, 'begin').length, 0, 'begin waits behind the renewal');
+  assert.equal(await h.api.renew(), false, 'a second renewal cannot slip in while begin is admitting');
+  held.resolve(reply(200, ready(ROTATED))); await renewing;
+  assert.equal((await beginning).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(renewals(h), 1); h.api.dispose();
+});

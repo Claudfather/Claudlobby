@@ -39,3 +39,12 @@ cancel) is refused as `response_incomplete` instead of ending normally. An expli
 cancelled even after the final body, and a component shutdown failure neither
 replaces an earlier failure (an incomplete response included) nor skips the
 remaining drains or the control-reader join.
+
+A call is now admitted only after the final byte of the previous reply is
+written, so a call sent while a reply is blocked or partly written is refused as
+`invalid_request` instead of being queued. The setup panel follows the original
+sign-in attempt with one serialized status check about every two seconds, holds
+Preview and Launch while it is open, and the connected client holds session
+renewal (renewing first only when the session would end inside the attempt)
+until the attempt reaches a terminal result or the connection ends. Test-owned
+gates and threads in the SSH API tests are now released and joined on failure.

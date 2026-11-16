@@ -108,15 +108,24 @@ run over SSH has not been observed.
 **Calls.** Begin is call 1. Each later `call` names `setup-signin-status`,
 `setup-signin-code` or `setup-signin-cancel`, with `call_id` 2, 3, … up to 256
 and the generation and attempt ID of the start. One call is outstanding at a
-time. A `call` that arrives before the previous `reply`, repeats or skips an ID,
+time, and a call is outstanding until the final byte of its `reply` has been
+written: the output write and the arrival check share one lock, so a frame read
+while a reply is blocked or half written is early. A `call` that arrives before
+the previous `reply` is complete, repeats or skips an ID,
 names another operation or identity, or follows the closing reply is refused as
 `invalid_request` when it is read; it is never held for later and never reaches
-policy code. There are no `headers`, `chunk` or `ack` frames on this profile.
+policy code. A frame that follows a completely written reply is an ordinary next
+call and is admitted. There are no `headers`, `chunk` or `ack` frames on this profile.
 
 Every call is compiled by the same `operation_request` and sent through the same
 policy route as any other operation, so the principal, bearer token, workspace
 binding, grant, generation and expiry are checked again each time. The carrier
 keeps nothing from an earlier call as authority, and adds no session renewal.
+The canonical browser client therefore holds its own renewal while a conversation
+is admitted or live (explicit, automatic and setup-only alike), renews once
+before begin only if the session would end inside the bounded attempt, and does
+not begin if that renewal is not confirmed. It never extends a session locally;
+disconnect, expiry or disposal ends the hold, an unknown answer does not.
 The attempt's worker keeps the reader it was started with: a renewed, revoked or
 expired session stops the attempt, and its final state may then be unreadable.
 
@@ -169,6 +178,15 @@ These bound what the carrier admits and waits for. They are not proof that a
 process stopped: an expired bound starts the drain, and the drain still joins
 the worker without a timeout of its own. The process never exits, and so never
 releases its runtime reader, while that worker is alive.
+
+**Progress in the canonical UI.** While the original attempt is `starting` or
+`waiting`, the setup panel sends one status call about every two seconds (at most
+165 in 330 seconds), never overlapping a code, cancel or manual check. Polling
+stops on a terminal state, an error, expiry, a context change or disposal, and
+never begins again, replays, mints a new attempt ID or clears the retained
+attempt. The link and code are cleared when it is lost. Preview and Launch stay
+unavailable in the panel while that sign-in is open; the canonical policy and the
+drain remain the authority.
 
 **Afterwards.** Once the process has exited, `setup-signin-status` on
 `owner-api-v1` with the original generation and attempt ID reads the retained

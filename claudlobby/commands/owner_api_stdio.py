@@ -15,6 +15,7 @@ import json
 import os
 import re
 import select
+import threading
 import time
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -157,8 +158,12 @@ class APIChannel:
         self.partial_since = None
         self.interrupted = False
         self.admitted = None  # monotonic time of an admitted conversation start
+        # Held around each output write so a reader can tell whether a frame
+        # arrived before or after the final byte of a reply was written.
+        self.write_lock = threading.Lock()
 
-    def emit(self, kind, **values):
+    def emit(self, kind, _committed=None, **values):
+        """Write one frame; ``_committed`` runs under the write lock right after its final byte."""
         self.output_seq += 1
         raw = _wire({**values, 'version': 1, 'type': kind, 'seq': self.output_seq, 'session_id': self.session_id})
         if len(raw) > 32768 or self.output_seq > 4096:
@@ -167,10 +172,13 @@ class APIChannel:
         while raw:
             if not select.select([], [self.outgoing], [], max(0, deadline - time.monotonic()))[1]:
                 raise StdioRefused('output_unavailable')
-            count = os.write(self.outgoing, raw[:4096])
-            if not count:
-                raise StdioRefused('output_unavailable')
-            raw = raw[count:]
+            with self.write_lock:
+                count = os.write(self.outgoing, raw[:4096])
+                if not count:
+                    raise StdioRefused('output_unavailable')
+                raw = raw[count:]
+                if not raw and _committed is not None:
+                    _committed()
 
     def read(self, allowed, timeout=.25):
         if self.interrupted:
@@ -490,9 +498,13 @@ async def converse(channel, app, request, *, origin):
     calls = asyncio.Queue(maxsize=1)
     abort, stop, caller_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     carrier_error = []
-    # ``busy`` is read by the reader thread at the moment a frame is parsed, so a
-    # call that arrived before the previous reply is refused, never queued.
-    state = {'busy': True, 'next': 2, 'open': True}
+    # A call is outstanding until its reply's final byte is written. The reader
+    # thread compares the counts under the channel's write lock the moment a frame
+    # is parsed, so a call that arrived before that byte is refused, never queued.
+    state = {'admitted': 1, 'replied': 0, 'next': 2, 'open': True}
+
+    def committed():
+        state['replied'] += 1  # runs under channel.write_lock, right after the final byte
     status = sent = 0
     current = None
 
@@ -505,7 +517,17 @@ async def converse(channel, app, request, *, origin):
 
     def read_one():
         frame = channel.read({'call', 'cancel'})
-        return frame, state['busy']
+        if frame is None:
+            return None, False
+        # A write lock still held after a short wait means a reply write is stalled:
+        # the final byte has not been written, so this frame is early. It is never
+        # parked until the write ends, which would turn it into a valid later call.
+        held = not channel.write_lock.acquire(timeout=.05)
+        try:
+            return frame, held or state['replied'] < state['admitted']
+        finally:
+            if not held:
+                channel.write_lock.release()
 
     async def controls():
         try:
@@ -529,7 +551,7 @@ async def converse(channel, app, request, *, origin):
                     operation_request(frame['operation'], frame['input'], frame['token'], None)
                 except ValueError:
                     raise StdioRefused('invalid_request') from None
-                state['busy'] = True
+                state['admitted'] += 1
                 state['next'] += 1
                 calls.put_nowait(frame)
         except StdioRefused as exc:
@@ -626,11 +648,10 @@ async def converse(channel, app, request, *, origin):
                     closing = operation == 'setup-signin-cancel' or value['state'] in _TERMINAL
                 if closing:
                     state['open'] = False  # no later call is admitted
-                else:
-                    state['busy'] = False  # this call is answered once its reply is committed
                 try:
-                    channel.emit('reply', call_id=call_id, status=code, headers=selected,
-                                 data=base64.b64encode(data).decode('ascii'))
+                    # The next call is admissible only once the reply's final byte is written.
+                    channel.emit('reply', _committed=committed, call_id=call_id, status=code,
+                                 headers=selected, data=base64.b64encode(data).decode('ascii'))
                 except StdioRefused as exc:
                     raise carrier(exc.code) from None
                 except OSError:

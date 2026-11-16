@@ -20,6 +20,8 @@ const positive = v => Number.isSafeInteger(v) && v > 0;
 const referenceShape = v => keys(v, ['reference_id', 'endpoint_origin', 'revision'])
   || keys(v, ['reference_id', 'endpoint_origin', 'revision', 'transport']) && v.transport === 'mac_openssh';
 const RENEW_WINDOW = 120000, ACTIVITY_WINDOW = 300000;
+// A sign-in conversation lasts at most 330 seconds from begin; keep a margin for admission.
+const SIGNIN_LIFETIME = 345000, SIGNIN_TERMINAL = ['connected', 'needs_attention', 'cancelled'];
 function origin(v) {
   if (typeof v !== 'string' || v.length > 2048) return false;
   try { const u = new URL(v); return u.protocol === 'https:' && u.origin === v && !u.hostname.includes('*') && !u.username && !u.password; }
@@ -87,6 +89,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   let renewalUnknown = false, continuityPaused = false, actionRequests = 0;
   let renewing = false, disconnectRequested = false, reconnectRequired = false;
   let accessRejected = false, connectIncomplete = false;
+  // While a sign-in conversation is admitted or live, no renewal may rotate the begin-time
+  // bearer. ``renewalRun`` lets begin wait for a renewal already in flight.
+  let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null;
+  const signinHeld = () => signinAdmitting || signinLive;
+  const trackRenewal = run => {
+    const clear = () => { if (renewalRun === run) renewalRun = null; };
+    renewalRun = run; run.then(clear, clear); return run;
+  };
   const readFailures = new Map();
   const requests = new Set(), cursors = new Map();
   let setupOnly = false, setupSignedOut = false; const setupListeners = new Set();
@@ -105,6 +115,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   function wipe() {
     token = null; pending = null; expires = 0; renewalUnknown = false; setupOnly = false; setupSignedOut = false;
+    signinLive = false; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
     clearTimeout(expiryTimer); expiryTimer = null;
     clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
@@ -171,6 +182,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   function scheduleContinuity() {
     clearTimeout(continuityTimer); continuityTimer = null;
     if (disposed || ended || !token || continuityPaused || renewalUnknown) return;
+    if (signinHeld()) { continuityChanged(); return; } // released sign-in calls scheduleContinuity again
     const remaining = expires - now(), gen = epoch;
     if (remaining <= 0) return; // The existing expiry gate owns termination.
     if (remaining <= RENEW_WINDOW) {
@@ -183,6 +195,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       if (disposed || gen !== epoch || !valid(true)) return;
       if (expires - now() > RENEW_WINDOW) { scheduleContinuity(); return; }
       continuityChanged();
+      if (signinHeld()) return; // never consumes the one automatic attempt
       if (visible && lastActivity !== null && now() - lastActivity <= ACTIVITY_WINDOW
           && !autoAttempted && !busy && !actionRequests && handle.snapshot().state === 'ready') {
         autoAttempted = true;
@@ -300,6 +313,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       // No session has expired before the first admitted host challenge.
       // Retained binding/uncertain issuance still follows normal expiry handling.
       if ((action === 'status' && !token && !binding) || !valid(true)) return { status: 403, json: async () => ({ state: 'denied' }) };
+      if (action === 'renew' && signinHeld() && !renewalPermit) throw new Error(); // last line of defence
       const result = await http(ref.endpoint_origin + '/api/owner/connected/' + action,
         { method: action === 'status' ? 'GET' : 'POST', ...(action !== 'status' ? { body: {} } : {}), signal: options.signal });
       if (result.status === 200 && action !== 'logout') admission(result.data, result.start, action === 'renew');
@@ -502,13 +516,18 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       return false;
     } finally { busy = false; scheduleContinuity(); }
   }
-  async function renew() {
-    if (setupOnly) return lifecycle('renew');
-    if (busy || !valid(true)) return;
+  async function renew(internal = false) {
+    if (!internal && signinHeld()) { continuityChanged(); return false; }
+    return trackRenewal(renewOnce(internal));
+  }
+  async function renewOnce(internal) {
+    if (setupOnly) return lifecycle('renew', internal);
+    if (busy || !valid(true)) return false;
     busy = true; renewing = true;
     try {
       await owner.sessionControls.renew();
       renewalUnknown = handle.snapshot().state !== 'ready';
+      return !renewalUnknown;
     } finally {
       busy = false; renewing = false;
       if (disconnectRequested) await logout();
@@ -538,8 +557,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         stop('Disconnected in this view. Host sign-out was not confirmed. Choose Connect again to return.');
     }
   }
-  async function lifecycle(action) {
+  async function lifecycle(action, internal = false) {
     if (!setupOnly && action === 'status') return handle.start();
+    if (action === 'renew' && !internal && signinHeld()) { continuityChanged(); return false; }
     if (busy || !valid(true)) return false;
     busy = true;
     try {
@@ -558,6 +578,39 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       return ['ready','setup_only'].includes(snapshot().state);
     } catch { stop('Connection outcome unknown. Check again explicitly.'); return false; }
     finally { busy = false; }
+  }
+  async function signinBegin(input) {
+    if (signinHeld() || disposed || ended) throw new Error('A Claude sign-in is already open.');
+    signinAdmitting = true; // from here no renewal path can start
+    try {
+      if (renewalRun) await renewalRun.catch(() => {});
+      if (!valid(true)) throw new Error('Sign-in was not started. Connect again first.');
+      if (expires - now() < SIGNIN_LIFETIME) {
+        // Not enough session left for the whole attempt: renew once, now, before begin.
+        renewalPermit = true;
+        let renewed = false;
+        try { renewed = (await (setupOnly ? lifecycle('renew', true) : renew(true))) === true; }
+        catch { renewed = false; } finally { renewalPermit = false; }
+        if (!renewed || !valid(true) || expires - now() < SIGNIN_LIFETIME)
+          throw new Error('Sign-in was not started. The session could not be renewed first.');
+      }
+      signinLive = true; // live from the moment begin is sent; an unknown outcome keeps it held
+      const epochAtBegin = epoch;
+      try { return settleSignin(await setupRequest('signin-begin', input)); }
+      catch (error) {
+        // A completed refusal means no attempt was admitted; a lost or unknown answer proves nothing.
+        if ([400, 401, 403, 409].includes(error?.status) && epochAtBegin === epoch) { signinLive = false; scheduleContinuity(); }
+        throw error;
+      }
+    } finally { signinAdmitting = false; }
+  }
+  function settleSignin(result) {
+    // Only a delivered body naming a terminal state releases the hold; the transport
+    // releases that body only after its own drain. Anything else leaves it held.
+    if (signinLive && result && typeof result === 'object' && SIGNIN_TERMINAL.includes(result.state)) {
+      signinLive = false; scheduleContinuity();
+    }
+    return result;
   }
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
@@ -579,7 +632,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     setupSignin: (operation,input) => {
       if (!['begin','status','code','cancel'].includes(operation)) throw new Error('Unsupported sign-in action');
-      return setupRequest('signin-'+operation,input);
+      return operation === 'begin' ? signinBegin(input)
+        : setupRequest('signin-'+operation,input).then(settleSignin);
     },
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');

@@ -23,6 +23,30 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
   let signinAttempt=null, signinState=null, signinUrl=null, signinNotice='', signinBlocked=false;
+  let signinTimer=null, signinHalted=false;
+  // One status check at a time, about every two seconds: at most 165 calls in the 330-second
+  // conversation, so manual checks beside it stay far inside the 256-call bound.
+  const SIGNIN_POLL_MS=2000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
+  const signinOpen = () => context?.provider_signin===true && !!signinAttempt && !SIGNIN_TERMINAL.includes(signinState);
+  const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
+  function clearSignin(notice) {
+    signinUrl=null; if (mount) mount.code.value='';
+    if (notice) signinNotice=notice;
+  }
+  function stopSigninPoll() { clearTimeout(signinTimer); signinTimer=null; }
+  function scheduleSigninPoll() {
+    stopSigninPoll();
+    if (disposed || !signinPolling() || !context?.provider_signin || pending || signinBlocked || !active() || !visible()) return;
+    const ticket=epoch;
+    signinTimer=setTimeout(() => {
+      signinTimer=null;
+      if (disposed || ticket!==epoch || !signinPolling()) return;
+      if (context?.expires_at<=now()) { clearSignin(lostNotice); changed(); return; }
+      if (busy) { scheduleSigninPoll(); return; } // never overlaps another call
+      void run('signin-status'); // its completion schedules the next check
+    },SIGNIN_POLL_MS);
+  }
+  const lostNotice='Sign-in link cleared. Keep this original attempt; owner recovery may be required. Checking status does not restart sign-in.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
   function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
   function scheduleHandoff() {
@@ -103,8 +127,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   function changed() { render(); onChange(); }
   function connectionChanged(next) {
     if (next.epoch !== state.epoch || next.state !== state.state) {
-      epoch++; context = null; plan = null; launchable = false; signinUrl=null;
-      if (mount) mount.code.value='';
+      epoch++; context = null; plan = null; launchable = false; stopSigninPoll();
+      clearSignin(signinAttempt && !SIGNIN_TERMINAL.includes(signinState) ? lostNotice : undefined);
     }
     state = next;
     if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
@@ -159,7 +183,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (disposed || ticket!==epoch || !active()) return false;
         signinReceipt(result);
       } else if (operation === 'preview') {
-        if (!context || context.launch_reserved || pending || legacyBlocked() || !goal.trim() || context.expires_at <= now()) return false;
+        if (!context || context.launch_reserved || pending || legacyBlocked() || signinOpen() || !goal.trim() || context.expires_at <= now()) return false;
         const selected = context, authored = goal;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
@@ -172,7 +196,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         save(pending); launchable = true;
         note = 'Configuration prepared. Review the frozen goal and changes before one explicit launch.';
       } else if (operation === 'launch') {
-        if (!context || !plan || !pending || !launchable || legacyBlocked() || !same(plan,pending)
+        if (!context || !plan || !pending || !launchable || legacyBlocked() || signinOpen() || !same(plan,pending)
             || planGoal !== goal || plan.expires_at <= now() || context.expires_at <= now()) return false;
         save(pending); launchable = false; // Retain the preview's original identity before the one launch POST.
         managedHandoff = context.managed_owner === true;
@@ -190,13 +214,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (!disposed && ticket === epoch) {
         if (operation === 'preview') { context = null; launchable = false; }
         if (operation === 'receipt') launchable = false;
-        if (operation.startsWith('signin-')) { signinNotice='Sign-in needs attention. Check the original attempt; nothing is repeated.'; signinUrl=null; return false; }
+        if (operation.startsWith('signin-')) {
+          signinHalted=true; // no automatic retry after an error; Check sign-in progress resumes it
+          clearSignin('Sign-in needs attention. Keep this original attempt; owner recovery may be required. Checking status does not restart sign-in.'); return false;
+        }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'Update outcome unknown. Keep the original identifiers; check its receipt while approval is active, or inspect locally after expiry/revocation. Do not launch again.'
           : 'Setup unavailable or refused. Check local approval explicitly before another preview; no team readiness is claimed.';
       }
       return false;
-    } finally { busy = false; if (!disposed) { changed(); scheduleHandoff(); } }
+    } finally { busy = false; if (!disposed) { changed(); scheduleHandoff(); scheduleSigninPoll(); } }
   }
   function signinReceipt(value) {
     if (!context || !keys(value,['attempt_id','generation','state','reason',...('url' in value?['url']:[])])
@@ -214,11 +241,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
-    signinState=value.state; signinUrl=url;
+    signinState=value.state; signinUrl=url; signinHalted=false;
     signinNotice=value.state==='connected' ? 'Claude connected for this host. This does not start your team.'
-      : value.state==='waiting' ? 'Sign in to Claude in the link below. If Claude shows a code, paste it here.'
-      : value.state==='starting' ? 'Waiting for Claude… Check sign-in progress.'
-      : 'Sign-in needs attention. Keep the original attempt; cancellation does not revoke a token.';
+      : value.state==='waiting' ? 'Sign in to Claude in the link below. If Claude shows a code, paste it here. Progress is checked automatically.'
+      : value.state==='starting' ? 'Starting Claude sign-in. Progress is checked automatically; you can also check now.'
+      : 'Keep this original attempt; owner recovery may be required. Checking status does not restart sign-in. Cancellation does not revoke a token.';
   }
   function receipt(value) {
     if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
@@ -249,7 +276,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
       || operation==='code' && signinState!=='waiting';
     area.disabled = !active() || busy || !!pending || legacyBlocked();
-    const guard = legacyBlocked() ? 'Incompatible historical setup identifiers are retained. Inspect them locally; this browser cannot launch a replacement.'
+    const guard = signinOpen() ? 'Finish or check Claude sign-in before previewing or launching.'
+      : legacyBlocked() ? 'Incompatible historical setup identifiers are retained. Inspect them locally; this browser cannot launch a replacement.'
       : !active() ? 'Connect this computer before setup.' : busy ? 'Checking setup…'
       : pending && !launchable ? 'Use Check original update receipt; launch is not repeated.'
       : !context ? 'Choose Check setup approval before previewing a team.'
@@ -267,8 +295,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     details.textContent = plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
       historical_identifiers:legacy,...(plan ? {changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at} : {})},null,2) : '';
     for (const [operation,button] of Object.entries(controls)) button.disabled = !active() || busy
-      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !goal.trim() || context.expires_at <= now())
-      || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
+      || operation === 'preview' && (!context || !!pending || legacyBlocked() || signinOpen() || !goal.trim() || context.expires_at <= now())
+      || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || signinOpen() || goal !== planGoal || plan.expires_at <= now() || context.expires_at <= now())
       || operation === 'receipt' && !pending;
   }
   function mountPanel({document,element}) {
@@ -298,6 +326,6 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
-    resumeHandoff:() => scheduleHandoff(),
-    dispose() { disposed = true; stopHandoff(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
+    resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); },
+    dispose() { disposed = true; stopHandoff(); stopSigninPoll(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
 }

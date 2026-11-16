@@ -1245,6 +1245,83 @@ test('Claude code goes only to the selected host and never enters retained UI st
   assert.ok(!JSON.stringify([...h.saved]).includes(code));h.api.dispose();
 });
 
+const authorizeURL='https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference';
+function pollHarness(statuses,options={}) {
+  const timers=[],calls=[],clock={t:1800000000}; let active=0,overlap=0;
+  const ui=dom(),panel=new ui.Element();
+  const h=setupHarness({setupOptions:{now:()=>clock.t,setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;},...options.setupOptions},
+    client:{async setupSignin(action,body){
+      calls.push([action,body]);active++;overlap=Math.max(overlap,active);
+      try{
+        if(action==='begin')return {...body,state:'starting',reason:null};
+        const next=await statuses.shift();if(next instanceof Error)throw next;
+        return {generation:body.generation,attempt_id:body.attempt_id,state:next,reason:null,...(next==='waiting'?{url:authorizeURL}:{})};
+      }finally{active--;}
+    }}});
+  h.context.provider_signin=true;h.api.mountPanel({document:ui.document,element:panel});
+  const link=descendants(panel).find(n=>n.tagName==='A'),code=descendants(panel).find(n=>n.attributes['aria-label']==='Claude sign-in code');
+  const live=()=>timers.filter(t=>t.live);
+  const fire=async()=>{const t=live()[0];assert.ok(t,'a poll is scheduled');t.live=false;t.fn();await flush();};
+  return {h,calls,clock,link,code,live,fire,timers,get overlap(){return overlap;}};
+}
+test('one serialized sign-in status poll follows the original attempt to its terminal result',async()=>{
+  const gate=deferred(),p=pollHarness([gate.promise,'waiting','connected']);
+  await p.h.api.run('context');assert.equal(p.live().length,0,'no poll before an attempt');
+  await p.h.api.run('signin-begin');
+  assert.equal(p.live().length,1);assert.equal(p.live()[0].ms,2000);
+  const attempt=JSON.parse(p.h.saved.get('test:claude'));
+  await p.fire(); // the status call is now held in flight
+  assert.equal(p.calls.at(-1)[0],'status');assert.equal(p.live().length,0,'no second timer while a call is in flight');
+  assert.equal(await p.h.api.run('signin-status'),false,'manual status serializes behind it');
+  assert.equal(await p.h.api.run('signin-cancel'),false,'cancel serializes behind it');
+  gate.resolve('waiting');await flush();
+  assert.equal(p.link.hidden,false);assert.equal(p.live().length,1,'the next poll follows only after completion');
+  p.code.value='typed-code';assert.equal(await p.h.api.run('signin-code'),true);assert.equal(p.code.value,'','code is cleared at once');
+  await p.fire();
+  assert.equal(p.h.api.snapshot().busy,false);assert.equal(p.live().length,0,'terminal state stops the poll');
+  assert.equal(p.overlap,1,'calls never overlapped');
+  assert.equal(p.calls.filter(c=>c[0]==='begin').length,1,'no automatic begin');
+  assert.ok(p.calls.every(c=>c[1].attempt_id===attempt.attempt_id&&c[1].generation===attempt.generation),'the original attempt throughout');
+  assert.deepEqual(JSON.parse(p.h.saved.get('test:claude')),attempt);p.h.api.dispose();
+});
+test('a poll error stops polling without replay; manual progress resumes it and keeps the original attempt',async()=>{
+  const p=pollHarness([new Error('lost'),'waiting','waiting']);
+  await p.h.api.run('context');await p.h.api.run('signin-begin');
+  const attempt=p.h.saved.get('test:claude');
+  await p.fire();assert.equal(p.live().length,0,'an error stops the timer');
+  assert.equal(p.link.hidden,true);
+  await p.h.api.run('signin-status');assert.equal(p.live().length,1,'an explicit check resumes polling');
+  assert.equal(p.h.saved.get('test:claude'),attempt,'the retained attempt is untouched');
+  assert.equal(p.calls.filter(c=>c[0]==='begin').length,1);p.h.api.dispose();
+});
+test('expiry, context loss and disposal stop the poll and clear link and code',async()=>{
+  for(const loss of ['expiry','context','dispose']){
+    const p=pollHarness(['waiting','waiting','waiting']);
+    await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
+    assert.equal(p.link.hidden,false);p.code.value='pending-code';
+    if(loss==='expiry'){const before=p.calls.length;p.clock.t=1800003601;await p.fire();
+      assert.equal(p.calls.length,before,'an expired approval sends no further status call');}
+    else if(loss==='context')p.h.change({state:'ready',epoch:2});
+    else p.h.api.dispose();
+    assert.equal(p.live().length,0,loss);assert.equal(p.code.value,'',loss);
+    if(loss!=='dispose')assert.equal(p.link.hidden,true,loss);
+    const attempts=p.calls.length;await flush();assert.equal(p.calls.length,attempts,'no further call after '+loss);
+    assert.ok(p.h.saved.has('test:claude'),'the original attempt is retained');
+    if(loss!=='dispose')p.h.api.dispose();
+  }
+});
+test('Preview and Launch wait for an open provider sign-in; setups without one are unchanged',async()=>{
+  const p=pollHarness(['connected']);p.h.api.setGoal('Ship it');
+  await p.h.api.run('context');await p.h.api.run('signin-begin');
+  assert.equal(await p.h.api.run('preview'),false,'refused while the attempt is open');
+  assert.ok(!p.h.calls.some(c=>c[0]==='preview'));
+  await p.fire();
+  assert.equal(await p.h.api.run('preview'),true,'allowed once connected');
+  p.h.api.dispose();
+  const plain=setupHarness();plain.api.setGoal('Ship it');await plain.api.run('context');
+  assert.equal(await plain.api.run('preview'),true);
+});
+
 // Browser carrier exercises the real Fetch facade and MessagePort boundary.
 const bridgeModule = async () => import(uri(await read('browser-owner-transport.js')));
 function browserDocument() {

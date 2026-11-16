@@ -140,6 +140,28 @@ class Client:
         self.observer, self.outgoing = os.pipe()
         self.channel = APIChannel(self.incoming, self.outgoing)
         self.seq = 0
+        self.owned, self.gates = [], []  # threads started and gates held for this client's test
+
+    def own(self, thread, *gates):
+        self.owned.append(thread)
+        self.gates.extend(gate for gate in gates if gate is not None)
+        return thread
+
+    def settle(self):
+        """Unconditional finalization, also after a failed assertion: release every
+        owned gate, let each owned thread end through its own drain, and only then
+        close this side. A thread that still lives is a failure, never left behind."""
+        try:
+            for gate in self.gates:
+                gate.set()
+            for thread in self.owned:
+                thread.join(10)
+                if thread.is_alive() and self.client is not None:
+                    self.hang_up()  # the lost-channel drain releases a thread waiting on input
+                    thread.join(10)
+        finally:
+            self.close()
+        assert not any(thread.is_alive() for thread in self.owned), 'a test-owned thread outlived its test'
 
     def send(self, kind, **values):
         self.seq += 1
@@ -170,14 +192,20 @@ class Client:
     def close(self):
         for fd in (self.incoming, self.client, self.observer, self.outgoing):
             if fd is not None:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass  # already closed by an earlier close
+        self.client = self.incoming = self.observer = self.outgoing = None
 
 
 @pytest.fixture
 def client():
     value = Client()
-    yield value
-    value.close()
+    try:
+        yield value
+    finally:
+        value.settle()
 
 
 def start_frame(**changes):
@@ -213,7 +241,7 @@ def run_in_thread(client, app, operation='session-status', payload=None, token=T
             outcome.append(None)
         except BaseException as exc:
             outcome.append(exc)
-    thread = threading.Thread(target=work)
+    thread = client.own(threading.Thread(target=work))
     thread.start()
     return thread, outcome
 
@@ -588,13 +616,14 @@ def run_serve(client, app):
             outcome.append(asyncio.run(serve(client.channel, app, start_frame(), origin=ORIGIN)))
         except BaseException as exc:
             outcome.append(exc)
-    thread = threading.Thread(target=work)
+    thread = client.own(threading.Thread(target=work))
     thread.start()
     return thread, outcome
 
 
 def test_end_is_emitted_only_after_lifespan_shutdown_completes(client):
     events, release = [], threading.Event()
+    client.gates.append(release)
     async def slow_shutdown():
         while not release.is_set():
             await asyncio.sleep(.02)
@@ -760,7 +789,7 @@ def run_conversation(client, app, request=None, origin=ORIGIN):
             outcome.append(asyncio.run(serve(client.channel, app, request or signin_frame(), origin=origin)))
         except BaseException as exc:
             outcome.append(exc)
-    thread = threading.Thread(target=work)
+    thread = client.own(threading.Thread(target=work), getattr(app, 'gate', None))
     thread.start()
     return thread, outcome
 
@@ -890,6 +919,40 @@ def test_signin_call_frames_are_refused_before_any_canonical_entry(client, monke
     assert client.quiet(), 'no reply and no end after a refused frame'
 
 
+def test_signin_call_sent_while_the_reply_is_still_being_written_is_refused_not_deferred(client, monkeypatch):
+    """The next call is admitted only after the reply's final byte: output blocked mid-reply
+    keeps it early, and releasing the output never turns it into a valid later call."""
+    from claudlobby.commands import owner_api_stdio
+    from claudlobby.commands.owner_stdio import StdioRefused
+    reached, release, writes = threading.Event(), threading.Event(), [0]
+    client.gates.append(release)
+    class StalledOS:
+        def __getattr__(self, name):
+            return getattr(os, name)
+        def write(self, fd, data):
+            if fd == client.outgoing:
+                writes[0] += 1
+                if writes[0] == 2:  # the first 4096 bytes are out; the rest of the reply is not
+                    reached.set()
+                    release.wait(10)
+            return os.write(fd, data)
+    monkeypatch.setattr(owner_api_stdio, 'os', StalledOS())
+    app = SigninApp(attempt('starting', padding='x' * 9000), attempt('waiting'))
+    thread, outcome = run_conversation(client, app)
+    assert reached.wait(5), 'the reply output is blocked part way'
+    call(client, 2)  # valid in itself, but call 1 has not been fully answered
+    time.sleep(.8)  # longer than one reader poll: the frame was read and judged while output is blocked
+    assert thread.is_alive() and app.events == ['signin-begin']
+    release.set()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'invalid_request', outcome
+    assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown'], 'only begin reached the engine'
+    first = client.frame()
+    assert (first['type'], first['call_id']) == ('reply', 1), 'the blocked reply was still delivered whole'
+    assert client.quiet(), 'no second reply and no end'
+
+
 @pytest.mark.parametrize('mode', ['cancel-idle', 'cancel-in-call', 'eof-idle', 'eof-in-call', 'signal', 'idle',
     'call-observation', 'clock', 'oversize', 'denied-begin', 'unavailable-status', 'unnamed-attempt', 'cancel-call'])
 def test_signin_conversation_closes_through_the_same_full_drain(client, monkeypatch, mode):
@@ -1008,8 +1071,8 @@ def ordinary_status(access, monkeypatch, payload, bearer):
     other = Client()
     try:
         request = start_frame(operation='setup-signin-status', input=payload, token=bearer)
-        thread = threading.Thread(target=lambda: asyncio.run(
-            serve(other.channel, canonical_app(access, monkeypatch), request, origin=HOST)))
+        thread = other.own(threading.Thread(target=lambda: asyncio.run(
+            serve(other.channel, canonical_app(access, monkeypatch), request, origin=HOST))))
         thread.start()
         head = other.frame(10)
         chunk = other.frame(10)
@@ -1018,7 +1081,7 @@ def ordinary_status(access, monkeypatch, payload, bearer):
         thread.join(10)
         return head['status'], json.loads(base64.b64decode(chunk['data']))
     finally:
-        other.close()
+        other.settle()
 
 
 def test_one_canonical_app_owns_the_attempt_from_begin_to_connected(client, synthetic_signin, monkeypatch):
@@ -1114,7 +1177,7 @@ def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replaceme
                 assert body_of(reply) == retained
             assert fresh.connected_setup.engine.signin._thread is None, 'no replacement attempt was started'
         finally:
-            again.close()
+            again.settle()
 
 
 # --- process entry: parser, dispatch and exit status ------------------------
