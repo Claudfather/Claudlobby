@@ -1288,7 +1288,12 @@ def test_a_claude_directory_redirected_after_the_request_gets_the_directory_refu
     pytest.param("data", "cannot be searched", marks=pytest.mark.skipif(
         os.geteuid() == 0, reason="root searches a directory without its search bit")),
     ("data", "is redirected (a link)"),
+    ("data", "is not a directory"),
     (".claude", "is not this user's"),
+    (".claude", "is not a directory"),
+    pytest.param(".claude", "cannot be searched", marks=pytest.mark.skipif(
+        os.geteuid() == 0, reason="root searches a directory without its search bit")),
+    ("bot", "is not this user's"),
 ])
 def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
         cold, monkeypatch, capsys, tmp_path, directory, cause):  # noqa: F811
@@ -1302,7 +1307,8 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     stood in for by its lstat, which names another owner."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     bot_dir = worker.root / "runtime/bots/worker"
-    path, elsewhere = bot_dir / directory, tmp_path / "elsewhere"
+    path = bot_dir if directory == "bot" else bot_dir / directory
+    elsewhere = tmp_path / "elsewhere"
     another_owner = [False]
     lstat = Path.lstat
 
@@ -1320,6 +1326,9 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     elif cause == "is redirected (a link)":
         path.rename(elsewhere)
         path.symlink_to(elsewhere, target_is_directory=True)
+    elif cause == "is not a directory":
+        path.rename(elsewhere)
+        path.write_text("")
     else:
         another_owner[0] = True
     worker.native.calls.clear()
@@ -1328,7 +1337,7 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     finally:  # repaired
         if cause == "cannot be searched":
             path.chmod(0o700)
-        elif cause == "is redirected (a link)":
+        elif cause in ("is redirected (a link)", "is not a directory"):
             path.unlink()
             elsewhere.rename(path)
         another_owner[0] = False
@@ -1338,6 +1347,7 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     hint = refused["error"].get("hint") or ""
     repair = {"cannot be searched": "give this user search permission on it",
               "is redirected (a link)": "put the directory itself back in place of the link",
+              "is not a directory": "put the directory itself back in its place",
               "is not this user's": "give it back to this user"}[cause]
     assert hint.startswith(f"{repair} (worker's {directory} directory), then ask for the handoff "
                            "again: claudlobby --json bot handoff worker."), refused
@@ -1347,6 +1357,24 @@ def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
     worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
     asked_again = worker.call("bot", "handoff", "worker")["data"]
     assert (asked_again["handoff"], asked_again["reason"]) == ("saved", "fresh_file_verified"), asked_again
+
+
+def test_a_refusal_no_directory_explains_keeps_the_generic_answer(cold, monkeypatch, capsys):  # noqa: F811
+    """#2935 item 14: a refusal that no directory explains keeps the generic answer. A
+    malformed .handoff-request under a healthy data/ refuses the request read, and the data/
+    it lies in is usable, so nothing is named: the generic message and hint, as before #2938's
+    named refusal, with nothing sent and the file left for inspection."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    request = worker.root / "runtime/bots/worker/data/.handoff-request"
+    request.write_text("{")
+    worker.native.calls.clear()
+    refused = worker.call("bot", "handoff", "worker", expected=6)
+    assert refused["error"]["message"] == "bot native or session readiness cannot be established", refused
+    assert refused["error"]["hint"] == ("inspect the exact private session; use bot restart for an "
+                                        "intentional bounce"), refused
+    assert refused["data"]["native_outcome"] == "unattempted", refused
+    assert "svc_activation_handoff" not in worker.native.calls, worker.native.calls
+    assert request.read_text() == "{"
 
 
 @pytest.mark.parametrize("case, handoff, reason", [

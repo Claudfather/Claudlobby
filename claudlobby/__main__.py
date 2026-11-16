@@ -15,9 +15,12 @@ log = logging.getLogger("claudlobby")
 def main(argv: list[str] | None = None) -> int:
     """Run one command, and exit with the status it answers (#2935).
 
-    Every way in comes here: the installation launcher, a native unit and
-    `python -m claudlobby`. So this is where a stderr that could not take a
-    line is settled, for every command (`_close_unwritable_stderr`).
+    The installation launcher, a native unit and `python -m claudlobby` all come
+    here, so this is where a stderr that could not take a line is settled
+    (`_close_unwritable_stderr`): for every command that runs through main. A
+    host update does not (#2935 item 18): but for its runtime and siblings
+    steps, the launcher hands it to the updater, whose own entries
+    (`git_update.main`, `update_entry.main`) leave such a stderr as it is.
     """
     try:
         return _run(argv)
@@ -50,8 +53,31 @@ def _close_unwritable_stderr() -> None:
             pass  # The stream is closed, though its last flush failed.
 
 
+class _CliParser(ResultArgumentParser):
+    """The CLI's own parser, and through add_subparsers every parser below it.
+
+    argparse prints a usage refusal (the usage, then the error) on stderr and
+    exits 2. When stderr cannot take it (a pipe whose reader has exited, a full
+    device, a stream open only for reading) the write raised, and the process
+    exited 1 where a stderr on /dev/null gives 2; so did a stderr that is None
+    (fd 2 was closed when Python started). Such a write is dropped here, as the
+    guarded lines are, so the refusal exits 2, and main closes the stream it
+    could not flush (#2935 item 17). A write that works is unchanged, and one
+    to another file (--help and --version print on stdout) is argparse's own.
+    """
+
+    def _print_message(self, message, file=None):
+        if file is not None and file is not sys.stderr:
+            super()._print_message(message, file)
+        elif sys.stderr is not None:  # None: fd 2 was closed when Python started.
+            try:
+                super()._print_message(message, sys.stderr)
+            except (OSError, ValueError):
+                pass  # The refusal's lines are lost, and its status is kept.
+
+
 def _run(argv: list[str] | None) -> int:
-    parser = ResultArgumentParser(
+    parser = _CliParser(
         prog="claudlobby",
         description="Compositor for Claude Code agent fleets.",
     )
