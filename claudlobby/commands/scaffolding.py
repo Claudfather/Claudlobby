@@ -110,10 +110,8 @@ def cmd_new_bot(args):
     except (ValueError, OSError, FleetYamlEditError, yaml.YAMLError) as exc:
         raise CommandFailure("conflict", "bot declaration cannot be authored in the selected fleet") from exc
 
-    guidance = (f"Review {paths.fleet_yaml}, then stage with `claudlobby --root {paths.root} "
-                f"config plan --release <release-id>` and activate the reviewed plan with "
-                f"`claudlobby --root {paths.root} host activate <plan-id> "
-                "--install-directory <native-user-unit-dir>` from an operator shell.")
+    guidance = (f"Review {paths.fleet_yaml}, then apply it with `claudlobby --root {paths.root} "
+                "host update apply FULL_COMMIT_SHA` from an operator shell.")
     data = {"fleet": context.fleet.name, "bot": inp.name, "fleet_yaml": str(paths.fleet_yaml),
             "stanza": stanza, "dry_run": args.dry_run, "written": False,
             "voice_path": str(paths.overlay_voices / f"{inp.name}.md") if inp.voice_text else None,

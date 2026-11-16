@@ -611,7 +611,8 @@ def _darwin_print(text: str, target: str, *, restore_pending: bool = False) -> d
             "Type": scalar["type"], "UnknownFields": json.dumps(sorted((scalar.keys() | blocks.keys()) - known))}
 
 
-def _darwin_foreign_print(text: str, target: str, anchors: set[str], owners: set[Path]) -> dict[str, str]:
+def _darwin_foreign_print(text: str, target: str, anchors: set[str], owners: set[Path],
+                          kinds: dict[str, str] | None = None) -> dict[str, str]:
     """Accept only sufficient foreign identity when a desktop job has extra grammar.
 
     The strict managed parser remains authoritative for every declared unit.
@@ -636,8 +637,9 @@ def _darwin_foreign_print(text: str, target: str, anchors: set[str], owners: set
             or any(not fields[key] or any(ord(char) < 32 for char in fields[key]) for key in execution)
             or not re.fullmatch(re.escape(native_domain) + r"(?: \[[0-9]+\])?", fields["domain"])):
         raise InventoryError("foreign launchd print domain or execution identity is incomplete")
-    if any(anchor and anchor in text for anchor in anchors):
-        raise InventoryError("foreign launchd print mentions a reviewed root or release")
+    found = [anchor for anchor in anchors if anchor and anchor in text]
+    if found:
+        raise InventoryError(_foreign_anchor_refusal(lines, target, found, kinds or {}))
     directory = fields.get("working directory", "")
     if directory:
         path = Path(directory)
@@ -645,6 +647,44 @@ def _darwin_foreign_print(text: str, target: str, anchors: set[str], owners: set
             raise InventoryError("foreign launchd working directory ownership is unknown")
     return {"Id": target.rsplit("/", 1)[1] + ".plist", "LoadState": "loaded",
             "ActiveState": "unknown", "ObservedDomain": target.rsplit("/", 1)[0]}
+
+
+# The print fields a foreign-job refusal may name. Any other is "another field",
+# so no text of the print itself reaches the refusal (#2945).
+_PRINT_FIELDS = frozenset({"inherited environment", "default environment", "environment", "program",
+                           "arguments", "working directory", "path", "stdout path", "stderr path"})
+_ENVIRONMENT_FIELDS = frozenset({"inherited environment", "default environment", "environment"})
+
+
+def _foreign_anchor_refusal(lines: list[str], target: str, found: list[str], kinds: dict[str, str]) -> str:
+    """Why a foreign job whose print mentions an anchor refuses, and what to do (#2945).
+
+    It names the job's label, the most specific anchor found, the fields it was
+    found in (from a fixed list) and a next step. Nothing else of the print: its
+    environment blocks hold values. A mention in an environment block alone means
+    the job inherited a bot's environment, as an app opened from a bot's shell does.
+    """
+    anchor = max(found, key=len)
+    fields, block = set(), None
+    for line in lines[1:-1]:
+        if line == "\t}":
+            block = None
+            continue
+        match = re.fullmatch(r"\t([^\t=]+) = (.*)", line)
+        field = block or (match[1] if match else None)
+        if match and block is None and match[2] == "{":
+            block = match[1]
+        if any(item in line for item in found):
+            fields.add(field if field in _PRINT_FIELDS else "another field")
+    where = " and ".join(sorted(fields)) or "another field"
+    if fields and fields <= _ENVIRONMENT_FIELDS:
+        step = ("it most likely inherited a bot's environment (an app opened from a bot's shell): "
+                "quit it, then start it again from a shell that did not come from a bot pane")
+    else:
+        step = (f"if it is a leftover of this installation, unload it (launchctl bootout {target}); "
+                "otherwise start it from outside this installation")
+    return (f"foreign launchd print mentions a reviewed root or release: job {target.rsplit('/', 1)[1]} "
+            f"names {kinds.get(anchor, 'a reviewed anchor')} in its {where}; {step}")
 
 
 class _PlistKeys(dict):
@@ -888,6 +928,17 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     anchors = {str(owner) for owner in owners}
     anchors.update(anchor for declaration in declarations for key, anchor in declaration.environment
                    if key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_NATIVE_DIR", "CLAUDLOBBY_CLI"))
+    # What each anchor is, so a foreign job's refusal can say which one it found (#2945).
+    named = {"CLAUDLOBBY_ROOT": "the data root", "CLAUDLOBBY_NATIVE_DIR": "the installation's native directory",
+             "CLAUDLOBBY_CLI": "the installation's CLI"}
+    kinds = {str(data_root): "the data root"}
+    for declaration in declarations:
+        kinds.setdefault(str(declaration.working_directory.resolve()),
+                         f"the working directory of {declaration.source.name}")
+    for declaration in declarations:
+        for key, anchor in declaration.environment:
+            if key in named:
+                kinds.setdefault(anchor, named[key])
     # This deterministic name only routes validation. Exemption requires the
     # independent job owner's exact files, placement and effective native argv.
     independent_name = None
@@ -961,7 +1012,7 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                 return props
             if name in expected:
                 return _darwin_print(observed.stdout, target)
-            foreign = _darwin_foreign_print(observed.stdout, target, anchors, owners)
+            foreign = _darwin_foreign_print(observed.stdout, target, anchors, owners, kinds)
             try:
                 return _darwin_print(observed.stdout, target)
             except InventoryError:

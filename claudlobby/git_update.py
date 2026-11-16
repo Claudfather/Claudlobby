@@ -781,6 +781,12 @@ def _interruption(exc, stage):
     return output[-(2000 - len(cause) - 1):] + "\n" + cause if output else cause
 
 
+# A stage's refusal prints its first line only, cut to 1,000 characters, and
+# exits 6 (#2945). An inventory refusal can end with a native tool's whole
+# stderr; printed whole, as a traceback, its last line is what the record's
+# reader and the job's notice took for the cause. Any other exception keeps its
+# traceback. The cut is written out here, not imported, because the stage may
+# run a source of another version.
 _STAGE_IMPORT = """import pathlib,sys
 source=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(source))
 import claudlobby
@@ -789,7 +795,13 @@ if pathlib.Path(claudlobby.__file__).resolve()!=source/'claudlobby/__init__.py':
 from claudlobby import update_entry
 if pathlib.Path(update_entry.__file__).resolve()!=source/'claudlobby/update_entry.py':
     raise SystemExit('application stage entry differs from explicit source')
-raise SystemExit(update_entry.main(sys.argv[2:]))
+try:
+    code=update_entry.main(sys.argv[2:])
+except (OSError,ValueError,RuntimeError) as exc:
+    line=(str(exc).strip().splitlines() or [''])[0]
+    print((line[:997]+'...' if len(line)>1000 else line) or type(exc).__name__,file=sys.stderr)
+    code=6
+raise SystemExit(code)
 """
 
 
@@ -2058,9 +2070,29 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
+_ERROR_LIMIT = 1000
+
+
+def error_line(exc: BaseException) -> str:
+    """A refusal's first line, cut to 1,000 characters, as the updater's entry prints it (#2945).
+
+    An inventory refusal can end with a native tool's whole stderr, which this
+    entry used to print whole. It names the exception's class when it has no message.
+    """
+    text = next(iter(str(exc).strip().splitlines()), "")
+    if len(text) > _ERROR_LIMIT:
+        text = text[:_ERROR_LIMIT - 3] + "..."
+    return text or type(exc).__name__
+
+
+def _entry(argv=None) -> int:
+    """The updater's entry: main, and a refusal printed as its first line, exit 6 (#2945)."""
     try:
-        sys.exit(main())
+        return main(argv)
     except (UpdateError, OSError, ValueError) as exc:
-        print(f"claudlobby update: {exc}", file=sys.stderr)
-        sys.exit(6)
+        print(f"claudlobby update: {error_line(exc)}", file=sys.stderr)
+        return 6
+
+
+if __name__ == "__main__":
+    sys.exit(_entry())

@@ -2299,8 +2299,8 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
             "default — no beat runs, and a check-in happens only when the "
             "operator sends /checkin by hand. Arm it with `defaults: { "
             "jobs: { manager-checkin: { enroll: true } } }` in fleet.yaml, "
-            "then stage with `config plan --release RELEASE_ID`, review with "
-            "`config diff PLAN_ID`, then ask the operator to apply with `claudlobby --root <data-root> host activate PLAN_ID --install-directory <native-user-unit-dir>`."
+            "then ask the operator to apply it with "
+            "`claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`."
         )
 
 

@@ -1319,13 +1319,13 @@ def check_manifest_provenance(
     prov = read_manifest_provenance(paths)
     if prov is None:
         report.add("manifest-provenance", "warn",
-                   "composed by a claudlobby without provenance — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>` to record its source")
+                   "composed by a claudlobby without provenance — apply the configuration with `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` to record its source")
         return
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA:
         report.add("manifest-provenance", "warn",
                    f"provenance schema {prov.get('schema')!r} is not the "
                    f"{MANIFEST_PROVENANCE_SCHEMA} this build reads — not "
-                   "interpreting it; stage a config plan for a sealed release and activate the returned plan to re-record")
+                   "interpreting it; apply the configuration with `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` to record it again")
         return
 
     changed = changed_manifest_inputs(fleet, paths, prov)
@@ -1337,7 +1337,7 @@ def check_manifest_provenance(
                    f"manifest changed since the running fleet was composed "
                    f"({', '.join(changed)}; composed {prov.get('composed_at')})"
                    + (f"; {how}" if how else "") +
-                   " — stage `claudlobby --root <data-root> config plan --release <sealed-release-id>` and activate the returned plan with `claudlobby --root <data-root> host activate <plan-id> --install-directory <native-user-unit-dir>`; activation restarts bots that read bot.conf and CLAUDE.md at session start")
+                   " — apply it with `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`; a bot reads bot.conf and CLAUDE.md at session start, so a running bot takes the change at its next restart")
         return
 
     # Compose-time conditions are reported even when nothing has changed since:
