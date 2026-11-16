@@ -1,8 +1,6 @@
-### Fixed — `bot handoff` says to repair a `.claude` redirected while it checks a save, and its hint names only the directories it refuses (#2935)
+### Fixed — `bot handoff` says to repair a `.claude` redirected while it checks a save (#2935)
 
-While the session has no handoff of its own, `bot handoff` checks the save in `.claude/session.md`. When `.claude` or the bot directory was redirected or not the user's own by then (it was changed while `bot handoff` ran), the answer's hint said to read `--check` until it reads `saved`, though `--check` cannot read `saved` until the directory is repaired. It now gives the hint a refused session handoff directory gets: repair the directory first, then read `--check`. One that is redirected before `bot handoff` starts is refused before anything is sent, as before.
-
-That hint also said a directory on the way is refused when it cannot be searched or read. Only one above the session's own directory is: when the session's own directory cannot be searched or read, the readers read `.claude/session.md`. And it said `--check` reads `unknown` (`file_unverified`) until the repair, which is not so while `.claude` is redirected: `--check` is then refused, at its read of the effective configuration. The hint now says both as they are.
+While the session has no handoff of its own, `bot handoff` checks the save in `.claude/session.md`. When `.claude` or the bot directory was redirected or not the user's own by then (it was changed while `bot handoff` ran), the answer's hint said to read `--check` until it reads `saved`, though `--check` cannot read `saved` until the directory is repaired, and `--check` is refused while `.claude` is redirected. It now gives the hint a refused session handoff directory gets: repair the directory first, then read `--check`. One that is redirected before `bot handoff` starts is refused before anything is sent, as before.
 
 ### Fixed — a stderr that cannot be written no longer turns an unreadable native-session receipt into a refusal (#2935)
 
