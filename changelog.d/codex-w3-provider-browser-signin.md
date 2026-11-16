@@ -124,3 +124,13 @@ comparison. The root-native exception does not change bot supervision or the
 mode-specific owner-socket defaults. Browser/root transport integration, native
 apt/systemd/LocalAPI compatibility and cold-host proof remain unqualified gates;
 this source candidate does not establish usable onboarding or host authority.
+
+### Added — Managed Apple Silicon runtime candidate
+
+A pure-stdlib managed runtime candidate supplies the fixed Python/Git/tmux/jq
+profile on Apple Silicon macOS 15+, with account-derived paths, exact-artifact
+readmission and original-request staging/discard. Installation, Git and native
+environment source integrate that exact profile; owner/provider source uses it
+with separate consents and adds no executable, sign-in or service authority.
+Private HTTPS Unix Serve and a useful native first team remain unqualified; this
+is not completed onboarding.

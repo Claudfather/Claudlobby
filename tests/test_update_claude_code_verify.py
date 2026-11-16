@@ -399,3 +399,26 @@ def test_only_the_first_stdout_line_carries_the_version(tmp_path, *, scratch_pla
     r = h.run()
     assert r.returncode == 1, r.stderr
     assert "printed no parseable version: Claude Code" in h.log()
+
+
+def test_updater_precondition_accepts_only_safe_version_bounder(tmp_path):
+    """Run the real precondition and version door, never an install/provider."""
+    from tests.test_claude_version import LIB, _managed_shell_context, _run, _stub
+    text = (LIB / "update-claude-code.sh").read_text()
+    start = text.index("# --- Every verdict below")
+    end = text.index("# --- Measure the fleet", start)
+    gate = text[start:end]
+    context = _managed_shell_context(tmp_path)
+    binary = _stub(tmp_path, "fixture-provider", healthy("2.1.281"))
+    prefix = (f'. "{LIB}/lib-common.sh"; _OS=Darwin; _TIMEOUT_BIN=""; '
+              'BOTS_DIR=""; log() { printf "LOG:%s\\n" "$*"; }; '
+              'emit_fleet_notice() { :; }; ')
+    tail = f'if measure_claude_version "{binary}"; then printf "MEASURED:%s" "$CLAUDE_VERSION"; fi'
+    result = _run(tmp_path, ["bash", "-c", prefix + gate + tail], **context)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "MEASURED:2.1.281", result.stdout
+    context["CLAUDLOBBY_INSTALLATION"] = tmp_path / "unadmitted"
+    result = _run(tmp_path, ["bash", "-c", prefix + gate + tail], **context)
+    assert result.returncode == 0, result.stderr
+    assert "UPDATE skipped" in result.stdout
+    assert "MEASURED" not in result.stdout

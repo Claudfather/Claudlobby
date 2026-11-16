@@ -158,9 +158,31 @@ unset _p
 # CLAUDLOBBY_TOOL_PREFIXES (colon-separated) substitutes the fallback list, so a
 # test or an unusual host can pin resolution — the same seam shape as
 # update-claude-code.sh's CLAUDE_UPDATE_FLEET_PATH. Set it empty to add nothing.
+# Consume the exact context emitted by canonical browser-install admission.
+# This is not a profile selector or a substitute for its receipt/tree checks.
+_managed_browser_python() {
+    [ "$_OS" = Darwin ] && [ -n "${HOME:-}" ] || return 1
+    local family="$HOME/.local/share/claudlobby-browser"
+    [ "${CLAUDLOBBY_ROOT:-}" = "$family/data" ] \
+        && [ "${CLAUDLOBBY_INSTALLATION:-}" = "$family/install" ] \
+        && [ "${CLAUDLOBBY_NATIVE_PYTHON:-}" = "$family/runtime/profile/python/bin/python3.12" ] \
+        && [ -x "$CLAUDLOBBY_NATIVE_PYTHON" ] || return 1
+    printf '%s' "$CLAUDLOBBY_NATIVE_PYTHON"
+}
+
+_managed_browser_tool_bin() {
+    _managed_browser_python >/dev/null || return 1
+    printf '%s' "$HOME/.local/share/claudlobby-browser/runtime/profile/bin"
+}
+
 own_tool_path() {
     # An unset HOME (a bare timer env) yields "/.local/bin" etc, which the -d
     # test below discards — so no set -u guard is needed on top.
+    local managed_bin
+    managed_bin="$(_managed_browser_tool_bin || true)"
+    if [ -n "$managed_bin" ]; then
+        case "$PATH" in "$managed_bin"|"$managed_bin":*) ;; *) PATH="$managed_bin:$PATH" ;; esac
+    fi
     local d IFS=:
     # shellcheck disable=SC2086  # deliberate split on the colon-separated list
     set -- ${CLAUDLOBBY_TOOL_PREFIXES-${_HOMEBREW:+$_HOMEBREW/bin:}${HOME:-}/.local/bin:${HOME:-}/.bun/bin:${HOME:-}/.npm-global/bin}
@@ -259,6 +281,9 @@ except OSError as e:
 # job once kept its own copy of this order, and with the user prefixes first it
 # updated a shadow copy while every bot ran another (#635).
 fleet_launch_path() {
+    local managed_bin
+    managed_bin="$(_managed_browser_tool_bin || true)"
+    [ -z "$managed_bin" ] || printf '%s:' "$managed_bin"
     printf '%s' "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}"
 }
 
@@ -295,7 +320,12 @@ fleet_claude_path() {
 # it is a caller whose own resolution found nothing, and it is reported as such.
 # Each run is bounded (CLAUDE_VERSION_TIMEOUT_S, default 10): a binary that hangs
 # is could-not-measure, never a wait that holds a generate or a timer open.
-# Without timeout/gtimeout, refuse instead of the generic helper's bare run.
+# Without timeout/gtimeout use only the exact admitted managed Mac Python.
+# All other installations retain the loud missing-bounder refusal.
+claude_version_bounder_available() {
+    [ -n "$_TIMEOUT_BIN" ] || _managed_browser_python >/dev/null
+}
+
 measure_claude_version() {
     CLAUDE_VERSION=""
     CLAUDE_VERSION_WHY=""
@@ -305,27 +335,109 @@ measure_claude_version() {
         CLAUDE_VERSION_WHY="no claude binary resolved"
         return 1
     fi
-    if [ -z "$_TIMEOUT_BIN" ]; then
-        CLAUDE_VERSION_WHY="timeout/gtimeout unavailable; install coreutils to bound --version"
+    if ! claude_version_bounder_available; then
+        CLAUDE_VERSION_WHY="timeout/gtimeout unavailable; no admitted Python to bound --version"
         return 1
+    fi
+    local python="" probe=""
+    if [ -z "$_TIMEOUT_BIN" ]; then
+        python="$(_managed_browser_python)"
+        # Version measurement only: no generic command runner or PATH Python.
+        probe='
+import math, os, selectors, signal, subprocess, sys, time
+try:
+    seconds = float(sys.argv[1])
+    if not math.isfinite(seconds) or not 0 < seconds <= 120:
+        raise ValueError()
+except ValueError:
+    sys.exit(125)
+try:
+    child = subprocess.Popen([sys.argv[2], "--version"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True, close_fds=True)
+except OSError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(127)
+selector = selectors.DefaultSelector()
+streams = {child.stdout: bytearray(), child.stderr: bytearray()}
+for stream in streams:
+    os.set_blocking(stream.fileno(), False)
+    selector.register(stream, selectors.EVENT_READ)
+deadline = time.monotonic() + seconds
+rc = None
+try:
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            rc = 124
+            break
+        for key, _ in selector.select(min(remaining, 0.05)):
+            chunk = os.read(key.fd, 4096)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            output = streams[key.fileobj]
+            if len(output) + len(chunk) > 16384:
+                rc = 125
+                break
+            output.extend(chunk)
+        if rc is not None:
+            break
+    if rc is None:
+        try:
+            rc = child.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            rc = 124
+finally:
+    # Own the entire child group, even when its leader exits before a child.
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    end = time.monotonic() + 0.1
+    while selector.get_map() and time.monotonic() < end:
+        for key, _ in selector.select(0.01):
+            if not os.read(key.fd, 4096):
+                selector.unregister(key.fileobj)
+    child.poll()  # Reap a terminated leader before signalling its remaining group.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait(timeout=1)
+    selector.close()
+    for stream in streams:
+        stream.close()
+sys.stdout.buffer.write(streams[child.stdout])
+sys.stderr.buffer.write(streams[child.stderr])
+sys.exit(rc if rc >= 0 else 128 - rc)
+'
     fi
     # Settled inside the substitution (|| exit) so install_error_trap never sees
     # the failing binary. Unneeded on bash 5.2 (measured: callers are all `if`s,
     # whose ERR suppression reaches in); kept for bash 3.2, unmeasured.
-    out="$(with_timeout "$secs" "$p" --version 2>/dev/null || exit $?)" || rc=$?
+    if [ -n "$python" ]; then
+        out="$("$python" -I -S -c "$probe" "$secs" "$p" 2>/dev/null || exit $?)" || rc=$?
+    else
+        out="$(with_timeout "$secs" "$p" --version 2>/dev/null || exit $?)" || rc=$?
+    fi
     first="${out%%$'\n'*}"
     if [ "$rc" -eq 0 ] && [[ $first =~ $re ]]; then
         CLAUDE_VERSION="${BASH_REMATCH[0]}"
         return 0
     fi
-    if [ "$rc" -eq 124 ] && [ -n "$_TIMEOUT_BIN" ]; then
+    if [ "$rc" -eq 124 ]; then
         CLAUDE_VERSION_WHY="$p --version did not finish within ${secs}s"
         return 1
     fi
     # Could not measure: say why in the binary's own words. stderr is where a
     # binary that cannot run explains itself; the read above discards it so a
     # warning can never be parsed as the version.
-    said="$(with_timeout "$secs" "$p" --version 2>&1 || true)"
+    if [ -n "$python" ]; then
+        said="$("$python" -I -S -c "$probe" "$secs" "$p" 2>&1 || true)"
+    else
+        said="$(with_timeout "$secs" "$p" --version 2>&1 || true)"
+    fi
     said="${said%%$'\n'*}"
     if [ "$rc" -ne 0 ]; then
         CLAUDE_VERSION_WHY="$p --version exited $rc"

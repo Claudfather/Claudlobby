@@ -17,6 +17,7 @@ import pytest
 @pytest.fixture
 def install(tmp_path, monkeypatch):
     from claudlobby import provider_install as p
+    monkeypatch.setattr(p.platform, "system", lambda: "Linux")
     home = tmp_path.resolve() / "account"
     target = home / ".local/share/claudlobby-browser/provider-bin/claude"
     target.parent.mkdir(parents=True, mode=0o700)
@@ -322,7 +323,7 @@ def test_exact_production_artifact_policy_matches_reviewed_signin(machine, key, 
 
 
 @pytest.mark.parametrize("system,machine,release,libc", [
-    ("Darwin", "arm64", {"ID":"ubuntu", "VERSION_ID":"24.04"}, "glibc 2.39"),
+    ("Darwin", "x86_64", {"ID":"ubuntu", "VERSION_ID":"24.04"}, "glibc 2.39"),
     ("Linux", "riscv64", {"ID":"ubuntu", "VERSION_ID":"24.04"}, "glibc 2.39"),
     ("Linux", "x86_64", {"ID":"ubuntu", "VERSION_ID":"22.04"}, "glibc 2.35"),
     ("Linux", "x86_64", {"ID":"debian", "VERSION_ID":"12"}, "glibc 2.36"),
@@ -345,6 +346,7 @@ def test_unsupported_host_never_selects_an_artifact(system, machine, release, li
     (b"HTTP/1.1 503 No\r\nContent-Length: 3\r\n\r\nabc", False)])
 def test_download_worker_validates_actual_http_response_without_following_redirects(response, ok, monkeypatch):
     from claudlobby import provider_install as p
+    monkeypatch.setattr(p.platform, "system", lambda: "Linux")
     received = []
     class Connection:
         def __init__(self, host, **kw):
@@ -418,3 +420,122 @@ def test_real_isolated_worker_cannot_resolve_an_arbitrary_artifact(install):
     with pytest.raises(f.p._Refused) as refused:
         list(f.p._download(artifact, f.p.time.monotonic() + 2, None, f.p.time.monotonic))
     assert refused.value.reason == "download_failed"
+
+
+@pytest.fixture
+def darwin_policy(tmp_path, monkeypatch):
+    from pathlib import Path
+    from claudlobby import provider_install as p
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    profile = SimpleNamespace(uid=os.getuid(), account="selected", home=home,
+        python=Path(sys.executable).resolve(),
+        ca_bundle=home / ".local/share/claudlobby-browser/runtime/profile/ca-bundle.pem")
+    class RuntimeRefusal(Exception): pass
+    calls = []
+    def admit(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["expected_uid"] == os.getuid()
+        assert kwargs["expected_account"] in (None, "selected")
+        return profile
+    policy = SimpleNamespace(admit_profile=admit, RuntimeRefusal=RuntimeRefusal)
+    monkeypatch.setattr(p, "_darwin_runtime", lambda: policy)
+    monkeypatch.setattr(p.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(p.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(p.pwd, "getpwnam", lambda _: SimpleNamespace(
+        pw_name="selected", pw_uid=os.getuid(), pw_dir=str(home)))
+    return SimpleNamespace(p=p, profile=profile, policy=policy, calls=calls)
+
+
+def test_darwin_exact_artifact_matches_retained_static_and_signin_policy(darwin_policy):
+    from claudlobby.plane.provider_signin import SUPPORTED
+    f = darwin_policy
+    artifact = f.p._artifact()
+    assert (artifact.platform, artifact.version, artifact.size, artifact.sha256) == (
+        "darwin-arm64", "2.1.325", 347406976,
+        "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2")
+    assert artifact.url == "https://downloads.claude.ai/claude-code-releases/2.1.325/darwin-arm64/claude"
+    assert SUPPORTED[artifact.sha256] == artifact.version and f.calls
+
+
+@pytest.mark.parametrize("defect", ["runtime", "python", "account-home", "intel"])
+def test_darwin_provider_refuses_before_target_or_child_effects(darwin_policy, monkeypatch, defect):
+    f = darwin_policy
+    if defect == "runtime":
+        def refuse(**_kw): raise f.policy.RuntimeRefusal()
+        f.policy.admit_profile = refuse
+    elif defect == "python":
+        f.profile.python = f.profile.home / "different-python"
+    elif defect == "account-home":
+        monkeypatch.setattr(f.p.pwd, "getpwnam", lambda _: SimpleNamespace(
+            pw_name="selected", pw_uid=os.getuid(), pw_dir=str(f.profile.home / "other-home")))
+    else:
+        monkeypatch.setattr(f.p.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(f.p, "_Directories", lambda *_a: pytest.fail("opened provider target"))
+    monkeypatch.setattr(f.p.subprocess, "Popen", lambda *_a, **_kw: pytest.fail("started child"))
+    for operation in (f.p.status, f.p.prepare):
+        result = operation("selected", os.getuid())
+        assert result.state == "blocked"
+    assert list(f.profile.home.iterdir()) == []
+
+
+def test_darwin_worker_uses_only_profile_ca_despite_ambient_trust(darwin_policy, monkeypatch):
+    f = darwin_policy
+    monkeypatch.setenv("SSL_CERT_FILE", "/untrusted-ca")
+    monkeypatch.setenv("HTTPS_PROXY", "http://untrusted.invalid")
+    certificates, requests = [], []
+    class Connection:
+        def __init__(self, host, **kw):
+            assert host == "downloads.claude.ai"
+        def request(self, method, path, headers): requests.append((method, path, headers))
+        def getresponse(self):
+            class Sock:
+                def makefile(self, *a, **kw):
+                    return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
+            response = http.client.HTTPResponse(Sock()); response.begin(); return response
+        def close(self): pass
+    monkeypatch.setattr(f.p.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(f.p.ssl.SSLContext, "load_verify_locations", lambda _self, **kw: certificates.append(kw))
+    output = io.BytesIO()
+    assert f.p._worker_transfer(f.p._ARTIFACTS["darwin-arm64"].path, 3, output)
+    assert output.getvalue() == b"abc"
+    assert certificates == [{"cafile": str(f.profile.ca_bundle)}] and len(requests) == 1
+
+
+def test_darwin_download_child_has_exact_python_no_site_no_bytecode_and_empty_environment(darwin_policy):
+    f = darwin_policy
+    children = []
+    artifact = f.p.Artifact("darwin-arm64", "2.1.325", 3, hashlib.sha256(b"abc").hexdigest())
+    def spawn(args, **kw):
+        assert args[:5] == [str(f.profile.python), "-I", "-S", "-B", "-c"]
+        assert args[-1] == "darwin-arm64" and kw["env"] == {}
+        assert kw["stdin"] == subprocess.DEVNULL and kw["close_fds"] is True
+        child = subprocess.Popen([str(f.profile.python), "-I", "-S", "-B", "-c",
+                                  "import os;os.write(1,b'abc')"], **kw)
+        children.append(child)
+        return child
+    assert b"".join(f.p._download(artifact, f.p.time.monotonic() + 5, None,
+                                  f.p.time.monotonic, spawn=spawn)) == b"abc"
+    assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_real_isolated_provider_loader_imports_only_fixed_canonical_sibling(tmp_path, monkeypatch):
+    from pathlib import Path
+    from claudlobby import provider_install as p
+    source = tmp_path / "owned-source"; source.mkdir()
+    module = source / "provider_install.py"; module.write_bytes(Path(p.__file__).read_bytes())
+    (source / "darwin_runtime.py").write_text(
+        "from dataclasses import dataclass\nimport sys\n"
+        "assert sys.flags.isolated and sys.flags.no_site and sys.flags.dont_write_bytecode\n"
+        "@dataclass(frozen=True)\nclass Profile: marker:str='fixed-sibling'\n"
+        "def admit_profile(): return Profile()\n")
+    decoy = tmp_path / "unselected"; decoy.mkdir()
+    (decoy / "darwin_runtime.py").write_text("raise AssertionError('ambient module loaded')\n")
+    monkeypatch.setenv("PYTHONPATH", str(decoy))
+    monkeypatch.setenv("CLAUDLOBBY_NATIVE_PYTHON", str(decoy / "unselected-python"))
+    command = ("import runpy;ns=runpy.run_path(" + repr(str(module)) + ");"
+               "policy=ns['_darwin_runtime']();print(policy.admit_profile().marker)")
+    # Only trusted test Python and synthetic stdlib source execute; no vendor binary.
+    result = subprocess.run([str(Path(sys.executable).resolve()), "-I", "-S", "-B", "-c", command],
+                            env={}, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0 and result.stdout == "fixed-sibling\n" and result.stderr == ""
+    assert not list(tmp_path.rglob("__pycache__"))

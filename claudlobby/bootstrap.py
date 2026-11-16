@@ -113,6 +113,11 @@ def _browser_environment(installation):
     family = home / ".local/share/claudlobby-browser"
     if installation.directory != family / "install" or installation.data_root != family / "data":
         raise BundleError("browser preparation requires the fixed account paths")
+    from .installation import managed_browser_environment
+    managed = managed_browser_environment(installation)
+    if managed is not None:
+        return {**managed, "PIP_CONFIG_FILE": os.devnull, "PIP_NO_INPUT": "1",
+                "PLANE_EMIT_DISABLED": "1", "TMPDIR": str(family / "staging")}
     return {"PATH": "/usr/bin:/bin", "HOME": str(home), "LANG": "C.UTF-8",
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
@@ -185,7 +190,7 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
     """
     import fcntl
     import runpy
-    from .installation import Installation, write_installation
+    from .installation import Installation, write_installation, managed_browser_runtime, _managed_git_flags
     from .git_update import (_write, validate_dependency_lock, run_dependency_command,
                              install_locked_dependencies, verify_locked_dependencies)
 
@@ -204,7 +209,14 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
     if isolated and (not callable(_browser_runner) or _preparation_lock_fd is None
                      or remote != _BROWSER_REMOTE or re.fullmatch(r"[0-9a-f]{40}", ref) is None):
         raise BundleError("browser preparation requires its fixed pinned profile and canonical lock")
+    profile = managed_browser_runtime(installation)
+    if profile is not None and interpreter != profile.python:
+        raise BundleError("browser preparation requires the exact managed Darwin Python")
+    if profile is not None and (remote != _BROWSER_REMOTE or re.fullmatch(r"[0-9a-f]{40}", ref) is None):
+        raise BundleError("browser preparation requires its fixed public remote and commit pin")
     clean_environment = _browser_environment(installation) if isolated else None
+    git_binary = str(profile.git) if profile is not None else "/usr/bin/git"
+    git_safety = _managed_git_flags() if profile is not None else _GIT_SAFETY
     if isolated:
         _browser_data_preflight(installation.data_root)
     installation.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -252,13 +264,19 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
                                    env=clean_environment, timeout=timeout)
         def policy_git(command):
             _checked_git_config(installation.source)
-            return isolated_command(["/usr/bin/git", *_GIT_SAFETY, *command[2:]], timeout=15)
+            return isolated_command([git_binary, *git_safety, *command[command.index("-C"):]], timeout=15)
         def preflight():
             if isolated:
                 return installation.preflight(expected_revision=revision, _run_git=policy_git)
             return installation.preflight(expected_revision=revision)
         def dependency(arguments):
+            arguments = [str(value) for value in arguments]
+            if profile is not None and "pip" in arguments:
+                position = arguments.index("pip") + 1
+                arguments[position:position] = ["--cert", str(profile.ca_bundle)]
             if not isolated:
+                if profile is not None:
+                    return run_dependency_command(arguments, _managed_environment=_browser_environment(installation))
                 return run_dependency_command(arguments)
             arguments = [str(value) for value in arguments]
             if "pip" in arguments:
@@ -270,14 +288,19 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         def git(*arguments, check=True):
             if isolated:
                 _checked_git_config(installation.source)
-                result = isolated_command(["/usr/bin/git", *_GIT_SAFETY,
+                result = isolated_command([git_binary, *git_safety,
                                            "-C", str(installation.source), *arguments])
                 if check and result.returncode:
                     raise BundleError("managed Git preparation refused; existing files were retained")
                 return result
             environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+            command = ['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null']
+            if profile is not None:
+                from .darwin_runtime import environment as runtime_environment
+                environment = runtime_environment(profile)
+                command = [git_binary, *git_safety]
             try:
-                result = subprocess.run(['git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+                result = subprocess.run([*command,
                     '-C', str(installation.source), *arguments], env=environment, capture_output=True,
                     timeout=300, check=False)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -356,7 +379,7 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             dependency([python, '-I', '-m', 'pip', '--isolated', 'download',
                 '--disable-pip-version-check', '--only-binary=:all:', '--require-hashes', '--no-deps',
                 '--dest', wheels, '-r', frozen_lock])
-            if isolated:
+            if isolated or profile is not None:
                 install_locked_dependencies(python, frozen_lock, wheels, runner=dependency)
             else:
                 install_locked_dependencies(python, frozen_lock, wheels)
@@ -380,7 +403,7 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
         wheels = installation.directory / 'cache/bootstrap-wheels'
         if wheels.is_symlink() or wheels.resolve() != wheels or wheels.exists() and not wheels.is_dir():
             raise BundleError("dependency preparation cache is redirected")
-        if isolated:
+        if isolated or profile is not None:
             verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None, runner=dependency)
         else:
             verify_locked_dependencies(python, lock, wheels if wheels.is_dir() else None)

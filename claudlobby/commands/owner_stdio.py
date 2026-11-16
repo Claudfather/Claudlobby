@@ -306,7 +306,7 @@ def _admit(args, request):
     from ..plane.owner_source import fresh_owner_setup
     _selectors(args)
     uid = os.getuid()
-    if uid == 0 or uid != os.geteuid() or uid != request["expected_uid"] or not sys.platform.startswith("linux"):
+    if uid == 0 or uid != os.geteuid() or uid != request["expected_uid"] or not (sys.platform.startswith("linux") or sys.platform == "darwin"):
         raise StdioRefused("account_changed")
     root = Path(pwd.getpwuid(uid).pw_dir) / ".local/share/claudlobby-browser/data"
     if not root.is_absolute() or root.resolve() != root or Path(args.root) != root:

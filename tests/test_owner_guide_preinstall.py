@@ -109,6 +109,7 @@ def snapshot(root):
 @pytest.fixture
 def installed(tmp_path, monkeypatch):
     module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
     home = tmp_path / "account"
     home.mkdir(mode=0o700)
     family = home / ".local/share/claudlobby-browser"
@@ -239,7 +240,8 @@ def test_original_finish_preserves_historical_preparation_without_installer_reco
 def test_actual_fixed_exec_preserves_normal_hello_and_following_guide_input(installed, tmp_path, action, flag):
     module, home, _install, value, python = installed
     driver = tmp_path / "public-fixture-driver.py"
-    driver.write_text("import pathlib,sys,types\n"
+    driver.write_text("import pathlib,sys,types,platform\n"
+        "platform.system=lambda: 'Linux'\n"
         "script,home,python,action=sys.argv[1:]\n"
         "body=pathlib.Path(script).read_text().split('# BEGIN EMBEDDED PYTHON\\n',1)[1].split('# END EMBEDDED PYTHON\\n',1)[0]\n"
         "m=types.ModuleType('fixture');exec(compile(body,script,'exec'),m.__dict__)\n"
@@ -261,3 +263,43 @@ def test_actual_fixed_exec_preserves_normal_hello_and_following_guide_input(inst
 def test_generated_selector_list_stays_with_canonical_owner():
     from claudlobby.commands.host_owner import _GENERATED
     assert payload().GENERATED == set(_GENERATED)
+
+
+def test_darwin_guide_uses_closed_runtime_tools_and_refuses_python_drift(tmp_path, monkeypatch):
+    from tests.test_host_install import _darwin_policy_fixture
+    module = payload(); home = tmp_path / "account"; home.mkdir(mode=0o700)
+    profile, _policy, environment = _darwin_policy_fixture(module, home, monkeypatch)
+    monkeypatch.setattr(module.sys, "executable", str(profile.python))
+    monkeypatch.setattr(module.sys, "prefix", module.sys.base_prefix)
+    assert module.account_profile(os.geteuid()) == home
+    assert module.independent_python() == profile.python
+    monkeypatch.setenv("GIT_EXEC_PATH", "FOREIGN-HELPER")
+    monkeypatch.setenv("SSL_CERT_FILE", "FOREIGN-CA")
+    assert module.git_environment(home) == environment
+    monkeypatch.setattr(module.sys, "executable", str(home / "other-python"))
+    with pytest.raises(module.Refusal) as error: module.independent_python()
+    assert error.value.code == "prerequisite_unusable"
+
+
+def test_shared_darwin_loader_cleanup_preserves_inherited_operator_evidence():
+    shell = SCRIPT.read_text().split("# BEGIN DARWIN EXISTING PYTHON SHELL\n", 1)[1].split(
+        "# END DARWIN EXISTING PYTHON SHELL\n", 1)[0]
+    definitions = shell.split("darwin_native() {", 1)[0]
+    # Fixed shell fixture only: no runtime tool or native platform operation.
+    script = definitions + """
+DYLD_FIXTURE_ONLY=loader-sentinel
+LD_FIXTURE_ONLY=loader-sentinel
+BOT_ID=bot-evidence
+CLAUDLOBBY_ROOT=root-evidence
+BASH_ENV=never-source
+ENV=never-source
+darwin_clean_loader_environment || exit 20
+[ -z "${DYLD_FIXTURE_ONLY+x}${LD_FIXTURE_ONLY+x}${BASH_ENV+x}${ENV+x}" ] || exit 21
+[ "$BOT_ID" = bot-evidence ] && [ "$CLAUDLOBBY_ROOT" = root-evidence ] || exit 22
+readonly LD_REFUSE_FIXTURE=retained
+darwin_clean_loader_environment >/dev/null 2>&1 && exit 23
+exit 0
+"""
+    result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                            env=constructed_env(), capture_output=True, timeout=5)
+    assert result.returncode == 0 and result.stdout == b"" and result.stderr == b""

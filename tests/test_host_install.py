@@ -50,6 +50,7 @@ def snapshot(root):
 
 
 def profile(module, tmp_path, monkeypatch):
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
     home = tmp_path / "account"
     home.mkdir(mode=0o700)
     python = Path(sys.executable).resolve()
@@ -254,6 +255,7 @@ def test_bootstrap_borrowed_lock_is_verified_not_an_integer_bypass(tmp_path, kin
 def test_bootstrap_isolation_drops_ambient_configuration(tmp_path, monkeypatch):
     from claudlobby import bootstrap
     from claudlobby.installation import Installation
+    monkeypatch.setattr(__import__("platform"), "system", lambda: "Linux")
     home = tmp_path / "account"
     monkeypatch.setattr(bootstrap.pwd, "getpwuid", lambda _uid: types.SimpleNamespace(pw_dir=str(home)))
     for key in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "HTTPS_PROXY",
@@ -319,7 +321,8 @@ def invoke_fixture(tmp_path, home, local_install_source, action, *, fail_downloa
     # Separate interpreter: the payload must import only its newly verified stage.
     # The two test adapters replace platform admission and the network with owned
     # local fixtures; Git, venv, pip, bootstrap, receipts and stable entries are real.
-    driver.write_text('''import sys,types,json,os,pwd
+    driver.write_text('''import sys,types,json,os,pwd,platform
+platform.system=lambda: "Linux"
 from pathlib import Path
 body=Path(sys.argv[1]).read_text().split("# BEGIN EMBEDDED PYTHON\\n",1)[1].split("# END EMBEDDED PYTHON\\n",1)[0]
 m=types.ModuleType("isolated_operation");exec(compile(body,sys.argv[1],"exec"),m.__dict__)
@@ -473,8 +476,9 @@ def test_incomplete_startup_admission_refuses_package_hooks_and_redirected_libra
     assert snapshot(tmp_path) == before
 
 
-def test_fixed_git_environment_disables_replacement_refs_for_exact_pin(tmp_path):
+def test_fixed_git_environment_disables_replacement_refs_for_exact_pin(tmp_path, monkeypatch):
     module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
     source = tmp_path / "source"; source.mkdir(mode=0o700)
     home = tmp_path / "account"; home.mkdir(mode=0o700)
     def fixture_git(*args):
@@ -521,3 +525,78 @@ def test_completed_preparation_missing_inactive_skeleton_refuses_without_repair(
     assert result["code"] == "identity_changed" and result["next"] == "inspect"
     assert not result["prepared"] and not result["activated"] and inspected.stderr == b""
     assert snapshot(home) == before and record.read_bytes() == receipt_bytes
+
+
+def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
+    canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
+    entry = (ROOT / "claudlobby/preinstall/darwin-runtime-v1.sh").read_text()
+    begin, end = "# BEGIN CANONICAL DARWIN RUNTIME PYTHON\n", "# END CANONICAL DARWIN RUNTIME PYTHON\n"
+    for path in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh", ROOT / "claudlobby/installation.py"):
+        assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == canonical
+    begin, end = "# BEGIN DARWIN EXISTING PYTHON SHELL\n", "# END DARWIN EXISTING PYTHON SHELL\n"
+    selector = entry.split(begin, 1)[1].split(end, 1)[0]
+    for path in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
+        assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == selector
+
+
+def _darwin_policy_fixture(module, home, monkeypatch):
+    profile = types.SimpleNamespace(uid=os.geteuid(), account="fixture", home=home,
+        root=home / ".local/share/claudlobby-browser/runtime/profile",
+        python=home / "fixed-python", git=home / "fixed-git",
+        ca_bundle=home / ".local/share/claudlobby-browser/runtime/profile/ca.pem")
+    class RuntimeRefusal(Exception):
+        def __init__(self, code): self.code = code
+    def admit(**values):
+        assert values == {"expected_uid": os.geteuid(), "expected_account": "fixture"}
+        return profile
+    environment = {"PATH": str(profile.root / "bin") + ":/usr/bin:/bin", "HOME": str(home),
+                   "GIT_EXEC_PATH": str(profile.root / "git/libexec/git-core"),
+                   "GIT_TEMPLATE_DIR": str(profile.root / "git/share/git-core/templates"),
+                   "GIT_SSL_CAINFO": str(profile.root / "ca.pem"),
+                   "GIT_ASKPASS": "/usr/bin/false", "SSL_CERT_FILE": str(profile.root / "ca.pem")}
+    policy = types.SimpleNamespace(admit_profile=admit, environment=lambda actual: environment.copy(),
+                                   RuntimeRefusal=RuntimeRefusal)
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.pwd, "getpwuid", lambda uid: types.SimpleNamespace(pw_dir=str(home), pw_name="fixture"))
+    monkeypatch.setattr(module, "_darwin_runtime", lambda: policy)
+    return profile, policy, environment
+
+
+def test_darwin_installer_uses_admitted_python_git_ca_and_exact_runtime_family(tmp_path, monkeypatch):
+    module = payload()
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    profile, policy, environment = _darwin_policy_fixture(module, home, monkeypatch)
+    assert module.account_profile(os.geteuid()) == home
+    monkeypatch.setattr(module.sys, "executable", str(profile.python))
+    monkeypatch.setattr(module.sys, "prefix", module.sys.base_prefix)
+    assert module.independent_python() == profile.python
+    env = module.fixed_environment(home)
+    assert all(env[key] == value for key, value in environment.items())
+    calls = []
+    module.git(lambda args, **kw: calls.append((args, kw)) or subprocess.CompletedProcess(args, 0),
+               env, tmp_path / "uncreated-source", "status")
+    assert calls[0][0][0] == str(profile.git)
+    assert "core.askPass=/usr/bin/false" in calls[0][0]
+    install, data, staging = create_paths(module, home)
+    runtime = profile.root.parent; runtime.mkdir(mode=0o700)
+    assert module.paths(home) == (install, data, staging)
+    (runtime.parent / "unknown").mkdir()
+    with pytest.raises(module.Refusal):
+        module.paths(home)
+    assert (runtime.parent / "unknown").exists()
+    monkeypatch.setattr(module.sys, "executable", str(home / "other-python"))
+    with pytest.raises(module.Refusal): module.independent_python()
+
+
+def test_darwin_runtime_refusal_precedes_installer_paths_and_children(tmp_path, monkeypatch):
+    module = payload(); home = tmp_path / "account"; home.mkdir(mode=0o700)
+    _profile, policy, _environment = _darwin_policy_fixture(module, home, monkeypatch)
+    def refuse(**_values): raise policy.RuntimeRefusal("unsupported_architecture")
+    policy.admit_profile = refuse
+    before = snapshot(home)
+    monkeypatch.setattr(module, "claim_paths", lambda *_args: pytest.fail("created paths"))
+    for action in ("prepare", "status"):
+        with pytest.raises(module.Refusal) as error:
+            module.execute(action, {"expected_uid": os.geteuid(), "source_revision": REVISION}, time.monotonic() + 15)
+        assert error.value.code == "unsupported_architecture"
+    assert snapshot(home) == before

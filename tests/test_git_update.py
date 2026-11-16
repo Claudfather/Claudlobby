@@ -2700,3 +2700,80 @@ def test_application_authorization_failure_without_record_reports_actual_boundar
         assert store.load() is None
     monkeypatch.undo()
     assert installation.preflight() == before
+
+
+def test_exact_darwin_browser_preflight_and_update_reestablish_verified_git_environment(tmp_path, monkeypatch):
+    from claudlobby import installation as locations, git_update as updater, bootstrap
+    from tests.test_host_install import _darwin_policy_fixture
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    profile, _policy, environment = _darwin_policy_fixture(locations, home, monkeypatch)
+    family = home / ".local/share/claudlobby-browser"
+    installation = locations.Installation(family / "install", family / "data")
+    monkeypatch.setenv("GIT_EXEC_PATH", "FOREIGN-HELPER")
+    monkeypatch.setenv("GIT_SSL_CAINFO", "FOREIGN-CA")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("DYLD_LIBRARY_PATH", "FOREIGN-LOADER")
+    monkeypatch.setenv("HTTPS_PROXY", "FOREIGN-PROXY")
+    seen = []
+    def run(args, **kwargs):
+        seen.append((args, kwargs))
+        text = kwargs.get("text")
+        answer = "" if "status" in args else str(installation.source) if "--show-toplevel" in args else "a" * 40
+        return subprocess.CompletedProcess(args, 0, answer if text else answer.encode(), "" if text else b"")
+    monkeypatch.setattr(locations.subprocess, "run", run)
+    assert installation.preflight() == "a" * 40
+    updater._git(installation, "rev-parse", "HEAD")
+    for args, options in seen:
+        assert args[0] == str(profile.git)
+        assert "core.hooksPath=/dev/null" in args and "credential.helper=" in args
+        assert "core.askPass=/usr/bin/false" in args
+        assert all(options["env"][key] == value for key, value in environment.items())
+        assert not {"GIT_CONFIG_COUNT", "DYLD_LIBRARY_PATH", "HTTPS_PROXY"} & options["env"].keys()
+    assert locations.managed_browser_runtime(locations.Installation(tmp_path / "generic", tmp_path / "data")) is None
+    other_installation = locations.Installation(family / "install", tmp_path / "other-data")
+    assert locations.managed_browser_runtime(other_installation) is None
+    assert other_installation.preflight() == "a" * 40
+    assert seen[-1][0][0] == "git"
+    assert locations.managed_browser_environment(installation) == environment
+    assert bootstrap._browser_environment(installation)["GIT_EXEC_PATH"] == environment["GIT_EXEC_PATH"]
+    profile.python.parent.mkdir(exist_ok=True)
+    profile.python.write_text("fixed fixture"); profile.python.chmod(0o700)
+    other = home / "other-python"; other.write_text("other fixture"); other.chmod(0o700)
+    with pytest.raises(bootstrap.BundleError, match="exact managed Darwin Python"):
+        bootstrap.prepare_git_installation(installation.directory, installation.data_root,
+            remote="https://example.invalid/public.git", ref="a" * 40, interpreter=other)
+    assert not installation.directory.exists()
+    with pytest.raises(bootstrap.BundleError, match="fixed public remote"):
+        bootstrap.prepare_git_installation(installation.directory, installation.data_root,
+            remote="https://example.invalid/public.git", ref="a" * 40, interpreter=profile.python)
+    store = object.__new__(updater.UpdateStore)
+    store.installation = installation
+    dependency_calls = []
+    monkeypatch.setattr(updater, "run_dependency_command", lambda args, **options:
+        dependency_calls.append((args, options)) or b"fixture dependency result")
+    assert store._dependency_run([profile.python, "-I", "-m", "pip", "download"]) == b"fixture dependency result"
+    assert dependency_calls == [([str(profile.python), "-I", "-m", "pip", "--cert",
+        str(profile.ca_bundle), "download"], {"_managed_environment": environment})]
+    with pytest.raises(updater.UpdateError, match="exact managed Darwin Python"):
+        store._dependency_binding({}, other)
+    assert not installation.directory.exists()
+    installation.bin.mkdir(mode=0o700, parents=True)
+    installation.cli.write_bytes(("#!" + str(other) + "\nfixture body\n").encode())
+    installation.cli.chmod(0o700)
+    with pytest.raises(locations.InstallationError, match="exact managed Darwin Python"):
+        locations._entry_python(installation)
+
+
+def test_darwin_update_runtime_refusal_has_no_git_or_receipt_effect(tmp_path, monkeypatch):
+    from claudlobby import installation as locations, git_update as updater
+    from tests.test_host_install import _darwin_policy_fixture
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    _profile, policy, _environment = _darwin_policy_fixture(locations, home, monkeypatch)
+    family = home / ".local/share/claudlobby-browser"
+    installation = locations.Installation(family / "install", family / "data")
+    def refuse(**_values): raise policy.RuntimeRefusal("runtime_identity_changed")
+    policy.admit_profile = refuse
+    monkeypatch.setattr(updater.subprocess, "run", lambda *_a, **_kw: pytest.fail("Git ran before runtime admission"))
+    with pytest.raises(updater.UpdateError, match="runtime_identity_changed"):
+        updater._git(installation, "status")
+    assert not installation.directory.exists()

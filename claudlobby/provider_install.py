@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import http.client
+import importlib.util
 import os
 from pathlib import Path
 import platform
@@ -45,6 +46,10 @@ class Artifact:
 # package/claude bytes. The official install.sh grounds this versioned raw route.
 # Additions require the same distribution/protocol inspection as provider_signin.
 _ARTIFACTS = {
+    # Official immutable manifest plus retained static Apple signature proof;
+    # this record makes no native execution or manifest-GPG acceptance claim.
+    "darwin-arm64": Artifact("darwin-arm64", "2.1.325", 347406976,
+        "84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2"),
     "linux-x64": Artifact("linux-x64", "2.1.325", 365842960,
         "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf"),
     "linux-arm64": Artifact("linux-arm64", "2.1.325", 364701112,
@@ -71,7 +76,40 @@ class _Refused(Exception):
         self.unknown = unknown
 
 
+def _darwin_runtime():
+    if __package__:
+        from . import darwin_runtime
+        return darwin_runtime
+    # The isolated stdlib child has no importable application package. Load only
+    # the canonical sibling of this already selected source-owned module.
+    name = "_claudlobby_provider_darwin_runtime"
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().with_name("darwin_runtime.py"))
+    if spec is None or spec.loader is None:
+        raise _Refused("runtime_not_admitted")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _darwin_profile(*, expected_uid=None, expected_account=None):
+    policy = _darwin_runtime()
+    try:
+        profile = policy.admit_profile(expected_uid=os.getuid() if expected_uid is None else expected_uid,
+                                       expected_account=expected_account)
+        if Path(sys.executable).resolve() != profile.python:
+            raise _Refused("runtime_not_admitted")
+        return profile
+    except policy.RuntimeRefusal:
+        raise _Refused("runtime_not_admitted") from None
+
+
 def _artifact():
+    if platform.system() == "Darwin":
+        if platform.machine() != "arm64":
+            raise _Refused("unsupported_platform")
+        _darwin_profile()
+        return _ARTIFACTS["darwin-arm64"]
     if platform.system() != "Linux":
         raise _Refused("unsupported_platform")
     release = platform.freedesktop_os_release()
@@ -96,6 +134,10 @@ def _account(account, expected_uid):
     home = entry.pw_dir
     if not isinstance(home, str) or not home.startswith("/") or home == "/" or os.path.normpath(home) != home:
         raise _Refused("unsafe_path")
+    if platform.system() == "Darwin":
+        profile = _darwin_profile(expected_uid=expected_uid, expected_account=account)
+        if profile.home != Path(home):
+            raise _Refused("account_changed")
     return Path(home) / _RELATIVE
 
 
@@ -198,12 +240,15 @@ def _worker_transfer(path, size, output):
     """Only the isolated child calls this; tests supply real HTTPResponse frames.
 
     http.client ignores proxy/netrc settings. The CA file is fixed to the supported
-    Ubuntu system trust store; SSL_CERT_*, HOME and user configuration are unused.
+    Ubuntu system store or exact admitted Darwin runtime; ambient trust selectors
+    and user configuration are unused.
     No redirect, compressed body, chunked body or manifest/latest request exists.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_verify_locations(cafile="/etc/ssl/certs/ca-certificates.crt")
+    ca = (str(_darwin_profile().ca_bundle) if platform.system() == "Darwin"
+          else "/etc/ssl/certs/ca-certificates.crt")
+    context.load_verify_locations(cafile=ca)
     connection = http.client.HTTPSConnection("downloads.claude.ai", timeout=10, context=context)
     try:
         connection.request("GET", path, headers={"Accept-Encoding": "identity", "Connection": "close"})
@@ -231,7 +276,10 @@ def _download(artifact, deadline, cancel, clock, *, spawn=subprocess.Popen):
     # source-owned stdlib module and selects its own immutable artifact record.
     # It never receives an account, HOME, target path, credentials or writable FD.
     command = "import runpy; runpy.run_path(" + repr(str(Path(__file__).resolve())) + ", run_name='__provider_download__')"
-    child = spawn([sys.executable, "-I", "-S", "-c", command, artifact.platform],
+    python, flags = sys.executable, ["-I", "-S"]
+    if artifact.platform == "darwin-arm64":
+        python, flags = str(_darwin_profile().python), ["-I", "-S", "-B"]
+    child = spawn([python, *flags, "-c", command, artifact.platform],
                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                   env={}, close_fds=True, start_new_session=True)
     selector = None
@@ -383,7 +431,7 @@ def _operate(account, expected_uid, *, write, cancel=None, downloader=_download,
             result = answer("unknown", "publication_uncertain")
         else:
             result = answer("unknown" if exc.unknown else "cancelled" if exc.reason == "cancelled" else "blocked", exc.reason)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, ImportError, subprocess.SubprocessError):
         result = answer("unknown" if publication_possible else "blocked",
                         "publication_uncertain" if publication_possible else "unsafe_path" if directories is None else "operation_failed")
     finally:
@@ -417,6 +465,8 @@ def prepare(account: str, expected_uid: int, *, cancel: threading.Event | None =
 if __name__ == "__provider_download__":
     try:
         selected = _ARTIFACTS[sys.argv[1]]
+        if _artifact() != selected:
+            raise _Refused("unsupported_platform")
         success = _worker_transfer(selected.path, selected.size, sys.stdout.buffer)
     except Exception:
         success = False  # no provider/network exception or diagnostic output

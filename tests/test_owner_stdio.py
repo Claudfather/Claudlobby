@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -230,6 +231,7 @@ def test_typed_storage_requires_both_distinct_confirmations(tmp_path):
 
 @pytest.fixture
 def fixed_profile(tmp_path, monkeypatch):
+    import platform
     import pwd
     import sys
     import sysconfig
@@ -256,6 +258,7 @@ def fixed_profile(tmp_path, monkeypatch):
     package = SimpleNamespace(installation=Installation(family / "install", family / "data"), source_revision="a" * 40)
     monkeypatch.setattr(pwd, "getpwuid", lambda _: SimpleNamespace(pw_dir=str(home), pw_name="example-account", pw_uid=os.getuid()))
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(Installation, "preflight", lambda self, **kwargs: "a" * 40)
     return SimpleNamespace(root=family / "data", package=package), request, home, path
 
@@ -833,3 +836,121 @@ while True: time.sleep(.01)
     finally:
         sender.join(4)
     assert not sender.is_alive() and not failures
+
+
+@pytest.fixture
+def darwin_fixed_profile(fixed_profile, monkeypatch):
+    from claudlobby import installation as locations
+    paths, request, home, receipt_path = fixed_profile
+    runtime_root = home / ".local/share/claudlobby-browser/runtime/profile"
+    python = runtime_root / "python/bin/python3.12"
+    python.parent.mkdir(parents=True, mode=0o700)
+    python.write_bytes(b"exact synthetic managed interpreter; never executed"); python.chmod(0o755)
+    runtime = SimpleNamespace(uid=os.getuid(), account="example-account", home=home,
+        root=runtime_root, python=python, bin=runtime_root / "bin", ca_bundle=runtime_root / "ca-bundle.pem")
+    environment = {"HOME":str(home), "PATH":str(runtime.bin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
+        "CLAUDLOBBY_NATIVE_PYTHON":str(python), "SSL_CERT_FILE":str(runtime.ca_bundle),
+        "GIT_EXEC_PATH":str(runtime_root / "git/libexec/git-core"), "GIT_ASKPASS":"/usr/bin/false"}
+    monkeypatch.setattr(locations, "managed_browser_runtime", lambda actual: runtime
+                        if actual == paths.package.installation else None)
+    monkeypatch.setattr(locations, "managed_browser_environment", lambda actual: dict(environment)
+                        if actual == paths.package.installation else None)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(__import__("platform"), "system", lambda: "Darwin")
+    monkeypatch.setattr(sys, "executable", str(python))
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt.update(interpreter=str(python), interpreter_sha256=hashlib.sha256(python.read_bytes()).hexdigest())
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+    binding = {key:value for key,value in receipt.items()
+               if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
+    request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    return paths, request, home, receipt_path, runtime, environment
+
+
+@pytest.mark.parametrize("plane", [None, "0", "1"])
+def test_darwin_fixed_owner_preserves_canonical_runtime_environment_and_launchd_target(darwin_fixed_profile, monkeypatch, plane):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, home, _receipt, runtime, environment = darwin_fixed_profile
+    if plane is not None: environment["PLANE_EMIT_DISABLED"] = plane
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "foreign-bus")
+    monkeypatch.setenv("SSL_CERT_FILE", "foreign-ca")
+    previous = dict(os.environ)
+    profile = FixedOwnerProfile(paths, request)
+    assert profile.units == home / "Library/LaunchAgents" and profile.runtime is runtime
+    with profile.environment():
+        assert os.environ["PATH"] == environment["PATH"]
+        assert os.environ["CLAUDLOBBY_NATIVE_PYTHON"] == str(runtime.python)
+        assert os.environ["SSL_CERT_FILE"] == str(runtime.ca_bundle)
+        assert os.environ.get("PLANE_EMIT_DISABLED") == plane
+        assert not {"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} & os.environ.keys()
+        assert os.environ["CLAUDE_CONFIG_DIR"] == str(profile.account)
+    assert dict(os.environ) == previous
+
+
+@pytest.mark.parametrize("defect", ["interpreter", "running-python", "runtime-unavailable", "runtime-home", "environment"])
+def test_darwin_owner_runtime_or_python_drift_refuses_without_effects(darwin_fixed_profile, monkeypatch, defect):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby import installation as locations
+    paths, request, home, receipt_path, runtime, _env = darwin_fixed_profile
+    if defect == "interpreter":
+        receipt = json.loads(receipt_path.read_bytes())
+        other = home / "other-python"; other.write_bytes(b"other");other.chmod(0o755)
+        receipt.update(interpreter=str(other), interpreter_sha256=hashlib.sha256(other.read_bytes()).hexdigest())
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True))
+        binding = {key:value for key,value in receipt.items()
+                   if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
+        request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    elif defect == "running-python": monkeypatch.setattr(sys, "executable", str(home / "unselected-python"))
+    elif defect == "runtime-unavailable": monkeypatch.setattr(locations, "managed_browser_runtime", lambda _actual: None)
+    elif defect == "environment":
+        def changed(_actual): raise locations.InstallationError("changed runtime")
+        monkeypatch.setattr(locations, "managed_browser_environment", changed)
+    else: runtime.home = home / "other-home"
+    before = dict(os.environ), sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused): FixedOwnerProfile(paths, request)
+    assert before == (dict(os.environ), sorted(str(p) for p in home.rglob("*")))
+
+
+def test_darwin_launchd_directory_requires_existing_manager_admission(darwin_fixed_profile, monkeypatch):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby.commands import host_owner_setup
+    paths, request, home, *_ = darwin_fixed_profile
+    profile = FixedOwnerProfile(paths, request)
+    monkeypatch.setattr(host_owner_setup, "_native_directories", lambda _paths: ())
+    refused = SimpleNamespace(approve=lambda *_a, **_kw: pytest.fail("unadmitted launchd directory proposed"))
+    with pytest.raises(StdioRefused, match="native_manager_prerequisite_missing"):
+        profile.prepare_directories(refused, paths)
+    assert not profile.project.exists() and not (profile.data / ".env").exists()
+    monkeypatch.setattr(host_owner_setup, "_native_directories", lambda _paths: (profile.units,))
+    proposals = []
+    consent = SimpleNamespace(approve=lambda action, scope: proposals.append((action,scope)))
+    profile.prepare_directories(consent, paths)
+    assert proposals[0][0] == "prepare_directories" and profile.units.is_dir()
+    assert not (home / ".config/systemd").exists()
+
+
+def test_darwin_stdio_admits_exact_root_only_after_native_operator_context(darwin_fixed_profile, monkeypatch):
+    from claudlobby.commands.owner_stdio import _admit
+    from claudlobby.commands import operator_context
+    from claudlobby import context
+    from claudlobby.plane import owner_source
+    paths, request, _home, *_ = darwin_fixed_profile
+    observed = []
+    monkeypatch.setattr(context, "resolve_paths", lambda **_kw: paths)
+    monkeypatch.setattr(owner_source, "fresh_owner_setup", lambda *_a, **_kw: observed.append("fresh"))
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda *_a: observed.append("native"))
+    monkeypatch.setattr(os, "isatty", lambda _fd: False)
+    args = SimpleNamespace(root=str(paths.root), fleet=None, seed=False, json=False, template="revenue-web-app")
+    assert _admit(args, request) is paths and observed == ["fresh", "native"]
+
+
+def test_darwin_owner_ingress_remains_explicit_native_gate(darwin_fixed_profile, monkeypatch):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    from claudlobby.plane import owner_ingress
+    paths, request, *_ = darwin_fixed_profile
+    profile = FixedOwnerProfile(paths, request)
+    monkeypatch.setattr(owner_ingress, "ServePrincipalVerifier", lambda **_kw: pytest.fail("executed Linux native path"))
+    with pytest.raises(StdioRefused, match="native_ingress_prerequisite_missing"): profile.origin()

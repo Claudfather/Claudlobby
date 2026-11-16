@@ -55,7 +55,7 @@ class FixedOwnerProfile:
         try:
             uid = os.getuid()
             if (uid == 0 or uid != os.geteuid() or uid != request["expected_uid"]
-                    or not sys.platform.startswith("linux")):
+                    or not (sys.platform.startswith("linux") or sys.platform == "darwin")):
                 raise StdioRefused("account_changed")
             account = pwd.getpwuid(uid)
             self.home = Path(account.pw_dir)
@@ -71,6 +71,15 @@ class FixedOwnerProfile:
             if (installation is None or installation.directory != self.install or installation.data_root != self.data
                     or paths.root != self.data or paths.package.source_revision != request["source_revision"]):
                 raise StdioRefused("installation_changed")
+            self.runtime = None
+            self.installation = installation
+            if sys.platform == "darwin":
+                from ..installation import managed_browser_runtime
+                self.runtime = managed_browser_runtime(installation)
+                if (self.runtime is None or self.runtime.uid != uid
+                        or self.runtime.account != self.account_name or self.runtime.home != self.home
+                        or Path(sys.executable).resolve() != self.runtime.python):
+                    raise StdioRefused("installation_changed")
             receipt = json.loads(_private_file(self.install / "preparation.json", read=True), object_pairs_hook=_unique)
             fields = {"schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256"}
             if (set(receipt) != fields | {"revision", "lock_sha256", "environment_owned", "complete"}
@@ -89,7 +98,8 @@ class FixedOwnerProfile:
                 raise StdioRefused("installation_changed")
             interpreter = Path(receipt["interpreter"])
             if (not interpreter.is_absolute() or interpreter.resolve() != interpreter
-                    or interpreter.is_relative_to(self.family)
+                    or self.runtime is None and interpreter.is_relative_to(self.family)
+                    or self.runtime is not None and interpreter != self.runtime.python
                     or not interpreter.is_file() or _digest(interpreter) != receipt["interpreter_sha256"]):
                 raise StdioRefused("installation_changed")
             if request["finish_setup"] is None and receipt["ref"] != request["source_revision"]:
@@ -98,7 +108,7 @@ class FixedOwnerProfile:
             self.account = self.family / "provider-profile"
             self.policy = self.family / "host-policy/system.yaml"
             self.provider = self.family / "provider-bin/claude"
-            self.units = self.home / ".config/systemd/user"
+            self.units = self.home / ("Library/LaunchAgents" if self.runtime is not None else ".config/systemd/user")
             self.request = dict(request)
             with self.environment():
                 if installation.preflight(expected_revision=request["source_revision"]) != request["source_revision"]:
@@ -110,8 +120,7 @@ class FixedOwnerProfile:
     def environment(self):
         """Called only after inherited/generated and native ancestry admission."""
         previous = dict(os.environ)
-        os.environ.clear()
-        os.environ.update({"HOME": str(self.home), "PATH": str(self.install / "env/bin") + ":/usr/bin:/bin",
+        environment = {"HOME": str(self.home), "PATH": str(self.install / "env/bin") + ":/usr/bin:/bin",
             "CLAUDLOBBY_INSTALLATION": str(self.install), "CLAUDLOBBY_ROOT": str(self.data),
             "LANG": "C.UTF-8", "TERM": "dumb", "TMPDIR": str(self.staging),
             "CLAUDLOBBY_HOST_SYSTEM_YAML": str(self.policy), "CLAUDE_CONFIG_DIR": str(self.account),
@@ -121,7 +130,19 @@ class FixedOwnerProfile:
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
-            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1", "PLANE_EMIT_DISABLED": "1"})
+            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1", "PLANE_EMIT_DISABLED": "1"}
+        if self.runtime is not None:
+            from ..installation import managed_browser_environment
+            managed = managed_browser_environment(self.installation)
+            if managed is None:
+                raise StdioRefused("installation_changed")
+            # Canonical runtime owns PATH, tools, CA and Plane policy. Owner-only
+            # selectors stay fixed, with no Linux runtime/bus assumptions.
+            owner = {key: environment[key] for key in ("CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_ROOT",
+                "TERM", "TMPDIR", "CLAUDLOBBY_HOST_SYSTEM_YAML", "CLAUDE_CONFIG_DIR", "PYTHONNOUSERSITE")}
+            environment = {**managed, **owner}
+        os.environ.clear()
+        os.environ.update(environment)
         try:
             yield
         finally:
@@ -198,6 +219,9 @@ class FixedOwnerProfile:
 
     def origin(self):
         """Read the official native daemon's own HTTPS identity; never a form URL."""
+        if self.runtime is not None:
+            # No fixed Mac daemon/Unix Serve principal profile is admitted yet.
+            raise StdioRefused("native_ingress_prerequisite_missing")
         from ..plane.owner_ingress import ServePrincipalVerifier
         async def inspect():
             verifier = ServePrincipalVerifier(tailscale_binary=Path("/usr/bin/tailscale"))
