@@ -11,12 +11,14 @@ def register_pr_subparsers(sub):
     holders = children.add_parser(
         "holders", help="List the open PRs that change given paths",
         description="List each open PR of OWNER/REPO that changes a PATH, matched on each "
-                    "changed file's name and its previous name (a rename or copy), with its "
-                    "number, draft state, base branch and last update. PRs that change a "
-                    "file with the same file name at another path are listed apart, not "
-                    "counted: a PR written before a directory move changes the file at its "
-                    "old path. Reads GitHub only, through gh. Exits 6, naming each PR, when "
-                    "the listing or any open PR's file list cannot be read in full.")
+                    "changed file's path and its previous path (a rename or copy), with its "
+                    "number, draft state, base branch and last update. Other PRs that "
+                    "change a file with the same file name at another path are listed "
+                    "separately and are not counted as holders: a PR written before a "
+                    "directory move changes the file at its old path. Reads GitHub only, "
+                    "through gh. Exits 6, naming each PR, when an open PR's file list cannot "
+                    "be read in full; when the open-PR listing itself cannot be read in "
+                    "full, exits 6 naming no PR, only the repository and the reason.")
     holders.add_argument("paths", nargs="+", metavar="PATH",
                          help="A file's path from the repository root")
     holders.add_argument("--repo", required=True, metavar="OWNER/REPO")

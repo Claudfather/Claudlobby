@@ -3,8 +3,10 @@
 A read of GitHub only. It needs no fleet, root or plane, changes nothing, and
 answers with one schema-1 result. It exits 0 when every open PR's file list was
 read in full, whether or not any PR changes a path. It exits 6 (unavailable)
-when the listing, or any open PR's file list, could not be read in full: the
-error names each such PR, and data keeps what was read. A bad argument exits 2.
+when any open PR's file list could not be read in full: the error names each
+such PR, and data keeps what was read. When the open-PR listing itself could not
+be read in full, it exits 6 too, naming no PR: the error names the repository
+and the reason, and data is empty. A bad argument exits 2.
 """
 
 from __future__ import annotations
