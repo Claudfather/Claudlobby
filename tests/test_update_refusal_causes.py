@@ -388,7 +388,9 @@ def test_the_operator_check_names_the_foreign_job_that_stopped_it(tmp_path, monk
              "foreign launchd print mentions a reviewed root or release: job application.fixture names the "
              "working directory of com.fixture.owned.plist in its inherited environment; it most likely inherited "
              "a bot's environment (an app opened from a bot's shell): quit it, then start it again from a shell "
-             "that did not come from a bot pane")
+             "that did not come from a bot pane; application.fixture.plist: loaded job has no observable "
+             "installed binding")
+    assert len(cause) <= 500  # within failure_cause's cut: both of the job's issues are named whole
     assert (refused.value.error.code, refused.value.error.message, refused.value.data) == (
         "unavailable", f"operator ancestry could not be verified: {cause}", {"cause": cause})
     assert isinstance(refused.value.__cause__, InventoryError)
