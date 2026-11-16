@@ -6,6 +6,371 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `pr holders`: one read names the open PRs that change given paths (#2833)
+
+`claudlobby --json pr holders PATH... --repo OWNER/REPO` lists, for each PATH, every open PR of the repository that changes it, with the PR's number, draft state, base branch and last update. A file matches on its path and on its previous path (a rename or a copy in the PR), and each match says which. Separately, it lists each other open PR that changes a file with the same file name at another path, without counting it as a holder: a PR written before a directory move changes the file at its old path. A PR that holds PATH is listed as a holder only. The result also says how many open PRs it read, and how many files.
+
+It fails closed. The listing counts as complete only when the PRs read match GitHub's count of open PRs. A PR's file list counts as complete only when the files read match GitHub's count of its changed files, each file once. When any PR's file list cannot be read in full, the read exits 6 (`unavailable`), and the error names each such PR. When the open-PR listing itself cannot be read in full, it exits 6 too and names no PR, only the repository and the reason. REST lists at most 3,000 files, so a PR with more is unreadable.
+
+It reads only GitHub, through `gh`. It makes one GraphQL request per 50 open PRs, plus a REST read of every page for a PR whose file list GraphQL cannot give in full: one that changes more than 100 files, renames or copies a file (GraphQL does not give the previous path), has a change type the read does not know, comes with no file list, or lists more or fewer files than its count.
+
+A syntax error under `pr holders` is still argparse's usage refusal: exit 2, and nothing on stdout, even with `--json`. Every other answer is one schema-1 result. No composed permission grants the command to bots yet; that is a separate change.
+
+### Fixed — a usage refusal exits 2 when stderr cannot be written (#2935)
+
+When stderr could not be written (a full device, a pipe whose reader had exited, fd 2 closed before Python started, or, under the installation launcher, a closed fd 2, in whose place the launcher hands the interpreter its runtime lock, open only for reading), a command line that the CLI's parser refused, such as an unknown command, exited 1 where a stderr on `/dev/null` gives 2: the parser's write of the usage and the error raised, and the command ended on that exception. The parser drops a write to stderr that fails now, so the refusal exits 2. With a working stderr it prints the same usage and error as before. A host update's arguments are read by the updater, which is not changed here, and a syntax refusal that a command answers with its own result (`invalid argument: command syntax`, printed on stderr without `--json`) still exits 1 where the write to stderr fails: on a full device, a pipe whose reader has exited, or a stream open only for reading.
+
+### Fixed — a stderr that cannot be written no longer turns a command's answer into exit status 120 (#2935)
+
+When stderr could not be written, on a full device, a pipe whose reader had exited or, under the installation launcher, a closed fd 2 (the launcher then hands the interpreter its runtime lock, open only for reading, as stderr), a command that dropped a line it could not write still exited 120 after printing a correct answer: the interpreter flushed stderr once more as it ended, and that flush failed too. A caller that read the status instead of the answer read a failure. Every command now closes such a stderr before it ends, so the exit status is the command's own, 0 for an answer that reads `ok: true`. A host update is the exception, apart from `host update runtime` and `host update siblings`: the installation launcher hands it to the updater, which does not close such a stderr. A stderr closed before Python itself starts was already passed over.
+
+### Fixed — `bot handoff` names a directory it cannot record its request through (#2935)
+
+When the bot's `data/`, which holds the handoff request, was a link, was not a directory, was not this user's or could not be searched, or its bot directory or `.claude`, whose file clock stamps the request, was not this user's, `bot handoff` refused before it recorded a request, with `bot native or session readiness cannot be established` and a hint to inspect the private session. It names the directory, the cause and the repair now, and says that nothing was sent, so the handoff is asked again once the directory is repaired; there is no request for `--check` to read. The exit status (6) and `native_outcome` (`unattempted`) are unchanged.
+
+### Fixed — a stderr that cannot be written no longer ends a planned restart's wait for an idle session (#2935)
+
+Before `bot restart` stops a running bot, it waits for the bot's native session to be idle, and says so on stderr every 30 s; a host update waits the same way before it stops each running bot. With a stderr that could not be written, that line ended the wait instead: with a broken stderr `bot restart` answered `bot native state cannot be established: [Errno 32] Broken pipe`, and with a closed one it ended with no answer. Such a stderr now loses the line, and the wait goes on: `bot restart` restarts the bot and resumes its session, as with a working stderr. With no stderr at all (closed when Python started), the line went to stdout, ahead of the JSON answer, and is now dropped.
+
+### Fixed — `bot handoff` says to repair a `.claude` redirected while it checks a save (#2935)
+
+While the session has no handoff of its own, `bot handoff` checks the save in `.claude/session.md`. When `.claude` or the bot directory was redirected or not the user's own by then (it was changed while `bot handoff` ran), the answer's hint said to read `--check` until it reads `saved`, though `--check` cannot read `saved` until the directory is repaired, and `--check` is refused while `.claude` is redirected. It now gives the hint a refused session handoff directory gets: repair the directory first, then read `--check`. One that is redirected before `bot handoff` starts is refused before anything is sent, as before.
+
+### Fixed — a stderr that cannot be written no longer turns an unreadable native-session receipt into a refusal (#2935)
+
+The handoff readers say on stderr when the native-session receipt cannot be read, and then read `.claude/session.md`. With a stderr that could not be written, that note raised instead: `bot handoff` answered `unknown` (`unverified`) with the hint to repair a handoff directory that was fine, `bot handoff BOT --check` read `unknown` (`file_unverified`), and with a closed stderr both ended with no answer. Such a stderr now loses the note and nothing else, in every handoff reader. With no stderr at all (closed when Python started), the note went to stdout, ahead of the JSON answer, and is now dropped.
+
+### Fixed — a refused unlinked report names the reason its fields were refused (#2935)
+
+`fleet reports submit` answered every invalid field with `invalid report fields; inspect command help`. The message now carries the report's own reason, for example `invalid report fields: PR URL and role must occur together` for a `--pr` with no `--pr-role`, as the refusals of the linked report verbs do. A refused report records nothing and sends nothing, as before.
+
+### Fixed — `bot handoff` says to repair a handoff directory it refuses (#2927)
+
+When `bot handoff` verifies a save and a directory below `data/` on the way to the session's own handoff is redirected or not the user's own, or one above the session's own directory (`data/claudna` or its `sessions/`) cannot be searched or read, it answers `unknown` (`unverified`) as before, and its hint now says to repair that directory first. `--check` reads `unknown` (`file_unverified`) until the directory is repaired, so the old hint, to read `--check` until it reads `saved`, named a wait with no end.
+
+### Fixed — `bot handoff` records its handoff script's result when its own stderr cannot be written (#2927)
+
+`bot handoff` passes on what its handoff script said on stderr just before it records the script's result. A stderr it could not write to raised there, so the result went unrecorded: with a broken stderr, `bot handoff` answered that the bot's native state could not be established, with the effect read as unattempted after the request had been sent, and with a closed one it ended with no answer at all. Such a stderr now loses those lines and nothing else. With no stderr at all (closed when Python started), the lines went to stdout, ahead of the JSON answer, and are now dropped.
+
+### Fixed — a refused linked report names the reason its fields were refused (#2933)
+
+`assignment progress`, `block`, `return`, `complete` and `fail` answered every invalid field with one message, `invalid linked report fields`, so nothing said which field was wrong or why. The message now carries the report's own reason, for example `invalid linked report fields: PR URL and role must occur together` for a `--pr` with no `--pr-role`. A refused report records nothing, as before.
+
+### Fixed — `bot handoff` says why its wait watched what it watched, and refuses a handoff directory it cannot read as its own (#2927)
+
+`bot handoff` now prints on stderr what its handoff script printed there, at most 20 lines and a count of the rest. That includes the line saying the script watched `.claude/session.md` alone because the CLI's private door gave no answer within 5 s, which `bot handoff` used to drop, so a wait that watched the wrong file read only as a slow save. A native-session receipt that is there and cannot be read (malformed, redirected, not the user's own) is said on stderr too, once per process, by every handoff reader: `bot handoff`, `bot handoff BOT --check`, a self restart and the scripts' file list. The readers still read `.claude/session.md` in both cases, as before.
+
+A directory above the session's own directory (`data/claudna` or its `sessions/`) that cannot be searched or read is now refused the way a redirected one is. `bot handoff` answers `unknown` (`unverified`), and a self restart refuses for want of a fresh owned handoff. Before, both answered that the bot's native state could not be established, and `bot handoff` reported the effect as unattempted after it had sent the save request. `data/` itself is not refused: it holds the native-session receipt that names the session, and when `data/` cannot be searched, is redirected or is not the user's own, that receipt cannot be read, so no session is named. Nor is the session's own directory when it cannot be searched, or an I/O error occurs inside it: the session then reads as having no handoff of its own, as before. Either way the readers read `.claude/session.md`, but `bot handoff` records its request in `data/`, and `--check` reads it there, before either reads a handoff: for a `data/` that cannot be searched, `bot handoff` refuses before it sends anything, and `--check` reads `unknown` (`request_unreadable`).
+
+### Fixed — `bot handoff`'s wait ends only on a save its readers read (#2927)
+
+While the bot's current session has its own handoff file, `bot handoff`'s wait for the save watches that file alone, because `bot handoff BOT --check` and the door's own verification read it alone. A write only to `.claude/session.md` beside it no longer ends the wait early with an `unknown` (`unverified`) answer while `--check` reads `pending`: the wait times out, and `--check` reads `pending` until the session saves its own file. Until the session has a file of its own, the wait watches both files, its own first.
+
+### Fixed — the handoff readers find clauDNA 0.35's session-owned handoff, with `.claude/session.md` as the fallback (#2924)
+
+clauDNA 0.35 saves each session's handoff in its own `R/sessions/<native session ID>/handoff.md`, R being the bot's composed `CLAUDNA_STATE_DIR`, and stopped writing `<bot dir>/.claude/session.md`, the one file every handoff reader here read. With 0.35 loaded, `bot handoff BOT` timed out and then refused every later request, a bot's own `bot restart --fresh` refused, and a fresh session resumed or started clean by the old file's age. Each reader now reads the session's own file when it exists, and `.claude/session.md` otherwise, which clauDNA before 0.35 and other session providers write. `bot handoff` verifies the save in that file, and its wait for the save watches the session's own file alone once it exists and both files until then; `bot handoff BOT --check` and a self restart read that file too, and a fresh session's resume reads the handoff the session it replaced saved. The receipt names only the new session, so `bot restart --fresh` now records the one it replaced beside it, in `data/native-session-predecessor.json`. A request the old reader left `pending` reads `saved` as soon as the bot's session has saved a handoff in that file, its own when it has one, and a refused new request now says so: ask the bot to save one, then read `--check` until it reads `saved`. The scripts reach the readers through a private `_handoff-files` CLI door, because a managed installation has no interpreter beside its CLI that imports the package. That is also why `bot handoff`'s recent-handoff skip never applied on a managed installation; it now does. A checkpoint proof from before native sessions still reads `.claude/session.md`, the file its hash covers.
+
+### Changed — `host update status` counts `health_errors` too, and `--full` prints the whole map (#2915)
+
+`health_errors` holds one error for each unit an update could not restore, so it grows with the units, as the collections the compact status already counts do. On one host with 136 units, an error for each would have made the status 9,094 to 56,255 bytes, from an empty error text to the 346-character one a bot left down gets. The status now counts the map under `omitted`, with its bytes and the units that reported an error, and `host update status --full` prints it whole. When an update ends with health errors, its notice still says how many units reported one and quotes the first. On that host the status is now 3,709 bytes, where it was 3,687: the empty map is counted rather than printed.
+
+### Changed — `host update status` prints a compact record led by `phase` and `target`, and `--full` prints the whole one (#2783)
+
+`claudlobby host update status` printed the whole update record. On one host with 136 units that was 1,567,145 bytes, with `update.phase` at character 1,291,280, so a reader that sees only the start of a long output saw neither `phase` nor `target`. The status now leaves out the five collections that grow with the units and files an update touches (`consumers`, `scope`, `quiet`, `candidate_config` and `publication`) and counts them under `omitted`: each one's bytes and units or entries, and how many consumers are in each state of `park`, `stop`, `restore` and `checkpoint_state`. Every other field but `health_errors` (#2915) stays at its path, led by `phase` and `target`. Over the same record the status is 3,709 bytes. `record_written_at` is when the updater last saved the record, not when it reached its phase. `host update status --full` and `host update recovery --full` print the whole record exactly as before, and `--full` with `apply` or `continue` is refused. With no update recorded, the output is unchanged.
+
+### Added — `bot usage --calls`: each call's context, its growth, and the rows stored before it (#2909)
+
+`claudlobby bot usage BOT --calls N` adds a per-call view to the window totals: the newest N main-chain calls of the bot's newest own session in the window, oldest first (20 when N is left out, at most 100). Each call gives its context (input + cache-read + cache-write tokens, the figure `fleet status` shows for the newest call), its growth over the previous call, its output tokens, and the rows the transcript stored before it, grouped by kind and target with their characters: the five largest groups are listed and the rest summed. A tool is named by its name, a file tool by its file as well, and a command or a message body is never printed. Attachment rows that store no rendered text, such as hook records, are counted apart. A call's `at` is the time of its first row, while `fleet status` gives the time of the newest call's last row, so the two can differ for a call written as several rows.
+
+The view reads the session back from its end and stops once it holds the calls it shows and the call before them, never past 16 MiB. `ended` says whether it stopped at the window's start, the call limit, the session's start or the byte cap, and `complete` whether every call in the window is shown.
+
+### Fixed — on a Git-runtime host, the daily source-currency report counts the data root again, and its notice names the Git update (#2886)
+
+`notify-behind.sh` read what the host runs through the sealed-release reader: the interpreter beside the composed CLI, then the host's release selection and manifest. On a Git-runtime host the composed CLI is the installation's stable launcher, with no interpreter beside it, and no release is selected, so the data root raised `source_unknown` every day and nothing was counted. It now reads the revision the Git runtime reports, `data.source_revision` from `claudlobby --json config diff` (no fingerprint), the one such read that needs neither a bot nor a fleet. That read refuses unless the committed configuration's revision is the HEAD of the installation's checkout, so it is the code that runs. The count is taken against the data root's checkout after its fetch, as before, and siblings still count from their own HEAD. The root's `source_behind` notice now says to apply the full commit it counted to with `host update apply`, as the operator, then `host update status`, in place of the retired build, seal, plan and `host activate` flow. A revision it cannot read still raises `source_unknown` and counts nothing, and its text now names the read and why it failed and points to `host update status`. The sealed-release reader is removed: since the Git runtime replaced sealed activation, no host runs this script from a sealed release.
+
+### Fixed — a session that lost its subreaper now reaches its manager, and CI asserts it (#2892)
+
+Since #2226 the pulse recorded `bot_subreaper_missing` and nothing read the record: it was not pushed, not critical and not in the brief.
+
+- **One push an episode to the bot's own fleet manager.** It goes through the debounce every pulse alert uses, its re-notify window included. It says to read the start's `bot_subreaper_unavailable` first, newest first and only a row from the session's start: a session that started without its subreaper reads the same as one that lost it. If the start recorded one, it says not to restart, since a restart may fail the same way, and to send the recorded reason to the reader's own manager, or to the operator when the reader is the fleet manager. If the start recorded none, it asks for a restart at the bot's next safe point, after the `safe-worker-restart` checks, and when the bot is the manager itself, for `/restart`. That push posts nothing to the fleet's alert channel, because the manager's own pane can act on it. A sweep that reads the session under its subreaper again ends the episode, and a sweep with no live session leaves it open. So a worker whose restart brings no subreaper back is not pushed again before the re-notify window. The manager's own restart changes where the push goes, so one that brings no subreaper back is pushed again at the next sweep, and after that at most once every half hour. Recording is unchanged: every sweep that reads the loss still records it.
+- **On by default, with an off switch.** `OBSERVABILITY_SUBREAPER_PUSH=0` in a bot's `fleet.yaml` env (`bots.<name>.env`) stops the push for that bot. The sweep then says so on stderr each time, still records the event, and ends an open episode, so turning the push back on pushes at the next sweep.
+- **Documented** in the fleet-observability protocol's decision table and per-type sweep, in the fleet-pulse skill's push list, and in the observability guide's row for the event.
+- **CI's harness job asserts it on Linux.** The harness's first worker runs on a tmux server outside any subreaper. Its real sweep records `bot_subreaper_missing` and pushes it to the manager, and the harness now checks both.
+- **The helper's tests also run under the pulse's own options:** `set -euo pipefail` and an ERR trap that functions and command substitutions inherit. Every verdict returns 0 under them, and a control shows the trap fails such a run.
+
+### Fixed — a resolver failure of any kind reads as unavailable, not as an exception (#2893)
+
+`env_tiers.read_tiers` decoded the resolver's output inside the subprocess call and checked the resolver's path before the call, and neither was inside the guard that turns a resolver failure into `ResolverUnavailable`. Output that is not valid text (on stdout, or on the stderr of a failed run) escaped as `UnicodeDecodeError`, and a path the OS refuses to examine as `OSError`. The callers that catch only `ResolverUnavailable` ended with the exception: `validate` stopped instead of warning that the authored `.env` tiers could not be resolved. Both now raise `ResolverUnavailable`, and each caller takes the path it already has for any other resolver failure. The resolver, its arguments and its environment are unchanged.
+
+### Fixed — registry reads compute each snapshot's instant key once, not three times (#2887)
+
+Since #1843 the registry's reads ordered snapshots by a Python key function that SQLite evaluated three times a row, so a full read (`plane registry`, its `--changes`, and the scan's tombstone check) ran about three times slower than before. Each read now computes the key once per snapshot, in one materialized step that holds only what the ordering needs; the window functions run over those narrow rows, and the payload columns are read only for the rows a read returns. The hash gate's per-snapshot read and the scan's tombstone read still search the partition index and read one entity's rows or one host's. Results, orderings, tombstones and the F11 completion rule are unchanged, and there is no migration.
+
+### Fixed — a bot session that loses its subreaper is recorded, and the subreaper's untested paths are pinned (#2184)
+
+#2176 starts each bot session under its own child subreaper (#2158), and its review left eleven notes: test gaps a regression could pass through, and a subreaper that could die without a trace.
+
+- **A lost subreaper is recorded.** `fleet-pulse.sh` now reads each live session's tmux server on Linux. When the server's parent is not a `bot-subreaper` (the subreaper died mid-session, or it never took its name), it records `bot_subreaper_missing` (notice) with the parent's name in `data.parent`, on every sweep while that holds. Until now only the start was checked (`bot_subreaper_unavailable`). A healthy server records nothing, and the check never touches a session. Restarting the bot gives it a new subreaper.
+- **Descriptors under an unlimited limit.** `SC_OPEN_MAX` is -1 under an unlimited soft descriptor limit, so the subreaper's last `closerange` ran up to -1. On a host whose Python has no `close_range(2)`, that closed nothing and left the caller's descriptors open for the session's life; where Python hands the range to `close_range(2)`, it closed them all. It now closes from `/proc/self/fd` then, on any host. Under a finite limit, as on every measured host, it does what it did.
+- **Tests for the gaps.** An idle subreaper spends no CPU, so a polling reap loop fails. A healthy start records no event. The descriptor test waits for the re-exec instead of racing it. Each fallback input keeps its behaviour and its reason: an empty socket, a tmux that cannot run, output that is not a report, a session added to a server outside the subreaper, and an interpreter that is unset or cannot run. Every call in `bot-subreaper.py` is scanned for a route to a signal, aliases and `getattr` included. The guard's ancestor refusal names the bot's subreaper.
+- **`bot_subreaper_unavailable`** is also recorded when the client failed and no session started; its registry comment now says so.
+
+### Fixed — package-check warnings no longer repeat the env resolver's error text (#1608)
+
+When `config validate` could not read whether the MCP package probe is
+armed, its warning quoted the `.env` tier resolver's exception text, which
+can carry values from the resolver's stderr or from a malformed row. The
+warning now says that tier resolution failed and names the script to
+check, `claudlobby/_runtime_scripts/env-tiers.sh`, without that text. It
+keeps its `mcp-unchecked` category, and the registry check still reports
+that it did not run.
+
+### Fixed — MCP declarations that name one server twice are refused before composition (#1808)
+
+Two MCP declarations that expand to the same runtime server name, such as
+`audit` with the instance `work` beside `audit-work`, or one instance listed
+twice, used to collapse into one server: one could silently replace the other
+or duplicate its grants. Composition, the MCP permission and integration-grant
+builders, and validation now refuse such a pair, naming both declarations,
+before any bot file is written. A manifest that has one fails until its
+declarations are corrected; nothing is renamed automatically. Valid names,
+environment prefixes, grants, first-seen fragment behavior and explicit empty
+instance lists are unchanged.
+
+### Fixed — registry, heartbeat and alert reads order timestamps as instants, not as text (#1599)
+
+Timestamps stored with different UTC offsets were compared as text, so a registry read could take an older snapshot as current or reverse a history window, utilization could leave out heartbeats inside its window, and a bot's brief could leave out its own critical alerts near the start of its 24-hour window. Registry and heartbeat reads now order and bound by one microsecond-precise UTC key, and a malformed, naive or out-of-range stored timestamp is left out of that ordering instead of read as current. Fleet event rows now carry a UTC `ts`, with the original wall clock in `ts_local`, so `claudlobby event list` gives `occurred_at` in UTC, and the brief labels its alerts UTC. Stored timestamps, hashes and the plane schema are unchanged.
+
+### Fixed — rejected environment values stay out of parser diagnostics (#1608)
+
+The restricted `.env` reader now reports the filename, physical line number,
+and rejection reason without copying input into startup or job logs. Accepted
+input and rejection rules are unchanged. It does not alter existing logs, and
+it does not complete the parser-parity work in #1608.
+
+### Docs — `dispatch_deadline` is the default deadline for `task assign` and `task reassign` (#2613)
+
+Three reference pages misdescribed `observability.dispatch_deadline`. It is the default deadline for work routed without `--expected-by`: `task assign` and `task reassign` freeze now plus the fleet manager's resolved value, 86400 seconds when no tier sets one, once per request. `0` makes those assignments open-ended, so setting it removes the deadline from all of them, not only from older rows. `OBSERVABILITY_DISPATCH_DEADLINE` is still composed into each `bot.conf`, but nothing reads it, and there is no `--deadline-min` flag. `system-yaml-schema.md` now gives the shipped floor, 86400, instead of 1800.
+
+### Fixed — a leftover flat runtime directory no longer hides a nested fleet from the runtime scripts (#1608)
+
+A fleet moved from `local/<fleet>/` to `local/<system>/<fleet>/` can leave its gitignored `local/<fleet>/runtime/` behind, with no `fleet.yaml`. The Python resolver already let that husk yield to the nested fleet, but the runtime scripts' `resolve_fleet_dir` took any flat directory first, so `resolve_bots_dir`, `fleet_runtime_dir` and the fleet `.env` tier read the husk. The shell resolver now takes a flat directory first only when it holds a `fleet.yaml`, never treats a flat fleet as a system container, and falls back to a bare flat directory only when no unique nested fleet exists. A flat fleet and a nested fleet of the same name still resolve to the flat one in the shell, as before; the Python resolver refuses that case.
+
+### Fixed — a registry history or changes read no longer decodes the whole registry (#1813)
+
+`claudlobby plane registry --history ALIAS` fetched and decoded every entity's snapshots and then kept only the requested one's. It now selects the requested entity's partitions in SQL and filters them only after the window functions, so a later alias still closes the earlier alias's interval, and each host keeps its own; it decodes only those rows. `--changes N` puts its LIMIT in SQL, outside LAG, so the first change returned still has its predecessor; a limit of 0 skips the query, and a negative or non-integer limit is refused. Rows, ordering, tombstones and the F11 completion rule are unchanged, and there is no migration.
+
+### Fixed — session-loop arming requires a real YAML Boolean (#1136)
+
+Non-null `claudron_session_loop` declarations now reject strings, numbers and containers in both fleet defaults and bot settings. Before, a quoted `claudron_session_loop: "false"` was truthy and armed the session hooks. Null and omission still inherit, and real Boolean overrides keep the existing hook behavior. An invalid fleet default is refused even where a bot sets a valid value. A quoted Boolean that was accepted before is now refused, so correct the source YAML before the next generation. Permission and sandbox Boolean hardening remains a separate change (#1809).
+
+### Fixed — the plane's trust panel warns only on unconfirmed bot actors, as `plane doctor` does (#1814)
+
+The trust panel raised its warning on every provisional identity. An external human recorded from a real Telegram message stays provisional for good, because no roster declares one, so the panel warned on the operator's own name as if it were a mistyped bot. It now warns on the list `plane doctor`'s `provisional actors` rung reads (`provisional_actors`, which leaves `human:` actors out), and shows the total of provisional identities beside it, without a warning. `/api/trust` gains `provisional_actor_suspects`; `provisional_identities` is unchanged.
+
+### Fixed — a bot whose session dies while an update's fence is up no longer wedges the update (#2734)
+
+A bot the update froze running whose session has since gone, with its unit still active, failed its checkpoint on every pass, and nothing could finish or replace the update. The stop now marks such a bot when its private tmux socket is missing, or owned and refusing a connection, which is the proof the stop's quiet check already takes, and the session observer does not read it ready. It then takes no checkpoint and stops the bot, and the restore starts it as frozen. A socket that still accepts, or a read that fails, still refuses as before.
+
+### Fixed — a drift refusal says what changed and what clears it, and a hand-stopped timer no longer stops an update (#2734)
+
+A timer or non-bot service that has gone down to inactive since the update was prepared now passes the stop, and so does a failed timer, and the restore brings each back as frozen. A failed service, or a unit still activating, refuses and is told to reset-failed or stop it, while a service a timer starts still passes in any of active, activating, inactive or failed, as before. Any other drift names the unit, the state saved and the state read, and the command that clears it where one is known to work under the fence, including `disable --runtime` for a runtime enablement. Bot rows stay exact.
+
+### Fixed — a host update's stage stops when no unit finishes, not after a fixed 900 s (#2734)
+
+The limit on a stage process was 900 s, and restoring 21 bots takes about 1,040 s, so a healthy restore was cut and its timers left for another run. Quiesce and restore now run for as long as they keep finishing units, and stop when 1,200 s pass with none finished: the longest honest step is a bot's 900 s capture wait. A unit that records a restore error does not count, so a stage failing every unit still stops and tells someone. A stage with no units keeps a plain limit, now also 1,200 s.
+
+### Docs — the context footer's two forms: `N% until auto-compact` and `NN% context used` (#1053)
+
+The `context-management` and `fleet-observability` protocols, and the references beside the fleet-ops and fleet-pulse skills, now describe both forms of the figure Claude Code draws in a bot's footer, where they named only `NN% context used`. `N% until auto-compact` is the share left before Claude Code compacts the conversation, not the share used; `NN% context used` is the share used. Read from Claude Code 2.1.322's code: with autocompact on, the footer shows the first whenever Claude Code holds the conversation to an autocompact window, and the second only when it holds it to none. A window set for the bot is always held, and with none set, as under `auto_compact_window: auto`, Claude Code holds a model with a native 1M window to its own 1M window by default. The pane observations from August 2026 stay, as observations of `NN% context used`. Where either form starts to render has not been measured.
+
+### Changed — bots' autocompact window defaults to 700,000 tokens (#1053)
+
+`auto_compact_window:` now defaults to `700000`, where it defaulted to `auto`. A bot whose entry and fleet `defaults:` set none composes a top-level `autoCompactWindow: 700000` into its `settings.local.json`: the window Claude Code compacts within. Claude Code checks its count of the context between requests and compacts once the count has passed the window less its own autocompact buffer (33k tokens in `/context` on Claude Code 2.1.322). The count can run below the real context: a live run on 2.1.322 at a window of 100,000 compacted with its count (`pre_tokens`) at 83,661 while the context held about 95,000 tokens. With nothing set, a model with a native 1M window compacts within its 1M window: at about 967,000 tokens, Claude Code's docs say. One large step can carry the context past the window before that check, and if the compaction fails ("Not enough messages to compact"), the request still goes out. Claude Code caps the window at the model's own, so a model with a 200,000-token window keeps its own. The bound is a number of tokens, the same on any host, which is why it is a package default rather than a number each host tunes.
+
+`auto_compact_window: auto` turns the bound off and composes what the default composed before: `modelSettings` naming each native-1M model `"auto"`. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in a bot's environment still takes precedence over either. Both forms keep blocking Claude Code's offer to "autocompact at 400k tokens instead" (#1388), since a window set in local settings stops it. On a model with a native 1M window, this default moves the compaction point from about 967,000 tokens to about 667,000 (700,000 less the buffer), so the footer's "N% until auto-compact" counts down to the new point. Only a model without a native 1M window changes wording, from "NN% context used" to "N% until auto-compact".
+
+### Added — reads group by workstream: the brief's open work, and `fleet reports list --workstream ID` (#1053)
+
+The brief's text view shows each open task under its workstream, each group in its oldest task's place, and the tasks in no workstream under a group of their own. In JSON, each `work.items[]` names its `workstream_id`.
+
+`claudlobby --json fleet reports list --workstream ID` lists only the reports that name that workstream, as each report's task stood when the report was made. It combines with `--bot`, `--status`, `--since` and `--unacknowledged`, and each report item now names its `workstream_id`. Like the other filters, it supplies no acknowledgement cursor. An ID the fleet never recorded, and that no report in the read names, is refused with `not_found` (exit 3): an empty page would read as "no reports" for what is most likely a typo.
+
+### Fixed — the plane UI shows a nudge's reason for a task in any workstream (#2871)
+
+Since #2870, the row a nudge records also names the task's workstream. The activity view showed the nudge's reason only when that ID had the form of a task's own workstream (`ws_` and 32 hex digits). A nudge on a task in any other workstream showed its literal message instead. That covers a workstream from `workstream open` (`ws-` and a slug, or its `--id`) and one an imported or older registry holds. The view now pairs any non-empty ID. It never shows the ID. The row must still hold exactly `by` and `reason`, or those two and `workstream_id`, and both must equal the message's.
+
+### Changed — task rows and messages about a task name its workstream (#1053)
+
+Each task verb's row now names the task's workstream at the moment of the act, in the row's `detail` as `workstream_id`: accept, every report (progress, block, return, complete, fail), withdraw, escalate, reschedule, nudge and reassign. After a `task move`, a row names the workstream the task moved to. A workstream's close names itself on each withdraw row it records. A communication about one task names it in its own `workstream_id` column: a report, an assignment delivery, a nudge's ask to the manager, a comment on a task, and the task recheck's ask about each overdue task. A task in no workstream, admitted before every task had one and not yet filed by `migration workstream-backfill`, names none, and so does a report that names no task. `task show` prints each row's `detail`, the field included. The field is metadata, so a metadata capture keeps it. Nothing migrates: rows recorded before the update name none.
+
+A delivery retried with its request ID still matches the communication it first recorded when the task has moved since, or when a release before this one recorded it. The workstream is the only field that retry check relaxes.
+
+### Changed — every workstream verb's JSON result names `filed_tasks` (#1053)
+
+Since `migration workstream-backfill` (#2869), the JSON result of each `workstream` verb that records (`open`, `progress`, `renew`, `block`, `unblock`, `close`, `prune`) and of the backfill's `--apply` carries `filed_tasks`: each task the backfill filed, with the workstream it left (none, or the closed one) and the one it was filed into. It is empty for every verb but the backfill. The field is additive; the backfill's own entry did not name it.
+
+### Added — `migration workstream-backfill`: every open task gets a workstream (#1053)
+
+`claudlobby --fleet F migration workstream-backfill` lists each open task that has no open workstream. That is a task admitted before every task had a workstream, or one a close left open in the workstream it ended, before a close checked its tasks. `--apply --request-id UUID` files each such task into its own workstream, the one `task admit` now opens for every new task. One batch records, for each task, that workstream's row (the task's title and project, with the fleet's manager as owner) and a `task_moved` row into it. A task in an open workstream stays where it is, and an ended task is never filed. A task the task reducer cannot resolve, or whose own workstream already exists, is left and named. The batch rechecks each task under the plane's write lock, so a task moved or ended in between refuses the batch, and nothing is recorded. Run it once per fleet after the update: a second run finds nothing to file and records nothing. Only a local person or the fleet's manager runs it, and no bot is granted it.
+
+### Changed — `workstream close --dry-run` reads the workstream's tasks (#1053)
+
+A close's dry run prints the refusal the close would raise, or the queued tasks it would withdraw, and still records nothing. A close now checks each task lock it holds just before its write, as each task verb checks its own, so a lock file replaced in between refuses the close.
+
+### Added — `task move`: a manager moves open work into another workstream (#1053)
+
+`claudlobby --json task move TASK_ID --workstream ID --reason TEXT --request-id UUID` moves an open task into another open workstream of its fleet and project. It records one system row, `task_moved`, which names the task, the workstream it left, the one it joined, who moved it and why. Only the fleet's manager or a local person moves a task, and only an open one. A move refuses a target that is archived, closed by the manager, or closed because every task in it has ended or moved out. The batch rechecks the target under the plane's write lock, so a close that lands in between refuses the move. A move also refuses a reason whose row would pass the 16,384 bytes the plane stores whole: JSON writes most control characters as six bytes, so a reason within its 4,096 bytes can still be too long. The fleet's manager is granted the command.
+
+Every read takes a task's workstream from its newest move, else from its admission. That covers `task show` and `task list`, each task verb's printout, the workstream registry (`workstream show` and `list`, the brief and the lookup door), admit's check of the workstream it joins, and `workstream close`. A close refuses or withdraws a task moved in, and leaves a task moved out alone.
+
+A workstream whose last open task moves out reads closed, dated by the move: `done` if a task it still holds completed, else `abandoned`. That is how a task's own workstream reads once its task has moved out.
+
+The move row's subject is the fleet itself, so a read seeks the fleet's own subject rows, not its whole system history.
+
+### Fixed — an idle prompt no longer reads as not idle when the host is busy (#2863)
+
+`pane_is_idle` piped the screen into `grep -q` under `pipefail`. `grep -q` stops at its first match, so when the host held up the writer between two of the screen's lines, the next line met a closed pipe and the match read as a miss: an idle screen read as not idle. keepalive's compact path then waited a tick instead of sending `/compact`, keepalive's own tick could read an idle pane as `UNKNOWN`, and `supervisor.sh` could read an idle bot as not idle. `pane_is_idle` now reads its text from a here-string, as `pane_is_busy` has since #2428.
+
+### Fixed — a heavy-slot render test no longer fails when its poll reads the slot's lock file mid-write (#2866)
+
+The render test's poll parsed `slot-0.lock` as it found it. `heavy-slot.py` creates that file empty and truncates it before each write, so a poll in that window failed `test_the_scope_dies_with_its_runner` with `JSONDecodeError` (CI run 42850852913). The test now reads the record as the module's own reader does, and as the run test has since #2125: an empty or half-written file is no record yet, and the poll tries again. Test-only; `heavy-slot.py` is unchanged.
+
+### Fixed — a held input box pages `input_held` on a bot that keeps working (#2854)
+
+keepalive reads the bot's input box on every tick, a busy one included, with the send path's own held test. It keeps `data/.held` from the first tick the box holds text until a tick shows it empty, whatever the verdict, with `data/.held-turn` beside it while a turn is running. fleet-pulse pages `input_held` once a fresh hold passes `OBSERVABILITY_INPUT_HELD_THRESHOLD`, however many tool calls the bot makes, and names whether a turn is running. Before, a bot that kept working never raised it, while every message sent to that bot was refused.
+
+`OBSERVABILITY_INPUT_HELD_THRESHOLD=0` now turns the `input_held` page off, and fleet-pulse says so on stderr each sweep a box holds. A held box with no turn running still keeps `activity_stuck` quiet; one under a running turn no longer does, so a hung turn still pages.
+
+### Fixed — `claudlobby host spec` names cgroup v2 for the bot throttle on a cgroup v1 or hybrid host, and never reads a disk with no blocks as 0% used (#2848)
+
+Four follow-ups from the review of #2846:
+
+- **A cgroup v1 or hybrid host.** The `bot_throttle` row still reads `unavailable` there, and its reason now says that cgroup v2, which `MemoryHigh` needs, is not mounted at `/sys/fs/cgroup`. It used to say that bots do not run under a systemd user manager. On such a host the spec cannot tell that, because it reads the user manager from cgroup v2's layout.
+- **A filesystem with no blocks in use or available.** `root_fs` leaves out `used_pct` instead of reading 0, as `df` prints `-` there.
+- **A `cgroup_disable=` list.** A list that includes `memory`, such as `cgroup_disable=hugetlb,memory`, is now named in the memory rows' reason, as `cgroup_disable=memory` already was.
+- **An unknown holder.** When a fact that the scope or the bot manager needs is unreadable, `memory_cap` and `bot_throttle` read `unknown` with that fact's reason. They no longer say the limit "cannot be set". `documentation/host-infra.md` now says what `--json` carries for a fact the host has nothing for: `false` for `user_manager` and an empty list for `zram`, where the text reads `none`.
+
+Tests now cover every row state the review listed as untested.
+
+### Added — every heavy-slot release row records what its run drew from memory and how long it waited (#1645)
+
+Each `heavy_slot_released` row now carries `waited_s`, the run's wait in the queue from its ticket's issue to its take, and a `peak` with MemAvailable at the start (`mem_available_mib_start`) and at its lowest (`mem_available_mib_low`) and the job's largest PSS (`job_pss_mib_high`), for plain runs and renders alike. Until now only a stopped run's row carried a peak, and no row carried the wait, so the host's lines could not be sized from what its runs draw. Every plain run is now read, its job's PSS included, also on a host that sets `stop = off`, where still nothing stops it. A figure none of whose readings succeeded is left out, never 0: a render whose PSS was never read no longer reports 0 MiB. A run that took a free slot with no ticket waited 0 s; with the queue off, or its file unreadable, the wait is left out.
+
+### Changed — a manager's `workstream close` checks the workstream's tasks (#1053)
+
+`workstream close` now refuses while any task in the workstream holds a live assignment (assigned, active or blocked), and names each such task with its state: the manager ends it first. It also refuses, naming it, a task the task reducer cannot resolve, since such a task cannot be told queued from assigned. Nothing is recorded when it refuses.
+
+Otherwise the close withdraws the workstream's queued tasks in its own batch: one `cancelled` row per task, the same row `task withdraw` writes, carrying the close's request and a reason that names the workstream. So a closed workstream never holds an open task. The result's `withdrawn_task_ids` lists them, and the text view names them on one line. A close of a workstream with no open task writes its one row, as before.
+
+The batch rechecks the workstream's open tasks under the plane's write lock, so a task assigned, ended or joined between the close's read and its write refuses the close, and nothing is written. The close also holds each queued task's lock, the one every task verb takes, through its write, so no task verb can act on a task the close is withdrawing.
+
+### Added — the workstream registry reads its tasks (#1053)
+
+Every reader of the workstream registry (`workstream show` and `list`, the brief, the manager's `workstream` verbs, the check-in and the inbox) now sees each workstream's tasks:
+- `task_ids` lists them in admission order and `open_task_ids` the open ones, and a task's newest row counts as its workstream's progress;
+- a workstream that holds a task and no open one reads closed: `done` if any of its tasks completed, else `abandoned`, with `closed_ts` and `closed_by: task:<ID>` taken from the row that ended its last open task;
+- the registry reads the same terminal facts as admit's join check, so the two agree on which workstreams are closed;
+- a recorded `workstream close` wins, and its `closed_by` names who closed it.
+
+A closed workstream refuses `progress`, `renew`, `block`, `unblock` and `close`, and `workstream prune` archives it. That holds for a blocked workstream too: when its last open task ends, it reads closed, and it leaves the blocked waits. So a workstream left waiting with no open task reads closed after the update; a wait that still stands needs an open task, and admitting one opens a workstream of its own.
+
+In the brief, a workstream that holds an open task is never `stalled` or `lease_expired`: its tasks carry their own deadline watch, and its entry names them in `open_task_ids`. A workstream that holds no task keeps its lease. Each of the brief's workstream lists (`active`, `stalled`, `blocked`) keeps its oldest 50 rows, and a cut is labeled in `degraded[]` with the count and `claudlobby --json workstream list`. The text view counts its "showing the oldest 10" line against the whole list.
+
+### Added — the per-minute host probe raises one `memory_thrash` alert an episode of swap thrash (#1645)
+
+`plane-host-probe.sh` already recorded the kernel's swap-out counter every minute, and alerted on nothing. It now hands that count to the new `claudlobby/_runtime_scripts/memory-thrash.py` once its samples are sent. The rate is the pages swapped out since the last reading, per minute of the time between them. When it stays over the host's line for the host's number of readings in a row, the probe raises one `memory_thrash` FLEET ALERT for that episode, through the shared alert path (the manager's pane and Telegram). The alert carries the run's rates, the free memory, the processes blocked on IO, and the largest bots by memory: each bot unit's processes, with the ones they started, at their proportional resident and swapped size, beside what no bot holds. The first reading under the line ends the episode, so the next run that reaches the line is a second episode with its own alert. An alert no channel took is raised again the next minute. The line is host config, not a package default: `state/memory-thrash/lines` holds it with the bounds it keeps, and a host with no file runs no check and says so once on the probe's journal. A file the check refuses (a name it does not know, a number that is not one, a bound broken) runs no check either, and raises one `memory_thrash_unarmed` FLEET ALERT saying why, so a bad edit is never a quiet off. `alert = off` in that file turns the alert off, and the samples keep recording. No new unit: the check runs inside the probe's existing timer. `memory-thrash.py replay` runs the same rule over the samples `claudlobby --json plane samples host.swap_pages` prints. A swap-out counter the probe cannot read (macOS has none) is skipped and said once.
+
+### Changed — the plane refuses a live task that names no workstream (#1053)
+
+The plane's contract now requires a workstream on every live task row (`work_item`): one whose `workstream_id` is missing or blank is refused before any row of its batch is written, and the refusal names the field. `task admit` already records the task's own workstream in the same batch, or joins an open one, so no door that writes tasks changes. Rows marked as legacy (imported history) may still name none, and tasks recorded before this change keep what they have; a later backfill door gives each open one its own workstream. A task row written by hand through `claudlobby plane emit` or `emit-batch` must now carry `workstream_id`. One left in a spool from before this change is quarantined when the spool drains, not ingested; task writes never spool, so only such a hand-written row can be there. `claudlobby plane schema` still shows the field as optional, because the rule depends on the row's origin.
+
+### Added — every new task belongs to a workstream: admit opens the task's own, or joins an open one (#1053)
+
+`task admit` without `--workstream` now records a one-to-one workstream in the task's own batch, so both land or neither does. Its ID is `ws_` and the task ID's 32 hex digits, its title is the task's, the fleet's manager owns it and whoever admitted the task opened it. With `--workstream ID`, the task joins that workstream, and admit refuses one that is archived, closed by the manager, or closed because every task in it has ended (completed, failed or withdrawn). The batch's precondition checks the join again under the plane's write lock, so a close that lands between the read and the write refuses the admit, and nothing is recorded. Task workstreams do not count toward `workstreams.max_active`, and `workstream open --id` refuses their `ws_<32 hex>` form. `task admit`, `assign`, `reassign`, `withdraw`, `escalate` and `nudge`, and `assignment accept`, `reschedule` and each report, print the task's `workstream_id`; `assignment deliver` does not. The fleet's manager is told, in its own instructions, to file a related follow-up into its task's workstream before that task closes; the fleet-ops guide, its command reference, the dispatch skill and the dispatch protocol say the same. Tasks admitted before this change keep no workstream; a later backfill door gives each open one its own. An admit request prepared before this change and retried after it with the same request ID refuses as a conflict. Inspect the request (`request show`): if it recorded no task, admit again with a new ID; if it recorded one, that task stands, and admitting it again would make a second.
+
+### Changed — the after-review merge guardrail keeps every rule and moves its measurements and reasons to the merge policy reference (#2273)
+
+Every bot that composes the `merge-policy-auto-after-review` guardrail carries all of it on every call. Its measurements, incidents and reasons are now in `library/skills/fleet-ops/merge-policy-reference.md`, which every bot gets with the `fleet-ops` skill directory and which costs nothing until a bot opens it. Eleven passages were already there word for word, written for the `--admin` guardrail; the six others are added word for word under the section of the rung they explain, marked as this guardrail's own. A short pointer to that section stands where the passages left. Every rule, never-line and command block stays in the guardrail, word for word and in order. The guardrail went from 15,917 to 11,424 bytes, and its composed section from 15,680 to 11,193 characters (Quality not measured: whether managers merge as safely with these passages one file away). No token count was taken.
+
+### Added — `claudlobby host spec` reads the host, and what its OS can enforce (#1645)
+
+A read-only verb, with `--json`, backed by the new `claudlobby/infra/spec.py`. It prints the host's facts, each with the place it was read from: RAM and free memory, the swap devices, zram, CPUs, the OS and kernel, the init system and `systemd-run`, the cgroup version and the controllers at the root, delegated to the user manager and in the caller's own cgroup, the pressure files, the kernel command line's cgroup and pressure settings, the root filesystem, and the bots declared on the data root. A fact that cannot be read says why instead of standing in a number, and a `/proc/meminfo` line that is not a number of kB is refused by its name (#2789's shape). Five rows then say what the OS can enforce here: a heavy run's scope, a memory cap on that scope, a memory throttle on a bot's unit, the memory stop's free-memory reading, and memory pressure. Each reads `available`, `inert`, `unavailable` or `unknown`, with the reason and, where a host setting would change it, that setting. On a Raspberry Pi whose firmware disables the memory controller, the cap reads `inert` and names `cgroup_disable=memory`. The read changes nothing: it writes no file and starts no unit or scope. Reference: `documentation/host-infra.md`.
+
+### Changed — the heavy slot's memory stop keeps the host's own bounds, and has one off line (#2790)
+
+A stop line could be set so that it never acts: a `stop_mib` under any reading the host gives before it runs out of memory, or a debounce, poll or grace so long that the stop comes too late. The bounds are now host config in the files that hold the lines: `state/heavy-slot/run-lines` holds `stop_mib_floor`, `notice_within_s` (the longest `debounce_reads` x `poll_s`) and `stopped_within_s` (the longest notice plus `grace_s`), and `state/heavy-slot/render-lines` holds the first two. A file that breaks its bounds refuses every run of its kind at exit 2, as an unreadable file does. The stop stays on by default; its one off is the line `stop = off` in `run-lines`, which every run then announces. With no file, `RUN_LINES` and `RENDER_LINES` hold the primary host's numbers (stop line 3800 MiB, floor 3000 MiB, notice within 6 s, stopped within 21 s) until a design sizes them from each host's own spec.
+
+### Changed — the pr-comment-hygiene protocol moves its sample comments to a shared partial (#1674)
+
+A bot that composes the pr-comment-hygiene protocol carries all of it on every call. Its sample findings, fork preferences and verdicts are now in `library/skills/_pr-comment-examples.md`, a shared partial that every bot's copy holds, each block behind a one-line pointer. They moved word for word, except that the samples' three reviewer names became neutral stand-ins. Every rule sentence, comment format and table stays in the protocol word for word, and so does the `[RESOLVED]` sample. By Claude Code's `/context`, the composed protocol went from 2,747 to 2,284 tokens a call (quality not measured: whether reviewers post as well-formed comments with the samples one file away is not measured).
+
+### Changed — the `--admin` merge guardrail moves its last two spans of evidence to its reference file (#2273)
+
+The `merge-policy-auto-admin` guardrail still held two passages that state no rule: the measurement behind rung 1's third state, an author on another fleet, and the error that `gh pr merge` prints when `--match-head-commit` is given an abbreviated sha. Both are now in `library/skills/fleet-ops/merge-policy-reference.md`, word for word, under its Rung 1 and merge-flag sections, and the guardrail keeps one pointer line for each. Every rule sentence and command block stays in the guardrail, word for word. By Claude Code's `/context`, the guardrail's composed section went from 5,699 to 5,583 tokens a call; whether managers merge as safely with these two passages one file away is not measured.
+
+### Changed — the fleet-ops guide moves its status table and three descriptions to its command reference (#1674)
+
+Every bot's `CLAUDE.md` ends with the fleet-ops guide, so every call carries all of it. Four pieces of its reference text are now in `library/skills/fleet-ops/command-reference.md`, word for word, each behind a one-line pointer: the deadline watch's table of what each status means, what `start`, `restart` and `stop` do, the brief's note on unacknowledged report rows, and what `project list` and `project show` print. Every rule sentence and command block stays in the guide, word for word. By Claude Code's `/context`, the composed guide went from 7,073 to 6,469 tokens a call; whether bots act as well with those pieces one file away is not measured.
+
+### Changed — the fleet-observability protocol keeps every rule and moves its reference text beside the fleet-pulse skill (#1674)
+
+Every bot that carries the fleet-observability protocol composes `library/protocols/fleet-observability.md` into its `CLAUDE.md`, so every call carries all of it. Its event writers and marker files, payload fields, detection mechanisms, history, reasons and critical-types table are now in `library/skills/fleet-pulse/fleet-observability-reference.md`, word for word, and the protocol names that file in two pointer lines. The protocol requires the `fleet-pulse` skill, so the file reaches every bot that composes the protocol and costs nothing until a bot opens it. By Claude Code's `/context`, the composed protocol went from 8,906 to 5,744 tokens; whether managers act as well with that text one file away is not measured. Every rule and every command a manager runs stays in the protocol, word for word. The tests that hold the critical-types table to the event registry and count the library's `data/` lines now read the new file as well, and a new test holds the protocol's pointer to it.
+
+### Changed — the same-identity fallback protocol keeps only what the GitHub integration and report-back do not already say (#1674)
+
+The same-identity fallback protocol repeated what two sections composed beside it already say. The GitHub integration's same-identity section says that GitHub blocks approve and request-changes on a PR its own identity authored. The report-back protocol shows the reviewed `assignment complete` report with `--artifact`, and says how `task reviews` joins a verdict to its report: by the URL the report names, or else by time, from 10 s before the verdict to 120 s after it. Each bot that composes this protocol on the measured host composes both. The protocol now leaves those to them. Every other sentence stays word for word, except that one now points to report-back for the report, and one says only what report-back does not: what a match by time alone misses. By Claude Code's `/context`, the composed protocol went from 1,337 to 1,094 tokens a call; whether reviewers post and report verdicts as well with those lines only in the other two sections is not measured.
+
+### Changed — the Telegram routing protocol drops two spans the fleet-ops guide already says (#2273)
+
+Every bot that carries the Telegram routing protocol composes `library/protocols/telegram-routing.md` into its `CLAUDE.md` beside the fleet-ops guide, so every call carries both. The protocol now leaves two spans to the composed guide and template: the manager's sentence to admit, assign and deliver through `/fleet-ops`, since assignment alone is not delivery; and the blocked post moment's note to record `assignment block` with its reason and request UUID, or an unlinked fleet report when no assignment exists. By Claude Code's `/context`, the composed protocol went from 584 to 497 tokens; whether bots route and report as well with those spans only in the guide is not measured. Every other rule stays in the protocol, word for word.
+
+### Changed — the token-efficiency protocol keeps only what the sections composed beside it do not already say (#1674)
+
+The token-efficiency protocol repeated rules that two sections composed beside it already say: the `simple-outside-rigorous-inside` principle and the report-back protocol, which each of the four bots that carry it on the measured host also composes. It now leaves to them rule zero's definition of a lossless cut and "no address, no compression", leading with the decision, that one line is not a length, that a message over its bar needs an address for its detail, and an exemptions line that repeats its own "Never compress" list. By Claude Code's `/context`, the composed protocol went from 1,364 to 1,058 tokens; whether bots write as well with those lines only in the principle and report-back is not measured. Every other sentence stays in the protocol, word for word.
+
+### Changed — the report-back protocol keeps only what the fleet-ops guide does not already say (#2273)
+
+Every bot that carries the report-back protocol composes `library/protocols/report-back.md` into its `CLAUDE.md` beside the fleet-ops guide, so every call carries both. The protocol now leaves to the composed guide and template four sentences and one paragraph that they already say: the pointer to `/fleet-ops`, one request UUID per operation, acknowledging the exact assignment, each verb's `--help` for report evidence fields, and a linked report's two outcomes with the rule for reusing its UUID. By Claude Code's `/context`, the composed protocol went from 1,570 to 1,376 tokens; whether bots report as well with those sentences only in the guide is not measured. Every other rule and every command block stays in the protocol, word for word.
+
+### Added — a test of keepalive's compaction tick under the compaction slot's stop (#2829)
+
+Test 6 in `tests/test_keepalive_compact.py`, the host slot, gains the stop's case. With a `disabled` file in the slot's directory, two of keepalive's real compaction ticks type no keys, keep the pending request, record one `compaction_skipped` with the reason `slot_disabled`, and leave the directory holding only `disabled`. Once the file is removed, the next tick types `/compact` and records `compaction_sent`. The stop (#2826) was pinned only by `compaction-slot.py`'s own tests, so a keepalive change that read the slot differently could have typed `/compact` under the stop and still passed. Tests only: no code outside `tests/` changes.
+
+### Added — an operator's stop for keepalive's compactions: a `disabled` file in the compaction slot's directory (#1053)
+
+keepalive's compaction executor runs on every bot with no switch; this is its off switch, a file that needs no activation and no restart. While anything named `disabled` sits in `$CLAUDLOBBY_ROOT/state/compaction-slot/` (`touch` it), `compaction-slot.py take` refuses every take as `disabled` (exit 75) and writes nothing, so keepalive types no `/compact` into any bot on the host: it keeps each pending request, records `compaction_skipped` with the reason `slot_disabled` once per request, and drops a request at 2 hours old as before. Removing the file (`rm`) lets the next take through. `status --json` reads `disabled`: `true` with the stop's path and time, `false`, or null when the stop cannot be looked at, in which case a take exits 2 and grants nothing. A lease already live is left to end as any lease does, and its release still works. The stop covers only what takes the slot: a manager's `bot compact WORKER`, a `/compact` typed into a pane and Claude Code's own automatic compaction do not take it, and the stop does not reach them.
+
+### Fixed — refusals, warnings and remedies name the live update, not the retired `config plan`, `host activate` and `new-fleet`
+
+Eight files that no open pull request changes told the reader to stage `config plan`, review `config diff PLAN_ID` and run `host activate`, or to scaffold a fleet with `claudlobby new-fleet`, none of which main has. Most of them now name `host update apply FULL_COMMIT_SHA`, in the form `switches.py` already prints: the `migration env` SKIP line, three `reconcile-fleet.sh` hints, the `gh-mention-guard.sh` breadcrumb for a missing handle manifest, the shared-config isolation remedy and five other remedies in `config validate`, and the `brief.on_start` door's fallback arm line. The missing-fleet-overlay error now says to check the `--fleet` name, and that `fleet setup` prepares a host's first fleet. The `plane registry --verify` hint now only says to review the authored change, because only a host's first update records the projection it compares against. What each check finds, and when, is unchanged. The ignition warnings' `briefing.slots` arm line and the plane view's equipment remedy keep their text for now.
+
+### Changed — the Codex chain budget test's failure gives each chain's bytes over and how to make room (#2242)
+
+When a chain of `CLAUDE.md` files outruns Codex's 32,768-byte budget, `test_codex_chain_reaches_every_folders_rules` in `tests/test_instruction_budget.py` now prints, for each such chain, the bytes each file adds (the last one up to its `## Script reference`), the total, the limit and the bytes over. It also names the remedy the root uses: keep every rule, and move reference text into `documentation/`, the nested file or the script's own header, leaving a one-line pointer in its place, starting with the root, which every chain reads. Before, it printed the same per-file bytes and the total, and said to trim the root. Tests only: no instruction file and no code outside `tests/` changes.
+
+### Changed — `task show` prints each event once (#2771)
+
+`claudlobby --json task show` printed the task's history, then each assignment with its own history and closing event, then the current assignment again. So each event appeared two to four times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. This is the shape `assignment show` has printed since #2768, so the two commands now print a task the same way. Every other place that held an event names it by ID:
+
+- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`; the current assignment's record is its entry in `data.task.assignments`.
+- Each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
+- The envelope's keys are unchanged, as are every other field, `resolved_from_prefix` and the plain-text lines. This change leaves `task list` and `fleet inbox` alone; #2812 changed both.
+- A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
+
+On one worker's three tasks with the most events (17, 15 and 11), a read is 47% to 49% smaller in tokens: 18,932 to 9,684 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
+
+### Changed — `assignment show` prints each event once (#2273)
+
+`claudlobby --json assignment show` printed the assignment and then its whole task, which carried the assignment again. So each event of the assignment appeared three times, four while it was the task's current assignment, and a closing event up to six times. Each event now appears once, in `data.events`, in ingest order: the task's events, each of its assignments' events and every closing event. Every other place that held an event names it by ID:
+
+- `data.assignment`, and each record in `data.task.assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of `data.events` with its `assignment_id`.
+- `data.task`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. The task's history is the entries of `data.events` with its `task_id`.
+- The envelope's keys are unchanged, as are every other field and the plain-text lines. This change leaves `task show` and `task list` alone; #2773 changed `task show` and #2812 changed `task list`.
+- A jq read of a removed key now gets null, which is also what an open assignment's `terminal_event` read before. To tell open from closed, read `state` or `terminal_event_id`.
+
+On three of one worker's closed assignments (13, 10 and 9 events), a read is 60% to 63% smaller in tokens: 21,246 to 7,813 on the largest, counted exactly with Claude Code's `/context`. Whether a reader acts as well on the shorter read is not measured.
+
 ### Removed — fixture code no test reads: two parameters and a SQL copy in `tests/release_fixtures.py`
 
 The `releases` fixture loses its `request` parameter and the compatibility update it read. No test has parametrized `releases` since #2727 deleted `tests/test_migration_plan.py`, so that update was always empty. `_database` loses its `version` parameter: both callers build version 1, so it now runs the original schema script alone. `releases` also stops copying the plane's SQL files into each historical release's `package/plane/migrations`: `claudlobby/migration_plan.py` was the only code that read that directory, and it went in #2727. Tests only: no test is added or removed, and nothing outside `tests/` changes.
