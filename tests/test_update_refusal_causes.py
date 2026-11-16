@@ -4,6 +4,8 @@
 - the updater's entry and its stages print a refusal's first line, cut to 1,000 characters;
 - the drift check names every generated unit that differs, and whether the candidate keeps it;
 - the foreign launchd refusal names the job, the anchor, where it was found, and a next step;
+- the operator check that `host update apply` and `continue` run first names the drifted units
+  or the foreign job that stopped it;
 - operator hints name `host update apply`, not the retired activation.
 """
 from __future__ import annotations
@@ -331,3 +333,64 @@ def test_each_manifest_provenance_warning_names_the_update_that_records_it(tmp_p
                          changed=case == "changed manifest")
     assert f"`claudlobby --root <data-root> {APPLY}`" in detail, detail
     assert "config plan" not in detail and "host activate" not in detail, detail
+
+
+# ---------------------------------------------------------------- the operator check names them too
+
+def _operator_reads(monkeypatch, snapshot):
+    """`require_operator_context`'s first reads, stubbed: the selected package and its committed
+    configuration. `host update apply` and `continue` run this check first, in the authorize stage.
+    What follows those reads is the shipped code, up to the stub each test names."""
+    from claudlobby import active_config, context
+    for key in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE"):
+        monkeypatch.delenv(key, raising=False)
+    package = SimpleNamespace(installation=object(), source_revision="a" * 40)
+    monkeypatch.setattr(context, "resolve_paths", lambda **_: SimpleNamespace(package=package))
+    monkeypatch.setattr(active_config, "read_current_config", lambda *_a, **_k: snapshot)
+
+
+def test_the_operator_check_names_each_drifted_unit_that_stopped_it(current_runtime, monkeypatch):
+    from claudlobby import supervision_inventory
+    from claudlobby.commands.operator_context import require_operator_context
+    root, _installation, _rendered, host = current_runtime
+    _operator_reads(monkeypatch, host.snapshot)
+    monkeypatch.setattr(supervision_inventory, "Adapter",
+                        lambda _package: SimpleNamespace(read=lambda _name: "catalog"))
+    monkeypatch.setattr(supervision_inventory, "_catalog", lambda _text: ("Linux", "", [], set(), {}))
+    monkeypatch.setattr(supervision_inventory, "collect_enrollment",
+                        lambda *_a, **_k: pytest.fail("the drift check refuses before the inventory is read"))
+    missing, changed = _linux_units(host)
+    missing.unlink()
+    changed.write_bytes(changed.read_bytes() + b"# edited by hand\n")
+    with pytest.raises(CommandFailure) as refused:
+        require_operator_context(root)
+    cause = ("2 current generated units differ from their committed configuration: "
+             f"{missing} (missing), {changed} (changed: other bytes)")
+    assert (refused.value.error.code, refused.value.error.message, refused.value.data) == (
+        "unavailable", f"operator ancestry could not be verified: {cause}", {"cause": cause})
+    assert isinstance(refused.value.__cause__, UnitDriftError)
+
+
+def test_the_operator_check_names_the_foreign_job_that_stopped_it(tmp_path, monkeypatch):
+    from claudlobby import config_units, supervision_inventory
+    from claudlobby.commands.operator_context import require_operator_context
+    obs = _darwin(tmp_path)
+    bot = (obs.root / "runtime/alpha/bots/worker").resolve()
+    obs.launchd["application.fixture.plist"] = _app_print("/Applications/Foreign", (
+        f"BOT_DIR => {bot}", f"CLAUDLOBBY_ROOT => {obs.root}", "PRIVATE_SETTING => print text that must stay out"))
+    _operator_reads(monkeypatch, {})
+    shipped = supervision_inventory.Adapter
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: shipped(obs.package, runner=obs.runner))
+    monkeypatch.setattr(config_units, "current_git_declarations", lambda *_: tuple(obs.declarations))
+    with pytest.raises(CommandFailure) as refused:
+        require_operator_context(obs.root)
+    cause = ("incomplete enrollment inventory: application.fixture.plist: cannot observe effective definition: "
+             "foreign launchd print mentions a reviewed root or release: job application.fixture names the "
+             "working directory of com.fixture.owned.plist in its inherited environment; it most likely inherited "
+             "a bot's environment (an app opened from a bot's shell): quit it, then start it again from a shell "
+             "that did not come from a bot pane")
+    assert (refused.value.error.code, refused.value.error.message, refused.value.data) == (
+        "unavailable", f"operator ancestry could not be verified: {cause}", {"cause": cause})
+    assert isinstance(refused.value.__cause__, InventoryError)
+    for text in ("must stay out", "PRIVATE_SETTING", "BOT_DIR", "=>"):
+        assert text not in refused.value.error.message

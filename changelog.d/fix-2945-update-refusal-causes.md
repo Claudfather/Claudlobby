@@ -17,3 +17,7 @@ A desktop app opened from a bot's shell inherits the bot's environment, and the 
 ### Fixed — operator hints name `host update apply`, not the retired activation (#2945)
 
 The doctor's manifest provenance warnings, the `config validate` warning for an unarmed check-in, the ignition arm line for briefing slots, the guidance a new bot declaration prints and the install scripts' missing-unit refusals told the operator to stage a `config plan` and run `host activate`, a command that no longer exists. They now name `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`.
+
+### Fixed — the operator check names what stopped it (#2945)
+
+`host update apply` and `continue` first check that they run outside any managed unit, and `host repos`, `host channels`, `host backup` and `host owner` run the same check. It reads the generated units and the native inventory, and when either refused, it said only "operator ancestry could not be verified". So the units the drift check names, and the foreign job the inventory names, never reached the operator. The refusal now ends with the failure's first line, cut to 500 characters, as `bot start` and the fleet lifecycle commands name theirs, and the JSON result carries it as `data.cause`. Its kind is unchanged, and so is what it refuses.

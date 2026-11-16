@@ -53,4 +53,10 @@ def require_operator_context(root: str | Path | None = None) -> None:
     except CommandFailure:
         raise
     except (OSError, KeyError, ValueError, RuntimeError) as exc:
-        raise CommandFailure("unavailable", "operator ancestry could not be verified") from exc
+        # Name what stopped the read, as the lifecycle doors do (#2487): a drifted unit
+        # or a foreign launchd job otherwise reached `host update apply` as this line
+        # alone (#2945). The kind, and what is refused, are unchanged.
+        from .bot_runtime import failure_cause
+        cause = failure_cause(exc)
+        raise CommandFailure("unavailable", f"operator ancestry could not be verified: {cause}",
+                             data={"cause": cause}) from exc
