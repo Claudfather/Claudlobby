@@ -1,6 +1,6 @@
 ### Fixed — `bot handoff` says to repair a `.claude` redirected while it checks a save (#2935)
 
-While the session has no handoff of its own, `bot handoff` checks the save in `.claude/session.md`. When `.claude` or the bot directory was redirected or not the user's own by then (it was changed while `bot handoff` ran), the answer's hint said to read `--check` until it reads `saved`, though `--check` cannot read `saved` until the directory is repaired. It now gives the hint a refused session handoff directory gets: repair the directory first, then read `--check`. One that is redirected before `bot handoff` starts is refused before anything is sent, as before.
+While the session has no handoff of its own, `bot handoff` checks the save in `.claude/session.md`. When `.claude` or the bot directory was redirected or not the user's own by then (it was changed while `bot handoff` ran), the answer's hint said to read `--check` until it reads `saved`, though `--check` cannot read `saved` until the directory is repaired, and `--check` is refused while `.claude` is redirected. It now gives the hint a refused session handoff directory gets: repair the directory first, then read `--check`. One that is redirected before `bot handoff` starts is refused before anything is sent, as before.
 
 ### Fixed — a stderr that cannot be written no longer turns an unreadable native-session receipt into a refusal (#2935)
 
