@@ -41,7 +41,7 @@ class TestLoggingConfiguration:
         import claudlobby.__main__ as m
         import inspect
 
-        src = inspect.getsource(m.main)
+        src = inspect.getsource(m._run)  # main runs the parser and the logging setup in _run (#2935)
         assert "%(asctime)s" in src
         assert "%(levelname)" in src
         assert "%(message)s" in src
@@ -51,7 +51,7 @@ class TestLoggingConfiguration:
         import claudlobby.__main__ as m
         import inspect
 
-        src = inspect.getsource(m.main)
+        src = inspect.getsource(m._run)  # main runs the parser and the logging setup in _run (#2935)
         assert "logging.DEBUG if args.verbose else logging.INFO" in src
 
     def test_claudlobby_logger_name(self):
