@@ -1284,6 +1284,71 @@ def test_a_claude_directory_redirected_after_the_request_gets_the_directory_refu
     assert (repaired["handoff"], repaired["reason"]) == ("saved", "written_after_request"), repaired
 
 
+@pytest.mark.parametrize("directory, cause", [
+    pytest.param("data", "cannot be searched", marks=pytest.mark.skipif(
+        os.geteuid() == 0, reason="root searches a directory without its search bit")),
+    ("data", "is redirected (a link)"),
+    (".claude", "is not this user's"),
+])
+def test_a_directory_bot_handoff_cannot_record_its_request_through_is_named(
+        cold, monkeypatch, capsys, tmp_path, directory, cause):  # noqa: F811
+    """#2935 item 12: before it records a request, bot handoff reads the earlier one in data/,
+    and a data/ it cannot search, or a redirected one, refused it with the generic "bot native
+    or session readiness cannot be established" and a hint that named neither the directory
+    nor the repair. Item 3, the half before the request: a .claude that is not this user's was
+    refused the same way, at the file clock that stamps the request. Each answer names the
+    directory, the cause and the repair now, and says nothing was sent: the handoff is asked
+    again once the directory is repaired, not read with --check. Another user's .claude is
+    stood in for by its lstat, which names another owner."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    bot_dir = worker.root / "runtime/bots/worker"
+    path, elsewhere = bot_dir / directory, tmp_path / "elsewhere"
+    another_owner = [False]
+    lstat = Path.lstat
+
+    def owned_by_another(self, *args, **kwargs):
+        info = lstat(self, *args, **kwargs)
+        if not (another_owner[0] and self == path):
+            return info
+        fields = list(info)
+        fields[4] = os.getuid() + 1  # st_uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", owned_by_another)
+    if cause == "cannot be searched":
+        path.chmod(0o600)
+    elif cause == "is redirected (a link)":
+        path.rename(elsewhere)
+        path.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        another_owner[0] = True
+    worker.native.calls.clear()
+    try:
+        refused = worker.call("bot", "handoff", "worker", expected=6)
+    finally:  # repaired
+        if cause == "cannot be searched":
+            path.chmod(0o700)
+        elif cause == "is redirected (a link)":
+            path.unlink()
+            elsewhere.rename(path)
+        another_owner[0] = False
+    assert refused["error"]["message"] == (f"worker's {directory} directory {cause}, so bot handoff "
+                                           "recorded no request and sent nothing"), refused
+    assert refused["data"]["native_outcome"] == "unattempted", refused
+    hint = refused["error"].get("hint") or ""
+    repair = {"cannot be searched": "give this user search permission on it",
+              "is redirected (a link)": "put the directory itself back in place of the link",
+              "is not this user's": "give it back to this user"}[cause]
+    assert hint.startswith(f"{repair} (worker's {directory} directory), then ask for the handoff "
+                           "again: claudlobby --json bot handoff worker."), refused
+    assert "--check has no request to read" in hint, refused
+    assert "svc_activation_handoff" not in worker.native.calls, worker.native.calls
+    assert not (bot_dir / "data/.handoff-request").exists()
+    worker.native.explicit_handoff = "handoff-saved"  # the fake saves .claude/session.md
+    asked_again = worker.call("bot", "handoff", "worker")["data"]
+    assert (asked_again["handoff"], asked_again["reason"]) == ("saved", "fresh_file_verified"), asked_again
+
+
 @pytest.mark.parametrize("case, handoff, reason", [
     pytest.param("own-file-saved", "saved", "fresh_file_verified", id="own-file-saved"),
     pytest.param("capture-from-before-the-request", "unknown", "unverified",
