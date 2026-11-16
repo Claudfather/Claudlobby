@@ -919,64 +919,157 @@ def test_signin_call_frames_are_refused_before_any_canonical_entry(client, monke
     assert client.quiet(), 'no reply and no end after a refused frame'
 
 
-@pytest.mark.parametrize('mode', ['late-release', 'quick-release', 'cancel', 'after-commit'])
-def test_signin_call_sent_while_the_reply_is_still_being_written_is_refused_not_deferred(client, monkeypatch, mode):
-    """The next call is admitted only after the reply's final byte is written and committed:
-    a frame read while output is stalled stays early however soon the output is released,
-    a cancel read during backpressure is still acted on, and a call after the whole reply
-    is ordinary. No lock time or sleep is the criterion; the writer stalls waiting for
-    writability, outside the channel's one I/O lock."""
+def wait_until(predicate, what, seconds=10):
+    end = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < end, what
+        time.sleep(.01)  # only a poll of an observed condition, never an ordering criterion
+
+
+def fill_output(client):
+    """Fill the real output pipe with junk until a nonblocking write would block, so the
+    reply writer genuinely cannot proceed; the peer then drains exactly this many bytes."""
+    import fcntl
+    flags = fcntl.fcntl(client.outgoing, fcntl.F_GETFL)
+    fcntl.fcntl(client.outgoing, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    total = 0
+    try:
+        while True:
+            try:
+                total += os.write(client.outgoing, b'x' * 512)
+            except BlockingIOError:
+                return total
+    finally:
+        fcntl.fcntl(client.outgoing, fcntl.F_SETFL, flags)
+
+
+def drain_output(client, count):
+    while count:
+        count -= len(os.read(client.observer, min(count, 4096)))
+
+
+def watch_blocked(client, monkeypatch):
+    """Observe, without ever blocking, each readiness wait of the writer that found no room."""
     from claudlobby.commands import owner_api_stdio
-    from claudlobby.commands.owner_stdio import StdioRefused
-    reached, release, waits = threading.Event(), threading.Event(), [0]
-    client.gates.append(release)
+    blocked = []
     real_select = owner_api_stdio.select.select
-    class StalledSelect:
+    class Observed:
         def __getattr__(self, name):
             return getattr(owner_api_stdio.select, name)
         def select(self, readable, writable, errored, timeout=None):
-            if writable == [client.outgoing]:
-                waits[0] += 1
-                if waits[0] == 2:  # the first 4096 bytes are out; the rest of the reply is not
-                    reached.set()
-                    release.wait(10)
-            return real_select(readable, writable, errored, timeout)
-    monkeypatch.setattr(owner_api_stdio, 'select', StalledSelect())
-    app = SigninApp(attempt('starting', padding='x' * 9000), attempt('waiting'), attempt('waiting'))
+            result = real_select(readable, writable, errored, timeout)
+            if writable == [client.outgoing] and not result[1]:
+                blocked.append(1)
+            return result
+    monkeypatch.setattr(owner_api_stdio, 'select', Observed())
+    return blocked
+
+
+def blocked_reply(client, monkeypatch, *answers):
+    """Start a conversation whose first reply is partly written and then cannot proceed."""
+    junk = fill_output(client)
+    blocked = watch_blocked(client, monkeypatch)
+    app = SigninApp(*answers)
     thread, outcome = run_conversation(client, app)
-    assert reached.wait(5), 'the reply output is blocked part way'
-    if mode == 'cancel':
-        client.send('cancel')
-        time.sleep(.8)  # the cancel is read while output is blocked
-        release.set()
-        thread.join(10)
-        assert not thread.is_alive()
-        assert not isinstance(outcome[0], StdioRefused) or outcome[0].code != 'invalid_request', outcome
-        assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown']
-        return
-    if mode == 'after-commit':
-        release.set()
-        first = client.frame()
-        assert (first['type'], first['call_id']) == ('reply', 1)
-        call(client, 2)  # sent after the whole reply: an ordinary next call
-        second = client.frame()
-        assert (second['type'], second['call_id']) == ('reply', 2)
-        client.send('cancel')
-        thread.join(10)
-        assert not thread.is_alive()
-        assert app.events[:2] == ['signin-begin', 'signin-status']
-        return
-    call(client, 2)  # valid in itself, but call 1 has not been fully answered
-    time.sleep(.8 if mode == 'late-release' else .35)  # the frame is read while output is blocked
-    assert thread.is_alive() and app.events == ['signin-begin']
-    release.set()
+    wait_until(lambda: blocked, 'the writer is waiting for room')
+    drain_output(client, 1024)  # a little room: the frame starts, then blocks again
+    mark = len(blocked)
+    wait_until(lambda: len(blocked) > mark + 1, 'the writer is blocked part way through the reply')
+    return app, thread, outcome, junk - 1024
+
+
+def test_cancel_during_blocked_reply_output_starts_the_drain_and_never_ends_successfully(client, monkeypatch):
+    """The peer stops draining mid-reply: cancellation is read, the writer is halted and
+    joined, canonical shutdown runs while the output is still blocked, and the torn reply
+    is an explicit incomplete outcome, never an end."""
+    from claudlobby.commands.owner_stdio import StdioRefused
+    app, thread, outcome, junk = blocked_reply(client, monkeypatch, attempt('starting', padding='x' * 9000))
+    client.send('cancel')
+    wait_until(lambda: 'shutdown' in app.events, 'canonical shutdown began while output stayed blocked')
     thread.join(10)
     assert not thread.is_alive()
-    assert isinstance(outcome[0], StdioRefused) and outcome[0].code == 'invalid_request', outcome
+    assert len(outcome) == 1 and isinstance(outcome[0], StdioRefused) and outcome[0].code == 'response_incomplete', outcome
+    assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown']
+    assert client.channel.torn, 'a half-written frame closes the channel to further output'
+    import select
+    rest = bytearray()
+    while select.select([client.observer], [], [], 0)[0]:
+        rest.extend(os.read(client.observer, 65536))
+    assert b'"type":"end"' not in bytes(rest), 'no successful end after a torn reply'
+
+
+def test_lost_input_during_blocked_reply_output_also_drains_without_an_end(client, monkeypatch):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    app, thread, outcome, junk = blocked_reply(client, monkeypatch, attempt('starting', padding='x' * 9000))
+    client.hang_up()
+    wait_until(lambda: 'shutdown' in app.events, 'canonical shutdown began while output stayed blocked')
+    thread.join(10)
+    assert not thread.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], StdioRefused) and outcome[0].code in {'response_incomplete', 'disconnected'}, outcome
+    assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown']
+
+
+def test_output_descriptor_flag_is_restored_after_every_step(client):
+    import fcntl
+    before = fcntl.fcntl(client.outgoing, fcntl.F_GETFL) & os.O_NONBLOCK
+    client.channel.emit('hello', profile='owner-api-v1')
+    assert fcntl.fcntl(client.outgoing, fcntl.F_GETFL) & os.O_NONBLOCK == before == 0
+    assert fcntl.fcntl(client.incoming, fcntl.F_GETFL) & os.O_NONBLOCK == 0
+    assert client.frame()['type'] == 'hello'
+
+
+def test_signin_call_read_while_the_reply_is_blocked_stays_early_after_the_commit(client, monkeypatch):
+    """Deterministic: the next call is read (and observed) while the reply cannot be written;
+    the output is then released and the commit completes before the reader goes on. The frame
+    keeps the classification of its read and is refused. Events, not sleeps, order every step."""
+    from claudlobby.commands.owner_stdio import StdioRefused
+    junk = fill_output(client)
+    blocked = watch_blocked(client, monkeypatch)
+    observed, proceed, committed = threading.Event(), threading.Event(), threading.Event()
+    client.gates.append(proceed)
+    real_read, real_emit = client.channel.read, client.channel.emit
+    def read(allowed, timeout=.25):
+        frame = real_read(allowed, timeout)
+        if frame is not None and frame['type'] == 'call':
+            observed.set()  # completed read, before it is classified
+            proceed.wait(10)
+        return frame
+    def emit(kind, *args, **values):
+        try:
+            return real_emit(kind, *args, **values)
+        finally:
+            if kind == 'reply':
+                committed.set()
+    client.channel.read, client.channel.emit = read, emit
+    # The second scripted reply is terminal, so a failing assertion cannot strand the conversation.
+    app = SigninApp(attempt('starting'), attempt('cancelled'))
+    thread, outcome = run_conversation(client, app)
+    wait_until(lambda: blocked, 'the reply writer is waiting for room, so admission has passed')
+    call(client, 2)
+    assert observed.wait(10), 'the call was read while the reply was still blocked'
+    assert not committed.is_set()
+    drain_output(client, junk)  # release the output; the reply commits
+    assert committed.wait(10), 'the reply was written and committed before the reader went on'
+    proceed.set()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], StdioRefused) and outcome[0].code == 'invalid_request', outcome
     assert app.events == ['signin-begin', 'shutdown', 'lifespan-shutdown'], 'only begin reached the engine'
+    assert client.frame()['call_id'] == 1
+
+
+def test_signin_call_after_the_whole_reply_is_ordinary(client, monkeypatch):
+    app = SigninApp(attempt('starting'), attempt('waiting'))
+    thread, outcome = run_conversation(client, app)
     first = client.frame()
-    assert (first['type'], first['call_id']) == ('reply', 1), 'the blocked reply was still delivered whole'
-    assert client.quiet(), 'no second reply and no end'
+    assert (first['type'], first['call_id']) == ('reply', 1)
+    call(client, 2)
+    second = client.frame()
+    assert (second['type'], second['call_id']) == ('reply', 2)
+    client.send('cancel')
+    thread.join(10)
+    assert not thread.is_alive()
+    assert app.events[:2] == ['signin-begin', 'signin-status']
 
 
 @pytest.mark.parametrize('mode', ['cancel-idle', 'cancel-in-call', 'eof-idle', 'eof-in-call', 'signal', 'idle',

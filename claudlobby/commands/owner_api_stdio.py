@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import json
 import os
 import re
@@ -164,24 +165,57 @@ class APIChannel:
         self.io_lock = threading.Lock()
         self.commits = 0  # replies whose final byte was written and committed
         self.observed_commits = 0  # commits already counted when the last bytes were read
+        self.torn = False  # a frame was left half written
 
-    def emit(self, kind, _commit=False, **values):
-        """Write one frame; the commit is counted under the I/O lock right after its final byte."""
+    def _step(self, fd, action):
+        """One syscall under the I/O lock, nonblocking: the descriptor's own flag is
+        set for the step and put back to what it was, so a shared description
+        (a duplex socket as 0 and 1) is never left changed."""
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        if flags & os.O_NONBLOCK:
+            return action()
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            return action()
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+
+    def emit(self, kind, _commit=False, _halt=None, **values):
+        """Write one frame; the commit is counted under the I/O lock right after its final byte.
+
+        Each step is a nonblocking write; would-block and short writes return to a
+        readiness wait outside the lock. ``_halt`` stops a write in progress (the
+        frame is then torn and nothing further is written on this channel)."""
+        if self.torn:
+            raise StdioRefused('output_unavailable')
         self.output_seq += 1
         raw = _wire({**values, 'version': 1, 'type': kind, 'seq': self.output_seq, 'session_id': self.session_id})
         if len(raw) > 32768 or self.output_seq > 4096:
             raise StdioRefused('output_limit')
+        total = len(raw)
         deadline = time.monotonic() + 15
-        while raw:
-            if not select.select([], [self.outgoing], [], max(0, deadline - time.monotonic()))[1]:
-                raise StdioRefused('output_unavailable')
-            with self.io_lock:
-                count = os.write(self.outgoing, raw[:4096])
-                if not count:
+        try:
+            while raw:
+                if _halt is not None and _halt.is_set():
+                    raise StdioRefused('output_aborted')
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise StdioRefused('output_unavailable')
-                raw = raw[count:]
-                if not raw and _commit:
-                    self.commits += 1
+                if not select.select([], [self.outgoing], [], min(remaining, .1))[1]:
+                    continue
+                with self.io_lock:
+                    try:
+                        count = self._step(self.outgoing, lambda: os.write(self.outgoing, raw[:4096]))
+                    except BlockingIOError:
+                        continue
+                    if not count:
+                        raise StdioRefused('output_unavailable')
+                    raw = raw[count:]
+                    if not raw and _commit:
+                        self.commits += 1
+        finally:
+            if raw and len(raw) < total:
+                self.torn = True  # a partial frame is on the wire; nothing may follow it
 
     def read(self, allowed, timeout=.25):
         if self.interrupted:
@@ -192,7 +226,10 @@ class APIChannel:
                     raise StdioRefused('expired')
                 return None
             with self.io_lock:
-                part = os.read(self.incoming, 4096)
+                try:
+                    part = self._step(self.incoming, lambda: os.read(self.incoming, 4096))
+                except BlockingIOError:
+                    return None
                 self.observed_commits = self.commits
             if not part:
                 raise StdioRefused('disconnected')
@@ -503,6 +540,8 @@ async def converse(channel, app, request, *, origin):
     calls = asyncio.Queue(maxsize=1)
     abort, stop, caller_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     carrier_error = []
+    halt = threading.Event()  # stops a reply write in progress in its own thread
+    writing = None
     # A call is outstanding until its reply's final byte is written and committed.
     # Bytes are read under the channel's one I/O lock, which also covers the final
     # write and its commit; the commit count seen by that read is the frame's
@@ -515,8 +554,12 @@ async def converse(channel, app, request, *, origin):
         error = StdioRefused(code)
         if not carrier_error:
             carrier_error.append(error)
-        abort.set()
+        trip()
         return error
+
+    def trip():
+        abort.set()
+        halt.set()
 
     def read_one():
         frame = channel.read({'call', 'cancel'})
@@ -532,7 +575,7 @@ async def converse(channel, app, request, *, origin):
                     continue
                 if frame['type'] == 'cancel':
                     caller_cancelled.set()
-                    abort.set()
+                    trip()
                     return
                 # Refused here, before any canonical entry: pipelined, duplicate,
                 # skipped, late, foreign-operation or changed-identity calls.
@@ -645,12 +688,16 @@ async def converse(channel, app, request, *, origin):
                     state['open'] = False  # no later call is admitted
                 try:
                     # The next call is admissible only once the reply's final byte is written.
-                    # Off the event loop: output backpressure must not stop the control
-                    # reader's cancellation or fault from being acted on.
-                    await asyncio.to_thread(channel.emit, 'reply', _commit=True, call_id=call_id, status=code,
-                                            headers=selected, data=base64.b64encode(data).decode('ascii'))
+                    # Off the event loop and halted by the abort: output backpressure must not
+                    # stop a cancellation or fault from starting the drain. The thread is joined
+                    # below however this ends.
+                    writing = asyncio.ensure_future(asyncio.to_thread(
+                        channel.emit, 'reply', _commit=True, _halt=halt, call_id=call_id, status=code,
+                        headers=selected, data=base64.b64encode(data).decode('ascii')))
+                    await asyncio.shield(writing)
                 except StdioRefused as exc:
-                    raise carrier(exc.code) from None
+                    # A halted write is a torn reply: unknown, never a successful end.
+                    raise carrier('response_incomplete' if exc.code == 'output_aborted' else exc.code) from None
                 except OSError:
                     raise carrier('output_unavailable') from None
                 status, sent = code, sent + len(data)
@@ -668,14 +715,16 @@ async def converse(channel, app, request, *, origin):
                 call_id, operation, payload, token = (frame['call_id'], frame['operation'],
                                                       frame['input'], frame['token'])
     except asyncio.CancelledError:
-        abort.set()
+        trip()
         raise
     except BaseException as exc:
         failed = exc
     finally:
-        abort.set()  # wakes a handler waiting in receive(); no further send is accepted
+        trip()  # wakes a handler waiting in receive(); no further send is accepted
         state['open'] = False
         begin_shutdown(app)
+        if writing is not None:
+            await asyncio.gather(writing, return_exceptions=True)  # the writer thread has returned
         if current is not None:
             if not current.done():
                 # The canonical handler shields and drains work it already started.

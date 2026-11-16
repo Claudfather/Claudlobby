@@ -110,12 +110,18 @@ run over SSH has not been observed.
 and the generation and attempt ID of the start. One call is outstanding at a
 time, and a call is outstanding until the final byte of its `reply` has been
 written and committed. Input reads and the final output write with its commit run
-as short steps under one I/O owner (never held while waiting for readiness), and a
+as short nonblocking steps under one I/O owner: each syscall sets the descriptor's
+nonblocking flag for that step and restores it, and would-block or a short write
+returns to a readiness wait outside the lock (never held while waiting). A
 frame is classified once, by the commits that owner had counted when its bytes were
 read. A frame already read while a reply is blocked or half written stays early,
 however soon the write finishes; no timing threshold decides it. Order is defined by
-complete frames observed and writes committed, not by packet arrival, and a cancel or
-fault stays readable during output backpressure. A `call` that arrives before
+complete frames observed and writes committed, not by packet arrival. A cancel or
+fault stays readable during output backpressure and halts the reply write in its own
+thread, so the drain starts while the peer is still not reading; the writer is joined
+before return. A reply left half written leaves the channel torn: it ends as
+`response_incomplete`, nothing further is written, and there is never a successful
+`end`. A `call` that arrives before
 the previous `reply` is complete, repeats or skips an ID,
 names another operation or identity, or follows the closing reply is refused as
 `invalid_request` when it is read; it is never held for later and never reaches
