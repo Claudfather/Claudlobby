@@ -7,6 +7,10 @@ when any open PR's file list could not be read in full: the error names each
 such PR, and data keeps what was read. When the open-PR listing itself could not
 be read in full, it exits 6 too, naming no PR: the error names the repository
 and the reason, and data is empty. A bad argument exits 2.
+
+A PATH is a file's path, and its holders are the PRs that change that file. When
+PRs read change files under PATH and a slash, the answer lists them apart
+(``under``), as a hint that PATH names a directory; its holders stay as they are.
 """
 
 from __future__ import annotations
@@ -41,6 +45,11 @@ def _lines(data: dict) -> tuple[str, ...]:
                 for entry in answer["same_name"] for changed in entry["files"]]
         if near:
             lines.append("  same file name at another path, not counted: " + ", ".join(near))
+        inside = [f"#{entry['number']} ({len(entry['files'])} "
+                  + ("file)" if len(entry["files"]) == 1 else "files)")
+                  for entry in answer["under"]]
+        if inside:
+            lines.append(f"  files under {answer['path']}/, not counted: " + ", ".join(inside))
     return tuple(lines)
 
 

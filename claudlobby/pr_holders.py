@@ -19,6 +19,8 @@ The read:
   ``changedFiles``, each once. REST lists at most 3000 files, so a larger PR is
   unreadable, and so is any other shortfall. The listing is read in full when it
   ends with as many PRs as its ``totalCount`` said on every page.
+- A renamed or copied file that REST lists with no previous name leaves its PR
+  unreadable too: its old path is unknown, so no path could match it.
 
 Each gh call's exit status is read directly, never through a pipe, and its whole
 body is parsed, because gh prints an error body on stdout too (#1066). A reason
@@ -235,6 +237,9 @@ def _rest_files(repo: str, number: int) -> list[ChangedFile]:
                 or not (row[1] is None or (isinstance(row[1], str) and row[1]))
                 or not isinstance(row[2], str)):
             raise ReadUnavailable("the REST file list has an unexpected shape")
+        if row[2] in _NEEDS_OLD_NAME and row[1] is None:
+            raise ReadUnavailable(f"the REST file list has a {row[2]} file with no "
+                                  "previous name")
         files.append(ChangedFile(row[0], row[1], row[2]))
     return files
 
@@ -299,24 +304,38 @@ def match_paths(paths: list[str], read: OpenPrRead) -> list[dict]:
     """For each path: the PRs that change it, matched on each file's name and its
     previous name, and apart from those, the PRs that change a file with the same
     file name at another path (a PR written before a directory move changes the
-    file at its old path). The second list holds candidates, not holders."""
+    file at its old path). The second list holds candidates, not holders.
+
+    A path is a file's path and a holder changes that file, so a directory has no
+    holders. ``under`` lists the PRs that change files under the path and a slash,
+    as a hint that it names a directory; it is not counted either. A PR that holds
+    the path is listed as a holder only."""
     answers = []
     for path in paths:
-        holders, same_name = [], []
+        holders, same_name, under = [], [], []
+        directory = path + "/"
         for pr in sorted(read.prs, key=lambda pr: pr.number):
             hits = [_entry(f, "name" if f.name == path else "previous_name")
                     for f in pr.files if path in (f.name, f.previous_name)]
             if hits:
                 holders.append(_pr(pr, hits))
                 continue
-            near = []
+            near, inside = [], []
             for changed_file in pr.files:
-                for matched_on, name in (("name", changed_file.name),
-                                         ("previous_name", changed_file.previous_name)):
+                names = (("name", changed_file.name),
+                         ("previous_name", changed_file.previous_name))
+                for matched_on, name in names:
                     if name and _file_name(name) == _file_name(path):
                         near.append(_entry(changed_file, matched_on))
                         break
+                for matched_on, name in names:
+                    if name and name.startswith(directory):
+                        inside.append(_entry(changed_file, matched_on))
+                        break
             if near:
                 same_name.append(_pr(pr, near))
-        answers.append({"path": path, "holders": holders, "same_name": same_name})
+            if inside:
+                under.append(_pr(pr, inside))
+        answers.append({"path": path, "holders": holders, "same_name": same_name,
+                        "under": under})
     return answers
