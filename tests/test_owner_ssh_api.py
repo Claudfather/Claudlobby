@@ -1449,20 +1449,66 @@ def watch_blocked(client, monkeypatch):
     return blocked
 
 
+def watch_writes(client, monkeypatch):
+    """Record each positive write the reply writer makes to the real output pipe.
+
+    A delegating stand-in for the writer module's ``os``: every call is the real one;
+    only a write to this client's output descriptor that returned bytes is noted. The
+    junk that filled the pipe was written by the test before this is installed, so it
+    can never count as reply progress."""
+    from claudlobby.commands import owner_api_stdio
+
+    written = []
+    real_os = owner_api_stdio.os
+
+    class Observed:
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def write(self, fd, data):
+            count = real_os.write(fd, data)  # a would-block raises before any record
+            if fd == client.outgoing and count > 0:
+                written.append(count)
+            return count
+
+    monkeypatch.setattr(owner_api_stdio, "os", Observed())
+    return written
+
+
 def blocked_reply(client, monkeypatch, *answers):
-    """Start a conversation whose first reply is partly written and then cannot proceed."""
+    """Start a conversation whose first reply is partly written and then cannot proceed.
+
+    Room is given to the real pipe a little at a time until the writer is observed to
+    write reply bytes; then it must be observed blocked again, with no further write."""
     junk = fill_output(client)
     blocked = watch_blocked(client, monkeypatch)
+    written = watch_writes(client, monkeypatch)
     app = SigninApp(*answers)
     thread, outcome = run_conversation(client, app)
     wait_until(lambda: blocked, "the writer is waiting for room")
-    drain_output(client, 1024)  # a little room: the frame starts, then blocks again
+    assert not written, "the full pipe admitted no reply byte before room was freed"
+    freed = 0
+    end = time.monotonic() + 10
+    while not written:
+        assert time.monotonic() < end, "no reply byte was written once room was freed"
+        drain_output(client, 1024)
+        freed += 1024
+        probe_end = time.monotonic() + 0.3
+        while not written and time.monotonic() < probe_end:
+            time.sleep(0.01)  # a poll of an observed condition, never an ordering criterion
     mark = len(blocked)
     wait_until(
         lambda: len(blocked) > mark + 1,
-        "the writer is blocked part way through the reply",
+        "the writer is blocked again part way through the reply",
     )
-    return app, thread, outcome, junk - 1024
+    progress = list(written)  # every step the freed room admitted has now landed
+    mark = len(blocked)
+    wait_until(
+        lambda: len(blocked) > mark + 1,
+        "the writer stays blocked, with no further reply byte",
+    )
+    assert written == progress, "the writer made no further progress while blocked"
+    return app, thread, outcome, junk - freed
 
 
 def test_cancel_during_blocked_reply_output_starts_the_drain_and_never_ends_successfully(
