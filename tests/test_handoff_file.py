@@ -7,6 +7,7 @@ file when it exists, and the per-directory file otherwise.
 """
 
 from datetime import datetime, timedelta, timezone
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -184,6 +185,66 @@ def test_a_data_directory_that_cannot_be_searched_or_is_redirected_is_not_refuse
     finally:
         if data_dir == "cannot-search":
             data.chmod(0o700)
+
+
+@pytest.mark.parametrize("above", ["data/claudna", "data/claudna/sessions"])
+def test_an_io_error_inside_a_directory_above_the_sessions_own_is_refused_by_every_reader(
+        tmp_path, capsys, monkeypatch, above):
+    """#2935 item 23: the walk down to the session's own directory calls lstat on each
+    directory on the way, and refuses one whose lstat fails for any reason but its absence.
+    So an I/O error inside data/claudna or its sessions/, as the walk looks up the next
+    directory in it, is refused by every reader, as one of the two that cannot be searched is
+    (test_a_session_directory_that_cannot_be_searched_is_refused_by_every_reader). The I/O
+    error is stood in for by that lookup's lstat, which raises EIO."""
+    bot = _bot(tmp_path)
+    sid = _launch(bot)
+    _save(handoff_file.legacy(bot))
+    own = _save(handoff_file.session_owned(bot, sid))
+    assert bot_operations._write_handoff_request(bot, {"requested_at": "2026-01-01T00:00:00Z"})
+    assert handoff_file.resolve(bot) == own  # read, until the error
+    looked_up = bot / above / own.relative_to(bot / above).parts[0]  # the next directory down
+    lstat = Path.lstat
+
+    def io_error(self, *args, **kwargs):
+        if self == looked_up:
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(self))
+        return lstat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", io_error)
+    with pytest.raises(bot_operations.HandoffDirectoryRefused):
+        bot_operations._fresh_self_handoff(bot)
+    assert bot_operations.handoff_state(bot)[:2] == ("unknown", "file_unverified")
+    rc, lines, err = _door(capsys, "watch", str(bot))
+    assert (rc, lines) == (3, []) and "the session handoff cannot be named" in err, err
+    assert os.strerror(errno.EIO) in err, err
+
+
+def test_an_io_error_inside_the_sessions_own_directory_is_not_refused(
+        tmp_path, capsys, monkeypatch):
+    """#2935 item 23: an I/O error inside the session's own directory, as its handoff is
+    looked up, is not refused, as that directory is not when it cannot be searched
+    (test_the_sessions_own_directory_that_cannot_be_searched_is_not_refused). Its handoff
+    reads as absent, so every reader reads .claude/session.md. The I/O error is stood in for
+    by that lookup's lstat (os.path.lexists makes it), which raises EIO."""
+    bot = _bot(tmp_path)
+    sid = _launch(bot)
+    legacy = _save(handoff_file.legacy(bot))
+    own = _save(handoff_file.session_owned(bot, sid))
+    assert bot_operations._write_handoff_request(bot, {"requested_at": "2026-01-01T00:00:00Z"})
+    assert handoff_file.resolve(bot) == own  # read, until the error
+    lstat = os.lstat
+
+    def io_error(path, *args, **kwargs):
+        if str(path) == str(own):
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(path))
+        return lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", io_error)
+    assert handoff_file.resolve(bot) == legacy
+    assert handoff_file.watch(bot) == [own, legacy]  # as for a session with no file of its own
+    assert bot_operations._fresh_self_handoff(bot) >= 0
+    assert bot_operations.handoff_state(bot)[:2] == ("saved", "written_after_request")
+    assert _door(capsys, "watch", str(bot)) == (0, [str(own), str(legacy)], "")
 
 
 def test_a_symlinked_own_handoff_is_named_so_its_reader_refuses_it(tmp_path):

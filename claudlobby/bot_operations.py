@@ -90,13 +90,19 @@ class HandoffDirectoryRefused(BotLifecycleError):
 
     It is redirected or not this user's own, on the way to the session's own
     handoff below data/ (data/claudna, its sessions/ and the session's own
-    directory) or to .claude/session.md (the bot directory and its .claude), or
-    it is data/claudna or its sessions/ and cannot be searched or read. data/
-    itself is not refused: it holds the native-session receipt that names the
-    session, and when data/ is redirected, not this user's or cannot be
-    searched, that receipt cannot be read, so no session is named. Nor is the
-    session's own directory when it cannot be searched or read: its handoff
-    reads as absent. Either way the readers read .claude/session.md.
+    directory) or to .claude/session.md (the bot directory and its .claude). Or
+    the walk down to the session's own directory
+    (`handoff_file._directories_present`) cannot look up the next directory on
+    the way: an I/O error occurs, or the directory it looks in, data/claudna or
+    its sessions/, cannot be searched. The walk calls lstat on each directory,
+    which needs search permission on the directory it is in, not read
+    permission, so one that can be searched but not read is not refused. data/
+    itself is not refused when it is redirected, not this user's or cannot be
+    searched: it holds the native-session receipt that names the session, and
+    that receipt then cannot be read, so no session is named. Nor is the
+    session's own directory when it cannot be searched or an I/O error occurs
+    inside it: its handoff reads as absent. Either way the readers read
+    .claude/session.md.
 
     The readers refuse such a directory rather than read past it, so `bot
     handoff --check` cannot read the handoff as saved until it is repaired. It
