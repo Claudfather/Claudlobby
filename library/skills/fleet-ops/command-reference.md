@@ -28,7 +28,7 @@ claudlobby --json workstream list
 
 On `pr holders`:
 It lists each open PR that changes a PATH, matched on each changed file's path
-and, for a rename, its previous path, with the PR's number, draft state, base
+and, for a rename or a copy, its previous path, with the PR's number, draft state, base
 branch and last update. PRs that change a file with the same file name at
 another path are listed separately and are not counted as holders. It exits 6
 and names each PR whose file list cannot be read in full. When the open-PR
