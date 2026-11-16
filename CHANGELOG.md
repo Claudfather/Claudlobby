@@ -70,7 +70,7 @@ All three ask the slot with one reader, which calls the slot's own `status()`: t
 
 - Each task record in `data.items` and `data.work.items`: `history`, `terminal_event` and `current_assignment` are gone, and `terminal_event_id` and `current_assignment_id` name them. A task's history is the entries of the page's events with its `task_id`; the current assignment's record is its entry in the task's `assignments`.
 - Each record in a task's `assignments`: `history` and `terminal_event` are gone, and `terminal_event_id` names the closing event (null while the assignment is open). An assignment's history is the entries of the page's events with its `assignment_id`.
-- Schema-1's top-level keys are unchanged, as are every other field, the cursors, `issues`, the inbox's reports and attention, and the plain-text lines. `task list --help` now says where the events are.
+- The envelope's keys are unchanged, as are every other field, the cursors, `issues`, the inbox's reports and attention, and the plain-text lines. `task list --help` now says where the events are.
 - A jq read of a removed key now gets null. That is also what an open task's `terminal_event` and a task with no current assignment's `current_assignment` read before, so to tell them apart, read `state`, `terminal_event_id` or `current_assignment_id`.
 
 On one fleet's live plane, a `task list --state all` page of 100 tasks went from 864,842 to 475,916 characters (−45.0%), and the open page of three tasks from 12,019 to 6,435 (−46.5%). `fleet inbox` saves the same 5,584 characters in its work section. Tokens, and whether a reader acts as well on the shorter read, are not measured.
@@ -175,7 +175,7 @@ The `claudlobby-dev-in-projects` guardrail, the `canary-rollout` protocol, the G
 
 ### Changed — the check-in protocol keeps its rules and points to its skill for the record command (#717)
 
-Every leaf manager carries the `checkin` protocol on every call. It now names `checkin record` and points to `/checkin` for the full command line, which the skill gives at the step that records the decision; it leaves the rule of one request UUID per operation to the fleet-ops guide, which states it for every bot; and it says once, not twice, that the `manager-checkin` fleet job sends `/checkin`. By Claude Code's `/context`, the protocol's composed section went from 1,113 to 1,018 tokens; whether managers check in as well with the command read from the skill is not measured. Every rule stays in the protocol.
+Every leaf manager carries the `checkin` protocol on every call. It now names `checkin record` and points to `/checkin` for the full command line, which the skill gives at the step that records the decision; it leaves the rule of one request UUID per operation to the fleet-ops guide, which states it for every bot; and it says once, not twice, that the `manager-checkin` fleet job sends `/checkin`. By Claude Code's `/context`, the protocol's composed section went from 1,113 to 1,018 tokens; whether managers check in as well with the command read from the skill is not measured. Every other rule stays in the protocol.
 
 ### Changed — the `decision-fork-lifecycle` protocol keeps its rules and points to its examples (#717, #1674)
 

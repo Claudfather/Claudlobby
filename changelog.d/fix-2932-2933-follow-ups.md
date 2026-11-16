@@ -1,6 +1,6 @@
 ### Fixed — `bot handoff` says to repair a handoff directory it refuses (#2927)
 
-When `bot handoff` verifies a save and a directory on the way to the session's own handoff is redirected, not the user's own, or cannot be searched or read, it answers `unknown` (`unverified`) as before, and its hint now says to repair that directory first. `--check` reads `unknown` (`file_unverified`) until the directory is repaired, so the old hint, to read `--check` until it reads `saved`, named a wait with no end.
+When `bot handoff` verifies a save and a directory below `data/` on the way to the session's own handoff is redirected or not the user's own, or one above the session's own directory (`data/claudna` or its `sessions/`) cannot be searched or read, it answers `unknown` (`unverified`) as before, and its hint now says to repair that directory first. `--check` reads `unknown` (`file_unverified`) until the directory is repaired, so the old hint, to read `--check` until it reads `saved`, named a wait with no end.
 
 ### Fixed — `bot handoff` records its handoff script's result when its own stderr cannot be written (#2927)
 
