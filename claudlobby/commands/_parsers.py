@@ -106,6 +106,9 @@ def register_subparsers(sub) -> None:
     from ._event_read_parsers import register_event_read_subparsers
     register_event_read_subparsers(sub)
 
+    from ._pr_parsers import register_pr_subparsers
+    register_pr_subparsers(sub)
+
     # --- observable plane (Phase 1 kernel) ---
     pp = sub.add_parser("plane", help="Observable-plane operations")
     psub = pp.add_subparsers(dest="plane_action", required=True)
