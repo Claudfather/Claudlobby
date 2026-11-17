@@ -50,7 +50,9 @@ import xml.etree.ElementTree as ET
 # why in its pull request; when a change removes skips, the check prints a
 # notice until the ceiling comes down to the count.
 SKIP_CEILINGS = {
-    "supported (ubuntu-latest, py3.10)": 17,
+    # 18: the zsh case in tests/test_telegram_token_env_name.py needs zsh,
+    # which the Ubuntu runner image does not install; the macOS lane runs it.
+    "supported (ubuntu-latest, py3.10)": 18,
     # 145 from #2930: three tests in tests/test_stand_in_fixtures.py read a
     # running stand-in's Linux /proc name, and macOS keeps copies.
     "supported (macos-latest, py3.11)": 145,

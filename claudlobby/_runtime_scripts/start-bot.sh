@@ -117,8 +117,26 @@ source_env_tiered
 # "Listening" but with a dark (non-delivering) poller. Export only a
 # non-empty resolved value; unset any empty leftover so the server's channel-dir
 # .env fallback still works.
-if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ] && [ -n "${!TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
-    export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME}"
+# The name is read only when it is a variable name: ASCII letters, digits and
+# underscores, not starting with a digit (the loader's SHELL_IDENT_RE). Any
+# other value reads no token, as an unset name does, and logs one line that
+# does not repeat it, since a token written in place of a name is not a
+# variable name either. The session shell's read below and
+# resolve_bot_telegram_token (lib-common.sh) run the same case. Its characters
+# are listed, not given as ranges: bash 3.2, macOS /bin/bash, matches a range
+# in the collation order of the locale.
+if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
+    case "$TELEGRAM_TOKEN_ENV_NAME" in
+        [0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
+            setup_log_dir "$BOT_DIR/logs/startup.log" 2>/dev/null || true
+            echo "$(ts_iso) TOKEN_ENV TELEGRAM_TOKEN_ENV_NAME is not a variable name, so start-bot.sh reads no token from it" >> "$BOT_DIR/logs/startup.log" 2>/dev/null || true
+            ;;
+        *)
+            if [ -n "${!TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
+                export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME}"
+            fi
+            ;;
+    esac
 fi
 [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 
@@ -249,8 +267,8 @@ printf '. %q\n' "$BOT_DIR/bot.conf" >> "$BOT_ENV_FILE"
 printf 'set +a\n' >> "$BOT_ENV_FILE"
 
 # Resolve the Telegram token via the indirection var set in bot.conf. .env tiers
-# provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it. Two correctness
-# constraints, both required for cross-shell (bash on Linux, zsh on macOS) correctness:
+# provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it. Three correctness
+# constraints, all required for cross-shell (bash on Linux, zsh on macOS) correctness:
 #   1. This block is sourced by the tmux session shell, which is zsh by default on
 #      macOS — where bash ${!name} indirection is unavailable. Resolve portably
 #      via eval so the same code works under bash (Linux) and zsh (macOS).
@@ -259,12 +277,30 @@ printf 'set +a\n' >> "$BOT_ENV_FILE"
 #      reading its own channel-dir .env, silently killing the inbound bridge. So
 #      export only a non-empty resolved value, then unset any empty leftover
 #      (e.g. an unfilled scaffold stub) so the server's .env fallback still works.
+#   3. The eval reads the name only when it is a variable name, through the same
+#      case as the read above, which bash and zsh both run. Any other value
+#      reads no token, as an unset name does, and appends one line to this
+#      bot's startup.log that does not repeat it. The append is grouped so a
+#      log it cannot open prints nothing: zsh prints a failed redirection on the
+#      shell's stderr even when the same command sends 2 to /dev/null (measured
+#      on zsh 5.9), and a group's own redirection covers it.
+setup_log_dir "$BOT_DIR/logs/startup.log" 2>/dev/null || true
+printf '_tg_log=%q\n' "$BOT_DIR/logs/startup.log" >> "$BOT_ENV_FILE"
 cat >> "$BOT_ENV_FILE" <<'TGTOKEOF'
 if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
-  eval "_tg_tok=\${${TELEGRAM_TOKEN_ENV_NAME}:-}"
-  [ -n "${_tg_tok:-}" ] && export TELEGRAM_BOT_TOKEN="${_tg_tok}"
-  unset _tg_tok
+  case "$TELEGRAM_TOKEN_ENV_NAME" in
+    [0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
+      { printf '%s TOKEN_ENV TELEGRAM_TOKEN_ENV_NAME is not a variable name, so the session shell reads no token from it\n' \
+          "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" >> "$_tg_log"; } 2>/dev/null || :
+      ;;
+    *)
+      eval "_tg_tok=\${${TELEGRAM_TOKEN_ENV_NAME}:-}"
+      [ -n "${_tg_tok:-}" ] && export TELEGRAM_BOT_TOKEN="${_tg_tok}"
+      unset _tg_tok
+      ;;
+  esac
 fi
+unset _tg_log
 [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 TGTOKEOF
 
