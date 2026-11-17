@@ -12,7 +12,7 @@ direct run still wrote the one host file.
 **A provider was checked on every fleet, declared or not.** A token with no
 value was a `skip`, so a fleet whose bots declare the GitHub MCP and hold no
 token, the very condition the check exists for, was never failed. And a fleet
-that never wanted Railway held a lasting `skip` that from day 3 re-surfaced as
+that never wanted Railway kept a lasting `skip` that from day 3 re-surfaced as
 "a permanent hole".
 
 So a provider is now checked only where a bot of the fleet declares its
@@ -289,7 +289,7 @@ class TestTheMixedEstate:
 
     def test_a_fleet_that_declares_no_provider_never_hears_about_one(self, tmp_path):
         """Per-fleet files alone are not enough: on its own file a fleet that
-        declares no Railway held a lasting skip, which re-surfaced from day 3 as
+        declares no Railway kept a lasting skip, which re-surfaced from day 3 as
         "SKIPPED ... a permanent hole" for a provider it never wanted."""
         e = Estate(tmp_path)
         e.fleet("b")

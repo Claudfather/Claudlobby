@@ -188,7 +188,7 @@ TG_POST="$LIB_DIR/tg-post.sh"
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.
 #
-# A tier line that assigns a name held fixed (readonly) before the tiers are
+# A tier line that assigns a name made readonly before the tiers are
 # read stops bash at that line, before any probe or state write. bash 3.2, the
 # macOS /bin/bash, then exits 0, which reads as a clean tick, so this window
 # makes any stop while the tiers are read exit 2 and say why. It keeps the
