@@ -113,7 +113,7 @@ class Estate:
             CLAUDLOBBY_ROOT=self.root, CLAUDLOBBY_CREDS_LOG=self.root / "creds-check.log",
             CREDS_TEST_POSTS=self.tmp / f"posts-{fleet}.log", **extra)
 
-    def selected(self, fleet: str, *declares: str) -> dict:
+    def run_selected(self, fleet: str, *declares: str) -> subprocess.CompletedProcess:
         """One tick as the selected CLI runs it, with the fleet's declarations."""
         fleet_root = self.root / "local" / fleet
         env = self._env(fleet, CLAUDLOBBY_INSTALLATION=self.installation.directory,
@@ -125,7 +125,11 @@ class Estate:
                 "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "worker"]
         for item in declares:
             argv += ["--declares", item]
-        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
+
+    def selected(self, fleet: str, *declares: str) -> dict:
+        """A selected tick that completed, and the state file it left."""
+        result = self.run_selected(fleet, *declares)
         assert result.returncode == 0 and result.stdout == "tick-complete\n", result.stderr
         return json.loads(self.selected_state(fleet).read_text())
 
@@ -261,18 +265,22 @@ class TestOnlyWhatTheFleetDeclaresIsChecked:
         assert state["railway_personal_token"]["status"] == "fail"
         assert "railway_personal_project_token" not in state
 
+    @pytest.mark.parametrize("entry", ["direct", "selected"])
     @pytest.mark.parametrize("line", ["_cc_declared_known=1", "_cc_declares=GITHUB_PAT=mcp/github"])
-    def test_a_tier_file_cannot_change_what_the_fleet_declares(self, tmp_path, line):
+    def test_a_tier_file_cannot_change_what_the_fleet_declares(self, tmp_path, line, entry):
         """The declarations are fixed before any .env file is parsed, on both
         entries. A tier that assigns one stops the tick, loudly, before a probe
-        or a state write: read as "declares nothing", it would end the checks."""
+        or a state write: read as "declares nothing", it would end the checks.
+        bash 3.2 exits 0 from that stop, so the script makes it exit 2."""
         e = Estate(tmp_path)
         fleet_root = e.fleet("a", RAILWAY_PERSONAL_TOKEN=LIVE)
         with (fleet_root / ".env").open("a") as env:
             env.write(line + "\n")
-        result = e.direct("a")
-        assert result.returncode != 0 and "readonly variable" in result.stderr, result
-        assert not e.direct_state("a").exists() and not e.probed("backboard.railway.app")
+        result = e.direct("a") if entry == "direct" else e.run_selected("a", *RAILWAY)
+        assert result.returncode == 2 and "readonly variable" in result.stderr, result
+        assert "creds-check: the tick stopped while reading the .env tiers" in result.stderr
+        assert not e.direct_state("a").exists() and not e.selected_state("a").exists()
+        assert not e.probed("backboard.railway.app")
 
 
 class TestTheMixedEstate:

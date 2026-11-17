@@ -186,6 +186,18 @@ TG_POST="$LIB_DIR/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.
+#
+# A tier line that assigns a name held fixed (readonly) before the tiers are
+# read stops bash at that line, before any probe or state write. bash 3.2, the
+# macOS /bin/bash, then exits 0, which reads as a clean tick, so this window
+# makes any stop while the tiers are read exit 2 and say why. It keeps the
+# EXIT cleanup lib-common.sh set, as that file asks, and restores it after.
+_cc_tiers_stopped() {
+    _lc_cleanup
+    echo "creds-check: the tick stopped while reading the .env tiers, before any probe (a tier may not assign a name the check holds fixed)" >&2
+    exit 2
+}
+trap '_cc_tiers_stopped' EXIT
 if [ "$_cc_admitted" -eq 1 ]; then
     # A tier cannot redirect a selected probe after its paths were checked.
     readonly CLAUDLOBBY_ROOT FLEET_ROOT FLEET_ARG LIB_DIR \
@@ -215,6 +227,7 @@ if [ "$_cc_admitted" -eq 1 ]; then
 else
     parse_env_file "$ENV_FILE"
 fi
+trap '_lc_cleanup' EXIT
 
 JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
