@@ -53,9 +53,13 @@ def _session(args, context) -> CommandOutput:
         result = reconcile_fleet(root=context.paths.root, fleet=context.fleet.name,
                                  bot=args.bot_id)
     except FleetLifecycleError as exc:
-        raise CommandFailure("unavailable" if exc.unavailable else "conflict",
-                             "private session or native enrollment could not be established",
-                             release_id=exc.release_id) from exc
+        from .bot_runtime import drift_cause
+
+        data, message = {}, "private session or native enrollment could not be established"
+        if drift_cause(exc.__cause__, data):  # the reconciliation wraps a drifted unit (#2954)
+            message = f"{message}: {data['cause']}"
+        raise CommandFailure("unavailable" if exc.unavailable else "conflict", message,
+                             data=data or None, release_id=exc.release_id) from exc
     except (ActivationError, PlanError, OperationContextError) as exc:
         raise CommandFailure("conflict", "selected bot configuration or activation is incomplete") from exc
     except (InventoryError, OSError) as exc:

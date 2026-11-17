@@ -5,6 +5,8 @@ sentence and exit 6, and dropped the failure's own message, so nothing said whic
 unit or file had stopped them: "bot native state cannot be established", or, from a
 fleet sweep, "fleet lifecycle stopped at unavailable bot evidence". The refusal now
 ends with that message, and the JSON result also carries it as `data.cause`.
+A generated unit that differs from its committed configuration is named the same
+way at the bot, fleet and bot session doors, with every unit in `data.drift` (#2954).
 
 The first test runs each public command through `main` with the real operation code
 and the real inventory read, over the repo's activation fixture and the fake native
@@ -16,6 +18,7 @@ import json
 import shlex
 import subprocess
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +27,7 @@ from claudlobby import bot_operations, context, fleet_operations
 from claudlobby.__main__ import main
 from claudlobby.command_result import execute
 from claudlobby.commands import bot_runtime, fleet_runtime
+from claudlobby.config_plan import PlanError
 from claudlobby.config_units import current_git_declarations
 from claudlobby.supervision_inventory import InventoryError
 from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # noqa: F401
@@ -136,8 +140,9 @@ def test_fleet_reconcile_names_a_failure_inside_its_per_bot_reads(cold, monkeypa
 
 
 def test_a_fleet_sweep_keeps_the_text_of_any_other_failure_private(cold, monkeypatch, capsys):
-    """Only an inventory or OS failure is named; another exception's text can carry a
-    configuration value or a native call's arguments, so it stays private."""
+    """Only an inventory or OS failure, or a drifted unit (#2954), is named; another
+    exception's text can carry a configuration value or a native call's arguments, so it
+    stays private."""
     worker = _worker_cli(cold, monkeypatch, capsys)
     _fail(worker, monkeypatch, "timeout")
     rc = main(["--root", str(worker.root), "--json", "fleet", "stop", "--workers"])
@@ -172,3 +177,69 @@ def test_a_cause_is_the_failures_first_line_cut_short_or_else_its_kind():
     assert bot_runtime.failure_cause(InventoryError()) == "InventoryError"
     assert bot_runtime.failure_cause(InventoryError("unit: refused\nnative stderr")) == "unit: refused"
     assert bot_runtime.failure_cause(InventoryError("x" * 600)) == "x" * 497 + "..."
+
+
+# ---------------------------------------------------------------- a drifted unit is named (#2954)
+
+DRIFT_COMMANDS = {
+    **COMMANDS,
+    "bot handoff": ["bot", "handoff", "worker"],
+    "bot interrupt": ["bot", "interrupt", "worker"],
+    "bot compact": ["bot", "compact", "worker"],
+    "bot session": ["bot", "session", "worker"],
+}
+
+
+def _drift_refusal(command):
+    """Each door's exit, error code and line before the cause (#2954)."""
+    if command == "bot session":
+        return 6, "unavailable", "private session or native enrollment could not be established"
+    if command == "fleet reconcile":
+        return 6, "unavailable", "fleet reconciliation has unavailable committed bot evidence"
+    if command.startswith("fleet "):
+        return 6, "unavailable", "fleet lifecycle stopped at unavailable bot evidence"
+    return 4, "conflict", "selected bot configuration or activation is incomplete"
+
+
+@pytest.mark.parametrize("command", sorted(DRIFT_COMMANDS))
+def test_each_door_names_a_generated_unit_that_differs_from_its_committed_configuration(
+        command, cold, monkeypatch, capsys):
+    """Item 1 of #2954: a unit file changed by hand stops every bot binding, and the bot,
+    fleet and bot session doors answered it with their fixed line alone. Each now ends that
+    line with the drift refusal, and its JSON result carries it as `data.cause` and every
+    unit as `data.drift`, as `host update` does (#2945). The exit and the code are as before."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    unit = next(Path(row["source"]) for row in worker.host.snapshot["units"]
+                if row["platform"] == "Linux" and row["source"].endswith("/com.example.worker.service"))
+    unit.chmod(0o600)  # the committed mode is another
+    rc = main(["--root", str(worker.root), "--json", *DRIFT_COMMANDS[command]])
+    body = json.loads(capsys.readouterr().out)
+    expected_rc, code, refusal = _drift_refusal(command)
+    cause = f"current generated unit differs from its committed configuration: {unit} (changed: other mode)"
+    assert (rc, body["ok"], body["error"]["code"]) == (expected_rc, False, code), body
+    assert body["error"]["message"] == f"{refusal}: {cause}"
+    assert body["data"]["cause"] == cause
+    assert body["data"]["drift"] == [{"path": str(unit), "state": "changed: other mode"}]
+    assert worker.native.actions == []
+    # Without --json the same message is the first line on stderr.
+    assert main(["--root", str(worker.root), *DRIFT_COMMANDS[command]]) == expected_rc
+    assert capsys.readouterr().err.splitlines()[0] == body["error"]["message"]
+
+
+@pytest.mark.parametrize("command", ["bot start", "fleet stop", "bot session"])
+def test_a_configuration_failure_that_is_not_drift_keeps_its_line_and_its_text_private(
+        command, cold, monkeypatch, capsys):
+    """Only a drift refusal is named (#2954). Another configuration failure's text can
+    carry a configuration value, so it stays out, as #2487 keeps it."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+
+    def declarations(*_args, **_kwargs):
+        raise PlanError("effective configuration holds a private value")
+
+    monkeypatch.setattr(bot_operations, "current_git_declarations", declarations)
+    rc = main(["--root", str(worker.root), "--json", *DRIFT_COMMANDS[command]])
+    out = capsys.readouterr().out
+    body = json.loads(out)
+    expected_rc, code, refusal = _drift_refusal(command)
+    assert (rc, body["error"]["code"], body["error"]["message"]) == (expected_rc, code, refusal), body
+    assert "cause" not in (body.get("data") or {}) and "private value" not in out

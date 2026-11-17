@@ -6,7 +6,7 @@ from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
 from ..runtime_admission import runtime_provenance
-from .bot_runtime import failure_cause, lifecycle_notes, native_state_refusal
+from .bot_runtime import drift_cause, failure_cause, lifecycle_notes, native_state_refusal
 
 
 def dispatch(args) -> CommandOutput:
@@ -90,6 +90,10 @@ def dispatch(args) -> CommandOutput:
             # A bot's native read failed inside the sweep or the reconciliation, which
             # wrap the failure: name it, as bot start, stop and restart do (#2487).
             data["cause"] = failure_cause(exc.__cause__)
+            message = f"{message}: {data['cause']}"
+        elif drift_cause(exc.__cause__, data):
+            # A drifted unit stopped a bot's binding inside the sweep or the
+            # reconciliation, which wrap it: name every unit, as the bot doors do (#2954).
             message = f"{message}: {data['cause']}"
         raise CommandFailure("unavailable" if exc.effect_attempted or exc.unavailable else "conflict",
                              message, data=data, release_id=exc.release_id,

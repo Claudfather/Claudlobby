@@ -23,7 +23,8 @@
 # "mutates operator source" category the defaults rule reserves for opt-in.
 # One knob arms it, in that host's own system.yaml:
 #     host: { jobs: { vault-sync: { enroll: true } } }
-# then stage a configuration plan and have the operator activate it.
+# then have the operator apply it:
+#     claudlobby --root <data-root> host update apply FULL_COMMIT_SHA
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

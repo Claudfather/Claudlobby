@@ -664,8 +664,10 @@ def _foreign_anchor_refusal(lines: list[str], target: str, found: list[str], kin
     environment blocks hold values. A mention in an environment block alone means
     the job inherited a bot's environment, as an app opened from a bot's shell does.
     """
-    anchor = max(found, key=len)
-    fields, block = set(), None
+    # The longest anchor is the most specific. Among anchors of one length the
+    # first by its text, so the anchor named never follows the order a set gave (#2954).
+    anchor = min(found, key=lambda item: (-len(item), item))
+    fields, other, block = set(), False, None
     for line in lines[1:-1]:
         if line == "\t}":
             block = None
@@ -675,16 +677,23 @@ def _foreign_anchor_refusal(lines: list[str], target: str, found: list[str], kin
         if match and block is None and match[2] == "{":
             block = match[1]
         if any(item in line for item in found):
-            fields.add(field if field in _PRINT_FIELDS else "another field")
-    where = " and ".join(sorted(fields)) or "another field"
-    if fields and fields <= _ENVIRONMENT_FIELDS:
+            if field in _PRINT_FIELDS:
+                fields.add(field)
+            else:
+                other = True
+    # A field off the list is "another field", named after the listed ones, and the
+    # sentence never reads "in its another field" (#2954).
+    named = " and ".join(sorted(fields))
+    where = (f"in its {named} and in another field" if named and other
+             else f"in its {named}" if named else "in another field")
+    if fields and not other and fields <= _ENVIRONMENT_FIELDS:
         step = ("it most likely inherited a bot's environment (an app opened from a bot's shell): "
                 "quit it, then start it again from a shell that did not come from a bot pane")
     else:
         step = (f"if it is a leftover of this installation, unload it (launchctl bootout {target}); "
                 "otherwise start it from outside this installation")
     return (f"foreign launchd print mentions a reviewed root or release: job {target.rsplit('/', 1)[1]} "
-            f"names {kinds.get(anchor, 'a reviewed anchor')} in its {where}; {step}")
+            f"names {kinds.get(anchor, 'a reviewed anchor')} {where}; {step}")
 
 
 class _PlistKeys(dict):
