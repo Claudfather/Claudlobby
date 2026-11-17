@@ -660,9 +660,11 @@ def _refleet(estate, extra: str):
 
 class TestWhatTheGitRoutingReadsIsDeclared:
     """#2968, #2969: a bot's `github_app:` and `git_credentials` declare what its
-    composed git config reads, through the walk the daily check reads. Before,
-    this door declared neither, so a stored push token read as a value no bot
-    declares, and a missing App variable went unreported."""
+    composed git config reads, and its `telegram.token_env` the variable its
+    Telegram channel reads, through the walk the daily check reads. Before,
+    this door declared none of them, so a stored push token or Telegram token
+    read as a value no bot declares, and a missing App variable went
+    unreported."""
 
     def test_a_push_token_is_declared_by_its_org(self, estate):
         fleet_dir, fleet, paths = _refleet(
@@ -672,6 +674,16 @@ class TestWhatTheGitRoutingReadsIsDeclared:
         assert "ACMEORG_PUSH_TOKEN" not in {f.subject for f in _shape(rows, 2)}
         row = next(f for f in _shape(rows, 1) if f.subject == "ACMEORG_PUSH_TOKEN")
         assert row.verdict == "OK" and "declared by git_credentials:Acme-Org" in row.detail, row
+        assert scope["declarations"] == 2
+
+    def test_a_telegram_token_variable_is_declared_by_its_bot(self, estate):
+        fleet_dir, fleet, paths = _refleet(
+            estate, "      telegram: {handle: w_bot, token_env: WORKER_TG_TOKEN}\n")
+        _write_env(fleet_dir / ".env", ACME_TOKEN="x", WORKER_TG_TOKEN="y")
+        rows, scope = creds.reconcile(paths, fleet)
+        assert "WORKER_TG_TOKEN" not in {f.subject for f in _shape(rows, 2)}
+        row = next(f for f in _shape(rows, 1) if f.subject == "WORKER_TG_TOKEN")
+        assert row.verdict == "OK" and "declared by telegram:worker" in row.detail, row
         assert scope["declarations"] == 2
 
     def test_an_app_routed_bot_declares_the_apps_variables(self, estate):

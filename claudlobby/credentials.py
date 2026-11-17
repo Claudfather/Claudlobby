@@ -74,7 +74,7 @@ class Declaration:
 
     var: str
     source: str  # "railway", "github" ...
-    kind: str  # "integration" | "mcp" | "git_credentials"
+    kind: str  # "integration" | "mcp" | "git_credentials" | "telegram"
     equipped_by: list[str] = field(default_factory=list)
 
 
@@ -151,7 +151,8 @@ def declared_by_bot(name: str, bot, paths) -> list:
     (`credential_check.fleet_declarations`) reads it, and so do the reconcile
     and the doctor (`declared_for_fleet`), so they cannot count two different
     sets for the same bot again. Its records are `mcp_resolve.RequiredVar`s,
-    and it reads three surfaces:
+    and it reads the four surfaces the composer registers
+    (`collect_env_contracts`):
 
     - `mcp_resolve.required_vars`: the bot's MCP fragments and integration
       docs, instance names applied, labelled `mcp/<fragment>` and
@@ -163,6 +164,12 @@ def declared_by_bot(name: str, bot, paths) -> list:
     - `git_credentials`: the variable holding each org's push token, labelled
       `git_credentials/<org>` (#2969). The composer registers these as well,
       and the bot's composed git config reads them at push time.
+    - `telegram.token_env`: the variable holding the bot's Telegram token,
+      labelled `telegram/<bot>`, unless it names the channel plugin's own
+      `TELEGRAM_BOT_TOKEN`, whose home is the channel's own `.env`; the
+      composer skips that one too. The daily check has a Telegram check of its
+      own for each channel bot, which reads no declaration, so this one adds
+      no second Telegram row there.
 
     A walk that raises refuses, with `DeclarationsUnreadable` naming the bot:
     read as declaring nothing, that bot's credentials would go unchecked with
@@ -181,6 +188,10 @@ def declared_by_bot(name: str, bot, paths) -> list:
     for org, var in sorted((getattr(bot, "git_credentials", None) or {}).items()):
         needed.append(RequiredVar(var, "fleet", None, f"GitHub token for the {org} org (git push)",
                                   True, None, f"git_credentials/{org}"))
+    telegram = getattr(bot, "telegram", None)
+    if telegram and telegram.token_env and not telegram.token_env_is_self_referential:
+        needed.append(RequiredVar(telegram.token_env, "bot", None, "Telegram bot token",
+                                  True, None, f"telegram/{name}"))
     seen: set[tuple[str, str]] = set()
     declared = []
     for req in needed:
@@ -221,15 +232,15 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
         for name in getattr(bot, "integrations", []) or []:
             integrations.add(name)
         for req in declared_by_bot(bot_name, bot, paths):
-            # The walk labels its ORIGIN "integration/<name>", "mcp/<name>" and
-            # "git_credentials/<org>". Split on that rather than testing
-            # membership in the equipped-integration set, which silently
-            # mislabelled every integration var as mcp because the prefixed
-            # string never matched a bare name. Read `.origin`, never `.source`
-            # — since #1214 the latter is the resolver descriptor and would
-            # partition to garbage.
+            # The walk labels its ORIGIN "integration/<name>", "mcp/<name>",
+            # "git_credentials/<org>" and "telegram/<bot>". Split on that
+            # rather than testing membership in the equipped-integration set,
+            # which silently mislabelled every integration var as mcp because
+            # the prefixed string never matched a bare name. Read `.origin`,
+            # never `.source` — since #1214 the latter is the resolver
+            # descriptor and would partition to garbage.
             kind, _, short = req.origin.partition("/")
-            if kind not in ("integration", "mcp", "git_credentials"):
+            if kind not in ("integration", "mcp", "git_credentials", "telegram"):
                 kind, short = "mcp", req.origin
             key = (req.name, short)
             decl = by_var.get(key)

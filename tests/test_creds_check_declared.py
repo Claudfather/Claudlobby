@@ -39,7 +39,7 @@ import pytest
 
 from tests.conftest import _write_exec, constructed_env
 from tests.package_fixtures import git_package
-from tests.test_creds_check_telegram import IS_VALID, _curl_stub
+from tests.test_creds_check_telegram import IS_VALID, REVOKED_TOKEN, VALID_TOKEN, _curl_stub
 from tests.test_maintenance_jobs import _native_fixture
 
 DAY = 86400
@@ -434,6 +434,19 @@ class TestTheSelectedCliPassesTheDeclarations:
             "ACME_PUSH_TOKEN=git_credentials/Acme-Org", "ACME_PUSH_TOKEN=git_credentials/Beta",
             "GITHUB_PAT=git_credentials/Gamma", "GITHUB_PAT=mcp/github"]
 
+    def test_a_bots_telegram_token_variable_is_declared(self, library_paths):
+        """The composer registers the variable a bot's `telegram.token_env` names,
+        unless it is the channel plugin's own TELEGRAM_BOT_TOKEN, whose home is
+        the channel's own `.env`; the walk reads the same."""
+        from claudlobby.config import TelegramConfig
+        from claudlobby.credential_check import fleet_declarations
+
+        fleet = _fleet_config(
+            manager={"telegram": TelegramConfig(handle="m_bot", token_env="MANAGER_TG_TOKEN")},
+            worker={"telegram": TelegramConfig(handle="w_bot", token_env="TELEGRAM_BOT_TOKEN")},
+            idle={"telegram": TelegramConfig(handle="i_bot")})
+        assert fleet_declarations(fleet, library_paths) == ["MANAGER_TG_TOKEN=telegram/manager"]
+
     def test_a_bot_whose_declarations_cannot_be_read_refuses_the_check(
             self, library_paths, monkeypatch):
         """Read as declaring nothing, that bot's credentials would go unprobed."""
@@ -557,9 +570,10 @@ class TestTheDoorsReadOneWalk:
 
     @staticmethod
     def _rosters():
-        from claudlobby.config import GithubAppConfig, McpEntry
+        from claudlobby.config import GithubAppConfig, McpEntry, TelegramConfig
 
         app = GithubAppConfig()
+        telegram = TelegramConfig(handle="w_bot", token_env="WORKER_TG_TOKEN")
         return {
             "mcp and integration": {"manager": {"mcp": [McpEntry("github")]},
                                     "worker": {"integrations": ["railway"]}},
@@ -567,16 +581,18 @@ class TestTheDoorsReadOneWalk:
             "github_app and the App fragment": {
                 "manager": {"github_app": app, "mcp": [McpEntry("github-app")]}},
             "git_credentials only": {"manager": {"git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN"}}},
+            "telegram token only": {"manager": {}, "worker": {"telegram": telegram}},
             "all of them": {
                 "manager": {"github_app": app, "mcp": [McpEntry("github")],
                             "git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN", "Gamma": "GITHUB_PAT"}},
-                "worker": {"integrations": ["railway"],
+                "worker": {"integrations": ["railway"], "telegram": telegram,
                            "git_credentials": {"Beta": "BETA_PUSH_TOKEN"}}},
         }
 
     @pytest.mark.parametrize("roster", ["mcp and integration", "github_app only",
                                         "github_app and the App fragment",
-                                        "git_credentials only", "all of them"])
+                                        "git_credentials only", "telegram token only",
+                                        "all of them"])
     def test_the_check_and_the_reconcile_door_count_the_same_declarations(
             self, library_paths, roster):
         from claudlobby.credential_check import fleet_declarations
@@ -732,3 +748,33 @@ class TestEachPushTokenIsChecked:
         e = Estate(tmp_path / "estate")
         e.fleet("a", ACME_PUSH_TOKEN=DEAD)
         assert e.selected("a", *declares)["git_credentials_ACME_PUSH_TOKEN"]["status"] == "fail"
+
+
+class TestATelegramTokenHasOneRowPerBot:
+    """The walk declares the variable a bot's `telegram.token_env` names, and the
+    selected CLI passes it as `VAR=telegram/<bot>`. The daily check keeps its
+    own Telegram check for each channel bot, which reads the bot's conf and no
+    declaration, so the declaration adds no second row: each tick, with it and
+    without it, leaves the same keys and one Telegram row for the bot."""
+
+    @staticmethod
+    def _tick(tmp_path: Path, token: str, *declares: str) -> tuple:
+        e = Estate(tmp_path)
+        bot = e.fleet("a") / "runtime" / "bots" / "worker"
+        with (bot / "bot.conf").open("a") as conf:
+            conf.write('export TELEGRAM_BOT_HANDLE="bot_one_bot"\n'
+                       'export TELEGRAM_TOKEN_ENV_NAME="WORKER_TG_TOKEN"\n')
+        (bot / ".env").write_text(f'WORKER_TG_TOKEN="{token}"\n')
+        return e.selected("a", *declares), e.posts("a")
+
+    @pytest.mark.parametrize("token,status", [(VALID_TOKEN, "ok"), (REVOKED_TOKEN, "fail")])
+    def test_the_declaration_adds_no_telegram_row(self, tmp_path, token, status):
+        without, posts_without = self._tick(tmp_path / "without", token)
+        declared, posts_declared = self._tick(tmp_path / "declared", token,
+                                              "WORKER_TG_TOKEN=telegram/worker")
+        assert sorted(declared) == sorted(without), declared
+        assert [key for key in declared if key.endswith("_worker")] == ["telegram_a_worker"]
+        assert not [key for key in declared if "WORKER_TG_TOKEN" in key.upper()]
+        assert declared["telegram_a_worker"]["status"] == status
+        assert declared["telegram_a_worker"]["detail"] == without["telegram_a_worker"]["detail"]
+        assert posts_declared == posts_without

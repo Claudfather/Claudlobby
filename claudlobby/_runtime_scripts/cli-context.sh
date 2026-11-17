@@ -82,10 +82,11 @@ _claudlobby_parse_runtime_scope() {
                 # VAR=SURFACE: a credential the activated fleet declares, and the
                 # surface declaring it: a library file (mcp/<name>,
                 # integration/<name>), whose name may hold any text but a
-                # control character, or an org named in the git_credentials of
-                # a bot (git_credentials/<org>, #2969). The probe only ever
-                # reads it as data.
-                declares_shape='^[A-Za-z_][A-Za-z0-9_]*=(mcp|integration|git_credentials)/[^[:cntrl:]]+$'
+                # control character, an org named in the git_credentials of a
+                # bot (git_credentials/<org>, #2969), or the telegram.token_env
+                # of a bot (telegram/<bot>). The probe only ever reads it as
+                # data.
+                declares_shape='^[A-Za-z_][A-Za-z0-9_]*=(mcp|integration|git_credentials|telegram)/[^[:cntrl:]]+$'
                 [[ "$value" =~ $declares_shape ]] || return 2
                 _CL_RUNTIME_DECLARES+=("$value") ;;
         esac

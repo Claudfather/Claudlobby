@@ -30,8 +30,11 @@
 # CLI reads the activated roster's declarations through the walk the reconcile
 # and doctor doors read too (#2968): the MCP fragments and integrations each
 # bot is equipped with, the GitHub App's variables for a bot routed through the
-# App (github_app:), and the variable holding each org's push token in a bot's
-# git_credentials (#2969). It passes them as `--declares VAR=SURFACE`. A
+# App (github_app:), the variable holding each org's push token in a bot's
+# git_credentials (#2969), and the variable holding a bot's Telegram token
+# (telegram.token_env). It passes them as `--declares VAR=SURFACE`. No check
+# reads a telegram/ declaration: check_telegram_tokens checks each channel bot
+# on its own, from its bot.conf, so a Telegram token has one row per bot. A
 # declared credential with no value is a FAIL, never a skip: the fleet said it
 # needs it. One no bot declares gets no probe and no row, so a fleet that never
 # wanted a provider never hears about it. A direct run has no declaration

@@ -126,7 +126,7 @@ def test_credentials_take_each_declaration_literally_and_in_order(runtime):
     # A surface names a library file, so its name may hold any text but a control character.
     values = ["RAILWAY_PERSONAL_TOKEN=integration/railway", "GITHUB_PAT=mcp/github",
               "_X1=integration/dir/name.v2", "ACME_KEY=mcp/my_server", "ACME_KEY=mcp/a name",
-              "ACME_PUSH_TOKEN=git_credentials/Acme-Org"]
+              "ACME_PUSH_TOKEN=git_credentials/Acme-Org", "WORKER_TG_TOKEN=telegram/worker"]
     tail = [part for value in values for part in ("--declares", value)]
     result = credentials(runtime, *tail)
     assert result.returncode == 0, result.stderr

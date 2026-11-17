@@ -23,12 +23,13 @@ class CredentialCheckError(RuntimeError):
 
 #: One `--declares` value: a credential's variable name, then the surface
 #: declaring it, `mcp/<name>` or `integration/<name>` for a library file, whose
-#: name may hold any text but a control character, or `git_credentials/<org>`
-#: for an org a bot names in its `git_credentials` (#2969). The probe's parser
+#: name may hold any text but a control character, `git_credentials/<org>` for
+#: an org a bot names in its `git_credentials` (#2969), or `telegram/<bot>` for
+#: a bot's `telegram.token_env`. The probe's parser
 #: holds the same shape (cli-context.sh); checking it here first names a value
 #: it would refuse, where its refusal would read as a probe that may have run.
 _DECLARATION = re.compile(
-    r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration|git_credentials)/[^\x00-\x1f\x7f-\x9f]+")
+    r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration|git_credentials|telegram)/[^\x00-\x1f\x7f-\x9f]+")
 
 
 def fleet_declarations(fleet, paths) -> list[str]:
@@ -37,10 +38,10 @@ def fleet_declarations(fleet, paths) -> list[str]:
     Each bot's declarations come from ``credentials.declared_by_bot``, the one
     walk the reconcile and doctor doors read too (#2968): its MCP fragments and
     integrations, instance names applied, the GitHub App's three variables for
-    a bot with ``github_app:``, and the variable holding each org's push token
-    in its ``git_credentials`` (#2969). A bot whose walk raises refuses the
-    check: read as declaring nothing, its credentials would go unprobed with no
-    word said.
+    a bot with ``github_app:``, the variable holding each org's push token in
+    its ``git_credentials`` (#2969), and the variable its ``telegram.token_env``
+    names. A bot whose walk raises refuses the check: read as declaring
+    nothing, its credentials would go unprobed with no word said.
     """
     declared: set[str] = set()
     for name in sorted(fleet.bots):
