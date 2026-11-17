@@ -30,7 +30,6 @@ claudlobby fleet uptime  # per-bot uptime, MTBR, restart rate
 claudlobby event list  # the fleet's events (rc 3 when the plane cannot answer)
 claudlobby workstream list  # the fleet's workstream registry
 claudlobby brief --bot <name> [--json] # one read door over fleet state for a bot
-claudlobby --json pr holders PATH... --repo OWNER/REPO  # the open PRs that change each PATH, old names included; exit 6 names a PR whose files cannot be read in full
 claudlobby host cache warm  # pre-download npx + uvx MCP packages
 claudlobby bot move <bot> --to <fleet> # move a bot between fleets
 
