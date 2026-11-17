@@ -1142,7 +1142,9 @@ check_tmux_session() {
 # tiered .env chain. Runs in a subshell so the calling env is untouched.
 # Empty output = no token reaches this bot. The ONE resolution shared by
 # bridge_state and creds-check — if they resolved differently, creds-check
-# would validate a token no bot actually runs with.
+# would validate a token no bot actually runs with. A TELEGRAM_TOKEN_ENV_NAME
+# that is not a variable name reads no token, as an unset one does, with one
+# line on stderr that does not repeat it (start-bot.sh runs the same case).
 resolve_bot_telegram_token() {
     local bot_dir="${1:?Usage: resolve_bot_telegram_token /path/to/bot/dir}"
     (
@@ -1153,7 +1155,14 @@ resolve_bot_telegram_token() {
         BOT_DIR="$bot_dir"
         source_env_tiered 2>/dev/null || true
         _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
-        if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
+        if [ -n "$_te" ]; then
+            case "$_te" in
+                [0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
+                    printf 'resolve_bot_telegram_token: TELEGRAM_TOKEN_ENV_NAME is not a variable name, so no token is read for %s\n' "$bot_dir" >&2
+                    ;;
+                *) printf '%s' "${!_te:-}" ;;
+            esac
+        fi
     ) || true
 }
 
