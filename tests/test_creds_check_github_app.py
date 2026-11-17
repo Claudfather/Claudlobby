@@ -178,8 +178,10 @@ def test_partial_app_config_does_not_attempt_a_mint(tmp_path):
 
 
 def test_static_pat_still_takes_precedence(tmp_path):
-    # A fleet with both a PAT and App config uses the PAT path (unchanged) —
-    # the App branch is only reached when no static token exists.
+    # A direct run, which reads no declarations, with both a PAT and App
+    # config uses the PAT path (unchanged) — there the App branch is only
+    # reached when no static token exists. A selected tick probes the App
+    # whenever a bot declares it (#2971, tests/test_creds_check_declared.py).
     state = _run(_fleet(tmp_path, pat="ghp_realtoken", app_env=APP))
     row = state["github_pat"]
     assert row["status"] == "ok"

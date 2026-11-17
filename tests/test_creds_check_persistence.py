@@ -114,9 +114,10 @@ class TestPersistentSkipResurfaces:
     """The case our own fleet was blind to.
 
     ``github_pat`` has been `skip` on this estate for as long as anyone looked.
-    NOT because of a name mismatch — ``check_github_pat`` falls back through
-    ``GITHUB_PERSONAL_ACCESS_TOKEN`` then ``GITHUB_TOKEN`` then ``GITHUB_PAT``,
-    so it does read the name the fleet uses. The value is simply EMPTY, and an
+    NOT because of a name mismatch — ``check_github_pat`` reads ``GITHUB_PAT``
+    (#2971; a direct run falls back through ``GITHUB_PERSONAL_ACCESS_TOKEN``
+    then ``GITHUB_TOKEN`` then ``GITHUB_PAT``), so it does read the name the
+    fleet uses. The value is simply EMPTY, and an
     empty value takes the same ``[ -z ]`` branch as an absent one.
 
     The point that survives either diagnosis: it is a SKIP, not a fail, and

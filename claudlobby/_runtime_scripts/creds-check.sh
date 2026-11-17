@@ -47,7 +47,13 @@
 #
 # Env vars consulted (selected mode reads host/root/fleet tiers; a direct
 # source-only call reads its chosen .env file):
-#   GITHUB_PERSONAL_ACCESS_TOKEN   — fleet GitHub PAT
+#   GITHUB_PAT                     — the token the GitHub MCP server receives,
+#                                    and the one static token a selected tick
+#                                    probes for it (#2971); a direct run probes
+#                                    the first of GITHUB_PERSONAL_ACCESS_TOKEN,
+#                                    GITHUB_TOKEN and GITHUB_PAT with a value
+#   GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH
+#                                  — the GitHub App's, which mint its tokens
 #   RAILWAY_PERSONAL_TOKEN         — Railway ACCOUNT token; answers `me`
 #   RAILWAY_PERSONAL_PROJECT_TOKEN — Railway WORKSPACE token; answers
 #                                    `projects`, and CANNOT answer `me`
@@ -533,44 +539,55 @@ provider_incident() {
     cat "$cache"
 }
 
-# record_probe <key> <provider> <noanswer|reject> <detail>: record a probe that
-# did not succeed, for the credential under state key <key>, as above.
-# <provider> names the status page to read: railway, github or telegram.
-record_probe() {
-    local key="$1" provider="$2" outcome="$3" detail="$4" incident
+# probe_verdict <provider> <noanswer|reject> <detail>: the verdict on a probe
+# that did not succeed, as above, left in _pv_status, _pv_detail and
+# _pv_reason (empty but for an unknown). <provider> names the status page to
+# read: railway, github or telegram. It records nothing, so a row that probes
+# two credentials can record one verdict for both (check_github_pat).
+probe_verdict() {
+    local provider="$1" outcome="$2" incident
+    _pv_detail="$3" _pv_reason=""
     if [ "$outcome" = "noanswer" ]; then
-        record_and_alert "$key" "unknown" "$detail" "no_answer"
-        return
+        _pv_status="unknown" _pv_reason="no_answer"
+        return 0
     fi
     incident="$(provider_incident "$provider")"
     if [ -n "$incident" ]; then
-        record_and_alert "$key" "unknown" \
-            "$detail, during an open incident on the provider's API: $incident" "provider_degraded"
+        _pv_status="unknown" _pv_reason="provider_degraded"
+        _pv_detail="$_pv_detail, during an open incident on the provider's API: $incident"
     else
-        record_and_alert "$key" "fail" "$detail"
+        _pv_status="fail"
     fi
+}
+
+# record_probe <key> <provider> <noanswer|reject> <detail>: record that
+# verdict for the credential under state key <key>.
+record_probe() {
+    probe_verdict "$2" "$3" "$4"
+    record_and_alert "$1" "$_pv_status" "$_pv_detail" "$_pv_reason"
 }
 
 # ---------------------------------------------------------------------
 # Provider checks
 # ---------------------------------------------------------------------
 
-# App-auth P4 (#1274): probe a fleet that mints App installation tokens at
-# use time instead of holding a static PAT. Reached only when GITHUB_APP_*
-# config is present (the gate is in check_github_pat), so an App-less fleet
-# never lands here even though the helper ships estate-wide in lib/.
-_check_github_app() {
+# App-auth P4 (#1274): the verdict on a fleet that mints App installation
+# tokens at use time instead of holding a static PAT, left in _pv_* (see
+# probe_verdict). Reached only when all three GITHUB_APP_* have a value (the
+# callers check), so an App-less fleet never lands here even though the helper
+# ships estate-wide in lib/.
+_github_app_verdict() {
     # Mint helper-DIRECT via the P1 mint CLI (D1: never `git credential fill`,
     # whose pathless context would serve whatever ambient config answers). A
     # mint failure has already emitted an auth_mint_failed event from the
     # helper, so this records the fleet-level verdict without re-alerting it.
     # A failed mint cannot say whether GitHub refused it or never answered, so
-    # it reads as a rejection and GitHub's status page decides (record_probe).
+    # it reads as a rejection and GitHub's status page decides (probe_verdict).
     local token
     if ! token="$("$LIB_DIR/mint-github-token.sh" 2>/dev/null)" || [ -z "$token" ]; then
-        record_probe "github_pat" github reject \
+        probe_verdict github reject \
             "GITHUB_APP_* configured but installation-token mint failed (see auth_mint_failed events)"
-        return
+        return 0
     fi
     # Probe an authenticated INSTALLATION endpoint. /user 403s a ghs_ token
     # ('Resource not accessible by integration'), so it cannot be reused here
@@ -589,63 +606,31 @@ _check_github_app() {
         https://api.github.com/installation/repositories 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
     case "$code" in
-        200) record_and_alert "github_pat" "ok" "App installation token OK (HTTP 200 on /installation/repositories)" ;;
-        401) record_probe "github_pat" github reject "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
-        403) record_probe "github_pat" github reject "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
-        *)   record_probe "github_pat" github "$(probe_outcome "$code")" "App token probe: HTTP $code on /installation/repositories" ;;
+        200) _pv_status="ok" _pv_reason=""
+             _pv_detail="App installation token OK (HTTP 200 on /installation/repositories)" ;;
+        401) probe_verdict github reject "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
+        403) probe_verdict github reject "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
+        *)   probe_verdict github "$(probe_outcome "$code")" "App token probe: HTTP $code on /installation/repositories" ;;
     esac
 }
 
-check_github_pat() {
-    local token="" var surfaces=""
-    # The first of these with a value is the token probed below.
-    for var in GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN GITHUB_PAT; do
-        token="${!var:-}"
-        [ -z "$token" ] || break
+# _github_app_missing: the GITHUB_APP_* variables with no value, comma
+# separated, and nothing when all three have one. The App is gated on this
+# CONFIG, never on the helper file: the helper is a shared-lib/ install, so
+# file-existence would make every App-less fleet attempt a doomed mint.
+_github_app_missing() {
+    local var out=""
+    for var in GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH; do
+        [ -n "${!var:-}" ] || out="${out:+$out, }$var"
     done
-    # The GitHub MCP declares GITHUB_PAT, and the App MCP or a bot routed
-    # through the App (github_app:) the GITHUB_APP_* trio (#1213): a fleet
-    # that declares none of them has no GitHub credential to check.
-    if [ "$_cc_declared_known" -eq 1 ] && ! surfaces="$(declared_by GITHUB_PAT \
-            GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH)"; then
-        not_declared "github_pat" "GITHUB_PAT or GITHUB_APP_*"
-        return
-    fi
-    if [ -z "$token" ]; then
-        # No static token — but an App-mode fleet mints one at use time. Gate
-        # on CONFIG presence (all three vars), never on the helper file: the
-        # helper is a shared-lib/ install, so file-existence would make every
-        # App-less fleet attempt a doomed mint. This is the App half of #1213's
-        # 'a declared integration is a fail, not a skip' — the fleet declared
-        # App auth, so absence of a working token is a fail, not a skip.
-        # Boundary: reads only the .env tier (the vars are exported by
-        # parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY
-        # in the helper's ~/.config/claudlobby/github-app.conf fallback reads
-        # as skip here — composed fleets always wire .env, so this bites only
-        # hand-configured operator/cron installs.
-        if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] \
-                && [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
-            _check_github_app
-            return
-        fi
-        if [ -n "$surfaces" ]; then
-            # Declared and absent is a FAIL, never a skip (#1213). An empty
-            # token does not stop the GitHub MCP: it starts and calls GitHub
-            # with no credential, so public reads succeed and writes fail, and
-            # it looks healthy. Recording skip here silenced the daily alert on
-            # exactly the fleets it exists for.
-            record_and_alert "github_pat" "fail" \
-                "declared by $surfaces, but no GitHub token has a value at the host, root or fleet tier and no complete GITHUB_APP_* config is set"
-            return
-        fi
-        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
-        return
-    fi
-    # A git_credentials push token in this same variable is not probed again
-    # by check_git_credentials (#2969).
-    _cc_github_pat_var="$var"
-    local code
-    local curl_err_file auth_cfg
+    printf '%s' "$out"
+}
+
+# _github_token_verdict VAR: the verdict on the static token VAR holds,
+# probed on /user, left in _pv_*.
+_github_token_verdict() {
+    local var="$1" token code curl_err_file auth_cfg
+    token="${!var:-}"
     curl_err_file=$(safe_mktemp)
     # auth_curl_cfg (lib-common, App-auth P1): the one owner of the
     # tokens-never-ride-argv invariant, escaping included.
@@ -658,9 +643,120 @@ check_github_pat() {
         https://api.github.com/user 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
     if [ "$code" = "200" ]; then
-        record_and_alert "github_pat" "ok" "HTTP 200"
+        _pv_status="ok" _pv_detail="HTTP 200" _pv_reason=""
     else
-        record_probe "github_pat" github "$(probe_outcome "$code")" "HTTP $code on /user"
+        probe_verdict github "$(probe_outcome "$code")" "HTTP $code on /user"
+    fi
+}
+
+# A direct run reads no declarations, so it knows no consumer to match: it
+# probes the first of GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN and GITHUB_PAT
+# with a value, else a complete App config, else records skip, as it did
+# before #2971. Boundary: it reads only the .env tier (the vars are exported
+# by parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY in
+# the helper's ~/.config/claudlobby/github-app.conf fallback reads as skip
+# here; composed fleets always wire .env, so this bites only hand-configured
+# operator/cron installs.
+_check_github_direct() {
+    local var
+    for var in GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN GITHUB_PAT; do
+        if [ -n "${!var:-}" ]; then
+            _github_token_verdict "$var"
+            record_and_alert "github_pat" "$_pv_status" "$_pv_detail" "$_pv_reason"
+            return
+        fi
+    done
+    if [ -z "$(_github_app_missing)" ]; then
+        _github_app_verdict
+        record_and_alert "github_pat" "$_pv_status" "$_pv_detail" "$_pv_reason"
+        return
+    fi
+    record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
+}
+
+# The GitHub row. A selected tick probes what each surface that declares a
+# GitHub credential hands its consumer (#2971):
+#   - for GITHUB_PAT (the GitHub MCP, mcp/github), GITHUB_PAT itself: the
+#     server receives that one token, its fragment (library/mcp/github.json)
+#     setting the server's GITHUB_PERSONAL_ACCESS_TOKEN from it, so a value
+#     in GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_TOKEN never reaches it;
+#   - for the App's three variables (its MCP fragment, or a bot routed through
+#     it with github_app:), the App, even beside a static token: they mint
+#     the tokens their consumers use.
+# Before, the row probed the first of those three static tokens with a value
+# and reached the App only when none had one, so a GITHUB_TOKEN beside an
+# empty GITHUB_PAT read ok while the server started with no token, and a
+# static token kept a declared App from being probed. A fleet that declares
+# both gets both probed in the one row, which records the worse verdict (a
+# fail, then an unknown) and names each in its detail.
+check_github_pat() {
+    local pat_by="" app_by="" missing="" var stray="" status="" reason=""
+    local pat_status="" pat_detail="" pat_reason="" app_status="" app_detail="" app_reason=""
+    if [ "$_cc_declared_known" -ne 1 ]; then
+        _check_github_direct
+        return
+    fi
+    # The GitHub MCP declares GITHUB_PAT, and the App MCP or a bot routed
+    # through the App (github_app:) the GITHUB_APP_* trio (#1213): a fleet
+    # that declares none of them has no GitHub credential to check.
+    pat_by="$(declared_by GITHUB_PAT)" || pat_by=""
+    app_by="$(declared_by GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID \
+        GITHUB_APP_PRIVATE_KEY_PATH)" || app_by=""
+    if [ -z "$pat_by$app_by" ]; then
+        not_declared "github_pat" "GITHUB_PAT or GITHUB_APP_*"
+        return
+    fi
+    if [ -n "$pat_by" ]; then
+        # This row covers GITHUB_PAT, value or none, so a git_credentials push
+        # token in it is not checked again (#2969).
+        _cc_github_pat_var="GITHUB_PAT"
+        if [ -n "${GITHUB_PAT:-}" ]; then
+            _github_token_verdict GITHUB_PAT
+        else
+            # Declared and absent is a FAIL, never a skip (#1213). An empty
+            # token does not stop the GitHub MCP: it starts and calls GitHub
+            # with no credential, so public reads succeed and writes fail, and
+            # it looks healthy. A token in one of the other two variables is
+            # named, since that is where the value went.
+            for var in GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN; do
+                [ -z "${!var:-}" ] || stray="${stray:+$stray and }$var"
+            done
+            _pv_status="fail" _pv_reason=""
+            _pv_detail="declared by $pat_by, but GITHUB_PAT has no value at the host, root or fleet tier"
+            case "$stray" in
+                '') ;;
+                *' and '*) _pv_detail="$_pv_detail ($stray have values, which are not read in its place)" ;;
+                *) _pv_detail="$_pv_detail ($stray has a value, which is not read in its place)" ;;
+            esac
+        fi
+        pat_status="$_pv_status" pat_detail="$_pv_detail" pat_reason="$_pv_reason"
+    fi
+    if [ -n "$app_by" ]; then
+        missing="$(_github_app_missing)"
+        if [ -z "$missing" ]; then
+            _github_app_verdict
+        else
+            # Declared with a variable missing is a FAIL too: the App cannot mint.
+            _pv_status="fail" _pv_reason=""
+            _pv_detail="declared by $app_by, but no value at the host, root or fleet tier for $missing"
+        fi
+        app_status="$_pv_status" app_detail="$_pv_detail" app_reason="$_pv_reason"
+    fi
+    if [ -z "$app_by" ]; then
+        record_and_alert "github_pat" "$pat_status" "$pat_detail" "$pat_reason"
+    elif [ -z "$pat_by" ]; then
+        record_and_alert "github_pat" "$app_status" "$app_detail" "$app_reason"
+    else
+        status="ok"
+        if [ "$pat_status" = "fail" ] || [ "$app_status" = "fail" ]; then
+            status="fail"
+        elif [ "$pat_status" = "unknown" ]; then
+            status="unknown" reason="$pat_reason"
+        elif [ "$app_status" = "unknown" ]; then
+            status="unknown" reason="$app_reason"
+        fi
+        record_and_alert "github_pat" "$status" \
+            "GITHUB_PAT: $pat_detail; GITHUB_APP_*: $app_detail" "$reason"
     fi
 }
 
@@ -712,11 +808,11 @@ _check_one_git_token() {
 
 # Each push token a bot of this fleet names in git_credentials (#2969). Before
 # it, a token no bot otherwise declared got no probe, no row and no alert, and
-# the first sign of a dead one was a failed git push. A variable check_github_pat
-# probed this tick is not probed again, and the log says it was checked as
-# github_pat. A row for a token no bot names any more is removed, as
-# not_declared removes a provider row. A direct run knows no declarations, so it
-# checks none.
+# the first sign of a dead one was a failed git push. GITHUB_PAT, which the
+# GitHub row covers whenever a bot declares it (#2971), is not probed again,
+# and the log says it was checked as github_pat. A row for a token no bot names
+# any more is removed, as not_declared removes a provider row. A direct run
+# knows no declarations, so it checks none.
 check_git_credentials() {
     local varname keep=" " stale named=0
     [ "$_cc_declared_known" -eq 1 ] || return 0
@@ -1065,7 +1161,8 @@ check_alert_pair() {
 # Run all checks
 # ---------------------------------------------------------------------
 
-# Set by check_github_pat to the variable it probed, read by check_git_credentials.
+# Set by check_github_pat to GITHUB_PAT when a bot declares it, the GitHub row
+# then covering it; read by check_git_credentials.
 _cc_github_pat_var=""
 CHECKS=(check_github_pat check_git_credentials check_railway_token check_telegram_tokens check_alert_pair)
 
