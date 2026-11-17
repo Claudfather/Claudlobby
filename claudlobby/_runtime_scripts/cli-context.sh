@@ -47,7 +47,7 @@ _claudlobby_parse_runtime_scope() {
     shift 2
     _claudlobby_require_native "$owner" || return $?
     _CL_RUNTIME_FLEET="" _CL_RUNTIME_FLEET_ROOT="" _CL_RUNTIME_BOTS_DIR="" _CL_RUNTIME_DRY_RUN=0
-    _CL_RUNTIME_PLUGINS=() _CL_RUNTIME_BOTS=()
+    _CL_RUNTIME_PLUGINS=() _CL_RUNTIME_BOTS=() _CL_RUNTIME_DECLARES=()
     case "${1:-}" in
         --admitted-runtime)
             [ "${CLAUDLOBBY_NATIVE_ADMITTED:-}" = 1 ] && _claudlobby_runtime_bound || {
@@ -65,7 +65,7 @@ _claudlobby_parse_runtime_scope() {
             continue
         fi
         case "$mode:$option" in
-            reload:--fleet|reload:--bots-dir|reload:--plugin|reload:--bot|credentials:--fleet|credentials:--fleet-root|credentials:--bots-dir|credentials:--bot) ;;
+            reload:--fleet|reload:--bots-dir|reload:--plugin|reload:--bot|credentials:--fleet|credentials:--fleet-root|credentials:--bots-dir|credentials:--bot|credentials:--declares) ;;
             *) printf 'claudlobby: unsupported admitted runtime option\n' >&2; return 2 ;;
         esac
         [ "$#" -ge 2 ] || { printf 'claudlobby: runtime option has no value\n' >&2; return 2; }
@@ -78,6 +78,11 @@ _claudlobby_parse_runtime_scope() {
             --bot)
                 [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || return 2
                 _CL_RUNTIME_BOTS+=("$value") ;;
+            --declares)
+                # VAR=SURFACE: a credential the activated fleet declares, and the
+                # library surface declaring it (mcp/<name>, integration/<name>).
+                [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || return 2
+                _CL_RUNTIME_DECLARES+=("$value") ;;
         esac
         shift 2
     done
