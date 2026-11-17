@@ -96,7 +96,8 @@ def _capture_source(path, destination, files, *, expected=None):
     """Copy one explicit authored input, never links or credential facilities."""
     before = path_state(path, source=True)
     if expected is not None and before != expected:
-        raise ActivationRefusal("backup configuration changed since activation; review and activate it first")
+        raise ActivationRefusal("backup configuration changed since it was applied; review it, then apply it "
+                                "with `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` first")
     if before["node"]["kind"] != "absent":
         # Do not dereference a link into an unrelated credential or vault tree.
         def walk(source, target):

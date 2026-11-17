@@ -1,0 +1,11 @@
+### Fixed — the bot and fleet commands and `bot session` name a generated unit that differs from the committed configuration (#2954)
+
+A unit file changed by hand stops every bot operation. `bot start`, `stop`, `restart`, `handoff`, `interrupt` and `compact` answered "selected bot configuration or activation is incomplete" and nothing more, and the fleet sweep, `fleet reconcile` and `bot session` answered with their own fixed lines. Each line now ends with the drift refusal, cut to 500 characters, as `host update` names it, and the JSON result carries it as `data.cause` and every unit as `data.drift`. Only that refusal is named: another configuration failure keeps its fixed line, because its text can carry a configuration value. The exit status and the error code are unchanged.
+
+### Fixed — the foreign launchd refusal reads "in another field" and names the same anchor on every run (#2954)
+
+When the anchor appeared in a print field outside the fixed list, the refusal read "in its another field". It now names the listed fields first and then "in another field", or "in another field" alone. Of two anchors of one length, it named whichever a set gave first, so the anchor it named could differ between two runs on one print. It now names the first by its text. Which jobs are refused is unchanged.
+
+### Fixed — `config diff`, a backup refusal and `vault-sync.sh` name `host update apply` where they said to activate (#2954)
+
+`config diff` said to "stage and activate a release" to record a runtime's provenance, and to "activate a configuration plan first" for a bot or the fleet timers when nothing was composed for them. A backup of a configuration input changed since it was applied said "review and activate it first", and the header of `vault-sync.sh` said to stage a configuration plan and have the operator activate it. They now name `claudlobby --root <data-root> host update apply FULL_COMMIT_SHA`. The restore guidance for an older bundle said to install the recorded release, then plan and activate through the normal host commands. It now says that no command starts a restored root yet, so the root stays inactive until a reviewed adoption step admits it, as the backup guide says. For both kinds of bundle, it says to select `host-system.yaml` while reviewing, not when planning.

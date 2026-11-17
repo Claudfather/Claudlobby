@@ -34,6 +34,24 @@ def failure_cause(exc: BaseException) -> str:
     return text or type(exc).__name__
 
 
+def drift_cause(exc: BaseException | None, data: dict) -> str | None:
+    """Name generated units that differ from the committed configuration (#2954).
+
+    Only a drift refusal (`UnitDriftError`) is named: its text is built from the
+    units' paths and fixed state words, so it carries no configuration value. Its
+    first line, cut as `failure_cause` cuts it, goes in `data` as `cause`, and every
+    unit as `drift`, as `host update` names them (#2945). Any other failure returns
+    None, and its text stays out of the refusal (#2487).
+    """
+    from ..config_units import UnitDriftError
+
+    if not isinstance(exc, UnitDriftError):
+        return None
+    data["cause"] = failure_cause(exc)
+    data["drift"] = [dict(row) for row in exc.rows]
+    return data["cause"]
+
+
 def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFailure:
     """A native read that failed, refused with the failure's own message (#2487).
 
@@ -184,7 +202,10 @@ def dispatch(args) -> CommandOutput:
     except ReleaseError as exc:
         raise CommandFailure("release_mismatch", "selected bot release differs from this executable", data=data) from exc
     except (ActivationError, PlanError, OperationContextError) as exc:
-        raise CommandFailure("conflict", "selected bot configuration or activation is incomplete", data=data) from exc
+        message = "selected bot configuration or activation is incomplete"
+        if drift_cause(exc, data):  # a drifted unit stopped the bot's binding (#2954)
+            message = f"{message}: {data['cause']}"
+        raise CommandFailure("conflict", message, data=data) from exc
     except (InventoryError, OSError) as exc:
         raise native_state_refusal("bot", exc, data) from exc
     if action == "handoff" and getattr(args, "check", False):

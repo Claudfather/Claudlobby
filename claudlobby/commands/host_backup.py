@@ -39,9 +39,9 @@ def dispatch(args):
                           "Git initialization must explicitly admit the restored database; restore alone does not make it runnable.",
                           "Reconcile external work, re-provision credentials, and pair and authorize owner access again.")
             else:
-                lines += ("Install the recorded release, review configuration and external work, re-provision credentials,",
-                          "then plan and activate through the normal host commands. Pair and authorize owner access again.")
-            lines += ("If host-system.yaml exists, select it with CLAUDLOBBY_HOST_SYSTEM_YAML when planning.",)
+                lines += ("Review configuration and external work, and re-provision credentials. No command starts a",
+                          "restored root yet: keep it inactive until a reviewed adoption step admits it. Pair and authorize owner access again.")
+            lines += ("If host-system.yaml exists, select it with CLAUDLOBBY_HOST_SYSTEM_YAML while reviewing.",)
     except ActivationRefusal as exc:
         raise CommandFailure("conflict", f"backup refused: {exc}") from exc
     except (OSError, ValueError, KeyError, TypeError) as exc:

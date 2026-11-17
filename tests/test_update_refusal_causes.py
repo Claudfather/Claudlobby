@@ -24,7 +24,7 @@ from claudlobby.commands import host_update
 from claudlobby.config_plan import PlanError
 from claudlobby.config_units import UnitDriftError, current_git_declarations
 from claudlobby.env_tiers import ResolverUnavailable
-from claudlobby.supervision_inventory import InventoryError, collect_enrollment
+from claudlobby.supervision_inventory import InventoryError, _foreign_anchor_refusal, collect_enrollment
 from tests.fixtures.current_runtime import current_runtime, tmp_path  # noqa: F401
 from tests.test_manifest_provenance import FLEET_YAML, _fleet, _paths
 from tests.test_supervision_inventory import Observations
@@ -201,6 +201,24 @@ def test_a_unit_replaced_by_a_link_or_a_directory_is_named_changed(current_runti
                                                             "changed: not a regular file"]
 
 
+def test_a_unit_reached_through_a_redirected_directory_is_named_changed(current_runtime):
+    """Item 2 of #2954: the unit is a regular file and no link, but a directory on its
+    path is a link to one elsewhere, so the path is not its own resolution."""
+    _root, _installation, _rendered, host = current_runtime
+    unit = _linux_units(host)[0]
+    directory = unit.parent
+    elsewhere = directory.with_name(directory.name + "-elsewhere")
+    directory.rename(elsewhere)
+    directory.symlink_to(elsewhere, target_is_directory=True)
+    assert unit.is_file() and not unit.is_symlink()  # precondition
+    with pytest.raises(UnitDriftError) as refused:
+        current_git_declarations(host.snapshot, "Linux")
+    states = {row["path"]: row["state"] for row in refused.value.rows}
+    assert states[str(unit)] == "changed: its directory is redirected", states
+    assert set(states.values()) == {"changed: its directory is redirected"}, states
+    assert f"{unit} (changed: its directory is redirected)" in str(refused.value)
+
+
 def test_a_drift_refusal_read_against_a_candidate_says_whether_it_keeps_each_unit():
     rows = [{"path": "/data/kept.service", "state": "missing"},
             {"path": "/data/gone.service", "state": "changed: other bytes"}]
@@ -244,11 +262,11 @@ def test_an_update_names_whether_its_candidate_keeps_each_drifted_unit(initial_s
 
 # ---------------------------------------------------------------- the foreign launchd refusal
 
-def _app_print(program, environment=()):
+def _app_print(program, environment=(), extra=()):
     return ("gui/501/application.fixture = {\n\tpath = (submitted by runningboardd.1)\n"
             f"\ttype = Submitted\n\tstate = running\n\tprogram = {program}\n"
             "\tinherited environment = {\n" + "".join(f"\t\t{line}\n" for line in environment) + "\t}\n"
-            "\tdomain = gui/501 [1]\n\tpid = 123\n}\n")
+            + "".join(f"\t{line}\n" for line in extra) + "\tdomain = gui/501 [1]\n\tpid = 123\n}\n")
 
 
 def _darwin(tmp_path):
@@ -298,12 +316,47 @@ def test_a_foreign_job_that_names_no_anchor_is_still_accepted(tmp_path):
     assert result.issues == ()
 
 
+def test_a_field_off_the_list_is_named_another_field_after_the_listed_ones(tmp_path):
+    """Item 3 of #2954: the sentence read "in its another field". A field the refusal
+    may not name is "another field" after the listed ones, and neither its name nor its
+    text is printed."""
+    obs = _darwin(tmp_path)
+    program = str(obs.root / "private-program")
+    obs.launchd["application.fixture.plist"] = _app_print(program, extra=(f"bundle path = {program}.bundle",))
+    message = _foreign_refusal(obs)
+    assert ("job application.fixture names the data root in its program and in another field; if it is a "
+            "leftover of this installation, unload it") in message, message
+    obs.launchd["application.fixture.plist"] = _app_print(
+        "/Applications/Foreign", extra=(f"bundle path = {obs.root}/private.bundle",))
+    message = _foreign_refusal(obs)
+    assert ("job application.fixture names the data root in another field; if it is a leftover of this "
+            "installation, unload it") in message, message
+    for text in ("its another field", "bundle path", "private.bundle"):
+        assert text not in message
+
+
+def test_of_two_anchors_of_one_length_the_same_one_is_named_whichever_comes_first():
+    """Item 3 of #2954: the anchors found come from a set, and of two of one length the
+    refusal named whichever the set gave first. It names the first by its text now, and
+    a longer anchor still comes before a shorter one."""
+    target = "gui/501/application.fixture"
+    lines = [f"{target} = {{", "\tprogram = /data/aa/x /data/bb/x /data/longer/x", "}"]
+    kinds = {"/data/aa": "the first anchor", "/data/bb": "the second anchor",
+             "/data/longer": "the longest anchor"}
+    named = {_foreign_anchor_refusal(lines, target, found, kinds)
+             for found in (["/data/aa", "/data/bb"], ["/data/bb", "/data/aa"])}
+    assert len(named) == 1, named
+    assert "names the first anchor in its program" in named.pop()
+    longest = _foreign_anchor_refusal(lines, target, ["/data/aa", "/data/longer", "/data/bb"], kinds)
+    assert "names the longest anchor in its program" in longest
+
+
 # ---------------------------------------------------------------- operator hints name the Git update door
 
 HINT_SOURCES = ("claudlobby/ignition.py", "claudlobby/doctor.py", "claudlobby/validator.py",
                 "claudlobby/commands/scaffolding.py", "claudlobby/_runtime_scripts/install-bot.sh",
                 "claudlobby/_runtime_scripts/install-bot-systemd.sh",
-                "claudlobby/_runtime_scripts/manager-checkin.sh")
+                "claudlobby/_runtime_scripts/manager-checkin.sh", "claudlobby/_runtime_scripts/vault-sync.sh")
 
 
 @pytest.mark.parametrize("source", HINT_SOURCES)
@@ -333,6 +386,73 @@ def test_each_manifest_provenance_warning_names_the_update_that_records_it(tmp_p
                          changed=case == "changed manifest")
     assert f"`claudlobby --root <data-root> {APPLY}`" in detail, detail
     assert "config plan" not in detail and "host activate" not in detail, detail
+
+
+# ---------------------------------------------------------------- item 4 of #2954: the lines that said activate
+
+def test_config_diff_names_the_git_update_where_a_runtime_directory_is_missing(fleet_dir):
+    """`config diff` said "activate a configuration plan first" for a bot or the fleet's
+    timers that were never composed."""
+    from claudlobby.config import load_fleet
+    from claudlobby.diff import diff_bot, diff_fleet_timers
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import git_package
+
+    paths = Paths(root=fleet_dir, package=git_package(fleet_dir))
+    fleet, merged = load_fleet(paths.fleet_yaml)
+    for text in (diff_bot("lead", fleet, paths), diff_fleet_timers(fleet, paths, merged)):
+        assert f"does not exist — apply the configuration with `claudlobby --root <data-root> {APPLY}` first" in text
+        assert "activate" not in text and "plan" not in text, text
+
+
+@pytest.mark.parametrize("case", ["no record", "unknown schema"])
+def test_config_diff_names_the_update_that_records_the_manifest_provenance(tmp_path, case):
+    """Its manifest line said "stage and activate a release" to record the provenance."""
+    from claudlobby.diff import manifest_header
+
+    paths = _paths(tmp_path, in_git=True)
+    if case == "unknown schema":
+        (paths.runtime / "composed.json").write_text(json.dumps({"schema": "unknown"}))
+    header = manifest_header(_fleet(), paths)
+    assert f"apply the configuration with `claudlobby --root <data-root> {APPLY}` to record" in header, header
+    assert "activate" not in header.lower() and "release" not in header, header
+
+
+def test_a_backup_of_an_input_changed_since_it_was_applied_names_the_git_update(tmp_path):
+    """The refusal said "review and activate it first"."""
+    from claudlobby.activation_state import ActivationRefusal
+    from claudlobby.config_plan import path_state
+    from claudlobby.host_backup import _capture_source
+
+    source = tmp_path / "fleet.yaml"
+    source.write_text("fleet: as applied\n")
+    applied = path_state(source, source=True)
+    source.write_text("fleet: edited since\n")
+    with pytest.raises(ActivationRefusal) as refused:
+        _capture_source(source, Path("fleet.yaml"), {}, expected=applied)
+    assert str(refused.value) == ("backup configuration changed since it was applied; review it, then apply it "
+                                  f"with `claudlobby --root <data-root> {APPLY}` first")
+
+
+@pytest.mark.parametrize("schema", [1, 2])
+def test_the_restore_guidance_names_no_retired_step(schema, tmp_path, monkeypatch):
+    """A restore of an older bundle said "plan and activate through the normal host
+    commands", and both said to select host-system.yaml "when planning". No command
+    starts a restored root yet (documentation/backup-and-restore.md)."""
+    from argparse import Namespace
+    from claudlobby import host_backup as backup
+    from claudlobby.commands import host_backup as command
+
+    for name in ("BOT_ID", "BOT_NAME", "BOT_DIR", "BOT_SERVICE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(backup, "restore_backup", lambda *_args, **_kwargs: {"schema": schema})
+    args = Namespace(fleet=None, seed=False, backup_command="restore", root=str(tmp_path / "replacement"),
+                     bundle=str(tmp_path / "bundle"), replacing_retired_host=True)
+    text = " ".join(command.dispatch(args).lines)
+    assert "activate" not in text and "plan" not in text, text
+    assert "select it with CLAUDLOBBY_HOST_SYSTEM_YAML while reviewing" in text, text
+    if schema == 1:
+        assert "No command starts a restored root yet: keep it inactive until a reviewed adoption step" in text
 
 
 # ---------------------------------------------------------------- the operator check names them too

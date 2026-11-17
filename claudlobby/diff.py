@@ -46,13 +46,15 @@ def manifest_header(fleet: FleetConfig, paths: Paths) -> str:
     prov = read_manifest_provenance(paths)
     if prov is None:
         return ("manifest: NO PROVENANCE RECORDED — this runtime was composed by a "
-                "claudlobby that did not stamp its inputs; stage and activate a release to "
+                "claudlobby that did not stamp its inputs; apply the configuration with "
+                "`claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` to "
                 "record them. Nothing below distinguishes an input change from "
                 "runtime drift.\n")
     if prov.get("schema") != MANIFEST_PROVENANCE_SCHEMA_EXPECTED:
         return (f"manifest: provenance schema {prov.get('schema')!r} is not the "
                 f"{MANIFEST_PROVENANCE_SCHEMA_EXPECTED} this build reads — not "
-                "interpreting it. Stage and activate a release to re-record.\n")
+                "interpreting it. Apply the configuration with "
+                "`claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` to record it again.\n")
     changed = changed_manifest_inputs(fleet, paths, prov)
     if changed:
         how = manifest_change_attribution(fleet, paths)
@@ -71,7 +73,8 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths, *, metadata_only: 
 
     bot_dir = paths.bot_runtime(bot_name)
     if not bot_dir.is_dir():
-        return f"runtime/bots/{bot_name}/ does not exist — activate a configuration plan first\n"
+        return (f"runtime/bots/{bot_name}/ does not exist — apply the configuration with "
+                "`claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` first\n")
 
     parts: list[str] = []
 
@@ -222,7 +225,8 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict,
 
     timers_dir = paths.runtime_fleet / "timers"
     if not timers_dir.is_dir():
-        return "=== fleet timers: runtime/fleet/timers/ does not exist — activate a configuration plan first\n"
+        return ("=== fleet timers: runtime/fleet/timers/ does not exist — apply the configuration with "
+                "`claudlobby --root <data-root> host update apply FULL_COMMIT_SHA` first\n")
 
     # Generate expected timers to a temp dir, then compare. Pass the REAL Paths
     # (redirecting output via output_dir) so diff and generate exercise an
