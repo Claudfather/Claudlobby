@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 
+from .config import GITHUB_APP_ENV_VARS
 from .context import native_environment
 from .mcp_resolve import required_vars
 from .operation_context import resolve_operation_scope
@@ -38,6 +39,11 @@ def fleet_declarations(fleet, paths) -> list[str]:
     whose walk raises, and a skipped bot would read here as declaring nothing,
     so its credentials would go unprobed with no word said. This refuses
     instead.
+
+    A bot with ``github_app:`` routes its git through the GitHub App, and the
+    composer registers the App's three variables for it whether or not it is
+    equipped with the App's MCP fragment, so they are declared here for it too,
+    under that fragment's name, ``mcp/github-app``, which holds their contract.
     """
     declared: set[str] = set()
     for name in sorted(fleet.bots):
@@ -47,6 +53,8 @@ def fleet_declarations(fleet, paths) -> list[str]:
             raise CredentialCheckError(
                 f"the credentials bot {name} declares cannot be read: {exc}") from exc
         declared.update(f"{req.name}={req.origin}" for req in needed)
+        if fleet.bots[name].github_app:
+            declared.update(f"{var}=mcp/github-app" for var in GITHUB_APP_ENV_VARS)
     for item in sorted(declared):
         if not _DECLARATION.fullmatch(item):
             raise CredentialCheckError(f"a declaration the probe cannot take: {item!r}")

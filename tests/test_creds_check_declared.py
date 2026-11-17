@@ -402,6 +402,23 @@ class TestTheSelectedCliPassesTheDeclarations:
             "RAILWAY_PERSONAL_TOKEN=integration/railway"]
         assert fleet_declarations(_fleet_config(manager={}), library_paths) == []
 
+    def test_a_bot_with_github_app_declares_the_app_variables(self, library_paths):
+        """`github_app:` routes a bot's git through the GitHub App, and the composer
+        registers the App's three variables for such a bot whether or not it is
+        equipped with the App's MCP fragment. They are declared under that
+        fragment's name, which holds their contract, so they merge with its own."""
+        from claudlobby.config import GithubAppConfig, McpEntry
+        from claudlobby.credential_check import fleet_declarations
+
+        app = GithubAppConfig()
+        assert fleet_declarations(_fleet_config(worker={"github_app": app}), library_paths) == [
+            *GITHUB_APP]
+        assert fleet_declarations(_fleet_config(worker={
+            "github_app": app, "mcp": [McpEntry("github-app")]}), library_paths) == [*GITHUB_APP]
+        assert fleet_declarations(_fleet_config(worker={
+            "github_app": app, "mcp": [McpEntry("github")]}), library_paths) == [
+            *GITHUB_APP, *GITHUB]
+
     def test_a_bot_whose_declarations_cannot_be_read_refuses_the_check(
             self, library_paths, monkeypatch):
         """Read as declaring nothing, that bot's credentials would go unprobed."""
@@ -459,3 +476,58 @@ class TestTheSelectedCliPassesTheDeclarations:
             "--declares", "GITHUB_PAT=mcp/github",
             "--declares", "RAILWAY_PERSONAL_PROJECT_TOKEN=integration/railway",
             "--declares", "RAILWAY_PERSONAL_TOKEN=integration/railway"]
+
+
+#: A complete App config. Not real: no key is at that path, and the mint the
+#: ticks below stand in for never reads one.
+APP_CONFIG = {"GITHUB_APP_ID": "999001", "GITHUB_APP_INSTALLATION_ID": "555002",
+              "GITHUB_APP_PRIVATE_KEY_PATH": "/nonexistent/app-key.pem"}
+
+
+@pytest.fixture
+def app_only_declarations(library_paths):
+    """What the selected CLI passes for a roster whose only GitHub equipment is
+    one bot's `github_app:`."""
+    from claudlobby.config import GithubAppConfig
+    from claudlobby.credential_check import fleet_declarations
+
+    return fleet_declarations(_fleet_config(worker={"github_app": GithubAppConfig()}),
+                              library_paths)
+
+
+class TestAnAppRoutedRosterIsChecked:
+    """Ticks with the declarations of a roster whose only GitHub equipment is
+    `github_app:`. The estate has a directory of its own beside the library
+    fixture's root."""
+
+    @staticmethod
+    def _mint_fails(e: Estate) -> Path:
+        """A stand-in for the App's mint helper that notes each call and fails,
+        as the mint does for a revoked key or a wrong installation."""
+        calls = e.tmp / "mint-calls.log"
+        _write_exec(e.native / "mint-github-token.sh",
+                    f'#!/bin/bash\necho minted >> "{calls}"\nexit 1\n')
+        return calls
+
+    def test_a_complete_app_config_reaches_the_app_probe(self, tmp_path, app_only_declarations):
+        """A dead App key on such a fleet is a fail with its alert. With no
+        declarations the tick logged "not checked" and raised none."""
+        e = Estate(tmp_path / "estate")
+        e.fleet("a", **APP_CONFIG)
+        calls = self._mint_fails(e)
+        state = e.selected("a", *app_only_declarations)
+        assert calls.is_file(), "the tick never asked the App for a token: " + e.log()
+        row = state["github_pat"]
+        assert row["status"] == "fail" and "installation-token mint failed" in row["detail"], row
+        assert "github_pat FAIL" in e.posts("a")
+
+    def test_an_incomplete_app_config_fails_naming_the_app(self, tmp_path, app_only_declarations):
+        e = Estate(tmp_path / "estate")
+        e.fleet("a", GITHUB_APP_ID=APP_CONFIG["GITHUB_APP_ID"])
+        calls = self._mint_fails(e)
+        state = e.selected("a", *app_only_declarations)
+        assert "github_pat" in state, "no GitHub row: " + e.log()
+        row = state["github_pat"]
+        assert row["status"] == "fail" and "declared by mcp/github-app," in row["detail"], row
+        assert "github_pat FAIL" in e.posts("a")
+        assert not calls.exists(), "an incomplete config has no App to ask"

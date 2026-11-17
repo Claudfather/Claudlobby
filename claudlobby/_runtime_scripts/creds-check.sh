@@ -28,7 +28,8 @@
 #
 # A provider is checked only where the fleet DECLARES it (#1213). The selected
 # CLI reads the activated roster's declarations, the MCP fragments and
-# integrations each bot is equipped with, and passes them as `--declares
+# integrations each bot is equipped with and the GitHub App's variables for a
+# bot routed through the App (github_app:), and passes them as `--declares
 # VAR=SURFACE`. A declared credential with no value is a FAIL, never a skip:
 # the fleet said it needs it. One no bot declares gets no probe and no row, so
 # a fleet that never wanted a provider never hears about it. A direct run has
@@ -592,9 +593,9 @@ _check_github_app() {
 
 check_github_pat() {
     local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}" surfaces=""
-    # The GitHub MCP declares GITHUB_PAT and the App MCP the GITHUB_APP_* trio
-    # (#1213): a fleet whose bots are equipped with neither has no GitHub
-    # credential to check.
+    # The GitHub MCP declares GITHUB_PAT, and the App MCP or a bot routed
+    # through the App (github_app:) the GITHUB_APP_* trio (#1213): a fleet
+    # that declares none of them has no GitHub credential to check.
     if [ "$_cc_declared_known" -eq 1 ] && ! surfaces="$(declared_by GITHUB_PAT \
             GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH)"; then
         not_declared "github_pat" "GITHUB_PAT or GITHUB_APP_*"
