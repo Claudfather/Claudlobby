@@ -25,7 +25,8 @@ def parse(runtime, mode, *args):
     script = '. "$1"; shift; _claudlobby_parse_runtime_scope "$@" || exit $?; '
     script += 'printf "%s\\n" "$_CL_RUNTIME_FLEET" "$_CL_RUNTIME_FLEET_ROOT" "$_CL_RUNTIME_BOTS_DIR" "$_CL_RUNTIME_DRY_RUN"; '
     script += 'printf "bot:%s\\n" ${_CL_RUNTIME_BOTS[@]+"${_CL_RUNTIME_BOTS[@]}"}; '
-    script += 'printf "plugin:%s\\n" ${_CL_RUNTIME_PLUGINS[@]+"${_CL_RUNTIME_PLUGINS[@]}"}'
+    script += 'printf "plugin:%s\\n" ${_CL_RUNTIME_PLUGINS[@]+"${_CL_RUNTIME_PLUGINS[@]}"}; '
+    script += 'printf "declares:%s\\n" ${_CL_RUNTIME_DECLARES[@]+"${_CL_RUNTIME_DECLARES[@]}"}'
     return subprocess.run(["/bin/bash", "-u", "-c", script, "parser", str(HELPER), mode,
                            runtime["CLAUDLOBBY_NATIVE_DIR"], *args], env=runtime,
                           capture_output=True, text=True, timeout=5)
@@ -110,3 +111,45 @@ def test_pulse_refuses_unmarked_entry_before_context_validation(runtime, marked,
     assert result.returncode == expected
     if not marked:
         assert "use claudlobby fleet pulse" in result.stderr
+
+
+CREDENTIALS = ["--admitted-runtime", "--fleet", "example", "--bot", "worker"]
+
+
+def credentials(runtime, *tail):
+    return parse(runtime, "credentials", *CREDENTIALS, "--fleet-root", runtime["FLEET_ROOT"],
+                 "--bots-dir", runtime["FLEET_ROOT"] + "/runtime/bots", *tail)
+
+
+def test_credentials_take_each_declaration_literally_and_in_order(runtime):
+    """#1213: the selected CLI passes the fleet's declarations, VAR=SURFACE each."""
+    # A surface names a library file, so its name may hold any text but a control character.
+    values = ["RAILWAY_PERSONAL_TOKEN=integration/railway", "GITHUB_PAT=mcp/github",
+              "_X1=integration/dir/name.v2", "ACME_KEY=mcp/my_server", "ACME_KEY=mcp/a name"]
+    tail = [part for value in values for part in ("--declares", value)]
+    result = credentials(runtime, *tail)
+    assert result.returncode == 0, result.stderr
+    assert [line for line in result.stdout.splitlines() if line.startswith("declares:")] == [
+        f"declares:{value}" for value in values]
+    # printf with no arguments prints its format once, so none reads as one empty line.
+    none = credentials(runtime)
+    assert none.returncode == 0, none.stderr
+    assert [line for line in none.stdout.splitlines() if line.startswith("declares:")] == [
+        "declares:"]
+
+
+@pytest.mark.parametrize("value", [
+    "GITHUB_PAT", "=mcp/github", "GITHUB_PAT=", "1PAT=mcp/github", "GITHUB-PAT=mcp/github",
+    "GITHUB_PAT=../x", "GITHUB_PAT=skill/github", "GITHUB_PAT=mcp/", "GITHUB_PAT=$(id)",
+    "GITHUB_PAT=mcp/github\nOTHER=mcp/x", "GITHUB_PAT=mcp/git\thub",
+])
+def test_credentials_refuse_a_declaration_of_any_other_shape(runtime, value):
+    result = credentials(runtime, "--declares", value)
+    assert result.returncode == 2 and result.stdout == ""
+
+
+def test_only_the_credentials_scope_takes_declarations(runtime):
+    result = parse(runtime, "reload", "--admitted-runtime", "--fleet", "example",
+                   "--bots-dir", runtime["FLEET_ROOT"] + "/runtime/bots", "--bot", "worker",
+                   "--declares", "GITHUB_PAT=mcp/github")
+    assert result.returncode == 2 and "unsupported admitted runtime option" in result.stderr

@@ -19,9 +19,26 @@
 # `record_and_alert <provider> <status> <detail>`, or `record_probe` for what
 # the provider answered, then add it to the CHECKS list. Status is "ok" /
 # "fail" / "skip" / "unknown"
-# (skip = required env var missing — no transition alert, but re-surfaces
+# (skip = a missing value the check does not count as a fault: a canary
+# bot's Telegram token, and any token a direct run, which knows no
+# declarations, finds no value for — no transition alert, but re-surfaces
 # once it has persisted past day 3; unknown = the provider gave no verdict,
-# see record_probe; see next_alert_day).
+# see record_probe; see next_alert_day). A provider that keys on a library
+# credential asks `declared_by` first.
+#
+# A provider is checked only where the fleet DECLARES it (#1213). The selected
+# CLI reads the activated roster's declarations, the MCP fragments and
+# integrations each bot is equipped with and the GitHub App's variables for a
+# bot routed through the App (github_app:), and passes them as `--declares
+# VAR=SURFACE`. A declared credential with no value is a FAIL, never a skip:
+# the fleet said it needs it. One no bot declares gets no probe and no row, so
+# a fleet that never wanted a provider never hears about it. A direct run has
+# no declaration source; it probes every provider and records a missing value
+# as skip, as it always did.
+#
+# State is per fleet (#1213): the selected CLI passes
+# state/creds-check/<fleet>.json (#1989), a direct run with a fleet writes
+# state/creds-check-state.<fleet>.json, and root mode keeps the one file it had.
 #
 # Env vars consulted (selected mode reads host/root/fleet tiers; a direct
 # source-only call reads its chosen .env file):
@@ -83,10 +100,15 @@ fi
 # (composer contract — same as fleet-pulse/log-rotate-fleet); the composed
 # unit env also carries CLAUDLOBBY_FLEET, the fallback for argless runs.
 # Used by the per-bot Telegram check to enumerate + namespace the right
-# fleet; other checks are fleet-agnostic.
+# fleet, and to choose the fleet's own state file.
 FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
 SELECTED_BOTS=""
 _cc_admitted=0
+# The credentials this fleet declares, one VAR=SURFACE per line, and whether
+# they are known. Only the selected CLI knows them; its list is complete, an
+# empty one included.
+_cc_declares=""
+_cc_declared_known=0
 if [ "${1:-}" = "--admitted-runtime" ]; then
     _claudlobby_parse_runtime_scope credentials "$LIB_DIR" "$@" || exit $?
     _cc_admitted=1
@@ -95,7 +117,16 @@ if [ "${1:-}" = "--admitted-runtime" ]; then
     for _cc_bot in ${_CL_RUNTIME_BOTS[@]+"${_CL_RUNTIME_BOTS[@]}"}; do
         SELECTED_BOTS="${SELECTED_BOTS}${SELECTED_BOTS:+$'\n'}$_cc_bot"
     done
+    _cc_declared_known=1
+    for _cc_decl in ${_CL_RUNTIME_DECLARES[@]+"${_CL_RUNTIME_DECLARES[@]}"}; do
+        _cc_declares="${_cc_declares}${_cc_declares:+$'\n'}$_cc_decl"
+    done
 fi
+# Fixed before any .env file is parsed: a tier cannot declare or undeclare.
+readonly _cc_declares _cc_declared_known
+case "$FLEET_ARG" in
+    */*|.|..) echo "creds-check: $FLEET_ARG cannot name a fleet" >&2; exit 2 ;;
+esac
 
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
@@ -136,12 +167,38 @@ if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
 fi
 ENV_FILE="${ENV_FILE:-$CLAUDLOBBY_ROOT/.env}"
 LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/state/logs/creds-check.log}"
-STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
+# One state file per fleet (#1213). The default used to be one file for the
+# host, so fleets ticking minutes apart overwrote each other's verdict on the
+# same keys: a run reset on every flip, the skip escalation never reached day 3
+# and a dead token alerted as a fresh FAIL at age 0 each day. The selected CLI
+# has passed a file per fleet since #1989; a direct run keeps a file of its
+# own, apart from that one, because it reads one .env file where the selected
+# run reads the tier cascade, and neither should reset the other's run. The
+# keys carry no fleet (the file is the fleet scope), so a selected run keeps
+# its age across this update; a direct run starts its fleet file fresh, and
+# the old host file is left as it was.
+if [ -n "$FLEET_ARG" ]; then
+    STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.$FLEET_ARG.json}"
+else
+    STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
+fi
 mkdir -p "$(dirname "$STATE")"
 TG_POST="$LIB_DIR/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
 # the source of truth for runtime credentials. Parse it safely before any check.
+#
+# A tier line that assigns a name made readonly before the tiers are
+# read stops bash at that line, before any probe or state write. bash 3.2, the
+# macOS /bin/bash, then exits 0, which reads as a clean tick, so this window
+# makes any stop while the tiers are read exit 2 and say why. It keeps the
+# EXIT cleanup lib-common.sh set, as that file asks, and restores it after.
+_cc_tiers_stopped() {
+    _lc_cleanup
+    echo "creds-check: the tick stopped while reading the .env tiers, before any probe (a tier may not assign a name the check holds fixed)" >&2
+    exit 2
+}
+trap '_cc_tiers_stopped' EXIT
 if [ "$_cc_admitted" -eq 1 ]; then
     # A tier cannot redirect a selected probe after its paths were checked.
     readonly CLAUDLOBBY_ROOT FLEET_ROOT FLEET_ARG LIB_DIR \
@@ -171,6 +228,7 @@ if [ "$_cc_admitted" -eq 1 ]; then
 else
     parse_env_file "$ENV_FILE"
 fi
+trap '_lc_cleanup' EXIT
 
 JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
@@ -181,6 +239,28 @@ mkdir -p "$(dirname "$LOG")"
 ts() { date -Iseconds; }
 log() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
 _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }  # bash 3.2 has no ${var,,}
+
+# declared_by VAR...: print the library surfaces (mcp/github,
+# integration/railway) through which this fleet declares any of VAR...,
+# comma-separated and each once; return 1 when it declares none of them. Read
+# it only when _cc_declared_known is 1: a direct run knows no declarations.
+declared_by() {
+    local line var out=""
+    while IFS= read -r line; do
+        for var in "$@"; do
+            if [ "${line%%=*}" = "$var" ]; then
+                case ", $out, " in
+                    *", ${line#*=}, "*) ;;
+                    *) out="${out:+$out, }${line#*=}" ;;
+                esac
+            fi
+        done
+    done <<EOF
+$_cc_declares
+EOF
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
 
 # ---------------------------------------------------------------------
 # State + alert plumbing
@@ -349,6 +429,32 @@ record_and_alert() {
     fi
 }
 
+# Remove one provider's row: the critical section run under with_lock.
+_drop_state() {
+    local provider="$1"
+    if "$JQ" --arg k "$provider" 'del(.[$k])' "$STATE" > "$STATE.tmp"; then
+        mv "$STATE.tmp" "$STATE"
+    else
+        rm -f "$STATE.tmp"
+        log "STATE WRITE FAILED for $provider — its row was not removed"
+    fi
+}
+
+# not_declared <provider> <what>: no bot of this fleet declares <what>, so the
+# provider gets no probe, no row and no alert (#1213). A row an earlier tick
+# wrote, before the declarations were read, is removed, so the state file
+# holds only what this fleet checks; its run ends without an alert, since the
+# fleet no longer asks for that credential.
+not_declared() {
+    local provider="$1" what="$2"
+    if "$JQ" -e --arg k "$provider" 'has($k)' "$STATE" >/dev/null 2>&1; then
+        with_lock "$STATE.lock" _drop_state "$provider"
+        log "$provider not checked: no bot of this fleet declares $what; its earlier row is removed"
+    else
+        log "$provider not checked: no bot of this fleet declares $what"
+    fi
+}
+
 # ---------------------------------------------------------------------
 # What a probe learned: a rejection, or no verdict at all (#2424)
 # ---------------------------------------------------------------------
@@ -486,7 +592,15 @@ _check_github_app() {
 }
 
 check_github_pat() {
-    local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
+    local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}" surfaces=""
+    # The GitHub MCP declares GITHUB_PAT, and the App MCP or a bot routed
+    # through the App (github_app:) the GITHUB_APP_* trio (#1213): a fleet
+    # that declares none of them has no GitHub credential to check.
+    if [ "$_cc_declared_known" -eq 1 ] && ! surfaces="$(declared_by GITHUB_PAT \
+            GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PATH)"; then
+        not_declared "github_pat" "GITHUB_PAT or GITHUB_APP_*"
+        return
+    fi
     if [ -z "$token" ]; then
         # No static token — but an App-mode fleet mints one at use time. Gate
         # on CONFIG presence (all three vars), never on the helper file: the
@@ -502,6 +616,16 @@ check_github_pat() {
         if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] \
                 && [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
             _check_github_app
+            return
+        fi
+        if [ -n "$surfaces" ]; then
+            # Declared and absent is a FAIL, never a skip (#1213). An empty
+            # token does not stop the GitHub MCP: it starts and calls GitHub
+            # with no credential, so public reads succeed and writes fail, and
+            # it looks healthy. Recording skip here silenced the daily alert on
+            # exactly the fleets it exists for.
+            record_and_alert "github_pat" "fail" \
+                "declared by $surfaces, but no GitHub token has a value at the host, root or fleet tier and no complete GITHUB_APP_* config is set"
             return
         fi
         record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
@@ -552,13 +676,25 @@ SPEC
 # One Railway token, probed with its own query. Records under its own key.
 _check_one_railway_token() {
     local varname="$1" query="$2" scope="$3"
-    local provider token resp_body code curl_err_file auth_cfg
+    local provider token surfaces="" resp_body code curl_err_file auth_cfg
     provider="railway_$(_lc "${varname#RAILWAY_}")"
+    # The Railway integration declares both tokens (#1213): a fleet whose bots
+    # are not equipped with it gets no Railway probe and no Railway row.
+    if [ "$_cc_declared_known" -eq 1 ] && ! surfaces="$(declared_by "$varname")"; then
+        not_declared "$provider" "$varname"
+        return
+    fi
     # Indirect expansion: bash 3.2 has no nameref, and this file targets it.
     eval "token=\"\${$varname:-}\""
 
     if [ -z "$token" ]; then
-        record_and_alert "$provider" "skip" "$varname not declared"
+        if [ -n "$surfaces" ]; then
+            # Declared and absent is a FAIL, never a skip (#1213).
+            record_and_alert "$provider" "fail" \
+                "$varname is declared by $surfaces but has no value at the host, root or fleet tier"
+        else
+            record_and_alert "$provider" "skip" "$varname has no value (a direct run reads no declarations)"
+        fi
         return
     fi
 
