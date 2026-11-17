@@ -660,7 +660,7 @@ The `persona:` key is accepted as a backwards-compatible alias for `expertise:` 
 
 ### `bots.<name>.telegram`
 
-Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env var name holding the token), `require_mention` (whether the bot responds only to @-mentions), `chat_id` (override fleet-level group).
+Telegram config for this bot. Fields: `handle` (bot username), `token_env` (the name of the env var holding the token, never the token: letters, digits and underscore, not starting with a digit, or the load refuses it, naming the bot, or `fleet defaults` when it is written there; an empty one is absent), `require_mention` (whether the bot responds only to @-mentions), `chat_id` (override fleet-level group).
 
 `token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `claudlobby/_runtime_scripts/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
 

@@ -1090,6 +1090,70 @@ class TestGitCredentialsParsing:
             load_fleet(root / "fleet.yaml")
 
 
+class TestTelegramTokenEnvParsing:
+    """`telegram.token_env` is the NAME of the env var holding a bot's Telegram
+    token (#2972). It is checked at load the way `git_credentials` names are:
+    since #2970 the daily credential check reads it through the shared
+    declaration walk, which refuses the whole fleet on a name that is not a
+    shell variable name, so a malformed one is refused here instead, naming the
+    tier that wrote it. An empty one loads as absent, as every reader of it
+    already reads it."""
+
+    @staticmethod
+    def _fleet(root, *, bot_token_env=None, defaults_token_env=None):
+        lines = ["fleet:", "  name: test-fleet", "  manager: lead", "  service_prefix: com.test"]
+        if defaults_token_env is not None:
+            lines += ["  defaults:", "    telegram:", f"      token_env: '{defaults_token_env}'"]
+        lines += ["  bots:", "    lead:", "      expertise: [eng]"]
+        if bot_token_env is not None:
+            lines += ["      telegram:", f"        token_env: '{bot_token_env}'"]
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "fleet.yaml").write_text("\n".join(lines) + "\n")
+        return root / "fleet.yaml"
+
+    @pytest.mark.parametrize("value", ["MY-TOKEN", "MY TOKEN"])
+    def test_a_malformed_name_is_refused_at_load_naming_the_bot_and_the_field(
+        self, tmp_path, value
+    ):
+        with pytest.raises(ValueError) as refused:
+            load_fleet(self._fleet(tmp_path / "f", bot_token_env=value))
+        message = str(refused.value)
+        assert "bot 'lead'" in message
+        assert "telegram.token_env" in message
+        # The value is not repeated: a token written in place of a name has a
+        # colon, so it is refused here, and the message would print it.
+        assert value not in message
+
+    def test_a_valid_name_loads_unchanged(self, tmp_path):
+        fleet, _md = load_fleet(self._fleet(tmp_path / "f", bot_token_env="TELEGRAM_TOKEN_LEAD"))
+        assert fleet.bots["lead"].telegram.token_env == "TELEGRAM_TOKEN_LEAD"
+
+    def test_the_plugins_own_variable_still_loads(self, tmp_path):
+        """`TELEGRAM_BOT_TOKEN`, the self-referential name (#750), is a name too."""
+        fleet, _md = load_fleet(self._fleet(tmp_path / "f", bot_token_env="TELEGRAM_BOT_TOKEN"))
+        telegram = fleet.bots["lead"].telegram
+        assert telegram.token_env == "TELEGRAM_BOT_TOKEN"
+        assert telegram.token_env_is_self_referential
+
+    def test_a_token_written_in_place_of_a_name_is_refused_without_printing_it(self, tmp_path):
+        token = "8888888:AAAAAAAAAAAAAAAAAAAA"  # the fake placeholder, shaped like a bot token
+        with pytest.raises(ValueError, match="telegram.token_env") as refused:
+            load_fleet(self._fleet(tmp_path / "f", bot_token_env=token))
+        assert token not in str(refused.value)
+
+    def test_an_empty_name_loads_as_absent(self, tmp_path):
+        """No refusal: the composer, the declarations walk, the validator and
+        start-bot.sh all read an empty token_env as not set."""
+        fleet, _md = load_fleet(self._fleet(tmp_path / "f", bot_token_env=""))
+        assert fleet.bots["lead"].telegram.token_env is None
+
+    def test_a_malformed_name_in_fleet_defaults_names_the_fleet_not_the_bot(self, tmp_path):
+        """A mistake in fleet defaults is not reported against a bot that only
+        inherited it (the `git_credentials` precedent)."""
+        with pytest.raises(ValueError, match="^fleet defaults: telegram.token_env"):
+            load_fleet(self._fleet(tmp_path / "f", defaults_token_env="MY-TOKEN"))
+
+
 @pytest.mark.parametrize(
     "defaults,raw,expected",
     [
