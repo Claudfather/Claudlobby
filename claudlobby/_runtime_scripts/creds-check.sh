@@ -19,7 +19,9 @@
 # `record_and_alert <provider> <status> <detail>`, or `record_probe` for what
 # the provider answered, then add it to the CHECKS list. Status is "ok" /
 # "fail" / "skip" / "unknown"
-# (skip = a direct run found no value — no transition alert, but re-surfaces
+# (skip = a missing value the check does not count as a fault: a canary
+# bot's Telegram token, and any token a direct run, which knows no
+# declarations, finds no value for — no transition alert, but re-surfaces
 # once it has persisted past day 3; unknown = the provider gave no verdict,
 # see record_probe; see next_alert_day). A provider that keys on a library
 # credential asks `declared_by` first.
@@ -605,9 +607,9 @@ check_github_pat() {
         if [ -n "$surfaces" ]; then
             # Declared and absent is a FAIL, never a skip (#1213). An empty
             # token does not stop the GitHub MCP: it starts and calls GitHub
-            # with no credential, so public reads succeed and every write
-            # fails, and nothing else reports it. Recording skip here disabled
-            # the check on exactly the fleets it exists for.
+            # with no credential, so public reads succeed and writes fail, and
+            # it looks healthy. Recording skip here silenced the daily alert on
+            # exactly the fleets it exists for.
             record_and_alert "github_pat" "fail" \
                 "declared by $surfaces, but no GitHub token has a value at the host, root or fleet tier and no complete GITHUB_APP_* config is set"
             return

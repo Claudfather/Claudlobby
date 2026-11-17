@@ -22,10 +22,10 @@ class CredentialCheckError(RuntimeError):
 
 
 #: One `--declares` value: a credential's variable name, then the library surface
-#: declaring it (`mcp/<name>`, `integration/<name>`, the name a library file
-#: name, so any text but a control character). The probe's parser holds the
-#: same shape (cli-context.sh); checking it here first names a value it would
-#: refuse, where its refusal would read as a probe that may have run.
+#: declaring it, `mcp/<name>` or `integration/<name>`; the name is a library file
+#: name, so it may hold any text but a control character. The probe's parser
+#: holds the same shape (cli-context.sh); checking it here first names a value
+#: it would refuse, where its refusal would read as a probe that may have run.
 _DECLARATION = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration)/[^\x00-\x1f\x7f-\x9f]+")
 
 
