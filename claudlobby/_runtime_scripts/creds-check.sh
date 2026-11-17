@@ -119,6 +119,8 @@ if [ "${1:-}" = "--admitted-runtime" ]; then
         _cc_declares="${_cc_declares}${_cc_declares:+$'\n'}$_cc_decl"
     done
 fi
+# Fixed before any .env file is parsed: a tier cannot declare or undeclare.
+readonly _cc_declares _cc_declared_known
 case "$FLEET_ARG" in
     */*|.|..) echo "creds-check: $FLEET_ARG cannot name a fleet" >&2; exit 2 ;;
 esac
@@ -188,8 +190,7 @@ if [ "$_cc_admitted" -eq 1 ]; then
         CLAUDLOBBY_RELEASE_ID CLAUDLOBBY_INSTALLATION CLAUDLOBBY_NATIVE_ADMITTED \
         CLAUDLOBBY_NATIVE_DIR CLAUDLOBBY_CLI \
         CLAUDLOBBY_CREDS_LOG CLAUDLOBBY_CREDS_STATE \
-        _cc_admitted _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE \
-        _cc_declares _cc_declared_known
+        _cc_admitted _cc_fleet_root _cc_bots_dir SELECTED_BOTS LOG STATE
     # A selected check must see the same tier cascade as a boot, never an
     # ambient token from the operator shell that a bot would not receive.
     unset BOT_ID BOT_NAME BOT_DIR BOT_SERVICE TELEGRAM_BOT_TOKEN TELEGRAM_STATE_DIR
@@ -608,7 +609,7 @@ check_github_pat() {
             # fails, and nothing else reports it. Recording skip here disabled
             # the check on exactly the fleets it exists for.
             record_and_alert "github_pat" "fail" \
-                "declared by $surfaces, but no GitHub token has a value at the host, root or fleet tier and the GITHUB_APP_* config is incomplete"
+                "declared by $surfaces, but no GitHub token has a value at the host, root or fleet tier and no complete GITHUB_APP_* config is set"
             return
         fi
         record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"

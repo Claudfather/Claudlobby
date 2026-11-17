@@ -261,6 +261,19 @@ class TestOnlyWhatTheFleetDeclaresIsChecked:
         assert state["railway_personal_token"]["status"] == "fail"
         assert "railway_personal_project_token" not in state
 
+    @pytest.mark.parametrize("line", ["_cc_declared_known=1", "_cc_declares=GITHUB_PAT=mcp/github"])
+    def test_a_tier_file_cannot_change_what_the_fleet_declares(self, tmp_path, line):
+        """The declarations are fixed before any .env file is parsed, on both
+        entries. A tier that assigns one stops the tick, loudly, before a probe
+        or a state write: read as "declares nothing", it would end the checks."""
+        e = Estate(tmp_path)
+        fleet_root = e.fleet("a", RAILWAY_PERSONAL_TOKEN=LIVE)
+        with (fleet_root / ".env").open("a") as env:
+            env.write(line + "\n")
+        result = e.direct("a")
+        assert result.returncode != 0 and "readonly variable" in result.stderr, result
+        assert not e.direct_state("a").exists() and not e.probed("backboard.railway.app")
+
 
 class TestTheMixedEstate:
     """One fleet declares Railway, another declares none, and their ticks
@@ -399,7 +412,7 @@ class TestTheSelectedCliPassesTheDeclarations:
         from claudlobby import credential_check as check
 
         monkeypatch.setattr(check, "required_vars", lambda bot, paths: [
-            SimpleNamespace(name="ACME_TOKEN", origin="mcp/acme tool")])
+            SimpleNamespace(name="ACME TOKEN", origin="mcp/acme")])
         with pytest.raises(check.CredentialCheckError,
                            match="a declaration the probe cannot take"):
             check.fleet_declarations(_fleet_config(manager={}), library_paths)

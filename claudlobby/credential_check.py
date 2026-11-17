@@ -22,10 +22,11 @@ class CredentialCheckError(RuntimeError):
 
 
 #: One `--declares` value: a credential's variable name, then the library surface
-#: declaring it (`mcp/<name>`, `integration/<name>`). The probe's parser holds the
+#: declaring it (`mcp/<name>`, `integration/<name>`, the name a library file
+#: name, so any text but a control character). The probe's parser holds the
 #: same shape (cli-context.sh); checking it here first names a value it would
 #: refuse, where its refusal would read as a probe that may have run.
-_DECLARATION = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9][A-Za-z0-9._/-]*")
+_DECLARATION = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration)/[^\x00-\x1f\x7f-\x9f]+")
 
 
 def fleet_declarations(fleet, paths) -> list[str]:

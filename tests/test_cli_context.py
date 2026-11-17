@@ -123,8 +123,9 @@ def credentials(runtime, *tail):
 
 def test_credentials_take_each_declaration_literally_and_in_order(runtime):
     """#1213: the selected CLI passes the fleet's declarations, VAR=SURFACE each."""
+    # A surface names a library file, so its name may hold any text but a control character.
     values = ["RAILWAY_PERSONAL_TOKEN=integration/railway", "GITHUB_PAT=mcp/github",
-              "_X1=integration/dir/name.v2"]
+              "_X1=integration/dir/name.v2", "ACME_KEY=mcp/my_server", "ACME_KEY=mcp/a name"]
     tail = [part for value in values for part in ("--declares", value)]
     result = credentials(runtime, *tail)
     assert result.returncode == 0, result.stderr
@@ -139,8 +140,8 @@ def test_credentials_take_each_declaration_literally_and_in_order(runtime):
 
 @pytest.mark.parametrize("value", [
     "GITHUB_PAT", "=mcp/github", "GITHUB_PAT=", "1PAT=mcp/github", "GITHUB-PAT=mcp/github",
-    "GITHUB_PAT=../x", "GITHUB_PAT=mcp/git hub", "GITHUB_PAT=mcp/github;id",
-    "GITHUB_PAT=mcp/github\nOTHER=mcp/x", "GITHUB_PAT=$(id)",
+    "GITHUB_PAT=../x", "GITHUB_PAT=skill/github", "GITHUB_PAT=mcp/", "GITHUB_PAT=$(id)",
+    "GITHUB_PAT=mcp/github\nOTHER=mcp/x", "GITHUB_PAT=mcp/git\thub",
 ])
 def test_credentials_refuse_a_declaration_of_any_other_shape(runtime, value):
     result = credentials(runtime, "--declares", value)

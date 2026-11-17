@@ -43,7 +43,7 @@ _claudlobby_require_native() {
 }
 
 _claudlobby_parse_runtime_scope() {
-    local mode="$1" owner="$2" option value
+    local mode="$1" owner="$2" option value declares_shape
     shift 2
     _claudlobby_require_native "$owner" || return $?
     _CL_RUNTIME_FLEET="" _CL_RUNTIME_FLEET_ROOT="" _CL_RUNTIME_BOTS_DIR="" _CL_RUNTIME_DRY_RUN=0
@@ -81,7 +81,10 @@ _claudlobby_parse_runtime_scope() {
             --declares)
                 # VAR=SURFACE: a credential the activated fleet declares, and the
                 # library surface declaring it (mcp/<name>, integration/<name>).
-                [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || return 2
+                # The name is a library file name, so any text but a control
+                # character; the probe only ever reads it as data.
+                declares_shape='^[A-Za-z_][A-Za-z0-9_]*=(mcp|integration)/[^[:cntrl:]]+$'
+                [[ "$value" =~ $declares_shape ]] || return 2
                 _CL_RUNTIME_DECLARES+=("$value") ;;
         esac
         shift 2
