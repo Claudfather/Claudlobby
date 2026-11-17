@@ -1380,6 +1380,33 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
     return out
 
 
+def _check_token_env(raw: object, *, where: str) -> None:
+    """Check one scope's ``telegram.token_env`` (#2972).
+
+    The value is the NAME of the env var holding the bot's Telegram token,
+    never the token. It is written into bot.conf, and the declarations walk
+    hands it to the daily credential check, which refuses the whole fleet on a
+    declaration whose name is not a shell variable name. So it must satisfy the
+    same SHELL_IDENT_RE contract as every other composed env-var name, checked
+    here at load one tier at a time with a ``where`` label, as
+    ``_parse_git_credentials`` checks its names, so a mistake in fleet defaults
+    is not reported against a bot. Absent or empty is no name: every reader
+    already reads an empty one as not set (the composer, the declarations walk,
+    the validator and start-bot.sh), so it loads as absent. The refusal does
+    not repeat the value: a Telegram bot token always has a colon, so one
+    written in place of a name is refused, and the message would otherwise
+    print it.
+    """
+    if raw is None or raw == "":
+        return
+    if not isinstance(raw, str) or not SHELL_IDENT_RE.match(raw):
+        raise ValueError(
+            f"{where}: telegram.token_env must be an env var NAME (letters, digits, "
+            f"underscore; not starting with a digit, e.g. TELEGRAM_TOKEN_MYBOT), not "
+            f"the token itself"
+        )
+
+
 _GITHUB_APP_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
@@ -1988,7 +2015,12 @@ def _check_claudna(cfg: ClaudnaConfig, where: str) -> ClaudnaConfig:
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
-    tg_raw = {**tg_defaults, **(raw.get("telegram", {}) or {})}
+    tg_bot = raw.get("telegram", {}) or {}
+    tg_raw = {**tg_defaults, **tg_bot}
+    # Each tier's token_env is checked where it is written, so a mistake in fleet
+    # defaults is not reported against a bot that only inherited it (#2972).
+    _check_token_env(tg_defaults.get("token_env"), where="fleet defaults")
+    _check_token_env(tg_bot.get("token_env"), where=f"bot '{name}'")
 
     # `expertise` accepts a list or a single string. Required field.
     # Backwards-compat: accept `persona:` for one or two more refactor cycles.
@@ -2165,7 +2197,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         telegram=TelegramConfig(
             handle=tg_raw.get("handle"),
-            token_env=tg_raw.get("token_env"),
+            token_env=tg_raw.get("token_env") or None,  # empty is absent (#2972)
             require_mention=bool(tg_raw.get("require_mention", True)),
             chat_id=tg_raw.get("chat_id"),
         ),
