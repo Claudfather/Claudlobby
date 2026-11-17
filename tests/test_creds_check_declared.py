@@ -39,7 +39,8 @@ import pytest
 
 from tests.conftest import _write_exec, constructed_env
 from tests.package_fixtures import git_package
-from tests.test_creds_check_telegram import IS_VALID, REVOKED_TOKEN, VALID_TOKEN, _curl_stub
+from tests.test_creds_check_telegram import (
+    ANSWERS_503, IS_VALID, REVOKED_TOKEN, VALID_TOKEN, _curl_stub)
 from tests.test_maintenance_jobs import _native_fixture
 
 DAY = 86400
@@ -694,16 +695,30 @@ class TestEachPushTokenIsChecked:
         assert e.posts("a").count("FAIL") == 1
         assert "git_credentials: GITHUB_PAT is checked as github_pat" in e.log()
 
-    def test_github_pat_gets_its_own_row_when_the_github_check_probed_another(self, tmp_path):
-        """The GitHub check probes the first of GITHUB_PERSONAL_ACCESS_TOKEN,
-        GITHUB_TOKEN and GITHUB_PAT that has a value. An org whose push token is
-        GITHUB_PAT still has that very variable probed."""
+    def test_github_pat_is_checked_as_github_pat_whatever_the_other_two_hold(self, tmp_path):
+        """The GitHub check probes GITHUB_PAT itself, never the first of
+        GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN and GITHUB_PAT with a value
+        (#2971), so an org whose push token is GITHUB_PAT has that very
+        variable probed, once, by the GitHub row."""
         e = Estate(tmp_path)
         e.fleet("a", GITHUB_PERSONAL_ACCESS_TOKEN=LIVE, GITHUB_PAT=DEAD)
         state = e.selected("a", "GITHUB_PAT=git_credentials/Acme-Org", *GITHUB)
-        assert state["github_pat"]["status"] == "ok", state
-        assert state["git_credentials_GITHUB_PAT"]["status"] == "fail", state
-        assert self._user_probes(e) == 2
+        assert state["github_pat"]["status"] == "fail", state
+        assert self._push_rows(state) == []
+        assert self._user_probes(e) == 1
+        assert "git_credentials: GITHUB_PAT is checked as github_pat" in e.log()
+
+    def test_github_pat_with_no_value_as_a_push_token_fails_once(self, tmp_path):
+        """Declared only through git_credentials and empty, GITHUB_PAT is the
+        GitHub row's to report: one fail, naming the org, and no second row."""
+        e = Estate(tmp_path)
+        e.fleet("a")
+        state = e.selected("a", "GITHUB_PAT=git_credentials/Acme-Org")
+        assert state["github_pat"]["status"] == "fail", state
+        assert state["github_pat"]["detail"].startswith(
+            "declared by git_credentials/Acme-Org, but GITHUB_PAT has no value"), state
+        assert self._push_rows(state) == []
+        assert e.posts("a").count("FAIL") == 1, e.posts("a")
 
     def test_a_fleet_that_names_no_push_token_says_none_was_checked(self, tmp_path):
         e = Estate(tmp_path)
@@ -778,3 +793,128 @@ class TestATelegramTokenHasOneRowPerBot:
         assert declared["telegram_a_worker"]["status"] == status
         assert declared["telegram_a_worker"]["detail"] == without["telegram_a_worker"]["detail"]
         assert posts_declared == posts_without
+
+
+#: What GitHub answers the App's probe with, in the row's words.
+APP_OK = "App installation token OK (HTTP 200 on /installation/repositories)"
+APP_401 = "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)"
+#: A token GitHub answers with a 503: no verdict on it.
+SLOW = "not-a-real-token" + ANSWERS_503
+
+
+class TestTheGitHubRowProbesWhatItsConsumerReads:
+    """#2971: the GitHub MCP server receives GITHUB_PAT and no other static
+    token (its fragment sets the server's GITHUB_PERSONAL_ACCESS_TOKEN from
+    it), and the App's three variables mint the tokens the App's consumers
+    use. The row probed the first of GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN
+    and GITHUB_PAT with a value, and reached the App only when none had one,
+    so it could probe a token its consumer never gets."""
+
+    @staticmethod
+    def _app(e: Estate, answer: str | None) -> Path:
+        """Stand in for the App: its mint hands out a token, and GitHub answers
+        the installation probe with `answer`; with None, the mint fails.
+        Returns the file that notes each mint."""
+        calls = e.tmp / "mint-calls.log"
+        token = "exit 1" if answer is None else "printf 'ghs_not_a_real_token'"
+        _write_exec(e.native / "mint-github-token.sh",
+                    f'#!/bin/bash\necho minted >> "{calls}"\n{token}\n')
+        if answer is not None:
+            estate_curl = e.bindir / "curl-estate"
+            (e.bindir / "curl").rename(estate_curl)
+            _write_exec(e.bindir / "curl", f"""#!/bin/bash
+case "$*" in
+  *api.github.com/installation/repositories*)
+    echo "$*" >> "$(dirname "$0")/argv.log"
+    printf '{answer}'
+    exit 0 ;;
+esac
+exec "{estate_curl}" "$@"
+""")
+        return calls
+
+    @pytest.mark.parametrize("other", ["GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"])
+    def test_a_token_beside_an_empty_github_pat_fails_naming_mcp_github(self, tmp_path, other):
+        """The issue's first test. The row read ok on the other variable's token
+        while the server started with none."""
+        e = Estate(tmp_path)
+        e.fleet("a", **{other: LIVE})
+        row = e.selected("a", *GITHUB)["github_pat"]
+        assert row["status"] == "fail", row
+        assert row["detail"] == (
+            "declared by mcp/github, but GITHUB_PAT has no value at the host, root or "
+            f"fleet tier ({other} has a value, which is not read in its place)"), row
+        assert not e.probed("api.github.com/user"), "a token the server never gets was probed"
+        assert "github_pat FAIL" in e.posts("a")
+
+    @pytest.mark.parametrize("values,status", [
+        ({"GITHUB_PAT": LIVE, "GITHUB_TOKEN": DEAD}, "ok"),
+        ({"GITHUB_PAT": DEAD, "GITHUB_PERSONAL_ACCESS_TOKEN": LIVE}, "fail")])
+    def test_github_pat_is_probed_whatever_the_other_two_hold(self, tmp_path, values, status):
+        e = Estate(tmp_path)
+        e.fleet("a", **values)
+        row = e.selected("a", *GITHUB)["github_pat"]
+        assert row["status"] == status, row
+
+    @pytest.mark.parametrize("token,status,detail,alerts", [
+        (LIVE, "ok", "HTTP 200", 0), (DEAD, "fail", "HTTP 401 on /user", 1)])
+    def test_a_row_where_only_github_pat_is_set_is_unchanged(
+            self, tmp_path, token, status, detail, alerts):
+        """The case this leaves as it was: the next tick keeps the row an
+        earlier tick wrote, its run and its alert count included, and sends
+        nothing."""
+        e = Estate(tmp_path)
+        e.fleet("a", GITHUB_PAT=token)
+        seeded = todays_row(status, detail, 2, alerts)
+        e.selected_state("a").parent.mkdir(parents=True)
+        e.selected_state("a").write_text(json.dumps({"github_pat": seeded}))
+        row = e.selected("a", *GITHUB)["github_pat"]
+        keys = ("status", "detail", "since_epoch", "alerts")
+        assert {key: row[key] for key in keys} == {key: seeded[key] for key in keys}, row
+        assert e.probed("api.github.com/user")
+        assert e.posts("a") == ""
+
+    @pytest.mark.parametrize("static", ["GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_PAT"])
+    def test_a_complete_app_config_beside_a_static_token_reaches_the_app_probe(
+            self, tmp_path, app_only_declarations, static):
+        """The issue's second test. The row probed the static token, which
+        GitHub refuses here, and never asked the App, which works."""
+        e = Estate(tmp_path / "estate")
+        e.fleet("a", **APP_CONFIG, **{static: DEAD})
+        calls = self._app(e, "200")
+        row = e.selected("a", *app_only_declarations)["github_pat"]
+        assert calls.is_file(), "the tick never asked the App for a token: " + e.log()
+        assert (row["status"], row["detail"]) == ("ok", APP_OK), row
+        assert not e.probed("api.github.com/user"), "a static token was probed"
+
+    @pytest.mark.parametrize("pat,app,status,detail", [
+        (LIVE, "200", "ok", f"GITHUB_PAT: HTTP 200; GITHUB_APP_*: {APP_OK}"),
+        (LIVE, "401", "fail", f"GITHUB_PAT: HTTP 200; GITHUB_APP_*: {APP_401}"),
+        (DEAD, "200", "fail", f"GITHUB_PAT: HTTP 401 on /user; GITHUB_APP_*: {APP_OK}"),
+        (None, "200", "fail", "GITHUB_PAT: declared by mcp/github, but GITHUB_PAT has no value "
+                              f"at the host, root or fleet tier; GITHUB_APP_*: {APP_OK}"),
+        (SLOW, "200", "unknown", f"GITHUB_PAT: HTTP 503 on /user; GITHUB_APP_*: {APP_OK}")],
+        ids=["both-ok", "app-refused", "pat-refused", "pat-empty", "pat-no-answer"])
+    def test_a_fleet_declaring_both_has_both_probed_in_one_row(
+            self, tmp_path, pat, app, status, detail):
+        """A bot routed through the App and equipped with the GitHub MCP, say:
+        the server reads GITHUB_PAT and git mints from the App. The one row
+        records the worse verdict, a fail before an unknown, and names each."""
+        e = Estate(tmp_path)
+        e.fleet("a", **APP_CONFIG, **({"GITHUB_PAT": pat} if pat else {}))
+        calls = self._app(e, app)
+        row = e.selected("a", *GITHUB, *GITHUB_APP)["github_pat"]
+        assert calls.is_file(), "the App was not probed: " + e.log()
+        assert e.probed("api.github.com/user") == (pat is not None)
+        assert (row["status"], row["detail"]) == (status, detail), row
+        assert row.get("reason") == ("no_answer" if status == "unknown" else None), row
+
+    def test_a_direct_run_still_probes_the_first_token_with_a_value(self, tmp_path):
+        """A direct run reads no declarations, so it has no consumer to match
+        and probes as it did: the first of GITHUB_PERSONAL_ACCESS_TOKEN,
+        GITHUB_TOKEN and GITHUB_PAT with a value."""
+        e = Estate(tmp_path)
+        e.fleet("a", GITHUB_TOKEN=LIVE, GITHUB_PAT=DEAD)
+        assert e.direct("a").returncode == 0
+        row = json.loads(e.direct_state("a").read_text())["github_pat"]
+        assert (row["status"], row["detail"]) == ("ok", "HTTP 200"), row
