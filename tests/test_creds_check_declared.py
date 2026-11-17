@@ -392,7 +392,7 @@ class TestTheSelectedCliPassesTheDeclarations:
             "GITHUB_PAT=mcp/github",
             "RAILWAY_PERSONAL_PROJECT_TOKEN=integration/railway",
             "RAILWAY_PERSONAL_TOKEN=integration/railway"]
-        assert fleet_declarations(_fleet_config(idle={}), library_paths) == []
+        assert fleet_declarations(_fleet_config(manager={}), library_paths) == []
 
     def test_a_bot_whose_declarations_cannot_be_read_refuses_the_check(
             self, library_paths, monkeypatch):

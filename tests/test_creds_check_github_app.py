@@ -121,11 +121,14 @@ def test_selected_check_reads_host_tier_app_config_without_ambient_token(tmp_pat
            "CLAUDLOBBY_CLI": str(installation.cli),
            "FLEET_ROOT": str(fleet_root), "CLAUDLOBBY_FLEET": "f",
            "GITHUB_PAT": "ambient-token-must-not-win"}
+    # What the selected CLI passes for a fleet whose bots are equipped with
+    # `mcp: [github-app]` (#1213): a GitHub credential no bot declares is not checked.
+    declares = [part for var in APP for part in ("--declares", f"{var}=mcp/github-app")]
     result = subprocess.run(
         ["bash", str(f["lib"] / "creds-check.sh"),
          "--admitted-runtime", "--fleet", "f",
          "--fleet-root", str(fleet_root),
-         "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "b1"],
+         "--bots-dir", str(fleet_root / "runtime" / "bots"), "--bot", "b1", *declares],
         env=env, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
