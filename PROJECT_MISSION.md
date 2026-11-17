@@ -2,7 +2,7 @@
 
 ## What this project is
 
-Claudlobby is a framework for running a fleet of always-on agent-CLI bots — Claude Code today, Codex through its execution adapter (#2149) — on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot orchestrates workers via tmux dispatch; workers report back via shared scripts and a fleet-state ledger.
+Claudlobby is a framework for running a fleet of always-on agent-CLI bots — Claude Code today, Codex through its execution adapter (#2149) — on a single Linux or macOS host. Each bot has its own persona, its own Telegram bot for communication, its own MCP servers, isolated state, and a distinct identity. A manager bot orchestrates workers via tmux dispatch; workers report back through the `claudlobby` CLI, which records each report in the plane, the host's local record of the fleet's work.
 
 The name is the metaphor: a COD lobby. Bots gather in a shared room (Telegram group chat), the manager assigns missions, workers execute and report back. It's a coordination layer for a squad.
 
@@ -109,7 +109,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 ## What we choose not to build
 
 - **A hosted version.** Claudlobby is software users run themselves. We are not becoming "Claude Code Bots as a Service."
-- **Web UI for fleet management.** Telegram + tmux + systemctl + fleet-state.json is the management surface. Adding a web UI would double the surface area for marginal benefit.
+- **Web UI for fleet management.** Telegram, tmux and the `claudlobby` CLI are the management surface. Adding a web UI would double the surface area for marginal benefit.
 - **Cross-host fleet coordination.** A Claudlobby fleet runs on one host. Multi-host coordination is interesting and explicitly out of scope for v1 — the architecture would change too much.
 - **Skill or knowledge management.** That's clauDNA and Claudron. Claudlobby orchestrates bots that consume those; it does not become them.
 - **Per-bot LLM provider abstraction.** Claudlobby composes and supervises agent CLIs — Claude Code today, OpenAI Codex through its execution adapter (#2145 F18/F11, #2149) — and the model stays each CLI's concern. It does not abstract LLM providers beneath the CLI, and a bot that is not an agent CLI belongs in a different framework.
