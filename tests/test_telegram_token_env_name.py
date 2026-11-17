@@ -237,6 +237,27 @@ def test_the_resolver_still_reads_a_variable_name(tmp_path):
     assert _notices(r.stderr) == []
 
 
+# The resolver asked for its cause: `_lib_call` puts the bot dir last.
+CAUSE = '_cause() { resolve_bot_telegram_token "$1" --cause; }; _cause'
+
+
+@BAD
+def test_the_resolver_names_the_cause_for_a_name_that_is_not_a_variable_name(tmp_path, name):
+    """With --cause the resolver prints `not_a_name` in place of a token, for
+    the daily check's reason (#2975), and nothing that repeats the name."""
+    r = _lib_call(tmp_path, CAUSE, _channel_bot(tmp_path, name))
+    assert (r.returncode, r.stdout) == (0, "not_a_name")
+    assert name not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("name", [GOOD_NAME, None], ids=["variable-name", "unset"])
+def test_the_resolver_names_no_cause_for_a_variable_name_or_none(tmp_path, name):
+    """--cause prints nothing for a variable name, never the token it names,
+    and nothing for no name."""
+    r = _lib_call(tmp_path, CAUSE, _channel_bot(tmp_path, name))
+    assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+
+
 @BAD
 def test_bridge_state_reads_a_name_that_is_not_a_variable_name_as_no_token(tmp_path, name):
     r = _lib_call(tmp_path, "bridge_state", _channel_bot(tmp_path, name))
@@ -246,9 +267,10 @@ def test_bridge_state_reads_a_name_that_is_not_a_variable_name_as_no_token(tmp_p
     assert (unset.stdout, unset.returncode) == ("no_token", 1)
 
 
-def test_the_daily_check_reads_a_name_that_is_not_a_variable_name_as_no_token(tmp_path):
-    """Each bad name's row reads as the row of a bot that names no variable
-    (`fail`, no token), and no name reaches anything the run writes."""
+def test_the_daily_check_says_a_name_that_is_not_a_variable_name_reads_no_token(tmp_path):
+    """Each bad name's row fails, as the row of a bot that names no variable
+    does, and its reason says the name is not a variable name (#2975); no name
+    reaches anything the run writes."""
     roster = [(f"bad{i}", f"bad_{i}_bot", name, None) for i, name in enumerate(BAD_NAMES.values(), 1)]
     roster += [("bot1", "bot_one_bot", "T_BOT1_TOKEN", VALID_TOKEN), ("unnamed", "unnamed_bot", "", None)]
     f = _fleet(tmp_path, roster=roster)
@@ -258,10 +280,11 @@ def test_the_daily_check_reads_a_name_that_is_not_a_variable_name_as_no_token(tm
     assert r.returncode == 0, r.stderr
     state = json.loads(f["state"].read_text())
     assert state["telegram_f_bot1"]["status"] == "ok"
+    unnamed = state["telegram_f_unnamed"]
+    assert unnamed["status"] == "fail" and NOTICE not in unnamed["detail"], unnamed
     for i in range(1, len(BAD_NAMES) + 1):
         row = state[f"telegram_f_bad{i}"]
-        assert (row["status"], row["detail"]) == (state["telegram_f_unnamed"]["status"], state["telegram_f_unnamed"]["detail"])
-    assert state["telegram_f_unnamed"]["status"] == "fail"
+        assert row["status"] == "fail" and NOTICE in row["detail"], row
     assert len(_notices(r.stderr)) >= len(BAD_NAMES), r.stderr
     written = [r.stdout, r.stderr, f["state"].read_text()]
     written += [p.read_text() for p in (f["root"] / "creds-check.log", f["tg_log"]) if p.exists()]

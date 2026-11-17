@@ -984,9 +984,15 @@ check_telegram_tokens() {
                 continue
             fi
             # Configured for Telegram but no credential reaches it: an
-            # outage, not a skip — alert.
-            record_and_alert "$key" "fail" \
-                "token resolves empty across env tiers (var named in bot.conf)"
+            # outage, not a skip — alert. A name that is not a variable name
+            # is said as such, never repeated (#2975).
+            if [ "$(resolve_bot_telegram_token "$d" --cause)" = not_a_name ]; then
+                record_and_alert "$key" "fail" \
+                    "TELEGRAM_TOKEN_ENV_NAME is not a variable name, so no token is read"
+            else
+                record_and_alert "$key" "fail" \
+                    "token resolves empty across env tiers (var named in bot.conf)"
+            fi
             continue
         fi
 

@@ -667,6 +667,70 @@ def test_bot_create_writes_library_voices_and_never_shadows_a_voice_at_the_old_p
 
 
 # ---------------------------------------------------------------------------
+# The token's variable name (#2975)
+# ---------------------------------------------------------------------------
+
+# Plain values with no shell syntax in them: a hyphen, a space, a leading digit.
+NOT_VARIABLE_NAMES = {"hyphen": "MY-TOKEN", "space": "MY TOKEN", "leading-digit": "1TOKEN"}
+TOKEN_ENV_RULE = "telegram.token_env must be an env var NAME"
+FAKE_TOKEN = "8888888:AAAAAAAAAAAAAAAAAAAA"
+
+
+def _files(root):
+    return {path.relative_to(root).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(root.rglob("*"))}
+
+
+@pytest.mark.parametrize("name", list(NOT_VARIABLE_NAMES.values()), ids=list(NOT_VARIABLE_NAMES))
+def test_bot_create_refuses_a_token_env_that_is_not_a_variable_name(tmp_path, monkeypatch, capsys, name):
+    """--token-env meets the loader's rule before anything is written: the
+    refusal says what a name must be and never repeats the value, and
+    fleet.yaml and the fleet's .env stay byte-identical, with nothing added."""
+    import json
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    (tmp_path / ".env").write_text("OTHER=keep\n")
+    before = _files(tmp_path)
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    assert main(["--root", str(tmp_path), "--json", "bot", "create", "--name", "newbie",
+                 "--expertise", "orchestration", "--telegram-handle", "newbie_bot",
+                 "--token-env", name, "--yes"]) == 2
+    out = capsys.readouterr()
+    refused = json.loads(out.out)
+    assert refused["command"] == "bot.create" and refused["error"]["code"] == "invalid_argument"
+    assert TOKEN_ENV_RULE in refused["error"]["message"]
+    assert name not in out.out + out.err
+    assert _files(tmp_path) == before
+
+
+def test_bot_create_asks_again_until_the_token_env_is_a_variable_name(tmp_path, monkeypatch, capsys):
+    """The wizard asks again after each answer that is not a variable name,
+    saying what a name must be and never repeating the answer; the variable
+    name it then gets writes both the .env line and the fleet.yaml entry."""
+    from claudlobby import context
+    from claudlobby.__main__ import main
+
+    (tmp_path / "fleet.yaml").write_text(FLEET_WITH_BOTS)
+    paths = Paths(root=tmp_path, package=source_package())
+    monkeypatch.setattr(context, "resolve_paths", lambda **kwargs: paths)
+    base = _wizard_answers("")  # index 18 answers the token's variable name, 21 "have a token?"
+    answers = iter(base[:18] + [*NOT_VARIABLE_NAMES.values(), "TELEGRAM_TOKEN_OK"]
+                   + base[19:21] + ["y", FAKE_TOKEN] + base[22:])
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
+
+    assert main(["--root", str(tmp_path), "bot", "create", "--interactive", "--yes"]) == 0
+    out = capsys.readouterr()
+    assert next(answers, None) is None
+    assert (tmp_path / ".env").read_text() == f"TELEGRAM_TOKEN_OK={FAKE_TOKEN}\n"
+    assert "token_env: TELEGRAM_TOKEN_OK" in (tmp_path / "fleet.yaml").read_text()
+    assert out.out.count(TOKEN_ENV_RULE) == len(NOT_VARIABLE_NAMES)
+    assert not any(name in out.out + out.err for name in NOT_VARIABLE_NAMES.values())
+
+
+# ---------------------------------------------------------------------------
 # .env token management
 # ---------------------------------------------------------------------------
 

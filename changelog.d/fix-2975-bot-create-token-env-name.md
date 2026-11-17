@@ -1,0 +1,5 @@
+### Fixed — `bot create` checks the token's variable name before it writes anything (#2975)
+
+`claudlobby bot create` took the name of the Telegram token's variable as typed, from `--token-env` or from the wizard's answer, and checked the new `fleet.yaml` text only as YAML. It now checks that name with the rule `telegram.token_env` meets at load since #2974 (ASCII letters, digits and underscores, not starting with a digit), in the loader's words, which never repeat the value. `--token-env` with any other value is refused before anything is written, so the fleet's `.env` and `fleet.yaml` stay as they were, and the wizard asks again. Before, the `.env` line and the `fleet.yaml` entry were both written first, and the next command that read the fleet was refused, leaving the operator to remove both by hand.
+
+The daily credential check's Telegram row for a bot whose `TELEGRAM_TOKEN_ENV_NAME` is not a variable name now says so in its reason, without the value, where it read as the row of a bot that names no variable. `resolve_bot_telegram_token` takes `--cause` to tell it.
