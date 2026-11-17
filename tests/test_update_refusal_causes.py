@@ -414,7 +414,9 @@ def test_config_diff_names_the_update_that_records_the_manifest_provenance(tmp_p
     if case == "unknown schema":
         (paths.runtime / "composed.json").write_text(json.dumps({"schema": "unknown"}))
     header = manifest_header(_fleet(), paths)
-    assert f"apply the configuration with `claudlobby --root <data-root> {APPLY}` to record" in header, header
+    # The unknown-schema line begins a sentence with it: "Apply the configuration with".
+    named = f"apply the configuration with `claudlobby --root <data-root> {APPLY}` to record"
+    assert named.lower() in header.lower(), header
     assert "activate" not in header.lower() and "release" not in header, header
 
 
