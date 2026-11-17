@@ -419,6 +419,21 @@ class TestTheSelectedCliPassesTheDeclarations:
             "github_app": app, "mcp": [McpEntry("github")]}), library_paths) == [
             *GITHUB_APP, *GITHUB]
 
+    def test_each_org_in_git_credentials_declares_its_push_token(self, library_paths):
+        """`git_credentials` maps each GitHub org to the variable holding its push
+        token, and the composed git config reads that variable at push time
+        (#2969). Each org is its own surface, so a token two orgs share is
+        declared twice, and GITHUB_PAT keeps its MCP declaration beside it."""
+        from claudlobby.config import McpEntry
+        from claudlobby.credential_check import fleet_declarations
+
+        fleet = _fleet_config(
+            manager={"git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN", "Beta": "ACME_PUSH_TOKEN"}},
+            worker={"git_credentials": {"Gamma": "GITHUB_PAT"}, "mcp": [McpEntry("github")]})
+        assert fleet_declarations(fleet, library_paths) == [
+            "ACME_PUSH_TOKEN=git_credentials/Acme-Org", "ACME_PUSH_TOKEN=git_credentials/Beta",
+            "GITHUB_PAT=git_credentials/Gamma", "GITHUB_PAT=mcp/github"]
+
     def test_a_bot_whose_declarations_cannot_be_read_refuses_the_check(
             self, library_paths, monkeypatch):
         """Read as declaring nothing, that bot's credentials would go unprobed."""
@@ -427,7 +442,7 @@ class TestTheSelectedCliPassesTheDeclarations:
         def unreadable(bot, paths):
             raise ValueError("a fragment that cannot be read")
 
-        monkeypatch.setattr(check, "required_vars", unreadable)
+        monkeypatch.setattr("claudlobby.mcp_resolve.required_vars", unreadable)
         with pytest.raises(check.CredentialCheckError,
                            match="the credentials bot manager declares cannot be read"):
             check.fleet_declarations(_fleet_config(manager={}), library_paths)
@@ -436,7 +451,7 @@ class TestTheSelectedCliPassesTheDeclarations:
             self, library_paths, monkeypatch):
         from claudlobby import credential_check as check
 
-        monkeypatch.setattr(check, "required_vars", lambda bot, paths: [
+        monkeypatch.setattr("claudlobby.mcp_resolve.required_vars", lambda bot, paths: [
             SimpleNamespace(name="ACME TOKEN", origin="mcp/acme")])
         with pytest.raises(check.CredentialCheckError,
                            match="a declaration the probe cannot take"):
@@ -531,3 +546,189 @@ class TestAnAppRoutedRosterIsChecked:
         assert row["status"] == "fail" and "declared by mcp/github-app," in row["detail"], row
         assert "github_pat FAIL" in e.posts("a")
         assert not calls.exists(), "an incomplete config has no App to ask"
+
+
+class TestTheDoorsReadOneWalk:
+    """#2968: the daily check, the reconcile and the doctor read one walk for what
+    a bot declares (`credentials.declared_by_bot`), so for the same roster they
+    count the same declarations. The reconcile and the doctor read them through
+    `declared_for_fleet`; before, that door added nothing for `github_app:` or
+    `git_credentials` and skipped a bot whose walk raised."""
+
+    @staticmethod
+    def _rosters():
+        from claudlobby.config import GithubAppConfig, McpEntry
+
+        app = GithubAppConfig()
+        return {
+            "mcp and integration": {"manager": {"mcp": [McpEntry("github")]},
+                                    "worker": {"integrations": ["railway"]}},
+            "github_app only": {"manager": {"github_app": app}},
+            "github_app and the App fragment": {
+                "manager": {"github_app": app, "mcp": [McpEntry("github-app")]}},
+            "git_credentials only": {"manager": {"git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN"}}},
+            "all of them": {
+                "manager": {"github_app": app, "mcp": [McpEntry("github")],
+                            "git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN", "Gamma": "GITHUB_PAT"}},
+                "worker": {"integrations": ["railway"],
+                           "git_credentials": {"Beta": "BETA_PUSH_TOKEN"}}},
+        }
+
+    @pytest.mark.parametrize("roster", ["mcp and integration", "github_app only",
+                                        "github_app and the App fragment",
+                                        "git_credentials only", "all of them"])
+    def test_the_check_and_the_reconcile_door_count_the_same_declarations(
+            self, library_paths, roster):
+        from claudlobby.credential_check import fleet_declarations
+        from claudlobby.credentials import declared_for_fleet
+
+        fleet = _fleet_config(**self._rosters()[roster])
+        declarations, _ = declared_for_fleet(fleet, library_paths)
+        read = sorted(f"{d.var}={d.kind}/{d.source}" for d in declarations)
+        assert read == fleet_declarations(fleet, library_paths)
+        assert read, "every roster here declares something"
+
+    def test_a_bot_whose_walk_raises_refuses_both_doors_naming_it(
+            self, library_paths, monkeypatch):
+        """The reconcile door used to skip such a bot and read it as declaring
+        nothing, while the daily check refused."""
+        from claudlobby import credential_check as check
+        from claudlobby.credentials import DeclarationsUnreadable, declared_for_fleet
+
+        def unreadable(bot, paths):
+            if bot.bot_id == "worker":
+                raise ValueError("a fragment that cannot be read")
+            return []
+
+        monkeypatch.setattr("claudlobby.mcp_resolve.required_vars", unreadable)
+        fleet = _fleet_config(manager={}, worker={})
+        named = "the credentials bot worker declares cannot be read: a fragment that cannot be read"
+        with pytest.raises(DeclarationsUnreadable, match=named):
+            declared_for_fleet(fleet, library_paths)
+        with pytest.raises(check.CredentialCheckError, match=named):
+            check.fleet_declarations(fleet, library_paths)
+
+
+#: A push token one org of the fleet names in a bot's git_credentials.
+PUSH = ("ACME_PUSH_TOKEN=git_credentials/Acme-Org",)
+
+
+class TestEachPushTokenIsChecked:
+    """#2969: ticks with the declarations of a bot that names push tokens in
+    `git_credentials`. Before, no bot declared them, so they got no probe, no
+    row and no alert, and the first sign of a dead one was a failed push."""
+
+    @staticmethod
+    def _user_probes(e: Estate) -> int:
+        argv = e.bindir / "argv.log"
+        return argv.read_text().count("api.github.com/user") if argv.exists() else 0
+
+    @staticmethod
+    def _push_rows(state: dict) -> list:
+        return sorted(key for key in state if key.startswith("git_credentials_"))
+
+    @pytest.mark.parametrize("token,status", [(LIVE, "ok"), (DEAD, "fail")])
+    def test_a_push_token_is_probed_under_a_row_of_its_own(self, tmp_path, token, status):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=token)
+        state = e.selected("a", *PUSH)
+        row = state["git_credentials_ACME_PUSH_TOKEN"]
+        assert row["status"] == status, row
+        assert "ACME_PUSH_TOKEN (declared by git_credentials/Acme-Org)" in row["detail"], row
+        assert self._user_probes(e) == 1
+        assert "github_pat" not in state, "no bot of this fleet declares GITHUB_PAT"
+        assert ("git_credentials_ACME_PUSH_TOKEN FAIL" in e.posts("a")) == (status == "fail")
+
+    def test_a_push_token_with_no_value_fails_naming_its_org(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a")
+        row = e.selected("a", *PUSH)["git_credentials_ACME_PUSH_TOKEN"]
+        assert row["status"] == "fail", row
+        assert "ACME_PUSH_TOKEN is declared by git_credentials/Acme-Org but has no value" in row["detail"]
+        assert "git_credentials_ACME_PUSH_TOKEN FAIL" in e.posts("a")
+        assert self._user_probes(e) == 0, "a token with no value has nothing to probe"
+
+    def test_each_token_has_its_own_verdict(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=LIVE, BETA_PUSH_TOKEN=DEAD)
+        state = e.selected("a", *PUSH, "BETA_PUSH_TOKEN=git_credentials/Beta")
+        assert state["git_credentials_ACME_PUSH_TOKEN"]["status"] == "ok"
+        assert state["git_credentials_BETA_PUSH_TOKEN"]["status"] == "fail"
+        assert e.posts("a").count("FAIL") == 1 and "git_credentials_BETA_PUSH_TOKEN FAIL" in e.posts("a")
+
+    def test_a_token_two_orgs_share_is_probed_once(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=DEAD)
+        state = e.selected("a", *PUSH, "ACME_PUSH_TOKEN=git_credentials/Beta")
+        assert self._push_rows(state) == ["git_credentials_ACME_PUSH_TOKEN"]
+        detail = state["git_credentials_ACME_PUSH_TOKEN"]["detail"]
+        assert "declared by git_credentials/Acme-Org, git_credentials/Beta" in detail, detail
+        assert self._user_probes(e) == 1
+        assert e.posts("a").count("FAIL") == 1
+
+    def test_github_pat_as_a_push_token_is_checked_once_as_github_pat(self, tmp_path):
+        """The GitHub check probes GITHUB_PAT under its own row, and the tick logs
+        that the push token was checked there, so the token is not probed twice."""
+        e = Estate(tmp_path)
+        e.fleet("a", GITHUB_PAT=DEAD)
+        state = e.selected("a", "GITHUB_PAT=git_credentials/Acme-Org", *GITHUB)
+        assert state["github_pat"]["status"] == "fail", state
+        assert self._push_rows(state) == []
+        assert self._user_probes(e) == 1
+        assert e.posts("a").count("FAIL") == 1
+        assert "git_credentials: GITHUB_PAT is checked as github_pat" in e.log()
+
+    def test_github_pat_gets_its_own_row_when_the_github_check_probed_another(self, tmp_path):
+        """The GitHub check probes the first of GITHUB_PERSONAL_ACCESS_TOKEN,
+        GITHUB_TOKEN and GITHUB_PAT that has a value. An org whose push token is
+        GITHUB_PAT still has that very variable probed."""
+        e = Estate(tmp_path)
+        e.fleet("a", GITHUB_PERSONAL_ACCESS_TOKEN=LIVE, GITHUB_PAT=DEAD)
+        state = e.selected("a", "GITHUB_PAT=git_credentials/Acme-Org", *GITHUB)
+        assert state["github_pat"]["status"] == "ok", state
+        assert state["git_credentials_GITHUB_PAT"]["status"] == "fail", state
+        assert self._user_probes(e) == 2
+
+    def test_a_fleet_that_names_no_push_token_says_none_was_checked(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=DEAD)
+        state = e.selected("a")
+        assert self._push_rows(state) == []
+        assert self._user_probes(e) == 0
+        assert ("git_credentials not checked: no bot of this fleet names a push token "
+                "in git_credentials") in e.log()
+
+    def test_a_row_for_a_token_no_bot_names_any_more_is_removed(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=DEAD, BETA_PUSH_TOKEN=DEAD)
+        first = e.selected("a", *PUSH, "BETA_PUSH_TOKEN=git_credentials/Beta")
+        assert self._push_rows(first) == ["git_credentials_ACME_PUSH_TOKEN",
+                                          "git_credentials_BETA_PUSH_TOKEN"]
+        second = e.selected("a", "BETA_PUSH_TOKEN=git_credentials/Beta")
+        assert self._push_rows(second) == ["git_credentials_BETA_PUSH_TOKEN"]
+        assert second["git_credentials_BETA_PUSH_TOKEN"]["since_epoch"] == (
+            first["git_credentials_BETA_PUSH_TOKEN"]["since_epoch"]), "the run it continues"
+        assert ("git_credentials_ACME_PUSH_TOKEN not checked: no bot of this fleet names it "
+                "in git_credentials; its earlier row is removed") in e.log()
+        assert e.posts("a").count("FAIL") == 2, "the first tick's two, and no alert for the removal"
+
+    def test_a_direct_run_checks_no_push_token(self, tmp_path):
+        e = Estate(tmp_path)
+        e.fleet("a", ACME_PUSH_TOKEN=DEAD)
+        result = e.direct("a")
+        assert result.returncode == 0, result.stderr
+        assert self._push_rows(json.loads(e.direct_state("a").read_text())) == []
+        assert "git_credentials" not in e.log()
+
+    def test_the_rosters_declarations_reach_the_probe(self, tmp_path, library_paths):
+        """End to end from a roster: the walk declares the token and the tick
+        probes it."""
+        from claudlobby.credential_check import fleet_declarations
+
+        declares = fleet_declarations(
+            _fleet_config(manager={"git_credentials": {"Acme-Org": "ACME_PUSH_TOKEN"}}),
+            library_paths)
+        assert declares == list(PUSH)
+        e = Estate(tmp_path / "estate")
+        e.fleet("a", ACME_PUSH_TOKEN=DEAD)
+        assert e.selected("a", *declares)["git_credentials_ACME_PUSH_TOKEN"]["status"] == "fail"

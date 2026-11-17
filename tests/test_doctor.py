@@ -1087,6 +1087,25 @@ class TestCheckCredentialsScoping:
         check_credentials(fleet, paths, report)
         assert report.checks[0].status == "warn"
 
+    def test_a_bot_whose_declarations_cannot_be_read_is_named(self, doctor_fleet, monkeypatch):
+        """#2968: such a bot stops the check, named, instead of reading as one that
+        declares nothing, so its credentials are never reported as checked."""
+        _, fleet, paths = doctor_fleet
+        calls = self._no_network(monkeypatch)
+
+        def unreadable(bot, paths):
+            raise ValueError("a fragment that cannot be read")
+
+        monkeypatch.setattr("claudlobby.mcp_resolve.required_vars", unreadable)
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert [(c.status, c.detail) for c in report.checks] == [(
+            "warn", "could not read fleet declarations, so nothing was probed: the credentials "
+                    "bot worker declares cannot be read: a fragment that cannot be read")]
+        assert calls == []
+
     def test_an_unreachable_cascade_refuses_rather_than_reading_as_no_value(
         self, doctor_fleet, monkeypatch
     ):

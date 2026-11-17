@@ -671,10 +671,15 @@ def check_credentials(
     no value, or a value exists only in the shell -- and collapsing them into
     one reassuring line is the defect this function already shipped once.
     """
-    from .credentials import declared_for_fleet, resolved_view
+    from .credentials import DeclarationsUnreadable, declared_for_fleet, resolved_view
 
     try:
         declarations, _ = declared_for_fleet(fleet, paths)
+    except DeclarationsUnreadable as exc:
+        # Named, rather than read as a bot that declares nothing (#2968).
+        report.add("credentials", "warn",
+                   f"could not read fleet declarations, so nothing was probed: {exc}")
+        return
     except Exception:  # noqa: BLE001 - a broken manifest must not crash doctor
         report.add("credentials", "warn", "could not read fleet declarations")
         return

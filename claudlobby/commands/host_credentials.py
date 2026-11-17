@@ -10,7 +10,7 @@ from ..runtime_admission import runtime_provenance
 
 def _reconcile(args) -> CommandOutput:
     from ..context import generated_selectors, resolve_context
-    from ..credentials import exits_nonzero, format_report, reconcile
+    from ..credentials import DeclarationsUnreadable, exits_nonzero, format_report, reconcile
     from ..env_tiers import ResolverUnavailable
     from ..paths import InvalidPathSelector
 
@@ -28,6 +28,9 @@ def _reconcile(args) -> CommandOutput:
     except ResolverUnavailable as exc:
         # No narrower fallback: an unreadable tier is not an empty tier.
         raise CommandFailure("unavailable", "credential tier resolution is unavailable") from exc
+    except DeclarationsUnreadable as exc:
+        # Nor is a bot whose declarations cannot be read one that declares nothing (#2968).
+        raise CommandFailure("unavailable", str(exc)) from exc
     report = format_report(findings, scope)
     failures = sum(row.is_failure for row in findings)
     unknown = sum(row.verdict == "UNKNOWN" for row in findings)

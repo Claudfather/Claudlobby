@@ -74,7 +74,7 @@ class Declaration:
 
     var: str
     source: str  # "railway", "github" ...
-    kind: str  # "integration" | "mcp"
+    kind: str  # "integration" | "mcp" | "git_credentials"
     equipped_by: list[str] = field(default_factory=list)
 
 
@@ -136,43 +136,100 @@ def parse_frontmatter_block(text: str, key: str) -> dict:
     return out
 
 
+class DeclarationsUnreadable(RuntimeError):
+    """What a bot declares could not be read, so its credentials are unknown (#2968)."""
+
+    def __init__(self, bot: str, exc: BaseException):
+        self.bot = bot
+        super().__init__(f"the credentials bot {bot} declares cannot be read: {exc}")
+
+
+def declared_by_bot(name: str, bot, paths) -> list:
+    """The credentials one bot declares, each labelled with the surface declaring it.
+
+    The one walk for this question (#2968). The daily credential check
+    (`credential_check.fleet_declarations`) reads it, and so do the reconcile
+    and the doctor (`declared_for_fleet`), so they cannot count two different
+    sets for the same bot again. Its records are `mcp_resolve.RequiredVar`s,
+    and it reads three surfaces:
+
+    - `mcp_resolve.required_vars`: the bot's MCP fragments and integration
+      docs, instance names applied, labelled `mcp/<fragment>` and
+      `integration/<doc>`.
+    - `github_app:`: the bot routes its git through the GitHub App, and the
+      composer registers the App's three variables for it whether or not it is
+      equipped with the App's MCP fragment (`collect_env_contracts`). They are
+      labelled `mcp/github-app`, the fragment that holds their contract.
+    - `git_credentials`: the variable holding each org's push token, labelled
+      `git_credentials/<org>` (#2969). The composer registers these as well,
+      and the bot's composed git config reads them at push time.
+
+    A walk that raises refuses, with `DeclarationsUnreadable` naming the bot:
+    read as declaring nothing, that bot's credentials would go unchecked with
+    no word said.
+    """
+    from .config import GITHUB_APP_ENV_VARS
+    from .mcp_resolve import RequiredVar, required_vars
+
+    try:
+        needed = list(required_vars(bot, paths))
+    except Exception as exc:  # noqa: BLE001 - any failure leaves them unknown
+        raise DeclarationsUnreadable(name, exc) from exc
+    if getattr(bot, "github_app", None):
+        needed += [RequiredVar(var, "fleet", None, description, True, None, "mcp/github-app")
+                   for var, description in GITHUB_APP_ENV_VARS.items()]
+    for org, var in sorted((getattr(bot, "git_credentials", None) or {}).items()):
+        needed.append(RequiredVar(var, "fleet", None, f"GitHub token for the {org} org (git push)",
+                                  True, None, f"git_credentials/{org}"))
+    seen: set[tuple[str, str]] = set()
+    declared = []
+    for req in needed:
+        if (req.name, req.origin) not in seen:
+            seen.add((req.name, req.origin))
+            declared.append(req)
+    return declared
+
+
 def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
     """(declarations, equipped integration names), via the SHIPPED resolver.
 
-    Declarations come from `mcp_resolve.required_vars`, never from a private
-    scan of the library. That is not a stylistic preference — the first version
-    of this module regex-scraped `${VAR}` out of MCP fragments and reported
-    `TOKEN` as an unsatisfied credential on the live estate. The fragment really
-    does say `${TOKEN}`, but the contract scopes it per instance, so the name
-    that must actually exist is `NOTION_TOKEN` — which was present the whole
-    time. A hand-rolled reader disagreed with the framework's own resolver and
-    manufactured a FAIL, in a tool built because a checker reading the wrong key
-    produced a false FAIL.
+    Declarations come from `declared_by_bot`, the walk the daily check reads
+    too (#2968), which reaches the library through `mcp_resolve.required_vars`,
+    never through a private scan of it. That is not a stylistic preference —
+    the first version of this module regex-scraped `${VAR}` out of MCP
+    fragments and reported `TOKEN` as an unsatisfied credential on the live
+    estate. The fragment really does say `${TOKEN}`, but the contract scopes it
+    per instance, so the name that must actually exist is `NOTION_TOKEN` —
+    which was present the whole time. A hand-rolled reader disagreed with the
+    framework's own resolver and manufactured a FAIL, in a tool built because a
+    checker reading the wrong key produced a false FAIL.
 
     `required_vars` also walks integration docs, so both declaration surfaces
     arrive already canonicalised and instance-prefixed.
-    """
-    from .mcp_resolve import required_vars
 
+    A bot whose declarations cannot be read refuses the whole read
+    (`DeclarationsUnreadable`, naming the bot). This door used to skip such a
+    bot, so the reconcile and the doctor read it as declaring nothing while the
+    daily check refused (#2968).
+    """
     by_var: dict[tuple[str, str], Declaration] = {}
     integrations: set[str] = set()
 
-    for bot_name, bot in getattr(fleet, "bots", {}).items():
+    bots = getattr(fleet, "bots", {})
+    for bot_name in sorted(bots):
+        bot = bots[bot_name]
         for name in getattr(bot, "integrations", []) or []:
             integrations.add(name)
-        try:
-            needed = required_vars(bot, paths)
-        except Exception:  # noqa: BLE001 - one bad bot must not void the inventory
-            continue
-        for req in needed:
-            # required_vars labels its ORIGIN "integration/<name>" and
-            # "mcp/<name>". Split on that rather than testing membership in the
-            # equipped-integration set, which silently mislabelled every
-            # integration var as mcp because the prefixed string never matched
-            # a bare name. Read `.origin`, never `.source` — since #1214 the
-            # latter is the resolver descriptor and would partition to garbage.
+        for req in declared_by_bot(bot_name, bot, paths):
+            # The walk labels its ORIGIN "integration/<name>", "mcp/<name>" and
+            # "git_credentials/<org>". Split on that rather than testing
+            # membership in the equipped-integration set, which silently
+            # mislabelled every integration var as mcp because the prefixed
+            # string never matched a bare name. Read `.origin`, never `.source`
+            # — since #1214 the latter is the resolver descriptor and would
+            # partition to garbage.
             kind, _, short = req.origin.partition("/")
-            if kind not in ("integration", "mcp"):
+            if kind not in ("integration", "mcp", "git_credentials"):
                 kind, short = "mcp", req.origin
             key = (req.name, short)
             decl = by_var.get(key)
@@ -372,7 +429,12 @@ def reconcile(
         "fleet_visible_tier": label,
         "tiers_present": [t[0] for t in tiers],
         "integrations_equipped": sorted(integrations),
-        "mcp_equipped": sorted({d.source for d in declarations if d.kind == "mcp"}),
+        # A fragment counts only where a bot is equipped with it: a bot routed
+        # through `github_app:` declares the App's variables under the App
+        # fragment's name without being equipped with it (#2968).
+        "mcp_equipped": sorted({d.source for d in declarations if d.kind == "mcp"}
+                               & {entry.name for bot in getattr(fleet, "bots", {}).values()
+                                  for entry in getattr(bot, "mcp", []) or []}),
         "declarations": len(declarations),
     }
     return findings, scope

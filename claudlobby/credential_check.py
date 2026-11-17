@@ -9,9 +9,8 @@ import re
 import stat
 import subprocess
 
-from .config import GITHUB_APP_ENV_VARS
 from .context import native_environment
-from .mcp_resolve import required_vars
+from .credentials import DeclarationsUnreadable, declared_by_bot
 from .operation_context import resolve_operation_scope
 from .runtime_admission import mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
@@ -22,39 +21,34 @@ class CredentialCheckError(RuntimeError):
         super().__init__(reason)
 
 
-#: One `--declares` value: a credential's variable name, then the library surface
-#: declaring it, `mcp/<name>` or `integration/<name>`; the name is a library file
-#: name, so it may hold any text but a control character. The probe's parser
+#: One `--declares` value: a credential's variable name, then the surface
+#: declaring it, `mcp/<name>` or `integration/<name>` for a library file, whose
+#: name may hold any text but a control character, or `git_credentials/<org>`
+#: for an org a bot names in its `git_credentials` (#2969). The probe's parser
 #: holds the same shape (cli-context.sh); checking it here first names a value
 #: it would refuse, where its refusal would read as a probe that may have run.
-_DECLARATION = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration)/[^\x00-\x1f\x7f-\x9f]+")
+_DECLARATION = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*=(?:mcp|integration|git_credentials)/[^\x00-\x1f\x7f-\x9f]+")
 
 
 def fleet_declarations(fleet, paths) -> list[str]:
     """``VAR=SURFACE`` for each credential the activated roster declares (#1213).
 
-    The walk is ``mcp_resolve.required_vars``, the one the reconcile and doctor
-    doors read through ``credentials.declared_for_fleet``: each bot's MCP
-    fragments and integrations, instance names applied. That door skips a bot
-    whose walk raises, and a skipped bot would read here as declaring nothing,
-    so its credentials would go unprobed with no word said. This refuses
-    instead.
-
-    A bot with ``github_app:`` routes its git through the GitHub App, and the
-    composer registers the App's three variables for it whether or not it is
-    equipped with the App's MCP fragment, so they are declared here for it too,
-    under that fragment's name, ``mcp/github-app``, which holds their contract.
+    Each bot's declarations come from ``credentials.declared_by_bot``, the one
+    walk the reconcile and doctor doors read too (#2968): its MCP fragments and
+    integrations, instance names applied, the GitHub App's three variables for
+    a bot with ``github_app:``, and the variable holding each org's push token
+    in its ``git_credentials`` (#2969). A bot whose walk raises refuses the
+    check: read as declaring nothing, its credentials would go unprobed with no
+    word said.
     """
     declared: set[str] = set()
     for name in sorted(fleet.bots):
         try:
-            needed = required_vars(fleet.bots[name], paths)
-        except Exception as exc:  # noqa: BLE001 - any failure leaves them unknown
-            raise CredentialCheckError(
-                f"the credentials bot {name} declares cannot be read: {exc}") from exc
+            needed = declared_by_bot(name, fleet.bots[name], paths)
+        except DeclarationsUnreadable as exc:
+            raise CredentialCheckError(str(exc)) from exc
         declared.update(f"{req.name}={req.origin}" for req in needed)
-        if fleet.bots[name].github_app:
-            declared.update(f"{var}=mcp/github-app" for var in GITHUB_APP_ENV_VARS)
     for item in sorted(declared):
         if not _DECLARATION.fullmatch(item):
             raise CredentialCheckError(f"a declaration the probe cannot take: {item!r}")
