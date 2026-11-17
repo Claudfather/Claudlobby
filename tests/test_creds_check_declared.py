@@ -411,11 +411,11 @@ class TestTheSelectedCliPassesTheDeclarations:
         from claudlobby.credential_check import fleet_declarations
 
         app = GithubAppConfig()
-        assert fleet_declarations(_fleet_config(worker={"github_app": app}), library_paths) == [
+        assert fleet_declarations(_fleet_config(manager={"github_app": app}), library_paths) == [
             *GITHUB_APP]
-        assert fleet_declarations(_fleet_config(worker={
+        assert fleet_declarations(_fleet_config(manager={
             "github_app": app, "mcp": [McpEntry("github-app")]}), library_paths) == [*GITHUB_APP]
-        assert fleet_declarations(_fleet_config(worker={
+        assert fleet_declarations(_fleet_config(manager={
             "github_app": app, "mcp": [McpEntry("github")]}), library_paths) == [
             *GITHUB_APP, *GITHUB]
 
@@ -491,7 +491,7 @@ def app_only_declarations(library_paths):
     from claudlobby.config import GithubAppConfig
     from claudlobby.credential_check import fleet_declarations
 
-    return fleet_declarations(_fleet_config(worker={"github_app": GithubAppConfig()}),
+    return fleet_declarations(_fleet_config(manager={"github_app": GithubAppConfig()}),
                               library_paths)
 
 
