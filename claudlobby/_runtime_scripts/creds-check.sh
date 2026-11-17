@@ -27,14 +27,19 @@
 # credential asks `declared_by` first.
 #
 # A provider is checked only where the fleet DECLARES it (#1213). The selected
-# CLI reads the activated roster's declarations, the MCP fragments and
-# integrations each bot is equipped with and the GitHub App's variables for a
-# bot routed through the App (github_app:), and passes them as `--declares
-# VAR=SURFACE`. A declared credential with no value is a FAIL, never a skip:
-# the fleet said it needs it. One no bot declares gets no probe and no row, so
-# a fleet that never wanted a provider never hears about it. A direct run has
-# no declaration source; it probes every provider and records a missing value
-# as skip, as it always did.
+# CLI reads the activated roster's declarations through the walk the reconcile
+# and doctor doors read too (#2968): the MCP fragments and integrations each
+# bot is equipped with, the GitHub App's variables for a bot routed through the
+# App (github_app:), the variable holding each org's push token in a bot's
+# git_credentials (#2969), and the variable holding a bot's Telegram token
+# (telegram.token_env). It passes them as `--declares VAR=SURFACE`. No check
+# reads a telegram/ declaration: check_telegram_tokens checks each channel bot
+# on its own, from its bot.conf, so a Telegram token has one row per bot. A
+# declared credential with no value is a FAIL, never a skip: the fleet said it
+# needs it. One no bot declares gets no probe and no row, so a fleet that never
+# wanted a provider never hears about it. A direct run has no declaration
+# source; it probes every provider and records a missing value as skip, as it
+# always did, and it checks no git_credentials token, since it knows none.
 #
 # State is per fleet (#1213): the selected CLI passes
 # state/creds-check/<fleet>.json (#1989), a direct run with a fleet writes
@@ -592,7 +597,12 @@ _check_github_app() {
 }
 
 check_github_pat() {
-    local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}" surfaces=""
+    local token="" var surfaces=""
+    # The first of these with a value is the token probed below.
+    for var in GITHUB_PERSONAL_ACCESS_TOKEN GITHUB_TOKEN GITHUB_PAT; do
+        token="${!var:-}"
+        [ -z "$token" ] || break
+    done
     # The GitHub MCP declares GITHUB_PAT, and the App MCP or a bot routed
     # through the App (github_app:) the GITHUB_APP_* trio (#1213): a fleet
     # that declares none of them has no GitHub credential to check.
@@ -631,6 +641,9 @@ check_github_pat() {
         record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
         return
     fi
+    # A git_credentials push token in this same variable is not probed again
+    # by check_git_credentials (#2969).
+    _cc_github_pat_var="$var"
     local code
     local curl_err_file auth_cfg
     curl_err_file=$(safe_mktemp)
@@ -649,6 +662,80 @@ check_github_pat() {
     else
         record_probe "github_pat" github "$(probe_outcome "$code")" "HTTP $code on /user"
     fi
+}
+
+# The variables this fleet declares as push tokens through git_credentials
+# (#2969), each once, one a line: a bot maps each GitHub org to the variable
+# holding its token, and the selected CLI declares that variable as
+# VAR=git_credentials/<org>.
+_git_credential_vars() {
+    local line
+    while IFS= read -r line; do
+        case "${line#*=}" in
+            git_credentials/*) printf '%s\n' "${line%%=*}" ;;
+        esac
+    done <<EOF | LC_ALL=C sort -u
+$_cc_declares
+EOF
+}
+
+# One push token, probed as check_github_pat probes a token, under a row of its
+# own: one dead token among several working ones is not "GitHub is broken"
+# (check_railway_token). The composed git config reads exactly this variable
+# at push time, so its own value is what is probed.
+_check_one_git_token() {
+    local varname="$1" provider="git_credentials_$1" token surfaces code curl_err_file auth_cfg
+    surfaces="$(declared_by "$varname")" || surfaces="git_credentials"
+    token="${!varname:-}"
+    if [ -z "$token" ]; then
+        # Declared and absent is a FAIL, never a skip (#1213).
+        record_and_alert "$provider" "fail" \
+            "$varname is declared by $surfaces but has no value at the host, root or fleet tier"
+        return
+    fi
+    curl_err_file=$(safe_mktemp)
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Accept: application/vnd.github+json")"
+    code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
+        --config "$auth_cfg" \
+        --max-time 10 \
+        https://api.github.com/user 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    if [ "$code" = "200" ]; then
+        record_and_alert "$provider" "ok" "$varname (declared by $surfaces): HTTP 200"
+    else
+        record_probe "$provider" github "$(probe_outcome "$code")" \
+            "$varname (declared by $surfaces): HTTP $code on /user"
+    fi
+}
+
+# Each push token a bot of this fleet names in git_credentials (#2969). Before
+# it, a token no bot otherwise declared got no probe, no row and no alert, and
+# the first sign of a dead one was a failed git push. A variable check_github_pat
+# probed this tick is not probed again, and the log says it was checked as
+# github_pat. A row for a token no bot names any more is removed, as
+# not_declared removes a provider row. A direct run knows no declarations, so it
+# checks none.
+check_git_credentials() {
+    local varname keep=" " stale named=0
+    [ "$_cc_declared_known" -eq 1 ] || return 0
+    for varname in $(_git_credential_vars); do
+        named=1
+        if [ "$varname" = "$_cc_github_pat_var" ]; then
+            log "git_credentials: $varname is checked as github_pat"
+            continue
+        fi
+        keep="${keep}git_credentials_$varname "
+        _check_one_git_token "$varname"
+    done
+    [ "$named" -eq 1 ] \
+        || log "git_credentials not checked: no bot of this fleet names a push token in git_credentials"
+    for stale in $("$JQ" -r 'keys[] | select(startswith("git_credentials_"))' "$STATE" 2>/dev/null || true); do
+        case "$keep" in *" $stale "*) continue ;; esac
+        with_lock "$STATE.lock" _drop_state "$stale"
+        log "$stale not checked: no bot of this fleet names it in git_credentials; its earlier row is removed"
+    done
 }
 
 # The Railway tokens a fleet may declare, and the query each is DEFINITIONALLY
@@ -978,7 +1065,9 @@ check_alert_pair() {
 # Run all checks
 # ---------------------------------------------------------------------
 
-CHECKS=(check_github_pat check_railway_token check_telegram_tokens check_alert_pair)
+# Set by check_github_pat to the variable it probed, read by check_git_credentials.
+_cc_github_pat_var=""
+CHECKS=(check_github_pat check_git_credentials check_railway_token check_telegram_tokens check_alert_pair)
 
 for fn in "${CHECKS[@]}"; do
     "$fn" || log "$fn raised (non-fatal)"
