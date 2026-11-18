@@ -40,7 +40,7 @@ from .plane.fleet_events import fleet_event_request
 from .runtime_admission import GitCurrentRuntime, RuntimeIdentity, mutation_admission
 from .compact_request import (CompactRequestError, CompactRequestResult,
                               record_own_compaction)
-from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
+from .stop_record import StopRecordError, check_reason, clear_stop, read_stop, write_stop
 from .supervision import build_supervision_spec
 from .supervision_inventory import (Adapter, InventoryError, _catalog, collect_enrollment,
                                     remaining_processes)
@@ -997,7 +997,8 @@ def _current_bot_binding(root, current, destination, bot, adapter=None):
         # Prototype snapshots have no placement authority after de-enrollment.
         # Exact installed evidence can still support existing-session reads.
         inventory = collect_enrollment(root, declarations, adapter=adapter,
-                                       only_names=frozenset({declaration.source.name})).require_complete()
+                                       only_names=frozenset({declaration.source.name}),
+                                       stop_recorded=_stop_recorded).require_complete()
         units = [unit for unit in inventory.units if unit.declaration.source == declaration.source]
         if len(units) != 1 or len(units[0].installed) != 1:
             raise BotLifecycleError("current bot native placement is unavailable; explicit enrollment is required")
@@ -1020,9 +1021,17 @@ def _current_bot_binding(root, current, destination, bot, adapter=None):
     return _CurrentBotBinding(adapter, manager, declaration, entry, declarations, spec, states[0])
 
 
+def _stop_recorded(bot_dir):
+    """The doors' stop check for the inventory: a recorded stop's session still
+    exiting is temporary (#2981). The inventory cannot read the record itself (see
+    collect_enrollment)."""
+    return read_stop(bot_dir) is not None
+
+
 def _observed(root, declarations, adapter, target, installed):
     inventory = collect_enrollment(root, declarations, adapter=adapter,
-                                   only_names=frozenset({installed.name})).require_complete()
+                                   only_names=frozenset({installed.name}),
+                                   stop_recorded=_stop_recorded).require_complete()
     matches = [unit for unit in inventory.units if unit.target == target]
     if len(matches) != 1:
         raise BotLifecycleError("bot has no unique native inventory observation")

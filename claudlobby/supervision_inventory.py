@@ -33,7 +33,6 @@ import sys
 from xml.parsers.expat import ExpatError
 
 from .resources import PackageResources, get_resources
-from .stop_record import read_stop
 
 
 def _target(manager, domain, source):
@@ -873,7 +872,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
                        adapter=None, only_names: frozenset[str] | None = None,
-                       historical_release=None, historical_parked=None) -> EnrollmentInventory:
+                       historical_release=None, historical_parked=None,
+                       stop_recorded=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -888,6 +888,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     ``only_names`` is for exact selected bot/fleet reads, not activation: it
     still proves each named unit's source, installed shadows, effective native
     binding and stability without unrelated host timer activity vetoing it.
+
+    ``stop_recorded`` answers, from a bot's working directory, whether its stop
+    is recorded; the lifecycle doors pass it (#2981). With it, a listed bot unit
+    with no file, whose quiet proof fails and whose cgroup still holds processes
+    after a recorded stop, is a temporary issue, not a consumer without its
+    bytes. Without it that unit keeps the old refusal: this module reads no stop
+    record itself, because the updater imports a retained copy of it that holds
+    only what ``git_update._JOB_SUPPORT`` names.
     """
     data_root = data_root.resolve(strict=True)
     historical_identity = None
@@ -1301,8 +1309,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                         # session it stopped is still leaving the cgroup. That is temporary,
                         # not a consumer without its bytes.
                         processes = (remaining_processes(adapter, directories[0] / name, name)
-                                     if declaration.scope == "bot"
-                                     and read_stop(declaration.working_directory) is not None
+                                     if declaration.scope == "bot" and stop_recorded is not None
+                                     and stop_recorded(declaration.working_directory)
                                      else None)
                         if processes:
                             raise _StillExiting(processes) from exc

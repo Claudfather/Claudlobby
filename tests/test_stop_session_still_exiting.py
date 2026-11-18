@@ -304,6 +304,12 @@ class _Observations(Observations):
             return subprocess.CompletedProcess(command, *self.members[command[7]], "")
         return super().runner(command, **kwargs)
 
+    def collect(self, **kwargs):
+        """The inventory as the lifecycle doors read it: with their stop check."""
+        return collect_enrollment(self.root, tuple(self.declarations), package=self.package,
+                                  runner=self.runner, stop_recorded=bot_operations._stop_recorded,
+                                  **kwargs)
+
 
 def _stopped(obs, name, scope="bot", working=None):
     """A declared unit as bot stop leaves it: no file, still listed, its quiet proof failing."""
@@ -323,9 +329,8 @@ def test_the_inventory_reads_a_recorded_stops_session_still_exiting_as_temporary
     declaration = _stopped(obs, name)
     write_stop(declaration.working_directory, by="operator", reason=None, request_id=str(uuid4()))
     obs.members[name] = (0, "3\n")
-    for only_names in (None, frozenset({name})):  # every reader, and a lifecycle door's own read
-        inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
-                                       runner=obs.runner, only_names=only_names)
+    for only_names in (None, frozenset({name})):  # a full read, and a lifecycle door's own read
+        inventory = obs.collect(only_names=only_names)
         with pytest.raises(SessionExiting) as raised:
             inventory.require_complete()
         assert isinstance(raised.value, InventoryError) and raised.value.processes == {name: 3}
@@ -352,6 +357,40 @@ def test_the_inventory_keeps_its_refusal_unless_a_recorded_stops_processes_are_c
     assert not isinstance(raised.value, SessionExiting)
     counted = [function for function, _ in obs.calls if function == "svc_activation_cgroup_members"]
     assert len(counted) == (1 if case in {"none-left", "unreadable"} else 0)
+
+
+def test_a_reader_without_the_doors_stop_check_keeps_the_old_refusal(tmp_path):  # noqa: F811
+    """Only the lifecycle doors pass the stop check. Any other reader of the inventory,
+    the updater's retained copy among them, keeps the old refusal and never asks for
+    the count."""
+    obs = _Observations(tmp_path)
+    name = "com.example.worker.service"
+    declaration = _stopped(obs, name)
+    write_stop(declaration.working_directory, by="operator", reason=None, request_id=str(uuid4()))
+    obs.members[name] = (0, "3\n")
+    inventory = collect_enrollment(obs.root, tuple(obs.declarations), package=obs.package,
+                                   runner=obs.runner)
+    with pytest.raises(InventoryError, match=f"{name}: {OLD}") as raised:
+        inventory.require_complete()
+    assert not isinstance(raised.value, SessionExiting)
+    assert not [function for function, _ in obs.calls if function == "svc_activation_cgroup_members"]
+
+
+def test_the_inventory_loads_with_only_what_the_updater_retains():
+    """The updater imports a retained, digest-checked copy of the inventory module
+    (git_update._JOB_SUPPORT) beside its quiet-check support, and nothing else of the
+    package: a module-level import of any other module fails that copy at load. So the
+    doors pass the stop check in, and the inventory imports no stop-record reader."""
+    import ast
+    from claudlobby import git_update, supervision_inventory
+    tree = ast.parse(Path(supervision_inventory.__file__).read_text(encoding="utf-8"))
+    imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    package = {node.module + ".py" for node in imports if isinstance(node, ast.ImportFrom) and node.level}
+    absolute = [alias.name for node in imports if isinstance(node, ast.Import) for alias in node.names]
+    absolute += [node.module for node in imports if isinstance(node, ast.ImportFrom) and not node.level]
+    # supervision_runtime.py is the quiet check's own retained support (_retained_job).
+    assert package and package <= set(git_update._JOB_SUPPORT) | {"supervision_runtime.py"}
+    assert not [name for name in absolute if name.split(".")[0] == "claudlobby"]
 
 
 def test_a_refusal_with_any_other_issue_is_not_temporary(tmp_path):  # noqa: F811
