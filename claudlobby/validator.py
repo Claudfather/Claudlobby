@@ -39,6 +39,7 @@ from .known_values import (
     BYPASS_ACTIONS,
     CLAUDNA_SKILL_RENAMES,
     CODE_AUDIT_BY_HAND_TYPES,
+    CODE_AUDIT_RENAMED_TYPES,
     CODE_AUDIT_SWEEP_TYPES,
     DEPRECATED_ENV_TIERS,
     ENV_TIERS,
@@ -1997,25 +1998,36 @@ def _validate_sweep_audit_types(audit_types: list[str], report: ValidationReport
     picks that entry. Said here instead, once per name, so it is read before any
     run; a warning, never an error: an old manifest must load, as with a retired
     key (#2992).
+
+    A name the skill's table listed before #2991 names the type that replaced it
+    (``CODE_AUDIT_RENAMED_TYPES``), read before the closest-type suggestion, which
+    misses two of the three.
     """
     runs = ", ".join(CODE_AUDIT_SWEEP_TYPES)
     for entry in dict.fromkeys(audit_types):
         if entry in CODE_AUDIT_SWEEP_TYPES:
             continue
-        if entry in CODE_AUDIT_BY_HAND_TYPES:
+        successor = CODE_AUDIT_RENAMED_TYPES.get(entry)
+        lens = successor or entry
+        if lens in CODE_AUDIT_BY_HAND_TYPES:
             report.warn(
                 "audit-type",
                 f"sweep.audit_types entry '{entry}' runs only by hand, as "
-                f"/claudna:audit {entry} in an attended session: code-audit-sweep "
+                f"/claudna:audit {lens} in an attended session: code-audit-sweep "
                 f"runs {runs}, so a run that picks it audits nothing and emits "
                 f"audit_failed",
             )
         else:
+            suffix = (
+                f" — the skill renamed it to '{successor}'"
+                if successor
+                else hint(entry, CODE_AUDIT_SWEEP_TYPES)
+            )
             report.warn(
                 "audit-type",
                 f"sweep.audit_types entry '{entry}' is not a type code-audit-sweep "
                 f"runs ({runs}): a run that picks it audits nothing and emits "
-                f"audit_failed{hint(entry, CODE_AUDIT_SWEEP_TYPES)}",
+                f"audit_failed{suffix}",
             )
 
 

@@ -369,6 +369,21 @@ CODE_AUDIT_SWEEP_TYPES: tuple[str, ...] = (
 # nothing; the warning says that instead of suggesting a spelling.
 CODE_AUDIT_BY_HAND_TYPES: frozenset[str] = frozenset({"data-model"})
 
+# Names the skill's table listed until #2991: it renamed two rows (security-audit is
+# now security, docs-review is docs) and dropped a third, because that lens runs only
+# by hand (data-model-audit is now data-model). A manifest written against the old
+# table can still hold one, and a similarity match misses two of the three:
+# docs-review scores 0.53 against docs, under closest_match's 0.6 cutoff, and
+# data-model-audit is close to none of the types the skill runs. validator.py reads
+# this map before it suggests a closest type, as it reads CLAUDNA_SKILL_RENAMES for a
+# renamed skill (#2543). tests/test_code_audit_sweep.py pins each replacement to a
+# type in CODE_AUDIT_SWEEP_TYPES or CODE_AUDIT_BY_HAND_TYPES.
+CODE_AUDIT_RENAMED_TYPES: dict[str, str] = {
+    "security-audit": "security",
+    "docs-review": "docs",
+    "data-model-audit": "data-model",
+}
+
 # ── Expertise → core tools ──────────────────────────────────────
 # Which tools each expertise area typically requires.
 EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {

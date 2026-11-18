@@ -324,7 +324,6 @@ class TestSweepAuditTypes:
     @pytest.mark.parametrize(
         "name, closest",
         [
-            ("security-audit", "security"),
             ("tech_debt", "tech-debt"),
             ("Security", "security"),
             ("product-enhancement", "product-enhance"),
@@ -337,6 +336,26 @@ class TestSweepAuditTypes:
     def test_a_name_with_nothing_close_gets_no_suggestion(self, tmp_path):
         (warned,) = self._warned(self._report(tmp_path, "[system]"))
         assert "'system'" in warned and "did you mean" not in warned, warned
+
+    @pytest.mark.parametrize(
+        "old, successor",
+        [("security-audit", "security"), ("docs-review", "docs")],
+    )
+    def test_a_name_the_old_table_listed_names_the_type_that_replaced_it(
+        self, tmp_path, old, successor
+    ):
+        (warned,) = self._warned(self._report(tmp_path, f"[{old}]"))
+        assert f"'{old}' is not a type code-audit-sweep runs ({_TYPES_RUN})" in warned, warned
+        assert warned.endswith(f"\u2014 the skill renamed it to '{successor}'"), warned
+        assert "did you mean" not in warned, warned
+
+    def test_the_old_data_model_name_gets_the_by_hand_line(self, tmp_path):
+        (warned,) = self._warned(self._report(tmp_path, "[data-model-audit]"))
+        assert "'data-model-audit' runs only by hand" in warned, warned
+        assert "as /claudna:audit data-model in an attended session" in warned, warned
+        assert _TYPES_RUN in warned
+        for other in ("did you mean", "renamed it", "is not a type"):
+            assert other not in warned, warned
 
     def test_data_model_is_named_as_a_lens_that_runs_only_by_hand(self, tmp_path):
         (warned,) = self._warned(self._report(tmp_path, "[tech-debt, data-model]"))
@@ -398,8 +417,22 @@ class TestSweepAuditTypeList:
             assert lens not in _skill_table_types()
         assert known_values.CODE_AUDIT_BY_HAND_TYPES.isdisjoint(known_values.CODE_AUDIT_SWEEP_TYPES)
 
+    def test_every_old_name_maps_to_a_type_that_runs_or_runs_by_hand(self):
+        current = (*known_values.CODE_AUDIT_SWEEP_TYPES, *known_values.CODE_AUDIT_BY_HAND_TYPES)
+        assert known_values.CODE_AUDIT_RENAMED_TYPES, "the old table's names are mapped"
+        for old, successor in known_values.CODE_AUDIT_RENAMED_TYPES.items():
+            assert successor in current, f"{old} -> {successor}: not a type the skill runs"
+            assert old not in current, f"{old} is a current type, so it would never be read here"
+
     def test_the_skill_stops_on_a_type_outside_its_table(self):
-        assert "audit_failed" in _skill_text()
+        # The skill names audit_failed three times; this is the sentence every warning line
+        # rests on ("a run that picks it audits nothing and emits audit_failed"). The text
+        # wraps in the file, so its whitespace is joined before the match.
+        text = " ".join(_skill_text().split())
+        assert (
+            "If the type you were dispatched is not in the table, run no audit: "
+            "emit `audit_failed`"
+        ) in text
 
 
 class TestSweepSelector:
