@@ -317,6 +317,8 @@ fleet:
     enabled: true                  # default true when the block is present
 ```
 
+`audit_types` takes the types the `code-audit-sweep` skill runs: `tech-debt`, `security`, `docs` and `product-enhance`. The selector rotates the list by day of year and hands the skill one entry per run; for any other name the skill runs no audit and emits `audit_failed`. `claudlobby config validate` warns on each such name, under the category `audit-type`, and names the closest type when one is close. `data-model`, an audit that runs only by hand, gets that said instead. It is a warning and never an error, so a manifest that names one still loads.
+
 After editing `fleet.sweep`, apply the reviewed commit with `claudlobby host update apply FULL_COMMIT` from an operator shell and inspect it with `host update status` ([Managed Git delivery](fleet-update-lifecycle.md#managed-git-delivery)). The update enrolls the declared timer on Linux or macOS. The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land on the plane; read them with `claudlobby --json event list --bot <owner> --source audit` and follow `data.next_cursor` when present.
 
 ### `bots.<bot>.briefing`
@@ -1186,6 +1188,7 @@ does not own.
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
 - **Warn** — `claudron_vault_path` is set but the `claudron` CLI is not on PATH, or the path does not resolve to a vault
+- **Warn** — `fleet.sweep.audit_types` names a type the `code-audit-sweep` skill does not run (`audit-type`): the closest type is named, and `data-model` is named as a lens that runs only by hand
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 

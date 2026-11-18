@@ -351,6 +351,24 @@ BYPASS_ACTIONS: frozenset[str] = frozenset(
     {"comment_and_label", "comment_only", "exit_silent"}
 )
 
+# ── Rolling code-audit sweep (fleet.sweep.audit_types) ───────────
+# The audit types the code-audit-sweep skill runs, in the order of its table
+# (library/skills/code-audit-sweep/SKILL.md). For any other name the skill runs
+# no audit and emits audit_failed; validator.py warns on such an entry in
+# fleet.sweep.audit_types. tests/test_code_audit_sweep.py pins this tuple to the
+# table, so the two cannot drift apart unnoticed.
+CODE_AUDIT_SWEEP_TYPES: tuple[str, ...] = (
+    "tech-debt",
+    "security",
+    "docs",
+    "product-enhance",
+)
+
+# Audit lenses the skill says run only by hand, because an --auto run of them
+# reports `blocked`. They are not in the table, so a rotation entry for one audits
+# nothing; the warning says that instead of suggesting a spelling.
+CODE_AUDIT_BY_HAND_TYPES: frozenset[str] = frozenset({"data-model"})
+
 # ── Expertise → core tools ──────────────────────────────────────
 # Which tools each expertise area typically requires.
 EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {
