@@ -32,7 +32,7 @@ the enhancement row — check your own skill list rather than assuming. If none 
 installed, do the audit directly against the "what it finds" column.
 
 Run non-interactively and file GitHub issues directly — with clauDNA that is
-`--auto --github-issues`; with another provider, use its equivalent flags.
+`--auto --output github`; with another provider, use its equivalent flags.
 
 ## Operations
 
@@ -76,8 +76,8 @@ Spawn a **background** Agent (subagent_type: general-purpose) with this prompt s
 You are running an automated {TYPE} audit.
 
 1. cd to {REPO_PATH}
-2. Run the /{SKILL} skill with --auto --github-issues flags, targeting the {DIR} directory
-3. Use: Skill tool with skill="{SKILL}" and args="--auto --github-issues {DIR}"
+2. Run the /{SKILL} skill with --auto --output github flags, targeting the {DIR} directory
+3. Use: Skill tool with skill="{SKILL}" and args="--auto --output github {DIR}"
 
 After the skill completes, collect:
 - All GitHub issue URLs created
