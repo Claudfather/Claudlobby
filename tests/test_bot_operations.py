@@ -600,6 +600,7 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
             self.enroll_needs_s = 0
             self.native_pid = 4242
             self.native_idle = True
+            self.cgroup_members = 0  # processes left in the unit's cgroup after a stop (#2981)
 
         def call(self, function, *args, timeout=30):
             self.calls.append(function)
@@ -619,6 +620,8 @@ def _worker_cli(cold, monkeypatch, capsys, *, exec_start_pre=None):
                 value = f"{self.native_pid}\t1700000000\t{'idle' if self.native_idle else 'unready'}"
             elif function == "svc_activation_quiet":
                 value = "inactive\tno-cgroup-witness"
+            elif function == "svc_activation_cgroup_members":
+                value = str(self.cgroup_members)
             elif function == "svc_activation_bot_fence":
                 self.fence_args.append(args)
                 value = "0\tprivate-fence"
@@ -1670,8 +1673,10 @@ def test_a_stop_waits_for_the_session_it_stopped_to_exit(cold, monkeypatch, caps
 
 
 def test_a_stop_whose_session_never_exits_still_reads_unverified(cold, monkeypatch, capsys):  # noqa: F811
-    """The wait is bounded: a session still in the cgroup at the bound refuses,
-    and the stop reads unverified, never stopped."""
+    """The wait is bounded: a quiet check that still refuses at the bound never
+    reads stopped. Here the count after it finds no process left in the cgroup,
+    so the refusal's cause is unknown and the stop reads unverified; processes
+    still left are named instead (#2981, tests/test_stop_session_still_exiting.py)."""
     worker = _worker_cli(cold, monkeypatch, capsys)
 
     def still_exiting(*args, **kwargs):

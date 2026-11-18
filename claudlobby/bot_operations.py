@@ -42,7 +42,8 @@ from .compact_request import (CompactRequestError, CompactRequestResult,
                               record_own_compaction)
 from .stop_record import StopRecordError, check_reason, clear_stop, write_stop
 from .supervision import build_supervision_spec
-from .supervision_inventory import Adapter, InventoryError, _catalog, collect_enrollment
+from .supervision_inventory import (Adapter, InventoryError, _catalog, collect_enrollment,
+                                    remaining_processes)
 
 
 _SELF_RESPONSE_WAIT_S = 30
@@ -70,6 +71,26 @@ class BotLifecycleError(RuntimeError):
         # A deliberate operator state (for example de-enrolled) refused this verb.
         self.skip_reason = skip_reason
         super().__init__(reason)
+
+
+class SessionStillExiting(BotLifecycleError):
+    """A stopped bot's session is still exiting (#2981).
+
+    The unit is gone and reads inactive, but its quiet check refused, and a read
+    after it found ``processes`` processes still in the unit's cgroup. A bot unit
+    runs KillMode=process, so systemd reads it stopped while the session it
+    started (tmux, claude, MCP servers) exits, which on a loaded host can take
+    longer than the stop's wait of ``settle_s`` seconds. A stop that ran has
+    nothing left to do: its record stays, and ``recording`` says whether its
+    record and its bot_stopped row landed. Run again once the session has gone,
+    the stop proves it quiet.
+    """
+
+    def __init__(self, processes: int, *, settle_s: int, recording: str | None = None, **kwargs):
+        self.processes, self.settle_s, self.recording = processes, settle_s, recording
+        super().__init__(f"the stopped session is still exiting: {processes} "
+                         f"{'process' if processes == 1 else 'processes'} left in its unit's cgroup",
+                         unavailable=True, **kwargs)
 
 
 class StaleHandoffError(BotLifecycleError):
@@ -1225,14 +1246,17 @@ def control_bot(*, root: Path, fleet: str | None, bot: str, control: str,
 
 
 def _record_lifecycle(root: Path, fleet: str, bot: str, event: str, *, by: str,
-                      reason: str | None, request_id: str, changed: bool) -> str:
+                      reason: str | None, request_id: str, changed: bool,
+                      remaining_processes: int | None = None) -> str:
     """The plane's audit row for a stop or a start (#2243): "committed", or "degraded"
     when the plane did not take it. Never raises: a stop must not depend on the plane,
-    and the sweep reads the local stop record, not this row."""
+    and the sweep reads the local stop record, not this row. A stop whose session was
+    still exiting when its wait ended says how many processes were left (#2981)."""
+    data = {"by": by, "reason": reason, "request_id": request_id, "changed": changed}
+    if remaining_processes is not None:
+        data["remaining_processes"] = remaining_processes
     raw = fleet_event_request(event, fleet=fleet, subject_kind="actor", subject=f"bot:{fleet}/{bot}",
-                              source="lifecycle", key=request_id,
-                              data={"by": by, "reason": reason, "request_id": request_id,
-                                    "changed": changed})
+                              source="lifecycle", key=request_id, data=data)
     try:
         recorded = emit_batch(root, [raw], require_commit=True)[0]
     except Exception:
@@ -1265,6 +1289,14 @@ def _confirm_stopped(adapter, installed, target, socket_path, *, effect_attempte
         assert_quiescent(adapter, installed_file=installed, target=target, socket_path=socket_path,
                          settle_s=settle_s)
     except (RuntimeEvidenceError, OSError) as exc:
+        # #2981: the unit is gone and inactive, and processes its session started are
+        # still in its cgroup: that session is still exiting. Any other refusal, or a
+        # count that cannot be read, keeps the answer below (its reason is #2259's).
+        processes = (remaining_processes(adapter, installed, target)
+                     if state == "not-found not-found inactive" else None)
+        if processes:
+            raise SessionStillExiting(processes, settle_s=settle_s,
+                                      effect_attempted=effect_attempted) from exc
         raise BotLifecycleError("bot native/session quiescence is unavailable",
                                 effect_attempted=effect_attempted, unavailable=True) from exc
 
@@ -1352,6 +1384,7 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                     recorded = True
                 except (StopRecordError, OSError):
                     recorded = False
+                exiting = None
                 if unit.installed:
                     effect_begun = False
                     try:
@@ -1364,6 +1397,8 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                         after = _observed(root, declarations, adapter, entry["target"], installed)
                         if after.installed:
                             raise BotLifecycleError("bot unit remains installed")
+                    except SessionStillExiting as exc:
+                        exiting = exc
                     except (BotLifecycleError, RuntimeEvidenceError, InventoryError, OSError) as exc:
                         attempted = effect_begun or (isinstance(exc, BotLifecycleError)
                                                      and exc.effect_attempted)
@@ -1380,11 +1415,24 @@ def set_bot_running(*, root: Path, fleet: str | None, bot: str, running: bool,
                                                 release_id=_release_id(release), **_provenance(release),
                                                 target=entry["target"]) from exc
                 else:
-                    _confirm_stopped(adapter, installed, entry["target"], socket,
-                                     settle_s=_STOP_SETTLE_S)
+                    try:
+                        _confirm_stopped(adapter, installed, entry["target"], socket,
+                                         settle_s=_STOP_SETTLE_S)
+                    except SessionStillExiting as exc:
+                        exiting = exc
                 row = _record_lifecycle(root, destination.fleet.name, bot, "bot_stopped", by=by,
                                         reason=reason, request_id=request_id,
-                                        changed=bool(unit.installed))
+                                        changed=bool(unit.installed),
+                                        remaining_processes=exiting.processes if exiting else None)
+                if exiting is not None:
+                    # #2981: every native step ran and the unit is gone; only the session it
+                    # stopped outlasted the wait. The stop is made, so its record stays and
+                    # its row is written, and the answer says to wait and run it again.
+                    raise SessionStillExiting(exiting.processes, settle_s=exiting.settle_s,
+                                              effect_attempted=exiting.effect_attempted,
+                                              recording=row if recorded else "degraded",
+                                              release_id=_release_id(release), **_provenance(release),
+                                              target=entry["target"]) from exiting
                 return _bot_result(BotLifecycleResult, release, destination.fleet.name, bot, _release_id(release),
                                           entry["target"], "stopped", bool(unit.installed), "not_running",
                                           recording=row if recorded else "degraded")

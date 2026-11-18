@@ -6,7 +6,7 @@ from dataclasses import asdict
 
 from ..command_result import CommandFailure, CommandOutput
 from ..runtime_admission import runtime_provenance
-from .bot_runtime import drift_cause, failure_cause, lifecycle_notes, native_state_refusal
+from .bot_runtime import drift_cause, exiting_hint, failure_cause, lifecycle_notes, native_state_refusal
 
 
 def dispatch(args) -> CommandOutput:
@@ -18,7 +18,8 @@ def dispatch(args) -> CommandOutput:
     from ..operation_context import OperationContextError
     from ..paths import InvalidPathSelector
     from ..releases import ReleaseError
-    from ..supervision_inventory import InventoryError
+    from ..bot_operations import SessionStillExiting
+    from ..supervision_inventory import InventoryError, SessionExiting
 
     action = args.public_command.removeprefix("fleet.")
     if args.seed:
@@ -86,19 +87,22 @@ def dispatch(args) -> CommandOutput:
         data["release_id"] = exc.release_id
         data.update(runtime_provenance(exc))
         message = str(exc)
-        if isinstance(exc.__cause__, (InventoryError, OSError)):
+        # A stopped bot's session still exiting holds the sweep up for now (#2981).
+        exiting = isinstance(exc.__cause__, (SessionExiting, SessionStillExiting))
+        if isinstance(exc.__cause__, (InventoryError, OSError, SessionStillExiting)):
             # A bot's native read failed inside the sweep or the reconciliation, which
-            # wrap the failure: name it, as bot start, stop and restart do (#2487).
+            # wrap the failure: name it, as bot start, stop and restart do (#2487). A
+            # stopped session still exiting is named too: its text is fixed words and a count.
             data["cause"] = failure_cause(exc.__cause__)
             message = f"{message}: {data['cause']}"
         elif drift_cause(exc.__cause__, data):
             # A drifted unit stopped a bot's binding inside the sweep or the
             # reconciliation, which wrap it: name every unit, as the bot doors do (#2954).
             message = f"{message}: {data['cause']}"
+        hint = "inspect the failed bot before resuming the remaining sweep" if exc.bot else None
         raise CommandFailure("unavailable" if exc.effect_attempted or exc.unavailable else "conflict",
-                             message, data=data, release_id=exc.release_id,
-                             hint="inspect the failed bot before resuming the remaining sweep"
-                             if exc.bot else None) from exc
+                             message, data=data, release_id=exc.release_id, retryable=exiting,
+                             hint=exiting_hint("the sweep") if exiting else hint) from exc
     except InvalidPathSelector as exc:
         raise CommandFailure("invalid_argument", "invalid fleet root or selector", data=data) from exc
     except ReleaseError as exc:
