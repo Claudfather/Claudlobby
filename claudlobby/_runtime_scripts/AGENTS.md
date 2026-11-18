@@ -38,12 +38,14 @@ a skill; touches *knowledge* → through the door. Full algorithm: Claudron repo
 The table that stood here is `documentation/runtime-script-reference.md` in the Claudlobby
 repository, moved there word for word: a row for each script it covers and for each public-CLI
 command that replaced an older script. Neither Claude Code nor Codex loads that file on its own,
-and an installed runtime does not ship it. Before changing a script, read its row there. Each row
-is one line that opens with the name of its script or command, so a grep from the repository
-root prints it:
+and a wheel install does not ship it; a runtime that runs from a git working tree has it in that
+tree. Before changing a script, read its row there. Each row is one line that opens with the name
+of its script or command, so a grep from the repository root prints it. A row for two commands
+names both in its first cell, and the second is found with `[^|]*` before its name:
 
 ```bash
 grep -n '^| `keepalive.sh`' documentation/runtime-script-reference.md
+grep -n '^| [^|]*`fleet usage`' documentation/runtime-script-reference.md
 ```
 
 When a row grows past its contract, put the history in the script's own header instead: a grep
