@@ -253,7 +253,7 @@ fleet:
   sweep:
     owner_bot: astrid              # bot whose session runs the audit
     repos: [acme/api, acme/web]    # optional; defaults to owner_bot's scope.repos
-    audit_types: [tech-debt, security-audit]  # rotated per run
+    audit_types: [tech-debt, security]  # rotated per run
     # label / schedule / enabled have sensible defaults
 ```
 
