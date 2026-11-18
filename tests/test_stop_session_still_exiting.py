@@ -16,6 +16,7 @@ tests/test_bot_operations.py, and the inventory over the fake observations of
 tests/test_supervision_inventory.py. No bot, unit or session is started or stopped.
 """
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import shlex
@@ -24,10 +25,10 @@ from uuid import uuid4
 
 import pytest
 
-from claudlobby import bot_operations
+from claudlobby import active_config, bot_operations
 from claudlobby.__main__ import main
 from claudlobby.config_units import current_git_declarations
-from claudlobby.stop_record import write_stop
+from claudlobby.stop_record import StopRecordError, read_stop, record_path, write_stop
 from claudlobby.supervision_inventory import (InventoryError, SessionExiting, collect_enrollment,
                                               remaining_processes)
 from claudlobby.supervision_runtime import RuntimeEvidenceError
@@ -101,6 +102,24 @@ def test_a_stop_whose_row_the_plane_refuses_says_its_recording_is_degraded(cold,
     assert (worker.root / "runtime/bots/worker/data/.stopped").exists()
 
 
+def test_a_stop_whose_own_record_did_not_land_says_its_recording_is_degraded(cold, monkeypatch, capsys):  # noqa: F811
+    """The plane took the row, but the stop's own record did not land (#2995, edge 5). The
+    sweep reads that record, not the row, so the answer's recording is degraded."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+
+    def refused(*_args, **_kwargs):
+        raise StopRecordError("the bot's data directory is not a directory this user owns")
+    monkeypatch.setattr(bot_operations, "write_stop", refused)
+    monkeypatch.setattr(bot_operations, "assert_quiescent", _quiet_refuses)
+    worker.native.cgroup_members = 2
+    body = worker.call("bot", "stop", "worker", expected=6)
+    assert (body["data"]["session"], body["data"]["recording"]) == ("exiting", "degraded")
+    (row,) = rows  # the row is committed: only the local record is missing
+    assert row["payload"]["data"]["data"]["remaining_processes"] == 2
+    assert not (worker.root / "runtime/bots/worker/data/.stopped").exists()
+
+
 @pytest.mark.parametrize("counted", [(0, "0\n"), (3, ""), (0, "many\n")],
                          ids=["none-left", "unreadable", "not-a-count"])
 def test_a_quiet_refusal_with_no_process_counted_keeps_the_unverified_answer(cold, monkeypatch, capsys,  # noqa: F811
@@ -123,6 +142,31 @@ def test_a_quiet_refusal_with_no_process_counted_keeps_the_unverified_answer(col
     assert body["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
     assert body["error"]["retryable"] is False and "session" not in body["data"]
     assert "svc_activation_cgroup_members" in worker.native.calls
+    assert worker.native.actions == ["stop"] and rows == []
+
+
+def test_a_stop_counts_processes_only_for_a_unit_gone_and_inactive(cold, monkeypatch, capsys):  # noqa: F811
+    """The count is asked only when the unit reads as a Linux stop leaves it: no file, not
+    found, inactive (#2995, edge 2). Any other stopped state, such as launchd's unchanged
+    unloaded inactive, has no cgroup to count, so a quiet refusal there keeps the
+    unverified answer even when the adapter would report processes."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    rows = _plane_rows(monkeypatch)
+    monkeypatch.setattr(bot_operations, "assert_quiescent", _quiet_refuses)
+    worker.native.cgroup_members = 3
+    serve = worker.native.call
+
+    def call(function, *args, timeout=30):
+        result = serve(function, *args, timeout=timeout)
+        if function == "svc_bot_disenroll_exact":
+            worker.host.states[worker.native.target] = "unchanged unloaded inactive"
+        return result
+    monkeypatch.setattr(worker.native, "call", call)
+    body = worker.call("bot", "stop", "worker", expected=6)
+    assert body["error"]["message"] == "bot lifecycle effect is unverified; inspect native state"
+    assert body["error"]["retryable"] is False and "session" not in body["data"]
+    assert "svc_inventory_state" in worker.native.calls
+    assert "svc_activation_cgroup_members" not in worker.native.calls
     assert worker.native.actions == ["stop"] and rows == []
 
 
@@ -288,6 +332,39 @@ def test_a_door_keeps_its_refusal_for_a_listed_unit_that_is_not_a_recorded_stop_
     assert worker.native.actions == []
 
 
+def _without_committed_placement(worker):
+    """Commit the worker's configuration again with no native placement, as a prototype
+    snapshot has it: the binding then reads the inventory itself (#2995, edge 1)."""
+    snapshot = deepcopy(worker.host.snapshot)
+    assert snapshot.pop("supervision")  # the fixture commits one
+    snapshot["fingerprint"] = active_config._fingerprint(snapshot)
+    active_config.publish_current_config(snapshot, installation=worker.installation,
+                                         expected_previous=worker.host.snapshot["fingerprint"])
+    worker.host.snapshot = snapshot
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_a_door_with_no_committed_placement_reads_a_recorded_stops_session_still_exiting_as_temporary(
+        action, cold, monkeypatch, capsys):  # noqa: F811
+    """With no committed placement, the binding reads the inventory itself, before the
+    door's own read (#2995, edge 1). It passes the doors' stop check too, so a recorded
+    stop's session still exiting is temporary there as well."""
+    worker = _worker_cli(cold, monkeypatch, capsys)
+    _without_committed_placement(worker)
+    name, record = _stopped_while_exiting(worker, monkeypatch)
+    before = record.read_text()
+    doors = []
+    monkeypatch.setattr(bot_operations, "_observed", lambda *args: doors.append(args))
+    body = worker.call("bot", action, "worker", expected=6)
+    error, data = body["error"], body["data"]
+    assert (error["code"], error["retryable"]) == ("unavailable", True)
+    cause = f"incomplete enrollment inventory: {name}: " + EXITING.format(count=_processes(3))
+    assert (data["cause"], data["exiting"]) == (cause, {name: 3})
+    assert error["message"] == f"bot native state cannot be established: {cause}"
+    assert doors == []  # the binding's own read answered, before the door's
+    assert worker.native.actions == [] and record.read_text() == before
+
+
 # ---------------------------------------------------------------- the inventory itself
 
 
@@ -342,6 +419,36 @@ def test_the_inventory_reads_a_recorded_stops_session_still_exiting_as_temporary
         assert len(inventory.digest) == 64
     (asked,) = {tuple(args) for function, args in obs.calls if function == "svc_activation_cgroup_members"}
     assert asked[1] == name and Path(asked[0]).name == name and not Path(asked[0]).exists()
+
+
+def test_an_unreadable_stop_record_still_reads_as_a_recorded_stop(tmp_path):  # noqa: F811
+    """A stop record that is there but cannot be read still says a stop was recorded, as
+    the sweep reads it, so its session still exiting is temporary too (#2995, edge 3)."""
+    obs = _Observations(tmp_path)
+    name = "com.example.worker.service"
+    declaration = _stopped(obs, name)
+    write_stop(declaration.working_directory, by="operator", reason=None, request_id=str(uuid4()))
+    record_path(declaration.working_directory).write_text("{not json\n")
+    assert read_stop(declaration.working_directory) == {}  # there, and unreadable
+    obs.members[name] = (0, "3\n")
+    with pytest.raises(SessionExiting) as raised:
+        obs.collect().require_complete()
+    assert raised.value.processes == {name: 3}
+
+
+def test_the_inventory_names_1_process_in_the_singular(tmp_path):  # noqa: F811
+    """The inventory's own text, like the stop's, says "1 process" (#2995, edge 4)."""
+    obs = _Observations(tmp_path)
+    name = "com.example.worker.service"
+    declaration = _stopped(obs, name)
+    write_stop(declaration.working_directory, by="operator", reason=None, request_id=str(uuid4()))
+    obs.members[name] = (0, "1\n")
+    with pytest.raises(SessionExiting) as raised:
+        obs.collect().require_complete()
+    assert raised.value.processes == {name: 1}
+    assert str(raised.value) == (f"incomplete enrollment inventory: {name}: its bot's stop is recorded and "
+                                 "its session is still exiting (1 process left in its cgroup); this is "
+                                 "temporary: retry once the session has exited")
 
 
 @pytest.mark.parametrize("case", ["no-stop-recorded", "none-left", "unreadable", "host-unit"])
