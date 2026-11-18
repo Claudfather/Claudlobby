@@ -77,7 +77,10 @@ You are running an automated {TYPE} audit.
 
 1. cd to {REPO_PATH}
 2. Run the /{SKILL} skill with --auto --output github flags, targeting the {DIR} directory
-3. Use: Skill tool with skill="{SKILL}" and args="--auto --output github {DIR}"
+3. Use: Skill tool. The skill field takes the skill's name alone. An audit takes its type first in args, as its lens
+   (a headless audit requires one):
+   - audit row: skill="claudna:audit" and args="{TYPE} --auto --output github {DIR}"
+   - enhancement row, which takes no lens: skill="claudna:product-enhance" and args="--auto --output github {DIR}"
 
 After the skill completes, collect:
 - All GitHub issue URLs created
