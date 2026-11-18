@@ -90,6 +90,62 @@ class InventoryError(ValueError):
     """Coverage or binding could not be proved; activation must not continue."""
 
 
+class SessionExiting(InventoryError):
+    """The inventory refused only because stopped bots' sessions are still exiting (#2981).
+
+    `bot stop` recorded each stop and removed the unit's file, and the unit reads
+    inactive, but processes its session started (tmux, claude, MCP servers) are
+    still in its cgroup: a bot unit runs KillMode=process, so systemd reads it
+    stopped while that session exits. The refusal is temporary: the same read
+    passes once they have gone. ``processes`` maps each unit to its count.
+    """
+
+    def __init__(self, message: str, processes: dict[str, int]):
+        self.processes = dict(processes)
+        super().__init__(message)
+
+
+class _StillExiting(InventoryError):
+    """One unit's refusal: its recorded stop's session is still exiting (#2981)."""
+
+    def __init__(self, processes: int):
+        self.processes = processes
+        super().__init__(f"its bot's stop is recorded and its session is still exiting "
+                         f"({processes} {'process' if processes == 1 else 'processes'} left in "
+                         "its cgroup); this is temporary: retry once the session has exited")
+
+
+class _ExitingIssue(str):
+    """An issue that is only a recorded stop's session still exiting (#2981).
+
+    It is a str, so an inventory's issues, payload and digest keep their shape;
+    `require_complete` reads its type to raise `SessionExiting`.
+    """
+
+    def __new__(cls, text: str, *, unit: str = "", processes: int = 0):
+        issue = super().__new__(cls, text)
+        issue.unit, issue.processes = unit, processes
+        return issue
+
+
+def remaining_processes(adapter, installed_file: Path, target: str) -> int | None:
+    """How many processes are still in a stopped unit's cgroup, or None (#2981).
+
+    A bot unit runs KillMode=process, so systemd reads it inactive once its
+    ExecStop returns, while the session it started is still exiting. None when
+    the unit is not inactive or its state or cgroup cannot be read, and on
+    Darwin, which has no cgroup.
+    """
+    try:
+        result = adapter.call("svc_activation_cgroup_members", installed_file, target)
+    except (OSError, subprocess.SubprocessError, InventoryError):
+        return None
+    count = (result.stdout or "").strip()
+    if result.returncode or not re.fullmatch(r"0|[1-9][0-9]{0,6}", count):
+        return None
+    return int(count)
+
+
 class Adapter:
     """One selected-native invocation owner, also usable by activation controls.
 
@@ -105,7 +161,8 @@ class Adapter:
         "svc_activation_snapshot", "svc_activation_assert_external",
         "svc_activation_pause", "svc_activation_resume", "svc_activation_reload",
         "svc_activation_clear_runtime_mask",
-        "svc_activation_start", "svc_activation_quiet", "svc_activation_bot_fence",
+        "svc_activation_start", "svc_activation_quiet", "svc_activation_cgroup_members",
+        "svc_activation_bot_fence",
         "svc_activation_bot_ready", "svc_activation_handoff", "svc_bot_native_session",
         "svc_activation_stop_private_server",
         "svc_bot_enroll_exact", "svc_bot_disenroll_exact", "svc_bot_session_observe",
@@ -267,7 +324,11 @@ class EnrollmentInventory:
 
     def require_complete(self):
         if self.issues or (not self.units and not self.bootstrap_empty):
-            raise InventoryError("incomplete enrollment inventory: " + "; ".join(self.issues))
+            message = "incomplete enrollment inventory: " + "; ".join(self.issues)
+            if self.issues and all(isinstance(issue, _ExitingIssue) for issue in self.issues):
+                # Only stopped sessions still exiting: the same read passes once they have gone (#2981).
+                raise SessionExiting(message, {issue.unit: issue.processes for issue in self.issues})
+            raise InventoryError(message)
         if self.bootstrap_empty:
             if self.units or self.bootstrap_empty is not True:
                 raise InventoryError("bootstrap inventory must have no original declarations")
@@ -811,7 +872,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                        package: PackageResources | None = None, runner=None,
                        bootstrap_empty: bool = False, legacy_source: bool = False,
                        adapter=None, only_names: frozenset[str] | None = None,
-                       historical_release=None, historical_parked=None) -> EnrollmentInventory:
+                       historical_release=None, historical_parked=None,
+                       stop_recorded=None) -> EnrollmentInventory:
     """Observe every installed/loaded candidate, preserving incomplete evidence.
 
     This accepts the current manifest, including intentionally uninstalled units;
@@ -826,6 +888,14 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
     ``only_names`` is for exact selected bot/fleet reads, not activation: it
     still proves each named unit's source, installed shadows, effective native
     binding and stability without unrelated host timer activity vetoing it.
+
+    ``stop_recorded`` answers, from a bot's working directory, whether its stop
+    is recorded; the lifecycle doors pass it (#2981). With it, a listed bot unit
+    with no file, whose quiet proof fails and whose cgroup still holds processes
+    after a recorded stop, is a temporary issue, not a consumer without its
+    bytes. Without it that unit keeps the old refusal: this module reads no stop
+    record itself, because the updater imports a retained copy of it that holds
+    only what ``git_update._JOB_SUPPORT`` names.
     """
     data_root = data_root.resolve(strict=True)
     historical_identity = None
@@ -1235,6 +1305,15 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                     try:
                         assert_quiescent(adapter, installed_file=directories[0] / name, target=name)
                     except RuntimeEvidenceError as exc:
+                        # #2981: `bot stop` recorded the stop and removed the file, and the
+                        # session it stopped is still leaving the cgroup. That is temporary,
+                        # not a consumer without its bytes.
+                        processes = (remaining_processes(adapter, directories[0] / name, name)
+                                     if declaration.scope == "bot" and stop_recorded is not None
+                                     and stop_recorded(declaration.working_directory)
+                                     else None)
+                        if processes:
+                            raise _StillExiting(processes) from exc
                         raise InventoryError("loaded consumer lacks installed source bytes") from exc
             else:
                 reviewed_content = sources[0].content if legacy_source and sources else generated.content
@@ -1242,7 +1321,8 @@ def collect_enrollment(data_root: Path, declarations: tuple[UnitDeclaration, ...
                                         str(declaration.working_directory), dict(declaration.environment),
                                         props, name in loaded, disabled)
         except (OSError, RuntimeError, InventoryError) as exc:
-            issues.append(f"{name}: {exc}")
+            issues.append(_ExitingIssue(f"{name}: {exc}", unit=name, processes=exc.processes)
+                          if isinstance(exc, _StillExiting) else f"{name}: {exc}")
         if generated is not None:
             target = domain + "/" + name.removesuffix(".plist") if domain else name
             units.append(EnrolledUnit(declaration, target, generated, sources, tuple(sorted(props.items()))))

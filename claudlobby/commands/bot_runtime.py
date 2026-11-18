@@ -52,15 +52,59 @@ def drift_cause(exc: BaseException | None, data: dict) -> str | None:
     return data["cause"]
 
 
+def exiting_hint(command: str) -> str:
+    """What to do while a stopped bot's session is still exiting (#2981): wait as
+    long as a stop waits for it, then run the command again."""
+    from ..bot_operations import _STOP_SETTLE_S
+
+    return (f"a stopped bot's session is still exiting: wait {_STOP_SETTLE_S} s, then run "
+            f"{command} again; until the session has gone, the lifecycle doors refuse "
+            "that bot before any effect")
+
+
 def native_state_refusal(subject: str, exc: Exception, data: dict) -> CommandFailure:
     """A native read that failed, refused with the failure's own message (#2487).
 
     Without that message the caller holds exit 6 and nothing to inspect. The JSON
-    result also carries it as `data.cause`.
+    result also carries it as `data.cause`. A read refused only because a stopped
+    bot's session is still exiting is temporary (#2981): it is retryable, its hint
+    names the wait, and `data.exiting` counts each unit's processes.
     """
+    from ..supervision_inventory import SessionExiting
+
     cause = failure_cause(exc)
-    return CommandFailure("unavailable", f"{subject} native state cannot be established: {cause}",
-                          data={**data, "cause": cause})
+    message = f"{subject} native state cannot be established: {cause}"
+    if isinstance(exc, SessionExiting):
+        return CommandFailure("unavailable", message, retryable=True, hint=exiting_hint("the same command"),
+                              data={**data, "cause": cause, "exiting": exc.processes})
+    return CommandFailure("unavailable", message, data={**data, "cause": cause})
+
+
+def still_exiting_failure(exc, action: str, bot: str, reason: str | None, data: dict) -> CommandFailure:
+    """A stopped bot's session still in its unit's cgroup after the quiet check (#2981).
+
+    A stop that ran made every native step and the unit is gone; only the session
+    it started had not exited when the stop's wait ended. The answer says so,
+    counts what is left, and names the wait and the command to run again.
+    """
+    data.update(native_outcome="unknown" if exc.effect_attempted else "unattempted",
+                release_id=exc.release_id, target=exc.target, session="exiting",
+                remaining_processes=exc.processes)
+    if exc.recording is not None:
+        data["recording"] = exc.recording
+    left = f"{exc.processes} {'process' if exc.processes == 1 else 'processes'} left in its unit's cgroup"
+    if action == "stop" and exc.effect_attempted:
+        message = (f"bot stop de-enrolled {bot}, and its session was still exiting when the "
+                   f"stop's {exc.settle_s} s wait ended: {left}")
+        keep = " (with the same --reason: a stop records its reason again)" if reason else ""
+        hint = (f"the stop is recorded and needs nothing more; to confirm it, wait {exc.settle_s} s "
+                f"and run bot stop {bot} again{keep}: while the session is still exiting, that and "
+                "every other lifecycle door refuse this bot before any effect and say so")
+    else:
+        message = f"{bot}'s stopped session is still exiting: {left}; this is temporary"
+        hint = exiting_hint(f"bot {action} {bot}")
+    return CommandFailure("unavailable", message, data=data, release_id=exc.release_id,
+                          retryable=True, hint=hint)
 
 
 def _canonical_uuid(value: str) -> bool:
@@ -92,8 +136,9 @@ def own_compaction_lines(result) -> tuple[str, ...]:
 
 def dispatch(args) -> CommandOutput:
     from ..activation_state import ActivationError
-    from ..bot_operations import (BotLifecycleError, HandoffDirectoryRefused, HandoffRequestRefused, check_handoff,
-                                  control_bot, handoff_bot, set_bot_running)
+    from ..bot_operations import (BotLifecycleError, HandoffDirectoryRefused, HandoffRequestRefused,
+                                  SessionStillExiting, check_handoff, control_bot, handoff_bot,
+                                  set_bot_running)
     from ..compact_request import CompactRequestResult
     from ..config_plan import PlanError
     from ..context import resolve_paths
@@ -143,6 +188,8 @@ def dispatch(args) -> CommandOutput:
         if exc.busy:
             raise CommandFailure("conflict", str(exc), data=data, retryable=True,
                                  hint="retry after the running bot lifecycle operation finishes") from exc
+        if isinstance(exc, SessionStillExiting):
+            raise still_exiting_failure(exc, action, args.bot_id, reason, data) from exc
         if exc.effect_attempted:
             data["native_outcome"] = "unknown"
             data["release_id"] = exc.release_id

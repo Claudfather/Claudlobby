@@ -13,7 +13,7 @@ from pathlib import Path
 from .supervision_runtime import assert_quiescent
 from .activation_state import ActivationError
 from .bot_operations import (BotLifecycleError, BotLifecycleResult,
-                             _current_bot_binding, set_bot_running)
+                             _current_bot_binding, _stop_recorded, set_bot_running)
 from .operation_context import resolve_operation_scope
 from .runtime_admission import GitCurrentRuntime, runtime_provenance
 from .stop_record import read_stop
@@ -159,7 +159,8 @@ def reconcile_fleet(*, root: Path, fleet: str | None, bot: str | None = None,
                           if declaration.scope == "bot" and declaration.fleet == destination.fleet.name
                           and (bot is None or declaration.bot == bot))
     inventory = collect_enrollment(destination.paths.root, declarations, adapter=adapter,
-                                   only_names=bot_names).require_complete()
+                                   only_names=bot_names,
+                                   stop_recorded=_stop_recorded).require_complete()
     completed = []
     for bot in ((bot,) if bot is not None else _targets(destination, workers_only=False)):
         try:

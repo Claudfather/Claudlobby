@@ -357,6 +357,32 @@ expect 3 svc_activation_quiet "$file" "$target" "" 5 2>/dev/null
 [ ! -s "$READS" ] && [ "$(( $(wc -l < "$SHOWS") ))" = 1 ]
 active=inactive
 for bad in x -1 1.5 08 1000; do settle_case 0; expect 3 svc_activation_quiet "$file" "$target" "" "$bad"; done
+
+# #2981: how many processes are still in a stopped unit's cgroup, which bot stop
+# and the inventory name when the quiet check refuses. Only an inactive unit is
+# counted, a unit systemd reports no cgroup for counts 0, and a cgroup that
+# cannot be read, a unit still active, an unreadable unit and Darwin refuse.
+_svc_cgroup_members() {
+    printf '%s\n' "$1" >> "$READS"
+    [ "$MEMBERS" != unreadable ] || return 3
+    local n=0
+    while [ "$n" -lt "$MEMBERS" ]; do printf '%s\n' "$((4240 + n))"; n=$((n + 1)); done
+}
+rm -f "$COLLECTED"; group=/user.slice/worker.service; : > "$READS"
+MEMBERS=3; [ "$(svc_activation_cgroup_members "$file" "$target")" = 3 ]
+[ "$(cat "$READS")" = /user.slice/worker.service ]
+MEMBERS=1; [ "$(svc_activation_cgroup_members "$file" "$target")" = 1 ]
+MEMBERS=0; [ "$(svc_activation_cgroup_members "$file" "$target")" = 0 ]
+rm -f "$file"; load=not-found; MEMBERS=2  # the shape bot stop leaves: no file, still listed
+[ "$(svc_activation_cgroup_members "$file" "$target")" = 2 ]
+: > "$file"; load=loaded
+group=""; MEMBERS=3; : > "$READS"
+[ "$(svc_activation_cgroup_members "$file" "$target")" = 0 ] && [ ! -s "$READS" ]
+group=/user.slice/worker.service; MEMBERS=unreadable
+expect 3 svc_activation_cgroup_members "$file" "$target"
+MEMBERS=3; active=active; expect 3 svc_activation_cgroup_members "$file" "$target"
+active=inactive; QUERY_FAIL=1; expect 3 svc_activation_cgroup_members "$file" "$target"
+QUERY_FAIL=0; _OS=Darwin; expect 3 svc_activation_cgroup_members "$file" "$target"; _OS=Linux
 unset -f _svc_cgroup_members; COLLECTED=""; SHOWS=""
 
 # Exercise the actual membership predicates with observed-data fixtures; only

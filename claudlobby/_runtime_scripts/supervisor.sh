@@ -1384,6 +1384,28 @@ svc_activation_quiet() {
     done
 }
 
+# How many processes are still in a stopped unit's Linux v2 cgroup (#2981). The
+# quiet check above refuses while any are left, for that reason or another; this
+# read counts them, so `bot stop` and the enrollment inventory can say that a
+# stopped session is still exiting. Prints the count, 0 once systemd reports no
+# cgroup for the unit. rc 3 when the unit is not inactive, when its state or its
+# cgroup cannot be read, and on Darwin, which has no cgroup.
+svc_activation_cgroup_members() {
+    local file="$1" target="$2" members pid count=0
+    [ "$_OS" = Linux ] || return 3
+    _svc_activation_read "$file" "$target" || return 3
+    [ "$SVC_ACT_ACTIVE" = inactive ] || return 3
+    if [ -n "$SVC_ACT_GROUP" ]; then
+        members=$(_svc_cgroup_members "$SVC_ACT_GROUP") || return 3
+        while IFS= read -r pid; do
+            [ -z "$pid" ] || count=$((count + 1))
+        done <<EOF
+$members
+EOF
+    fi
+    printf '%s\n' "$count"
+}
+
 # Reuse the restart owner's readiness policy without invoking its fleet walk.
 # Source only inside these cold activation calls, never the per-tool hot path.
 svc_activation_bot_fence() (
