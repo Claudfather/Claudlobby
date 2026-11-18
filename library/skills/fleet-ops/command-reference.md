@@ -41,7 +41,8 @@ or `claudlobby --json bot status BOT`. Each bot's `context` there is the input,
 cache-read and cache-write tokens of its newest main-chain call, with that
 call's time, read from its transcript; `tokens` is null with a `reason`, never 0,
 when the transcript cannot answer, and `compacted_after` names a compaction
-written since that call. `claudlobby --json bot session BOT` reads
+written since that call. `context.model` is the model that answered that call,
+null whenever `tokens` is. `claudlobby --json bot session BOT` reads
 the selected private session and native enrollment; it does not inspect another
 process by name. Use `claudlobby --json bot logs BOT` or the manager's
 `claudlobby --json fleet logs` for bounded file tails.

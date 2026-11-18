@@ -123,7 +123,8 @@ class BotStatus:
     stopped_by: str | None = None
     stop_reason: str | None = None
     # the live context (#2206): transcript_usage.current_context's answer,
-    # tokens None with its reason when the transcript cannot answer
+    # tokens None with its reason when the transcript cannot answer; model
+    # (#2979) is the same call's, None with them
     context: dict | None = None
 
     @property
@@ -400,7 +401,8 @@ def _live_context(paths: Paths, fleet: FleetConfig, bot_id: str) -> dict:
     try:
         return current_context(paths, fleet, bot_id)
     except Exception as exc:  # noqa: BLE001 - named in the field, not raised
-        return {"tokens": None, "at": None, "reason": f"context_read_failed: {type(exc).__name__}",
+        return {"tokens": None, "at": None, "model": None,
+                "reason": f"context_read_failed: {type(exc).__name__}",
                 "session": None, "compacted_after": None, "bytes_read": 0, "cap": None}
 
 
@@ -742,7 +744,8 @@ def _context_detail(context: dict | None) -> str:
     context = context or {}
     if context.get("tokens") is None:
         return f"unknown ({context.get('reason') or 'not read'})"
-    line = f"{context['tokens']:,} tokens at {context['at']} (the newest main-chain call)"
+    line = (f"{context['tokens']:,} tokens at {context['at']} "
+            f"(the newest main-chain call, model {context.get('model') or 'unknown'})")
     after = context.get("compacted_after")
     if after:
         line += (f"; compacted after it at {after['at']}, "
@@ -928,7 +931,8 @@ def format_json(statuses: list[BotStatus], fleet_name: str,
                 # The observed BUSY run, separate from assignment state.
                 "busy_age_secs": bs.busy_age_secs,
                 # The newest main-chain usage row (#2206); tokens null with a
-                # reason when the transcript cannot answer, never 0.
+                # reason when the transcript cannot answer, never 0. Its model
+                # (#2979) is null with them.
                 "context": bs.context,
                 "current_task": bs.current_task,
                 "open_assignments": bs.open_assignments,
