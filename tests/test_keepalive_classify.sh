@@ -150,6 +150,11 @@ assert_state "input-held-after-enter.txt" "HELD"
 # floor, calls all three held; the first did, on a mid-turn bot.
 assert_not_state "input-queued-hint.txt" "HELD"
 assert_not_state "idle-placeholder.txt" "HELD"
+# The box after an API error holds Claude Code's faint "Resend your message to
+# try again" where the suggestion sits (#2986); idle-resend-placeholder is
+# idle-placeholder rebuilt with that text, not a capture. It read HELD, and
+# fleet-pulse paged input_held on an empty box.
+assert_not_state "idle-resend-placeholder.txt" "HELD"
 assert_not_state "menu-option.txt" "HELD"
 assert_state "input-clean-submit.txt" "IDLE"
 
@@ -161,6 +166,7 @@ assert_state_c "input-held-cr.txt" "HELD"
 assert_state_c "input-held-after-enter.txt" "HELD"
 assert_not_state "input-queued-hint.txt" "HELD" C
 assert_not_state "idle-placeholder.txt" "HELD" C
+assert_not_state "idle-resend-placeholder.txt" "HELD" C
 assert_not_state "menu-option.txt" "HELD" C
 
 # Extensibility test: custom patterns via env vars
