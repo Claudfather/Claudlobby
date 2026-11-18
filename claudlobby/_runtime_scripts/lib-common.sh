@@ -1136,7 +1136,7 @@ check_tmux_session() {
 # The token VALUE is not in bot.conf — only its var NAME (TELEGRAM_TOKEN_ENV_NAME)
 # is; the value lives in the .env chain, which keepalive/fleet-pulse never source.
 # Resolve it via source_env_tiered IN A SUBSHELL so the caller's env is untouched.
-# resolve_bot_telegram_token <bot_dir>
+# resolve_bot_telegram_token <bot_dir> [--cause]
 # Print the bot's Telegram token, resolved the way start-bot.sh resolves it:
 # bot.conf names the var (TELEGRAM_TOKEN_ENV_NAME); the value lives in the
 # tiered .env chain. Runs in a subshell so the calling env is untouched.
@@ -1145,8 +1145,12 @@ check_tmux_session() {
 # would validate a token no bot actually runs with. A TELEGRAM_TOKEN_ENV_NAME
 # that is not a variable name reads no token, as an unset one does, with one
 # line on stderr that does not repeat it (start-bot.sh runs the same case).
+# With --cause it prints, in place of the token, `not_a_name` for such a name
+# and nothing otherwise, never the token: the daily check names that cause in
+# its reason (#2975). It returns 0 either way, as a caller under an ERR trap
+# needs inside a command substitution.
 resolve_bot_telegram_token() {
-    local bot_dir="${1:?Usage: resolve_bot_telegram_token /path/to/bot/dir}"
+    local bot_dir="${1:?Usage: resolve_bot_telegram_token /path/to/bot/dir [--cause]}"
     (
         load_bot_conf "$bot_dir" >/dev/null 2>&1 || true
         # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
@@ -1158,9 +1162,14 @@ resolve_bot_telegram_token() {
         if [ -n "$_te" ]; then
             case "$_te" in
                 [0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
-                    printf 'resolve_bot_telegram_token: TELEGRAM_TOKEN_ENV_NAME is not a variable name, so no token is read for %s\n' "$bot_dir" >&2
+                    # The mode is read from the arguments, which a sourced .env never sets.
+                    if [ "${2:-}" = --cause ]; then
+                        printf 'not_a_name'
+                    else
+                        printf 'resolve_bot_telegram_token: TELEGRAM_TOKEN_ENV_NAME is not a variable name, so no token is read for %s\n' "$bot_dir" >&2
+                    fi
                     ;;
-                *) printf '%s' "${!_te:-}" ;;
+                *) [ "${2:-}" = --cause ] || printf '%s' "${!_te:-}" ;;
             esac
         fi
     ) || true

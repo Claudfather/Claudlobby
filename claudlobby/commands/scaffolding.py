@@ -20,7 +20,7 @@ def cmd_new_bot(args):
     from ..context import generated_selectors, load_context, resolve_paths
     from ..newbot import (FleetYamlEditError, NewBotInputs, insert_bot_stanza,
                           interactive_collect, materialize_voice, render_stanza,
-                          write_token_to_env)
+                          token_env_refusal, write_token_to_env)
     from ..paths import InvalidPathSelector
     from .setup import _write_config
 
@@ -82,6 +82,8 @@ def cmd_new_bot(args):
 
     if not inp.name or not _SLUG_RE.fullmatch(inp.name) or not inp.expertise:
         raise CommandFailure("invalid_argument", "bot name or expertise is invalid")
+    if (refusal := token_env_refusal(inp.token_env, inp.name)) is not None:
+        raise CommandFailure("invalid_argument", refusal)
     if inp.name in context.fleet.bots:
         raise CommandFailure("conflict", f"bot is already declared: {inp.name}")
     if inp.team and inp.team not in context.fleet.teams:

@@ -26,7 +26,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-from .config import load_fleet
+from .config import _check_token_env, load_fleet
 from .paths import INSTRUCTION_FILE_NAMES, Paths
 from .prompts import ask as _ask, ask_yn as _ask_yn, ask_pick as _ask_pick
 
@@ -295,6 +295,25 @@ def maybe_create_voice(
 
 
 # ----------------------------------------------------------------------
+# The token's variable name
+# ----------------------------------------------------------------------
+
+
+def token_env_refusal(token_env: str | None, name: str) -> str | None:
+    """The loader's refusal of a token variable name, or None (#2975).
+
+    bot create checks it before writing anything: a name the loader refuses
+    would leave the .env line and the fleet.yaml entry behind it. The message
+    is the loader's, which never repeats the value.
+    """
+    try:
+        _check_token_env(token_env, where=f"bot '{name}'")
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+# ----------------------------------------------------------------------
 # .env management — token write
 # ----------------------------------------------------------------------
 
@@ -446,6 +465,9 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     handle = _ask("Telegram bot @handle (without @)", default=handle_default)
     token_env_default = f"TELEGRAM_TOKEN_{name.upper().replace('-', '_')}"
     token_env = _ask("Env var name for the token", default=token_env_default)
+    while (refusal := token_env_refusal(token_env, name)) is not None:
+        print(f"  ({refusal})")
+        token_env = _ask("Env var name for the token", default=token_env_default)
     require_mention = _ask_yn("Require @-mention to respond?", default=True)
     chat_id = _ask("Chat ID (override default group, optional)") or None
 
