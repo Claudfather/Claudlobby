@@ -125,6 +125,51 @@ def test_provider_signin_parser_private_redraw_chunks_and_wrapped_token():
     assert token not in repr(screen)
 
 
+def test_provider_signin_parser_accepts_claude_2_1_325_ink_stream():
+    """Claude 2.1.325 setup-token: DECSC/DECRC, DECSTBM reset, focus/theme
+    private modes, unanswered terminal queries, an unknown OSC, and an OSC 8
+    hyperlink carrying an id parameter (shape captured from the real binary)."""
+    from claudlobby.plane.provider_signin import TokenScreen
+    screen = TokenScreen()
+    url = ('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+           '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+           '&scope=user%3Ainference&code_challenge=' + 'a'*43 + '&code_challenge_method=S256&state=' + 'b'*32)
+    token = 'sk-ant-oat01-' + 's'*80
+    stream = ('\x1b7\x1b[r\x1b8\x1b[?25h\x1b[?25l\x1b[?2004h\x1b[?2031h\x1b[?1004h'
+              '\x1b[>0q\x1b[?u\x1b[c\x1b]7501;?\x07'
+              'Welcome\x1b[9Gto\x1b[12GClaude\x1b[19GCode\x1b[24Gv2.1.325\r\r\n'
+              '\x1b[1A\x1b[1C\x1b[2G\u00b7 Opening browser to sign in\u2026\r\r\n'
+              "Browser didn't open? Use the url below to sign in (c to copy)\r\r\n\r\r\n"
+              '\x1b]8;id=17zzcid;' + url + '\x07' + url + '\x1b]8;;\x07\r\r\n'
+              'Paste code here if prompted >\r\r\n'
+              '\x1b[2J\x1b[H\u2713 Long-lived authentication token created successfully!\r\n'
+              'Your OAuth token (valid for 1 year):\r\n' + token + '\r\n'
+              "Store this token securely. You won't be able to see it again.\r\n"
+              '\x1b[?2031l\x1b[?1004l\x1b[?2004l').encode()
+    for start in range(0, len(stream), 5): screen.feed(stream[start:start+5])
+    assert screen.url == url
+    assert screen.token() == token
+    assert token not in repr(screen)
+
+
+@pytest.mark.parametrize('sequence', [b'\x1b[?2031;x', b'\x1b[>1q', b'\x1b[5c', b'\x1b[3;9r', b'\x1b=',
+                                      b'\x1b[?123456h'])
+def test_provider_signin_parser_still_refuses_unmodelled_sequences(sequence):
+    from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
+    with pytest.raises(SigninRefused):
+        TokenScreen().feed(sequence + b'x')
+
+
+def test_provider_signin_parser_ignores_osc8_with_unknown_params():
+    from claudlobby.plane.provider_signin import TokenScreen
+    screen = TokenScreen()
+    url = ('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+           '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+           '&scope=user%3Ainference&code_challenge=' + 'a'*43 + '&code_challenge_method=S256&state=' + 'b'*32)
+    screen.feed(('\x1b]8;foo=bar;' + url + '\x07open\x1b]8;;\x07').encode())
+    assert screen.url is None
+
+
 def test_provider_signin_rejects_foreign_url_echo_and_ambiguous_tokens():
     from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
     screen = TokenScreen()

@@ -1,0 +1,1 @@
+- Browser Claude sign-in: the private setup-token screen now accepts the terminal output of Claude 2.1.325 (cursor save/restore, scroll-region reset, presentation-only private modes, unanswered terminal queries, and OSC 8 links with an `id` parameter). Before this, every connected sign-in at the pinned binary ended `needs_attention`/`unsupported_output` before showing a link.

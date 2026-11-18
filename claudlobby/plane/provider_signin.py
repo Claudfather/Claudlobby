@@ -151,6 +151,7 @@ class TokenScreen:
         self._escape = ""
         self._rows = [[] for _ in range(64)]
         self._row = self._col = self._bytes = 0
+        self._saved = (0, 0)
         self.url = None
         self._candidate = None
 
@@ -158,13 +159,25 @@ class TokenScreen:
         return "<private Claude sign-in screen>"
 
     def _csi(self, value):
-        match = re.fullmatch(r"\x1b\[([0-9;?]*)([A-Za-z])", value)
+        match = re.fullmatch(r"\x1b\[([0-9;?>]*)([A-Za-z])", value)
         if not match:
             raise SigninRefused("unsupported_output")
         raw, final = match.groups()
-        if raw.startswith("?"):  # Cursor visibility, bracketed paste, alternate screen.
-            if final not in "hl" or raw not in {"?25", "?2004", "?1049"}:
-                raise SigninRefused("unsupported_output")
+        if raw.startswith("?"):
+            # Private modes (cursor, paste, focus, alternate screen, Ink's
+            # theme/sync modes) only change presentation; the screen ignores them.
+            if final in "hl" and re.fullmatch(r"\?[0-9]{1,5}(;[0-9]{1,5}){0,7}", raw):
+                return
+            if final == "u" and raw == "?":  # Kitty keyboard protocol query; never answered.
+                return
+            raise SigninRefused("unsupported_output")
+        if raw.startswith(">"):
+            if final == "q" and raw in {">", ">0"}:  # XTVERSION query; never answered.
+                return
+            raise SigninRefused("unsupported_output")
+        if final == "c" and raw in {"", "0"}:  # Primary device attributes query; never answered.
+            return
+        if final == "r" and raw == "":  # Reset the scrolling region to the full screen.
             return
         numbers = [int(v or 0) for v in raw.split(";")]
         if any(v > 4096 for v in numbers):
@@ -204,12 +217,15 @@ class TokenScreen:
                 if self._escape.startswith("\x1b]"):
                     if c == "\x07" or self._escape.endswith("\x1b\\"):
                         payload = self._escape[2:-1] if c == "\x07" else self._escape[2:-2]
-                        if payload.startswith("8;;") and manual_url(payload[3:]):
-                            if self.url is not None and self.url != payload[3:]: raise SigninRefused("ambiguous_output")
-                            self.url = payload[3:]
+                        link = re.fullmatch(r"8;((?:id=[A-Za-z0-9_.:-]{1,128})?);(.*)", payload, re.S)
+                        if link and manual_url(link.group(2)):
+                            if self.url is not None and self.url != link.group(2): raise SigninRefused("ambiguous_output")
+                            self.url = link.group(2)
                         self._escape = ""
                 elif self._escape.startswith("\x1b["):
                     if c.isalpha() or c == "~": self._csi(self._escape); self._escape = ""
+                elif len(self._escape) == 2 and c == "7": self._saved = (self._row, self._col); self._escape = ""
+                elif len(self._escape) == 2 and c == "8": self._row, self._col = self._saved; self._escape = ""
                 elif len(self._escape) == 2 and c not in "[]": raise SigninRefused("unsupported_output")
                 continue
             if c == "\x1b": self._escape = c
