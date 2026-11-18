@@ -142,6 +142,7 @@ def test_provider_signin_parser_accepts_claude_2_1_325_ink_stream():
               "Browser didn't open? Use the url below to sign in (c to copy)\r\r\n\r\r\n"
               '\x1b]8;id=17zzcid;' + url + '\x07' + url + '\x1b]8;;\x07\r\r\n'
               'Paste code here if prompted >\r\r\n'
+              '\x1b(B\x0f\x1b[?2004h\x1b[1A\x1b[1C' + '*'*26 + '\r\r\n'
               '\x1b[2J\x1b[H\u2713 Long-lived authentication token created successfully!\r\n'
               'Your OAuth token (valid for 1 year):\r\n' + token + '\r\n'
               "Store this token securely. You won't be able to see it again.\r\n"
@@ -152,8 +153,17 @@ def test_provider_signin_parser_accepts_claude_2_1_325_ink_stream():
     assert token not in repr(screen)
 
 
+def test_provider_signin_parser_restores_saved_cursor():
+    from claudlobby.plane.provider_signin import TokenScreen
+    screen = TokenScreen()
+    screen.feed(b'ab\x1b7\x1b[5Gx\x1b8c')
+    assert ''.join(screen._rows[0]) == 'abc x'
+
+
 @pytest.mark.parametrize('sequence', [b'\x1b[?2031;x', b'\x1b[>1q', b'\x1b[5c', b'\x1b[3;9r', b'\x1b=',
-                                      b'\x1b[?123456h'])
+                                      b'\x1b[?123456h', b'\x1b[?3h', b'\x1b[?7l', b'\x1b[?25;6h', b'\x1b[?h',
+                                      b'\x1b[>c', b'\x1b[?>1h', b'\x1b[?1u', b'\x1b[>0;1q', b'\x1b#8',
+                                      b'\x1b[0r', b'\x1b[1>2A', b'\x1b[1?2A', b'\x1b(0', b'\x1b)B', b'\x0e'])
 def test_provider_signin_parser_still_refuses_unmodelled_sequences(sequence):
     from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
     with pytest.raises(SigninRefused):
@@ -167,6 +177,8 @@ def test_provider_signin_parser_ignores_osc8_with_unknown_params():
            '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
            '&scope=user%3Ainference&code_challenge=' + 'a'*43 + '&code_challenge_method=S256&state=' + 'b'*32)
     screen.feed(('\x1b]8;foo=bar;' + url + '\x07open\x1b]8;;\x07').encode())
+    screen.feed(('\x1b]8;id=a:b;' + url + '\x07open\x1b]8;;\x07').encode())
+    screen.feed(b'\x1b]8;id=1;https://evil.example/cai/oauth/authorize\x07open\x1b]8;;\x07')
     assert screen.url is None
 
 

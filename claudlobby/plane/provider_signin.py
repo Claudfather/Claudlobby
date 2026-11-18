@@ -144,6 +144,14 @@ def manual_url(value):
         return False
 
 
+# Presentation-only DEC private modes Claude 2.1.325 sets/resets: cursor
+# visibility, focus reporting, alternate screen, bracketed paste, theme reports.
+_PRIVATE_MODES = frozenset({"25", "1004", "1049", "2004", "2031"})
+# Unanswered queries (kitty keyboard, XTVERSION, primary device attributes)
+# and the full-screen scroll-region reset; none changes the modelled screen.
+_IGNORED_CSI = frozenset({("?", "u"), (">", "q"), (">0", "q"), ("", "c"), ("0", "c"), ("", "r")})
+
+
 class TokenScreen:
     """Bounded private screen for the inspected Ink output, never a terminal API."""
     def __init__(self):
@@ -159,26 +167,16 @@ class TokenScreen:
         return "<private Claude sign-in screen>"
 
     def _csi(self, value):
-        match = re.fullmatch(r"\x1b\[([0-9;?>]*)([A-Za-z])", value)
+        match = re.fullmatch(r"\x1b\[([?>]?[0-9;]*)([A-Za-z])", value)
         if not match:
             raise SigninRefused("unsupported_output")
         raw, final = match.groups()
-        if raw.startswith("?"):
-            # Private modes (cursor, paste, focus, alternate screen, Ink's
-            # theme/sync modes) only change presentation; the screen ignores them.
-            if final in "hl" and re.fullmatch(r"\?[0-9]{1,5}(;[0-9]{1,5}){0,7}", raw):
-                return
-            if final == "u" and raw == "?":  # Kitty keyboard protocol query; never answered.
-                return
-            raise SigninRefused("unsupported_output")
-        if raw.startswith(">"):
-            if final == "q" and raw in {">", ">0"}:  # XTVERSION query; never answered.
-                return
-            raise SigninRefused("unsupported_output")
-        if final == "c" and raw in {"", "0"}:  # Primary device attributes query; never answered.
+        if (raw, final) in _IGNORED_CSI:
             return
-        if final == "r" and raw == "":  # Reset the scrolling region to the full screen.
+        if raw[:1] == "?" and final in "hl" and set(raw[1:].split(";")) <= _PRIVATE_MODES:
             return
+        if raw[:1] in {"?", ">"}:
+            raise SigninRefused("unsupported_output")
         numbers = [int(v or 0) for v in raw.split(";")]
         if any(v > 4096 for v in numbers):
             raise SigninRefused("unsupported_output")
@@ -217,16 +215,19 @@ class TokenScreen:
                 if self._escape.startswith("\x1b]"):
                     if c == "\x07" or self._escape.endswith("\x1b\\"):
                         payload = self._escape[2:-1] if c == "\x07" else self._escape[2:-2]
-                        link = re.fullmatch(r"8;((?:id=[A-Za-z0-9_.:-]{1,128})?);(.*)", payload, re.S)
-                        if link and manual_url(link.group(2)):
-                            if self.url is not None and self.url != link.group(2): raise SigninRefused("ambiguous_output")
-                            self.url = link.group(2)
+                        link = re.fullmatch(r"8;(?:id=[A-Za-z0-9_.-]{1,128})?;(.*)", payload, re.S)
+                        url = link.group(1) if link else None
+                        if url and manual_url(url):
+                            if self.url is not None and self.url != url: raise SigninRefused("ambiguous_output")
+                            self.url = url
                         self._escape = ""
                 elif self._escape.startswith("\x1b["):
                     if c.isalpha() or c == "~": self._csi(self._escape); self._escape = ""
-                elif len(self._escape) == 2 and c == "7": self._saved = (self._row, self._col); self._escape = ""
-                elif len(self._escape) == 2 and c == "8": self._row, self._col = self._saved; self._escape = ""
-                elif len(self._escape) == 2 and c not in "[]": raise SigninRefused("unsupported_output")
+                elif self._escape == "\x1b7": self._saved = (self._row, self._col); self._escape = ""  # DECSC
+                elif self._escape == "\x1b8": self._row, self._col = self._saved; self._escape = ""  # DECRC
+                elif self._escape == "\x1b(": pass  # Awaiting the G0 character set designator.
+                elif self._escape == "\x1b(B": self._escape = ""  # G0 = US-ASCII; nothing to model.
+                else: raise SigninRefused("unsupported_output")
                 continue
             if c == "\x1b": self._escape = c
             elif c == "\r": self._col = 0
@@ -234,7 +235,7 @@ class TokenScreen:
                 self._row += 1
                 if self._row == 64: self._rows.pop(0); self._rows.append([]); self._row = 63
             elif c == "\b": self._col = max(0, self._col-1)
-            elif c == "\x07": pass
+            elif c in "\x07\x0f": pass  # Bell; shift-in to the (US-ASCII) G0 set.
             elif ord(c) < 32: raise SigninRefused("unsupported_output")
             else:
                 row = self._rows[self._row]
