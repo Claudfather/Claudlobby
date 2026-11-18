@@ -1,0 +1,3 @@
+### Fixed — `sweep-personal` and the autonomous runner's issue-filing targets pass `--output github` (#2925)
+
+Under clauDNA 0.35, `--auto` controls interaction only and defaults to `--output artifacts`, so a run that is expected to file issues names `--output github`. `sweep-personal` now passes `--auto --output github`, as `sweep` does, in its provider line and in both dispatch steps; it passed `--github-issues`, which clauDNA does not take. The `autonomous-runner` skill now says, under "Construct the invocation", that a target expected to file issues carries `--output github` in `autonomous_runner.args`, and its archetype's example of an issue-producing run reads `/claudna:audit tech-debt --auto --output github`.

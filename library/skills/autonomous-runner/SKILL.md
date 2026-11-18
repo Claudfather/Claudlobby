@@ -213,6 +213,8 @@ For `/claudna:build` and similar issue-consuming skills, `<issue#>` comes from S
 
 `<args>` is the verbatim `autonomous_runner.args` string from fleet.yaml.
 
+A target expected to file issues carries `--output github` in `autonomous_runner.args`, because clauDNA's `--auto` controls interaction only and defaults to `--output artifacts`.
+
 Dispatch as a `general-purpose` subagent with this prompt:
 
 ```
