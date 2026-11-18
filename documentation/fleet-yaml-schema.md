@@ -313,7 +313,7 @@ fleet:
     repos: [acme/api, acme/web]    # optional; defaults to owner_bot's scope.repos
     label: auto-audit              # staleness label (default: auto-audit)
     schedule: "*-*-* 03:00:00"     # systemd OnCalendar (default: nightly 03:00)
-    audit_types: [tech-debt, security-audit]  # rotated per run (default: [tech-debt])
+    audit_types: [tech-debt, security]  # rotated per run (default: [tech-debt])
     enabled: true                  # default true when the block is present
 ```
 
