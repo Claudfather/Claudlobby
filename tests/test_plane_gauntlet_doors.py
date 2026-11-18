@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from claudlobby.plane.db import connect, db_path
+from tests.plane_fixtures import ro
 from tests.test_plane_events_door import _serving
 
 LIB_DIR = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scripts"
@@ -64,9 +65,35 @@ def _bash(cmd: str, env: dict, cwd=None, stdin: str | None = None):
     )
 
 
-def _bash_committed(root: Path, scratch_plane_env, cmd: str, env: dict):
+# The rows each door below writes: its message, and the message's one attempt.
+COMMUNICATION = "SELECT 1 FROM communications"
+TRANSMISSION = "SELECT 1 FROM events WHERE kind='transmission'"
+ROW_WAIT_S = 30.0
+
+
+def _bash_committed(root: Path, scratch_plane_env, cmd: str, env: dict, *,
+                    awaiting: tuple[str, ...]):
+    """Run a door against this test's own daemon, and keep the daemon serving
+    until each query in `awaiting` finds a row, for ROW_WAIT_S at most (#2997).
+
+    Both doors here emit in the background class. A send that misses the
+    socket's 1.0 s deadline, or is sent in the cooldown after such a miss, is
+    staged, not committed (#1693), and the daemon replays the stage about once
+    a second, but only while it serves. A read made once, after the door has
+    returned and the daemon has stopped, can then find no row although the
+    door worked: the class #2274 fixed in the harness."""
     with _serving(root, scratch_plane_env) as socket:
-        return _bash(cmd, {**env, "PLANE_SOCKET": str(socket)})
+        r = _bash(cmd, {**env, "PLANE_SOCKET": str(socket)})
+        deadline = time.monotonic() + ROW_WAIT_S
+        for sql in awaiting:
+            while not _found(root, sql) and time.monotonic() < deadline:
+                time.sleep(0.1)
+        return r
+
+
+def _found(root: Path, sql: str) -> bool:
+    with ro(root) as conn:
+        return conn.execute(sql).fetchone() is not None
 
 
 def _rows(tmp_path: Path, sql: str, params: tuple = ()):
@@ -180,20 +207,21 @@ class TestTgPostArmed:
         # Tab in the body — the F14 class the per-string escaper was added
         # for; the single jq -nc assembly must encode it correctly.
         r = _bash_committed(tmp_path, scratch_plane_env,
-                            f'"{libdir}/tg-post.sh" "line1\ttabbed"', tge)
+                            f'"{libdir}/tg-post.sh" "line1\ttabbed"', tge,
+                            awaiting=(COMMUNICATION, TRANSMISSION))
         assert r.returncode == 0, r.stderr
         comm = _rows(
             tmp_path,
             "SELECT body, message_class, recipient_raw FROM communications",
         )
-        assert comm and comm[0]["body"] == "line1\ttabbed"
+        assert comm and comm[0]["body"] == "line1\ttabbed", r.stderr
         assert comm[0]["message_class"] == "notice"
         tx = _rows(
             tmp_path,
             "SELECT event, carrier, carrier_ref FROM events"
             " WHERE kind='transmission'",
         )
-        assert tx and tx[0]["event"] == "carrier_accepted"
+        assert tx and tx[0]["event"] == "carrier_accepted", r.stderr
         assert tx[0]["carrier"] == "telegram-tgpost"
         assert tx[0]["carrier_ref"] == "tg:42"
 
@@ -202,26 +230,28 @@ class TestTgPostArmed:
         tge = self._tg_env(
             tmp_path, env, '{"ok":true,"result":{"message_id":"weird"}}'
         )
-        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge)
+        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge,
+                            awaiting=(TRANSMISSION,))
         assert r.returncode == 0, r.stderr
         tx = _rows(
             tmp_path,
             "SELECT carrier_ref FROM events WHERE kind='transmission'",
         )
-        assert tx and tx[0]["carrier_ref"] is None
+        assert tx and tx[0]["carrier_ref"] is None, r.stderr
 
     def test_rejected_post_lands_failed_transmission(self, tmp_path, armed, scratch_plane_env):
         libdir, env = armed
         tge = self._tg_env(
             tmp_path, env, '{"ok":false,"description":"chat not found"}'
         )
-        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge)
+        r = _bash_committed(tmp_path, scratch_plane_env, f'"{libdir}/tg-post.sh" "hello"', tge,
+                            awaiting=(TRANSMISSION,))
         assert r.returncode == 3
         tx = _rows(
             tmp_path,
             "SELECT event FROM events WHERE kind='transmission'",
         )
-        assert tx and tx[0]["event"] == "failed"
+        assert tx and tx[0]["event"] == "failed", r.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -238,20 +268,21 @@ def test_briefing_trigger_armed_lands_briefing_comm(tmp_path, armed, scratch_pla
     (botdir / ".claude" / "skills" / "briefing").mkdir(parents=True)  # composed skill
     (botdir / "bot.conf").write_text('export FLEET_NAME="brf-fleet"\n')
     r = _bash_committed(tmp_path, scratch_plane_env,
-                        f'"{libdir}/briefing-trigger.sh" brf-fleet w1 morning', env)
+                        f'"{libdir}/briefing-trigger.sh" brf-fleet w1 morning', env,
+                        awaiting=(COMMUNICATION, TRANSMISSION))
     assert r.returncode == 0, r.stderr
     comm = _rows(
         tmp_path,
         "SELECT sender_alias, message_class, body FROM communications",
     )
-    assert comm and comm[0]["message_class"] == "briefing"
+    assert comm and comm[0]["message_class"] == "briefing", r.stderr
     assert comm[0]["sender_alias"] == "system:briefing-trigger"
     assert comm[0]["body"] == "/briefing morning"
     tx = _rows(
         tmp_path,
         "SELECT event FROM events WHERE kind='transmission'",
     )
-    assert tx and tx[0]["event"] == "pane_submitted"
+    assert tx and tx[0]["event"] == "pane_submitted", r.stderr
 
 
 # ---------------------------------------------------------------------------
