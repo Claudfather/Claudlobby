@@ -12,7 +12,7 @@ Compositor for agent-CLI fleets — Claude Code today, Codex through the executi
 
 ## Ecosystem boundary
 
-What claudlobby is beside clauDNA and Claudron is in
+What claudlobby is beside clauDNA and Claudron, and what `library/skills/` and `library/` are, is in
 [`documentation/architecture/overview.md`](documentation/architecture/overview.md). The local rules:
 
 - **Skills here are fleet operations.** Engineering-workflow skills belong in clauDNA.
@@ -28,7 +28,7 @@ What claudlobby is beside clauDNA and Claudron is in
 
 ## Architecture
 
-The architecture diagram, the other key concepts, bot supervision and the canonical task commands are in [`documentation/architecture/overview.md`](documentation/architecture/overview.md).
+The architecture diagram, how the compositor reads `fleet.yaml`, bot supervision and the canonical task, assignment, message and report commands are in [`documentation/architecture/overview.md`](documentation/architecture/overview.md).
 
 The template `claude.md.j2` owns all top-level structure — library files supply slot content.
 
@@ -36,6 +36,8 @@ The template `claude.md.j2` owns all top-level structure — library files suppl
 
 - **MCP fragments** — JSON wire configs in `library/mcp/` with `${ENV_VAR}` placeholders. Never real tokens.
 - **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
+
+The other key concepts (expertise, skills, guardrails, protocols, plugins and voices) are in [`documentation/architecture/overview.md`](documentation/architecture/overview.md).
 
 ### Runtime model
 
@@ -154,7 +156,7 @@ One line per script, for routing; operators use the public CLI. **Before changin
 
 Everything in these top-level directories is committed and shared:
 
-- `library/` — All composable building blocks, voices included (see Architecture above)
+- `library/` — All composable building blocks, voices included (see [`documentation/architecture/overview.md`](documentation/architecture/overview.md))
 - `templates/` — Jinja2 templates for CLAUDE.md generation
 - `claudlobby/_runtime_scripts/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
