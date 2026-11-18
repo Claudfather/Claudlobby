@@ -377,12 +377,20 @@ rm -f "$file"; load=not-found; MEMBERS=2  # the shape bot stop leaves: no file, 
 [ "$(svc_activation_cgroup_members "$file" "$target")" = 2 ]
 : > "$file"; load=loaded
 group=""; MEMBERS=3; : > "$READS"
-[ "$(svc_activation_cgroup_members "$file" "$target")" = 0 ] && [ ! -s "$READS" ]
+# One test a line: under set -e, a failed first test of an && list fails nothing (#2995).
+[ "$(svc_activation_cgroup_members "$file" "$target")" = 0 ]
+[ ! -s "$READS" ]
 group=/user.slice/worker.service; MEMBERS=unreadable
 expect 3 svc_activation_cgroup_members "$file" "$target"
 MEMBERS=3; active=active; expect 3 svc_activation_cgroup_members "$file" "$target"
 active=inactive; QUERY_FAIL=1; expect 3 svc_activation_cgroup_members "$file" "$target"
-QUERY_FAIL=0; _OS=Darwin; expect 3 svc_activation_cgroup_members "$file" "$target"; _OS=Linux
+QUERY_FAIL=0
+# Darwin has no cgroup, so the count refuses there before any read, even for a job
+# launchd reads as stopped, which the state reader itself would answer (#2995).
+_OS=Darwin; file="$T/fleet.worker.plist"; target=gui/501/fleet.worker; launched=0; : > "$file"
+[ "$(svc_activation_snapshot "$file" "$target")" = 'unchanged unloaded inactive' ]
+expect 3 svc_activation_cgroup_members "$file" "$target"
+_OS=Linux; file="$T/worker.service"; target=worker.service
 unset -f _svc_cgroup_members; COLLECTED=""; SHOWS=""
 
 # Exercise the actual membership predicates with observed-data fixtures; only
