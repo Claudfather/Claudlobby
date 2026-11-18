@@ -1,7 +1,7 @@
 ---
 name: sweep
 description: "Use when the scheduled code sweep fires, or you are asked to audit the fleet's stalest repo or for the sweep's status. Periodic code-quality sweep across fleet repos. Picks the stalest repo, runs the appropriate audit skill via a subagent, records findings. Scheduled via cron or manually."
-argument-hint: "[<repo-name>] [--type tech-debt|security-audit|docs-review|data-model-audit] [run|status]"
+argument-hint: "[<repo-name>] [--type tech-debt|security|docs] [run|status]"
 ---
 
 
@@ -18,8 +18,11 @@ The sweep orchestrates whatever code-audit skills the bot has available. Pick a 
 | tech-debt | Dead code, god modules, deprecated patterns |
 | security | Credential leaks, injection vectors, auth gaps |
 | docs | Stale or missing documentation |
-| data-model | Schema / app mismatches (if applicable) |
 | enhancement | UX gaps, missing features, inconsistencies |
+
+clauDNA's `data-model` lens (schema / app mismatches) is not in this table: an
+`--auto` run of that lens reports `blocked`, so it runs by hand, as
+`/claudna:audit data-model` in an attended session.
 
 **Which skill runs each one:** use the audit skills you actually have. clauDNA
 provides these as `/claudna:audit <type>` and `/claudna:product-enhance` for the
@@ -61,9 +64,8 @@ Default rotation per repo (so every repo sees every audit over time):
 | Week | Audit |
 |------|-------|
 | 1 | `tech-debt` |
-| 2 | `security-audit` |
-| 3 | `docs-review` |
-| 4 | `data-model-audit` *(skip if not applicable)* |
+| 2 | `security` |
+| 3 | `docs` |
 
 Override with `--type`.
 

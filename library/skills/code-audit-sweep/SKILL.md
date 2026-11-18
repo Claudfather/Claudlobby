@@ -28,10 +28,15 @@ exists to kill.
 | audit-type | Finds |
 |---|---|
 | `tech-debt` | Dead code, god modules, deprecated patterns |
-| `security-audit` | Credential leaks, injection, auth gaps |
-| `docs-review` | Stale or missing documentation |
-| `data-model-audit` | Schema / app mismatches |
+| `security` | Credential leaks, injection, auth gaps |
+| `docs` | Stale or missing documentation |
 | `product-enhance` | UX gaps, missing features |
+
+The first three are lenses of clauDNA's audit. Its `data-model` lens (schema /
+app mismatches) is not in this table: an `--auto` run of that lens reports
+`blocked`, so it runs by hand, as `/claudna:audit data-model` in an attended
+session. If the type you were dispatched is not in the table, run no audit:
+emit `audit_failed` (step 4) with a `"reason"` that names the type.
 
 **Which skill runs each one:** use the audit skills you actually have. clauDNA
 provides them as `/claudna:audit <type>`, with `/claudna:product-enhance` for
@@ -54,18 +59,20 @@ fabricate an audit.
 **2. Run the audit in a subagent** (keep your main context clean):
 
 > Run the audit for `<audit-type>` using whichever audit skill you have — with
-> clauDNA that is `/claudna:<audit-type> --auto --output github`. Scope it to the
+> clauDNA that is `/claudna:audit <audit-type> --auto --output github`, the type
+> first, as the audit's lens; for `product-enhance`, which takes no lens, it is
+> `/claudna:product-enhance --auto --output github`. Scope it to the
 > highest-impact directory of the repo. Cap at ~10 new issues. Capture every
 > GitHub issue URL and number created.
 
 **3. Guarantee the `auto-audit` label — do not trust delegation.**
 
 `/claudna:publish` applies only the labels present in each doc's frontmatter
-`tags:` (`gh issue create --label "<tags>"`). The audit skills
-(`tech-debt`/`security-audit`/`product-enhance`) name only `priority:*` /
-`enhancement` in their own output instructions; the "always apply `auto-audit`"
-rule lives in the inherited `_shared/output-guide.md`, which an `--auto` run may
-or may not honour. So treat the label as **your** responsibility:
+`tags:` (`gh issue create --label "<tags>"`). The audit's `tech-debt`,
+`security` and `docs` lenses and `product-enhance` do not name `auto-audit` in
+their own output instructions; the "always apply `auto-audit`" rule lives in
+the inherited `_shared/output-guide.md`, which an `--auto` run may or may not
+honour. So treat the label as **your** responsibility:
 
 - **Preferred:** if you can influence the audit's doc frontmatter, ensure
   `auto-audit` is in `tags:` of every doc *before* publish runs.
