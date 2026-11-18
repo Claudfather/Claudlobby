@@ -3948,6 +3948,7 @@ pane_is_busy() {
 # on a bot that was mid-turn:
 #   Try "fix typecheck errors"         an empty box's suggestion
 #   Press up to edit queued messages   a message queued behind a running turn
+#   Resend your message to try again   the faint line drawn after an API error (#2986)
 #   1. Yes, try it                     a menu's selected option: Enter CHOOSES
 # A menu also offers its own exit below the options ("Esc to cancel").
 # Exit words inside authored text are not chrome. An unnumbered footer is
@@ -3965,7 +3966,7 @@ pane_is_held() {
     first=$(_pane_strip_chrome "${region%%$'\n'*}")
     [ -n "$first" ] || return 1
     case "$first" in
-        'Try "'*'"'|'Press up to edit queued messages') return 1 ;;
+        'Try "'*'"'|'Press up to edit queued messages'|'Resend your message to try again') return 1 ;;
     esac
     _pane_region_is_menu "$region" "$first" && return 1
     return 0

@@ -55,18 +55,41 @@ for loc in "" C; do
         check "$f (held)" 0 "$(fixture "$f.txt")" "$loc"
     done
     # Not held: Claude Code's own text in the box (the queued-message hint, an
-    # empty box's suggestion), a menu where an Enter would choose, empty
-    # boxes, and frames with no box at all.
+    # empty box's suggestion, the resend line after an API error), a menu where
+    # an Enter would choose, empty boxes, and frames with no box at all.
     for f in input-queued-hint idle-placeholder menu-option usage-limit-menu input-clean-submit \
-             idle-prompt idle-chevron idle-remote-control idle-permission \
+             idle-resend-placeholder idle-prompt idle-chevron idle-remote-control idle-permission \
              unknown-output unknown-blank verb-no-esc predraw-empty busy-spinner; do
         check "$f (not held)" 1 "$(fixture "$f.txt")" "$loc"
     done
 done
 
+# The box Claude Code draws after an API error (#2986): idle-placeholder's empty
+# box with the faint line "Resend your message to try again" where its
+# suggestion sits. idle-resend-placeholder is that frame rebuilt with the
+# reported text, not a capture. The same box with text typed after the glyph is
+# held, and so is typed text that begins with the line's words: the line is
+# known by its whole text, as the queued-message hint is.
+resend_box=$(fixture idle-resend-placeholder.txt)
+typed_box=$(printf '%s\n' "$resend_box" | sed 's/Resend your message to try again/continue the review/')
+opening_box=$(printf '%s\n' "$resend_box" | sed 's/Resend your message to try again/&, then continue/')
+if [ "$typed_box" = "$resend_box" ] || [ "$opening_box" = "$resend_box" ]; then
+    echo "  FAIL  the typed-text frames were not built"; failed=$((failed + 1))
+fi
+for loc in "" C; do
+    check "typed text in the resend box (held)" 0 "$typed_box" "$loc"
+    check "text opening with the resend line (held)" 0 "$opening_box" "$loc"
+done
+
 # Shapes no fixture covers.
 check "empty pane" 1 ""
 check "glyph and a no-break space only" 1 "$(printf '\342\235\257\302\240\n')"
+for loc in "" C; do
+    check "glyph, no-break space, resend line" 1 \
+        "$(printf '\342\235\257\302\240Resend your message to try again\n')" "$loc"
+    check "glyph, no-break space, typed text" 0 \
+        "$(printf '\342\235\257\302\240continue the review\n')" "$loc"
+done
 check "ascii glyph with text" 0 "$(printf '> continue the review\n')"
 check "a second menu option selected" 1 \
     "$(printf '    1. Yes\n  \342\235\257 2. No, and tell Claude what to do differently\n\n  Esc to cancel\n')"

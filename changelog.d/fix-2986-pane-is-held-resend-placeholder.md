@@ -1,0 +1,3 @@
+### Fixed — an empty input box showing Claude Code's resend line no longer reads as held (#2986)
+
+After an API error Claude Code draws the faint line "Resend your message to try again" in the empty input box. `pane_is_held` read it as text that was never submitted, so keepalive classified the bot `HELD`, fleet-pulse paged `input_held` for an empty box, and `pane_send_verified` refused to type into it (`recipient-input-held`). `pane_is_held` now knows the line by its text, as it knows an empty box's suggestion and the queued-message hint, so a box that shows only that line reads as not held. Text typed into the box, including text that begins with those words, still reads as held.
