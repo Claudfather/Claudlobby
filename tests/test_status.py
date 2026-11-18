@@ -982,3 +982,55 @@ class TestContextInStatus:
         assert "Context:    503,386 tokens" in format_bot_detail(alice)
         assert ("Context:    unknown (transcript_directory_missing_or_untrusted)"
                 in format_bot_detail(bob))
+
+    @staticmethod
+    def _row(model=None):
+        message = {"role": "assistant", "content": [],
+                   "usage": {"input_tokens": 7, "cache_creation_input_tokens": 300,
+                             "cache_read_input_tokens": 503079, "output_tokens": 9}}
+        if model is not None:
+            message["model"] = model
+        return {"type": "assistant", "isSidechain": False, "sessionId": "s1",
+                "timestamp": "2026-10-06T20:31:02Z", "message": message}
+
+    @staticmethod
+    def _collect(mock_fleet, mock_paths):
+        with (
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status._check_systemd_service", return_value=(True, "exited")),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+        return {bs.name: bs for bs in results}, results
+
+    def test_the_model_rides_beside_the_tokens(self, mock_fleet, mock_paths):
+        """#2979: the model of the call `context` counts rides in the JSON row
+        and in the bot's detail; null beside null tokens, under their reason."""
+        self._transcript(mock_paths, "alice", [self._row("claude-opus-4-8")])
+        bots, results = self._collect(mock_fleet, mock_paths)
+        rows = {row["name"]: row for row in json.loads(format_json(results, "f"))["bots"]}
+        assert rows["alice"]["context"]["model"] == "claude-opus-4-8"
+        bob = rows["bob"]["context"]
+        assert (bob["tokens"], bob["model"], bob["reason"]) == (
+            None, None, "transcript_directory_missing_or_untrusted")
+        assert ("Context:    503,386 tokens at 2026-10-06T20:31:02+00:00 (the newest main-chain "
+                "call, model claude-opus-4-8)") in format_bot_detail(bots["alice"])
+        assert ("Context:    unknown (transcript_directory_missing_or_untrusted)"
+                in format_bot_detail(bots["bob"]))
+
+    def test_a_row_naming_no_model_reads_unknown_in_the_detail(self, mock_fleet, mock_paths):
+        self._transcript(mock_paths, "alice", [self._row()])
+        bots, _ = self._collect(mock_fleet, mock_paths)
+        alice = bots["alice"]
+        assert (alice.context["tokens"], alice.context["model"]) == (503386, None)
+        assert "(the newest main-chain call, model unknown)" in format_bot_detail(alice)
+
+    def test_a_reader_fault_costs_the_model_with_the_tokens(self, mock_fleet, mock_paths):
+        """A fault in the reader costs `context`, never the status read: the
+        model is null beside the tokens, under the fault's reason."""
+        self._transcript(mock_paths, "alice", [self._row("claude-opus-4-8")])
+        with patch("claudlobby.transcript_usage.current_context",
+                   side_effect=RuntimeError("reader fault")):
+            bots, _ = self._collect(mock_fleet, mock_paths)
+        context = bots["alice"].context
+        assert (context["tokens"], context["model"], context["reason"]) == (
+            None, None, "context_read_failed: RuntimeError")

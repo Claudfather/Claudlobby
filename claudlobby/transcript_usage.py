@@ -624,10 +624,12 @@ class _Tail:
 def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
                     head_cap: int = SESSION_HEAD_BYTES) -> dict:
     """One bot's live context (#2206): its newest main-chain usage row's input
-    + cache read + cache creation tokens and that row's time, with any
-    compaction written after the row. The row is from the bot's own newest
-    session, never a hook's headless one (``newest_own_session``). ``tokens``
-    is None, never 0, with a ``reason`` when no such row can be read.
+    + cache read + cache creation tokens, that row's time and the model it
+    names (``message.model``, #2979), with any compaction written after the
+    row. The row is from the bot's own newest session, never a hook's headless
+    one (``newest_own_session``). ``tokens`` is None, never 0, with a
+    ``reason`` when no such row can be read, and ``model`` is None with it; a
+    row that names no model gives its tokens with ``model`` None.
 
     Cost per call: one listing of the bot's transcript directory (at most
     MAX_ENTRIES entries); the head of its own newest session and of each newer
@@ -639,8 +641,8 @@ def current_context(paths, fleet, bot_id: str, *, cap: int = CONTEXT_TAIL_BYTES,
     """
     source = transcript_source(paths, fleet, bot_id)
     if source.directory is None:
-        return {"tokens": None, "at": None, "reason": source.issue, "session": None,
-                "compacted_after": None, "bytes_read": 0, "cap": cap}
+        return {"tokens": None, "at": None, "model": None, "reason": source.issue,
+                "session": None, "compacted_after": None, "bytes_read": 0, "cap": cap}
     return context_in(source.directory, cap=cap, head_cap=head_cap)
 
 
@@ -650,7 +652,7 @@ def context_in(directory: Path, *, cap: int = CONTEXT_TAIL_BYTES,
     reads once ``transcript_source`` has found the directory. A runtime script
     that knows the bot's directory (#1053's compact-guard.py) calls this, so it
     reads the context as the CLI does without loading the fleet's config."""
-    result = {"tokens": None, "at": None, "reason": None, "session": None,
+    result = {"tokens": None, "at": None, "model": None, "reason": None, "session": None,
               "compacted_after": None, "bytes_read": 0, "cap": cap}
     sessions, issue = session_transcripts(directory)
     chosen = None
@@ -683,6 +685,7 @@ def context_in(directory: Path, *, cap: int = CONTEXT_TAIL_BYTES,
                 # (model <synthetic>) carries zero usage: no call, so no context.
                 if tokens and at is not None:
                     return {**result, "tokens": tokens, "at": at.isoformat(),
+                            "model": _text(obj["message"].get("model")),
                             "bytes_read": tail.bytes_read}
     except OSError:
         return {**result, "reason": "unreadable_transcript_file",

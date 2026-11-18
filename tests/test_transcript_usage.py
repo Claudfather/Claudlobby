@@ -714,6 +714,106 @@ class TestCurrentContext:
         assert (ctx["tokens"], ctx["reason"], len(heads)) == (None, "no_transcript", limit)
 
 
+
+class TestContextModel:
+    """#2979: `context` names the model of the call it counts: the
+    `message.model` of the row that gives `tokens` and `at`, read in the same
+    pass. It is null whenever `tokens` is, under the same `reason`."""
+
+    def test_the_model_is_the_newest_main_chain_rows(self, tmp_path):
+        fleet, paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", [
+            _usage("2026-10-06T19:00:00Z", 1, 2, 3, model="claude-sonnet-4-8"),
+            _said("2026-10-06T19:00:01Z", "y" * 200_000),
+            _usage("2026-10-06T20:31:02Z", 7, 300, 503079),
+            _said("2026-10-06T20:31:05Z")])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["at"], ctx["model"], ctx["reason"]) == (
+            503386, "2026-10-06T20:31:02+00:00", MODEL, None)
+        # The same pass: the read stops at that row, short of the older one.
+        assert ctx["bytes_read"] < path.stat().st_size
+
+    def test_sidechain_and_synthetic_rows_give_no_model(self, tmp_path):
+        """A helper's row (isSidechain) and the zero-usage row Claude Code
+        writes itself for an error or an interrupt (model <synthetic>) are
+        skipped, as they are for `tokens`."""
+        fleet, paths, d = _one_bot(tmp_path)
+        synthetic = _usage("2026-10-06T20:02:00Z", 0, 0, 0, out=0, model="<synthetic>")
+        _session(d, "s1.jsonl", [
+            _usage("2026-10-06T20:00:00Z", 2, 3, 4),
+            _usage("2026-10-06T20:01:00Z", 50, 60, 70, sidechain=True, model="claude-haiku-4-8"),
+            synthetic])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["model"]) == (9, MODEL)
+        _session(d, "s2.jsonl", [synthetic], mtime=4_000_000_000)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["model"], ctx["session"], ctx["reason"]) == (
+            None, None, "s2", "no_main_usage_row_in_transcript")
+
+    def test_a_model_changed_mid_session_reads_as_the_newest_calls(self, tmp_path):
+        """After an in-session model change the next call names the new
+        model, and a change back names the first again: the newest call
+        decides, not the session's first or most frequent model."""
+        fleet, paths, d = _one_bot(tmp_path)
+        rows = [_usage("2026-10-06T20:00:00Z", 1, 2, 3),
+                _usage("2026-10-06T20:01:00Z", 1, 2, 30),
+                _usage("2026-10-06T20:02:00Z", 1, 2, 300, model="claude-sonnet-4-8")]
+        _session(d, "s1.jsonl", rows)
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["model"]) == (303, "claude-sonnet-4-8")
+        _session(d, "s1.jsonl", rows + [_usage("2026-10-06T20:03:00Z", 1, 2, 3000)])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["model"]) == (3003, MODEL)
+
+    def test_a_row_naming_no_model_keeps_its_tokens(self, tmp_path):
+        """A usage row that names no model, or names it as anything but a
+        non-empty string, still gives `tokens` and `at`. Its `model` is null,
+        and `reason` stays null, since the call was read."""
+        fleet, paths, d = _one_bot(tmp_path)
+        for model in (None, "", 7):
+            _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 2, 3, model=model)])
+            ctx = tu.current_context(paths, fleet, "b")
+            assert (ctx["tokens"], ctx["model"], ctx["reason"]) == (6, None, None)
+        row = _usage("2026-10-06T20:00:00Z", 1, 2, 3)
+        del row["message"]["model"]
+        _session(d, "s1.jsonl", [row])
+        ctx = tu.current_context(paths, fleet, "b")
+        assert (ctx["tokens"], ctx["model"], ctx["reason"]) == (6, None, None)
+
+    def test_no_tokens_is_no_model_under_the_same_reason(self, tmp_path):
+        """Each path on which `tokens` is null sets `model` null beside it,
+        under the reason `tokens` carries."""
+        fleet, paths, d = _one_bot(tmp_path)
+        seen = {"transcript_directory_missing_or_untrusted": tu.current_context(paths, fleet, "b")}
+        d.mkdir(parents=True)
+        seen["no_transcript"] = tu.context_in(d)
+        _session(d, "s1.jsonl", [_said("2026-10-06T20:00:00Z")])
+        seen["no_main_usage_row_in_transcript"] = tu.current_context(paths, fleet, "b")
+        _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 2, 3),
+                                 _said("2026-10-06T20:00:01Z", "z" * 3000)])
+        seen["no_main_usage_row_within_cap"] = tu.current_context(paths, fleet, "b", cap=1024)
+        fleet.accounts["b"] = "relative/account"
+        seen["account_directory_unresolved"] = tu.current_context(paths, fleet, "b")
+        for reason, ctx in seen.items():
+            assert (ctx["tokens"], ctx["model"], ctx["reason"]) == (None, None, reason)
+
+    def test_an_unreadable_transcript_is_no_model(self, tmp_path):
+        import os
+        import pytest
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        fleet, paths, d = _one_bot(tmp_path)
+        path = _session(d, "s1.jsonl", [_usage("2026-10-06T20:00:00Z", 1, 2, 3)])
+        path.chmod(0)
+        try:
+            ctx = tu.current_context(paths, fleet, "b")
+        finally:
+            path.chmod(0o600)
+        assert (ctx["tokens"], ctx["model"], ctx["reason"]) == (
+            None, None, "unreadable_transcript_file")
+
+
 class TestCompactionRow:
     def test_a_boundary_row_reads_trigger_tokens_and_time(self):
         row = tu.compaction_row(_boundary("2026-10-06T20:33:29.519Z", 503386, 17666, uuid="u9"))
