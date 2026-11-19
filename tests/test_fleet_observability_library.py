@@ -112,7 +112,8 @@ DECISION = {
         "A bot whose input box holds text it never submitted, with no turn running, gets `input_held` instead (below), and a bot keepalive is not watching is named in `keepalive_silent`.",
     ),
     "keepalive_silent": (
-        "**keepalive has stopped watching** live, supervised bots in this fleet, so `activity_stuck` is not judged for them; one alert an episode names them all, and comes again when another bot joins.",
+        "**keepalive has not watched** these live, supervised bots for `OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD` (default 600 s; `0` turns this alert off), so `activity_stuck` is not judged for them.",
+        "One alert an episode names them all; it comes again at once when another bot joins, and on the re-notify window, until a sweep names none.",
         "**Do not restart a bot for this alone**: it says keepalive stopped, not that the bot did.",
         "Tell the operator: the fleet's keepalive timer is theirs to start, or to enroll again (`keepalive_failed` beside it means keepalive runs and fails).",
         "A bot stopped through `bot stop`, or with no unit file or no session, is never named: its own alerts cover it.",
