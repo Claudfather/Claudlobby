@@ -196,7 +196,8 @@ route currently accepts only the independently inspected Claude Code 2.1.325
 Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
 Each attempt retains one verified public executable copy (roughly 350 MiB) in
 its private owner state, so an ordinary provider auto-update cannot replace the
-approved executable between verification and launch. A matching version string
+approved executable between verification and launch. One setup approval allows at
+most three attempts (below), so about 1 GiB at most. A matching version string
 alone is insufficient. An unsupported binary is
 refused before invocation; use your existing private provider setup instead.
 
@@ -204,14 +205,17 @@ Keep the explicitly selected `--account-directory`; create/choose that private
 profile directory before invoking the guide. This filesystem choice does not
 authenticate the provider. The data root must be private
 0700 and its routing `.env` an owned, single-link regular file, mode 0600. The
-operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider authorization
-attempt and storage of its subscription token on this host. This does not grant
+operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider sign-in (at most
+one attempt ever receives an authorization code) and storage of its subscription
+token on this host. This does not grant
 ordinary messages, native activation, or a model turn. Website sign-in is not
 provider consent or local authority.
 
 In the connected setup page choose **Sign in to Claude**, open its Claude link,
 and approve at the provider. If Claude gives a code, paste it into the private
-Claude code field on the connected setup page. It is sent directly to the
+Claude code field on the connected setup page, by the time the page shows beside
+the link (**Paste the code by …**, the attempt's own deadline from the host, in
+your local time). It is sent directly to the
 selected host, never through the website server. Choose **Check sign-in
 progress** for the original attempt. **Claude connected** means the token was
 stored in this host's private routing file; it does not mean bots started or
@@ -220,7 +224,7 @@ passed native readiness. Preview and Launch keep their separate approvals.
 The official `claude setup-token` process owns OAuth and its browser/code flow.
 The host captures its output privately; token/code/terminal output are never
 shown by Plane, placed in request receipts or sent through Vercel. Only the
-validated provider link and finite progress states are exposed. The credential
+validated provider link, its deadline and finite progress states are exposed. The credential
 update appends one literal token while preserving unrelated routing bytes and
 refuses existing tokens, unsafe files or unsupported environment syntax. In
 those cases choose local private setup/recovery rather than overwriting another
@@ -235,3 +239,14 @@ token, and does not revoke one. Interrupted attempts need local attention; setup
 never automatically remints or retries. Provider acceptance and native background
 readiness still require an authorized real trial; synthetic tests are not those
 observations.
+
+One ending can be retried from the browser: an attempt that timed out (after five
+minutes) before its code reached the Claude CLI. The host records that a code was
+delivered before it types the code, so a restart cannot make a later timeout look
+retryable. The panel then says **The sign-in took too long. Choose Try again for a
+new sign-in link.** **Try again** starts a new attempt, with a new attempt ID and a
+new sign-in link, under the same approval, and only when you choose it. The old
+link and its code stop working. A new attempt still refuses a saved credential,
+and one approval allows at most three attempts. Every other ending, including a
+timeout after the code was sent and a cancelled or interrupted attempt, keeps the
+single attempt: recover setup on the computer.

@@ -1,0 +1,7 @@
+### Fixed — A Claude sign-in that timed out before its code was sent now offers Try again, instead of stranding setup
+
+First-team setup gives the Claude sign-in five minutes. When that ran out (a password reset, a slow second factor, stepping away), the panel said the setup allowed only one Claude sign-in and offered nothing but a progress check, so the whole setup had to be recovered on the computer. The host now records, before it types a code, that a code reached the Claude CLI, and reports an attempt that timed out with no code delivered as retryable. The panel then says "The sign-in took too long. Choose Try again for a new sign-in link." Try again starts a new attempt, with a new attempt ID and sign-in link, under the same approval, and is sent only on that click. Every other ending keeps the single attempt, including a timeout after the code was sent, a cancelled or interrupted attempt and a saved credential, and one approval allows at most three attempts.
+
+### Added — The Claude sign-in step shows the time its code must be pasted by
+
+Once the sign-in link is ready, the step now says "Paste the code by 11:50 AM." in the viewer's local time, so the five-minute limit is no longer a surprise. The time is the attempt's own deadline as the host enforces it (the earlier of its timeout and the setup approval's expiry), sent beside the link as `expires_at` in whole seconds; the panel only formats it and starts no timer of its own.

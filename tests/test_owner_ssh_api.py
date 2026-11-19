@@ -2064,6 +2064,79 @@ def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replaceme
             again.settle()
 
 
+def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(
+    client, synthetic_signin, monkeypatch
+):
+    from uuid import uuid4
+    from claudlobby.plane import provider_signin
+
+    engine, grant, reader, program, _secret, env = synthetic_signin
+    access, bearer = engine.store.access, reader.token
+    monkeypatch.setattr(provider_signin, "SECONDS", 2)
+    first = {"generation": grant.generation, "attempt_id": str(uuid4())}
+
+    def begin(channel, app, payload):
+        return run_conversation(
+            channel,
+            app,
+            start_frame(
+                profile="owner-signin-v1",
+                operation="setup-signin-begin",
+                input=payload,
+                token=bearer,
+            ),
+            origin=HOST,
+        )
+
+    thread, outcome = begin(client, canonical_app(access, monkeypatch), first)
+    assert client.frame(10)["status"] == 200
+    number, _ = poll_until(client, 1, first, bearer, "waiting")
+    number, ended = poll_until(client, number, first, bearer, "needs_attention")
+    assert ended == {
+        **first,
+        "state": "needs_attention",
+        "reason": "timeout",
+        "retryable": True,
+    }
+    end = client.frame(15)
+    thread.join(15)
+    assert outcome == [None] and (end["type"], end["status"]) == ("end", 200), (
+        "a terminal reply still closes the conversation"
+    )
+    assert ordinary_status(access, monkeypatch, first, bearer) == (200, ended)
+    # A later conversation names a new attempt ID: a new worker and link, one approval.
+    program.with_name("synthetic-provider-state").write_text("c" * 32)
+    monkeypatch.setattr(provider_signin, "SECONDS", 300)
+    second = {"generation": grant.generation, "attempt_id": str(uuid4())}
+    again = Client()
+    try:
+        follow, result = begin(again, canonical_app(access, monkeypatch), second)
+        begun = again.frame(10)
+        assert begun["status"] == 200
+        assert body_of(begun)["attempt_id"] == second["attempt_id"]
+        number, waiting = poll_until(again, 1, second, bearer, "waiting")
+        assert waiting["url"].endswith("&state=" + "c" * 32), "the new run's own link"
+        assert type(waiting["expires_at"]) is int, "the new run's own deadline"
+        again.send(
+            "call",
+            call_id=number + 1,
+            operation="setup-signin-code",
+            input={**second, "code": "accepted#" + "c" * 32},
+            token=bearer,
+        )
+        assert again.frame(10)["status"] == 200
+        poll_until(again, number + 1, second, bearer, "connected")
+        assert again.frame(15)["type"] == "end"
+        follow.join(15)
+        assert result == [None]
+    finally:
+        again.settle()
+    assert env.read_text().count("CLAUDE_CODE_OAUTH_TOKEN=") == 1
+    assert ordinary_status(access, monkeypatch, first, bearer)[0] == 403, (
+        "the replaced attempt is retired"
+    )
+
+
 # --- process entry: parser, dispatch and exit status ------------------------
 
 

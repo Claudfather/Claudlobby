@@ -1,8 +1,12 @@
-"""One locally approved Claude CLI setup-token attempt; secrets never leave this host.
+"""One locally approved Claude CLI setup-token sign-in; secrets never leave this host.
 
 The recognizer is pinned to inspected public distribution bytes, not a private
 OAuth API. PTY contents, pasted codes and tokens are memory-only. A persisted
 interrupted attempt is uncertain and can never be dispatched again.
+
+One attempt is current at a time. A new attempt ID replaces it only after an
+ending that proves its code never reached the CLI (``RETRYABLE``), so at most one
+attempt per approval ever receives a code, and at most one token can be minted.
 """
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pty
@@ -35,8 +40,29 @@ SUPPORTED = {
     "7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67": "2.1.325",  # Linux arm64 glibc
     "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf": "2.1.325",  # Linux x86_64 glibc
 }
+# The owner-signin-v1 conversation (330 s) and the browser's pre-begin session margin
+# (345 s) are sized around this; a longer attempt needs all three changed together.
 SECONDS = 300
 ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
+# Each attempt retains its own verified executable copy (roughly 350 MiB), so three
+# attempts per setup approval bound that to about 1 GiB.
+MAX_ATTEMPTS = 3
+# The (state, reason) endings after which a new attempt may replace the current one,
+# and then only when the persisted record also says no code was delivered
+# (code_delivered is 0; a NULL from the single-attempt table never qualifies).
+# The worker writes a terminal row as its final act, after reaping its child; a reap
+# it cannot prove records unknown/child_quiet_unproven instead. needs_attention/timeout
+# is raised in the wait loop, before any token is read or stored, and with no code
+# delivered the CLI never had what it needs to mint one. Every other ending keeps the
+# single attempt: provider_failed and the output refusals would recur; changed files
+# and credential_already_present need the computer; storage_uncertain and
+# environment_* can follow a minted token; boundary_or_process_failure names no
+# cause; unknown (child_quiet_unproven, interrupted) cannot rule out a live child.
+# cancelled/effect_uncertain is also left out, although the same proof holds before
+# a code: a lost or idle conversation still never admits a replacement.
+RETRYABLE = frozenset({("needs_attention", "timeout")})
+_LEGACY_COLUMNS = ["attempt_id","generation","state","reason"]
+_COLUMNS = _LEGACY_COLUMNS + ["code_delivered","retired"]
 MAX_OUTPUT = 131072
 _ROUTING = ("PATH","TMPDIR","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_STATE_HOME","XDG_DATA_HOME",
     "HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy",
@@ -358,7 +384,10 @@ def stage_binary(parent, scope, attempt, source_fd, before):
 
 
 class ProviderSignin:
-    """One attempt bound to one SetupEngine; no restart or replacement recovery."""
+    """One current attempt bound to one SetupEngine; no restart recovery.
+
+    Only a RETRYABLE ending admits a successor attempt ID (``begin``).
+    """
     def __init__(self, store):
         self.store = store
         self._lock = threading.RLock()
@@ -367,22 +396,46 @@ class ProviderSignin:
         self._code = None
         self._attempt = None
         self._url = None
+        self._closed = False  # set by shutdown: this process starts no successor
+        self._expires_at = None  # whole host-clock seconds; the current attempt's deadline
 
     @staticmethod
     def initialize(conn):
-        conn.execute("CREATE TABLE IF NOT EXISTS setup_provider(attempt_id TEXT PRIMARY KEY,generation TEXT NOT NULL,state TEXT NOT NULL,reason TEXT)")
-        ProviderSignin._schema(conn)
+        conn.execute("CREATE TABLE IF NOT EXISTS setup_provider(attempt_id TEXT PRIMARY KEY,generation TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,code_delivered INTEGER,retired INTEGER NOT NULL DEFAULT 0)")
+        ProviderSignin._migrate(conn)
 
     @staticmethod
     def _schema(conn):
+        """True for the current table, False for the single-attempt table it extends."""
         columns=[row[1] for row in conn.execute("PRAGMA table_info(setup_provider)")]
-        if columns != ["attempt_id","generation","state","reason"]: raise AccessUnavailable()
+        if columns not in (_COLUMNS,_LEGACY_COLUMNS): raise AccessUnavailable()
+        return columns == _COLUMNS
+
+    @staticmethod
+    def _migrate(conn):
+        """Upgrade only inside a write transaction (allow, begin); reads accept either shape.
+
+        A row from the single-attempt table never recorded whether its code was
+        delivered, so it keeps NULL there, which no retry accepts.
+        """
+        if not ProviderSignin._schema(conn):
+            conn.execute("ALTER TABLE setup_provider ADD COLUMN code_delivered INTEGER")
+            conn.execute("ALTER TABLE setup_provider ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+            if not ProviderSignin._schema(conn): raise AccessUnavailable()
+
+    @staticmethod
+    def _current(conn):
+        """The one current (unretired) row or None, and how many attempts exist."""
+        extra = "code_delivered,retired" if ProviderSignin._schema(conn) else "NULL AS code_delivered,0 AS retired"
+        rows = conn.execute("SELECT attempt_id,generation,state,reason,"+extra+" FROM setup_provider").fetchall()
+        current = [row for row in rows if row['retired'] == 0]
+        if (len(current)>1 or rows and not current
+                or any(row['retired'] not in (0,1) or row['code_delivered'] not in (None,0,1) for row in rows)):
+            raise AccessUnavailable()
+        return (current[0] if current else None), len(rows)
 
     def _row(self, conn, grant, attempt):
-        self._schema(conn)
-        rows = conn.execute("SELECT * FROM setup_provider LIMIT 2").fetchall()
-        if len(rows)>1: raise AccessUnavailable()
-        row=rows[0] if rows else None
+        row,_ = self._current(conn)
         if row is None or row['attempt_id'] != attempt or row['generation'] != grant.generation:
             raise AccessDenied("signin_original_attempt_required")
         return row
@@ -391,6 +444,31 @@ class ProviderSignin:
         with self.store.access._connection(write=True) as conn:
             self._row(conn,grant,attempt)
             conn.execute("UPDATE setup_provider SET state=?,reason=? WHERE attempt_id=?", (state,reason,attempt))
+
+    def _mark_delivered(self, grant, attempt):
+        # Committed before the first code byte reaches the CLI: from then on a token may
+        # exist, and no restart can read this attempt as one whose code was never sent.
+        with self.store.access._connection(write=True) as conn:
+            self._row(conn,grant,attempt)
+            if not self._schema(conn): raise AccessUnavailable()
+            conn.execute("UPDATE setup_provider SET code_delivered=1 WHERE attempt_id=?", (attempt,))
+
+    @staticmethod
+    def _retryable(row, attempts):
+        """The record's half of a retry: a RETRYABLE ending, no code delivered, attempts left."""
+        return (row['state'],row['reason']) in RETRYABLE and row['code_delivered'] == 0 and attempts < MAX_ATTEMPTS
+
+    def _settled(self, attempt):
+        """Under the lock, for a row read as terminal: has this process's worker returned?
+
+        A terminal row is its worker's final write, so at most the thread's own return
+        is still pending; it needs nothing this lock guards, and the join is bounded.
+        """
+        thread = self._thread
+        if (thread is not None and thread.is_alive() and self._attempt == attempt
+                and thread is not threading.current_thread()):
+            thread.join(timeout=1)
+        return thread is None or not thread.is_alive()
 
     def _admit(self, reader, grant):
         self.store.authorize(reader,expected=grant,effects=True)
@@ -413,18 +491,35 @@ class ProviderSignin:
     def begin(self, reader, grant, attempt):
         with self._lock:
             self._admit(reader,grant)
+            successor = None
             with self.store.access._connection(write=True) as conn:
-                self._schema(conn)
-                rows = conn.execute("SELECT * FROM setup_provider").fetchall()
-                if rows:
+                self._migrate(conn)
+                current,attempts = self._current(conn)
+                if current is not None and current['attempt_id'] == attempt:
                     self._row(conn,grant,attempt)  # Original identity is retained even after a restart.
                 else:
+                    if current is not None:
+                        # Another ID replaces the current attempt only after a RETRYABLE ending
+                        # with no worker of it still running here, and never reuses a retired ID.
+                        # The persisted terminal row is the proof for a worker in another process.
+                        if (current['generation'] != grant.generation or not self._retryable(current,attempts)
+                                or not self._settled(current['attempt_id'])
+                                or conn.execute("SELECT 1 FROM setup_provider WHERE attempt_id=?", (attempt,)).fetchone()):
+                            raise AccessDenied("signin_original_attempt_required")
+                        if self._closed: raise AccessUnavailable()
                     check_scope(grant.provider_signin,self.store.access.root)
-                    environment_ready(self.store.access.root)
-                    conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL)", (attempt,grant.generation,"starting"))
-                    self._attempt = attempt
-                    self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
-            if self._thread is not None and self._thread.ident is None:
+                    environment_ready(self.store.access.root)  # A saved credential still refuses any attempt.
+                    if current is not None:
+                        conn.execute("UPDATE setup_provider SET retired=1 WHERE attempt_id=?", (current['attempt_id'],))
+                    conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0)", (attempt,grant.generation,"starting"))
+                    successor = current is not None
+            if successor is not None:
+                # Only after the commit, so a refused or rolled-back admission leaves no worker.
+                if successor:
+                    self._cancel = threading.Event()  # its own; the retired attempt's stays set
+                    self._code = self._url = self._expires_at = None
+                self._attempt = attempt
+                self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
                 self._thread.start()
             return self.status(reader,grant,attempt)
 
@@ -436,7 +531,12 @@ class ProviderSignin:
             if state not in _TERMINAL and (attempt != self._attempt or self._thread is None or not self._thread.is_alive()):
                 state,reason = "unknown","interrupted"
             result = {"attempt_id":attempt,"generation":grant.generation,"state":state,"reason":reason}
-            if state == "waiting" and self._url: result["url"] = self._url
+            if state == "waiting" and self._url:
+                result["url"] = self._url
+                # The deadline the worker enforces, so the browser shows the host's own time.
+                if self._expires_at is not None: result["expires_at"] = self._expires_at
+            # Present only when begin would now admit a new attempt ID; begin re-checks it all.
+            if self._retryable(row,self._current(conn)[1]) and self._settled(attempt): result["retryable"] = True
             return result
 
     def code(self, reader, grant, attempt, code):
@@ -453,29 +553,36 @@ class ProviderSignin:
 
     def cancel(self, reader, grant, attempt):
         with self._lock:
-            current=self.status(reader,grant,attempt)
-            if current['state'] not in _TERMINAL:
-                self._cancel.set()
-        self.shutdown()
+            self.status(reader,grant,attempt)  # Only the current attempt; a refusal ends here.
+            # Set whatever its state (after the end it is inert), and taken with its worker
+            # under one lock: a successor admitted later gets a fresh event. No close.
+            self._cancel.set()
+            thread=self._thread
+        self._join(thread)
         return self.status(reader,grant,attempt)
 
     def shutdown(self):
         # The same lock orders cancellation against both effect admissions.
         # Never hold it while joining: the worker needs it to finish/drain.
         with self._lock:
+            self._closed=True
             self._cancel.set()
             thread=self._thread
+        self._join(thread)
+
+    @staticmethod
+    def _join(thread):
         if thread is not None and thread.ident is not None and thread is not threading.current_thread():
             thread.join()  # Worker has a finite deadline and bounded owned-child discharge.
 
     def summary(self, reader, grant):
         with self.store.access._connection() as conn:
-            row=conn.execute("SELECT * FROM setup_provider").fetchone()
+            row,_=self._current(conn)
         return None if row is None else self.status(reader,grant,row["attempt_id"])
 
     def ready(self, reader, grant):
         with self.store.access._connection() as conn:
-            row=conn.execute("SELECT * FROM setup_provider").fetchone()
+            row,_=self._current(conn)
         if row is None or self.status(reader,grant,row['attempt_id'])['state'] != 'connected':
             raise AccessDenied("signin_not_complete")
 
@@ -510,7 +617,11 @@ class ProviderSignin:
                     process=subprocess.Popen([str(staged),'setup-token'],cwd=self.store.access.root,env=env,
                         stdin=slave,stdout=slave,stderr=slave,start_new_session=True,close_fds=True)
             os.close(slave); slave=None
+            # Host-clock time read first and floored, so the reported expiry is never later
+            # than the monotonic deadline; the approval's own expiry also ends the attempt.
+            expires=min(math.floor(self.store.access._now()+SECONDS),math.floor(grant.expires_at))
             deadline=time.monotonic()+SECONDS
+            with self._lock: self._expires_at=expires
             enter_at=None  # when the Enter after a delivered code is due
             while True:
                 if self._cancel.is_set(): state,reason="cancelled","effect_uncertain";break
@@ -531,6 +642,7 @@ class ProviderSignin:
                         self._url=screen.url; self._set(grant,attempt,"waiting")
                     if self._code is not None:
                         self._admit(reader,grant)
+                        self._mark_delivered(grant,attempt)  # before any code byte reaches the CLI
                         code,self._code=self._code,None
                         os.write(master,code.encode('ascii'))
                         code=None; enter_at=time.monotonic()+ENTER_DELAY
@@ -583,5 +695,5 @@ class ProviderSignin:
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
             with self._lock:
-                self._code=self._url=None
+                self._code=self._url=self._expires_at=None
                 self._set(grant,attempt,state,reason)

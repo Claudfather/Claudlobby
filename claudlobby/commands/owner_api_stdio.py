@@ -49,8 +49,9 @@ _FIELDS = {
     'read-grid': ('fleet', 'focus'), 'read-stream': ('cursor', 'once'),
 }
 # The provider sign-in attempt lives in one process: its worker thread, PTY child,
-# URL and code hand-off are ProviderSignin instance state, and the retained row
-# admits exactly one original attempt. A one-operation exec would start that
+# URL and code hand-off are ProviderSignin instance state, and the retained record
+# admits one current attempt (another ID only after an ending it reports as
+# retryable, in a later conversation). A one-operation exec would start that
 # attempt and cancel it in its own mandatory drain, or deliver a code to a
 # process that never owned the child. These stay refused on owner-api-v1, where
 # signin-status remains a read-only observation; the one owner of an attempt is
