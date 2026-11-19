@@ -1947,7 +1947,7 @@ def test_one_canonical_app_owns_the_attempt_from_begin_to_connected(
 
 
 @pytest.mark.parametrize("loss", ["eof", "expiry", "worker-exit"])
-def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replacement(
+def test_lost_conversation_drains_the_owned_attempt_and_only_a_later_one_replaces_it(
     client, synthetic_signin, monkeypatch, loss
 ):
     from uuid import uuid4
@@ -2029,11 +2029,18 @@ def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replaceme
     status, retained = ordinary_status(access, monkeypatch, payload, bearer)
     assert status == 200 and retained["attempt_id"] == payload["attempt_id"]
     assert retained["state"] in {"cancelled", "needs_attention"}, retained
-    # A new process: the retained original ends at once without a worker; a new identity is denied.
-    for changed, expected in (
-        (payload, 200),
-        ({**payload, "attempt_id": str(uuid4())}, 403),
-    ):
+    # The drain cancels an attempt whose code never reached the CLI: no token can exist and its
+    # child was reaped, so the record admits a new attempt ID (the same proof as a timeout).
+    replaceable = (retained["state"], retained["reason"]) == ("cancelled", "effect_uncertain")
+    assert retained.get("retryable") is (True if replaceable else None), retained
+    if loss != "expiry":
+        assert replaceable, "a lost or idle conversation ends as a clean cancel"
+    # A new process: the retained original ends at once without a worker; a new identity is
+    # admitted only after a replaceable ending, and never by the conversation that lost it.
+    fresh_id = {**payload, "attempt_id": str(uuid4())}
+    for changed in (payload, fresh_id):
+        admitted = changed is fresh_id and replaceable
+        expected = 403 if changed is fresh_id and not replaceable else 200
         again, fresh = Client(), canonical_app(access, monkeypatch)
         try:
             second, result = run_conversation(
@@ -2048,20 +2055,30 @@ def test_lost_conversation_drains_the_owned_attempt_and_never_admits_a_replaceme
                 origin=HOST,
             )
             reply = again.frame(10)
+            assert reply["status"] == expected, reply
+            if admitted:
+                assert body_of(reply)["attempt_id"] == changed["attempt_id"]
+                assert fresh.connected_setup.engine.signin._thread is not None
+                again.send(
+                    "call",
+                    call_id=2,
+                    operation="setup-signin-cancel",
+                    input=changed,
+                    token=bearer,
+                )
+                assert again.frame(10)["status"] == 200
             end = again.frame(15)
-            second.join(10)
-            assert (reply["status"], end["type"], end["status"]) == (
-                expected,
-                "end",
-                expected,
-            ) and result == [None]
-            if expected == 200:
+            second.join(15)
+            assert (end["type"], end["status"]) == ("end", expected) and result == [None]
+            if changed is payload:
                 assert body_of(reply) == retained
-            assert fresh.connected_setup.engine.signin._thread is None, (
-                "no replacement attempt was started"
-            )
+            if not admitted:
+                assert fresh.connected_setup.engine.signin._thread is None, (
+                    "no replacement attempt was started"
+                )
         finally:
             again.settle()
+    assert env.read_text() == "export ROUTE=private\n"
 
 
 def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(

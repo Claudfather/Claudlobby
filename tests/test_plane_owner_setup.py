@@ -1032,8 +1032,8 @@ def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synt
         assert first['attempt_id']==attempt
         waiting=_signin_until(engine,grant,reader,attempt,'waiting')
         assert waiting['url'].startswith('https://claude.com/cai/oauth/authorize?')
-        # The worker's own deadline in whole host-clock seconds, sent only beside the link.
-        assert waiting['expires_at']==int(engine.store.access._now()+provider_signin.SECONDS)
+        # The last moment a code is taken, in whole host-clock seconds, sent only beside the link.
+        assert waiting['expires_at']==int(engine.store.access._now()+provider_signin.SECONDS-provider_signin.CODE_MARGIN)
         assert type(waiting['expires_at']) is int
         with pytest.raises(AccessDenied):engine.signin_begin(reader,grant.generation,str(uuid4()))
         with pytest.raises(AccessDenied):engine.preview(reader,grant.generation,'Do not start while signing in')
@@ -1063,9 +1063,30 @@ def test_provider_signin_reported_deadline_never_outlasts_the_setup_approval(syn
     try:
         engine.signin_begin(reader,grant.generation,attempt)
         waiting=_signin_until(engine,grant,reader,attempt,'waiting')
-        assert waiting['expires_at']==int(grant.expires_at)
+        assert waiting['expires_at']==int(grant.expires_at-provider_signin.CODE_MARGIN)
     finally:engine.signin.shutdown()
     assert 'expires_at' not in engine.signin_status(reader,grant.generation,attempt)
+
+
+def test_provider_signin_late_code_is_refused_so_the_attempt_ends_as_a_clean_timeout(synthetic_signin,monkeypatch):
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,_program,_token,env=synthetic_signin
+    # The whole attempt is inside the margin, so its code window is already closed.
+    monkeypatch.setattr(provider_signin,'SECONDS',2);monkeypatch.setattr(provider_signin,'CODE_MARGIN',2)
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        waiting=_signin_until(engine,grant,reader,attempt,'waiting')
+        assert waiting['expires_at']==int(engine.store.access._now()),'the shown time is the cutoff code() enforces'
+        with pytest.raises(AccessDenied) as refused:
+            engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        assert refused.value.code=='signin_code_unavailable'
+        assert _signin_row(engine,attempt)['code_delivered']==0,'nothing reached the CLI'
+        engine.signin._thread.join(timeout=10)
+        ended=engine.signin_status(reader,grant.generation,attempt)
+        assert (ended['state'],ended['reason'],ended.get('retryable'))==('needs_attention','timeout',True)
+        assert env.read_text()=='export ROUTE=private\n'
+    finally:engine.signin.shutdown()
 
 
 @pytest.mark.parametrize('stop',['cancel','shutdown','revoke'])
@@ -1084,9 +1105,21 @@ def test_provider_signin_owned_child_drained_no_replay_and_no_credential(synthet
         assert not engine.signin._thread.is_alive()
         assert env.read_text()=='export ROUTE=private\n'
         if stop!='revoke':
-            result=SetupEngine(engine.store.access).signin_status(reader,grant.generation,attempt)
-            assert result['state'] in {'cancelled','needs_attention','unknown'}
-            assert 'url' not in result
+            later=SetupEngine(engine.store.access)
+            result=later.signin_status(reader,grant.generation,attempt)
+            # Stopped before any code reached the CLI: no token can exist and the child was reaped,
+            # so the record admits a new attempt ID (the same proof as a timeout before its code).
+            assert result=={'attempt_id':attempt,'generation':grant.generation,'state':'cancelled',
+                            'reason':'effect_uncertain','retryable':True}
+            if stop=='shutdown':
+                with pytest.raises(AccessUnavailable):engine.signin_begin(reader,grant.generation,str(uuid4()))
+            fresh=str(uuid4())
+            try:
+                owner=later if stop=='shutdown' else engine  # a closing process starts nothing new
+                owner.signin_begin(reader,grant.generation,fresh)
+                assert _signin_until(owner,grant,reader,fresh,'waiting')['url'].startswith('https://claude.com/')
+                assert _signin_row(engine,attempt)['retired']==1
+            finally:later.signin.shutdown()
     finally:engine.signin.shutdown()
 
 
@@ -1404,7 +1437,9 @@ def test_provider_signin_timeout_after_code_is_never_retried_even_after_restart(
     from claudlobby.plane import provider_signin
     engine,grant,reader,program,token,env=synthetic_signin
     # The code reaches the CLI but Enter is not due before the deadline: a timeout after the code.
+    # (CODE_MARGIN 0 models a code that slipped in at the last moment: the margin is what prevents it.)
     monkeypatch.setattr(provider_signin,'SECONDS',2)
+    monkeypatch.setattr(provider_signin,'CODE_MARGIN',0)
     monkeypatch.setattr(provider_signin,'ENTER_DELAY',60)
     attempt=str(uuid4())
     try:
@@ -1445,7 +1480,11 @@ def test_provider_signin_live_attempt_refuses_a_successor_from_any_process(synth
     ([('needs_attention','timeout',0)]*3,False),  # MAX_ATTEMPTS used
     ([('needs_attention','timeout',1)],False),  # the code reached the CLI
     ([('needs_attention','timeout',None)],False),  # a single-attempt-table row: delivery was never recorded
-    ([('cancelled','effect_uncertain',0)],False),
+    ([('cancelled','effect_uncertain',0)],True),  # Cancel or a drained conversation before its code
+    ([('cancelled','effect_uncertain',1)],False),  # cancelled after the code reached the CLI
+    ([('cancelled','effect_uncertain',None)],False),
+    ([('cancelled','effect_uncertain',0)]*3,False),
+    ([('cancelled','provider_failed',0)],False),  # only the exact pairs
     ([('needs_attention','provider_failed',0)],False),
     ([('needs_attention','unsupported_output',0)],False),
     ([('needs_attention','storage_uncertain',1)],False),
@@ -1503,6 +1542,33 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
     finally:engine.signin.shutdown()
 
 
+def test_provider_signin_two_racing_successors_admit_exactly_one(synthetic_signin):
+    import threading
+    engine,grant,reader,*_=synthetic_signin
+    ended=str(uuid4())
+    with engine.store.access._connection(write=True) as conn:
+        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?)',(ended,grant.generation,'needs_attention','timeout',0,0))
+    owners=[SetupEngine(engine.store.access) for _ in range(2)]  # two processes, one record
+    ids=[str(uuid4()) for _ in owners]
+    gate,outcomes=threading.Barrier(2),[None,None]
+    def race(number):
+        gate.wait()
+        try:outcomes[number]=owners[number].signin_begin(reader,grant.generation,ids[number])['attempt_id']
+        except AccessDenied as exc:outcomes[number]=exc.code
+    threads=[threading.Thread(target=race,args=(number,)) for number in range(2)]
+    try:
+        for thread in threads:thread.start()
+        for thread in threads:thread.join(20)
+        admitted=[number for number in range(2) if outcomes[number]==ids[number]]
+        assert len(admitted)==1 and outcomes[1-admitted[0]]=='signin_original_attempt_required',outcomes
+        assert [owner.signin._thread is not None for owner in owners].count(True)==1
+        with engine.store.access._connection() as conn:
+            assert conn.execute('SELECT attempt_id FROM setup_provider WHERE retired=0').fetchall()[0][0]==ids[admitted[0]]
+            assert conn.execute('SELECT COUNT(*) FROM setup_provider').fetchone()[0]==2
+    finally:
+        for owner in owners:owner.signin.shutdown()
+
+
 def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_retry(synthetic_signin):
     from claudlobby.plane.provider_signin import ProviderSignin
     engine,grant,reader,*_=synthetic_signin
@@ -1515,6 +1581,8 @@ def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_re
     ended={'attempt_id':attempt,'generation':grant.generation,'state':'needs_attention','reason':'timeout'}
     assert restarted.signin_status(reader,grant.generation,attempt)==ended
     with pytest.raises(AccessDenied):restarted.signin_begin(reader,grant.generation,str(uuid4()))
+    with engine.store.access._connection() as conn:  # the refused begin's upgrade rolled back with it
+        assert [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]==['attempt_id','generation','state','reason']
     assert restarted.signin_begin(reader,grant.generation,attempt)==ended  # re-reading the original upgrades the table
     with engine.store.access._connection() as conn:
         assert [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]==['attempt_id','generation','state','reason','code_delivered','retired']

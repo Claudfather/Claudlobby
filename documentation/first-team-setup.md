@@ -214,8 +214,9 @@ provider consent or local authority.
 In the connected setup page choose **Sign in to Claude**, open its Claude link,
 and approve at the provider. If Claude gives a code, paste it into the private
 Claude code field on the connected setup page, by the time the page shows beside
-the link (**Paste the code by …**, the attempt's own deadline from the host, in
-your local time). It is sent directly to the
+the link (**Paste the code by …**, in your local time: the host's last moment for a
+code, 20 seconds before the attempt's own deadline, so a code is never cut off
+while it is exchanged; a later code is refused). It is sent directly to the
 selected host, never through the website server. Choose **Check sign-in
 progress** for the original attempt. **Claude connected** means the token was
 stored in this host's private routing file; it does not mean bots started or
@@ -240,13 +241,23 @@ never automatically remints or retries. Provider acceptance and native backgroun
 readiness still require an authorized real trial; synthetic tests are not those
 observations.
 
-One ending can be retried from the browser: an attempt that timed out (after five
-minutes) before its code reached the Claude CLI. The host records that a code was
-delivered before it types the code, so a restart cannot make a later timeout look
-retryable. The panel then says **The sign-in took too long. Choose Try again for a
-new sign-in link.** **Try again** starts a new attempt, with a new attempt ID and a
-new sign-in link, under the same approval, and only when you choose it. The old
-link and its code stop working. A new attempt still refuses a saved credential,
-and one approval allows at most three attempts. Every other ending, including a
-timeout after the code was sent and a cancelled or interrupted attempt, keeps the
-single attempt: recover setup on the computer.
+Two endings can be retried from the browser, and only before the code reached the
+Claude CLI: an attempt that timed out (after five minutes), and one that was
+cancelled (**Cancel sign-in**, or a lost connection that closed the sign-in). The
+host records that a code was delivered before it types the code, so a restart
+cannot make a later ending look retryable. The panel then says **The sign-in took
+too long.** or **The sign-in stopped before a code was sent.**, followed by **Choose
+Try again for a new sign-in link.** **Try again** starts a new attempt, with a new
+attempt ID and a new sign-in link, under the same approval, and only when you
+choose it. The old link and its code stop working. A new attempt still refuses a
+saved credential, and one approval allows at most three attempts. If the computer
+refuses Try again, or it could not be sent, the page keeps following the ended
+attempt. Every other ending, including a timeout or cancel after the code was sent
+and an interrupted attempt, keeps the single attempt: recover setup on the computer.
+While the Claude tab is in front, the setup page keeps checking every 25 seconds so
+the sign-in is not closed while you approve.
+
+Before downgrading Claudlobby, finish or recover setup first. This version adds two
+columns to the host's sign-in record (`setup_provider`) when it approves setup or
+starts a sign-in, and older versions refuse that table: their sign-in steps answer
+unavailable until the record is recovered on the computer.

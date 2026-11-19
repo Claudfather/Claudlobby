@@ -53,14 +53,19 @@ MAX_ATTEMPTS = 3
 # The worker writes a terminal row as its final act, after reaping its child; a reap
 # it cannot prove records unknown/child_quiet_unproven instead. needs_attention/timeout
 # is raised in the wait loop, before any token is read or stored, and with no code
-# delivered the CLI never had what it needs to mint one. Every other ending keeps the
-# single attempt: provider_failed and the output refusals would recur; changed files
-# and credential_already_present need the computer; storage_uncertain and
-# environment_* can follow a minted token; boundary_or_process_failure names no
-# cause; unknown (child_quiet_unproven, interrupted) cannot rule out a live child.
-# cancelled/effect_uncertain is also left out, although the same proof holds before
-# a code: a lost or idle conversation still never admits a replacement.
-RETRYABLE = frozenset({("needs_attention", "timeout")})
+# delivered the CLI never had what it needs to mint one. cancelled/effect_uncertain
+# (Cancel, or a conversation that drained) has the same proof: with no code delivered
+# no token can exist, and the worker reaped its child before writing it; a cancel
+# after a code has code_delivered 1. Every other ending keeps the single attempt:
+# provider_failed and the output refusals would recur; changed files and
+# credential_already_present need the computer; storage_uncertain and environment_*
+# can follow a minted token; boundary_or_process_failure names no cause; unknown
+# (child_quiet_unproven, interrupted) cannot rule out a live child.
+RETRYABLE = frozenset({("needs_attention", "timeout"), ("cancelled", "effect_uncertain")})
+# A code is taken only while at least this many seconds of the attempt remain, so a
+# late code cannot be cut off mid-exchange by the timeout (a token the provider may
+# have minted but this host never stored); the reported expires_at is that cutoff.
+CODE_MARGIN = 20
 _LEGACY_COLUMNS = ["attempt_id","generation","state","reason"]
 _COLUMNS = _LEGACY_COLUMNS + ["code_delivered","retired"]
 MAX_OUTPUT = 131072
@@ -397,7 +402,8 @@ class ProviderSignin:
         self._attempt = None
         self._url = None
         self._closed = False  # set by shutdown: this process starts no successor
-        self._expires_at = None  # whole host-clock seconds; the current attempt's deadline
+        self._expires_at = None  # whole host-clock seconds: the last moment a code is taken
+        self._code_until = None  # the same cutoff on the monotonic clock, which code() enforces
 
     @staticmethod
     def initialize(conn):
@@ -491,7 +497,7 @@ class ProviderSignin:
     def begin(self, reader, grant, attempt):
         with self._lock:
             self._admit(reader,grant)
-            successor = None
+            started = replaces = False  # set only inside the committed admission below
             with self.store.access._connection(write=True) as conn:
                 self._migrate(conn)
                 current,attempts = self._current(conn)
@@ -512,12 +518,14 @@ class ProviderSignin:
                     if current is not None:
                         conn.execute("UPDATE setup_provider SET retired=1 WHERE attempt_id=?", (current['attempt_id'],))
                     conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0)", (attempt,grant.generation,"starting"))
-                    successor = current is not None
-            if successor is not None:
+                    started, replaces = True, current is not None
+            if started:
                 # Only after the commit, so a refused or rolled-back admission leaves no worker.
-                if successor:
-                    self._cancel = threading.Event()  # its own; the retired attempt's stays set
-                    self._code = self._url = self._expires_at = None
+                if replaces:
+                    # A fresh event: the ended attempt's may be set (Cancel or a drain), and a set
+                    # event would stop the new worker at once. Nothing of its link or code carries over.
+                    self._cancel = threading.Event()
+                    self._code = self._url = self._expires_at = self._code_until = None
                 self._attempt = attempt
                 self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
                 self._thread.start()
@@ -542,7 +550,8 @@ class ProviderSignin:
     def code(self, reader, grant, attempt, code):
         with self._lock:
             current = self.status(reader,grant,attempt)
-            if current['state'] != 'waiting' or self._code is not None or not self._url:
+            if (current['state'] != 'waiting' or self._code is not None or not self._url
+                    or self._code_until is None or time.monotonic() >= self._code_until):
                 raise AccessDenied("signin_code_unavailable")
             parts = code.split('#') if isinstance(code,str) else []
             state = parse_qs(urlsplit(self._url).query)['state'][0]
@@ -617,11 +626,13 @@ class ProviderSignin:
                     process=subprocess.Popen([str(staged),'setup-token'],cwd=self.store.access.root,env=env,
                         stdin=slave,stdout=slave,stderr=slave,start_new_session=True,close_fds=True)
             os.close(slave); slave=None
-            # Host-clock time read first and floored, so the reported expiry is never later
-            # than the monotonic deadline; the approval's own expiry also ends the attempt.
-            expires=min(math.floor(self.store.access._now()+SECONDS),math.floor(grant.expires_at))
-            deadline=time.monotonic()+SECONDS
-            with self._lock: self._expires_at=expires
+            # The code window closes CODE_MARGIN seconds before the attempt's timeout or the
+            # approval's expiry (which also ends it). Host-clock time is read first and the
+            # result floored, so the reported expiry is never later than the enforced cutoff.
+            wall=self.store.access._now(); begun=time.monotonic()
+            deadline=begun+SECONDS
+            window=min(SECONDS,grant.expires_at-wall)-CODE_MARGIN
+            with self._lock: self._code_until,self._expires_at=begun+window,math.floor(wall+window)
             enter_at=None  # when the Enter after a delivered code is due
             while True:
                 if self._cancel.is_set(): state,reason="cancelled","effect_uncertain";break
@@ -695,5 +706,5 @@ class ProviderSignin:
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
             with self._lock:
-                self._code=self._url=self._expires_at=None
+                self._code=self._url=self._expires_at=self._code_until=None
                 self._set(grant,attempt,state,reason)
