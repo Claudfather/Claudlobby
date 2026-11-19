@@ -59,8 +59,7 @@ def test_task_move_through_the_command_records_one_move_and_replays_it(readers, 
         "workstream_id"] == target
     shown = _call(capsys, root, "workstream", "show", target)["data"]["workstream"]
     assert shown["task_ids"] == [admitted["task_id"]]
-    # `workstream show` takes an opened workstream's ID; the list holds a task's own one too.
-    left = _call(capsys, root, "workstream", "list")["data"]["workstreams"][own]
+    left = _call(capsys, root, "workstream", "show", own)["data"]["workstream"]
     assert (left["task_ids"], left["status"], left["closed_by"]) == (
         [], "abandoned", "task:" + admitted["task_id"])
     assert _call(capsys, root, *argv)["data"]["replayed"] is True
