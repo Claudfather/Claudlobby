@@ -530,7 +530,8 @@ class ProviderSignin:
                     if self._code is not None:
                         self._admit(reader,grant)
                         code,self._code=self._code,None
-                        os.write(master,(code+'\n').encode('ascii'))
+                        # Claude's raw-mode TUI submits on Enter (CR); LF only types a newline and the attempt times out.
+                        os.write(master,(code+'\r').encode('ascii'))
                         code=None
                         self._set(grant,attempt,"starting")
                 if process.poll() is not None:
