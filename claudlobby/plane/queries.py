@@ -307,7 +307,18 @@ EVENT_OCCURRED_AT_SQL = "SELECT occurred_at FROM events WHERE ingest_seq = ?"
 #   unconfirmed  a submission-class fact (pane_submitted / carrier_queued) but NO
 #                usable received proof: the tail was lost, or the receiver was
 #                mid-turn/down, or the receipt lacked a wire proof to verify
-#   NULL         nothing was submitted to a pane — no tmux-delivery verdict
+#   NULL         nothing was submitted to a pane and no receipt could be judged
+#                — no tmux-delivery verdict
+#
+# #3001: when a message has NO submission-class fact, the wire proof comes from
+# its newest tmux `unknown` fact that carries one. A send typed into the box but
+# not submitted (native rc 3) stays `unknown`, since its submission is unproven,
+# but the bytes its proof names went on the wire. When the text is submitted
+# later, the receiver's row is judged against them and reads delivered,
+# truncated or altered (altered: the text was glued to what the box already
+# held, #2060). Such a fact never makes `unconfirmed` (`s.submitted`): with no
+# receipt, a send whose submission is unproven still has no verdict, and a
+# submission-class fact, when there is one, is still the only proof read.
 #
 # The NEWEST `received` / submission wins (a re-send mints a fresh msg_id, so in
 # practice there is one — MAX(ingest_seq) is defensive). Format with ph = the
@@ -350,7 +361,7 @@ DELIVERY_STATUS_SQL = (
     "   AND r.received_bytes < s.wire_bytes THEN 'truncated'"
     "  WHEN r.received_sha256 IS NOT NULL AND s.wire_sha256 IS NOT NULL"
     "    THEN 'altered'"
-    "  WHEN s.msg_id IS NOT NULL THEN 'unconfirmed'"
+    "  WHEN s.submitted THEN 'unconfirmed'"
     "  ELSE NULL"
     " END AS delivery, r.ingest_seq AS received_ingest_seq"
     + _RECEIPT_PARTIES_SQL +
@@ -363,13 +374,18 @@ DELIVERY_STATUS_SQL = (
     "  WHERE e.msg_id=c.msg_id AND" + _RECEIPT_MATCH_SQL + ")"
     " LEFT JOIN ("
     "  SELECT e.ingest_seq, e.msg_id,"
+    "   e.event IN ('pane_submitted','carrier_queued') AS submitted,"
     "   json_extract(e.detail, '$.wire_sha256') AS wire_sha256,"
     "   json_extract(e.detail, '$.wire_bytes') AS wire_bytes"
     "  FROM events e WHERE e.kind='transmission'"
-    "   AND e.event IN ('pane_submitted','carrier_queued')"
-    " ) s ON s.ingest_seq=(SELECT MAX(e.ingest_seq) FROM events e"
+    "   AND e.event IN ('pane_submitted','carrier_queued','unknown')"
+    " ) s ON s.ingest_seq=COALESCE((SELECT MAX(e.ingest_seq) FROM events e"
     "  WHERE e.kind='transmission' AND e.event IN ('pane_submitted','carrier_queued')"
-    "   AND e.msg_id=c.msg_id AND e.host_uid=c.host_uid AND e.fleet_uid IS c.fleet_uid)"
+    "   AND e.msg_id=c.msg_id AND e.host_uid=c.host_uid AND e.fleet_uid IS c.fleet_uid),"
+    " (SELECT MAX(e.ingest_seq) FROM events e"
+    "  WHERE e.kind='transmission' AND e.event='unknown' AND e.carrier='tmux'"
+    "   AND json_extract(e.detail, '$.wire_sha256') IS NOT NULL"
+    "   AND e.msg_id=c.msg_id AND e.host_uid=c.host_uid AND e.fleet_uid IS c.fleet_uid))"
     " WHERE c.msg_id IN ({ph})"
 )
 

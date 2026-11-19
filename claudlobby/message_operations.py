@@ -9,7 +9,7 @@ an idle, held box is waiting for (#2105); it never sends the payload again.
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -296,6 +296,18 @@ def transmit_native_attempt(route: MessageRoute, package: PackageResources,
             tx_item, _ = validate_item(tx_raw, modes)
             tx_fact = expected_fact(tx_item, host_uid=route.host_uid,
                                     fleet_uid=route.selected_fleet_uid, parties=parties)
+            if (prior is not None and prior.transmission_fact is not None
+                    and prior.transmission_fact != tx_fact and observation.status == "unknown"
+                    and observation.wire_sha256 is not None):
+                # A release before #3001 recorded an `unknown` row without its wire
+                # proof; a replay of that request keeps the projection it retained.
+                tx_raw = encode_transmission(
+                    intent, replace(observation, wire_sha256=None, wire_bytes=None),
+                    request_id=request_id, attempt_no=reservation.attempt_no,
+                    event_id=reservation.event_id, occurred_at=at.isoformat())
+                tx_item, _ = validate_item(tx_raw, modes)
+                tx_fact = expected_fact(tx_item, host_uid=route.host_uid,
+                                        fleet_uid=route.selected_fleet_uid, parties=parties)
             if prior is not None and prior.transmission_fact is not None and prior.transmission_fact != tx_fact:
                 raise ReceiptConflict("retained transmission projection changed")
             if store is not None and observation_retained:

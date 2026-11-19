@@ -283,6 +283,9 @@ class Transmission(_Strict):
     # for EVERY shape, so DELIVERED fires for a whole delivery regardless of
     # sanitize. Rides `detail` on a SUBMISSION-class tmux fact (pane_submitted /
     # carrier_queued — both put these bytes on the pane); the JOIN reads it there.
+    # It also rides a tmux `unknown` fact (#3001): a send typed into the box but
+    # not submitted (native rc 3) stays `unknown`, and the JOIN reads its proof
+    # when the message has no submission-class fact.
     wire_bytes: Optional[int] = Field(None, ge=0)
     wire_sha256: Optional[str] = None
 
@@ -310,18 +313,23 @@ class Transmission(_Strict):
                 f" transmission, not {self.state!r}"
             )
         # The WIRE proof (chunk P fold F1) is the SENDER's half of the join and
-        # rides a submission-class tmux fact only: the bytes it names are the
-        # ones a pane received. Unlike the received proof it is OPTIONAL there (a
-        # host with no sha tool records the fact without it, and the join then
-        # cannot upgrade past 'unconfirmed' — never a false verdict), but a wire
-        # proof on any other state is a mis-emitting door and fails loud.
+        # rides a submission-class tmux fact: the bytes it names are the ones a
+        # pane received. It may ride a tmux `unknown` fact too (#3001), a send
+        # whose bytes went on the wire but whose submission is unproven: the
+        # state stays `unknown`, and only the receiver's own `received` row can
+        # turn the proof into a verdict. Unlike the received proof it is
+        # OPTIONAL (a host with no sha tool records the fact without it, and the
+        # join then cannot upgrade past 'unconfirmed' — never a false verdict),
+        # but a wire proof on any other state is a mis-emitting door and fails
+        # loud.
         has_wire = self.wire_bytes is not None or self.wire_sha256 is not None
         if has_wire:
-            if self.state not in ("pane_submitted", "carrier_queued"):
+            if not (self.state in ("pane_submitted", "carrier_queued")
+                    or self.state == "unknown" and self.carrier == "tmux"):
                 raise ValueError(
                     "wire_bytes/wire_sha256 are only valid on a submission-class"
-                    f" tmux transmission (pane_submitted/carrier_queued), not"
-                    f" {self.state!r}"
+                    " tmux transmission (pane_submitted/carrier_queued) or a tmux"
+                    f" 'unknown' one, not {self.state!r} on {self.carrier!r}"
                 )
             if self.wire_bytes is None or self.wire_sha256 is None:
                 raise ValueError(

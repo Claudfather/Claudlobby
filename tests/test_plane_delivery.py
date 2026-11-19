@@ -260,3 +260,125 @@ def test_view_excludes_the_received_row_from_the_display_tx(tmp_path):
     assert m1["delivery_state"] == "confirmed by the receiver"
     assert [t["event"] for t in m1["tx"]] == ["pane_submitted"]  # no 'received'
     assert all(t["event"] != "received" for t in m1["tx"])
+
+
+# --- #3001: a send typed but not submitted keeps its wire proof -------------
+# Native rc 3 means the text was typed into the box and not submitted, so the
+# send stays `unknown`. Its wire proof rides that row, and when the message has
+# no submission-class fact the JOIN reads it there, so a receipt recorded once
+# the text is submitted later reads delivered, truncated or altered. Before
+# #3001 the contract refused a wire proof on an `unknown` fact.
+
+GLUED = "text the box already held " + BODY   # #2060: typed onto a held box
+
+
+def _typed(mid, wire=None, *, attempt=1):
+    """The `unknown` fact of a send typed but not submitted (native rc 3), with
+    the wire proof the transport observed (`wire=None`: none was observed)."""
+    row = _submitted(mid, wire, state="unknown")
+    row["payload"]["attempt_no"] = attempt
+    return row
+
+
+def _seed_typed(root):
+    _full_capture(root)
+    initialize_plane(root)
+    later = _submitted(_mid("e"), None)          # a later attempt, submitted without a proof
+    later["payload"]["attempt_no"] = 2
+    emit_batch(root, [
+        # typed, then submitted later and received whole
+        _comm(_mid("a"), BODY), _typed(_mid("a"), BODY), _received(_mid("a"), BODY),
+        # typed onto text the box already held, and submitted with it
+        _comm(_mid("b"), BODY), _typed(_mid("b"), BODY), _received(_mid("b"), GLUED),
+        # typed, then only a prefix of it arrived
+        _comm(_mid("c"), BODY), _typed(_mid("c"), BODY), _received(_mid("c"), BODY[:-10]),
+        # typed and never submitted: no receipt
+        _comm(_mid("d"), BODY), _typed(_mid("d"), BODY),
+        # a submission-class fact is still the only proof read when there is one
+        _comm(_mid("e"), BODY), _typed(_mid("e"), BODY), later, _received(_mid("e"), BODY),
+        # a later attempt observed no proof: the newest typed fact WITH one is read
+        _comm(_mid("f"), BODY), _typed(_mid("f"), BODY), _typed(_mid("f"), None, attempt=2),
+        _received(_mid("f"), BODY),
+    ])
+
+
+def _typed_rows(root):
+    db = root / "state" / "plane" / "plane.db"
+    conn = connect(str(db))
+    migrate(conn)
+    conn.row_factory = sqlite3.Row
+    ids = [_mid(t) for t in "abcdef"]
+    delivery = {r["msg_id"]: dict(r) for r in conn.execute(
+        q.DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(ids))), ids)}
+    proofs = {r[0]: r[1] for r in conn.execute(
+        "SELECT msg_id, json_extract(detail, '$.wire_sha256') FROM events"
+        " WHERE kind='transmission' AND event='unknown' AND attempt_no=1")}
+    return delivery, proofs
+
+
+def test_a_send_typed_then_submitted_later_reads_delivered(tmp_path):
+    _seed_typed(tmp_path)
+    delivery, proofs = _typed_rows(tmp_path)
+    assert proofs[_mid("a")] == _sha(BODY)
+    assert delivery[_mid("a")]["delivery"] == "delivered"
+
+
+def test_a_typed_send_glued_to_text_the_box_held_reads_altered(tmp_path):
+    _seed_typed(tmp_path)
+    row = _typed_rows(tmp_path)[0][_mid("b")]
+    assert row["delivery"] == "altered"
+    assert row["received_bytes"] > row["wire_bytes"]   # longer, another hash: not truncated
+
+
+def test_a_typed_send_cut_short_reads_truncated_against_its_own_wire_bytes(tmp_path):
+    _seed_typed(tmp_path)
+    row = _typed_rows(tmp_path)[0][_mid("c")]
+    assert row["delivery"] == "truncated"
+    assert row["wire_bytes"] - row["received_bytes"] == 10   # the view's shortfall
+
+
+def test_a_typed_send_with_no_receipt_has_no_verdict(tmp_path):
+    """The proof alone is never a verdict: with no receipt, a send whose
+    submission is unproven reads NULL, as before, never 'unconfirmed'."""
+    _seed_typed(tmp_path)
+    delivery, proofs = _typed_rows(tmp_path)
+    assert proofs[_mid("d")] == _sha(BODY)
+    assert delivery[_mid("d")]["delivery"] is None
+
+
+def test_a_submission_class_fact_is_still_the_only_proof_read_when_there_is_one(tmp_path):
+    """The typed fact's proof is read only when the message has no
+    submission-class fact. Here a later attempt was submitted without a proof,
+    so the receipt has nothing to compare and reads 'unconfirmed', as before."""
+    _seed_typed(tmp_path)
+    delivery, proofs = _typed_rows(tmp_path)
+    assert proofs[_mid("e")] == _sha(BODY)
+    assert delivery[_mid("e")]["delivery"] == "unconfirmed"
+
+
+def test_the_newest_typed_fact_that_carries_a_proof_is_read(tmp_path):
+    _seed_typed(tmp_path)
+    assert _typed_rows(tmp_path)[0][_mid("f")]["delivery"] == "delivered"
+
+
+def test_the_view_says_a_typed_send_submitted_later_was_confirmed(tmp_path):
+    _seed_typed(tmp_path)
+    msgs = _channel(tmp_path)
+    assert msgs[_mid("a")]["delivery_state"] == "confirmed by the receiver"
+    assert msgs[_mid("b")]["delivery_state"] == "ARRIVED ALTERED"
+    assert msgs[_mid("c")]["delivery_state"] == "ARRIVED SHORT by 10 bytes"
+    assert msgs[_mid("d")]["delivery_state"] is None
+
+
+def test_the_contract_takes_a_wire_proof_on_a_tmux_unknown_fact_and_no_other_uncertain_one():
+    from claudlobby.plane.contracts import Transmission
+    base = {"msg_id": _mid("a"), "attempt_no": 1, "destination": DEST}
+    proof = {"wire_sha256": _sha(BODY), "wire_bytes": _nbytes(BODY)}
+    typed = Transmission(carrier="tmux", state="unknown", **base, **proof)
+    assert (typed.wire_sha256, typed.wire_bytes) == (_sha(BODY), _nbytes(BODY))
+    for carrier, state in (("tmux", "failed"), ("tmux", "send_attempted"),
+                           ("telegram-tgpost", "unknown"), ("telegram-bridge", "unknown")):
+        with pytest.raises(ValueError, match="only valid on"):
+            Transmission(carrier=carrier, state=state, **base, **proof)
+    with pytest.raises(ValueError, match="together"):
+        Transmission(carrier="tmux", state="unknown", **base, wire_sha256=_sha(BODY))

@@ -144,8 +144,12 @@ def test_transmission_states_do_not_promote_uncertain_native_effects(tmp_path):
     validate_item(submitted, {})
     unknown = _transmission(intent, TransportObservation("unknown", proof, 42, -9))
     assert unknown["payload"]["state"] == "unknown"
-    assert "wire_sha256" not in unknown["payload"] and "wire_bytes" not in unknown["payload"]
+    # #3001: the proof rides the uncertain row; only a receipt makes it a verdict.
+    assert (unknown["payload"]["wire_sha256"], unknown["payload"]["wire_bytes"]) == (proof, 42)
     validate_item(unknown, {})
+    bare = _transmission(intent, TransportObservation("unknown", native_returncode=3))
+    assert "wire_sha256" not in bare["payload"] and "wire_bytes" not in bare["payload"]
+    validate_item(bare, {})
     failed = _transmission(intent, TransportObservation("failed"))
     assert failed["payload"]["state"] == "failed"
     validate_item(failed, {})

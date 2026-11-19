@@ -243,7 +243,11 @@ def encode_transmission(intent: RequestIntent, observation: TransportObservation
         raise MessagePayloadError("invalid native wire proof")
     payload = {"msg_id": intent.message_id, "attempt_no": attempt_no, "carrier": "tmux",
                "destination": intent.route.peer_destination.session, "state": state}
-    if state == "pane_submitted" and observation.wire_sha256 is not None:
+    # The proof names the bytes the helper put on the wire, so it rides an
+    # `unknown` row too (#3001): a send typed but not submitted (native rc 3)
+    # stays `unknown`, and a receipt recorded once the text is submitted later
+    # is still judged against these bytes. A `failed` row has none to carry.
+    if state in ("pane_submitted", "unknown") and observation.wire_sha256 is not None:
         payload.update(wire_sha256=observation.wire_sha256, wire_bytes=observation.wire_bytes)
     return {**_envelope(intent, request_id=request_id, event_id=event_id,
                         occurred_at=occurred_at, family="transmission"), "payload": payload}
