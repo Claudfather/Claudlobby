@@ -164,9 +164,10 @@ def test_a_live_work_item_must_name_its_workstream():
 
 def test_a_workstream_id_of_only_spaces_is_taken_by_every_family_that_names_one():
     """#2853: the contract tests that a workstream is named, not how the name is
-    spelled. The live work_item check refuses a missing or empty id, and a string of
-    spaces passes it, as it passes the other families' min_length. Stripping in one
-    place only would make two rules: change every family together, and this test."""
+    spelled. The live work_item check refuses a missing or empty id; task, workstream
+    and workstream_event set min_length=1; communication sets no length rule. None of
+    them strips, so a string of spaces passes all five. Stripping in one place only
+    would make two rules: change every family together, and this test."""
     from claudlobby.plane.contracts import WORKSTREAM_EVENTS
 
     spaces = "   "
@@ -190,13 +191,17 @@ def test_a_legacy_work_item_may_name_no_workstream():
 
 
 def _plane_rows(root) -> dict:
-    """What the plane holds in the four tables a task's batch could write to."""
+    """The row count of every table in the plane's database, by name: all the
+    tables in sqlite_master, so a table a batch writes is counted whether or not
+    this test knew of it."""
     from claudlobby.plane.db import connect, db_path
 
     conn = connect(db_path(root))
     try:
-        return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in ("workstreams", "work_items", "events", "ingest_ledger")}
+        tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+        return {table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                for table in tables}
     finally:
         conn.close()
 
@@ -208,21 +213,30 @@ def _opening() -> dict:
 
 def test_a_batch_whose_task_names_no_workstream_records_nothing(tmp_path):
     """The door validates every request before its one transaction, so a
-    task's batch (its workstream, then the task) whose task names none
-    leaves no row at all, the workstream's included: none in the workstream
-    and task tables, the event log or the ingest ledger. The same batch with
-    the task naming its workstream writes rows, so the counts can move."""
+    task's batch (its workstream, then the task) whose task names none leaves
+    the plane as it was: every table keeps the row count it had before the
+    batch. That is the count before, not zero: the full-text index's tables
+    hold rows after initialize_plane. The tables include identity_registry,
+    where the batch's aliases (the fleet and the bot) are minted: a door that
+    resolved them before validating would leave them behind. The same batch
+    with the task naming its workstream writes rows, so the counts can move: a
+    workstream, a task, two ledger rows, the two provisional identities and
+    the ledger's row in sqlite_sequence, SQLite's counter for an autoincrement
+    key. It writes no event."""
     from claudlobby.plane.emit_api import emit_batch
     from tests.plane_setup import initialize_plane
 
     initialize_plane(tmp_path)
+    before = _plane_rows(tmp_path)
     with pytest.raises(ContractViolation):
         emit_batch(tmp_path, [_opening(), _req("work_item", _work_item(workstream_id=None))],
                    require_commit=True)
-    assert _plane_rows(tmp_path) == {"workstreams": 0, "work_items": 0, "events": 0, "ingest_ledger": 0}
+    assert _plane_rows(tmp_path) == before
     emit_batch(tmp_path, [_opening(), _req("work_item", _work_item())], require_commit=True)
-    written = _plane_rows(tmp_path)
-    assert written["workstreams"] == 1 and written["work_items"] == 1 and written["ingest_ledger"] == 2
+    after = _plane_rows(tmp_path)
+    assert {table: after[table] - before[table] for table in after if after[table] != before[table]} == {
+        "identity_registry": 2, "ingest_ledger": 2, "sqlite_sequence": 1,
+        "work_items": 1, "workstreams": 1}
 
 
 def test_a_task_naming_no_workstream_is_refused_before_any_access_to_the_plane(tmp_path):
@@ -231,17 +245,20 @@ def test_a_task_naming_no_workstream_is_refused_before_any_access_to_the_plane(t
     plane on the root, a batch whose task names no workstream raises the
     contract's refusal, not the pending-initialization one, and leaves no
     database file. A valid batch there is refused for the missing plane, so the
-    missing file alone says nothing."""
-    from claudlobby.plane.db import db_path
+    missing file alone says nothing. The file is looked for after each call, so
+    a failure says which call left it; db_file only joins the path, where
+    db_path would make the plane's directory."""
+    from claudlobby.plane.db import db_file
     from claudlobby.plane.emit_api import emit_batch
     from claudlobby.plane.schema_state import PendingMigrationError
 
     with pytest.raises(PendingMigrationError):
         emit_batch(tmp_path, [_opening(), _req("work_item", _work_item())], require_commit=True)
+    assert not db_file(tmp_path).exists()
     with pytest.raises(ContractViolation):
         emit_batch(tmp_path, [_opening(), _req("work_item", _work_item(workstream_id=None))],
                    require_commit=True)
-    assert not db_path(tmp_path).exists()
+    assert not db_file(tmp_path).exists()
 
 
 def test_receiver_acknowledged_is_gone():
