@@ -68,8 +68,9 @@ def test_shipped_script_parses_under_system_bash(script):
 #     _add "$(_metric host.procs "{\"running\":$_running,\"blocked\":$_blocked}")"
 # and its macOS jobs failed while every Linux job passed. Brace expansion scans a word for its
 # quotes, and bash 3.2's scan pairs the double quotes without stepping over the $( ). So it reads
-# the inner string as unquoted and splits the word at the comma: `_add` got two words. bash 4 and
-# later step over the $( ) and keep the word whole, and `bash -n` passes the line on both.
+# the inner string as unquoted and splits the word at the comma: `_add` got two words. bash 5.2.15
+# steps over the $( ) and keeps the word whole (no bash 4 was run), and `bash -n` passes the line
+# on both.
 #
 # _BraceScan follows a script's quoting: quotes, $( ), ${ }, backquotes, $(( )), comments and
 # heredocs. It reports each `{` that opens a brace expression (one with a comma, or a sequence such
@@ -79,9 +80,9 @@ def test_shipped_script_parses_under_system_bash(script):
 #
 # What it does not tell apart:
 # - It reports the shape where bash 3.2 does no brace expansion: a plain assignment (v="$(...)"),
-#   [[ ]], a case word and a here-string. Telling those apart needs a command parser, and that
-#   parser's mistakes would be misses. The fix is one line either way: build the object outside
-#   the $( ), in a variable or with printf or awk.
+#   an assignment before a command, [[ ]], a case word and a here-string. Telling those apart
+#   needs a command parser, and that parser's mistakes would be misses. The fix is one line either
+#   way: build the object outside the $( ), in a variable or with printf or awk.
 # - It misses a brace that opens in one string of the $( ) and closes in another. It also misses
 #   two other shapes bash 3.2 splits: a brace in an unquoted <( ), and a case pattern inside a
 #   $( ), which bash 3.2 cannot parse anyway.
@@ -349,9 +350,11 @@ def test_shipped_script_has_no_brace_literal_bash_3_2_splits(script):
                     "teach _BraceScan the construct, so that the script is read and not passed")
     rows = text.splitlines()
     assert not found, (
-        "bash 3.2, which is macOS /bin/bash, splits each word below at its brace literal, where "
-        "bash 5 keeps it whole. Build the object outside the $( ), in a variable or with printf "
-        "or awk (#2857):\n"
+        "each line below has a brace literal in a double-quoted string inside a quoted $( ). "
+        "bash 3.2, which is macOS /bin/bash, splits such a word at the brace and bash 5 keeps it "
+        "whole. bash 3.2 keeps it whole too in five shapes the scan does not tell apart: a plain "
+        "assignment, an assignment before a command, [[ ]], a case word and a here-string. Either "
+        "way, build the object outside the $( ), in a variable or with printf or awk (#2857):\n"
         + "\n".join(f"{_script_id(script)}:{n}: {rows[n - 1].strip()}" for n in found))
 
 
@@ -405,3 +408,22 @@ _SHAPES = [
 @pytest.mark.parametrize(("shape", "lines"), [s[1:] for s in _SHAPES], ids=[s[0] for s in _SHAPES])
 def test_the_brace_scan_reports_where_bash_3_2_splits(shape, lines):
     assert _brace_splits(shape) == lines
+
+
+# Inputs the scan cannot follow, each with the error it raises: the construct, and the line the
+# scan stopped on. The per-script test fails such a script by name. If `lost` stopped raising,
+# the scan would go on without its place: the first and third inputs would end in a TypeError,
+# and the second would be read to its end and passed. An unterminated heredoc or single quote is
+# left out: there the scan would loop forever.
+_LOST = [
+    ("an-unterminated-double-quote", 'echo ok\necho "a', "unterminated double quote, from line 2"),
+    ("an-unterminated-substitution", "echo ok\necho $(date", "unterminated $(, from line 2"),
+    ("an-unterminated-parameter", "echo ok\necho ${v", "unterminated ${, from line 2"),
+]
+
+
+@pytest.mark.parametrize(("text", "error"), [s[1:] for s in _LOST], ids=[s[0] for s in _LOST])
+def test_the_brace_scan_names_what_it_cannot_follow(text, error):
+    with pytest.raises(_LostPlace) as lost:
+        _brace_splits(text)
+    assert str(lost.value) == error
