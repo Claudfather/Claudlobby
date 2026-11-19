@@ -1361,6 +1361,40 @@ test('mounted ready session renews before begin and keeps the approved context, 
   } finally { if(previousStorage)Object.defineProperty(globalThis,'localStorage',previousStorage);else delete globalThis.localStorage; }
 });
 
+test('Copy link sits beside the new-tab sign-in link and shows the link to copy by hand when the clipboard is blocked',async()=>{
+  const store=new Map(),previous={localStorage:Object.getOwnPropertyDescriptor(globalThis,'localStorage'),navigator:Object.getOwnPropertyDescriptor(globalThis,'navigator')};
+  const restore=name=>previous[name]?Object.defineProperty(globalThis,name,previous[name]):delete globalThis[name];
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)}});
+  const written=[];let clipboard={writeText:async text=>{written.push(text);}};
+  Object.defineProperty(globalThis,'navigator',{configurable:true,get:()=>({clipboard})});
+  try {
+  const h=harness({count:1}),origin=refs[0].endpoint_origin+'/api/owner/connected/setup/';
+  await h.api.checkAccount();h.mount();await h.api.act(0,'connect');
+  h.overrides.set(origin+'context',()=>reply(200,{version:2,template:'revenue-web-app',repository:'example-org/shop',fleet:'shop',
+    source_revision:'b'.repeat(40),generation:id(9),expires_at:1800003600,request:null,launch_reserved:false,provider_signin:true,signin_attempt:null}));
+  h.overrides.set(origin+'signin-begin',init=>reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  const nodes=()=>descendants(h.ui.get('owner-session')),button=text=>nodes().find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  const field=()=>nodes().find(n=>n.attributes['aria-label']==='Claude sign-in link');
+  assert.equal(button('Copy link').hidden,true,'no link yet, so nothing to copy');
+  button('Check setup approval').click();await flush();button('Sign in to Claude').click();await flush();
+  const link=nodes().find(n=>n.tagName==='A'&&n.textContent==='Open Claude sign-in');
+  assert.equal(link.attributes.target,'_blank','the link still opens a new tab');
+  const copy=button('Copy link'),siblings=nodes().find(n=>n.children.includes(link)),note=()=>siblings.children.find(n=>n.tagName==='SPAN');
+  assert.equal(note().attributes.role,'status');
+  assert.equal(copy.hidden,false);assert.equal(siblings.children.indexOf(copy),siblings.children.indexOf(link)+1,'Copy link is right after the link');
+  assert.equal(field().hidden,true);assert.equal(note().textContent,'');
+  copy.click();await flush();
+  assert.deepEqual(written,[authorizeURL]);assert.equal(note().textContent,'Link copied. Paste it into a new tab.');assert.equal(field().hidden,true);
+  clipboard={writeText:async()=>{throw new DOMException('blocked','NotAllowedError');}};
+  copy.click();await flush();
+  assert.equal(note().textContent,'Copying is blocked here. Copy the link from the box below.');
+  assert.equal(field().hidden,false);assert.equal(field().value,authorizeURL);assert.equal(field().readOnly,true);
+  clipboard=undefined;copy.click();await flush();
+  assert.equal(field().hidden,false,'a missing clipboard falls back the same way');
+  h.api.dispose();
+  } finally { restore('localStorage');restore('navigator'); }
+});
+
 test('provider-required Preview needs this context\'s attempt confirmed connected; recovery states are not readiness',async()=>{
   const states=[['none',null],['unknown','unknown'],['cancelled','cancelled'],['needs_attention','needs_attention'],['connected','connected']];
   for(const [name,state] of states){
