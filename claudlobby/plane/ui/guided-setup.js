@@ -54,6 +54,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // signinCopy {url,kind,n} is live only while url is the current link; n counts repeats of one result.
   let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0;
   let busyOperation=null; // presentation: which explicit operation is in flight
+  // Presentation from the entry that owns Connect: {operation:'connect'|'check', disabled, busy:null|operation, hint}.
+  // connectFocus follows one panel click ('sent', then 'busy') so keyboard focus lands on the next action.
+  // standalone: the panel is the whole view (no computer card or workspace beside it); launched: a clean done receipt.
+  let onConnect=null, connectView=null, connectFocus=null, standalone=false, launched=false;
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
   // this attempt's code was taken; and whether the computer refused (not merely missed) a code or the attempt.
   let signinCodeSent=null, signinRefusal=null; // signinRefusal: null | 'code' | 'attempt'
@@ -102,7 +106,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
     if (!handoffUntil) handoffUntil = now() + 600;
     if (now() >= handoffUntil || handoffReads >= 80) {
-      stopHandoff(); note = 'Automatic checks paused. Choose Check connection on the computer card, then Check launch status. Do not launch again.'; changed(); return;
+      stopHandoff(); note = standalone ? 'Automatic checks paused. Choose Check launch status to look again. Do not launch again.'
+        : 'Automatic checks paused. Choose Check connection on the computer card, then Check launch status. Do not launch again.'; changed(); return;
     }
     if (!visible() || !active()) return; // Resume the same reads when this view/connection returns.
     handoffTimer = setTimeout(async () => {
@@ -188,7 +193,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     state = next;
     if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
-      stopHandoff(); note = 'Connection needs attention. Reconnect from the computer card; the launch is not repeated.';
+      stopHandoff(); note = standalone ? 'Connection needs attention. Choose Connect above; the launch is not repeated.'
+        : 'Connection needs attention. Reconnect from the computer card; the launch is not repeated.';
     }
     changed(); scheduleHandoff();
   }
@@ -318,8 +324,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
-    note = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0
-      ? 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
+    launched = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
+    note = launched ? standalone ? 'Team launched. Your team is running on this computer.'
+      : 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
       ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Details.'
       : value.state === 'quiesce' && !value.launch_reserved
@@ -358,7 +365,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       signin:!signinShown ? null : signinDone ? 'done' : approved ? 'current' : 'upcoming',
       goal:pending ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
       launch:pending ? 'current' : 'upcoming'};
+    // With a Connect step, nothing after it is current until this computer is connected.
+    const connecting = !!m.steps.connect && !live;
+    if (m.steps.connect) states.connect = live ? 'done' : 'current';
+    if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
+    if (standalone && launched) states.launch = 'done'; // the whole view ends on a finished step
     const progress = {approve:'',signin:'',goal:'',launch:''};
+    progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
     if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
     if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = 'This page checks for progress automatically.';
     if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
@@ -386,7 +399,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : states.signin !== 'current' ? null
       : typed ? 'code' : waitingLink ? 'link'
       : signinAttempt && !ended && signinRefusal !== 'attempt' && !((signinState === 'starting' || sent) && !signinHalted) ? 'status' : null;
-    const filled = (name, quiet) => lead === name ? 'pill setup-primary' : quiet;
+    const filled = (name, quiet) => (connecting ? 'connect' : lead) === name ? 'pill setup-primary' : quiet;
     const [text,tone] = signinStatusLine();
     m.signinStatus.hidden = !['current','done'].includes(states.signin);
     setText(m.signinStatus,text);
@@ -421,7 +434,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     setText(m.summary,launchShown ? `Team ${plan.fleets[0]} is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
       : 'Check launch status to see where setup stands. This page never sends a launch twice.');
     setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
-    setText(m.status,[note, legacyBlocked() ? LEGACY : !live ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
+    setText(m.status,[note, legacyBlocked() ? LEGACY : !live && !m.connect ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
     setText(m.declaration,context ? context.template === 'local-project'
       ? `Team ${context.fleet} for local project ${context.project_directory}. After the team is ready and messages are locally approved, tell the lead what to do. The lead records the task and coordinates implementation and independent review.`
       : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '');
@@ -439,9 +452,26 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || !signinReady() || goal !== planGoal || plan.expires_at <= time || context.expires_at <= time)
       || operation === 'receipt' && !pending;
     m.recheck.disabled = controls.context.disabled;
+    if (m.connect) {
+      const {button,hint} = m.connect;
+      setText(button,connectView?.operation === 'check' ? 'Check connection' : 'Connect');
+      button.className = filled('connect','pill ghost');
+      button.disabled = !connectView || !!connectView.disabled || !!connectView.busy;
+      setText(hint,connecting && !connectView?.busy ? connectView?.hint || '' : '');
+    }
+    if (m.launchDone) setText(m.launchDone,launched ? '✓ Team launched' : '');
+    // After a Connect chosen in this panel, keyboard focus moves on with the steps instead of falling to the page.
+    if (connectFocus && connectView?.busy) connectFocus = 'busy';
+    if (connectFocus && live) { connectFocus = null; controls.context.focus?.(); }
+    else if (connectFocus === 'busy' && !connectView?.busy) {
+      connectFocus = null; if (!m.connect.button.disabled) m.connect.button.focus?.();
+    }
   }
   // Numbered steps; only the current step shows its body. Long approval text and identifiers sit under Details.
-  function mountPanel({document,element}) {
+  // connect: optional, from an entry that owns Connect for this computer; it adds a first "Connect this computer" step.
+  // standalone: the panel is the whole view, so its notes never point at a computer card and a launch ends on a done step.
+  function mountPanel({document,element,connect,standalone:alone = false}) {
+    standalone = alone === true;
     const make = (tag,className,text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
     const action = (label,className,operation) => { const node = make('button',className,label); node.type = 'button';
       node.addEventListener('click',() => { if (!node.disabled) void run(operation); }); return node; };
@@ -458,6 +488,20 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       root.append(number,make('h3','setup-step-title',title),...(doneLine ? [doneLine] : []),...before,body,progress); list.append(root);
       return steps[name] = {root,number,done:doneLine,body,progress};
     };
+    onConnect = typeof connect === 'function' ? connect : null;
+    let connectStep = null;
+    if (onConnect) {
+      const connectRow = step('connect','Connect this computer'), button = make('button','pill setup-primary','Connect'), hint = make('p','setup-hint');
+      button.type = 'button';
+      button.addEventListener('click',() => {
+        if (button.disabled || !onConnect) return;
+        connectFocus = 'sent'; try { onConnect(); } catch { /* the entry owns Connect and its outcome */ }
+        if (connectFocus === 'sent') connectFocus = null; // the entry refused it, so nothing will move focus
+      });
+      connectRow.done.append(make('span','','✓ Connected'));
+      connectRow.body.append(make('p','setup-step-text','Connect so you can finish setup.'),row(button),hint);
+      connectStep = {button,hint};
+    }
     const approve = step('approve','Approve setup'), approveDone = make('span');
     const recheck = action('Check again','setup-text-button','context'), approveHint = make('p','setup-hint');
     const contextButton = action('Check setup approval','pill setup-primary','context');
@@ -487,12 +531,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const goalField = make('label','setup-field'), preview = action('Preview team','pill setup-primary','preview'), goalHint = make('p','setup-hint');
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
     goalStep.body.append(goalText,goalField,row(preview),goalHint);
-    const launchStep = step('launch','Launch your team',{done:false}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
+    const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','setup-text-button','receipt');
     launchStep.body.append(summary,row(launch,receiptButton),launchHint);
+    const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
     disclosure.append(make('summary','','Details'),declaration,authority,details); element.append(disclosure);
-    mount = {root:element,status,steps,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
+    mount = {root:element,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,launch,receipt:receiptButton}};
     detailsFor = null; render();
@@ -500,5 +545,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
     resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); },
+    // Presentation only: how the entry's Connect looks now. It never connects or sends anything itself.
+    showConnect(value) {
+      const next = value && typeof value === 'object' ? {operation:value.operation === 'check' ? 'check' : 'connect',
+        disabled:!!value.disabled, busy:['connect','check'].includes(value.busy) ? value.busy : null,
+        hint:typeof value.hint === 'string' ? value.hint : ''} : null;
+      if (JSON.stringify(next) === JSON.stringify(connectView)) return;
+      connectView = next; if (!disposed) render();
+    },
     dispose() { disposed = true; stopHandoff(); stopSigninPoll(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
 }

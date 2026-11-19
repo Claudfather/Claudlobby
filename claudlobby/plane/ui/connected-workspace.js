@@ -53,6 +53,43 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Map();
+  // Presentation only: the browser carrier serves the one saved reference its parent bound, so only
+  // that computer is shown. Before the offer, or for a carrier that never bound, every computer is shown.
+  function boundReference() {
+    if (!browserTransport || !doc) return null;
+    let id; try { id = fetch.browserOwnerReference; } catch { return null; }
+    return doc.references.some(ref => ref.reference_id === id) ? id : null;
+  }
+  const shown = reference => { const id = boundReference(); return id === null || id === reference.reference_id; };
+  // An offer admitted after the account check repaints the computers and asks the boards to read again.
+  let bridgeSettled = false;
+  const settledMarker = browserTransport ? fetch.browserOwnerSettled : null;
+  if (doc && typeof settledMarker?.then === 'function') Promise.resolve(settledMarker).then(() => {
+    if (disposed) return;
+    bridgeSettled = true;
+    if (boundReference() !== null) transport?.presentationChanged?.();
+    changed();
+  }, () => {});
+  // The browser carrier's frame is the body of the website's setup step: a setup-only view of the bound
+  // computer (workspace.css hides the rest). Its line says, in plain sentences, why no panel shows yet.
+  function setupOnlyNote() {
+    return phase === 'checking' ? 'Checking your workspace…'
+      : phase === 'unavailable' ? 'Your account could not be checked yet. This page tries again shortly.'
+      : phase === 'empty' ? 'No computer is saved in your workspace yet.'
+      : phase === 'denied' ? 'Your account or saved computers changed. Reopen setup from your workspace.'
+      : phase === 'disposed' ? 'Setup closed.'
+      : bridgeSettled ? 'This page could not reach your computer. Reopen setup from your workspace.'
+      : 'Opening the connection to your computer…';
+  }
+  // The Connect step's hint in the setup-only view: what happened and what to choose, without builder detail.
+  function connectHint(status, connection, continuity, expired) {
+    if (connection === 'not_connected' || ['ready','setup_only','checking','renewing','logout'].includes(status.state)) return '';
+    if (expired) return 'Your connection to this computer expired. Choose Connect to continue.';
+    if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect again.';
+    if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect again.';
+    if (['disconnected','signed_out'].includes(connection)) return 'Disconnected from this computer. Choose Connect to continue.';
+    return 'The connection to this computer could not be confirmed. Choose Check connection to look again.';
+  }
   const snapshot = () => Object.freeze({phase, accountUnavailable,
     computers: clients.map(({reference, client, label}) => ({reference_id:reference.reference_id,
       endpoint_origin:reference.endpoint_origin, ...(reference.transport === undefined ? {} : {transport:reference.transport}),
@@ -178,7 +215,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           fetch,now,setTimeout,clearTimeout,onChange:changed});
       }
       nextTransport = createTransport({sources:nextClients.map(({client,key,reference,label}) => ({key,
-        label:computerLabel(reference), savedLabel:label, reader:client.readHandle,
+        label:computerLabel(reference), savedLabel:label, reader:client.readHandle, shown:() => shown(reference),
         connectionState:() => client.connectionState?.() || client.snapshot().state,
         readFailure:url => client.readFailure?.(url)}))});
       for (const {client,actions,key,setup} of nextClients) {
@@ -358,13 +395,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       check.textContent = 'Check account'; check.addEventListener('click', () => { if (!check.disabled && !loading) void checkAccount(); }); heading.append(check);
       mount.controls = {note, check, rows:[]};
     }
-    const controls = mount.controls;
+    const controls = mount.controls, bound = boundReference();
     controls.note.textContent = phase === 'denied' ? 'Your account or saved computers changed. Close this view and open your workspace again.'
       : phase === 'empty' ? 'No computers saved yet. Add one in your workspace, then reopen this view.'
       : phase === 'checking' ? 'Checking your workspace…'
       : phase === 'unavailable' ? 'Account check unavailable. No computer has been connected.'
       : phase === 'disposed' ? 'Workspace closed.'
       : accountUnavailable ? 'Account check unavailable. Existing computer sessions remain independent.'
+      : bound ? 'Connect this computer to view its teams. Active use keeps the connection alive. Unsent drafts stay in this open view.'
       : 'Connect each computer to view its teams. Active use keeps connections alive. Unsent drafts stay in this open view.';
     controls.check.hidden = ['denied','disposed'].includes(phase);
     controls.check.disabled = controls.check.hidden;
@@ -406,7 +444,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const setupEyebrow = document.createElement('p'); setupEyebrow.className = 'eyebrow setup-focus-eyebrow'; setupEyebrow.textContent = 'First-team setup';
       const setupHeading = document.createElement('h2'); setupHeading.className = 'setup-focus-title'; setupHeading.tabIndex = -1;
       const setupBody = document.createElement('div'); setupPanel.append(setupEyebrow,setupHeading,setupBody); help.append(setupPanel);
-      clients[index].setup.mountPanel({document,element:setupBody});
+      // In the browser carrier the panel is the whole view, and its first step is this computer's explicit Connect.
+      clients[index].setup.mountPanel({document,element:setupBody,...(browserTransport ? {standalone:true,connect:() => {
+        const operation = mount?.controls?.rows[index]?.panelOperation;
+        if (operation) void act(index,operation);
+      }} : {})});
       goto.addEventListener('click', () => {
         if (goto.hidden || !goto.isConnected) return;
         setupPanel.scrollIntoView?.({block:'start'}); setupHeading.focus?.({preventScroll:true});
@@ -420,13 +462,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
-      row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
+      const {reference,client,enrollment} = clients[index], status = client.snapshot();
+      row.hidden = phase !== 'ready' || !shown(reference); // a computer the browser carrier cannot reach is not listed
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const connection = client.connectionState?.() || status.state;
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
-      const focused = phase === 'ready' && status.state === 'setup_only' && !!mount.setupHost;
+      // In the browser carrier the bridged computer's panel is the view in every state, so Connect is its first step.
+      const bridged = bound === reference.reference_id;
+      const focused = phase === 'ready' && !!mount.setupHost && !row.hidden
+        && (browserTransport ? bridged : status.state === 'setup_only');
       if (focused !== controls.focused) { (focused ? mount.setupHost : help).append(setupPanel); controls.focused = focused; }
       setupHeading.textContent = focused ? `Finish setting up ${name}` : 'First-team setup';
       goto.hidden = !focused;
@@ -435,13 +481,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       label.textContent = `${name} · ${pendingLabel || (expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed')}`;
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
+      const toPanel = 'Finish setting up this computer in the setup panel.';
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
         ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
-        : status.state === 'setup_only' ? focused ? 'Finish setting up this computer in the setup panel.'
+        : status.state === 'setup_only' ? focused ? toPanel
           : 'Choose Check setup approval below to continue setting up your first team.'
-        : connection === 'not_connected' ? 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
+        : connection === 'not_connected' ? focused ? toPanel : 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
         : '');
@@ -475,8 +522,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           || ['renew','logout'].includes(operation) && !['ready','setup_only','unavailable','renewing','logout'].includes(status.state);
         button.disabled = disabled(operation);
       }
-      if (connection === 'ready') controls.attentionState = null;
-      else if (['setup_only','not_connected','denied','unavailable'].includes(connection)
+      if (browserTransport) {
+        // The panel's Connect step mirrors this card's own Connect or Check connection; it adds no other operation.
+        const operation = primaryOperation === 'check' ? 'check' : 'connect';
+        controls.panelOperation = operation;
+        clients[index].setup.showConnect?.({operation, disabled:disabled(operation),
+          busy:pending.get(index) || (status.state === 'checking' ? 'check' : null),
+          hint:connectHint(status, connection, continuity, expired)});
+      }
+      // A computer that is not listed does not ask for attention.
+      if (!row.hidden && connection === 'ready') controls.attentionState = null;
+      else if (!row.hidden && ['setup_only','not_connected','denied','unavailable'].includes(connection)
           && controls.attentionState !== connection) {
         controls.attentionState = connection;
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
@@ -484,17 +540,31 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     });
     if (mount.setupHost) {
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
-      mount.setupHost.hidden = !focusing;
-      // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
-      if (focusing) rail.dataset.setupFocus = clients.some(({client}) => client.snapshot().state === 'ready') ? 'shared' : 'only';
-      else delete rail.dataset.setupFocus;
+      if (mount.setupStatus) {
+        // Setup-only view: the host is the whole main area, with a plain line until the panel shows.
+        if (mount.setupStatus.parentNode !== mount.setupHost) mount.setupHost.prepend(mount.setupStatus);
+        mount.setupStatus.hidden = focusing; mount.setupStatus.textContent = focusing ? '' : setupOnlyNote();
+        mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
+      } else {
+        mount.setupHost.hidden = !focusing;
+        // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
+        if (focusing) rail.dataset.setupFocus = clients.some(({client,reference}) => shown(reference) && client.snapshot().state === 'ready') ? 'shared' : 'only';
+        else delete rail.dataset.setupFocus;
+      }
     }
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
     // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
     const rail = document.getElementById('rail-channel'), setupHost = rail ? document.createElement('section') : null;
     if (setupHost) { setupHost.id = 'setup-focus'; setupHost.className = 'setup-focus'; setupHost.hidden = true; rail.prepend(setupHost); }
-    mount = {document,element,setupHost,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
+    // The browser carrier's frame is a setup-only view: workspace.css shows only #setup-focus under this marker.
+    let setupStatus = null;
+    if (browserTransport) {
+      invoke(() => document.documentElement?.setAttribute('data-workspace-view','setup'));
+      if (setupHost) { setupStatus = document.createElement('p'); setupStatus.className = 'setup-only-status';
+        setupStatus.setAttribute('role','status'); setupStatus.setAttribute('aria-live','polite'); setupHost.prepend(setupStatus); }
+    }
+    mount = {document,element,setupHost,setupStatus,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const tools = document.getElementById('view-nav')?.querySelector?.('details');
     if (tools) {
@@ -548,9 +618,36 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     // account availability. No account, host, draft or action metadata crosses
     // this boundary; the shell checks the exact origin and frame source.
     const view = document.defaultView;
-    if (doc && !disposed && view && view.parent !== view)
+    if (doc && !disposed && view && view.parent !== view) {
       invoke(() => view.parent.postMessage({type:'claudfather.workspace.ready',version:1}, doc.shell_origin));
+      if (browserTransport) reportSize(document, view);
+    }
     return {dispose};
+  }
+  // Setup-only view: the parent sizes the frame to this content. Only the height crosses, to the exact shell
+  // origin, at most once per animation frame and only when it changed.
+  function reportSize(document, view) {
+    const root = document.querySelector('main') || document.body, page = document.documentElement || root;
+    if (!root || typeof view.ResizeObserver !== 'function') return;
+    const frame = typeof view.requestAnimationFrame === 'function' ? fn => view.requestAnimationFrame(fn) : fn => setTimeout(fn,16);
+    const cancel = typeof view.cancelAnimationFrame === 'function' ? id => view.cancelAnimationFrame(id) : id => clearTimeout(id);
+    let scheduled = null, posted = null, observer = null;
+    const measure = () => {
+      scheduled = null;
+      if (disposed) return;
+      let height; try { height = Math.ceil(page.getBoundingClientRect().height); } catch { return; }
+      if (!Number.isFinite(height)) return;
+      height = Math.min(20000, Math.max(1, height));
+      if (height === posted) return;
+      posted = height;
+      invoke(() => view.parent.postMessage({type:'claudfather.workspace.size',version:1,height}, doc.shell_origin));
+    };
+    try {
+      observer = new view.ResizeObserver(() => { if (scheduled === null && !disposed) scheduled = frame(measure); });
+      observer.observe(root);
+    } catch { observer = null; return; }
+    const previous = mount.cleanup;
+    mount.cleanup = () => { previous?.(); observer?.disconnect(); if (scheduled !== null) cancel(scheduled); scheduled = null; };
   }
   function dispose() {
     if (disposed) return; disposed = true;

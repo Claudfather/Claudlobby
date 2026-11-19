@@ -119,7 +119,7 @@ function translate(url, options, target) {
 export function createBrowserOwnerTransport({documentContext, window = globalThis.window,
   nativeFetch = globalThis.fetch.bind(globalThis), selection = ['browser-v1'], now = () => Date.now()/1000,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout} = {}) {
-  let doc = null, channelId = null, sessionId = null, target = null, port = null;
+  let doc = null, channelId = null, sessionId = null, target = null, port = null, bound = null;
   let closed = false, outgoing = 0, incoming = 0, nextID = 0, offerTimer;
   const requests = new Map();
   let resolveReady, rejectReady;
@@ -215,7 +215,7 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
       || event.ports?.length !== 1) return;
     sessionId=value.sessionId;target={...value.reference,targetHandle:value.targetHandle};port=event.ports[0];
     port.onmessage=receive;port.onmessageerror=dispose;port.start();clearTimeout(offerTimer);
-    try {post('ready');resolveReady();} catch {dispose();}
+    try {post('ready');bound=value.reference.reference_id;resolveReady();} catch {dispose();}
   }
   try {
     const d=documentContext;
@@ -261,7 +261,12 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
       try {post('request',{id,request,credit:4});} catch {dispose();}
     });
   }
-  // Cosmetic integration marker: never an action grant or network authority.
+  // Cosmetic integration markers: never an action grant or network authority.
   Object.defineProperty(fetch,'browserOwnerTransport',{value:true});
+  // The saved reference the parent's offer bound, kept after retirement; null before the offer.
+  // Presentation reads it to show that one computer; every request above still checks the live target.
+  Object.defineProperty(fetch,'browserOwnerReference',{get:() => bound});
+  // Settles, never rejects, once the offer is admitted or the carrier retires without one.
+  Object.defineProperty(fetch,'browserOwnerSettled',{value:ready.then(() => {}, () => {})});
   return Object.freeze({fetch,dispose,ready});
 }

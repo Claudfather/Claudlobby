@@ -214,6 +214,46 @@ tasks and exact linked task detail use the existing aggregate reader/renderer.
 All agents, Team details, Recorder, search and bot equipment inspection are
 explicitly disabled because the bounded aggregate does not supply those reads.
 
+**Browser-carrier setup view.** Over the browser carrier
+(`fetch.browserOwnerTransport`) the document is the body of the website's setup
+step, not a workspace. The carrier adds two cosmetic markers beside that flag:
+`browserOwnerReference`, the `reference_id` its parent's admitted offer bound
+(`null` before an offer, kept after retirement), and `browserOwnerSettled`, which
+resolves, never rejects, once an offer is admitted or the carrier retires
+without one. Neither is a grant or a network authority. The account check still
+matches the complete saved-reference set, a controller still exists for every
+saved reference, and each carrier request is still checked against its live
+bound target. The entry uses the bound reference only for presentation. Other
+saved computers are left out of the computer list, attention callbacks, and the
+aggregate sources, coverage, team choices and blocker text (the reader's
+`shown` source filter). Before an offer, or when none arrives, every computer
+stays listed. A later offer repaints, and `presentationChanged` asks the boards
+to read again.
+
+The document marks `<html data-workspace-view="setup">`. `workspace.css` then
+shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
+computer cards, overview, diagnostics), the room heading and search, activity,
+tasks, Recorder and the Message team composer are all hidden. The page grows
+with its content and has no internal scroll container, and the panel fills the
+frame width. The bound computer's panel is the view in every connection state.
+Its first step, Connect this computer, mirrors that computer's own Connect or
+Check connection. One click sends one connect. Nothing connects, signs in or
+retries a session mutation automatically, and failures say what to choose next
+in plain sentences. After Connect, the existing steps follow: approve setup,
+sign in to Claude, describe the goal, launch. A clean done receipt marks Launch
+done with "Team launched. Your team is running on this computer." The full
+workspace is never revealed in this mode. While no panel can show, one status
+line says why: checking, account unavailable, no saved computer, or reopen setup.
+
+After its ready message, the framed document observes `<main>` with
+`ResizeObserver`. It measures the document height at most once per animation
+frame. When the value changes, it posts exactly
+`{type:"claudfather.workspace.size",version:1,height}` to the document's
+`shell_origin`, never `*`. `height` is a whole number of CSS pixels from 1 to
+20000. No other data crosses, and disposal stops observing. The website must
+accept the message only from its own frame window and the Plane origin, and must
+clamp it. Native documents post no size and keep the full workspace.
+
 Website metadata reads have one eight-second total header/body deadline and a
 16KiB body bound. The visible document rechecks on visibility and every 30 seconds.
 A provider outage cannot create an admitted account context; a previously verified
