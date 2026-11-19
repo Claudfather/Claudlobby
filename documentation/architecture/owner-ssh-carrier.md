@@ -238,8 +238,9 @@ once rather than after a link nobody can use. A begin is refused
 again that begin would refuse; it says instead that the approval expired or ends
 too soon. The panel shows `expires_at` in local time as **Paste the code by …**; it
 is text only and starts no timer. A Try again keeps the ID it replaces beside the
-new one in storage until a host answer names the new one. A refused or never-sent
-Try again restores the ended attempt at once, in memory and in storage, even if the
+new one in storage until a host answer names the new one; the record is written
+before anything changes in memory. A refused or never-sent Try again (also one this
+browser could not save) restores the ended attempt at once, in memory and in storage, even if the
 connection changed meanwhile. After a lost answer, a context that still names the
 replaced attempt shows only that the new ID is not admitted yet: its begin can
 still commit after the browser stopped waiting. The panel then follows the ended

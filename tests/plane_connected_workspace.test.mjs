@@ -1778,6 +1778,35 @@ test('a Try again that never left this browser is undone even when the connectio
   assert.equal(calls.length,1);
   h.api.dispose();
 });
+test('a Try again whose storage write fails sends nothing, stays on the ended attempt, and the next Try again works',async()=>{
+  const calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw new Error('lost');}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  const write=h.storage.setItem;let fail=1;
+  h.storage.setItem=(key,value)=>{if(key==='test:claude'&&fail-->0)throw new Error('quota');return write(key,value);};
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.deepEqual(calls,[],'nothing was sent');
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original);
+  assert.equal(status.textContent,'This browser could not save the new sign-in, so nothing was sent. Choose Try again.');
+  assert.equal(visible(retry),true);
+  // The next answer naming the ended attempt keeps a clean record (never {X, replaced_by: X}).
+  assert.equal(await h.api.run('context'),true);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original);
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const page=dom(),root=new page.Element();reloaded.mountPanel({document:page.document,element:root});
+  assert.equal(await reloaded.run('context'),true);
+  assert.equal(stepPart(root,'signin','setup-signin-status').textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  reloaded.dispose();
+  // The next Try again works: one begin with a new ID, stored beside the ended one.
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,original.attempt_id);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{generation:original.generation,attempt_id:calls[0][1].attempt_id,replaces:original.attempt_id});
+  h.api.dispose();
+});
 test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{
   const calls=[];
   const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);return {...body,state:'starting',reason:null};}}});

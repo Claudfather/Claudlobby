@@ -257,8 +257,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           const value={generation:context.generation,attempt_id:globalThis.crypto.randomUUID()};
           // A Try again keeps the ID it replaces beside it, so any later page load can tell which one is current;
           // any ID set aside by an earlier unsettled Try again is dropped (restored if this one is undone).
-          signinPredecessor = action==='retry' ? signinAttempt.attempt_id : null; signinSuccessor=null;
-          storage.setItem(storageKey+':claude',JSON.stringify(signinPredecessor ? {...value,replaces:signinPredecessor} : value));
+          const replaces = action==='retry' ? signinAttempt.attempt_id : null;
+          // Written before anything changes in memory: a failed write sends nothing and undoes the Try again.
+          try { storage.setItem(storageKey+':claude',JSON.stringify(replaces ? {...value,replaces} : value)); }
+          catch { throw Object.assign(new Error('This browser could not save the new sign-in, so nothing was sent. Choose Try again.'),
+            {code:'signin_not_started'}); }
+          signinPredecessor=replaces; signinSuccessor=null;
           signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
           if (action==='retry') { // nothing of the ended attempt carries over to the new one
             signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
