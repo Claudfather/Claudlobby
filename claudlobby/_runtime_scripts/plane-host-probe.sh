@@ -204,9 +204,10 @@ printf '{"events":[%s]}' "$_samples" | PLANE_EMIT_COOLDOWN_STAGE=1 plane_emit_ev
 # state/memory-thrash/ and reads the host's line from the lines file there. No
 # file is no check, said once on this job's journal. A file it refuses is no check
 # either, and raises memory_thrash_unarmed once, so a bad edit never turns the
-# alert off unseen. It runs after the samples are sent, so a slow check never
-# holds them, and it reads the count the samples carry, so a replay of the
-# recorded samples is the check that ran.
+# alert off unseen. No python3 on this job's PATH is no check too, said once on
+# the journal by _thrash_no_python (#2856). It runs after the samples are sent,
+# so a slow check never holds them, and it reads the count the samples carry,
+# so a replay of the recorded samples is the check that ran.
 
 # _thrash_sent DIR WHAT MARK...: after an alert, mark it sent (memory-thrash.py
 # delivered MARK...) once Telegram or the manager's pane took it; until then the
@@ -224,10 +225,29 @@ _thrash_sent() {
     fi
 }
 
+# _thrash_no_python DIR: say on this job's journal that no python3 runs the check
+# (#2856). memory-thrash.py keeps its own skips in its state so that it says
+# each once, and it cannot run here, so the shell keeps the marker instead:
+# DIR/.no-python3, made when the line is said and taken away by _thrash once
+# python3 is back, so a later loss is said again. A marker it cannot make
+# leaves the line said every minute.
+_thrash_no_python() {
+    local mark="$1/.no-python3"
+    [ ! -e "$mark" ] || return 0
+    printf "memory-thrash: skipped: no python3 on this job's PATH (%s), so the swap thrash check does not run\n" \
+        "$PATH" >&2
+    { mkdir -p "$1" && : > "$mark"; } 2>/dev/null
+    return 0
+}
+
 _thrash() {
     local dir="$CLAUDLOBBY_ROOT/state/memory-thrash" boot="" given verdict kind id text
     local dirs=() bots_dir bots msg
-    command -v python3 >/dev/null 2>&1 || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        _thrash_no_python "$dir"
+        return 0
+    fi
+    [ ! -e "$dir/.no-python3" ] || rm -f "$dir/.no-python3"
     given=(--skip "$_swp_why")
     if [ -n "$_swp_out" ]; then
         read -r boot 2>/dev/null < "$PROC/sys/kernel/random/boot_id" || boot=""
