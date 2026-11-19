@@ -69,6 +69,26 @@ def test_emit_contract_violation_exits_2(tmp_path: Path):
         (tmp_path / "state" / "plane" / "spool").glob("*.json")
     )
 
+    # A live task that names no workstream (#2852). That change's rollout check expects
+    # this exit code and this text from `plane emit-batch`, read as JSON.
+    refusal = ("contract violation: {'loc': ('payload', 'workstream_id'), "
+               "'msg': 'a live work_item must name its workstream'}")
+    task = {"event_type": "work_item", "emitter": "cli-test", "fleet": "example-fleet",
+            "payload": {"work_item_id": "wi_" + "0" * 32, "title": "t",
+                        "created_by": "bot:example-fleet/alpha"}}
+    r = _run(["--root", str(tmp_path), "plane", "emit", "work_item", "--file", "-"],
+             stdin=json.dumps(task))
+    assert r.returncode == 2
+    assert refusal in r.stderr
+    batch = {"events": [task, {"event_type": "rollout-check-guard", "emitter": "cli-test",
+                               "payload": {}}]}
+    r = _run(["--root", str(tmp_path), "--json", "plane", "emit-batch", "--require-commit",
+              "--file", "-"], stdin=json.dumps(batch))
+    assert r.returncode == 2
+    refused = json.loads(r.stdout)
+    assert refused["ok"] is False and refused["error"]["code"] == "invalid_argument"
+    assert refused["error"]["message"] == refusal
+
 
 def test_capture_modes_per_family(tmp_path: Path):
     """Round-3 F8: metadata/full behavior for EVERY content family."""
