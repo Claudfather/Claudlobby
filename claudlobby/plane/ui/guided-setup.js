@@ -18,6 +18,7 @@ const localContinue = value => value.continuation ? `Continue locally: ${value.c
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
 // Presentation only: the step that shows each operation's progress, and its text.
 const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin':['signin','Starting Claude sign-in…'],
+  'signin-retry':['signin','Starting a new Claude sign-in…'],
   'signin-status':['signin','Checking sign-in…'],'signin-code':['signin','Sending your code…'],'signin-cancel':['signin','Cancelling sign-in…'],
   preview:['goal','Preparing your team preview…'],launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
 // Skips unchanged writes, so a status region is not re-announced on every two-second check.
@@ -40,8 +41,13 @@ const SIGNIN_REASONS = {timeout:'The sign-in took too long.', provider_failed:'C
 const signinOutcome = (state, reason) => typeof reason === 'string' && Object.hasOwn(SIGNIN_REASONS, reason) ? SIGNIN_REASONS[reason]
   : state === 'cancelled' ? 'Sign-in was cancelled; a sign-in Claude had already finished stays saved.'
   : state === 'unknown' ? 'This computer could not confirm how sign-in ended.' : 'Sign-in did not finish.';
-// The host keeps exactly one attempt per setup and refuses another attempt ID (provider_signin.py).
-const ONE_ATTEMPT = 'This setup allows only one Claude sign-in, so trying again needs setup to be recovered on the computer itself.';
+// The host keeps one attempt per setup and refuses another attempt ID, except after an ending it
+// reports as retryable: a sign-in that timed out before its code reached Claude (provider_signin.py).
+const NO_RETRY = 'Trying again needs setup to be recovered on the computer itself.';
+const RETRY = 'Choose Try again for a new sign-in link.';
+// Exactly the host's RETRYABLE endings (provider_signin.py); the host also requires that no code was sent.
+const retryableEnding = (state, reason) => state === 'needs_attention' && reason === 'timeout'
+  || state === 'cancelled' && reason === 'effect_uncertain';
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
@@ -50,7 +56,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let context = null, plan = null, pending = null, conflicts = [], legacy = [], incompatible = false;
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
-  let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false;
+  // signinRetryable: the host's latest answer for this attempt said it would admit a new attempt ID.
+  // signinDeadline: the host's expires_at beside the current link (whole host-clock seconds), else null.
+  // signinRetryFrom: while a Try again is in flight, the ended attempt it replaces, restored if nothing was admitted.
+  let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false, signinRetryable=false;
+  let signinDeadline=null, signinRetryFrom=null;
   // signinCopy {url,kind,n} is live only while url is the current link; n counts repeats of one result.
   let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0;
   let busyOperation=null; // presentation: which explicit operation is in flight
@@ -60,15 +70,20 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const codeSent = () => !!signinAttempt && signinCodeSent===signinAttempt.attempt_id;
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
   // conversation, so manual checks beside it stay far inside the 256-call bound.
-  const SIGNIN_POLL_MS=2000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
+  // While this page is hidden (Claude's tab in front), a slower read-only check keeps the owning
+  // conversation inside its 45-second idle bound, so it is not drained and cancelled meanwhile.
+  const SIGNIN_POLL_MS=2000, SIGNIN_HIDDEN_POLL_MS=25000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
   const signinOpen = () => context?.provider_signin===true && !!signinAttempt && !SIGNIN_TERMINAL.includes(signinState);
   // Provider-required Preview/Launch needs this context's own attempt confirmed connected; a
   // missing, unknown, cancelled or needs_attention attempt is not readiness. Not required: no guard.
   const signinReady = () => context?.provider_signin!==true
     || !!signinAttempt && signinAttempt.generation===context.generation && signinState==='connected';
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
+  // Try again: only for an ended attempt of this live approval that the host said a new attempt may replace.
+  const signinRetryOffered = () => context?.provider_signin===true && context.expires_at>now() && !pending && !signinBlocked
+    && !!signinAttempt && signinRetryable && retryableEnding(signinState,signinReason);
   function clearSignin(notice) {
-    signinUrl=null; if (mount) mount.code.value='';
+    signinUrl=signinDeadline=null; if (mount) mount.code.value='';
     if (notice) signinNotice=notice;
   }
   // Copy is a fallback beside the new-tab link. Where the clipboard is blocked, show the link to copy by hand.
@@ -85,15 +100,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   function stopSigninPoll() { clearTimeout(signinTimer); signinTimer=null; }
   function scheduleSigninPoll() {
     stopSigninPoll();
-    if (disposed || !signinPolling() || !context?.provider_signin || pending || signinBlocked || !active() || !visible()) return;
-    const ticket=epoch;
+    if (disposed || !signinPolling() || !context?.provider_signin || pending || signinBlocked || !active()) return;
+    const ticket=epoch, delay=visible() ? SIGNIN_POLL_MS : SIGNIN_HIDDEN_POLL_MS;
     signinTimer=setTimeout(() => {
       signinTimer=null;
       if (disposed || ticket!==epoch || !signinPolling()) return;
       if (context?.expires_at<=now()) { clearSignin(lostNotice); changed(); return; }
       if (busy) { scheduleSigninPoll(); return; } // never overlaps another call
       void run('signin-status',{quiet:true}); // its completion schedules the next check
-    },SIGNIN_POLL_MS);
+    },delay);
   }
   const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval again, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
@@ -221,11 +236,18 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else if (operation.startsWith('signin-')) {
         if (!context?.provider_signin || pending || signinBlocked) return false;
         const action=operation.slice(7);
-        if (action==='begin') {
-          if (signinAttempt) return false;
+        if (action==='begin' || action==='retry') {
+          // Try again is a new attempt ID, sent only from its explicit click; nothing retries automatically.
+          if (action==='begin' ? signinAttempt : !signinRetryOffered()) return false;
+          signinRetryFrom = action==='retry'
+            ? {attempt:signinAttempt,state:signinState,reason:signinReason,retryable:signinRetryable} : null;
           const value={generation:context.generation,attempt_id:globalThis.crypto.randomUUID()};
           storage.setItem(storageKey+':claude',JSON.stringify(value));
           signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
+          if (action==='retry') { // nothing of the ended attempt carries over to the new one
+            signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
+            signinRetryable=signinHalted=false; signinNotice='';
+          }
         }
         if (!signinAttempt || signinAttempt.generation!==context.generation) return false;
         let input={...signinAttempt};
@@ -236,7 +258,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           if (!code || code.length>2305 || /[\r\n\x00]/.test(code)) return false;
           input.code=code;
         }
-        const result=await client.setupSignin(action,input); input=null;
+        const result=await client.setupSignin(action==='retry' ? 'begin' : action,input); input=null; signinRetryFrom=null;
         if (disposed || ticket!==epoch || !active()) return false;
         signinReceipt(result);
         if (action==='code') { signinRefusal=null; if (signinState==='waiting') signinCodeSent=signinAttempt.attempt_id; }
@@ -277,9 +299,22 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           const refused=[400,401,403,409].includes(error?.status);
           // A refused code leaves the attempt waiting (the host keeps only a valid code), so its link and checks stay.
           if (refused && operation==='signin-code') { signinRefusal ??= 'code'; return false; }
+          // A refused Try again rolled the host back and an unsent one reached nothing: the ended attempt
+          // is still the current one, so this browser follows it again (memory and storage).
+          const from = operation==='signin-retry' && (refused || error?.code==='signin_not_started') ? signinRetryFrom : null;
+          signinRetryFrom=null;
+          if (from) {
+            signinAttempt=from.attempt; signinState=from.state; signinReason=from.reason;
+            signinRetryable=!refused && from.retryable; // after a refusal only the host's next answer offers it again
+            try { storage.setItem(storageKey+':claude',JSON.stringify(from.attempt)); } catch { signinBlocked=true; }
+            clearSignin(refused ? 'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.'
+              : error.message); // the client's own text for a begin it never sent
+            return false;
+          }
           signinHalted=true; // no automatic retry after an error; Check sign-in progress resumes it
+          signinRetryable=false; // only a later host answer can offer Try again again
           signinRefusal = refused ? 'attempt' : signinRefusal === 'attempt' ? null : signinRefusal;
-          clearSignin(refused ? `This computer refused this browser’s Claude sign-in. ${ONE_ATTEMPT}`
+          clearSignin(refused ? `This computer refused this browser’s Claude sign-in. ${NO_RETRY}`
             : 'Could not reach this computer to check sign-in. Choose Check sign-in progress to look again; it never starts a second sign-in.');
           return false;
         }
@@ -292,11 +327,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); scheduleSigninPoll(); } }
   }
   function signinReceipt(value) {
-    if (!context || !keys(value,['attempt_id','generation','state','reason',...('url' in value?['url']:[])])
+    if (!context || !keys(value,['attempt_id','generation','state','reason',...['url','expires_at','retryable'].filter(key => key in value)])
         || !uuid(value.attempt_id) || value.generation!==context.generation
         || signinAttempt && (value.attempt_id!==signinAttempt.attempt_id || value.generation!==signinAttempt.generation)
         || !['starting','waiting','connected','needs_attention','cancelled','unknown'].includes(value.state)
-        || value.reason!==null && (typeof value.reason!=='string' || !/^[a-z_]{1,64}$/.test(value.reason))) throw new Error();
+        || value.reason!==null && (typeof value.reason!=='string' || !/^[a-z_]{1,64}$/.test(value.reason))
+        // retryable comes only as true, and only on an attempt that ended without a saved sign-in.
+        || 'retryable' in value && (value.retryable!==true || !retryableEnding(value.state,value.reason))
+        // expires_at comes only beside a link, as whole positive seconds.
+        || 'expires_at' in value && (!('url' in value) || !Number.isSafeInteger(value.expires_at) || value.expires_at<=0)) throw new Error();
     let url=null;
     if (value.url!==undefined) {
       const selected=new URL(value.url);
@@ -308,6 +347,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
     signinState=value.state; signinReason=value.reason; signinUrl=url; signinHalted=false; signinNotice='';
+    signinRetryable=value.retryable===true; signinDeadline=url!==null && value.expires_at!==undefined ? value.expires_at : null;
     if (signinRefusal==='attempt' || value.state!=='waiting') signinRefusal=null;
     if (value.state!=='waiting') { signinCodeSent=null; if (mount) mount.code.value=''; }
   }
@@ -332,15 +372,21 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const SIGNIN_ENDED = ['connected','needs_attention','cancelled','unknown'];
   const signinSent = () => signinState === 'waiting' && codeSent();
   const signinLinkLive = () => signinState === 'waiting' && !!signinUrl && !signinSent();
+  // The host's own deadline in this viewer's local time (minutes, never rounded up); no client-side timer.
+  const pasteBy = () => signinDeadline === null ? ''
+    : ` Paste the code by ${new Date(signinDeadline*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}.`;
   function signinStatusLine() { // [text, tone]
     if (signinBlocked) return ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention'];
     if (signinState === 'connected') return ['✓ Claude connected','done'];
     if (signinNotice) return [signinNotice,'attention'];
-    if (SIGNIN_ENDED.includes(signinState)) return [`${signinOutcome(signinState,signinReason)} ${ONE_ATTEMPT}`,'attention'];
+    if (SIGNIN_ENDED.includes(signinState)) {
+      const retry = signinRetryOffered(); // a replaceable cancel stopped before any code reached Claude
+      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : NO_RETRY}`,'attention'];
+    }
     if (!signinAttempt) return ['Connect your Claude account so your team can work.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',''];
-    if (signinRefusal === 'code' && signinState === 'waiting') return ['The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.','attention'];
-    if (signinLinkLive()) return ['Open Claude sign-in, approve access, then paste the code Claude shows you.',''];
+    if (signinRefusal === 'code' && signinState === 'waiting') return [`The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.${pasteBy()}`,'attention'];
+    if (signinLinkLive()) return [`Open Claude sign-in, approve access, then paste the code Claude shows you.${pasteBy()}`,''];
     if (signinState === 'starting') return ['Starting Claude sign-in…',''];
     return ['A sign-in was already started in this browser. Check its progress.',''];
   }
@@ -384,7 +430,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
       : !approved ? 'context'
       : states.signin !== 'current' ? null
-      : typed ? 'code' : waitingLink ? 'link'
+      : typed ? 'code' : waitingLink ? 'link' : signinRetryOffered() ? 'retry'
       : signinAttempt && !ended && signinRefusal !== 'attempt' && !((signinState === 'starting' || sent) && !signinHalted) ? 'status' : null;
     const filled = (name, quiet) => lead === name ? 'pill setup-primary' : quiet;
     const [text,tone] = signinStatusLine();
@@ -413,6 +459,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
       || operation==='code' && signinState!=='waiting'
       || operation==='code' && sent;
+    // Try again shows, filled, only where the host said a new attempt may replace the ended one.
+    const retry = m.steps.signin.retry, retryShown = signinRetryOffered();
+    retry.hidden = !retryShown; retry.className = filled('retry','pill ghost');
+    retry.disabled = !live || busy || !retryShown;
     setText(m.goalDone,pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '');
     setText(m.goalText,context ? `Team ${context.fleet} works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
@@ -466,6 +516,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const signinStatus = make('p','setup-signin-status'); signinStatus.setAttribute('role','status');
     const signin = step('signin','Sign in to Claude',{done:false,before:[signinStatus]});
     const begin = action('Sign in to Claude','pill setup-primary','signin-begin');
+    const retry = signin.retry = action('Try again','pill ghost','signin-retry'); // held on its step for render
     const signinLink = make('a','pill setup-primary','Open Claude sign-in'); signinLink.setAttribute('target','_blank'); signinLink.setAttribute('rel','noreferrer noopener');
     const signinCopyButton = make('button','pill ghost','Copy link'); signinCopyButton.type = 'button';
     signinCopyButton.addEventListener('click',() => { void copySigninLink(); });
@@ -478,7 +529,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const codeLabel = make('label','setup-field'), submit = action('Submit code','pill ghost','signin-code'), codeRow = make('div','setup-code');
     codeLabel.append(make('span','setup-field-label','Code from Claude'),code); codeRow.append(codeLabel,submit);
     const check = action('Check sign-in progress','setup-text-button','signin-status'), cancel = action('Cancel sign-in','setup-text-button','signin-cancel');
-    signin.body.append(row(begin,signinLink,signinCopyButton,signinCopyNote),signinField,codeRow,row(check,cancel));
+    signin.body.append(row(begin,retry,signinLink,signinCopyButton,signinCopyNote),signinField,codeRow,row(check,cancel));
     const goalStep = step('goal','Describe the goal'), goalDone = make('span'), goalText = make('p','setup-step-text');
     goalStep.done.append(goalDone);
     const area = make('textarea','setup-input'); area.maxLength = 2000; area.rows = 4; area.value = goal;

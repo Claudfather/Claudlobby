@@ -92,7 +92,8 @@ not cross this transport.
 
 The provider sign-in attempt lives inside one process: its worker thread, its
 terminal child, the sign-in link and the code hand-off are held in memory, and
-the retained record admits exactly one original attempt. A one-operation process
+the retained record admits one current attempt (another attempt ID only after an
+ending it reports as retryable; see **Try again** below). A one-operation process
 would start that attempt and then cancel it in its own mandatory drain. So on
 profile `owner-api-v1`, `setup-signin-begin`, `setup-signin-code` and
 `setup-signin-cancel` still refuse with `operation_requires_persistent_owner`
@@ -171,9 +172,27 @@ A refused code and a refused authorization are the same `403` with
 `{"state": "denied"}`; the carrier does not tell them apart. Sign-in succeeded
 only when a 200 reply says `connected`. A begin that is refused, or that finds an
 attempt retained by an earlier process (read as `unknown`, reason `interrupted`,
-or as its recorded final state), closes at once and starts no worker. Nothing
-here creates, resets or replaces an attempt, and a new setup approval does not
-either: a retained unresolved or cancelled attempt needs owner recovery.
+or as its recorded final state), closes at once and starts no worker. The carrier
+never creates, resets or replaces an attempt, and a new setup approval does not
+either: a retained attempt that is unresolved, or that ended after its code reached
+the CLI, needs owner recovery.
+
+**Try again.** The one exception is decided by the retained record, never by the
+carrier. Status replies carry `"retryable": true` only when the attempt ended
+`needs_attention` with reason `timeout`, or `cancelled` with reason
+`effect_uncertain` (an explicit cancel, or the drain of a lost or idle
+conversation), its record says no code reached the CLI
+(the host commits that before it types a code; a row from before that column
+existed never qualifies), fewer than three attempts exist for the approval, and no
+worker of it is alive in the answering process. A worker writes its terminal row
+as its last act, after reaping its child (a reap it cannot prove reads `unknown`),
+so that row is the proof that an earlier process's attempt has stopped. A later
+conversation whose begin names a new attempt ID then retires the old attempt and
+starts the new one under the same grant, generation and admission, with every
+check a first attempt gets, `credential_already_present` included. A retired ID is
+never admitted again. The conversation that lost or cancelled an attempt never
+admits its replacement: it drains and ends, and only a later conversation's begin
+can. Every other ending, and any ending after a code was delivered, stays as above.
 
 **Drain and `end`.** Closing always runs the same drain: no more calls, the
 handler in flight is cancelled and awaited, the owned components shut down
@@ -199,10 +218,23 @@ releases its runtime reader, while that worker is alive.
 
 **Progress in the canonical UI.** While the original attempt is `starting` or
 `waiting`, the setup panel sends one status call about every two seconds (at most
-165 in 330 seconds), never overlapping a code, cancel or manual check. Polling
+165 in 330 seconds), never overlapping a code, cancel or manual check. While the
+page is hidden (the Claude sign-in tab in front) it keeps the same read-only call
+every 25 seconds instead, inside the 45-second idle bound, so authorizing at the
+provider does not drain the conversation and cancel the attempt. Polling
 stops on a terminal state, an error, expiry, a context change or disposal, and
 never begins again, replays, mints a new attempt ID or clears the retained
-attempt. The link and code are cleared when it is lost. Preview and Launch stay
+attempt. Only an explicit **Try again**, shown while the latest answer carries
+`retryable`, mints a new attempt ID and begins it. A `waiting` reply that carries
+the link also carries `expires_at`: in whole host-clock seconds, the last moment the
+host accepts a code, 20 seconds before the earlier of the attempt's timeout and the
+setup approval's expiry. A later code is refused (`signin_code_unavailable`), so a
+code is never cut off mid-exchange by the timeout and a late one ends as a clean,
+retryable timeout. The panel shows that time in local time as **Paste the code by
+…**; it is text only and starts no timer. A Try again that the host refused, or that
+the browser never sent, restores the ended attempt it replaced, in memory and in
+storage, so later checks and reloads still follow it. The link and code are cleared
+when it is lost. Preview and Launch stay
 unavailable in the panel while that sign-in is open; the canonical policy and the
 drain remain the authority.
 

@@ -1525,7 +1525,8 @@ test('an ended Claude sign-in says what happened and offers no second attempt, w
     await h.api.run('context');
     const status=stepPart(panel,'signin','setup-signin-status'),button=text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
     assert.match(status.textContent,said,String(reason));
-    assert.match(status.textContent,/allows only one Claude sign-in, so trying again needs setup to be recovered on the computer itself\.$/);
+    assert.match(status.textContent,/ Trying again needs setup to be recovered on the computer itself\.$/);
+    assert.equal(visible(button('Try again')),false,'without the host saying so, no Try again');
     assert.equal(status.dataset.tone,'attention');assert.equal(status.attributes.role,'status');
     assert.equal(visible(button('Sign in to Claude')),false);assert.equal(button('Sign in to Claude').disabled,true);
     assert.equal(visible(button('Cancel sign-in')),false);assert.equal(button('Check sign-in progress').className,'setup-text-button');
@@ -1547,7 +1548,7 @@ test('a failed sign-in check explains itself and makes Check sign-in progress th
   assert.equal(p.calls.filter(c=>c[0]==='begin').length,1);p.h.api.dispose();
 });
 const refusal=()=>Object.assign(new Error('refused'),{status:403});
-const REFUSED='This computer refused this browser’s Claude sign-in. This setup allows only one Claude sign-in, so trying again needs setup to be recovered on the computer itself.';
+const REFUSED='This computer refused this browser’s Claude sign-in. Trying again needs setup to be recovered on the computer itself.';
 test('a refused sign-in call says the computer refused it; only a lost answer says the computer could not be reached',async()=>{
   // Begin fails before its POST, yet the attempt is already retained; every check of it is then refused.
   const p=pollHarness([refusal(),refusal()],{begin(){throw new Error('Sign-in was not started. Connect again first.');}});
@@ -1564,6 +1565,207 @@ test('a refused sign-in call says the computer refused it; only a lost answer sa
   assert.deepEqual(p.calls.map(c=>c[0]),['begin','status','status'],'never a second begin');
   assert.deepEqual(JSON.parse(p.h.saved.get('test:claude')),{generation:p.calls[0][1].generation,attempt_id:p.calls[0][1].attempt_id});
   p.h.api.dispose();
+});
+const retryEnded={generation:id(9),attempt_id:id(12),state:'needs_attention',reason:'timeout'};
+test('Try again appears for an ending the host marks retryable and starts one fresh attempt only on its click',async()=>{
+  const timers=[],calls=[];let answer=null;
+  const h=setupHarness({setupOptions:{setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
+    client:{async setupSignin(action,body){calls.push([action,body]);return answer(action,body);}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),button=text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  const retry=button('Try again'),live=()=>timers.filter(t=>t.live);
+  assert.equal(status.textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  assert.equal(status.dataset.tone,'attention');
+  assert.equal(visible(retry),true);assert.equal(retry.disabled,false);
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again is the one filled action');
+  assert.equal(visible(button('Sign in to Claude')),false);assert.equal(visible(button('Cancel sign-in')),false);
+  // Nothing starts on its own: no timer, no begin from a resume, a re-check or the first-attempt door.
+  h.api.resumeHandoff();await h.api.run('context');
+  assert.equal(await h.api.run('signin-begin'),false);
+  assert.equal(live().length,0);assert.deepEqual(calls,[]);
+  const gate=deferred();answer=()=>gate.promise;
+  retry.click();await flush();
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin','Try again uses the host begin door');
+  const fresh=JSON.parse(h.saved.get('test:claude'));
+  assert.deepEqual(calls[0][1],fresh,'the new attempt is retained before its one begin');
+  assert.notEqual(fresh.attempt_id,retryEnded.attempt_id);assert.equal(fresh.generation,retryEnded.generation);
+  assert.equal(stepPart(panel,'signin','setup-progress').textContent,'Starting a new Claude sign-in…');
+  assert.equal(retry.disabled,true,'held while it starts');retry.click();await flush();
+  assert.equal(calls.length,1,'a second click while it starts sends nothing');
+  gate.resolve({...fresh,state:'starting',reason:null});await flush();
+  assert.equal(status.textContent,'Starting Claude sign-in…');assert.equal(visible(retry),false);
+  // The new attempt is followed like a first one: one poll, for its own ID, to its new link.
+  answer=(_action,body)=>({...body,state:'waiting',reason:null,url:authorizeURL});
+  assert.equal(live().length,1);const t=live()[0];t.live=false;t.fn();await flush();
+  assert.deepEqual(calls[1],['status',fresh]);
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Open Claude sign-in']);
+  assert.equal(await h.api.run('signin-retry'),false,'an open attempt offers no Try again');assert.equal(calls.length,2);
+  h.api.dispose();
+});
+test('Try again follows only the host\'s retryable answer, and a later answer or a failed check takes it away',async()=>{
+  const button=(panel,text)=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  // Shapes the host never sends are refused, so none of them can offer Try again.
+  for(const bad of [{state:'needs_attention',reason:'timeout',retryable:false},{state:'connected',reason:null,retryable:true},
+      {state:'unknown',reason:'interrupted',retryable:true},{state:'waiting',reason:null,url:authorizeURL,retryable:true}]){
+    const h=setupHarness({client:{async setupSignin(_action,body){return {generation:body.generation,attempt_id:body.attempt_id,...bad};}}});
+    h.context.provider_signin=true;h.context.signin_attempt=retryEnded;
+    const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');
+    assert.equal(await h.api.run('signin-status'),false,JSON.stringify(bad));
+    assert.match(stepPart(panel,'signin','setup-signin-status').textContent,/^Could not reach this computer to check sign-in\. /);
+    assert.equal(visible(button(panel,'Try again')),false);assert.equal(await h.api.run('signin-retry'),false);
+    h.api.dispose();
+  }
+  const replies=[{retryable:true},{},{retryable:true},new Error('lost'),{retryable:true}],calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){
+    calls.push(action);const next=replies.shift();if(next instanceof Error)throw next;
+    return {generation:body.generation,attempt_id:body.attempt_id,state:'needs_attention',reason:'timeout',...next};}}});
+  h.context.provider_signin=true;h.context.signin_attempt=retryEnded;
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const retry=button(panel,'Try again'),status=stepPart(panel,'signin','setup-signin-status'),offered=[];
+  assert.equal(visible(retry),false);
+  for(let i=0;i<5;i++){await h.api.run('signin-status');offered.push([visible(retry),status.textContent.endsWith(' Choose Try again for a new sign-in link.')]);}
+  assert.deepEqual(offered,[[true,true],[false,false],[true,true],[false,false],[true,true]]);
+  assert.deepEqual(calls,['status','status','status','status','status'],'checking never begins');
+  h.api.dispose();
+});
+const notStarted=()=>Object.assign(new Error('Sign-in was not started. Connect again first.'),{code:'signin_not_started'});
+for(const [name,failure] of [['refused',refusal],['never sent',notStarted]])
+test(`a Try again that was ${name} keeps following the ended attempt, here and after a reload`,async()=>{
+  const calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw failure();}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.equal(calls.length,1);const [[action,sent]]=calls;
+  assert.equal(action,'begin');assert.notEqual(sent.attempt_id,retryEnded.attempt_id,'the new attempt was the one asked for');
+  const original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original,'nothing was admitted, so the ended attempt is kept');
+  if(name==='refused'){
+    assert.equal(status.textContent,'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.');
+    assert.equal(visible(retry),false,'only the host\'s next answer offers it again');
+    assert.equal(await h.api.run('signin-retry'),false);assert.equal(calls.length,1);
+  } else {
+    assert.equal(status.textContent,'Sign-in was not started. Connect again first.');
+    assert.equal(visible(retry),true,'the host\'s last answer still stands');
+  }
+  assert.equal(await h.api.run('signin-begin'),false,'never a first begin over a kept attempt');
+  // The host still names the ended attempt: a context check (as on a reload) shows it and offers Try again.
+  assert.equal(await h.api.run('context'),true);
+  assert.equal(status.textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  assert.equal(visible(retry),true);assert.equal(calls.length,1,'nothing more was sent');
+  // A reload: a new panel over the same storage reads the kept attempt and accepts the host's answer.
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.equal(await reloaded.run('context'),true,'a later page load is not stranded');
+  assert.equal(reloaded.snapshot().context.signin_attempt.attempt_id,retryEnded.attempt_id);
+  h.api.dispose();reloaded.dispose();
+});
+test('a Try again whose answer was lost keeps its new attempt: the host may have started it',async()=>{
+  const calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw new Error('lost');}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),calls[0][1]);
+  assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
+  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),false);
+  assert.equal(await h.api.run('signin-retry'),false);assert.equal(calls.length,1,'no second begin of any kind');
+  h.api.dispose();
+});
+test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{
+  const calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);return {...body,state:'starting',reason:null};}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,state:'cancelled',reason:'effect_uncertain',retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
+  assert.equal(visible(retry),true);assert.deepEqual(calls,[]);
+  retry.click();await flush();
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
+  h.api.dispose();
+  for(const ending of [{state:'cancelled',reason:'provider_failed'},{state:'cancelled',reason:null},{state:'needs_attention',reason:'effect_uncertain'},
+      {state:'needs_attention',reason:'provider_failed'}]){
+    const other=setupHarness({client:{async setupSignin(){throw new Error('unused');}}});
+    other.context.provider_signin=true;other.context.signin_attempt={...retryEnded,...ending,retryable:true};
+    assert.equal(await other.api.run('context'),false,JSON.stringify(ending));
+    other.context.signin_attempt={...retryEnded,...ending};
+    assert.equal(await other.api.run('context'),true,'the same ending without retryable is ordinary');
+    assert.equal(await other.api.run('signin-retry'),false);
+    other.api.dispose();
+  }
+});
+test('while this page is hidden, a live sign-in keeps a slow read-only check so its conversation stays open',async()=>{
+  const timers=[];let shown=true,reply;
+  const h=setupHarness({setupOptions:{visible:()=>shown,setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
+    client:{async setupSignin(action,body){return reply(action,body);}}});
+  h.context.provider_signin=true;
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const live=()=>timers.filter(t=>t.live),actions=[];
+  reply=(action,body)=>{actions.push(action);return {...body,state:'waiting',reason:null,url:authorizeURL};};
+  await h.api.run('signin-begin');
+  assert.deepEqual(live().map(t=>t.ms),[2000]);
+  shown=false; // Claude's tab is in front
+  let t=live()[0];t.live=false;t.fn();await flush();
+  assert.deepEqual(live().map(t=>t.ms),[25000],'well inside the 45-second idle bound');
+  t=live()[0];t.live=false;t.fn();await flush();
+  assert.deepEqual(live().map(t=>t.ms),[25000]);
+  shown=true;h.api.resumeHandoff();
+  assert.deepEqual(live().map(t=>t.ms),[2000],'back to the ordinary pace when shown');
+  assert.deepEqual(actions,['begin','status','status'],'only status reads; never a begin, code or cancel');
+  // An ended attempt schedules nothing, hidden or not.
+  shown=false;reply=(action,body)=>{actions.push(action);return {...body,state:'needs_attention',reason:'timeout'};};
+  t=live()[0];t.live=false;t.fn();await flush();
+  assert.equal(live().length,0);
+  h.api.dispose();
+});
+test('the sign-in link shows the host\'s own deadline in local time, as text, with no timer of its own',async()=>{
+  const timers=[];let reply;
+  const h=setupHarness({setupOptions:{setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
+    client:{async setupSignin(_action,body){return reply(body);}}});
+  h.context.provider_signin=true;
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),live=()=>timers.filter(t=>t.live);
+  const local=seconds=>new Date(seconds*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  const ASK='Open Claude sign-in, approve access, then paste the code Claude shows you.';
+  const minute=1800000000-1800000000%60,deadline=minute+59; // 59 seconds into its minute
+  reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL,expires_at:deadline});
+  await h.api.run('signin-begin');
+  assert.equal(status.textContent,`${ASK} Paste the code by ${local(minute)}.`,'the minute it falls in, never rounded up');
+  assert.match(local(minute),/\d:\d\d/);assert.notEqual(status.dataset.tone,'attention');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Open Claude sign-in']);
+  assert.equal(live().length,1,'only the ordinary status check is scheduled');
+  // Each answer replaces it: a link without expires_at shows no time, a later one shows the host's.
+  reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL});
+  let t=live()[0];t.live=false;t.fn();await flush();
+  assert.equal(status.textContent,ASK);
+  reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL,expires_at:minute+120});
+  t=live()[0];t.live=false;t.fn();await flush();
+  assert.equal(status.textContent,`${ASK} Paste the code by ${local(minute+120)}.`);
+  reply=body=>({...body,state:'needs_attention',reason:'timeout'});
+  t=live()[0];t.live=false;t.fn();await flush();
+  assert.equal(status.textContent.includes('Paste the code by'),false,'an ended attempt shows no deadline');
+  h.api.dispose();
+  // expires_at is refused away from a link and in any shape but whole positive seconds.
+  for(const bad of [{state:'starting',reason:null,expires_at:deadline},{state:'waiting',reason:null,url:authorizeURL,expires_at:deadline+0.5},
+      {state:'waiting',reason:null,url:authorizeURL,expires_at:String(deadline)},{state:'waiting',reason:null,url:authorizeURL,expires_at:0},
+      {state:'waiting',reason:null,url:authorizeURL,expires_at:null}]){
+    const other=setupHarness({client:{async setupSignin(_action,body){return {...body,...bad};}}});
+    other.context.provider_signin=true;
+    const page=dom(),root=new page.Element();other.api.mountPanel({document:page.document,element:root});
+    await other.api.run('context');await other.api.run('signin-begin');
+    const line=stepPart(root,'signin','setup-signin-status').textContent;
+    assert.equal(line.includes('Paste the code by')||line===ASK,false,JSON.stringify(bad));
+    other.api.dispose();
+  }
 });
 test('a refused code keeps the waiting attempt, its link and its automatic checks',async()=>{
   const p=pollHarness(['waiting',refusal(),'waiting','waiting']);

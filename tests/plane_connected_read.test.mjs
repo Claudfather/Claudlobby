@@ -804,7 +804,8 @@ test('setup-only sessions hold lifecycle renewal the same way', async () => {
 test('an unknown begin result keeps the hold; only a completed refusal, disconnect or disposal ends it', async () => {
   const h = signinHarness(); await h.api.connect();
   h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
-  await assert.rejects(h.api.setupSignin('begin', attemptInput));
+  await assert.rejects(h.api.setupSignin('begin', attemptInput), error => error.code !== 'signin_not_started',
+    'a sent begin is never reported as not started');
   assert.equal(signinCalls(h, 'begin').length, 1);
   assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'a lost answer proves no cleanup');
   assert.equal(signinCalls(h, 'begin').length, 1, 'nothing replays or begins again');
@@ -831,7 +832,8 @@ test('begin renews first only when the session cannot cover the bounded attempt,
   const failed = signinHarness(); await failed.api.connect();
   failed.overrides.set('renew', () => { throw new Error('lost renewal'); });
   failed.time = 600000;
-  await assert.rejects(failed.api.setupSignin('begin', attemptInput), /not started/);
+  await assert.rejects(failed.api.setupSignin('begin', attemptInput),
+    error => /not started/.test(error.message) && error.code === 'signin_not_started');
   assert.equal(signinCalls(failed, 'begin').length, 0, 'no begin without a confirmed renewal');
   failed.api.dispose();
 });

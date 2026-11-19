@@ -584,12 +584,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch { stop('Connection outcome unknown. Check again explicitly.'); return false; }
     finally { busy = false; }
   }
+  // A begin refused before anything was sent: the caller may keep following the attempt it had.
+  const notStarted = message => Object.assign(new Error(message), {code: 'signin_not_started'});
   async function signinBegin(input) {
-    if (signinHeld() || disposed || ended) throw new Error('A Claude sign-in is already open.');
+    if (signinHeld() || disposed || ended) throw notStarted('A Claude sign-in is already open.');
     signinAdmitting = true; // from here no renewal path can start
     try {
       if (renewalRun) await renewalRun.catch(() => {});
-      if (!valid(true)) throw new Error('Sign-in was not started. Connect again first.');
+      if (!valid(true)) throw notStarted('Sign-in was not started. Connect again first.');
       if (expires - now() < SIGNIN_LIFETIME) {
         // Not enough session left for the whole attempt: renew once, now, before begin.
         renewalPermit = true; signinRenewing = true;
@@ -597,7 +599,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
         try { renewed = (await renew(true)) === true; }
         catch { renewed = false; } finally { renewalPermit = false; signinRenewing = false; }
         if (!renewed || !valid(true) || expires - now() < SIGNIN_LIFETIME)
-          throw new Error('Sign-in was not started. The session could not be renewed first.');
+          throw notStarted('Sign-in was not started. The session could not be renewed first.');
       }
       signinLive = true; // live from the moment begin is sent; an unknown outcome keeps it held
       const epochAtBegin = epoch;
