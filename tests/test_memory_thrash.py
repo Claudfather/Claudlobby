@@ -321,9 +321,11 @@ def test_status_prints_the_rule_and_the_state(tmp_path):
 
 
 # State files no `check` writes: a hand edit, a disk fault, another version's file.
-# Before #2856, `check` failed on each of the first six with the exception its id
+# Before #2856, `check` failed on each of the first nine with the exception its id
 # names and printed no verdict, every minute until the file changed, so the probe
-# paged nothing. It read the last two as none already, but said nothing.
+# paged nothing. It read the last two as none already, but said nothing. One clause
+# of `_kept` alone refuses each of the three after from-1e300 (the run's count, peak
+# and alerted), so each of those cases fails if its clause is taken out (#3008).
 DAMAGED = [
     pytest.param('{"last": [1]}', id="last-a-list-AttributeError"),
     pytest.param('{"last": {"at": 0.0, "boot": "b1"}}', id="no-out-KeyError"),
@@ -331,6 +333,12 @@ DAMAGED = [
     pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": NaN}}', id="out-NaN-ValueError"),
     pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": 0}, "run": {"from": 1e300, "count": 2,'
                  ' "rates": [500, 500], "peak": 500, "alerted": false}}', id="from-1e300-OverflowError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": 0}, "run": {"from": 0.0, "count": "two",'
+                 ' "rates": [500, 500], "peak": 500, "alerted": false}}', id="count-a-word-TypeError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": 0}, "run": {"from": 0.0, "count": 2,'
+                 ' "rates": [500, 500], "peak": null, "alerted": false}}', id="peak-null-TypeError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": 0}, "run": {"from": 0.0, "count": 2,'
+                 ' "rates": [500, 500], "peak": 500}}', id="no-alerted-KeyError"),
     pytest.param("[" * 5000 + "]" * 5000, id="nested-RecursionError"),
     pytest.param('{"last": ', id="not-json"),
     pytest.param("[1, 2]", id="not-an-object"),
