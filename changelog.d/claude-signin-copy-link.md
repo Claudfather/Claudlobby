@@ -1,3 +1,3 @@
-### Fixed — Claude sign-in gets a Copy link fallback beside "Open Claude sign-in"
+### Fixed — Claude sign-in gets a Copy link fallback beside "Open Claude sign-in" (#3013)
 
 The workspace's Claude sign-in showed only "Open Claude sign-in", a link that opens a new tab. Where a browser blocks pop-ups from the embedded workspace, a newcomer had no way to reach the sign-in page. A small **Copy link** button now sits beside the link and copies the same Claude sign-in address, saying "Link copied. Paste it into a new tab." Where the clipboard is blocked, the address appears in a read-only box, selected, to copy by hand. The link still opens a new tab, and copying never starts, repeats or cancels a sign-in.

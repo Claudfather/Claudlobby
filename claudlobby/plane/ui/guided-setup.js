@@ -24,7 +24,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
   let signinAttempt=null, signinState=null, signinUrl=null, signinNotice='', signinBlocked=false;
-  let signinTimer=null, signinHalted=false, signinCopy=null; // null, 'copied' or 'manual' for the current link
+  let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0; // signinCopy: null, 'copied' or 'manual' for the current link
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
   // conversation, so manual checks beside it stay far inside the 256-call bound.
   const SIGNIN_POLL_MS=2000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
@@ -35,16 +35,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     || !!signinAttempt && signinAttempt.generation===context.generation && signinState==='connected';
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
   function clearSignin(notice) {
-    signinUrl=null; signinCopy=null; if (mount) mount.code.value='';
+    signinUrl=null; signinCopy=null; copySeq++; if (mount) mount.code.value='';
     if (notice) signinNotice=notice;
   }
   // Copy is a fallback beside the new-tab link. Where the clipboard is blocked, show the link to copy by hand.
   async function copySigninLink() {
-    const url=signinUrl; if (!url) return;
+    const url=signinUrl, seq=++copySeq; if (!url) return;
     let copied=true; try { await copyText(url); } catch { copied=false; }
-    if (disposed || url!==signinUrl) return;
+    if (disposed || seq!==copySeq || url!==signinUrl) return; // a later click, a new link or a cleared one wins
     signinCopy=copied ? 'copied' : 'manual'; changed();
-    if (!copied) mount?.signinField.select?.();
+    if (!copied) { mount?.signinField.focus?.(); mount?.signinField.select?.(); }
   }
   function stopSigninPoll() { clearTimeout(signinTimer); signinTimer=null; }
   function scheduleSigninPoll() {
@@ -261,7 +261,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
-    if (url!==signinUrl) signinCopy=null;
+    if (url!==signinUrl) { signinCopy=null; copySeq++; }
     signinState=value.state; signinUrl=url; signinHalted=false;
     signinNotice=value.state==='connected' ? 'Claude connected for this host. This does not start your team.'
       : value.state==='waiting' ? 'Sign in to Claude in the link below. If Claude shows a code, paste it here. Progress is checked automatically.'
