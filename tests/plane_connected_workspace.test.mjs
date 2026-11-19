@@ -48,6 +48,9 @@ function dom({rail=true}={}) {
     remove(){if(this.parentNode)this.parentNode.children=this.parentNode.children.filter(c=>c!==this);this.parentNode=null;this.isConnected=false;}
     replaceChildren(...nodes){for(const c of this.children){c.isConnected=false;c.parentNode=null;}this.children=[];this.append(...nodes);this.textContent='';}
     setAttribute(k,v){this.attributes[k]=v;}
+    get classList(){const names=()=>(this.className||'').split(/\s+/).filter(Boolean);
+      return {contains:name=>names().includes(name),toggle:(name,force=!names().includes(name))=>{
+        this.className=[...names().filter(n=>n!==name),...(force?[name]:[])].join(' ');return force;}};}
     addEventListener(n,fn){this.handlers[n]=fn;}
     focus(){document.activeElement=this;}
     close(){this.closed=true;}
@@ -1637,9 +1640,11 @@ test('without a main area the first-team panel stays in the sidebar card and ope
 test('an account change removes the main-area setup panel with the rest of the private view',async()=>{
   const h=harness({count:1});h.mount();h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
   await h.api.checkAccount();await h.api.act(0,'connect');
-  const rail=h.ui.get('rail-channel');assert.equal(rail.dataset.setupFocus,'only');assert.equal(rail.children.length,1);
+  const rail=h.ui.get('rail-channel'),host=rail.children[0];
+  assert.equal(rail.dataset.setupFocus,'only');assert.equal(rail.children.length,1);assert.equal(host.children.length,1);
   h.metadataStatus=403;await h.api.checkAccount();
-  assert.equal(h.api.snapshot().phase,'denied');assert.equal(rail.children.length,0,'no setup panel is left behind');
+  assert.equal(h.api.snapshot().phase,'denied');assert.equal(host.children.length,0,'no setup panel is left behind');
+  assert.equal(host.hidden,true);assert.equal(rail.children.length,1,'only the emptied host remains');
   assert.equal(rail.dataset.setupFocus,undefined);h.api.dispose();
 });
 

@@ -75,9 +75,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
       mount.element.replaceChildren(); mount.controls = null;
-      mount.setupHost?.replaceChildren(); mount.setupHost?.remove?.();
-      if (mount.setupRail) delete mount.setupRail.dataset.setupFocus;
-      mount.setupHost = mount.setupRail = undefined;
+      mount.setupHost?.replaceChildren(); // render below hides the emptied host and leaves the main area as it was
       mount.document.querySelector('main')?.replaceChildren(mount.element);
       for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
@@ -347,17 +345,6 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     catch { return false; }
     finally { pending.delete(index); if (!disposed) changed(); }
   }
-  // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
-  function setupHost() {
-    if (mount.setupHost !== undefined) return mount.setupHost;
-    const rail = mount.document.getElementById('rail-channel');
-    let host = null;
-    if (rail) {
-      host = mount.document.createElement('section'); host.id = 'setup-focus'; host.className = 'setup-focus'; host.hidden = true;
-      if (typeof rail.prepend === 'function') rail.prepend(host); else rail.append(host);
-    }
-    mount.setupRail = rail || undefined; return mount.setupHost = host;
-  }
   function render() {
     if (!mount) return;
     const {document, element} = mount; element.hidden = false;
@@ -439,7 +426,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const connection = client.connectionState?.() || status.state;
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
-      const focused = phase === 'ready' && status.state === 'setup_only' && !!setupHost();
+      const focused = phase === 'ready' && status.state === 'setup_only' && !!mount.setupHost;
       if (focused !== controls.focused) { (focused ? mount.setupHost : help).append(setupPanel); controls.focused = focused; }
       setupHeading.textContent = focused ? `Finish setting up ${name}` : 'First-team setup';
       goto.hidden = !focused;
@@ -473,7 +460,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
       primary.dataset.operation = primaryOperation; primary.textContent = primaryTitle;
-      primary.className = 'pill connection-primary' + (focused ? ' connection-primary-quiet' : ''); // Go to setup leads instead
+      primary.classList.toggle('connection-primary-quiet', focused); // Go to setup leads instead
       primary.setAttribute('aria-label', primaryTitle + ' ' + new URL(reference.endpoint_origin).hostname);
       const disabled = operation => row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
@@ -496,15 +483,18 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       }
     });
     if (mount.setupHost) {
-      const focusing = controls.rows.some(row => row.focused);
+      const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
       mount.setupHost.hidden = !focusing;
       // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
-      if (focusing) mount.setupRail.dataset.setupFocus = clients.some(({client}) => client.snapshot().state === 'ready') ? 'shared' : 'only';
-      else delete mount.setupRail.dataset.setupFocus;
+      if (focusing) rail.dataset.setupFocus = clients.some(({client}) => client.snapshot().state === 'ready') ? 'shared' : 'only';
+      else delete rail.dataset.setupFocus;
     }
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
-    mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
+    // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
+    const rail = document.getElementById('rail-channel'), setupHost = rail ? document.createElement('section') : null;
+    if (setupHost) { setupHost.id = 'setup-focus'; setupHost.className = 'setup-focus'; setupHost.hidden = true; rail.prepend(setupHost); }
+    mount = {document,element,setupHost,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const tools = document.getElementById('view-nav')?.querySelector?.('details');
     if (tools) {

@@ -632,7 +632,7 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .connection-card { min-width:0; padding:18px; border:1px solid var(--edge); border-radius:10px; background:var(--panel); }
 .connection-name { display:block; overflow-wrap:anywhere; margin-bottom:12px; font-size:13px; }
 .connection-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-.connection-primary.pill { border:1px solid var(--accent); background:var(--accent); color:var(--panel); }
+.connection-primary.pill,.connection-goto.pill { border:1px solid var(--accent); background:var(--accent); color:var(--panel); }
 .connection-actions a,.connection-approval > a { color:var(--accent); font-size:12px; margin-right:8px; }
 .connection-detail { margin:12px 0 0; color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
 .connection-detail:empty { display:none; }
@@ -892,7 +892,6 @@ textarea.setup-input { min-height:96px; resize:vertical; }
 .setup-details p { margin:8px 0 0; line-height:1.55; }
 .setup-details pre { margin:8px 0 0; padding:10px; border-radius:8px; background:var(--bg); font-size:11px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .setup-details pre:empty { display:none; }
-.connection-goto.pill { border:1px solid var(--accent); background:var(--accent); color:var(--panel); }
 .connection-primary.connection-primary-quiet.pill { background:transparent; color:var(--accent); }
 /* In the sidebar card the same panel stays compact. */
 .connection-approval .setup-focus-panel .setup-focus-eyebrow { display:none; }

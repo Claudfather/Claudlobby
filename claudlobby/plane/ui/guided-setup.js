@@ -16,11 +16,12 @@ const continuation = value => value === undefined || typeof value === 'string' &
 const localContinue = value => value.continuation ? `Continue locally: ${value.continuation}.`
   : 'Use this installation’s stable CLI with host update continue.';
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
-// Presentation only: progress text per operation and the step that shows it.
-const PROGRESS = {context:'Checking setup approval…','signin-begin':'Starting Claude sign-in…','signin-status':'Checking sign-in…',
-  'signin-code':'Sending your code…','signin-cancel':'Cancelling sign-in…',preview:'Preparing your team preview…',
-  launch:'Launching your team…',receipt:'Checking launch status…'};
-const stepOf = operation => operation === 'context' ? 'approve' : operation.startsWith('signin-') ? 'signin' : operation === 'preview' ? 'goal' : 'launch';
+// Presentation only: the step that shows each operation's progress, and its text.
+const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin':['signin','Starting Claude sign-in…'],
+  'signin-status':['signin','Checking sign-in…'],'signin-code':['signin','Sending your code…'],'signin-cancel':['signin','Cancelling sign-in…'],
+  preview:['goal','Preparing your team preview…'],launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
+// Skips unchanged writes, so a status region is not re-announced on every two-second check.
+const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
 // One plain sentence for each finite host reason (provider_signin.py); unknown reasons fall back by state.
 const sameFiles = 'Setup files on this computer changed during sign-in.', unreadable = 'Claude replied in a way this computer did not recognize.';
 const SIGNIN_REASONS = {timeout:'The sign-in took too long.', provider_failed:'Claude stopped before sign-in finished.',
@@ -52,10 +53,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false;
   // signinCopy {url,kind,n} is live only while url is the current link; n counts repeats of one result.
   let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0;
-  let busyOperation=null, background=false; // presentation: which explicit operation is in flight
+  let busyOperation=null; // presentation: which explicit operation is in flight
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
-  // this attempt's code was taken; and whether the computer refused (not merely missed) a call.
-  let signinCodeSent=null, signinCodeRefused=false, signinRefused=false;
+  // this attempt's code was taken; and whether the computer refused (not merely missed) a code or the attempt.
+  let signinCodeSent=null, signinRefusal=null; // signinRefusal: null | 'code' | 'attempt'
   const codeSent = () => !!signinAttempt && signinCodeSent===signinAttempt.attempt_id;
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
   // conversation, so manual checks beside it stay far inside the 256-call bound.
@@ -91,7 +92,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (disposed || ticket!==epoch || !signinPolling()) return;
       if (context?.expires_at<=now()) { clearSignin(lostNotice); changed(); return; }
       if (busy) { scheduleSigninPoll(); return; } // never overlaps another call
-      background=true; void run('signin-status'); // its completion schedules the next check
+      void run('signin-status',{quiet:true}); // its completion schedules the next check
     },SIGNIN_POLL_MS);
   }
   const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval again, then check sign-in progress.';
@@ -191,8 +192,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     changed(); scheduleHandoff();
   }
-  async function run(operation) {
-    const quiet = background; background = false; // the automatic poll shows steady text, not a progress flash
+  async function run(operation, {quiet = false} = {}) { // quiet: the automatic poll shows steady text, not a progress flash
     if (disposed || busy || !active()) return false;
     if (operation === 'context') { context = null; launchable = false; }
     const ticket = epoch; busy = true; busyOperation = quiet || !Object.hasOwn(PROGRESS,operation) ? null : operation; changed();
@@ -239,7 +239,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         const result=await client.setupSignin(action,input); input=null;
         if (disposed || ticket!==epoch || !active()) return false;
         signinReceipt(result);
-        if (action==='code') { signinCodeRefused=false; if (signinState==='waiting') signinCodeSent=signinAttempt.attempt_id; }
+        if (action==='code') { signinRefusal=null; if (signinState==='waiting') signinCodeSent=signinAttempt.attempt_id; }
       } else if (operation === 'preview') {
         if (!context || context.launch_reserved || pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= now()) return false;
         const selected = context, authored = goal;
@@ -276,9 +276,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
           const refused=[400,401,403,409].includes(error?.status);
           // A refused code leaves the attempt waiting (the host keeps only a valid code), so its link and checks stay.
-          if (refused && operation==='signin-code') { signinCodeRefused=true; return false; }
+          if (refused && operation==='signin-code') { signinRefusal ??= 'code'; return false; }
           signinHalted=true; // no automatic retry after an error; Check sign-in progress resumes it
-          signinRefused=refused;
+          signinRefusal = refused ? 'attempt' : signinRefusal === 'attempt' ? null : signinRefusal;
           clearSignin(refused ? `This computer refused this browser’s Claude sign-in. ${ONE_ATTEMPT}`
             : 'Could not reach this computer to check sign-in. Choose Check sign-in progress to look again; it never starts a second sign-in.');
           return false;
@@ -307,8 +307,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
-    signinState=value.state; signinReason=value.reason; signinUrl=url; signinHalted=false; signinNotice=''; signinRefused=false;
-    if (value.state!=='waiting') { signinCodeSent=null; signinCodeRefused=false; if (mount) mount.code.value=''; }
+    signinState=value.state; signinReason=value.reason; signinUrl=url; signinHalted=false; signinNotice='';
+    if (signinRefusal==='attempt' || value.state!=='waiting') signinRefusal=null;
+    if (value.state!=='waiting') { signinCodeSent=null; if (mount) mount.code.value=''; }
   }
   function receipt(value) {
     if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
@@ -329,6 +330,21 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : 'Still in progress. Checking status never repeats or resumes setup.';
   }
   const SIGNIN_ENDED = ['connected','needs_attention','cancelled','unknown'];
+  const signinSent = () => signinState === 'waiting' && codeSent();
+  const signinLinkLive = () => signinState === 'waiting' && !!signinUrl && !signinSent();
+  function signinStatusLine() { // [text, tone]
+    if (signinBlocked) return ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention'];
+    if (signinState === 'connected') return ['✓ Claude connected','done'];
+    if (signinNotice) return [signinNotice,'attention'];
+    if (SIGNIN_ENDED.includes(signinState)) return [`${signinOutcome(signinState,signinReason)} ${ONE_ATTEMPT}`,'attention'];
+    if (!signinAttempt) return ['Connect your Claude account so your team can work.',''];
+    if (signinSent()) return ['Code sent, finishing sign-in…',''];
+    if (signinRefusal === 'code' && signinState === 'waiting') return ['The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.','attention'];
+    if (signinLinkLive()) return ['Open Claude sign-in, approve access, then paste the code Claude shows you.',''];
+    if (signinState === 'starting') return ['Starting Claude sign-in…',''];
+    return ['A sign-in was already started in this browser. Check its progress.',''];
+  }
+  let detailsFor = null; // the plan, pending and identifier counts the Details JSON was last built from
   const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Details.';
   function render() {
     if (!mount) return;
@@ -343,79 +359,80 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       goal:pending ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
       launch:pending ? 'current' : 'upcoming'};
     const progress = {approve:'',signin:'',goal:'',launch:''};
-    if (busy && busyOperation) progress[stepOf(busyOperation)] = PROGRESS[busyOperation];
+    if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
     if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = 'This page checks for progress automatically.';
     if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
     let number = 0;
     for (const [name,step] of Object.entries(m.steps)) {
       const state = states[name]; step.root.hidden = state === null;
       if (state === null) continue;
-      step.root.dataset.state = state; step.number.textContent = String(++number);
+      step.root.dataset.state = state; setText(step.number,String(++number));
       if (step.done) step.done.hidden = state !== 'done';
       step.body.hidden = state !== 'current';
-      step.progress.textContent = progress[name];
+      setText(step.progress,progress[name]);
     }
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    m.approveDone.textContent = context ? `✓ Setup approved for team ${context.fleet}` : '';
-    m.approveHint.textContent = context && !approved ? 'Setup approval expired. Check it again to continue.' : '';
+    setText(m.approveDone,context ? `✓ Setup approved for team ${context.fleet}` : '');
+    setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
     m.recheck.hidden = launchable; // re-checking would retire a fresh preview's launch
-    controls.context.className = pending ? 'pill ghost' : 'pill setup-primary'; // a retained launch's status check leads
-    const ended = SIGNIN_ENDED.includes(signinState), sent = signinState === 'waiting' && codeSent();
-    const waitingLink = signinState === 'waiting' && !!signinUrl && !sent, typed = !!m.code.value && !sent;
-    const [text,tone] = signinBlocked ? ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention']
-      : signinState === 'connected' ? ['✓ Claude connected','done']
-      : signinNotice ? [signinNotice,'attention']
-      : ended ? [`${signinOutcome(signinState,signinReason)} ${ONE_ATTEMPT}`,'attention']
-      : !signinAttempt ? ['Connect your Claude account so your team can work.','']
-      : sent ? ['Code sent, finishing sign-in…','']
-      : signinCodeRefused && signinState === 'waiting' ? ['The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.','attention']
-      : waitingLink ? ['Open Claude sign-in, approve access, then paste the code Claude shows you.','']
-      : signinState === 'starting' ? ['Starting Claude sign-in…','']
-      : ['A sign-in was already started in this browser. Check its progress.',''];
+    const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
+    m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
+    const launchShown = !!plan && launchable;
+    // One filled action: the step that can move leads. Preview team, Launch team and Sign in to Claude are filled whenever shown.
+    const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
+      : !approved ? 'context'
+      : states.signin !== 'current' ? null
+      : typed ? 'code' : waitingLink ? 'link'
+      : signinAttempt && !ended && signinRefusal !== 'attempt' && !((signinState === 'starting' || sent) && !signinHalted) ? 'status' : null;
+    const filled = (name, quiet) => lead === name ? 'pill setup-primary' : quiet;
+    const [text,tone] = signinStatusLine();
     m.signinStatus.hidden = !['current','done'].includes(states.signin);
-    m.signinStatus.textContent = text;
+    setText(m.signinStatus,text);
     if (tone) m.signinStatus.dataset.tone = tone; else delete m.signinStatus.dataset.tone;
     const {begin,status:check,code:submit,cancel} = m.signinControls;
     begin.hidden = !!signinAttempt || signinBlocked;
     check.hidden = !signinAttempt || signinState === 'connected';
     cancel.hidden = !signinAttempt || ended;
     m.codeRow.hidden = signinState !== 'waiting';
-    // One filled action at a time: the link, then Submit code once a code is typed, or a status check when nothing else can move.
-    m.signinLink.className = typed ? 'pill ghost' : 'pill setup-primary';
-    submit.className = typed ? 'pill setup-primary' : 'pill ghost';
-    check.className = signinAttempt && !ended && !signinRefused && !waitingLink && !typed && !((signinState === 'starting' || sent) && !signinHalted)
-      ? 'pill setup-primary' : 'setup-text-button';
+    controls.context.className = filled('context','pill ghost');
+    m.signinLink.className = filled('link','pill ghost');
+    submit.className = filled('code','pill ghost');
+    check.className = filled('status','setup-text-button');
+    controls.receipt.className = filled('receipt','setup-text-button');
     m.signinLink.hidden = !waitingLink; if (signinUrl) m.signinLink.setAttribute('href',signinUrl); else m.signinLink.removeAttribute?.('href');
     m.signinCopyButton.hidden = !waitingLink;
     const copy = waitingLink && signinCopy?.url === signinUrl ? signinCopy : null;
     // A repeated result toggles a trailing no-break space so the status region announces it again.
-    m.signinCopyNote.textContent = !copy ? '' : (copy.kind === 'copied' ? 'Link copied. Paste it into a new tab.'
-      : 'Copying is blocked here. Copy the link from the box below.') + (copy.n % 2 ? '' : ' ');
+    setText(m.signinCopyNote,!copy ? '' : (copy.kind === 'copied' ? 'Link copied. Paste it into a new tab.'
+      : 'Copying is blocked here. Copy the link from the box below.') + (copy.n % 2 ? '' : ' '));
     m.signinField.hidden = copy?.kind !== 'manual'; m.signinField.value = m.signinField.hidden ? '' : signinUrl;
     m.code.disabled = !live || signinState !== 'waiting' || sent; // not held while busy, so typing keeps focus during a check
     for (const [operation,button] of Object.entries(m.signinControls)) button.disabled=!live || busy || signinBlocked
       || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
       || operation==='code' && signinState!=='waiting'
       || operation==='code' && sent;
-    m.goalDone.textContent = pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '';
-    m.goalText.textContent = context ? `Team ${context.fleet} works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '';
-    m.goalHint.textContent = goal.trim() ? '' : 'Write a goal to preview your team.';
+    setText(m.goalDone,pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '');
+    setText(m.goalText,context ? `Team ${context.fleet} works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
+    setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
     m.area.disabled = !live || busy || !!pending || legacyBlocked();
-    const launchShown = !!plan && launchable;
     controls.launch.hidden = !launchShown;
-    controls.receipt.className = launchShown ? 'setup-text-button' : 'pill setup-primary';
-    m.summary.textContent = launchShown ? `Team ${plan.fleets[0]} is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
-      : 'Check launch status to see where setup stands. This page never sends a launch twice.';
-    m.launchHint.textContent = plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '';
-    m.status.textContent = [note, legacyBlocked() ? LEGACY : !live ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' ');
-    m.declaration.textContent = context ? context.template === 'local-project'
+    setText(m.summary,launchShown ? `Team ${plan.fleets[0]} is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
+      : 'Check launch status to see where setup stands. This page never sends a launch twice.');
+    setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
+    setText(m.status,[note, legacyBlocked() ? LEGACY : !live ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
+    setText(m.declaration,context ? context.template === 'local-project'
       ? `Team ${context.fleet} for local project ${context.project_directory}. After the team is ready and messages are locally approved, tell the lead what to do. The lead records the task and coordinates implementation and independent review.`
-      : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '';
-    m.authority.textContent = context ? `Local approval covers ${context.template === 'local-project' ? `read/write access to local project ${context.project_directory}` : context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '';
-    m.details.textContent = plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
-      historical_identifiers:legacy,...(plan ? {changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at} : {})},null,2) : '';
+      : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '');
+    setText(m.authority,context ? `Local approval covers ${context.template === 'local-project' ? `read/write access to local project ${context.project_directory}` : context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '');
+    // conflicts and legacy only grow (retain), so their lengths track every change.
+    const detailsKey = [plan, pending, conflicts.length, legacy.length];
+    if (!detailsFor || detailsKey.some((value,index) => value !== detailsFor[index])) {
+      detailsFor = detailsKey;
+      setText(m.details,plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
+        historical_identifiers:legacy,...(plan ? {changes:plan.changes,effects:plan.effects,expires_at:plan.expires_at} : {})},null,2) : '');
+    }
     m.disclosure.hidden = !context && !m.details.textContent;
     for (const [operation,button] of Object.entries(controls)) button.disabled = !live || busy
       || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= time)
@@ -456,7 +473,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const signinField = make('input','signin-link-field'); signinField.type = 'text'; signinField.readOnly = true; signinField.setAttribute('aria-label','Claude sign-in link');
     const code = make('input','setup-input'); code.type = 'password'; code.maxLength = 2305; code.dataset.field = 'signin-code';
     for (const [name,value] of [['autocomplete','off'],['autocapitalize','off'],['spellcheck','false']]) code.setAttribute(name,value);
-    code.addEventListener('input',() => render()); // emphasis only; the code is read solely by Submit code
+    // Emphasis only (the code is read solely by Submit code): repaint when the field turns empty or non-empty.
+    code.addEventListener('input',() => { if (!!code.value !== mount.codeHad) render(); });
     const codeLabel = make('label','setup-field'), submit = action('Submit code','pill ghost','signin-code'), codeRow = make('div','setup-code');
     codeLabel.append(make('span','setup-field-label','Code from Claude'),code); codeRow.append(codeLabel,submit);
     const check = action('Check sign-in progress','setup-text-button','signin-status'), cancel = action('Cancel sign-in','setup-text-button','signin-cancel');
@@ -477,7 +495,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     mount = {root:element,status,steps,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,launch,receipt:receiptButton}};
-    render();
+    detailsFor = null; render();
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
