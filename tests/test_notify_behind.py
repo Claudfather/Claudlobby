@@ -80,6 +80,19 @@ CONFLICT = {"code": "conflict", "hint": None, "retryable": False,
             "message": "committed Git configuration drift is unavailable"}
 
 
+# A stand-in for timeout(1) (#2907). lib-common's with_timeout resolves `timeout` from PATH when it
+# is sourced, so a directory holding this first on PATH is what the script runs its reads under. It
+# records the bound it was asked for (TIMEOUT_ASKED), answers the revision read as timeout(1) does
+# once its bound has passed (exit 124) without waiting for it, and runs every other command as asked.
+TIMEOUT_STAND_IN = (
+    "#!/bin/bash\n"
+    "bound=$1; shift\n"
+    'printf "%s %s\\n" "$bound" "$*" >> "$TIMEOUT_ASKED"\n'
+    'case "$*" in *" --json config diff") exit 124 ;; esac\n'
+    'exec "$@"\n'
+)
+
+
 def _envelope(*, revision=None, error=None):
     """The one-line JSON envelope `claudlobby --json config diff` prints."""
     data = {"bot": None, "changes": [], "fleet": None, "mode": "current"}
@@ -298,6 +311,50 @@ class TestNotifyBehind:
         lines = h.captured()
         assert len(lines) == 1
         assert "3 commit" in lines[0]
+
+
+class TestASiblingCheckout:
+    """#2907: a sibling framework checkout runs from its own checkout, so its
+    source_behind notice names the pull that moves it, `git -C <repo> pull
+    --ff-only`. The data root's notice names the update of what runs instead (#2886,
+    TestCountsFromTheRunningRevision). The sibling here is a second checkout of the
+    same org that Python lists as an editable install: the org match, the
+    top-level resolution and the notice are the real code."""
+
+    def _sibling(self, h, tmp_path, monkeypatch, *, behind):
+        forge = "https://github.com/testorg"
+        # The org is read from each checkout's raw origin URL (repo_remote_org), so both
+        # remotes carry a forge-shaped URL and insteadOf keeps the fetch local.
+        _git(h.root, "config", "remote.origin.url", f"{forge}/claudlobby.git")
+        _git(h.root, "config", f"url.{h.origin}.insteadOf", f"{forge}/claudlobby.git")
+        origin = tmp_path / "sibling-origin"
+        origin.mkdir()
+        _git(origin, "init", "-b", "main")
+        _commit(origin, "seed")
+        sibling = tmp_path / "sibling"
+        subprocess.run(GIT + ["clone", str(origin), str(sibling)], check=True, capture_output=True)
+        _git(sibling, "config", "remote.origin.url", f"{forge}/sibling.git")
+        _git(sibling, "config", f"url.{origin}.insteadOf", f"{forge}/sibling.git")
+        for i in range(behind):
+            _commit(origin, f"sibling-ahead-{i}")
+        dist = tmp_path / "site" / "sibling-0.0.0.dist-info"
+        dist.mkdir(parents=True)
+        (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: sibling\nVersion: 0.0.0\n")
+        (dist / "direct_url.json").write_text(
+            json.dumps({"url": f"file://{sibling}", "dir_info": {"editable": True}}))
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+            [str(tmp_path / "site"), *filter(None, [os.environ.get("PYTHONPATH")])]))
+        return sibling
+
+    def test_a_stale_sibling_is_told_to_pull_itself(self, tmp_path, monkeypatch, *, scratch_plane_env):
+        h = Harness(tmp_path, behind=0, scratch_plane_env=scratch_plane_env)
+        sibling = self._sibling(h, tmp_path, monkeypatch, behind=2)
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        (msg,) = h.messages()  # the root is in sync, so the one notice is the sibling's
+        assert "FLEET NOTICE [source_behind]:" in msg and "sibling on " in msg, msg
+        assert (f"is 2 commit(s) behind origin/main — apply with: git -C {os.path.realpath(sibling)} "
+                "pull --ff-only") in msg, msg
 
 
 class TestTgPostStateDirResolution:
@@ -717,6 +774,28 @@ class TestCountsFromTheRunningRevision:
         if serve:
             events = h.events()
             assert '"type":"source_unknown"' in events and "source_behind" not in events
+
+    def test_a_revision_read_that_does_not_answer_in_time_is_said_with_its_bound(
+            self, tmp_path, monkeypatch, *, scratch_plane_env):
+        # #2907: the read runs under `with_timeout 120`, and the notice names that bound. Waiting
+        # 120 s is not the test: TIMEOUT_STAND_IN is first on PATH, records the bound the script
+        # asked for and answers the read as timeout(1) does once its bound has passed, exit 124.
+        h = Harness(tmp_path, behind=2, scratch_plane_env=scratch_plane_env)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        _write_exec(str(bindir / "timeout"), TIMEOUT_STAND_IN)
+        asked = tmp_path / "timeout-asked"
+        monkeypatch.setenv("PATH", os.pathsep.join([str(bindir), os.environ["PATH"]]))
+        monkeypatch.setenv("TIMEOUT_ASKED", str(asked))
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        lines = asked.read_text().splitlines() if asked.exists() else []
+        assert [line.split(" ", 1)[0] for line in lines if line.endswith(" --json config diff")] == ["120"], lines
+        (msg,) = h.messages()
+        assert "FLEET NOTICE [source_unknown]:" in msg, msg
+        assert "cannot be read (claudlobby config diff did not answer within 120 s)" in msg, msg
+        assert f"not counted — inspect claudlobby --root {os.path.realpath(h.root)} host update status" in msg, msg
+        assert "commit(s) behind" not in msg and "2 commit" not in msg, msg
 
     def test_a_revision_read_again_clears_source_unknown(self, tmp_path, *, scratch_plane_env):
         # #2384: the clear of source_unknown, pinned. Left in place, its marker
