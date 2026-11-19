@@ -243,8 +243,9 @@ never automatically remints or retries. Provider acceptance and native backgroun
 readiness still require an authorized real trial; synthetic tests are not those
 observations.
 
-Two endings can be retried from the browser, and only before the code reached the
-Claude CLI: an attempt that timed out (after five minutes), and one that was
+Two endings can be retried from the browser, only before the code reached the
+Claude CLI and while the setup approval has at least 50 seconds left: an attempt
+that timed out (after five minutes), and one that was
 cancelled (**Cancel sign-in**, or a lost connection that closed the sign-in). The
 host records that a code was delivered before it types the code, so a restart
 cannot make a later ending look retryable. The panel then says **The sign-in took
@@ -253,8 +254,11 @@ Try again for a new sign-in link.** **Try again** starts a new attempt, with a n
 attempt ID and a new sign-in link, under the same approval, and only when you
 choose it. The old link and its code stop working. A new attempt still refuses a
 saved credential, and one approval allows at most three attempts. If the computer
-refuses Try again, it could not be sent, or its answer was lost before the computer
-started it, the page keeps following the ended attempt, also after a reload. Every
+refuses Try again or it could not be sent, the page keeps following the ended
+attempt, also after a reload. If its answer was lost, the computer may still start
+it, so the page follows whichever of the two attempts the computer names next, also
+after a reload. With less approval left the page says **Setup approval expired.** or
+**Setup approval ends too soon for a new sign-in.** instead of offering Try again. Every
 other ending, including a timeout or cancel after the code was sent
 and an interrupted attempt, keeps the single attempt: recover setup on the computer.
 While the Claude tab is in front, the setup page keeps checking every 25 seconds so

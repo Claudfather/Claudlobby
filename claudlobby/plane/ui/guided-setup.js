@@ -48,6 +48,8 @@ const RETRY = 'Choose Try again for a new sign-in link.';
 // Exactly the host's RETRYABLE endings (provider_signin.py); the host also requires that no code was sent.
 const retryableEnding = (state, reason) => state === 'needs_attention' && reason === 'timeout'
   || state === 'cancelled' && reason === 'effect_uncertain';
+// The host's CODE_MARGIN + MIN_CODE_WINDOW (provider_signin.py): with less approval left it starts no new sign-in.
+const SIGNIN_APPROVAL_ROOM = 50;
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
@@ -59,9 +61,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // signinRetryable: the host's latest answer for this attempt said it would admit a new attempt ID.
   // signinDeadline: the host's expires_at beside the current link (whole host-clock seconds), else null.
   // signinRetryFrom: while a Try again is in flight, the ended attempt it replaces, restored if nothing was admitted.
-  // signinPredecessor: the ID a Try again replaced, kept (also in storage) until a host answer settles which is current.
+  // While a Try again is unsettled, the other ID is kept (also in storage) until the host names the new one:
+  // signinPredecessor, the ended ID it replaces (this browser follows the new one); signinSuccessor, the
+  // unanswered new ID this browser set aside after the host named the ended one. At most one is set.
   let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false, signinRetryable=false;
-  let signinDeadline=null, signinRetryFrom=null, signinPredecessor=null;
+  let signinDeadline=null, signinRetryFrom=null, signinPredecessor=null, signinSuccessor=null;
+  const signinRecord = () => ({...signinAttempt,...(signinPredecessor ? {replaces:signinPredecessor} : {}),
+    ...(signinSuccessor ? {replaced_by:signinSuccessor} : {})});
   // signinCopy {url,kind,n} is live only while url is the current link; n counts repeats of one result.
   let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0;
   let busyOperation=null; // presentation: which explicit operation is in flight
@@ -163,10 +169,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     try {
     const text=storage?.getItem(storageKey+':claude');
     if (text) {
-      const value=JSON.parse(text); // replaces: the ended attempt an unanswered Try again was replacing
-      if (!keys(value,['generation','attempt_id',...('replaces' in value ? ['replaces'] : [])]) || !uuid(value.generation) || !uuid(value.attempt_id)
-          || 'replaces' in value && (!uuid(value.replaces) || value.replaces===value.attempt_id)) throw new Error();
-      signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id}); signinPredecessor=value.replaces ?? null;
+      const value=JSON.parse(text), other='replaces' in value ? 'replaces' : 'replaced_by' in value ? 'replaced_by' : null;
+      if (!keys(value,['generation','attempt_id',...(other ? [other] : [])]) || !uuid(value.generation) || !uuid(value.attempt_id)
+          || other && (!uuid(value[other]) || value[other]===value.attempt_id)) throw new Error();
+      signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
+      signinPredecessor=value.replaces ?? null; signinSuccessor=value.replaced_by ?? null;
     }
     } catch { signinBlocked=true; }
     const text = storage?.getItem(storageKey);
@@ -246,10 +253,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           // Try again is a new attempt ID, sent only from its explicit click; nothing retries automatically.
           if (action==='begin' ? signinAttempt : !signinRetryOffered()) return false;
           signinRetryFrom = action==='retry'
-            ? {attempt:signinAttempt,state:signinState,reason:signinReason,retryable:signinRetryable} : null;
+            ? {attempt:signinAttempt,state:signinState,reason:signinReason,retryable:signinRetryable,successor:signinSuccessor} : null;
           const value={generation:context.generation,attempt_id:globalThis.crypto.randomUUID()};
-          // A Try again keeps the ID it replaces beside it, so any later page load can tell which one is current.
-          signinPredecessor = action==='retry' ? signinAttempt.attempt_id : null;
+          // A Try again keeps the ID it replaces beside it, so any later page load can tell which one is current;
+          // any ID set aside by an earlier unsettled Try again is dropped (restored if this one is undone).
+          signinPredecessor = action==='retry' ? signinAttempt.attempt_id : null; signinSuccessor=null;
           storage.setItem(storageKey+':claude',JSON.stringify(signinPredecessor ? {...value,replaces:signinPredecessor} : value));
           signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
           if (action==='retry') { // nothing of the ended attempt carries over to the new one
@@ -309,6 +317,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           // A refused code leaves the attempt waiting (the host keeps only a valid code), so its link and checks stay.
           if (refused && operation==='signin-code') { signinRefusal ??= 'code'; return false; }
           if (restored) { clearSignin(restored); return false; }
+          // An unsettled Try again: the host may have moved to the other ID. One context read (never a begin)
+          // lets this browser follow whichever attempt the host now names.
+          if (refused && operation==='signin-status' && (signinPredecessor || signinSuccessor)) {
+            signinHalted=true; queueMicrotask(() => { if (!disposed && ticket===epoch) void run('context'); });
+            return false;
+          }
           signinHalted=true; // no automatic retry after an error; Check sign-in progress resumes it
           signinRetryable=false; // only a later host answer can offer Try again again
           signinRefusal = refused ? 'attempt' : signinRefusal === 'attempt' ? null : signinRefusal;
@@ -329,16 +343,18 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   function restoreRetry(error) {
     const from=signinRetryFrom, refused=[400,401,403,409].includes(error?.status); signinRetryFrom=null;
     if (disposed || !from || !refused && error?.code!=='signin_not_started') return '';
-    signinAttempt=from.attempt; signinPredecessor=null; signinState=from.state; signinReason=from.reason;
+    signinAttempt=from.attempt; signinPredecessor=null; signinSuccessor=from.successor; signinState=from.state; signinReason=from.reason;
     signinRetryable=!refused && from.retryable; // after a refusal only the host's next answer offers it again
-    try { storage.setItem(storageKey+':claude',JSON.stringify(from.attempt)); } catch { signinBlocked=true; }
+    try { storage.setItem(storageKey+':claude',JSON.stringify(signinRecord())); } catch { signinBlocked=true; }
     return refused ? 'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.'
       : error.message; // the client's own text for a begin it never sent
   }
   function signinReceipt(value) {
-    // The host names a Try again's predecessor only while it is still current, and admitting the new ID retires it
-    // for good: so the new ID was never admitted (its answer was lost), and this browser follows the predecessor.
-    const follows = !!signinAttempt && !!signinPredecessor && value?.attempt_id===signinPredecessor && value.generation===signinAttempt.generation;
+    // While a Try again is unsettled the host may name either ID. Naming the ended one means the new one is not
+    // admitted yet (a begin may still be committing); admitting it retires the ended one for good. Either is safe to
+    // follow, and only an answer naming the new ID settles which is current.
+    const other = signinPredecessor ?? signinSuccessor;
+    const follows = !!signinAttempt && !!other && value?.attempt_id===other && value.generation===signinAttempt.generation;
     if (!context || !keys(value,['attempt_id','generation','state','reason',...['url','expires_at','retryable'].filter(key => key in value)])
         || !uuid(value.attempt_id) || value.generation!==context.generation
         || signinAttempt && !follows && (value.attempt_id!==signinAttempt.attempt_id || value.generation!==signinAttempt.generation)
@@ -356,8 +372,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           || selected.searchParams.get('scope')!=='user:inference' || value.url.length>8192) throw new Error();
       url=value.url;
     }
-    signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id}); signinPredecessor=null;
-    storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
+    if (follows && signinPredecessor) { signinSuccessor=signinAttempt.attempt_id; signinPredecessor=null; } // set the new ID aside
+    else if (follows) signinSuccessor=null; // the host named the new ID: settled
+    else signinPredecessor=null; // an answer for the ID held: settled if it was the new one; an ended one keeps its successor
+    signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
+    storage.setItem(storageKey+':claude',JSON.stringify(signinRecord()));
     signinState=value.state; signinReason=value.reason; signinUrl=url; signinHalted=false; signinNotice='';
     signinRetryable=value.retryable===true; signinDeadline=url!==null && value.expires_at!==undefined ? value.expires_at : null;
     if (signinRefusal==='attempt' || value.state!=='waiting') signinRefusal=null;
@@ -393,7 +412,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (signinNotice) return [signinNotice,'attention'];
     if (SIGNIN_ENDED.includes(signinState)) {
       const retry = signinRetryOffered(); // a replaceable cancel stopped before any code reached Claude
-      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : NO_RETRY}`,'attention'];
+      // Too little approval left for the host to start another sign-in; a new approval keeps this retained attempt.
+      const ending = !retry && retryableEnding(signinState,signinReason) && !!context && context.expires_at-now() < SIGNIN_APPROVAL_ROOM;
+      const why = !ending ? '' : context.expires_at <= now() ? 'Setup approval expired. ' : 'Setup approval ends too soon for a new sign-in. ';
+      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
     }
     if (!signinAttempt) return ['Connect your Claude account so your team can work.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',''];

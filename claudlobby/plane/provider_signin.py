@@ -469,6 +469,10 @@ class ProviderSignin:
         """The record's half of a retry: a RETRYABLE ending, no code delivered, attempts left."""
         return (row['state'],row['reason']) in RETRYABLE and row['code_delivered'] == 0 and attempts < MAX_ATTEMPTS
 
+    def _room(self, grant):
+        """Does the approval leave a useful code window for a new attempt? Begin and status share it."""
+        return grant.expires_at-self.store.access._now() >= CODE_MARGIN+MIN_CODE_WINDOW
+
     def _settled(self, attempt):
         """Under the lock, for a row read as terminal: has this process's worker returned?
 
@@ -518,7 +522,7 @@ class ProviderSignin:
                                 or conn.execute("SELECT 1 FROM setup_provider WHERE attempt_id=?", (attempt,)).fetchone()):
                             raise AccessDenied("signin_original_attempt_required")
                         if self._closed: raise AccessUnavailable()
-                    if grant.expires_at-self.store.access._now() < CODE_MARGIN+MIN_CODE_WINDOW:
+                    if not self._room(grant):
                         raise AccessDenied("signin_approval_ending")  # refused before anything is staged
                     check_scope(grant.provider_signin,self.store.access.root)
                     environment_ready(self.store.access.root)  # A saved credential still refuses any attempt.
@@ -551,7 +555,8 @@ class ProviderSignin:
                 # The deadline the worker enforces, so the browser shows the host's own time.
                 if self._expires_at is not None: result["expires_at"] = self._expires_at
             # Present only when begin would now admit a new attempt ID; begin re-checks it all.
-            if self._retryable(row,self._current(conn)[1]) and self._settled(attempt): result["retryable"] = True
+            if self._retryable(row,self._current(conn)[1]) and self._room(grant) and self._settled(attempt):
+                result["retryable"] = True
             return result
 
     def code(self, reader, grant, attempt, code):

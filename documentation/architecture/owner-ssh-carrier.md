@@ -233,14 +233,21 @@ code is never cut off mid-exchange by the timeout. An attempt with no code taken
 that moment ends there as `needs_attention`/`timeout`, so Try again is offered at
 once rather than after a link nobody can use. A begin is refused
 (`signin_approval_ending`) before anything is staged when the approval has less than
-50 seconds left (the 20-second margin plus a 30-second code window). The panel
-shows `expires_at` in local time as **Paste the code by …**; it is text only and
-starts no timer. A Try again keeps the ID it replaces beside the new one in
-storage until a host answer settles which is current. A refused or never-sent Try
-again restores the ended attempt at once, in memory and in storage, even if the
+50 seconds left (the 20-second margin plus a 30-second code window), and
+`retryable` is reported only under the same check, so the panel never offers a Try
+again that begin would refuse; it says instead that the approval expired or ends
+too soon. The panel shows `expires_at` in local time as **Paste the code by …**; it
+is text only and starts no timer. A Try again keeps the ID it replaces beside the
+new one in storage until a host answer names the new one. A refused or never-sent
+Try again restores the ended attempt at once, in memory and in storage, even if the
 connection changed meanwhile. After a lost answer, a context that still names the
-replaced attempt proves the new ID was never admitted (admitting it retires the old
-one for good), so the panel follows the old one again. The link and code are cleared
+replaced attempt shows only that the new ID is not admitted yet: its begin can
+still commit after the browser stopped waiting. The panel then follows the ended
+attempt and keeps the new ID beside it as its accepted alternate, and follows the
+new one once an answer names it (admitting it retires the ended one for good). Only
+an answer naming the new ID, or another Try again, drops the alternate; any third ID
+is refused. While a Try again is unsettled, a refused status check reads the
+context once instead of reporting the refusal. The link and code are cleared
 when it is lost. Preview and Launch stay
 unavailable in the panel while that sign-in is open; the canonical policy and the
 drain remain the authority.
