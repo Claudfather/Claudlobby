@@ -1588,13 +1588,15 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   const gate=deferred();answer=()=>gate.promise;
   retry.click();await flush();
   assert.equal(calls.length,1);assert.equal(calls[0][0],'begin','Try again uses the host begin door');
-  const fresh=JSON.parse(h.saved.get('test:claude'));
+  const {replaces,...fresh}=JSON.parse(h.saved.get('test:claude'));
+  assert.equal(replaces,retryEnded.attempt_id,'the ID it replaces is kept beside it until the host answers');
   assert.deepEqual(calls[0][1],fresh,'the new attempt is retained before its one begin');
   assert.notEqual(fresh.attempt_id,retryEnded.attempt_id);assert.equal(fresh.generation,retryEnded.generation);
   assert.equal(stepPart(panel,'signin','setup-progress').textContent,'Starting a new Claude sign-in…');
   assert.equal(retry.disabled,true,'held while it starts');retry.click();await flush();
   assert.equal(calls.length,1,'a second click while it starts sends nothing');
   gate.resolve({...fresh,state:'starting',reason:null});await flush();
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),fresh,'an answer for the new ID settles it');
   assert.equal(status.textContent,'Starting Claude sign-in…');assert.equal(visible(retry),false);
   // The new attempt is followed like a first one: one poll, for its own ID, to its new link.
   answer=(_action,body)=>({...body,state:'waiting',reason:null,url:authorizeURL});
@@ -1665,17 +1667,144 @@ test(`a Try again that was ${name} keeps following the ended attempt, here and a
   assert.equal(reloaded.snapshot().context.signin_attempt.attempt_id,retryEnded.attempt_id);
   h.api.dispose();reloaded.dispose();
 });
-test('a Try again whose answer was lost keeps its new attempt: the host may have started it',async()=>{
+for(const admitted of [false,true])
+test(`a Try again whose answer was lost follows whichever attempt the host names next (${admitted?'the new one':'the ended one'})`,async()=>{
   const calls=[];
   const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw new Error('lost');}}});
   h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');
+  const retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
   assert.equal(await h.api.run('signin-retry'),false);
-  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),calls[0][1]);
-  assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
-  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),false);
+  const fresh={generation:retryEnded.generation,attempt_id:calls[0][1].attempt_id},original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  assert.notEqual(fresh.attempt_id,original.attempt_id);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{...fresh,replaces:original.attempt_id},'the host may have started it');
+  assert.equal(visible(retry),false);
   assert.equal(await h.api.run('signin-retry'),false);assert.equal(calls.length,1,'no second begin of any kind');
+  // A later page load, then its context: the host names its one current attempt.
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const page=dom(),root=new page.Element();reloaded.mountPanel({document:page.document,element:root});
+  h.context.signin_attempt=admitted ? {...fresh,state:'starting',reason:null} : {...retryEnded,retryable:true};
+  assert.equal(await reloaded.run('context'),true,'never stranded on the unanswered ID');
+  const line=()=>stepPart(root,'signin','setup-signin-status').textContent,again=descendants(root).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  if(admitted){
+    assert.deepEqual(JSON.parse(h.saved.get('test:claude')),fresh,'an answer naming the new ID settles it');
+    assert.equal(line(),'Starting Claude sign-in…');assert.equal(visible(again),false);
+  } else {
+    // Not admitted yet: a begin may still be committing, so the new ID stays acceptable beside the ended one.
+    assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{...original,replaced_by:fresh.attempt_id});
+    assert.equal(line(),'The sign-in took too long. Choose Try again for a new sign-in link.');assert.equal(visible(again),true);
+    // The late begin commits and retires the ended attempt: the next context names the new ID, also after a reload.
+    h.context.signin_attempt={...fresh,state:'waiting',reason:null,url:authorizeURL};
+    const later=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+    const laterPage=dom(),laterRoot=new laterPage.Element();later.mountPanel({document:laterPage.document,element:laterRoot});
+    assert.equal(await later.run('context'),true,'the new ID is followed after a reload');
+    assert.deepEqual(JSON.parse(h.saved.get('test:claude')),fresh);
+    assert.deepEqual(filledIn(stepsOf(laterRoot)[1]),['Open Claude sign-in']);
+    assert.equal(await reloaded.run('context'),true,'and on the page that had followed the ended one');
+    later.dispose();
+  }
+  // A third ID is never accepted, whichever one this browser holds.
+  h.context.signin_attempt={...retryEnded,attempt_id:id(13),retryable:true};
+  assert.equal(await reloaded.run('context'),false,'an ID this browser never started is refused');
+  assert.equal(calls.length,1,'nothing was sent on its own');
+  h.api.dispose();reloaded.dispose();
+});
+test('a status refusal during an unsettled Try again reads the context once and follows the attempt it names',async()=>{
+  const calls=[];let lost=true;
+  const h=setupHarness({client:{async setupSignin(action,body){
+    calls.push([action,body]);
+    if(action==='begin'&&lost)throw new Error('lost');
+    throw Object.assign(new Error('refused'),{status:403}); // the new ID was never admitted
+  }}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  assert.equal(await h.api.run('signin-retry'),false);
+  const contexts=()=>h.calls.filter(c=>c[0]==='context').length,before=contexts();
+  assert.equal(await h.api.run('signin-status'),false);await flush();
+  assert.deepEqual(calls.map(c=>c[0]),['begin','status'],'one check, then no further sign-in call');
+  assert.equal(contexts(),before+1,'one context read in its place');
+  assert.equal(status.textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  assert.equal(visible(retry),true,'never "recover setup on the computer" for an unsettled Try again');
+  h.api.dispose();
+});
+test('stored sign-in records with a malformed or doubled other ID are refused',async()=>{
+  const a=id(12),b=id(13);
+  for(const record of [{generation:id(9),attempt_id:a,replaces:a},{generation:id(9),attempt_id:a,replaced_by:a},
+      {generation:id(9),attempt_id:a,replaces:'not-a-uuid'},{generation:id(9),attempt_id:a,replaced_by:7},
+      {generation:id(9),attempt_id:a,replaces:b,replaced_by:b}]){
+    const saved=new Map([['test:claude',JSON.stringify(record)]]);
+    const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
+    const h=setupHarness();
+    const panel=createGuidedSetup({client:h.client,storage,storageKey:'test',now:()=>1800000000});
+    const ui=dom(),root=new ui.Element();panel.mountPanel({document:ui.document,element:root});
+    h.context.provider_signin=true;await panel.run('context');
+    assert.match(stepPart(root,'signin','setup-signin-status').textContent,/cannot keep track of a Claude sign-in/,JSON.stringify(record));
+    panel.dispose();h.api.dispose();
+  }
+});
+test('an ended attempt the host will not replace because the approval is ending says so',async()=>{
+  const h=setupHarness({client:{async setupSignin(){throw new Error('unused');}}});
+  h.context.provider_signin=true;h.context.expires_at=1800000000+49;h.context.signin_attempt=retryEnded; // no retryable
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  assert.equal(stepPart(panel,'signin','setup-signin-status').textContent,
+    'The sign-in took too long. Setup approval ends too soon for a new sign-in. Trying again needs setup to be recovered on the computer itself.');
+  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),false);
+  h.context.expires_at=1800000000+50;await h.api.run('context');
+  assert.equal(stepPart(panel,'signin','setup-signin-status').textContent,
+    'The sign-in took too long. Trying again needs setup to be recovered on the computer itself.','enough approval: the host\'s own reason applies');
+  h.api.dispose();
+});
+test('a Try again that never left this browser is undone even when the connection changed meanwhile',async()=>{
+  const calls=[];let h;
+  h=setupHarness({client:{async setupSignin(action,body){
+    calls.push([action,body]);
+    h.change({state:'unavailable',epoch:2}); // a failed pre-begin renewal suspends the connection first
+    throw Object.assign(new Error('Sign-in was not started. The session could not be renewed first.'),{code:'signin_not_started'});
+  }}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  assert.equal(await h.api.run('signin-retry'),false);
+  const original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original,'restored although the epoch moved');
+  h.change({state:'setup_only',epoch:3}); // reconnected
+  assert.equal(await h.api.run('context'),true);
+  assert.equal(stepPart(panel,'signin','setup-signin-status').textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),true);
+  assert.equal(calls.length,1);
+  h.api.dispose();
+});
+test('a Try again whose storage write fails sends nothing, stays on the ended attempt, and the next Try again works',async()=>{
+  const calls=[];
+  const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw new Error('lost');}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  const write=h.storage.setItem;let fail=1;
+  h.storage.setItem=(key,value)=>{if(key==='test:claude'&&fail-->0)throw new Error('quota');return write(key,value);};
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.deepEqual(calls,[],'nothing was sent');
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original);
+  assert.equal(status.textContent,'This browser could not save the new sign-in, so nothing was sent. Choose Try again.');
+  assert.equal(visible(retry),true);
+  // The next answer naming the ended attempt keeps a clean record (never {X, replaced_by: X}).
+  assert.equal(await h.api.run('context'),true);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original);
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const page=dom(),root=new page.Element();reloaded.mountPanel({document:page.document,element:root});
+  assert.equal(await reloaded.run('context'),true);
+  assert.equal(stepPart(root,'signin','setup-signin-status').textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  reloaded.dispose();
+  // The next Try again works: one begin with a new ID, stored beside the ended one.
+  assert.equal(await h.api.run('signin-retry'),false);
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,original.attempt_id);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{generation:original.generation,attempt_id:calls[0][1].attempt_id,replaces:original.attempt_id});
   h.api.dispose();
 });
 test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{

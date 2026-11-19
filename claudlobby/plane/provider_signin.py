@@ -64,8 +64,13 @@ MAX_ATTEMPTS = 3
 RETRYABLE = frozenset({("needs_attention", "timeout"), ("cancelled", "effect_uncertain")})
 # A code is taken only while at least this many seconds of the attempt remain, so a
 # late code cannot be cut off mid-exchange by the timeout (a token the provider may
-# have minted but this host never stored); the reported expires_at is that cutoff.
+# have minted but this host never stored); the reported expires_at is that cutoff. An
+# attempt with no code taken by then ends as a timeout at once, so Try again is
+# offered without a dead wait.
 CODE_MARGIN = 20
+# A begin needs at least this long for a code inside the approval's remaining time,
+# or it would only spend an attempt (and its executable copy).
+MIN_CODE_WINDOW = 30
 _LEGACY_COLUMNS = ["attempt_id","generation","state","reason"]
 _COLUMNS = _LEGACY_COLUMNS + ["code_delivered","retired"]
 MAX_OUTPUT = 131072
@@ -464,6 +469,10 @@ class ProviderSignin:
         """The record's half of a retry: a RETRYABLE ending, no code delivered, attempts left."""
         return (row['state'],row['reason']) in RETRYABLE and row['code_delivered'] == 0 and attempts < MAX_ATTEMPTS
 
+    def _room(self, grant):
+        """Does the approval leave a useful code window for a new attempt? Begin and status share it."""
+        return grant.expires_at-self.store.access._now() >= CODE_MARGIN+MIN_CODE_WINDOW
+
     def _settled(self, attempt):
         """Under the lock, for a row read as terminal: has this process's worker returned?
 
@@ -513,6 +522,8 @@ class ProviderSignin:
                                 or conn.execute("SELECT 1 FROM setup_provider WHERE attempt_id=?", (attempt,)).fetchone()):
                             raise AccessDenied("signin_original_attempt_required")
                         if self._closed: raise AccessUnavailable()
+                    if not self._room(grant):
+                        raise AccessDenied("signin_approval_ending")  # refused before anything is staged
                     check_scope(grant.provider_signin,self.store.access.root)
                     environment_ready(self.store.access.root)  # A saved credential still refuses any attempt.
                     if current is not None:
@@ -544,7 +555,8 @@ class ProviderSignin:
                 # The deadline the worker enforces, so the browser shows the host's own time.
                 if self._expires_at is not None: result["expires_at"] = self._expires_at
             # Present only when begin would now admit a new attempt ID; begin re-checks it all.
-            if self._retryable(row,self._current(conn)[1]) and self._settled(attempt): result["retryable"] = True
+            if self._retryable(row,self._current(conn)[1]) and self._room(grant) and self._settled(attempt):
+                result["retryable"] = True
             return result
 
     def code(self, reader, grant, attempt, code):
@@ -634,6 +646,7 @@ class ProviderSignin:
             window=min(SECONDS,grant.expires_at-wall)-CODE_MARGIN
             with self._lock: self._code_until,self._expires_at=begun+window,math.floor(wall+window)
             enter_at=None  # when the Enter after a delivered code is due
+            delivered=False
             while True:
                 if self._cancel.is_set(): state,reason="cancelled","effect_uncertain";break
                 self._admit(reader,grant)  # Revocation/expiry stops the owned attempt, even with no browser polling.
@@ -649,11 +662,16 @@ class ProviderSignin:
                     # select/admission above may have raced cancellation or
                     # revocation. Delivering the code can trigger token minting.
                     if self._cancel.is_set(): state,reason="cancelled","effect_uncertain";break
+                    if not delivered and self._code is None and time.monotonic()>=self._code_until:
+                        # No code can be taken any more and none was delivered: the same clean
+                        # timeout now, rather than a waiting link nobody can use until the deadline.
+                        raise SigninRefused("timeout")
                     if screen.url and not self._url:
                         self._url=screen.url; self._set(grant,attempt,"waiting")
                     if self._code is not None:
                         self._admit(reader,grant)
                         self._mark_delivered(grant,attempt)  # before any code byte reaches the CLI
+                        delivered=True
                         code,self._code=self._code,None
                         os.write(master,code.encode('ascii'))
                         code=None; enter_at=time.monotonic()+ENTER_DELAY
