@@ -152,7 +152,7 @@ def _work_item(**over) -> dict:
 
 def test_a_live_work_item_must_name_its_workstream():
     """#1053: every live task belongs to a workstream. A live work_item with
-    none, or a blank one, is refused, and the refusal names the field."""
+    none, or an empty one, is refused, and the refusal names the field."""
     for payload in (_work_item(workstream_id=None), _work_item(workstream_id="")):
         with pytest.raises(ContractViolation) as refused:
             validate_request(_req("work_item", payload))
@@ -162,6 +162,26 @@ def test_a_live_work_item_must_name_its_workstream():
     assert env.origin == "live" and payload.workstream_id == "ws-test"
 
 
+def test_a_workstream_id_of_only_spaces_is_taken_by_every_family_that_names_one():
+    """#2853: the contract tests that a workstream is named, not how the name is
+    spelled. The live work_item check refuses a missing or empty id, and a string of
+    spaces passes it, as it passes the other families' min_length. Stripping in one
+    place only would make two rules: change every family together, and this test."""
+    from claudlobby.plane.contracts import WORKSTREAM_EVENTS
+
+    spaces = "   "
+    named = {
+        "work_item": _work_item(workstream_id=spaces),
+        "communication": _intent_payload(workstream_id=spaces),
+        "task": {"work_item_id": "wi_" + "0" * 32, "event": "progress", "workstream_id": spaces},
+        "workstream": {"workstream_id": spaces, "title": "t", "opened_by": "bot:example-fleet/alpha"},
+        "workstream_event": {"workstream_id": spaces, "event": WORKSTREAM_EVENTS[0]},
+    }
+    for family, payload in named.items():
+        _, validated = validate_request(_req(family, payload))
+        assert validated.workstream_id == spaces, family
+
+
 def test_a_legacy_work_item_may_name_no_workstream():
     """The rule is for live rows: imported history keeps what it carried."""
     env, payload = validate_request({**_req("work_item", _work_item(workstream_id=None)),
@@ -169,27 +189,60 @@ def test_a_legacy_work_item_may_name_no_workstream():
     assert env.origin == "legacy" and payload.workstream_id is None
 
 
+def _plane_rows(root) -> dict:
+    """What the plane holds in the four tables a task's batch could write to."""
+    from claudlobby.plane.db import connect, db_path
+
+    conn = connect(db_path(root))
+    try:
+        return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("workstreams", "work_items", "events", "ingest_ledger")}
+    finally:
+        conn.close()
+
+
+def _opening() -> dict:
+    return _req("workstream", {"workstream_id": "ws-test", "title": "t",
+                               "opened_by": "bot:example-fleet/alpha"})
+
+
 def test_a_batch_whose_task_names_no_workstream_records_nothing(tmp_path):
     """The door validates every request before its one transaction, so a
     task's batch (its workstream, then the task) whose task names none
-    leaves no row at all, the workstream's included."""
-    from claudlobby.plane.db import connect, db_path
+    leaves no row at all, the workstream's included: none in the workstream
+    and task tables, the event log or the ingest ledger. The same batch with
+    the task naming its workstream writes rows, so the counts can move."""
     from claudlobby.plane.emit_api import emit_batch
     from tests.plane_setup import initialize_plane
 
     initialize_plane(tmp_path)
-    workstream = _req("workstream", {"workstream_id": "ws-test", "title": "t",
-                                     "opened_by": "bot:example-fleet/alpha"})
     with pytest.raises(ContractViolation):
-        emit_batch(tmp_path, [workstream, _req("work_item", _work_item(workstream_id=None))],
+        emit_batch(tmp_path, [_opening(), _req("work_item", _work_item(workstream_id=None))],
                    require_commit=True)
-    conn = connect(db_path(tmp_path))
-    try:
-        counts = [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                  for table in ("workstreams", "work_items")]
-    finally:
-        conn.close()
-    assert counts == [0, 0]
+    assert _plane_rows(tmp_path) == {"workstreams": 0, "work_items": 0, "events": 0, "ingest_ledger": 0}
+    emit_batch(tmp_path, [_opening(), _req("work_item", _work_item())], require_commit=True)
+    written = _plane_rows(tmp_path)
+    assert written["workstreams"] == 1 and written["work_items"] == 1 and written["ingest_ledger"] == 2
+
+
+def test_a_task_naming_no_workstream_is_refused_before_any_access_to_the_plane(tmp_path):
+    """The refusal comes before the door's schema check and before it opens the
+    plane, as an over-cap one does (tests/test_plane_review_fixes.py): with no
+    plane on the root, a batch whose task names no workstream raises the
+    contract's refusal, not the pending-initialization one, and leaves no
+    database file. A valid batch there is refused for the missing plane, so the
+    missing file alone says nothing."""
+    from claudlobby.plane.db import db_path
+    from claudlobby.plane.emit_api import emit_batch
+    from claudlobby.plane.schema_state import PendingMigrationError
+
+    with pytest.raises(PendingMigrationError):
+        emit_batch(tmp_path, [_opening(), _req("work_item", _work_item())], require_commit=True)
+    with pytest.raises(ContractViolation):
+        emit_batch(tmp_path, [_opening(), _req("work_item", _work_item(workstream_id=None))],
+                   require_commit=True)
+    assert not db_path(tmp_path).exists()
+
 
 def test_receiver_acknowledged_is_gone():
     # 22 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B)
