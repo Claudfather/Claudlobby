@@ -240,14 +240,19 @@ Its first step, Connect this computer, mirrors that computer's own Connect or
 Check connection. One click sends one connect. Nothing connects, signs in or
 retries a session mutation automatically, and failures say what to choose next
 in plain sentences. After Connect, the existing steps follow: approve setup,
-sign in to Claude, describe the goal, launch. A clean done receipt marks Launch
-done with "Team launched. Your team is running on this computer." The full
+sign in to Claude, describe the goal, launch. A clean done receipt for the
+current request marks every shown step done, with "Team launched. Your team is
+running on this computer." This holds even after the launch handoff's status
+check moves the connection on and clears the approval context. A request
+rebound later is not shown as launched. Keyboard focus moves on after a panel
+Connect only while the frame has focus and nothing else took it. The full
 workspace is never revealed in this mode. While no panel can show, one status
 line says why: checking, account unavailable, no saved computer, or reopen setup.
 
-After its ready message, the framed document observes `<main>` with
-`ResizeObserver`. It measures the document height at most once per animation
-frame. When the value changes, it posts exactly
+After its ready message, the framed document observes its root element with
+`ResizeObserver`. Browsers deliver at most one notification per rendering
+frame, and each one measures the document height. When the value changes, the
+document posts exactly
 `{type:"claudfather.workspace.size",version:1,height}` to the document's
 `shell_origin`, never `*`. `height` is a whole number of CSS pixels from 1 to
 20000. No other data crosses, and disposal stops observing. The website must

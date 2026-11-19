@@ -77,7 +77,6 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       : phase === 'unavailable' ? 'Your account could not be checked yet. This page tries again shortly.'
       : phase === 'empty' ? 'No computer is saved in your workspace yet.'
       : phase === 'denied' ? 'Your account or saved computers changed. Reopen setup from your workspace.'
-      : phase === 'disposed' ? 'Setup closed.'
       : bridgeSettled ? 'This page could not reach your computer. Reopen setup from your workspace.'
       : 'Opening the connection to your computer…';
   }
@@ -112,7 +111,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
       mount.element.replaceChildren(); mount.controls = null;
-      mount.setupHost?.replaceChildren(); // render below hides the emptied host and leaves the main area as it was
+      // render below hides the emptied host and leaves the main area as it was; a setup-only view keeps its status line
+      mount.setupHost?.replaceChildren(...(mount.setupStatus ? [mount.setupStatus] : []));
       mount.document.querySelector('main')?.replaceChildren(mount.element);
       for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
@@ -542,8 +542,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
       if (mount.setupStatus) {
         // Setup-only view: the host is the whole main area, with a plain line until the panel shows.
-        if (mount.setupStatus.parentNode !== mount.setupHost) mount.setupHost.prepend(mount.setupStatus);
-        mount.setupStatus.hidden = focusing; mount.setupStatus.textContent = focusing ? '' : setupOnlyNote();
+        // Retirement keeps the line in its host; a closed view writes nothing more.
+        if (phase !== 'disposed') {
+          const text = focusing ? '' : setupOnlyNote(); mount.setupStatus.hidden = focusing;
+          if (mount.setupStatus.textContent !== text) mount.setupStatus.textContent = text; // no repeated announcement
+        }
         mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
       } else {
         mount.setupHost.hidden = !focusing;
@@ -625,15 +628,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     return {dispose};
   }
   // Setup-only view: the parent sizes the frame to this content. Only the height crosses, to the exact shell
-  // origin, at most once per animation frame and only when it changed.
+  // origin, and only when it changed. A ResizeObserver on the root element reports at most once per rendering frame.
   function reportSize(document, view) {
-    const root = document.querySelector('main') || document.body, page = document.documentElement || root;
-    if (!root || typeof view.ResizeObserver !== 'function') return;
-    const frame = typeof view.requestAnimationFrame === 'function' ? fn => view.requestAnimationFrame(fn) : fn => setTimeout(fn,16);
-    const cancel = typeof view.cancelAnimationFrame === 'function' ? id => view.cancelAnimationFrame(id) : id => clearTimeout(id);
-    let scheduled = null, posted = null, observer = null;
+    const page = document.documentElement;
+    if (!page || typeof view.ResizeObserver !== 'function') return;
+    let posted = null, observer = null;
     const measure = () => {
-      scheduled = null;
       if (disposed) return;
       let height; try { height = Math.ceil(page.getBoundingClientRect().height); } catch { return; }
       if (!Number.isFinite(height)) return;
@@ -642,12 +642,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       posted = height;
       invoke(() => view.parent.postMessage({type:'claudfather.workspace.size',version:1,height}, doc.shell_origin));
     };
-    try {
-      observer = new view.ResizeObserver(() => { if (scheduled === null && !disposed) scheduled = frame(measure); });
-      observer.observe(root);
-    } catch { observer = null; return; }
+    try { observer = new view.ResizeObserver(measure); observer.observe(page); } catch { observer?.disconnect(); return; }
     const previous = mount.cleanup;
-    mount.cleanup = () => { previous?.(); observer?.disconnect(); if (scheduled !== null) cancel(scheduled); scheduled = null; };
+    mount.cleanup = () => { previous?.(); observer.disconnect(); };
   }
   function dispose() {
     if (disposed) return; disposed = true;

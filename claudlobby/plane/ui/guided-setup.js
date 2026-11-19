@@ -56,8 +56,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let busyOperation=null; // presentation: which explicit operation is in flight
   // Presentation from the entry that owns Connect: {operation:'connect'|'check', disabled, busy:null|operation, hint}.
   // connectFocus follows one panel click ('sent', then 'busy') so keyboard focus lands on the next action.
-  // standalone: the panel is the whole view (no computer card or workspace beside it); launched: a clean done receipt.
-  let onConnect=null, connectView=null, connectFocus=null, standalone=false, launched=false;
+  // standalone: the panel is the whole view (no computer card or workspace beside it).
+  // launchedFor: the binding a clean done receipt was for; a rebound request is not launched.
+  let onConnect=null, connectView=null, connectFocus=null, standalone=false, launchedFor=null;
+  const launched = () => !!launchedFor && !!pending && same(launchedFor,pending);
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
   // this attempt's code was taken; and whether the computer refused (not merely missed) a code or the attempt.
   let signinCodeSent=null, signinRefusal=null; // signinRefusal: null | 'code' | 'attempt'
@@ -324,8 +326,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
-    launched = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
-    note = launched ? standalone ? 'Team launched. Your team is running on this computer.'
+    const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
+    launchedFor = done ? pending : null;
+    note = done ? standalone ? 'Team launched. Your team is running on this computer.'
       : 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
       ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Details.'
@@ -369,7 +372,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const connecting = !!m.steps.connect && !live;
     if (m.steps.connect) states.connect = live ? 'done' : 'current';
     if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
-    if (standalone && launched) states.launch = 'done'; // the whole view ends on a finished step
+    // The whole view ends on finished steps, even after the handoff's status check moved the connection
+    // on and cleared the approval context: nothing is left to approve or check again.
+    const finished = standalone && launched();
+    if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
     const progress = {approve:'',signin:'',goal:'',launch:''};
     progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
     if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
@@ -387,9 +393,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    setText(m.approveDone,context ? `✓ Setup approved for team ${context.fleet}` : '');
+    setText(m.approveDone,context ? `✓ Setup approved for team ${context.fleet}` : finished ? '✓ Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
-    m.recheck.hidden = launchable; // re-checking would retire a fresh preview's launch
+    m.recheck.hidden = launchable || finished; // re-checking would retire a fresh preview's launch
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
@@ -459,12 +465,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       button.disabled = !connectView || !!connectView.disabled || !!connectView.busy;
       setText(hint,connecting && !connectView?.busy ? connectView?.hint || '' : '');
     }
-    if (m.launchDone) setText(m.launchDone,launched ? '✓ Team launched' : '');
-    // After a Connect chosen in this panel, keyboard focus moves on with the steps instead of falling to the page.
+    if (m.launchDone) setText(m.launchDone,finished ? '✓ Team launched' : '');
+    // After a Connect chosen in this panel, keyboard focus moves on with the steps instead of falling to the page,
+    // but only while this document has focus and nothing else took it (focus is on the page or still on Connect).
+    const focusFree = () => { const doc = m.document; if (doc?.hasFocus?.() === false) return false;
+      const current = doc?.activeElement; return !current || current === doc.body || current === m.connect?.button; };
     if (connectFocus && connectView?.busy) connectFocus = 'busy';
-    if (connectFocus && live) { connectFocus = null; controls.context.focus?.(); }
+    if (connectFocus && live) { connectFocus = null; if (focusFree()) controls.context.focus?.(); }
     else if (connectFocus === 'busy' && !connectView?.busy) {
-      connectFocus = null; if (!m.connect.button.disabled) m.connect.button.focus?.();
+      connectFocus = null; if (!m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
     }
   }
   // Numbered steps; only the current step shows its body. Long approval text and identifiers sit under Details.
@@ -537,7 +546,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
     disclosure.append(make('summary','','Details'),declaration,authority,details); element.append(disclosure);
-    mount = {root:element,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
+    mount = {root:element,document,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,launch,receipt:receiptButton}};
     detailsFor = null; render();

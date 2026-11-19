@@ -1904,26 +1904,28 @@ function browserCarrier(h,bound=null) {
     browserOwnerReference:{get:()=>reference},browserOwnerSettled:{value:settled.promise}});
   return {fetch,bind(value){reference=value;settled.resolve();},settle(){settled.resolve();}};
 }
-// The frame's documentElement and window as a browser gives an embedded page; posts and animation frames are recorded.
+// The frame's documentElement and window as a browser gives an embedded page; posts are recorded.
+// resize() delivers one ResizeObserver notification, as a browser does at most once per rendering frame.
 function framedPage(ui) {
   const page={attributes:{},height:640,setAttribute(k,v){this.attributes[k]=String(v);},getAttribute(k){return this.attributes[k]??null;},
     getBoundingClientRect(){return {height:this.height};}};
-  const posts=[],observers=[],frames=new Map();let next=0;
+  const posts=[],observers=[];
   class ResizeObserver {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
-  const view={parent:{postMessage:(...args)=>posts.push(args)},ResizeObserver,
-    requestAnimationFrame:fn=>{frames.set(++next,fn);return next;},cancelAnimationFrame:id=>{frames.delete(id);}};
+  const view={parent:{postMessage:(...args)=>posts.push(args)},ResizeObserver};
   ui.document.documentElement=page;ui.document.defaultView=view;
-  return {page,view,posts,observers,frames,
+  return {page,view,posts,observers,
     sizes:()=>posts.filter(([message])=>message.type==='claudfather.workspace.size'),
-    resize(height){page.height=height;for(const o of observers)if(!o.closed)o.fn([{target:o.targets[0]}],o);},
-    frame(){const run=[...frames.values()];frames.clear();for(const fn of run)fn(0);}};
+    resize(height){page.height=height;for(const o of observers)if(!o.closed)o.fn([{target:o.targets[0]}],o);}};
 }
-function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[]}={}) {
-  const restore=stubLocalStorage(); // the guide keeps its saved setup in localStorage, as in a browser
-  const h=harness({references:landingRefs}),frame=framedPage(h.ui),carrier=browser?browserCarrier(h,bound):null;
+// One localStorage per test, restored once after every landing in it closes (t.after runs first-in, first-out).
+const landingStorage=new WeakMap();
+function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata}={}) {
+  if(!landingStorage.has(t)){const restore=stubLocalStorage();landingStorage.set(t,[]);t.after(()=>{for(const close of landingStorage.get(t))close();restore();});}
+  const h=harness({references}),frame=framedPage(h.ui),carrier=browser?browserCarrier(h,bound):null;
+  if(metadata)h.metadata=metadata;
   if(browser)h.api.dispose();
   const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch}):h.api;
-  t.after(()=>{workspace.dispose();restore();});
+  landingStorage.get(t).push(()=>workspace.dispose()); // the guide keeps its saved setup in localStorage, as in a browser
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session'),onConnectionAttention:event=>attention.push(event)});
   const cards=()=>h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
   const rail=h.ui.get('rail-channel'),host=rail.children[0];
@@ -2085,25 +2087,22 @@ test('setup-only view shows only the bridged computer\'s panel and a plain line 
   assert.equal(l.h.ui.get('main').children.length,1,'only the closing line remains in the main area');
   assertPlain(descendants(l.h.ui.get('main')).map(n=>n.textContent).filter(Boolean));
 });
-test('setup-only view posts its content height to the exact shell origin, once per frame and only when it changes',async t=>{
+test('setup-only view posts its content height to the exact shell origin, once per observation and only when it changes',async t=>{
   const l=landing(t),{frame}=l,ready=[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin];
   assert.deepEqual(frame.posts,[ready],'the ready message comes first; no size before a measurement');
-  assert.equal(frame.observers.length,1);assert.deepEqual(frame.observers[0].targets,[l.h.ui.get('main')],'the observer watches the view root');
+  assert.equal(frame.observers.length,1);assert.deepEqual(frame.observers[0].targets,[frame.page],'the observer watches the root element');
   await l.workspace.checkAccount();await flush();assert.equal(frame.sizes().length,0,'rendering alone posts nothing; the observer reports');
-  frame.resize(812);frame.resize(812.2);frame.resize(900.4);
-  assert.equal(frame.frames.size,1,'changes within one frame share one measurement');assert.equal(frame.sizes().length,0);
-  frame.frame();
+  frame.resize(900.4);
   assert.deepEqual(frame.sizes(),[[{type:'claudfather.workspace.size',version:1,height:901},documentContext.shell_origin]]);
   assert.deepEqual(Object.keys(frame.sizes()[0][0]),['type','version','height'],'exactly these keys');
-  frame.resize(900.1);frame.frame();assert.equal(frame.sizes().length,1,'an unchanged height is not posted again');
-  for(const height of [0,-5,50000,20001,Number.NaN,Infinity,640]){frame.resize(height);frame.frame();}
+  frame.resize(900.1);frame.resize(901);assert.equal(frame.sizes().length,1,'an unchanged height is not posted again');
+  for(const height of [0,-5,50000,20001,Number.NaN,Infinity,640])frame.resize(height);
   assert.deepEqual(frame.sizes().map(([message])=>message.height),[901,1,20000,640],'whole CSS pixels between 1 and 20000');
   assert.ok(frame.sizes().every(([message])=>Number.isInteger(message.height)));
   assert.ok(frame.posts.every(([,origin])=>origin===documentContext.shell_origin),'never a wildcard target');
-  frame.resize(700);assert.equal(frame.frames.size,1);
-  l.workspace.dispose();
-  assert.equal(frame.frames.size,0,'a pending measurement is cancelled');assert.equal(frame.observers[0].closed,true);
-  frame.observers[0].fn([]);frame.frame();assert.equal(frame.sizes().length,4,'nothing is posted after the view closes');
+  l.workspace.dispose();assert.equal(frame.observers[0].closed,true,'disposal stops observing');
+  frame.observers[0].fn([]);frame.page.height=700;frame.observers[0].fn([]);
+  assert.equal(frame.sizes().length,4,'nothing is posted after the view closes');
 });
 test('a framed setup-only view without ResizeObserver still announces ready and posts no size',async t=>{
   const restore=stubLocalStorage(),h=harness({references:landingRefs}),frame=framedPage(h.ui),carrier=browserCarrier(h,landingRefs[0].reference_id);
@@ -2130,4 +2129,77 @@ test('a standalone panel ends on a done Launch step with a plain running line; t
     }
     assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
   }
+});
+test('a standalone managed launch ends on finished steps after its status check moves the connection on',async()=>{
+  for(const standalone of [true,false]){
+    const timers=[];let h=null;
+    h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+      client:{async setupReceipt(input){return {...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}};},
+        // As the connected read client: the same session's status check goes setup_only, checking, then ready.
+        async check(){h.change({state:'checking'});h.change({state:'ready',epoch:2});}}});
+    h.context.managed_owner=true;
+    const ui=dom(),panel=new ui.Element();
+    h.api.mountPanel({document:ui.document,element:panel,...(standalone?{standalone:true,connect:()=>{}}:{})});
+    await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');
+    while(timers.length){await timers.shift()();await flush();}
+    assert.equal(h.client.snapshot().state,'ready','the handoff promoted the connection and cleared the approval context');
+    const shape=stepShape(panel).map(row=>row.slice(0,2)),note=descendants(panel).find(n=>n.className==='setup-note').textContent;
+    const buttons=descendants(panel).filter(n=>n.tagName==='BUTTON'&&visible(n)).map(n=>n.textContent);
+    if(standalone){
+      assert.deepEqual(shape,[['connect','done'],['approve','done'],['goal','done'],['launch','done']]);
+      assert.deepEqual(buttons,[],'nothing is left to approve, check again or launch');
+      assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved'&&visible(n)));
+      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)));
+      assert.equal(note,'Team launched. Your team is running on this computer.');
+    } else {
+      assert.deepEqual(shape[0],['approve','current'],'the shared panel keeps its existing steps');
+      assert.match(note,/^Team launched\. Once its bots show as running/);
+    }
+    assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+  }
+});
+test('a rebound setup request is not shown as launched, so its launch status can be checked',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>{}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');await h.api.run('receipt');
+  assert.equal(stepShape(panel).at(-1)[1],'done');
+  Object.assign(h.context,{request:{...h.pending,request_id:id(11)},launch_reserved:true});
+  assert.equal(await h.api.run('context'),true);
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['goal','done'],['launch','current']]);
+  assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'the new request leads with its status check');
+  assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)),false);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+test('Connect moves keyboard focus on only while this frame has focus and nothing else took it',async t=>{
+  for(const away of ['element','frame']){
+    const l=landing(t);await l.workspace.checkAccount();await flush();
+    l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+    const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON'),heading=panel.children.find(n=>n.tagName==='H2');
+    button.focus();button.click();
+    if(away==='element')heading.focus();else l.h.ui.document.hasFocus=()=>false;
+    await flush();
+    assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
+    assert.equal(l.h.ui.document.activeElement,away==='element'?heading:null,'focus stays where the person left it: '+away);
+  }
+  // A refused Connect does not pull focus back once the person moved on.
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));
+  const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON'),heading=panel.children.find(n=>n.tagName==='H2');
+  button.focus();button.click();heading.focus();await flush();
+  assert.equal(button.disabled,false);assert.equal(l.h.ui.document.activeElement,heading);
+  assert.equal(l.mutations().length,1,'one challenge, no retry');
+});
+test('browser carrier: one saved computer opens its panel; an account listing only the bound computer of several is refused',async t=>{
+  // The document and account both list one computer: the ordinary single-computer setup.
+  const one=landing(t,{references:[landingRefs[0]]});await one.workspace.checkAccount();await flush();
+  assert.equal(one.workspace.snapshot().phase,'ready');
+  assert.equal(one.panel().children.find(n=>n.tagName==='H2').textContent,'Finish setting up a.example.test');
+  assert.deepEqual(stepShape(one.panel())[0].slice(0,2),['connect','current']);assert.deepEqual(one.mutations(),[]);
+  // The document saved three computers but the account lists only the bound one: the saved set changed, so nothing is admitted.
+  const partial=landing(t,{metadata:context([landingRefs[0]])});await partial.workspace.checkAccount();await flush();
+  assert.equal(partial.workspace.snapshot().phase,'denied','the complete saved-reference set is still required');
+  assert.equal(partial.panel(),undefined);assert.deepEqual(partial.mutations(),[]);
+  assert.equal(partial.h.calls.filter(c=>!c.url.startsWith(documentContext.shell_origin)).length,0,'no request reaches any computer');
+  assert.equal(partial.status().textContent,'Your account or saved computers changed. Reopen setup from your workspace.');
+  assert.equal(partial.h.ui.get('main').children.length,1,'only the closing line remains in the main area');
 });
