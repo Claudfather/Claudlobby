@@ -8,9 +8,13 @@ files into CHANGELOG.md. changelog.d/README.md has the format and the cadence.
 check runs in CI (.github/workflows/changelog.yml) at the root of a checkout that
 holds the PR's history, and reads the pull_request event at $GITHUB_EVENT_PATH and,
 with --body, the description as read live (a re-run replays the original event). It
-passes a PR that adds an entry to changelog.d/<head branch, each / as ->.md, or
-whose description has a line "Changelog: none — <why>". It refuses a fragment under
-any other name, an entry heading not of the form ### <Category> — <what changed>,
+reads the PR's changes from where its head meets the live tip of its base branch,
+origin/<base ref>, as the PR's Files changed does. It passes a PR that adds an entry
+to changelog.d/<head branch, each / as ->.md, or whose description has a line
+"Changelog: none — <why>". It also lets a PR carry the fragments of PRs merged into
+it with GitHub's merge commit, each named after its own head branch. It refuses a
+fragment under any other name, an entry heading not of the form ### <Category> —
+<what changed>,
 and a new entry written into CHANGELOG.md itself, unless the PR is a roll-up: one
 that deletes fragments, leaves CHANGELOG.md exactly as assemble makes it from them,
 and changes nothing else.
@@ -44,6 +48,8 @@ VALID_ENTRY = re.compile(r"^### (?:%s) — \S.*$" % "|".join(CATEGORIES))
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 VERSION_HEADING = re.compile(r"^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})$")
 VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]*$")
+# The subject of the commit GitHub's merge button makes; the branch follows the owner.
+MERGED_PR = re.compile(r"^Merge pull request #\d+ from [^/\s]+/(\S+)$")
 # The description is read with the rollout check's list bullets, bold markers and vacuous
 # words (.github/workflows/verify-rollout.yml), so the two checks read one body alike.
 PREFIX = r"^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?\s*"
@@ -182,6 +188,39 @@ def merge_order(repo: Path, rev: str, paths: list[str]) -> list[str]:
     return order
 
 
+def base_tip(repo: Path, base: dict) -> str:
+    """The live tip of the PR's base branch, origin/<ref> as the checkout fetched it: GitHub
+    does not update an open PR's base.sha when its base branch moves. The event's sha only
+    where the checkout has no such ref."""
+    if base.get("ref"):
+        try:
+            return git(repo, "rev-parse", "--verify", "--quiet",
+                       f"refs/remotes/origin/{base['ref']}^{{commit}}").strip()
+        except Refusal:
+            pass
+    return base["sha"]
+
+
+def merged_fragments(repo: Path, since: str, head: str, paths: list[str]) -> set[str]:
+    """Those of the paths that a PR merged into since..head brought as its own fragment: a
+    commit there with the subject GitHub's merge button gives, `Merge pull request #N from
+    <owner>/<branch>`, added the path against its first parent, and the path is that
+    branch's fragment. A squash merge leaves no such commit."""
+    if not paths:
+        return set()
+    found = set()
+    for line in git(repo, "log", "--merges", "--format=%H %s", f"{since}..{head}").splitlines():
+        sha, _, subject = line.partition(" ")
+        match = MERGED_PR.match(subject)
+        path = fragment_path(match.group(1)) if match else None
+        if path in paths and path not in found:
+            added = git(repo, "--literal-pathspecs", "diff", "--name-only", "--no-renames",
+                        "--diff-filter=A", "-z", f"{sha}^1", sha, "--", path)
+            if path in added.split("\0"):
+                found.add(path)
+    return found
+
+
 def _visible_lines(body: str) -> list[str]:
     """The description's lines a reader sees: no code fences, no HTML comments."""
     text = "\n".join(line for _, line in _structure(body)[0] if not FENCE.match(line))
@@ -217,18 +256,22 @@ def check(repo: Path, event: dict, body: str | None = None) -> tuple[list[str], 
     """(problems, what passed) for the pull request of a GitHub pull_request event; body, when
     given, is the description as read live, in place of the event's copy."""
     pr = event["pull_request"]
-    branch, head, base = pr["head"]["ref"], pr["head"]["sha"], pr["base"]["sha"]
-    since = git(repo, "merge-base", base, head).strip()
+    branch, head = pr["head"]["ref"], pr["head"]["sha"]
+    since = git(repo, "merge-base", base_tip(repo, pr["base"]), head).strip()
     fields = git(repo, "diff", "--name-status", "--no-renames", "-z", since, head).split("\0")
     status = dict(zip(fields[1::2], fields[0::2]))
     own = fragment_path(branch)
     fragments = {p: s for p, s in status.items() if p.startswith(FRAGMENTS + "/") and p != README}
-    misnamed = sorted(p for p, s in fragments.items() if s == "A" and p != own)
+    candidates = sorted(p for p, s in fragments.items() if s == "A" and p != own)
+    merged = merged_fragments(repo, since, head, candidates)
+    misnamed = [p for p in candidates if p not in merged]
     problems = [
         f"`{path}` is not this PR's fragment. Name it `{own}`: the head branch, "
         f"`{branch}`, with each `/` as `-`."
         for path in misnamed
     ]
+    for path in sorted(merged):
+        problems += [f"`{path}`: {problem}." for problem in fragment_problems(show(repo, head, path))]
     added = 0
     if status.get(own) in ("A", "M"):
         text = show(repo, head, own)
