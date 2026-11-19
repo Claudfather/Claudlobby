@@ -382,3 +382,50 @@ def test_the_contract_takes_a_wire_proof_on_a_tmux_unknown_fact_and_no_other_unc
             Transmission(carrier=carrier, state=state, **base, **proof)
     with pytest.raises(ValueError, match="together"):
         Transmission(carrier="tmux", state="unknown", **base, wire_sha256=_sha(BODY))
+
+
+# --- #3003: what the join's reading of a typed fact leaves open ---------------
+# A send typed again records another `unknown` fact with its own proof, and the
+# join reads the newest; a `carrier_queued` fact is submission-class, so it
+# makes a send with no receipt read `unconfirmed` and is the only proof read.
+
+def _join(root, tags):
+    conn = connect(str(root / "state" / "plane" / "plane.db"))
+    migrate(conn)
+    conn.row_factory = sqlite3.Row
+    ids = [_mid(t) for t in tags]
+    return {r["msg_id"]: dict(r) for r in conn.execute(
+        q.DELIVERY_STATUS_SQL.format(ph=",".join("?" * len(ids))), ids)}
+
+
+def test_the_newest_of_several_typed_facts_with_a_proof_is_the_one_read(tmp_path):
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    other = BODY[:-1] + "Z"                      # the same length, another hash
+    emit_batch(tmp_path, [
+        # the older fact names other bytes, the newest names what arrived
+        _comm(_mid("a"), BODY), _typed(_mid("a"), other), _typed(_mid("a"), BODY, attempt=2),
+        _received(_mid("a"), BODY),
+        # the older fact names what arrived, the newest does not
+        _comm(_mid("b"), BODY), _typed(_mid("b"), BODY), _typed(_mid("b"), other, attempt=2),
+        _received(_mid("b"), BODY),
+    ])
+    rows = _join(tmp_path, "ab")
+    assert rows[_mid("a")]["delivery"] == "delivered"
+    assert rows[_mid("b")]["delivery"] == "altered"
+
+
+def test_a_carrier_queued_fact_counts_as_submitted_and_is_the_only_proof_read(tmp_path):
+    _full_capture(tmp_path)
+    initialize_plane(tmp_path)
+    queued = _submitted(_mid("d"), None, state="carrier_queued")
+    queued["payload"]["attempt_no"] = 2
+    emit_batch(tmp_path, [
+        # queued and not yet received: submitted, so unconfirmed (an `unknown` fact alone reads NULL)
+        _comm(_mid("c"), BODY), _submitted(_mid("c"), None, state="carrier_queued"),
+        # queued after a typed fact: the typed fact's proof is not read, so the receipt has nothing to compare
+        _comm(_mid("d"), BODY), _typed(_mid("d"), BODY), queued, _received(_mid("d"), BODY),
+    ])
+    rows = _join(tmp_path, "cd")
+    assert rows[_mid("c")]["delivery"] == "unconfirmed"
+    assert rows[_mid("d")]["delivery"] == "unconfirmed"

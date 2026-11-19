@@ -19,10 +19,12 @@ from claudlobby.message_context import MessageRoute
 from claudlobby.message_payload import MessageBody
 from claudlobby.message_transport import TransportDestination, TransportOutcome, send as native_send
 from claudlobby.paths import Paths
+from claudlobby.plane import emit_api
 from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.ids import mint_msg_id, mint_event_id
+from claudlobby.plane.queue_paths import spool_path, staged_dir
 from claudlobby.request_facts import FactProof
 from claudlobby.request_receipts import ReceiptConflict, RequestStore, locked_request
 from claudlobby.report_payload import ReportPayload
@@ -387,7 +389,6 @@ def test_unknown_result_needs_explicit_retry_and_preserves_first_attempt(estate)
     assert saved.message_attempts[1].observation.status == "submitted"
 
 
-
 def test_a_typed_but_unsubmitted_send_keeps_its_wire_proof_and_replays_purely(estate):
     """#3001: native rc 3 (typed into the box, not submitted) stays `unknown`,
     and the transport's wire proof rides that row, so a receipt recorded once
@@ -406,6 +407,40 @@ def test_a_typed_but_unsubmitted_send_keeps_its_wire_proof_and_replays_purely(es
     replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
     assert replay.replayed and replay.delivery == "unknown"
     assert len(calls) == 1 and _counts(conn) == (1, 1)
+
+
+def test_a_typed_send_whose_record_fails_queues_nothing_and_a_replay_records_it(estate, monkeypatch):
+    """#3003. The `unknown` row of a send typed into the box and not submitted
+    carries the transport's wire proof (#3001). The native door records it with
+    `require_commit`, so a record that fails on a storage error writes no spool
+    or staged entry for a receipt check to count as proof pending ingest. The
+    request keeps the attempt, and a replay records the row and sends nothing."""
+    route, package, conn = estate
+    root = route.selected.paths.root
+    request_id, proof, calls = str(uuid4()), "sha256:" + "c" * 64, []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return TransportOutcome("unknown", proof, 77, 3)
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")  # retryable: spooled unless the caller needs the commit
+    record = messages.emit_batch
+    def fail_the_transmission(root_, raw, **kwargs):
+        if raw[0]["event_type"] != "transmission":
+            return record(root_, raw, **kwargs)
+        with monkeypatch.context() as outage:
+            outage.setattr(emit_api, "ingest_many", refuse)
+            return record(root_, raw, **kwargs)
+    monkeypatch.setattr(messages, "emit_batch", fail_the_transmission)
+    first = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert first.delivery == "unknown" and len(calls) == 1 and _counts(conn) == (1, 0)
+    queued = [path for directory in (staged_dir(root), spool_path(root)) if directory.exists()
+              for path in directory.rglob("*") if path.is_file()]
+    assert queued == []
+    monkeypatch.setattr(messages, "emit_batch", record)
+    replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert replay.replayed and len(calls) == 1 and _counts(conn) == (1, 1)
+    assert [tuple(row) for row in conn.execute(
+        "SELECT event, json_extract(detail, '$.wire_sha256') FROM events WHERE kind='transmission'")] == [("unknown", proof)]
 
 
 def test_a_replay_keeps_an_unknown_row_retained_without_its_wire_proof(estate, monkeypatch):
@@ -433,6 +468,52 @@ def test_a_replay_keeps_an_unknown_row_retained_without_its_wire_proof(estate, m
     assert [tuple(row) for row in conn.execute(
         "SELECT event, json_extract(detail, '$.wire_sha256') FROM events WHERE kind='transmission'")] == [
         ("unknown", None)]
+
+
+def _retained_by_another_release(route, package, conn, monkeypatch, outcome, rewrite):
+    """Send once through an encoder that `rewrite`s the transmission payload it
+    encodes, as another release would have recorded it, then put the encoder
+    back. Returns the request, its transport and the transport's calls."""
+    request_id, calls = str(uuid4()), []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return outcome
+    encode = messages.encode_transmission
+    def recorded_by_another_release(intent, observation, **kwargs):
+        raw = encode(intent, observation, **kwargs)
+        rewrite(raw["payload"])
+        return raw
+    monkeypatch.setattr(messages, "encode_transmission", recorded_by_another_release)
+    _call(route, package, request_id, transport=transport, require_durable_request=True)
+    monkeypatch.setattr(messages, "encode_transmission", encode)
+    assert _counts(conn) == (1, 1)
+    return request_id, transport, calls
+
+
+def _without_wire_proof(payload):
+    for key in ("wire_sha256", "wire_bytes"):
+        payload.pop(key, None)
+
+
+@pytest.mark.parametrize("outcome, rewrite", [
+    (TransportOutcome("unknown", "sha256:" + "c" * 64, 77, 3),
+     lambda payload: payload.update(wire_sha256="sha256:" + "d" * 64, wire_bytes=5)),
+    (TransportOutcome("unknown", "sha256:" + "c" * 64, 77, 3),
+     lambda payload: (_without_wire_proof(payload), payload.update(destination="elsewhere"))),
+    (TransportOutcome("submitted", "sha256:" + "c" * 64, 77, 0), _without_wire_proof),
+], ids=["another-proof", "another-destination", "submitted-without-proof"])
+def test_a_replay_refuses_any_difference_but_a_missing_proof_on_an_unknown_row(
+        estate, monkeypatch, outcome, rewrite):
+    """The one difference a replay absolves is an `unknown` row retained without
+    its wire proof (the test above). Any other difference between the retained
+    projection and the one this release encodes still refuses, sends nothing
+    again and records no second row."""
+    route, package, conn = estate
+    request_id, transport, calls = _retained_by_another_release(
+        route, package, conn, monkeypatch, outcome, rewrite)
+    with pytest.raises(ReceiptConflict, match="retained transmission projection changed"):
+        _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert len(calls) == 1 and _counts(conn) == (1, 1)
 
 
 def test_uncertain_retry_refuses_staged_or_uninspectable_receiver_proof_only(estate, monkeypatch):

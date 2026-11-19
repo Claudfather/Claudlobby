@@ -175,7 +175,6 @@ def test_receipt_waits_for_late_sender_proof_in_fresh_snapshot(estate, monkeypat
     assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 3
 
 
-
 def test_a_send_typed_then_submitted_later_reaches_a_final_verdict(estate):
     """#3001: a send typed into the box but not submitted (native rc 3) records
     `unknown` with the transport's wire proof. Once the text is submitted

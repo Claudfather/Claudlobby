@@ -278,8 +278,9 @@ EVENT_OCCURRED_AT_SQL = "SELECT occurred_at FROM events WHERE ingest_seq = ?"
 # the sender's msg_id.
 #
 # fold F1: it JOINs that against the SENDER's WIRE proof (wire_sha256 /
-# wire_bytes, in `detail` on a submission-class tmux fact — bot_tmux_send hashes
-# the EXACT bytes it put on the wire), NOT the communication's body hash. The
+# wire_bytes, in `detail` on a submission-class tmux fact, or on a tmux
+# `unknown` one (#3001) — bot_tmux_send hashes the EXACT bytes it put on the
+# wire), NOT the communication's body hash. The
 # body is the raw logical message; the receiver hashes what came off the wire,
 # which `sanitize_tmux_input` rewrote (newlines/tabs -> spaces). Comparing the
 # arrival against the raw body read every multi-line / tabbed / double-spaced
