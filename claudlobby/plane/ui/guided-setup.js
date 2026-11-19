@@ -23,6 +23,13 @@ const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin
   preview:['goal','Preparing your team preview…'],launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
 // Skips unchanged writes, so a status region is not re-announced on every two-second check.
 const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
+// The control a visitor uses next: the filled action, else Sign in to Claude, the goal or Launch team, whichever
+// is shown and enabled. Null when none is, so focus is left where it is.
+const nextAction = m => [m.lead,m.signinControls.begin,m.area,m.controls.launch].find(control => {
+  if (!control || control.disabled) return false;
+  for (let node = control; node && node !== m.root; node = node.parentNode) if (node.hidden) return false;
+  return true;
+}) ?? null;
 // One plain sentence for each finite host reason (provider_signin.py); unknown reasons fall back by state.
 const sameFiles = 'Setup files on this computer changed during sign-in.', unreadable = 'Claude replied in a way this computer did not recognize.';
 const SIGNIN_REASONS = {timeout:'The sign-in took too long.', provider_failed:'Claude stopped before sign-in finished.',
@@ -321,7 +328,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } catch (error) {
       const restored = operation==='signin-retry' ? restoreRetry(error) : ''; // even if the connection moved on meanwhile
       if (!disposed && ticket === epoch) {
-        if (operation === 'preview') { context = null; launchable = false; }
+        // A failed read leaves no approval shown beside its "could not confirm" note.
+        if (operation === 'preview' || operation === 'context') { context = null; launchable = false; }
         if (operation === 'receipt') launchable = false;
         if (operation.startsWith('signin-')) {
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
@@ -520,6 +528,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const retry = m.steps.signin.retry, retryShown = signinRetryOffered();
     retry.hidden = !retryShown; retry.className = filled('retry','pill ghost');
     retry.disabled = !live || busy || !retryShown;
+    m.lead = {context:controls.context,receipt:controls.receipt,code:submit,link:m.signinLink,retry,status:check}[lead] ?? null;
     setText(m.goalDone,pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '');
     setText(m.goalText,context ? `Team ${context.fleet} works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
@@ -559,7 +568,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const focusFree = () => { const doc = m.document; if (doc?.hasFocus?.() === false) return false;
       const current = doc?.activeElement; return !current || current === doc.body || current === m.connect?.button; };
     if (connectFocus && connectView?.busy) connectFocus = 'busy';
-    if (connectFocus && live) { connectFocus = null; if (focusFree()) controls.context.focus?.(); }
+    if (connectFocus && live) {
+      // Checking setup approval only reads it, so after a Connect chosen here the panel does that itself while the
+      // computer is still in first-team setup. Focus then moves to the next action (Check setup approval if the read failed).
+      connectFocus = null;
+      queueMicrotask(async () => {
+        if (client.snapshot().state === 'setup_only') await run('context');
+        if (!disposed && mount === m && focusFree()) nextAction(m)?.focus?.();
+      });
+    }
     else if (connectFocus === 'busy' && !connectView?.busy) {
       connectFocus = null; if (!m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
     }

@@ -901,7 +901,7 @@ test('setup-only computer stays visible without blocking the other admitted dash
 
 const {createGuidedSetup}=await import(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url));
 function setupHarness(options={}) {
-  const calls=[],listeners=new Set(),saved=new Map(); let state={state:'setup_only',epoch:1};
+  const calls=[],listeners=new Set(),saved=new Map(options.saved); let state={state:'setup_only',epoch:1};
   const pending={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
   const context={version:2,template:'revenue-web-app',fleet:'shop',repository:'example-org/shop',source_revision:pending.source_revision,
     generation:id(9),expires_at:1800003600,request:null,launch_reserved:false};
@@ -2228,6 +2228,8 @@ test('browser bridge names its bound reference only after the parent offer, and 
   assert.equal(lost.bridge.fetch.browserOwnerReference,null,'a carrier that never bound names no computer');
 });
 const landingRefs=['a','b','c'].map((n,i)=>({reference_id:id(i+4),endpoint_origin:`https://${n}.example.test`,revision:1}));
+const landingContext={version:2,template:'revenue-web-app',repository:'example-org/shop',fleet:'shop',source_revision:'b'.repeat(40),
+  generation:id(9),expires_at:1800003600,request:null,launch_reserved:false,provider_signin:true,signin_attempt:null};
 // A browser-carrier fetch double: the same markers as browser-owner-transport.js over the harness fetch.
 function browserCarrier(h,bound=null) {
   const settled=deferred();let reference=bound;
@@ -2299,20 +2301,101 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   await l.workspace.checkAccount();l.h.timer(30000);await flush();
   assert.deepEqual(l.mutations(),[],'nothing is sent to a computer before the click');
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>reply(200,landingContext));
   button.focus();button.click();
   assert.equal(button.disabled,true);assert.equal(stepPart(panel,'connect','setup-progress').textContent,'Connecting…');
   await flush();
-  assert.deepEqual(l.mutations().map(c=>new URL(c.url).pathname.split('/').at(-1)),['challenge','issue'],'one click, one connect');
+  assert.deepEqual(l.mutations().map(c=>new URL(c.url).pathname.split('/').at(-1)),['challenge','issue','context'],'one click, one connect, then one approval read');
   assert.equal(l.mutations().every(c=>c.url.startsWith(landingRefs[0].endpoint_origin)),true);
   assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
   assert.equal(l.panel(),panel,'the same panel continues the setup');assert.equal(l.rail.dataset.setupFocus,'only');
-  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','upcoming']]);
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
   assert.ok(descendants(stepsOf(panel)[0]).some(n=>n.textContent==='✓ Connected'&&visible(n)));
-  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[],[]]);
-  assert.equal(l.h.ui.document.activeElement?.textContent,'Check setup approval','keyboard focus moves on to the next action');
-  assert.equal(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).length,0,'setup approval is still checked only on request');
+  assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved for team shop'&&visible(n)));
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],[],['Sign in to Claude'],[],[]]);
+  assert.equal(l.h.ui.document.activeElement?.textContent,'Sign in to Claude','keyboard focus moves on to the next action');
+  l.h.timer(30000);await flush();
+  assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['context'],
+    'reading the approval is the only setup call; sign-in waits for its own click');
   assert.deepEqual(l.shownCards(),['a.example.test · First-team setup']);
 });
+test('a failed approval read after Connect keeps Check setup approval, focuses it and does not retry',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>reply(503,{}));
+  const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');
+  button.focus();button.click();await flush();
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)).slice(0,3),[['connect','done'],['approve','current'],['signin','upcoming']]);
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[],[]]);
+  assert.equal(l.h.ui.document.activeElement?.textContent,'Check setup approval');
+  assertPlain(l.shownText());
+  assert.ok(l.shownText().includes('Could not confirm setup approval. Make sure setup was approved on this computer, then check again.'));
+  for(let round=0;round<3;round++){for(const t of l.h.timers.filter(t=>t.active)){t.active=false;t.fn();}await flush();}
+  assert.equal(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).length,1,'one automatic read, never a retry');
+});
+test('the approval read after Connect does not take focus the visitor moved elsewhere',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  const gate=deferred();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>gate.promise.then(()=>reply(200,landingContext)));
+  const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');
+  button.focus();button.click();await flush();
+  const details=descendants(panel).find(n=>n.tagName==='DETAILS');details.focus();
+  gate.resolve();await flush();
+  assert.equal(stepShape(panel)[2][1],'current');
+  assert.equal(l.h.ui.document.activeElement,details,'focus stays where the visitor put it');
+});
+// A standalone panel whose own Connect was chosen; finish() makes that connection live as the entry does.
+function connectedPanel({saved=[],context={},client={}}={}) {
+  const h=setupHarness({saved,client,setupOptions:{setTimeout:()=>0,clearTimeout:()=>{}}});
+  Object.assign(h.context,context);h.change({state:'not_connected',epoch:2});
+  const ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>h.api.showConnect({operation:'connect',busy:'connect'})});
+  h.api.showConnect({operation:'connect'});
+  const connect=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');connect.focus();connect.click();
+  return {h,panel,focused:()=>ui.document.activeElement,reads:()=>h.calls.filter(c=>c[0]==='context').length,
+    async finish(state='setup_only'){h.change({state,epoch:3});h.api.showConnect({operation:'connect'});await flush();}};
+}
+const settingUp={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+test('after a panel Connect, focus moves to whatever the next shown action is',async()=>{
+  for(const [name,options,expected] of [
+    ['no Claude sign-in in this approval',{},'TEXTAREA'],
+    ['a sign-in started earlier in this browser',{saved:[['test:claude',JSON.stringify({generation:id(9),attempt_id:id(12)})]],
+      context:{provider_signin:true,signin_attempt:{generation:id(9),attempt_id:id(12),state:'waiting',reason:null,url:authorizeURL}}},'Open Claude sign-in'],
+    ['a setup already submitted from this browser',{saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})]],
+      context:{request:settingUp,launch_reserved:true}},'Check launch status']]){
+    const p=connectedPanel(options);await p.finish();
+    assert.equal(p.reads(),1,name);
+    const focused=p.focused();
+    assert.equal(expected==='TEXTAREA'?focused?.tagName:focused?.textContent,expected,name);
+    assert.ok(visible(focused)&&!focused.disabled,`${name}: focus is on a shown, enabled control`);
+    p.h.api.dispose();
+  }
+});
+test('a computer that is already set up gets no automatic approval read after Connect',async()=>{
+  const p=connectedPanel();await p.finish('ready');
+  assert.equal(p.reads(),0,'only a computer in first-team setup is read automatically');
+  assert.equal(p.focused()?.textContent,'Check setup approval','focus moves to the step\'s own action, as before');
+  p.h.api.dispose();
+});
+test('a panel disposed during the approval read moves no focus',async()=>{
+  const gate=deferred(),p=connectedPanel({client:{setupContext:()=>gate.promise}});
+  await p.finish();assert.equal(p.reads(),0,'the gated read is in flight');
+  const before=p.focused();p.h.api.dispose();gate.resolve(p.h.context);await flush();
+  assert.equal(p.focused(),before);
+});test('a failed approval read never leaves Approve setup marked done beside its error',async()=>{
+  // The host names a different sign-in attempt from the one this browser kept, so the read is refused after parsing.
+  const h=setupHarness({saved:[['test:claude',JSON.stringify({generation:id(9),attempt_id:id(12)})]]}),ui=dom(),panel=new ui.Element();
+  Object.assign(h.context,{provider_signin:true,signin_attempt:{generation:id(9),attempt_id:id(13),state:'waiting',reason:null,url:authorizeURL}});
+  h.api.mountPanel({document:ui.document,element:panel});
+  assert.equal(await h.api.run('context'),false);
+  assert.equal(h.api.snapshot().context,null);
+  assert.equal(stepShape(panel)[0][1],'current','approve stays the current step');
+  assert.deepEqual(filledIn(stepsOf(panel)[0]),['Check setup approval']);
+  h.api.dispose();
+});
+
+
 test('a refused Connect from the panel keeps Connect, says why, and returns focus to it without retrying',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));

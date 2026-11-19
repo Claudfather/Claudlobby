@@ -240,7 +240,14 @@ Its first step, Connect this computer, mirrors that computer's own Connect or
 Check connection. One click sends one connect. Nothing connects, signs in or
 retries a session mutation automatically, and failures say what to choose next
 in plain sentences. After Connect, the existing steps follow: approve setup,
-sign in to Claude, describe the goal, launch. A clean done receipt for the
+sign in to Claude, describe the goal, launch. When the computer is still in
+first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
+setup approval read (`context`, which changes nothing on the computer), so
+approve setup is done without a second click. A computer that is already set up
+gets no automatic read. If the read fails, no approval is shown, Check setup
+approval stays the step's action and nothing retries it. Sign-in, preview and
+launch still each wait for their own click. Focus then moves to the next shown,
+enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is
 running on this computer." This holds even after the launch handoff's status
 check moves the connection on and clears the approval context. A request
