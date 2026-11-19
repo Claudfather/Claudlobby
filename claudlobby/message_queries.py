@@ -155,26 +155,16 @@ class QueuedProof:
     reason: str | None = None
 
 
-def _typed_proof(payload) -> bool:
-    """A tmux `unknown` fact that carries its wire proof: a send typed into the
-    box and not submitted (#3001). The join reads that proof once the receiver's
-    row lands, so a receipt check counts the fact as proof pending ingest. It is
-    no proof of submission, which is what the retry gate asks for."""
-    return (payload.get("state") == "unknown" and payload.get("carrier") == "tmux"
-            and payload.get("wire_sha256") is not None)
-
-
-def _queued_proof(value, message_id, *, typed: bool = False) -> bool:
+def _queued_proof(value, message_id) -> bool:
     if isinstance(value, list):
-        return any(_queued_proof(item, message_id, typed=typed) for item in value)
+        return any(_queued_proof(item, message_id) for item in value)
     if not isinstance(value, dict):
         return False
     payload = value.get("payload")
     if (value.get("event_type") == "transmission" and isinstance(payload, dict)
-            and payload.get("msg_id") == message_id
-            and (payload.get("state") in _SUBMISSION_PROOF or (typed and _typed_proof(payload)))):
+            and payload.get("msg_id") == message_id and payload.get("state") in _SUBMISSION_PROOF):
         return True
-    return any(_queued_proof(item, message_id, typed=typed) for item in value.values())
+    return any(_queued_proof(item, message_id) for item in value.values())
 
 
 def _queued_bytes(path: Path, limit: int) -> bytes | None:
@@ -220,7 +210,7 @@ def pending_transmission_proof(root: Path, message_id: str, *,
 
 
 def queued_transmission_proof(root: Path, message_id: str, *, written_after: float | None = None,
-                              probe_timeout: float = 0.5, typed: bool = False) -> QueuedProof:
+                              probe_timeout: float = 0.5) -> QueuedProof:
     """Submission/receiver proof for one message still awaiting Plane ingest.
 
     Bounded and read-only over the existing staged and spool queues: it never
@@ -244,11 +234,6 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     counted. Orphaned stages wait an hour for replay, so a burst of them held
     every later receipt past the bound (#2086). One written after the message
     may hold its proof and is read like any other.
-
-    With `typed`, a staged tmux `unknown` fact that carries a wire proof counts
-    too (#3003): once the receiver's row lands, the join reads that proof, so
-    the receipt check waits for it as for any staged proof. The retry gate
-    leaves it off, since an `unknown` fact does not establish submission.
     """
     probe, entries = scan_queue_dir(staged_dir(root))
     spool = scan_spool(root)
@@ -277,7 +262,7 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
                                               f" {_PENDING_BYTES} bytes a receipt check reads")
         try:
             value = json.loads(data)
-            found = needle in data and _queued_proof(value, message_id, typed=typed)
+            found = needle in data and _queued_proof(value, message_id)
         except ValueError:
             # A torn entry cannot establish irrelevance.
             return QueuedProof("unavailable", f"queued Plane entry {path.name} is not a whole batch"
@@ -478,7 +463,7 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
     message = None
     since = _recorded_instant(ctx, message_id)
     while True:
-        queued = queued_transmission_proof(ctx.root, message_id, written_after=since, typed=True)
+        queued = queued_transmission_proof(ctx.root, message_id, written_after=since)
         try:
             with _snapshot(ctx, deadline=deadline) as conn:
                 observed = _show(conn, ctx, message_id)

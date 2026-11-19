@@ -17,7 +17,6 @@ import time
 import pytest
 
 from claudlobby import message_queries as q
-from claudlobby.message_payload import MESSAGE_EMITTER
 from claudlobby.plane.db import db_file
 from claudlobby.plane.migrations import SCHEMA_USER_VERSION, _migration_files, migrate
 from claudlobby.task_operations import TaskActor, TaskOperationContext
@@ -237,17 +236,6 @@ def staged_receipt(root, number=1, name="1-ev_staged.batch"):
     return staged / name
 
 
-def typed_event(number=1, *, carrier="tmux", proof=True):
-    """The `unknown` fact of a send typed into the box and not submitted, as the
-    native door writes it (#3001): with the wire proof the transport observed."""
-    payload = {"msg_id": mid(number), "attempt_no": 1, "carrier": carrier,
-               "destination": "worker", "state": "unknown"}
-    if proof:
-        payload.update(wire_sha256="sha256:" + "c" * 64, wire_bytes=77)
-    return {"event_type": "transmission", "emitter": MESSAGE_EMITTER, "fleet": "a",
-            "event_id": "ev_" + "f" * 32, "occurred_at": "2026-09-28T00:00:00Z", "payload": payload}
-
-
 @contextmanager
 def ingest_daemon(monkeypatch, *, answer=DAEMON_ANSWER):
     """Where the receipt check probes the ingest daemon, a real listener on a
@@ -356,51 +344,6 @@ def test_queued_receiver_proof_is_unavailable_never_missing_and_committed_proof_
     assert (unreadable.receipt_observation, unreadable.exit_code) == ("unavailable", 6)
     transmission(conn, "received")  # committed receiver proof beside unavailable queues
     final = q.receipt(ctx, ident)
-    assert (final.receipt_observation, final.integrity_verdict, final.exit_code) == ("received", "delivered", 0)
-
-
-def test_a_staged_typed_fact_with_its_proof_is_proof_pending_for_a_receipt_not_for_a_resend(
-        estate, monkeypatch):
-    """#3003. A send typed into the box and not submitted records `unknown` with
-    its wire proof (#3001), and the join reads that proof once the receiver's row
-    lands. While the fact waits in the queue, a receipt check whose receipt has
-    not landed answers `unavailable`, as it does for a staged receipt or
-    submission, and not `missing`. An `unknown` fact with no proof, or one on
-    another carrier, holds nothing the join reads. The retry gate is unchanged:
-    an `unknown` fact does not establish submission, so it never refuses a resend."""
-    ctx, conn = estate
-    ident = communication(conn)
-    transmission(conn, "received", number=2)  # destination history exists
-    staged = ctx.root / "state/plane/staged"
-    stage_events = client_stager(staged)
-    with ingest_daemon(monkeypatch):
-        stage_events(typed_event(proof=False))
-        # The contract refuses a proof on another carrier's `unknown` fact, so only a hand-written stage holds one.
-        stage(staged, f"{time.time_ns()}-ev_{'1' * 32}.batch", [typed_event(carrier="telegram-tgpost")], time.time())
-        quiet = q.receipt(ctx, ident, wait=0)
-        assert (quiet.receipt_observation, quiet.exit_code) == ("missing", 8), quiet.reason
-        stage_events(typed_event())
-        pending = q.receipt(ctx, ident, wait=0)
-        assert (pending.receipt_observation, pending.exit_code, pending.code) == ("unavailable", 6, "unavailable")
-        assert "staged (pending" in pending.reason
-        assert q.pending_transmission_proof(ctx.root, ident) == "absent"  # nor does it refuse a resend
-
-
-def test_a_staged_typed_fact_decides_nothing_once_the_receivers_row_has_landed(estate, monkeypatch):
-    """The receipt reads `received` before it looks at the queue, so a staged
-    fact decides nothing once the receiver's row has landed, as for a staged
-    submission: the receipt is `unconfirmed` (exit 8) until the typed row lands,
-    and then its proof gives the verdict."""
-    ctx, conn = estate
-    ident = communication(conn)
-    transmission(conn, "received")
-    stage_events = client_stager(ctx.root / "state/plane/staged")
-    with ingest_daemon(monkeypatch):
-        stage_events(typed_event())
-        early = q.receipt(ctx, ident, wait=0)
-        assert (early.receipt_observation, early.integrity_verdict, early.exit_code) == ("received", "unconfirmed", 8)
-        transmission(conn, "unknown", fleet="a")
-        final = q.receipt(ctx, ident)
     assert (final.receipt_observation, final.integrity_verdict, final.exit_code) == ("received", "delivered", 0)
 
 

@@ -19,10 +19,12 @@ from claudlobby.message_context import MessageRoute
 from claudlobby.message_payload import MessageBody
 from claudlobby.message_transport import TransportDestination, TransportOutcome, send as native_send
 from claudlobby.paths import Paths
+from claudlobby.plane import emit_api
 from claudlobby.plane.db import connect, db_file
 from claudlobby.plane.identity import resolve, resolve_party
 from claudlobby.plane.ids import ensure_host_uid
 from claudlobby.plane.ids import mint_msg_id, mint_event_id
+from claudlobby.plane.queue_paths import spool_path, staged_dir
 from claudlobby.request_facts import FactProof
 from claudlobby.request_receipts import ReceiptConflict, RequestStore, locked_request
 from claudlobby.report_payload import ReportPayload
@@ -405,6 +407,40 @@ def test_a_typed_but_unsubmitted_send_keeps_its_wire_proof_and_replays_purely(es
     replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
     assert replay.replayed and replay.delivery == "unknown"
     assert len(calls) == 1 and _counts(conn) == (1, 1)
+
+
+def test_a_typed_send_whose_record_fails_queues_nothing_and_a_replay_records_it(estate, monkeypatch):
+    """#3003. The `unknown` row of a send typed into the box and not submitted
+    carries the transport's wire proof (#3001). The native door records it with
+    `require_commit`, so a record that fails on a storage error writes no spool
+    or staged entry for a receipt check to count as proof pending ingest. The
+    request keeps the attempt, and a replay records the row and sends nothing."""
+    route, package, conn = estate
+    root = route.selected.paths.root
+    request_id, proof, calls = str(uuid4()), "sha256:" + "c" * 64, []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return TransportOutcome("unknown", proof, 77, 3)
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")  # retryable: spooled unless the caller needs the commit
+    record = messages.emit_batch
+    def fail_the_transmission(root_, raw, **kwargs):
+        if raw[0]["event_type"] != "transmission":
+            return record(root_, raw, **kwargs)
+        with monkeypatch.context() as outage:
+            outage.setattr(emit_api, "ingest_many", refuse)
+            return record(root_, raw, **kwargs)
+    monkeypatch.setattr(messages, "emit_batch", fail_the_transmission)
+    first = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert first.delivery == "unknown" and len(calls) == 1 and _counts(conn) == (1, 0)
+    queued = [path for directory in (staged_dir(root), spool_path(root)) if directory.exists()
+              for path in directory.rglob("*") if path.is_file()]
+    assert queued == []
+    monkeypatch.setattr(messages, "emit_batch", record)
+    replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert replay.replayed and len(calls) == 1 and _counts(conn) == (1, 1)
+    assert [tuple(row) for row in conn.execute(
+        "SELECT event, json_extract(detail, '$.wire_sha256') FROM events WHERE kind='transmission'")] == [("unknown", proof)]
 
 
 def test_a_replay_keeps_an_unknown_row_retained_without_its_wire_proof(estate, monkeypatch):
