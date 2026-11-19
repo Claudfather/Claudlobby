@@ -199,8 +199,14 @@ def _read(args) -> CommandOutput:
                                **selected.cursor_scope} if eligible else None
             scope = {"fleet_uid": bindings["fleet_uid"], "viewer_uid": viewer_uid,
                      "release_id": release_id, **selected.provenance, "author": args.bot, "status": args.status,
-                     "since": since, "workstream": args.workstream, "unacknowledged": args.unacknowledged,
-                     "prior_seq": prior_seq, "prior_ack_event": prior_ack_seq}
+                     "since": since, "workstream": args.workstream, "unacknowledged": args.unacknowledged}
+            if args.unacknowledged:
+                # Only an unacknowledged read's rows depend on the viewer's read
+                # position: it starts there, so its next page is served only at
+                # the position its last page was. Any other listing returns the
+                # same rows wherever the position is, so an acknowledgement by the
+                # same viewer between its pages leaves its cursor valid (#2837).
+                scope.update(prior_seq=prior_seq, prior_ack_event=prior_ack_seq)
             after = None if eligible else _after(args.cursor, scope, release_id)
             # An unacknowledged read starts at the viewer's read position, as
             # the ACK does: nothing at or below it is unacknowledged.
