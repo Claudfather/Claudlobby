@@ -926,6 +926,22 @@ else
         fi
     fi
 fi
+
+# #2862: every tick that settles a verdict stamps data/.observed, whatever the
+# verdict. fleet-pulse judges activity_stuck, which reads a missing .idle as a
+# running turn, only while that stamp is fresh, and pages keepalive_silent for a
+# live bot on which it goes stale. data/.observed-since is where the current
+# watch began: the first watched tick, and the first after a silence longer
+# than OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD, so a late tick never restarts a
+# stall. 0 or no number reads as 600 here; fleet-pulse reads 0 as the page off.
+_observed_after=${OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD:-600}
+case "$_observed_after" in ''|0|*[!0-9]*) _observed_after=600 ;; esac
+if marker_age_within "$BOT_DIR/data/.observed" "$_observed_after"; then
+    touch "$BOT_DIR/data/.observed"
+else
+    touch "$BOT_DIR/data/.observed-since" "$BOT_DIR/data/.observed"
+fi
+
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 

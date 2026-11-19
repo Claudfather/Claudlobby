@@ -655,6 +655,46 @@ else
     debounce_clear "$state_dir" "$fleet" alert_target_refused
 fi
 
+# --- keepalive_silent (#2862): who keepalive has stopped watching ------------
+# Check 5 calls this for every bot. A live, supervised bot (unit installed, not
+# stopped, session up: one keepalive-all ticks) whose data/.observed is older
+# than the active window is unwatched. The pulse's own first sighting of that,
+# a bare epoch in <fleet>.<bot>.unwatched, starts its wait, so a sweep that runs
+# before keepalive's first tick after a boot or an update pages nothing. Once
+# the wait reaches the bot's OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD (default
+# 600 s; 0 turns the page off for that bot, said on stderr each sweep;
+# keepalive.sh reads the same key for where its watch restarts, with 0 as 600),
+# the bot is named in the fleet's one keepalive_silent alert after the loop. Any
+# other bot keeps no sighting: one stopped, with no unit or with no session is
+# not one keepalive watches, and its own checks report it.
+_ks_names=""
+_ks_detail=""
+_keepalive_silent_count() {  # <watched: 0|1>
+    local marker="$state_dir/${fleet}.${bot_id}.unwatched" now since threshold last
+    if [ "$1" -eq 1 ] || [ "$_svc_checked" -eq 0 ] || [ "$_session_alive" -eq 0 ]; then
+        [ ! -e "$marker" ] || rm -f "$marker"
+        return 0
+    fi
+    now=$(date +%s)
+    [ -f "$marker" ] || printf '%s\n' "$now" > "$marker"
+    since=$(head -c 20 "$marker" 2>/dev/null | tr -cd '0-9' || true)
+    [ -n "$since" ] || since=$now
+    last=$(stat_mtime "$_current_bot_dir/data/.observed" 2>/dev/null || true)
+    if [ -n "$last" ]; then
+        last="last watched $(epoch_to_iso_utc "$last" || true)"
+    else
+        last="no watch recorded"
+    fi
+    threshold=$(bot_conf_get "$_current_bot_dir" OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD 600)
+    case "$threshold" in ''|*[!0-9]*) threshold=600 ;; esac
+    if [ "$threshold" -eq 0 ]; then
+        echo "fleet-pulse: keepalive has not watched ${bot_id} (${last}); keepalive_silent is off (OBSERVABILITY_KEEPALIVE_SILENT_THRESHOLD=0)" >&2
+    elif [ $(( now - since )) -ge "$threshold" ]; then
+        _ks_names="${_ks_names:+$_ks_names }$bot_id"
+        _ks_detail="${_ks_detail:+$_ks_detail; }${bot_id} (${last})"
+    fi
+}
+
 # --- Iterate all bots ---
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
@@ -1141,25 +1181,42 @@ for bot_dir in "$BOTS_DIR"/*/; do
     else
         _clear_current_bot "unknown_alerted"
     fi
-    if [ "$_held_turn" != none ] && [ "$_limited" = 0 ] && [ "$_no_turn" -eq 0 ] && [ -f "$marker" ]; then
+    # #2862: activity_stuck reads the absence of keepalive's .idle stamp as a
+    # running turn, so it is judged only while keepalive watches the bot: its
+    # data/.observed, stamped on every tick that settles a verdict, no older than
+    # the active window (the horizon at which presence types a bot stale). An
+    # unwatched bot is not judged and its alert stays as it was; the silence is
+    # keepalive_silent's (_keepalive_silent_count).
+    _watch_window=${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}
+    case "$_watch_window" in ''|*[!0-9]*) _watch_window=$_ACTIVE_WINDOW_DEFAULT ;; esac
+    _watched=0
+    if marker_age_within "$bot_dir/data/.observed" "$_watch_window"; then _watched=1; fi
+    _keepalive_silent_count "$_watched"
+    if [ "$_watched" -eq 1 ] && [ "$_held_turn" != none ] && [ "$_limited" = 0 ] && [ "$_no_turn" -eq 0 ] && [ -f "$marker" ]; then
         # If idle marker is newer than tool-call marker, bot is idle — skip
         if ! marker_is_newer "$idle_marker" "$marker"; then
             threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
             now_epoch=$(date +%s)
             last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
-            # #2391: the stall runs from the later of the last tool call and
-            # .last-no-turn, so a turn is not charged the wait before it began.
-            # No .last-no-turn (never seen without a turn, or a keepalive older
-            # than the marker): the tool call.
+            # #2391, #2862: the stall runs from the latest of the last tool call,
+            # .last-no-turn (so a turn is not charged the wait before it began),
+            # .observed-since (where keepalive's current watch began: a silence
+            # long enough to page restarts it, a late tick does not) and .spawn
+            # (the session's start), so a turn is charged only time keepalive
+            # watched, in its own session. A marker that is missing drops out.
             last_no_turn_epoch=$(stat_mtime "$last_no_turn_marker" 2>/dev/null || echo null)
+            observed_since_epoch=$(stat_mtime "$bot_dir/data/.observed-since" 2>/dev/null || echo null)
+            spawn_epoch=$(stat_mtime "$bot_dir/data/.spawn" 2>/dev/null || echo null)
             stall_since=$last_epoch
-            if [ "$last_no_turn_epoch" != null ] && [ "$last_no_turn_epoch" -gt "$stall_since" ]; then
-                stall_since=$last_no_turn_epoch
-            fi
+            for _since in "$last_no_turn_epoch" "$observed_since_epoch" "$spawn_epoch"; do
+                if [ "$_since" != null ] && [ "$_since" -gt "$stall_since" ]; then
+                    stall_since=$_since
+                fi
+            done
             gap=$(( now_epoch - stall_since ))
             if [ "$gap" -ge "$threshold" ]; then
                 emit_fleet_event "activity_stuck" "pulse" \
-                    '{"last_tool_call_epoch":'"$last_epoch"',"last_no_turn_epoch":'"$last_no_turn_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
+                    '{"last_tool_call_epoch":'"$last_epoch"',"last_no_turn_epoch":'"$last_no_turn_epoch"',"observed_since_epoch":'"$observed_since_epoch"',"spawn_epoch":'"$spawn_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
                 _alert_current_bot "activity_alerted" activity_stuck \
                     "no tool calls for ${gap}s while not idle (likely hung mid-task)"
             else
@@ -1238,6 +1295,40 @@ for bot_dir in "$BOTS_DIR"/*/; do
         fi
     fi
 done
+
+# --- keepalive_silent (#2862): the fleet's one alert an episode -------------
+# The bots the loop found unwatched past their threshold (_ks_names), named in
+# one alert through the shared alert primitive: a plane row on the fleet, the
+# manager's pane and the fleet's Telegram. While the episode lasts it is sent
+# again on the pulse's re-notify window, and at once when it names a bot it did
+# not name before, so a second silence is never folded into the first. It ends
+# at the first sweep that names no bot. <fleet>.keepalive_silent.named holds the
+# bots the open episode names, kept once its alert has gone out. debounce_notify's
+# recipient argument would not do: it also fires when a bot leaves, and it is
+# rate-limited.
+# A send that reached nobody buys no window (#900): unless Telegram or the
+# manager's pane took it, no marker is written and the next sweep sends again.
+_keepalive_silent_page() {
+    emit_failure_alert "$BOTS_DIR" "keepalive_silent" "$1"
+    [ "${_ALERT_DELIVERED:-0}" -eq 1 ] || [ "${_ALERT_TMUX_REACHED:-0}" -eq 1 ]
+}
+_ks_named="$state_dir/${fleet}.keepalive_silent.named"
+if [ -n "$_ks_names" ]; then
+    _ks_prev=$(cat "$_ks_named" 2>/dev/null || true)
+    for _ks_bot in $_ks_names; do
+        case " $_ks_prev " in
+            *" $_ks_bot "*) ;;
+            *) debounce_clear "$state_dir" "$fleet" keepalive_silent; break ;;
+        esac
+    done
+    debounce_notify "$state_dir" "$fleet" keepalive_silent _keepalive_silent_page \
+        "keepalive for ${fleet} has not watched ${_ks_detail}, so activity_stuck is not judged for them. Remedy: look at this fleet's keepalive timer and its last run, and the keepalive-all log under the root's state/logs. A timer that is stopped or not enrolled is the operator's to start or enroll again." \
+        "" "$_RENOTIFY_AFTER_S" || true
+    [ ! -f "$state_dir/${fleet}.keepalive_silent" ] || printf '%s\n' "$_ks_names" > "$_ks_named"
+else
+    debounce_clear "$state_dir" "$fleet" keepalive_silent
+    [ ! -e "$_ks_named" ] || rm -f "$_ks_named"
+fi
 
 # --- Events read-back: the plane, the only source (F18 closure, R2b-2) ---
 # The plane is read by INSTANT (the escalation inside its window, the summary

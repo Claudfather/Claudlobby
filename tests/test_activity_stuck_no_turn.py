@@ -31,6 +31,10 @@ from tests.test_keepalive_usage_limit import FIXTURES, Rig, _frame, _future_rese
 
 MIN = 60
 HOUR = 3600
+# keepalive's watch on each swept bot: a tick a minute ago, and a watch begun a
+# day ago, before any marker these tests stamp. A stall is judged only on a
+# watched bot and never charged from before the watch began (#2862).
+WATCHED = {".observed": MIN, ".observed-since": 24 * HOUR}
 
 
 def _age(marker, now, age):
@@ -73,15 +77,19 @@ NO_TURN = {
 }
 
 
-def _stuck(tmp_path, scratch_plane_env, *, expect, data=None, **ages):
-    """Copy each bot's data/ from *data* (a keepalive rig's), stamp the named
-    markers the given seconds before now (any other keeps its copied mtime,
-    or stays absent), run one sweep, and check that exactly the bots in
-    *expect* paged. Returns now and each page's data."""
+def _stuck(tmp_path, scratch_plane_env, *, expect, data=None, watched=True, **ages):
+    """Copy each bot's data/ from *data* (a keepalive rig's), stamp keepalive's
+    watch (WATCHED, unless *watched* is false: the copied markers then stand)
+    and then the named markers the given seconds before now (any other keeps
+    its copied mtime, or stays absent), run one sweep, and check that exactly
+    the bots in *expect* paged. Returns now and each page's data."""
     root, paths = _two_dead_bots(tmp_path)
     for bot, src in (data or {}).items():
         shutil.copytree(src, paths.runtime_bots / bot / "data", dirs_exist_ok=True)
     now = int(time.time())
+    for bot in ("w1", "w2") if watched else ():
+        for name, age in WATCHED.items():
+            _age(paths.runtime_bots / bot / "data" / name, now, age)
     for bot, markers in ages.items():
         for name, age in markers.items():
             _age(paths.runtime_bots / bot / "data" / name, now, age)

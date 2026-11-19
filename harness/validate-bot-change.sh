@@ -653,8 +653,10 @@ val_box_up "$MGR" ""
 tmux new-session -d -s "$BOT" 'printf "\n⠹ Cogitating (esc to interrupt)\n"; sleep 600'
 sleep 1  # let panes render
 
-# Worker made a tool call a moment ago, then went silent (gap will exceed 1s).
-touch "$BOT_DIR/data/.last-tool-call"
+# Worker made a tool call a moment ago, then went silent (gap will exceed 1s),
+# while keepalive watched its pane: activity_stuck is judged only on a bot
+# whose data/.observed is fresh (#2862), and no keepalive runs here.
+touch "$BOT_DIR/data/.last-tool-call" "$BOT_DIR/data/.observed"
 
 # A task was dispatched and is already past its deadline, with no report —
 # on the plane, where the watchdog now reads it (the fleet declared first).
@@ -4816,20 +4818,25 @@ done
 
 val_plane_ready "$ROOT" "$F3"
 
-# S1 fixture: marker 25h stale, .idle touched AFTER it (what keepalive does).
+# S1 fixture: marker 25h stale, .idle touched AFTER it (what keepalive does),
+# on a session an hour old that keepalive watches: since #2862 a stall is
+# judged only on a watched bot (data/.observed) and never charged from before
+# its session started, so a .spawn of now would keep the control quiet too.
 val_backdate "$F3_BOTS/$SIDLE/data/.last-tool-call" 90000
-touch "$F3_BOTS/$SIDLE/data/.idle"
-touch "$F3_BOTS/$SIDLE/data/.spawn"
+touch "$F3_BOTS/$SIDLE/data/.idle" "$F3_BOTS/$SIDLE/data/.observed"
+val_backdate "$F3_BOTS/$SIDLE/data/.spawn" 3600
 
 # S2 fixture: no marker at all. .spawn present and aged past any plausible
 # grace, so "it is simply too early to judge" cannot explain the silence.
 rm -f "$F3_BOTS/$SNOMARK/data/.last-tool-call"
 val_backdate "$F3_BOTS/$SNOMARK/data/.spawn" 90000
+touch "$F3_BOTS/$SNOMARK/data/.observed"
 
 # Control fixture: identical to S1 minus the .idle marker.
 val_backdate "$F3_BOTS/$SCTL/data/.last-tool-call" 90000
 rm -f "$F3_BOTS/$SCTL/data/.idle"
-touch "$F3_BOTS/$SCTL/data/.spawn"
+touch "$F3_BOTS/$SCTL/data/.observed"
+val_backdate "$F3_BOTS/$SCTL/data/.spawn" 3600
 
 CLAUDLOBBY_ROOT="$ROOT" CLAUDLOBBY_FLEET="$F3" val_pulse "$LIB_DIR" "$F3" >/dev/null 2>&1 || true
 

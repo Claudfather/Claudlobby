@@ -137,6 +137,10 @@ class Fleet:
         return self.pages.read_text().splitlines() if self.pages.exists() else []
 
     def sweep(self, **env):
+        for bot in ("mgr", "w1"):
+            # keepalive watches both bots all along: activity_stuck judges a
+            # bot only while its watch stamp is fresh (#2862)
+            (self.bots / bot / "data" / ".observed").touch()
         (self.root / ".claudlobby-harness-root").write_text(str(self.root.resolve()))
         result = subprocess.run(
             [sys.executable, str(REPO / "harness/compose.py"), "--root", str(self.root),
