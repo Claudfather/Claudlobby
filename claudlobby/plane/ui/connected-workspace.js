@@ -75,6 +75,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (mount) {
       // A changed account cannot leave private records in a paused old document.
       mount.element.replaceChildren(); mount.controls = null;
+      mount.setupHost?.replaceChildren(); mount.setupHost?.remove?.();
+      if (mount.setupRail) delete mount.setupRail.dataset.setupFocus;
+      mount.setupHost = mount.setupRail = undefined;
       mount.document.querySelector('main')?.replaceChildren(mount.element);
       for (const id of ['fleet-totals', 'presence-strip', 'task-detail-content', 'focus-pane', 'focus-title'])
         mount.document.getElementById(id)?.replaceChildren();
@@ -344,6 +347,17 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     catch { return false; }
     finally { pending.delete(index); if (!disposed) changed(); }
   }
+  // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
+  function setupHost() {
+    if (mount.setupHost !== undefined) return mount.setupHost;
+    const rail = mount.document.getElementById('rail-channel');
+    let host = null;
+    if (rail) {
+      host = mount.document.createElement('section'); host.id = 'setup-focus'; host.className = 'setup-focus'; host.hidden = true;
+      if (typeof rail.prepend === 'function') rail.prepend(host); else rail.append(host);
+    }
+    mount.setupRail = rail || undefined; return mount.setupHost = host;
+  }
   function render() {
     if (!mount) return;
     const {document, element} = mount; element.hidden = false;
@@ -375,12 +389,14 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const actions = document.createElement('div'); actions.className = 'connection-actions'; row.append(actions);
       const primary = document.createElement('button'); primary.type = 'button'; primary.className = 'pill connection-primary';
       primary.addEventListener('click', () => { if (primary.isConnected && !primary.disabled) void act(index,primary.dataset.operation); });
-      actions.append(primary);
+      const goto = document.createElement('button'); goto.type = 'button'; goto.className = 'pill connection-goto'; goto.textContent = 'Go to setup';
+      goto.setAttribute('aria-label','Go to setup for ' + new URL(reference.endpoint_origin).hostname); goto.hidden = true;
+      actions.append(primary,goto);
       const detail = document.createElement('p'); detail.className = 'connection-detail'; row.append(detail);
       const help = document.createElement('details'); help.className = 'connection-approval';
       const summary = document.createElement('summary'); summary.textContent = 'Connection options and first-time setup'; help.append(summary); row.append(help);
       const steps = document.createElement('p');
-      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace. Continue first-team setup below. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
+      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup here. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
       help.append(steps);
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
@@ -398,23 +414,35 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const proposal = document.createElement('div'); proposal.setAttribute('role','group');
       proposal.className = 'connection-proposal';
       proposal.setAttribute('aria-label','Local workspace approval ' + new URL(reference.endpoint_origin).hostname);
-      const setupPanel = document.createElement("div"); setupPanel.setAttribute("role","group"); setupPanel.setAttribute("aria-label","First-team setup " + new URL(reference.endpoint_origin).hostname); help.append(setupPanel);
-      clients[index].setup.mountPanel({document,element:setupPanel});
+      const setupPanel = document.createElement('div'); setupPanel.className = 'setup-focus-panel'; setupPanel.setAttribute('role','group');
+      setupPanel.setAttribute('aria-label','First-team setup ' + new URL(reference.endpoint_origin).hostname);
+      const setupEyebrow = document.createElement('p'); setupEyebrow.className = 'eyebrow setup-focus-eyebrow'; setupEyebrow.textContent = 'First-team setup';
+      const setupHeading = document.createElement('h2'); setupHeading.className = 'setup-focus-title'; setupHeading.tabIndex = -1;
+      const setupBody = document.createElement('div'); setupPanel.append(setupEyebrow,setupHeading,setupBody); help.append(setupPanel);
+      clients[index].setup.mountPanel({document,element:setupBody});
+      goto.addEventListener('click', () => {
+        if (goto.hidden || !goto.isConnected) return;
+        setupPanel.scrollIntoView?.({block:'start'}); setupHeading.focus?.({preventScroll:true});
+      });
       if (!browserTransport) {help.append(proposal); clients[index].enrollment.mountPanel({document,element:proposal,
         onForget:() => { if (phase === 'ready') {
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,buttons,help,access,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
-      const {row,label,detail,primary,buttons,help,access} = controls;
+      const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
       row.hidden = phase !== 'ready'; const {reference,client,enrollment} = clients[index], status = client.snapshot();
       const continuity = client.continuity?.();
       enrollment.refresh?.(); const approval = enrollment.snapshot();
       const connection = client.connectionState?.() || status.state;
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
+      const focused = phase === 'ready' && status.state === 'setup_only' && !!setupHost();
+      if (focused !== controls.focused) { (focused ? mount.setupHost : help).append(setupPanel); controls.focused = focused; }
+      setupHeading.textContent = focused ? `Finish setting up ${name}` : 'First-team setup';
+      goto.hidden = !focused;
       const labels = {ready:'Connected',setup_only:'First-team setup',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
       const pendingLabel = {connect:'Connecting',check:'Checking connection'}[pending.get(index)];
       label.textContent = `${name} · ${pendingLabel || (expired ? 'Session expired' : labels[connection] || 'Connection unconfirmed')}`;
@@ -424,7 +452,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
         ? 'This connection expires soon. Use Keep connected to continue; active use renews it automatically.'
-        : status.state === 'setup_only' ? 'Choose Check setup approval below to continue setting up your first team.'
+        : status.state === 'setup_only' ? focused ? 'Finish setting up this computer in the setup panel.'
+          : 'Choose Check setup approval below to continue setting up your first team.'
         : connection === 'not_connected' ? 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
@@ -434,8 +463,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           ? 'Local approval may have been prepared. Inspect the retained code on this computer; do not prepare it again. Connect only after local approval.'
           : browserTransport ? 'Return to your workspace’s guided setup to inspect the retained approval, then check this connection.' : 'Waiting for local approval on this computer. Confirm the retained code in its terminal, then choose Connect.';
       access.hidden = browserTransport || ['ready','setup_only'].includes(status.state);
-      // Reveal setup on entry; later paints preserve the chosen disclosure state.
-      if (status.state === 'setup_only' && !controls.setupOnly
+      // Reveal sidebar setup on entry; later paints preserve the chosen disclosure state.
+      if (status.state === 'setup_only' && !controls.setupOnly && !focused
           || approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
       controls.setupOnly = status.state === 'setup_only';
@@ -444,6 +473,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];
       primary.dataset.operation = primaryOperation; primary.textContent = primaryTitle;
+      primary.className = 'pill connection-primary' + (focused ? ' connection-primary-quiet' : ''); // Go to setup leads instead
       primary.setAttribute('aria-label', primaryTitle + ' ' + new URL(reference.endpoint_origin).hostname);
       const disabled = operation => row.hidden || pending.has(index)
         || ['checking','renewing','logout'].includes(status.state)
@@ -465,6 +495,13 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
       }
     });
+    if (mount.setupHost) {
+      const focusing = controls.rows.some(row => row.focused);
+      mount.setupHost.hidden = !focusing;
+      // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
+      if (focusing) mount.setupRail.dataset.setupFocus = clients.some(({client}) => client.snapshot().state === 'ready') ? 'shared' : 'only';
+      else delete mount.setupRail.dataset.setupFocus;
+    }
   }
   function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
     mount = {document,element,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
