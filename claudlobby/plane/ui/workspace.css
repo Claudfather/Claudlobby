@@ -885,7 +885,8 @@ body.plane-workspace { padding:0 24px 24px; }
   color:var(--ink); font-size:13px; line-height:1.5; }
 textarea.setup-input { min-height:96px; resize:vertical; }
 .setup-input::placeholder { color:var(--dim); }
-.setup-panel[data-polling] button:disabled { opacity:1; cursor:progress; }
+/* An automatic check holds every action; it dims them only if it takes a moment, so quick checks do not flash. */
+.setup-panel[data-polling] button:disabled { cursor:progress; transition:opacity 0s .4s; }
 .setup-details { margin-top:16px; color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
 .setup-details > summary { cursor:pointer; font-weight:600; color:var(--ink); }
 .setup-details p { margin:8px 0 0; line-height:1.55; }

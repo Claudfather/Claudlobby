@@ -396,7 +396,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const help = document.createElement('details'); help.className = 'connection-approval';
       const summary = document.createElement('summary'); summary.textContent = 'Connection options and first-time setup'; help.append(summary); row.append(help);
       const steps = document.createElement('p');
-      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup here. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
+      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup in the setup panel. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
       help.append(steps);
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';

@@ -1277,7 +1277,7 @@ function pollHarness(statuses,options={}) {
     client:{async setupSignin(action,body){
       calls.push([action,body]);active++;overlap=Math.max(overlap,active);
       try{
-        if(action==='begin')return {...body,state:'starting',reason:null};
+        if(action==='begin')return options.begin?options.begin(body):{...body,state:'starting',reason:null};
         const next=await statuses.shift();if(next instanceof Error)throw next;
         return {generation:body.generation,attempt_id:body.attempt_id,state:next,reason:null,...(next==='waiting'?{url:authorizeURL}:{})};
       }finally{active--;}
@@ -1487,13 +1487,17 @@ test('first-team setup is numbered steps in order, each with one filled action, 
   const area=descendants(panel).find(n=>n.tagName==='TEXTAREA');
   assert.match(area.attributes.placeholder,/^For example: /);
   assert.equal(descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(area)).children[0].textContent,'What should your team work on first?');
+  const recheck=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check again');
+  assert.equal(recheck.hidden,false);
   h.api.setGoal('Ship the signup form');await h.api.run('preview');
+  assert.equal(recheck.hidden,true,'re-checking approval would retire a fresh preview, so it is not offered while launchable');
   assert.deepEqual(shape().map(r=>r[1]),['done','done','done','current']);
   assert.ok(says('✓ Goal: Ship the signup form'));
   assert.deepEqual(filled().launch,['Launch team']);
   assert.ok(says('Team shop is ready. Launching changes 0 generated files and starts or restarts 1 bot.'));
   await h.api.run('launch');
   assert.deepEqual(filled().launch,['Check launch status'],'after one launch only its status check remains');
+  assert.equal(recheck.hidden,false,'once the launch is spent, approval can be checked again');
   assert.ok(shown().every(n=>filledIn(n).length<=1));
   const details=panel.children.find(n=>n.tagName==='DETAILS');
   assert.equal(details.children[0].textContent,'Details');
@@ -1539,6 +1543,69 @@ test('a failed sign-in check explains itself and makes Check sign-in progress th
   assert.deepEqual(filledIn(stepsOf(p.panel)[1]),['Open Claude sign-in']);assert.equal(status.dataset.tone,undefined);
   assert.equal(p.calls.filter(c=>c[0]==='begin').length,1);p.h.api.dispose();
 });
+const refusal=()=>Object.assign(new Error('refused'),{status:403});
+const REFUSED='This computer refused this browser’s Claude sign-in. This setup allows only one Claude sign-in, so trying again needs setup to be recovered on the computer itself.';
+test('a refused sign-in call says the computer refused it; only a lost answer says the computer could not be reached',async()=>{
+  // Begin fails before its POST, yet the attempt is already retained; every check of it is then refused.
+  const p=pollHarness([refusal(),refusal()],{begin(){throw new Error('Sign-in was not started. Connect again first.');}});
+  await p.h.api.run('context');assert.equal(await p.h.api.run('signin-begin'),false);
+  const status=stepPart(p.panel,'signin','setup-signin-status');
+  assert.match(status.textContent,/^Could not reach this computer to check sign-in\. /,'an unknown begin outcome proves nothing');
+  assert.deepEqual(filledIn(stepsOf(p.panel)[1]),['Check sign-in progress']);assert.equal(p.live().length,0);
+  for(let i=0;i<2;i++){
+    assert.equal(await p.h.api.run('signin-status'),false);
+    assert.equal(status.textContent,REFUSED);assert.equal(status.dataset.tone,'attention');
+    assert.deepEqual(filledIn(stepsOf(p.panel)[1]),[],'a refusal does not invite the same check again');
+    assert.equal(p.live().length,0,'no automatic check after a refusal');
+  }
+  assert.deepEqual(p.calls.map(c=>c[0]),['begin','status','status'],'never a second begin');
+  assert.deepEqual(JSON.parse(p.h.saved.get('test:claude')),{generation:p.calls[0][1].generation,attempt_id:p.calls[0][1].attempt_id});
+  p.h.api.dispose();
+});
+test('a refused code keeps the waiting attempt, its link and its automatic checks',async()=>{
+  const p=pollHarness(['waiting',refusal(),'waiting','waiting']);
+  await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
+  const status=stepPart(p.panel,'signin','setup-signin-status');
+  p.code.value='wrong#code';p.code.handlers.input();
+  assert.equal(await p.h.api.run('signin-code'),false);assert.equal(p.code.value,'','the refused code is not kept');
+  assert.match(status.textContent,/^The computer did not accept that code\. Copy the whole code Claude shows you and submit it again/);
+  assert.equal(status.dataset.tone,'attention');
+  assert.equal(visible(p.link),true,'the link stays');assert.equal(p.code.disabled,false,'a corrected code can still be sent');
+  assert.equal(p.live().length,1,'automatic checks continue');
+  await p.fire();assert.match(status.textContent,/^The computer did not accept that code\. /,'a later check keeps the explanation');
+  p.code.value='good#code';p.code.handlers.input();
+  assert.equal(await p.h.api.run('signin-code'),true);assert.equal(status.textContent,'Code sent, finishing sign-in…');
+  p.h.api.dispose();
+});
+test('a taken code holds Submit code and the field until the attempt leaves waiting',async()=>{
+  const p=pollHarness(['waiting','waiting','waiting','connected']);
+  await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
+  const status=stepPart(p.panel,'signin','setup-signin-status'),submit=descendants(p.panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Submit code');
+  p.code.value='good#code';p.code.handlers.input();
+  assert.equal(await p.h.api.run('signin-code'),true,'the host answers waiting until its worker uses the code');
+  assert.equal(status.textContent,'Code sent, finishing sign-in…');assert.equal(status.dataset.tone,undefined);
+  assert.equal(visible(p.link),false,'sign-in is not offered again');
+  assert.equal(p.code.disabled,true);assert.equal(submit.disabled,true);
+  assert.deepEqual(filledIn(stepsOf(p.panel)[1]),[],'nothing to press while sign-in finishes');
+  assert.equal(stepPart(p.panel,'signin','setup-progress').textContent,'This page checks for progress automatically.');
+  p.code.value='second';assert.equal(await p.h.api.run('signin-code'),false);
+  await p.fire();assert.equal(status.textContent,'Code sent, finishing sign-in…','still held while the host says waiting');
+  assert.deepEqual(p.calls.map(c=>c[0]),['begin','status','code','status'],'no second code is sent');
+  await p.fire();assert.equal(status.textContent,'✓ Claude connected');
+  assert.equal(p.code.value,'','leaving waiting empties the field');p.h.api.dispose();
+});
+test('the code field is emptied whenever the attempt is not waiting for one',async()=>{
+  const p=pollHarness(['waiting','needs_attention']);
+  await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
+  p.code.value='half-typed';p.code.handlers.input();
+  await p.fire();assert.equal(p.code.value,'');assert.equal(p.code.disabled,true);p.h.api.dispose();
+});
+test('buttons held by an automatic check look held once it takes a moment',async()=>{
+  const css=await read('workspace.css'),rule=css.match(/\.setup-panel\[data-polling\] button:disabled\s*\{([^}]*)\}/);
+  assert.ok(rule);assert.doesNotMatch(rule[1],/(^|;)\s*opacity\s*:/,'the shared disabled look applies');
+  assert.match(rule[1],/transition:\s*opacity 0s \.4s/,'after a short delay, so quick checks do not flash');
+  assert.match(css,/button:disabled\s*\{[^}]*opacity:\.5/);
+});
 test('every wait shows progress in its step; the automatic sign-in check neither flashes nor takes the code field',async()=>{
   const gate=deferred(),h=setupHarness({client:{setupContext:()=>gate.promise}});
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
@@ -1547,7 +1614,7 @@ test('every wait shows progress in its step; the automatic sign-in check neither
   gate.resolve(h.context);await reading;assert.equal(progress.textContent,'');h.api.dispose();
   const polls=[deferred(),deferred(),deferred()],p=pollHarness(polls.map(d=>d.promise));
   await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
-  assert.equal(p.panel.dataset.polling,'true','an automatic check is marked so held buttons do not dim');
+  assert.equal(p.panel.dataset.polling,'true','an automatic check is marked; workspace.css decides how held buttons look');
   assert.equal(stepPart(p.panel,'signin','setup-progress').textContent,'This page checks for progress automatically.');
   polls[0].resolve('waiting');await flush();assert.equal(p.panel.dataset.polling,undefined);
   const checking=p.h.api.run('signin-status');
@@ -1735,7 +1802,8 @@ test('explicit browser transport shows canonical guide recovery without native t
   const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
   const nodes=descendants(h.ui.get('owner-session')),text=nodes.map(n=>n.textContent).join(' ');
-  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
+  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);
+  assert.match(text,/finish first-team setup in the setup panel\./);assert.doesNotMatch(text,/setup here/,'the panel may be in the main area');assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
   assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
   assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
   const native=harness({count:1});native.mount();await native.api.checkAccount();assert.match(descendants(native.ui.get('owner-session')).map(n=>n.textContent).join(' '),/DATA_ROOT/);native.api.dispose();
