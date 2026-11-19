@@ -1,3 +1,3 @@
-### Fixed — Claude sign-in codes now submit, instead of waiting until the attempt times out
+### Fixed — Claude sign-in codes now submit, instead of waiting until the attempt times out (#3015)
 
 Pasting the code from the Claude sign-in page never finished sign-in: the host typed the code followed by a line feed, and Claude's full-screen sign-in prompt runs in raw mode, where only Enter (carriage return) submits. The prompt showed the masked code and waited until the five-minute attempt expired. The host now ends the code with a carriage return. The synthetic provider in the sign-in tests switches its terminal to raw mode and refuses a line feed, so the tests fail if the code is sent the old way.
