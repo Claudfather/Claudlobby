@@ -175,6 +175,34 @@ def test_receipt_waits_for_late_sender_proof_in_fresh_snapshot(estate, monkeypat
     assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 3
 
 
+
+def test_a_send_typed_then_submitted_later_reaches_a_final_verdict(estate):
+    """#3001: a send typed into the box but not submitted (native rc 3) records
+    `unknown` with the transport's wire proof. Once the text is submitted
+    later, the receiver's row is judged against that proof: a whole arrival
+    reads delivered, and one glued to text the box already held reads altered,
+    where both read unconfirmed and timed out before."""
+    ctx, conn = estate
+    whole = communication(conn)
+    transmission(conn, "unknown", fleet="a")  # typed, not submitted
+    assert q.receipt(ctx, whole).integrity_verdict == "unknown"  # no receipt yet
+    transmission(conn, "received")  # submitted later, arrived whole
+    final = q.receipt(ctx, whole)
+    assert (final.receipt_observation, final.integrity_verdict, final.exit_code) == ("received", "delivered", 0)
+    glued = communication(conn, 2)
+    transmission(conn, "unknown", number=2, fleet="a")
+    transmission(conn, "received", number=2, proof="def", size=40)  # longer, another hash
+    mismatch = q.receipt(ctx, glued)
+    assert (mismatch.integrity_verdict, mismatch.exit_code, mismatch.code) == ("altered", 10, "receipt_mismatch")
+    # Only a tmux fact's proof is read: a channel carrier never typed into a box.
+    channel = communication(conn, 3)
+    insert(conn, "events", kind="transmission", event="unknown", msg_id=channel, carrier="telegram-tgpost",
+           attempt_no=1, detail=json.dumps({"destination": "bot:b/worker",
+                                            "wire_sha256": "sha256:" + "abc" * 22, "wire_bytes": 12}))
+    transmission(conn, "received", number=3)
+    assert q.receipt(ctx, channel).integrity_verdict == "unconfirmed"
+
+
 def test_no_history_is_immediate_and_observable_missing_times_out_without_writes(estate, monkeypatch):
     ctx, conn = estate
     ident = communication(conn)

@@ -261,6 +261,44 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
     assert row["delivery"] == "truncated"
 
 
+
+@pytest.mark.parametrize("held", ["", "text the box already held "], ids=["whole", "glued"])
+def test_a_send_typed_then_submitted_later_is_judged_through_the_join(tmp_path, held, *, scratch_plane_env):
+    """#3001: a send typed into the box but not submitted (native rc 3) records
+    `unknown`, with the sender's real wire proof on that row. When the text is
+    submitted later, the real hook lands the receipt and the JOIN judges it
+    against that proof: a whole arrival reads DELIVERED, and one glued to text
+    the box already held (#2060) reads ALTERED."""
+    from claudlobby.plane import queries as q
+    from claudlobby.plane.db import connect
+    from claudlobby.plane.emit_api import emit_batch
+    from claudlobby.plane.migrations import migrate
+
+    payload = "set +H; " + BODY
+    sha, safe, nbytes = _wire_proof(payload)
+    root = _root(tmp_path)
+    initialize_plane(root)
+    emit_batch(root, [
+        {"event_type": "communication", "emitter": "t", "fleet": FLEET,
+         "payload": {"msg_id": MSGID, "sender": f"bot:{FLEET}/mgr",
+                     "recipient": f"bot:{FLEET}/{BOT}", "recipient_raw": BOT,
+                     "message_class": "task_request", "command_type": "task",
+                     "body": payload}},
+        {"event_type": "transmission", "emitter": "t", "fleet": FLEET,
+         "payload": {"msg_id": MSGID, "attempt_no": 1, "carrier": "tmux",
+                     "destination": BOT, "state": "unknown",
+                     "wire_sha256": sha, "wire_bytes": nbytes}},
+    ])
+    r = _run_committed(_hookjson(_arrival(held + safe), ensure_ascii=False), _env(root, scratch_plane_env=scratch_plane_env), root, scratch_plane_env)
+    assert r.returncode == 0 and r.stdout == ""
+    db = root / "state" / "plane" / "plane.db"
+    conn = connect(str(db))
+    migrate(conn)
+    conn.row_factory = sqlite3.Row
+    row = dict(conn.execute(q.DELIVERY_STATUS_SQL.format(ph="?"), [MSGID]).fetchone())
+    assert row["delivery"] == ("altered" if held else "delivered")
+
+
 # --- the prefilter / recogniser ---------------------------------------------
 
 @pytest.mark.parametrize("codex", [False, True], ids=["minimal", "native-codex"])

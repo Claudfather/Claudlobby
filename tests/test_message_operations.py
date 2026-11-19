@@ -387,6 +387,54 @@ def test_unknown_result_needs_explicit_retry_and_preserves_first_attempt(estate)
     assert saved.message_attempts[1].observation.status == "submitted"
 
 
+
+def test_a_typed_but_unsubmitted_send_keeps_its_wire_proof_and_replays_purely(estate):
+    """#3001: native rc 3 (typed into the box, not submitted) stays `unknown`,
+    and the transport's wire proof rides that row, so a receipt recorded once
+    the text is submitted later can be judged against it."""
+    route, package, conn = estate
+    request_id = str(uuid4())
+    proof, calls = "sha256:" + "c" * 64, []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return TransportOutcome("unknown", proof, 77, 3)
+    first = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert first.delivery == "unknown"
+    assert [tuple(row) for row in conn.execute(
+        "SELECT event, carrier, json_extract(detail, '$.wire_sha256'), json_extract(detail, '$.wire_bytes')"
+        " FROM events WHERE kind='transmission'")] == [("unknown", "tmux", proof, 77)]
+    replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert replay.replayed and replay.delivery == "unknown"
+    assert len(calls) == 1 and _counts(conn) == (1, 1)
+
+
+def test_a_replay_keeps_an_unknown_row_retained_without_its_wire_proof(estate, monkeypatch):
+    """A release before #3001 recorded an `unknown` row without the wire proof.
+    A replay of that request keeps the projection it retained: no conflict, no
+    second row, and nothing sent again."""
+    route, package, conn = estate
+    request_id = str(uuid4())
+    calls = []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return TransportOutcome("unknown", "sha256:" + "c" * 64, 77, 3)
+    encode = messages.encode_transmission
+    def before_3001(intent, observation, **kwargs):
+        raw = encode(intent, observation, **kwargs)
+        for key in ("wire_sha256", "wire_bytes"):
+            raw["payload"].pop(key, None)
+        return raw
+    monkeypatch.setattr(messages, "encode_transmission", before_3001)
+    first = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    monkeypatch.setattr(messages, "encode_transmission", encode)
+    replay = _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert replay.replayed and replay.message_id == first.message_id and replay.delivery == "unknown"
+    assert len(calls) == 1 and _counts(conn) == (1, 1)
+    assert [tuple(row) for row in conn.execute(
+        "SELECT event, json_extract(detail, '$.wire_sha256') FROM events WHERE kind='transmission'")] == [
+        ("unknown", None)]
+
+
 def test_uncertain_retry_refuses_staged_or_uninspectable_receiver_proof_only(estate, monkeypatch):
     from claudlobby.plane import daemon
     route, package, conn = estate
