@@ -387,7 +387,6 @@ def test_unknown_result_needs_explicit_retry_and_preserves_first_attempt(estate)
     assert saved.message_attempts[1].observation.status == "submitted"
 
 
-
 def test_a_typed_but_unsubmitted_send_keeps_its_wire_proof_and_replays_purely(estate):
     """#3001: native rc 3 (typed into the box, not submitted) stays `unknown`,
     and the transport's wire proof rides that row, so a receipt recorded once
@@ -433,6 +432,52 @@ def test_a_replay_keeps_an_unknown_row_retained_without_its_wire_proof(estate, m
     assert [tuple(row) for row in conn.execute(
         "SELECT event, json_extract(detail, '$.wire_sha256') FROM events WHERE kind='transmission'")] == [
         ("unknown", None)]
+
+
+def _retained_by_another_release(route, package, conn, monkeypatch, outcome, rewrite):
+    """Send once through an encoder that `rewrite`s the transmission payload it
+    encodes, as another release would have recorded it, then put the encoder
+    back. Returns the request, its transport and the transport's calls."""
+    request_id, calls = str(uuid4()), []
+    def transport(*args, **kwargs):
+        calls.append(1)
+        return outcome
+    encode = messages.encode_transmission
+    def recorded_by_another_release(intent, observation, **kwargs):
+        raw = encode(intent, observation, **kwargs)
+        rewrite(raw["payload"])
+        return raw
+    monkeypatch.setattr(messages, "encode_transmission", recorded_by_another_release)
+    _call(route, package, request_id, transport=transport, require_durable_request=True)
+    monkeypatch.setattr(messages, "encode_transmission", encode)
+    assert _counts(conn) == (1, 1)
+    return request_id, transport, calls
+
+
+def _without_wire_proof(payload):
+    for key in ("wire_sha256", "wire_bytes"):
+        payload.pop(key, None)
+
+
+@pytest.mark.parametrize("outcome, rewrite", [
+    (TransportOutcome("unknown", "sha256:" + "c" * 64, 77, 3),
+     lambda payload: payload.update(wire_sha256="sha256:" + "d" * 64, wire_bytes=5)),
+    (TransportOutcome("unknown", "sha256:" + "c" * 64, 77, 3),
+     lambda payload: (_without_wire_proof(payload), payload.update(destination="elsewhere"))),
+    (TransportOutcome("submitted", "sha256:" + "c" * 64, 77, 0), _without_wire_proof),
+], ids=["another-proof", "another-destination", "submitted-without-proof"])
+def test_a_replay_refuses_any_difference_but_a_missing_proof_on_an_unknown_row(
+        estate, monkeypatch, outcome, rewrite):
+    """The one difference a replay absolves is an `unknown` row retained without
+    its wire proof (the test above). Any other difference between the retained
+    projection and the one this release encodes still refuses, sends nothing
+    again and records no second row."""
+    route, package, conn = estate
+    request_id, transport, calls = _retained_by_another_release(
+        route, package, conn, monkeypatch, outcome, rewrite)
+    with pytest.raises(ReceiptConflict, match="retained transmission projection changed"):
+        _call(route, package, request_id, transport=transport, require_durable_request=True)
+    assert len(calls) == 1 and _counts(conn) == (1, 1)
 
 
 def test_uncertain_retry_refuses_staged_or_uninspectable_receiver_proof_only(estate, monkeypatch):

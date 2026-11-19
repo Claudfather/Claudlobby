@@ -261,7 +261,6 @@ def test_a_genuinely_shortened_arrival_reads_TRUNCATED_through_the_join(tmp_path
     assert row["delivery"] == "truncated"
 
 
-
 @pytest.mark.parametrize("held", ["", "text the box already held "], ids=["whole", "glued"])
 def test_a_send_typed_then_submitted_later_is_judged_through_the_join(tmp_path, held, *, scratch_plane_env):
     """#3001: a send typed into the box but not submitted (native rc 3) records
