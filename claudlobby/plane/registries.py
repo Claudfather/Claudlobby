@@ -343,9 +343,12 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "binary_unrunnable": "critical",
     "vault_sync_failed": "critical",
     # ...and from the fleet jobs: a bot's keepalive that failed to run
-    # (keepalive-all), a halted rolling restart, and the alert target checks of
-    # fleet-pulse and creds-check.
+    # (keepalive-all), the live bots no keepalive tick has watched past the
+    # threshold (fleet-pulse, one alert an episode that names them, #2862), a
+    # halted rolling restart, and the alert target checks of fleet-pulse and
+    # creds-check.
     "keepalive_failed": "critical",
+    "keepalive_silent": "critical",
     "rolling_restart_stalled": "critical",
     "alert_target_refused": "critical",
     "alert_pair_unreachable": "critical",

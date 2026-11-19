@@ -215,12 +215,16 @@ class Fleet:
             time.sleep(0.05)
 
     def stall(self, bot: str):
-        """No tool call for two hours and no idle tick since: activity_stuck."""
+        """No tool call for two hours and no idle tick since, under keepalive's watch:
+        activity_stuck."""
         (self.bots / bot / "data" / ".idle").unlink(missing_ok=True)
         marker = self.bots / bot / "data" / ".last-tool-call"
         marker.touch()
         then = time.time() - 2 * HOUR
         os.utime(marker, (then, then))
+        # keepalive watches the bot all along: activity_stuck judges a bot only
+        # while its watch stamp is fresh (#2862)
+        (self.bots / bot / "data" / ".observed").touch()
 
     def idle(self, bot: str):
         """keepalive saw the bot idle after its last tool call: no alert."""
