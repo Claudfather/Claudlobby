@@ -983,8 +983,15 @@ assert os.environ['DISABLE_AUTOUPDATER']=='1'
 assert os.environ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']=='1'
 assert os.environ['HTTPS_PROXY']=='http://proxy.example.test:8888'
 assert not any(key in os.environ for key in ['ANTHROPIC_API_KEY','CLAUDE_CODE_OAUTH_TOKEN','SSH_AUTH_SOCK'])
+import tty
+tty.setraw(0)  # Like Claude's Ink TUI: raw before the prompt shows; only CR (Enter) submits, LF never does.
 sys.stdout.write('\\x1b]8;;'+{url!r}+'\\x07Open Claude\\x1b]8;;\\x07\\r\\n');sys.stdout.flush()
-code=sys.stdin.readline().strip()
+typed=b''
+while not typed.endswith(b'\\r'):
+    ch=os.read(0,1)
+    if not ch or ch==b'\\n':sys.exit(3)
+    typed+=ch
+code=typed[:-1].decode()
 assert code=='accepted#'+ 'b'*32
 sys.stdout.write('\\x1b[2K\\r✓ Long-lived authentication token created successfully!\\r\\nYour OAuth token (valid for 1 year):\\r\\n'+{token!r}+'\\r\\nStore this token securely. You won\\\'t be able to see it again.\\r\\nUse this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\\r\\n');sys.stdout.flush()
 '''
@@ -1222,7 +1229,7 @@ def test_provider_signin_cancel_wins_before_effect_admission(synthetic_signin,mo
     queue_gate=threading.Event();code_writes=[]
     original_write=provider_signin.os.write
     def observed_write(fd,data):
-        if data==('accepted#'+'b'*32+'\n').encode():code_writes.append(True)
+        if data in (('accepted#'+'b'*32).encode(),b'\r'):code_writes.append(data)
         return original_write(fd,data)
     monkeypatch.setattr(provider_signin.os,'write',observed_write)
     original_popen=subprocess.Popen
@@ -1278,6 +1285,7 @@ def test_provider_signin_cancel_wins_before_effect_admission(synthetic_signin,mo
         assert not engine.signin._thread.is_alive()
         assert len(calls)==(1 if when=='ready-token' or when.startswith('queued-code') else 0)
         if when.startswith('queued-code'):assert not code_writes
+        if when=='ready-token':assert code_writes==[('accepted#'+'b'*32).encode(),b'\r']  # Enter is its own keypress
         assert env.read_text()=='export ROUTE=private\n'
     finally:
         release.set();engine.signin.shutdown()

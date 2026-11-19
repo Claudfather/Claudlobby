@@ -36,6 +36,7 @@ SUPPORTED = {
     "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf": "2.1.325",  # Linux x86_64 glibc
 }
 SECONDS = 300
+ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
 MAX_OUTPUT = 131072
 _ROUTING = ("PATH","TMPDIR","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_STATE_HOME","XDG_DATA_HOME",
     "HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy",
@@ -510,6 +511,7 @@ class ProviderSignin:
                         stdin=slave,stdout=slave,stderr=slave,start_new_session=True,close_fds=True)
             os.close(slave); slave=None
             deadline=time.monotonic()+SECONDS
+            enter_at=None  # when the Enter after a delivered code is due
             while True:
                 if self._cancel.is_set(): state,reason="cancelled","effect_uncertain";break
                 self._admit(reader,grant)  # Revocation/expiry stops the owned attempt, even with no browser polling.
@@ -530,9 +532,14 @@ class ProviderSignin:
                     if self._code is not None:
                         self._admit(reader,grant)
                         code,self._code=self._code,None
-                        os.write(master,(code+'\n').encode('ascii'))
-                        code=None
+                        os.write(master,code.encode('ascii'))
+                        code=None; enter_at=time.monotonic()+ENTER_DELAY
                         self._set(grant,attempt,"starting")
+                    elif enter_at is not None and time.monotonic()>=enter_at:
+                        # Claude's raw-mode prompt submits only on Enter (CR); LF never does. Enter goes
+                        # as its own keypress after the code, so the code can't be read as pasted text.
+                        self._admit(reader,grant)
+                        os.write(master,b'\r'); enter_at=None
                 if process.poll() is not None:
                     # Drain the remaining finite PTY output before extracting a token.
                     while select.select([master],[],[],0)[0]:
