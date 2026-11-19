@@ -15,7 +15,9 @@ A rate over the line (strictly over: a rate equal to it is not) starts or extend
 a run. A run of `minutes` readings in a row over the line is an episode, and an
 episode raises one alert; the first reading under the line ends it, so the next
 run that reaches `minutes` is a second episode with an alert of its own. A new
-boot (another boot ID) or a counter that went back starts again from that reading.
+boot (another boot ID) or a counter that went back starts again from that reading,
+and so does a DIR/state.json that holds no state `check` keeps (one it cannot
+read, or not the shape it writes), which `check` says on stderr (#2856).
 
 The line is the host's own, read from DIR/lines on every check, in `name = value`
 lines (`#` starts a comment): `line_pages` (pages a minute), `minutes`, and the
@@ -198,12 +200,60 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _read_state(d: Path) -> dict:
+def _is_time(value) -> bool:
+    """A number (not a bool) that _iso writes as a time."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
     try:
-        state = json.loads((d / STATE_FILE).read_text())
-    except (OSError, ValueError):
+        _iso(value)
+    except (OverflowError, OSError, ValueError):
+        return False
+    return True
+
+
+def _is_count(value) -> bool:
+    """A whole number of at least 0 (not a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _kept(state) -> bool:
+    """Whether state is the shape check keeps: an object whose last reading, run
+    and skip, each where present, hold what step and _quiet write in them."""
+    if not isinstance(state, dict):
+        return False
+    last, run, skip = state.get("last"), state.get("run"), state.get("skip")
+    if last is not None and not (isinstance(last, dict) and _is_time(last.get("at"))
+                                 and _is_count(last.get("out"))
+                                 and isinstance(last.get("boot", ""), str)):
+        return False
+    if run is not None and not (isinstance(run, dict) and _is_time(run.get("from"))
+                                and _is_count(run.get("count")) and _is_count(run.get("peak"))
+                                and isinstance(run.get("rates"), list)
+                                and all(_is_count(rate) for rate in run["rates"])
+                                and isinstance(run.get("alerted"), bool)):
+        return False
+    return skip is None or (isinstance(skip, dict) and isinstance(skip.get("why"), str)
+                            and _is_time(skip.get("since"))
+                            and isinstance(skip.get("paged"), bool))
+
+
+def _read_state(d: Path, say: bool = False) -> dict:
+    """DIR/state.json, or {} when there is none or it holds no state check keeps:
+    one it cannot read, or not the shape _kept reads (#2856). The check then starts
+    again from the reading in hand. With say, a state read as none is said on
+    stderr."""
+    f = d / STATE_FILE
+    try:
+        state = json.loads(f.read_text())
+    except FileNotFoundError:
         return {}
-    return state if isinstance(state, dict) else {}
+    except (OSError, ValueError, RecursionError):
+        state = None
+    if _kept(state):
+        return state
+    if say:
+        _say(f"{f} holds no state this check keeps: starting again from this reading")
+    return {}
 
 
 def _write_state(d: Path, state: dict) -> None:
@@ -249,7 +299,7 @@ def _check(d: Path, args) -> int:
         _print("skipped", "another check holds the lock")
         return 0
     try:
-        state = _read_state(d)
+        state = _read_state(d, say=True)
         at = float(os.environ.get("MEMORY_THRASH_NOW") or time.time())
         rule, why, refused = _rule(d / LINES_FILE)
         if args.skip is not None and refused is None:

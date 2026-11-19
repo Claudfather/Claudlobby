@@ -13,7 +13,9 @@ alert, and a stub curl stands in for Telegram.
 from __future__ import annotations
 
 import json
+import math
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -318,6 +320,84 @@ def test_status_prints_the_rule_and_the_state(tmp_path):
     assert refused == f"refused: {state / 'lines'} line 2: minutes needs a positive whole number"
 
 
+# State files no `check` writes: a hand edit, a disk fault, another version's file.
+# Before #2856, `check` failed on each of the first six with the exception its id
+# names and printed no verdict, every minute until the file changed, so the probe
+# paged nothing. It read the last two as none already, but said nothing.
+DAMAGED = [
+    pytest.param('{"last": [1]}', id="last-a-list-AttributeError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1"}}', id="no-out-KeyError"),
+    pytest.param('{"last": {"at": "yesterday", "boot": "b1", "out": 0}}', id="at-a-word-TypeError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": NaN}}', id="out-NaN-ValueError"),
+    pytest.param('{"last": {"at": 0.0, "boot": "b1", "out": 0}, "run": {"from": 1e300, "count": 2,'
+                 ' "rates": [500, 500], "peak": 500, "alerted": false}}', id="from-1e300-OverflowError"),
+    pytest.param("[" * 5000 + "]" * 5000, id="nested-RecursionError"),
+    pytest.param('{"last": ', id="not-json"),
+    pytest.param("[1, 2]", id="not-an-object"),
+]
+
+
+@pytest.mark.parametrize("damaged", DAMAGED)
+def test_a_damaged_state_reads_as_none_and_the_check_starts_again(tmp_path, damaged):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "state.json").write_text(damaged)
+    said = (f"memory-thrash: {state / 'state.json'} holds no state this check keeps:"
+            " starting again from this reading")
+    first = _check(state, 60, 500)
+    assert _fields(first) == ["baseline", "no reading before this one"] and said in first.stderr
+    again = _check(state, 120, 1000)
+    assert _fields(again) == ["over", "500", "1"] and said not in again.stderr
+
+
+def test_a_damaged_state_keeps_no_refusal_from_its_page(tmp_path):
+    # A refusal kept with a start _iso cannot write: before #2856 `check` failed as it
+    # printed the refusal, so the probe never paged it.
+    state = tmp_path / "state"
+    state.mkdir()
+    lines = state / "lines"
+    lines.write_text(BAD_RULE)
+    why = f"{lines} line 2: minutes needs a positive whole number"
+    (state / "state.json").write_text(json.dumps(
+        {"skip": {"why": f"refused: {why}", "since": 1e300, "paged": False}}))
+    result = _check(state, 60, 0, lines=None)
+    assert _fields(result) == ["refused", "1970-01-01T00:01:00Z", why]
+    assert "holds no state this check keeps" in result.stderr
+
+
+VERDICTS = {"skipped", "refused", "baseline", "under", "over", "alert", "alerted", "ended"}
+SHAPED = {"last": {"at": 60.0, "boot": "b1", "out": 0},
+          "run": {"from": 60.0, "count": 2, "rates": [500, 500], "peak": 500, "alerted": False},
+          "skip": {"why": "no /proc/vmstat", "since": 60.0, "paged": False}}
+ODD = [None, True, -1, 7, 2**64, 10**400, 0.5, 1e300, math.nan, math.inf, "", "x", [], [1, "x"], {}]
+
+
+def test_check_prints_a_verdict_and_keeps_its_shape_whatever_the_state_held(tmp_path, monkeypatch,
+                                                                             capsys):
+    """Seeded rounds of states whose parts and values are each kept, left out or
+    swapped for an odd value (a word, NaN, a number past any time). Each `check`
+    exits 0 with one verdict and leaves a state it reads back as its own (#2856)."""
+    mt = load_lib_module("memory-thrash")
+    rng = random.Random(2856)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "lines").write_text(RULE)
+    for _ in range(400):
+        damaged = {name: rng.choice(ODD) if rng.random() < 0.1 else
+                   {key: rng.choice(ODD) if rng.random() < 0.3 else value
+                    for key, value in part.items() if rng.random() < 0.9}
+                   for name, part in SHAPED.items() if rng.random() < 0.8}
+        text = json.dumps(damaged)
+        (state / "state.json").write_text(text)
+        monkeypatch.setenv("MEMORY_THRASH_NOW", str(rng.choice([0, 120, 180])))
+        given = (["--skip", "no /proc/vmstat"] if rng.random() < 0.3 else
+                 ["--out", str(rng.choice([0, 500, 1500])), "--boot-id", rng.choice(["b1", "b2", ""])])
+        assert mt.main(["check", "--state-dir", str(state), *given]) == 0, text
+        printed = capsys.readouterr().out.splitlines()
+        assert len(printed) == 1 and printed[0].split("\t")[0] in VERDICTS, (text, printed)
+        assert mt._kept(json.loads((state / "state.json").read_text())), text
+
+
 class FakeProc:
     """A /proc with this user's processes: stat, exe, cgroup and smaps_rollup."""
 
@@ -514,3 +594,36 @@ def test_the_probe_says_no_line_once_and_raises_nothing(tmp_path, *, scratch_pla
     assert [r["type"] for r in rows if r["type"].startswith("memory_thrash")] == []
     said = "memory-thrash: skipped: no line for this host: "
     assert said in first.stderr and said not in again.stderr
+
+
+def test_the_probe_alerts_after_a_damaged_state_and_says_it_once(tmp_path, *, scratch_plane_env):
+    # Before #2856 `check` failed on this state every minute, so the episode raised nothing.
+    root, proc, env = _probe_host(tmp_path, scratch_plane_env)
+    state = root / "state" / "memory-thrash" / "state.json"
+    state.write_text('{"last": {"at": "yesterday", "boot": "boot-1", "out": 0}}\n')
+    with _serving(root, scratch_plane_env) as socket:
+        said = [_probe(proc, env, socket, at, out).stderr
+                for at, out in ((0, 0), (60, 500), (120, 1000))]
+    rows = [json.loads(line) for line in read_fleet_events(root).splitlines()]
+    assert len([r for r in rows if r["type"] == "memory_thrash"]) == 1, rows
+    line = f"memory-thrash: {state} holds no state this check keeps: starting again from this reading"
+    assert line in said[0] and not any(line in s for s in said[1:])
+
+
+def test_the_probe_says_once_that_no_python3_runs_the_check(tmp_path, sysbin_excluding, *,
+                                                             scratch_plane_env):
+    # The PATH is a directory of the system's own tools less python3, beside the stubs,
+    # never the system dirs with one left out: a python3 in /usr/bin is found there (#1958).
+    root, proc, env = _probe_host(tmp_path, scratch_plane_env)
+    bare = {**env, "PATH": f"{tmp_path / 'stubs'}{os.pathsep}{sysbin_excluding('python3')}"}
+    mark = root / "state" / "memory-thrash" / ".no-python3"
+    said = (f"memory-thrash: skipped: no python3 on this job's PATH ({bare['PATH']}), so the swap"
+            " thrash check does not run")
+    with _serving(root, scratch_plane_env) as socket:
+        first = _probe(proc, bare, socket, 0, 0)
+        again = _probe(proc, bare, socket, 60, 500)
+        assert said in first.stderr and said not in again.stderr and mark.exists()
+        # with python3 back the check runs and the marker goes, so the next loss is said again
+        back = _probe(proc, env, socket, 120, 1000)
+        assert "no python3" not in back.stderr and not mark.exists()
+        assert said in _probe(proc, bare, socket, 180, 1500).stderr
