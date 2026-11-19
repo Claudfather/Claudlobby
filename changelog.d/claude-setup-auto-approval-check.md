@@ -1,3 +1,3 @@
-### Changed — the setup panel checks setup approval by itself after Connect
+### Changed — the setup panel checks setup approval by itself after Connect (#3025)
 
 In the setup panel, a Connect chosen there on a computer still in first-team setup is now followed by one setup approval read, so "Approve setup" is done without a second click on Check setup approval. The read changes nothing on the computer, and a computer that is already set up is not read automatically. Keyboard focus then moves to the next shown action: Sign in to Claude, Open Claude sign-in, the goal, or Check launch status. It is not moved if the visitor put it somewhere else meanwhile. If the read fails, Check setup approval stays the step's action and has focus, nothing retries it, and the step no longer shows an approval beside the "could not confirm" message. Sign-in, preview and launch still each wait for their own click.
