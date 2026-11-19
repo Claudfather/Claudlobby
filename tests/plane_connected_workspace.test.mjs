@@ -1588,13 +1588,15 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   const gate=deferred();answer=()=>gate.promise;
   retry.click();await flush();
   assert.equal(calls.length,1);assert.equal(calls[0][0],'begin','Try again uses the host begin door');
-  const fresh=JSON.parse(h.saved.get('test:claude'));
+  const {replaces,...fresh}=JSON.parse(h.saved.get('test:claude'));
+  assert.equal(replaces,retryEnded.attempt_id,'the ID it replaces is kept beside it until the host answers');
   assert.deepEqual(calls[0][1],fresh,'the new attempt is retained before its one begin');
   assert.notEqual(fresh.attempt_id,retryEnded.attempt_id);assert.equal(fresh.generation,retryEnded.generation);
   assert.equal(stepPart(panel,'signin','setup-progress').textContent,'Starting a new Claude sign-in…');
   assert.equal(retry.disabled,true,'held while it starts');retry.click();await flush();
   assert.equal(calls.length,1,'a second click while it starts sends nothing');
   gate.resolve({...fresh,state:'starting',reason:null});await flush();
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),fresh,'an answer for the new ID settles it');
   assert.equal(status.textContent,'Starting Claude sign-in…');assert.equal(visible(retry),false);
   // The new attempt is followed like a first one: one poll, for its own ID, to its new link.
   answer=(_action,body)=>({...body,state:'waiting',reason:null,url:authorizeURL});
@@ -1665,17 +1667,51 @@ test(`a Try again that was ${name} keeps following the ended attempt, here and a
   assert.equal(reloaded.snapshot().context.signin_attempt.attempt_id,retryEnded.attempt_id);
   h.api.dispose();reloaded.dispose();
 });
-test('a Try again whose answer was lost keeps its new attempt: the host may have started it',async()=>{
+for(const admitted of [false,true])
+test(`a Try again whose answer was lost follows whichever attempt the host names next (${admitted?'the new one':'the ended one'})`,async()=>{
   const calls=[];
   const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);throw new Error('lost');}}});
   h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
   assert.equal(await h.api.run('signin-retry'),false);
-  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),calls[0][1]);
-  assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
-  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),false);
+  const fresh={generation:retryEnded.generation,attempt_id:calls[0][1].attempt_id},original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  assert.notEqual(fresh.attempt_id,original.attempt_id);
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{...fresh,replaces:original.attempt_id},'the host may have started it');
+  assert.equal(visible(retry),false);
   assert.equal(await h.api.run('signin-retry'),false);assert.equal(calls.length,1,'no second begin of any kind');
+  // A later page load, then its context: the host names its one current attempt. Admitting the new ID would
+  // have retired the ended one for good, so naming the ended one proves the new ID was never started.
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  const page=dom(),root=new page.Element();reloaded.mountPanel({document:page.document,element:root});
+  h.context.signin_attempt=admitted ? {...fresh,state:'starting',reason:null} : {...retryEnded,retryable:true};
+  assert.equal(await reloaded.run('context'),true,'never stranded on the unanswered ID');
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),admitted ? fresh : original);
+  const line=stepPart(root,'signin','setup-signin-status').textContent,again=descendants(root).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
+  if(admitted){assert.equal(line,'Starting Claude sign-in…');assert.equal(visible(again),false);}
+  else{assert.equal(line,'The sign-in took too long. Choose Try again for a new sign-in link.');assert.equal(visible(again),true);}
+  assert.equal(calls.length,1,'nothing was sent on its own');
+  h.api.dispose();reloaded.dispose();
+});
+test('a Try again that never left this browser is undone even when the connection changed meanwhile',async()=>{
+  const calls=[];let h;
+  h=setupHarness({client:{async setupSignin(action,body){
+    calls.push([action,body]);
+    h.change({state:'unavailable',epoch:2}); // a failed pre-begin renewal suspends the connection first
+    throw Object.assign(new Error('Sign-in was not started. The session could not be renewed first.'),{code:'signin_not_started'});
+  }}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,retryable:true};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  assert.equal(await h.api.run('signin-retry'),false);
+  const original={generation:retryEnded.generation,attempt_id:retryEnded.attempt_id};
+  assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original,'restored although the epoch moved');
+  h.change({state:'setup_only',epoch:3}); // reconnected
+  assert.equal(await h.api.run('context'),true);
+  assert.equal(stepPart(panel,'signin','setup-signin-status').textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
+  assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again')),true);
+  assert.equal(calls.length,1);
   h.api.dispose();
 });
 test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{

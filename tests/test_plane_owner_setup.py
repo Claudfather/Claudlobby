@@ -1068,24 +1068,60 @@ def test_provider_signin_reported_deadline_never_outlasts_the_setup_approval(syn
     assert 'expires_at' not in engine.signin_status(reader,grant.generation,attempt)
 
 
-def test_provider_signin_late_code_is_refused_so_the_attempt_ends_as_a_clean_timeout(synthetic_signin,monkeypatch):
-    from claudlobby.plane import provider_signin
+def test_provider_signin_late_code_is_refused_so_the_attempt_ends_as_a_clean_timeout(synthetic_signin):
+    import time
     engine,grant,reader,_program,_token,env=synthetic_signin
-    # The whole attempt is inside the margin, so its code window is already closed.
-    monkeypatch.setattr(provider_signin,'SECONDS',2);monkeypatch.setattr(provider_signin,'CODE_MARGIN',2)
     attempt=str(uuid4())
     try:
         engine.signin_begin(reader,grant.generation,attempt)
-        waiting=_signin_until(engine,grant,reader,attempt,'waiting')
-        assert waiting['expires_at']==int(engine.store.access._now()),'the shown time is the cutoff code() enforces'
-        with pytest.raises(AccessDenied) as refused:
-            engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        with engine.signin._lock:  # the worker cannot act meanwhile: the refusal is the cutoff's alone
+            engine.signin._code_until=time.monotonic()  # the code window has just closed
+            assert engine.signin_status(reader,grant.generation,attempt)['state']=='waiting'
+            with pytest.raises(AccessDenied) as refused:
+                engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
         assert refused.value.code=='signin_code_unavailable'
-        assert _signin_row(engine,attempt)['code_delivered']==0,'nothing reached the CLI'
         engine.signin._thread.join(timeout=10)
+        assert not engine.signin._thread.is_alive(),'ended at the cutoff, long before its 300 seconds'
         ended=engine.signin_status(reader,grant.generation,attempt)
         assert (ended['state'],ended['reason'],ended.get('retryable'))==('needs_attention','timeout',True)
+        assert _signin_row(engine,attempt)['code_delivered']==0,'nothing reached the CLI'
         assert env.read_text()=='export ROUTE=private\n'
+    finally:engine.signin.shutdown()
+
+
+def test_provider_signin_ends_at_its_code_cutoff_so_try_again_is_offered_at_once(synthetic_signin,monkeypatch):
+    import time
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,*_=synthetic_signin
+    monkeypatch.setattr(provider_signin,'CODE_MARGIN',provider_signin.SECONDS-1)  # a one-second code window
+    attempt=str(uuid4())
+    try:
+        began=time.monotonic()
+        engine.signin_begin(reader,grant.generation,attempt)
+        engine.signin._thread.join(timeout=15)
+        assert not engine.signin._thread.is_alive() and time.monotonic()-began<15
+        assert engine.signin_status(reader,grant.generation,attempt)=={'attempt_id':attempt,'generation':grant.generation,
+            'state':'needs_attention','reason':'timeout','retryable':True}
+        assert _signin_row(engine,attempt)['code_delivered']==0
+    finally:engine.signin.shutdown()
+
+
+def test_provider_signin_begin_is_refused_when_the_approval_leaves_no_useful_code_window(synthetic_signin,monkeypatch):
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,*_=synthetic_signin
+    access=engine.store.access
+    left=grant.expires_at-access._now()  # the approval's remaining time (the session stays valid)
+    attempt=str(uuid4())
+    try:
+        monkeypatch.setattr(provider_signin,'MIN_CODE_WINDOW',left-provider_signin.CODE_MARGIN+1)  # one second short
+        with pytest.raises(AccessDenied) as refused:engine.signin_begin(reader,grant.generation,attempt)
+        assert refused.value.code=='signin_approval_ending'
+        assert engine.signin._thread is None and not (engine.root/'state/provider-signin'/('claude-signin-'+attempt)).exists()
+        with access._connection() as conn:assert conn.execute('SELECT COUNT(*) FROM setup_provider').fetchone()[0]==0
+        monkeypatch.setattr(provider_signin,'MIN_CODE_WINDOW',left-provider_signin.CODE_MARGIN)  # exactly enough
+        assert engine.signin_begin(reader,grant.generation,attempt)['attempt_id']==attempt
+        assert engine.signin._thread is not None
     finally:engine.signin.shutdown()
 
 
@@ -1398,7 +1434,8 @@ def test_provider_signin_timeout_before_code_admits_one_fresh_attempt(synthetic_
     import subprocess
     from claudlobby.plane import provider_signin
     engine,grant,reader,program,token,env=synthetic_signin
-    monkeypatch.setattr(provider_signin,'SECONDS',2)
+    margin=provider_signin.CODE_MARGIN
+    monkeypatch.setattr(provider_signin,'SECONDS',2);monkeypatch.setattr(provider_signin,'CODE_MARGIN',0)  # a 2 s code window
     children=[];original_popen=subprocess.Popen
     def observed_popen(argv,*args,**kwargs):
         if argv[1:]==['setup-token']:children.append(argv[0])
@@ -1412,7 +1449,7 @@ def test_provider_signin_timeout_before_code_admits_one_fresh_attempt(synthetic_
             'state':'needs_attention','reason':'timeout','retryable':True}
         assert _signin_row(engine,first)['code_delivered']==0
         program.with_name('synthetic-provider-state').write_text('c'*32)  # the provider's next run: another OAuth state
-        monkeypatch.setattr(provider_signin,'SECONDS',300)
+        monkeypatch.setattr(provider_signin,'SECONDS',300);monkeypatch.setattr(provider_signin,'CODE_MARGIN',margin)
         started=engine.signin_begin(reader,grant.generation,second)
         assert started['attempt_id']==second and started['state'] in {'starting','waiting'} and 'retryable' not in started
         new_link=_signin_until(engine,grant,reader,second,'waiting')['url']

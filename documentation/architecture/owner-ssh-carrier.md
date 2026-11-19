@@ -229,11 +229,18 @@ attempt. Only an explicit **Try again**, shown while the latest answer carries
 the link also carries `expires_at`: in whole host-clock seconds, the last moment the
 host accepts a code, 20 seconds before the earlier of the attempt's timeout and the
 setup approval's expiry. A later code is refused (`signin_code_unavailable`), so a
-code is never cut off mid-exchange by the timeout and a late one ends as a clean,
-retryable timeout. The panel shows that time in local time as **Paste the code by
-…**; it is text only and starts no timer. A Try again that the host refused, or that
-the browser never sent, restores the ended attempt it replaced, in memory and in
-storage, so later checks and reloads still follow it. The link and code are cleared
+code is never cut off mid-exchange by the timeout. An attempt with no code taken by
+that moment ends there as `needs_attention`/`timeout`, so Try again is offered at
+once rather than after a link nobody can use. A begin is refused
+(`signin_approval_ending`) before anything is staged when the approval has less than
+50 seconds left (the 20-second margin plus a 30-second code window). The panel
+shows `expires_at` in local time as **Paste the code by …**; it is text only and
+starts no timer. A Try again keeps the ID it replaces beside the new one in
+storage until a host answer settles which is current. A refused or never-sent Try
+again restores the ended attempt at once, in memory and in storage, even if the
+connection changed meanwhile. After a lost answer, a context that still names the
+replaced attempt proves the new ID was never admitted (admitting it retires the old
+one for good), so the panel follows the old one again. The link and code are cleared
 when it is lost. Preview and Launch stay
 unavailable in the panel while that sign-in is open; the canonical policy and the
 drain remain the authority.

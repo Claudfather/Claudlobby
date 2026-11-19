@@ -59,8 +59,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // signinRetryable: the host's latest answer for this attempt said it would admit a new attempt ID.
   // signinDeadline: the host's expires_at beside the current link (whole host-clock seconds), else null.
   // signinRetryFrom: while a Try again is in flight, the ended attempt it replaces, restored if nothing was admitted.
+  // signinPredecessor: the ID a Try again replaced, kept (also in storage) until a host answer settles which is current.
   let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false, signinRetryable=false;
-  let signinDeadline=null, signinRetryFrom=null;
+  let signinDeadline=null, signinRetryFrom=null, signinPredecessor=null;
   // signinCopy {url,kind,n} is live only while url is the current link; n counts repeats of one result.
   let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0;
   let busyOperation=null; // presentation: which explicit operation is in flight
@@ -161,7 +162,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (storage === undefined) storage = globalThis.localStorage;
     try {
     const text=storage?.getItem(storageKey+':claude');
-    if (text) { const value=JSON.parse(text); if (!keys(value,['generation','attempt_id']) || !uuid(value.generation) || !uuid(value.attempt_id)) throw new Error(); signinAttempt=Object.freeze(value); }
+    if (text) {
+      const value=JSON.parse(text); // replaces: the ended attempt an unanswered Try again was replacing
+      if (!keys(value,['generation','attempt_id',...('replaces' in value ? ['replaces'] : [])]) || !uuid(value.generation) || !uuid(value.attempt_id)
+          || 'replaces' in value && (!uuid(value.replaces) || value.replaces===value.attempt_id)) throw new Error();
+      signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id}); signinPredecessor=value.replaces ?? null;
+    }
     } catch { signinBlocked=true; }
     const text = storage?.getItem(storageKey);
     if (text) {
@@ -242,7 +248,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           signinRetryFrom = action==='retry'
             ? {attempt:signinAttempt,state:signinState,reason:signinReason,retryable:signinRetryable} : null;
           const value={generation:context.generation,attempt_id:globalThis.crypto.randomUUID()};
-          storage.setItem(storageKey+':claude',JSON.stringify(value));
+          // A Try again keeps the ID it replaces beside it, so any later page load can tell which one is current.
+          signinPredecessor = action==='retry' ? signinAttempt.attempt_id : null;
+          storage.setItem(storageKey+':claude',JSON.stringify(signinPredecessor ? {...value,replaces:signinPredecessor} : value));
           signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
           if (action==='retry') { // nothing of the ended attempt carries over to the new one
             signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
@@ -291,6 +299,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else return false;
       return true;
     } catch (error) {
+      const restored = operation==='signin-retry' ? restoreRetry(error) : ''; // even if the connection moved on meanwhile
       if (!disposed && ticket === epoch) {
         if (operation === 'preview') { context = null; launchable = false; }
         if (operation === 'receipt') launchable = false;
@@ -299,18 +308,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           const refused=[400,401,403,409].includes(error?.status);
           // A refused code leaves the attempt waiting (the host keeps only a valid code), so its link and checks stay.
           if (refused && operation==='signin-code') { signinRefusal ??= 'code'; return false; }
-          // A refused Try again rolled the host back and an unsent one reached nothing: the ended attempt
-          // is still the current one, so this browser follows it again (memory and storage).
-          const from = operation==='signin-retry' && (refused || error?.code==='signin_not_started') ? signinRetryFrom : null;
-          signinRetryFrom=null;
-          if (from) {
-            signinAttempt=from.attempt; signinState=from.state; signinReason=from.reason;
-            signinRetryable=!refused && from.retryable; // after a refusal only the host's next answer offers it again
-            try { storage.setItem(storageKey+':claude',JSON.stringify(from.attempt)); } catch { signinBlocked=true; }
-            clearSignin(refused ? 'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.'
-              : error.message); // the client's own text for a begin it never sent
-            return false;
-          }
+          if (restored) { clearSignin(restored); return false; }
           signinHalted=true; // no automatic retry after an error; Check sign-in progress resumes it
           signinRetryable=false; // only a later host answer can offer Try again again
           signinRefusal = refused ? 'attempt' : signinRefusal === 'attempt' ? null : signinRefusal;
@@ -326,10 +324,24 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       return false;
     } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); scheduleSigninPoll(); } }
   }
+  // A refused Try again rolled the host back and an unsent one reached nothing: the ended attempt is still
+  // the current one, so this browser follows it again (memory and storage). Returns the notice, or '' if neither.
+  function restoreRetry(error) {
+    const from=signinRetryFrom, refused=[400,401,403,409].includes(error?.status); signinRetryFrom=null;
+    if (disposed || !from || !refused && error?.code!=='signin_not_started') return '';
+    signinAttempt=from.attempt; signinPredecessor=null; signinState=from.state; signinReason=from.reason;
+    signinRetryable=!refused && from.retryable; // after a refusal only the host's next answer offers it again
+    try { storage.setItem(storageKey+':claude',JSON.stringify(from.attempt)); } catch { signinBlocked=true; }
+    return refused ? 'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.'
+      : error.message; // the client's own text for a begin it never sent
+  }
   function signinReceipt(value) {
+    // The host names a Try again's predecessor only while it is still current, and admitting the new ID retires it
+    // for good: so the new ID was never admitted (its answer was lost), and this browser follows the predecessor.
+    const follows = !!signinAttempt && !!signinPredecessor && value?.attempt_id===signinPredecessor && value.generation===signinAttempt.generation;
     if (!context || !keys(value,['attempt_id','generation','state','reason',...['url','expires_at','retryable'].filter(key => key in value)])
         || !uuid(value.attempt_id) || value.generation!==context.generation
-        || signinAttempt && (value.attempt_id!==signinAttempt.attempt_id || value.generation!==signinAttempt.generation)
+        || signinAttempt && !follows && (value.attempt_id!==signinAttempt.attempt_id || value.generation!==signinAttempt.generation)
         || !['starting','waiting','connected','needs_attention','cancelled','unknown'].includes(value.state)
         || value.reason!==null && (typeof value.reason!=='string' || !/^[a-z_]{1,64}$/.test(value.reason))
         // retryable comes only as true, and only on an attempt that ended without a saved sign-in.
@@ -344,7 +356,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           || selected.searchParams.get('scope')!=='user:inference' || value.url.length>8192) throw new Error();
       url=value.url;
     }
-    signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
+    signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id}); signinPredecessor=null;
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
     signinState=value.state; signinReason=value.reason; signinUrl=url; signinHalted=false; signinNotice='';
     signinRetryable=value.retryable===true; signinDeadline=url!==null && value.expires_at!==undefined ? value.expires_at : null;
