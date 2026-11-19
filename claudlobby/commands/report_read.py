@@ -30,6 +30,26 @@ def _cursor(scope: dict, after: tuple[int, str]) -> str:
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
+# What a read answers when the viewer's read position has moved since the page its cursor came from.
+_POSITION_ADVANCED = "report read position advanced after this page"
+# The scope keys that hold that position. Only an --unacknowledged read has them: it starts there.
+_POSITION = ("prior_seq", "prior_ack_event")
+
+
+def _only_the_position_moved(held: object, scope: dict) -> bool:
+    """Whether a cursor's scope is the read's own but for the viewer's read position, the one
+    difference an acknowledgement between two pages makes. The cursor must hold the position as
+    every read writes it, none or a whole number. Anything else it differs in is a changed viewer,
+    filter or release, or a token no read issued."""
+    if not isinstance(held, dict):
+        return False
+    for key in _POSITION:
+        if key not in held or key not in scope or (held[key] is not None and type(held[key]) is not int):
+            return False
+    return ({key: item for key, item in held.items() if key not in _POSITION}
+            == {key: item for key, item in scope.items() if key not in _POSITION})
+
+
 def _after(token: str | None, scope: dict, release_id: str | None) -> tuple[int, str] | None:
     if token is None:
         return None
@@ -39,13 +59,16 @@ def _after(token: str | None, scope: dict, release_id: str | None) -> tuple[int,
         raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
         value = json.loads(raw)
         if (not isinstance(value, dict) or set(value) != {"v", "scope", "after"}
-                or type(value["v"]) is not int or value["v"] != 1
-                or value["scope"] != scope):
+                or type(value["v"]) is not int or value["v"] != 1):
             raise ValueError
         key = value["after"]
         if (not isinstance(key, list) or len(key) != 2 or type(key[0]) is not int
                 or key[0] < 1 or not isinstance(key[1], str) or not key[1]):
             raise ValueError
+        if value["scope"] != scope:
+            if not _only_the_position_moved(value["scope"], scope):
+                raise ValueError
+            raise CommandFailure("conflict", _POSITION_ADVANCED, release_id=release_id)
         return key[0], key[1]
     except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
         raise CommandFailure("invalid_argument", "invalid report cursor or changed viewer, filters or read position",
@@ -248,7 +271,7 @@ def _read(args) -> CommandOutput:
                     prefix = decode_cursor(destination.paths.root, args.cursor,
                                            identity=cursor_identity)
                     if prefix.prior_seq != prior_seq or prefix.prior_ack_seq != prior_ack_seq:
-                        raise CommandFailure("conflict", "report read position advanced after this page",
+                        raise CommandFailure("conflict", _POSITION_ADVANCED,
                                              release_id=release_id)
                     served = validate_prefix(prefix, rows)
                 remaining = rows[len(served):]
