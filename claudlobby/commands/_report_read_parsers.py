@@ -15,5 +15,6 @@ def register_report_read_subparsers(children):
     listing.add_argument("--unacknowledged", action="store_true",
                          help="Show reports beyond this viewer's recorded read position")
     listing.add_argument("--limit", type=int, default=100, metavar="N", help="Page size, 1 to 1000")
-    listing.add_argument("--cursor", metavar="TOKEN", help="Continue the same viewer, filters and read position")
+    listing.add_argument("--cursor", metavar="TOKEN",
+                         help="Continue the same viewer and filters, and with --unacknowledged the same read position")
     listing.set_defaults(func=_dispatch, public_command="fleet.reports.list")
