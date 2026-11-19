@@ -1361,6 +1361,57 @@ test('mounted ready session renews before begin and keeps the approved context, 
   } finally { if(previousStorage)Object.defineProperty(globalThis,'localStorage',previousStorage);else delete globalThis.localStorage; }
 });
 
+test('Copy link sits beside the new-tab sign-in link and shows the link to copy by hand when the clipboard is blocked',async()=>{
+  const store=new Map(),previous={localStorage:Object.getOwnPropertyDescriptor(globalThis,'localStorage'),navigator:Object.getOwnPropertyDescriptor(globalThis,'navigator')};
+  const restore=name=>previous[name]?Object.defineProperty(globalThis,name,previous[name]):delete globalThis[name];
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)}});
+  const written=[];let clipboard={writeText:async text=>{written.push(text);}};
+  Object.defineProperty(globalThis,'navigator',{configurable:true,get:()=>({clipboard})});
+  try {
+  const h=harness({count:1}),origin=refs[0].endpoint_origin+'/api/owner/connected/setup/';
+  await h.api.checkAccount();h.mount();await h.api.act(0,'connect');
+  h.overrides.set(origin+'context',()=>reply(200,{version:2,template:'revenue-web-app',repository:'example-org/shop',fleet:'shop',
+    source_revision:'b'.repeat(40),generation:id(9),expires_at:1800003600,request:null,launch_reserved:false,provider_signin:true,signin_attempt:null}));
+  h.overrides.set(origin+'signin-begin',init=>reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  const nodes=()=>descendants(h.ui.get('owner-session')),button=text=>nodes().find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  const field=()=>nodes().find(n=>n.attributes['aria-label']==='Claude sign-in link');
+  assert.equal(button('Copy link').hidden,true,'no link yet, so nothing to copy');
+  button('Check setup approval').click();await flush();button('Sign in to Claude').click();await flush();
+  const link=nodes().find(n=>n.tagName==='A'&&n.textContent==='Open Claude sign-in');
+  assert.equal(link.attributes.target,'_blank','the link still opens a new tab');
+  const copy=button('Copy link'),siblings=nodes().find(n=>n.children.includes(link)),note=()=>siblings.children.find(n=>n.tagName==='SPAN');
+  assert.equal(note().attributes.role,'status');
+  assert.equal(copy.hidden,false);assert.equal(siblings.children.indexOf(copy),siblings.children.indexOf(link)+1,'Copy link is right after the link');
+  assert.equal(field().hidden,true);assert.equal(note().textContent,'');
+  const copied='Link copied. Paste it into a new tab.',blocked='Copying is blocked here. Copy the link from the box below.';
+  copy.click();await flush();
+  assert.deepEqual(written,[authorizeURL]);assert.equal(note().textContent,copied);assert.equal(field().hidden,true);
+  clipboard=undefined;copy.click();await flush();
+  assert.equal(note().textContent,blocked,'a missing clipboard falls back to the box');
+  assert.equal(field().hidden,false);assert.equal(field().value,authorizeURL);assert.equal(field().readOnly,true);
+  copy.click();await flush();assert.equal(note().textContent,blocked);
+  clipboard={writeText:async()=>{throw new DOMException('blocked','NotAllowedError');}};
+  copy.click();await flush();assert.equal(note().textContent,blocked,'a rejected write falls back the same way');
+  // A copy that settles after the link changed, or after a later click, changes nothing.
+  const pending=[];clipboard={writeText:()=>new Promise((resolve,reject)=>pending.push({resolve,reject}))};
+  const renewed=authorizeURL+'&state=renewed';
+  h.overrides.set(origin+'signin-status',init=>reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:renewed}));
+  copy.click();await flush();
+  button('Check sign-in progress').click();await flush();
+  assert.equal(link.attributes.href,renewed);assert.equal(note().textContent,'','a new link clears the old copy state');assert.equal(field().hidden,true);
+  pending[0].reject(new DOMException('blocked','NotAllowedError'));await flush();
+  assert.equal(note().textContent,'','a stale rejection is ignored');assert.equal(field().hidden,true);
+  copy.click();await flush();copy.click();await flush();
+  pending[2].resolve();await flush();assert.equal(note().textContent,copied);
+  pending[1].reject(new DOMException('blocked','NotAllowedError'));await flush();
+  assert.equal(note().textContent,copied,'an older click settling later is ignored');assert.equal(field().hidden,true);
+  h.overrides.set(origin+'signin-cancel',init=>reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state:'cancelled',reason:null}));
+  button('Cancel sign-in').click();await flush();
+  assert.equal(copy.hidden,true);assert.equal(note().textContent,'','cancel clears the copy note');assert.equal(field().hidden,true);
+  h.api.dispose();
+  } finally { restore('localStorage');restore('navigator'); }
+});
+
 test('provider-required Preview needs this context\'s attempt confirmed connected; recovery states are not readiness',async()=>{
   const states=[['none',null],['unknown','unknown'],['cancelled','cancelled'],['needs_attention','needs_attention'],['connected','connected']];
   for(const [name,state] of states){

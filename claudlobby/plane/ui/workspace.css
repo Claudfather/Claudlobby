@@ -625,6 +625,8 @@ button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px s
 .owner-session { display:flex; align-items:center; flex-wrap:wrap; gap:8px; max-width:38rem; }
 .owner-session [role="status"] { color:var(--dim); font-size:11px; }
 .owner-session[hidden] { display:none; }
+.signin-link-field { display:block; width:100%; margin-top:4px; font-size:11px; }
+.signin-link-field[hidden] { display:none; }
 .owner-session.connected-session { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; flex-basis:100%; max-width:none; gap:12px; }
 .connection-heading { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .connection-card { min-width:0; padding:18px; border:1px solid var(--edge); border-radius:10px; background:var(--panel); }

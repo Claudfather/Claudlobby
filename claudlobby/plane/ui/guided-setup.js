@@ -18,12 +18,13 @@ const localContinue = value => value.continuation ? `Continue locally: ${value.c
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
 
 export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
-  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout, visible = () => true}) {
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout, visible = () => true,
+  copyText = text => globalThis.navigator.clipboard.writeText(text)}) {
   let context = null, plan = null, pending = null, conflicts = [], legacy = [], incompatible = false;
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
   let state = client.snapshot();
   let signinAttempt=null, signinState=null, signinUrl=null, signinNotice='', signinBlocked=false;
-  let signinTimer=null, signinHalted=false;
+  let signinTimer=null, signinHalted=false, signinCopy=null, copySeq=0; // signinCopy: null, 'copied' or 'manual' for the current link
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
   // conversation, so manual checks beside it stay far inside the 256-call bound.
   const SIGNIN_POLL_MS=2000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
@@ -34,8 +35,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     || !!signinAttempt && signinAttempt.generation===context.generation && signinState==='connected';
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
   function clearSignin(notice) {
-    signinUrl=null; if (mount) mount.code.value='';
+    signinUrl=null; signinCopy=null; copySeq++; if (mount) mount.code.value='';
     if (notice) signinNotice=notice;
+  }
+  // Copy is a fallback beside the new-tab link. Where the clipboard is blocked, show the link to copy by hand.
+  async function copySigninLink() {
+    const url=signinUrl, seq=++copySeq; if (!url) return;
+    let copied=true; try { await copyText(url); } catch { copied=false; }
+    if (disposed || seq!==copySeq || url!==signinUrl) return; // a later click, a new link or a cleared one wins
+    signinCopy=copied ? 'copied' : 'manual'; changed();
+    if (!copied) { mount?.signinField.focus?.(); mount?.signinField.select?.(); }
   }
   function stopSigninPoll() { clearTimeout(signinTimer); signinTimer=null; }
   function scheduleSigninPoll() {
@@ -252,6 +261,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     signinAttempt=Object.freeze({generation:value.generation,attempt_id:value.attempt_id});
     storage.setItem(storageKey+':claude',JSON.stringify(signinAttempt));
+    if (url!==signinUrl) { signinCopy=null; copySeq++; }
     signinState=value.state; signinUrl=url; signinHalted=false;
     signinNotice=value.state==='connected' ? 'Claude connected for this host. This does not start your team.'
       : value.state==='waiting' ? 'Sign in to Claude in the link below. If Claude shows a code, paste it here. Progress is checked automatically.'
@@ -278,10 +288,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   function render() {
     if (!mount) return;
-    const {area,status,declaration,authority,controls,details,summary,signinBox,signinStatus,signinLink,code,signinControls} = mount;
+    const {area,status,declaration,authority,controls,details,summary,signinBox,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,signinControls} = mount;
     signinBox.hidden=!context?.provider_signin || !!pending;
     signinStatus.textContent=signinNotice;
     signinLink.hidden=!signinUrl; if (signinUrl) signinLink.setAttribute('href',signinUrl); else signinLink.removeAttribute?.('href');
+    signinCopyButton.hidden=!signinUrl;
+    signinCopyNote.textContent=!signinUrl ? '' : signinCopy==='copied' ? 'Link copied. Paste it into a new tab.'
+      : signinCopy==='manual' ? 'Copying is blocked here. Copy the link from the box below.' : '';
+    signinField.hidden=!signinUrl || signinCopy!=='manual'; signinField.value=signinField.hidden ? '' : signinUrl;
     code.disabled=!active() || busy || signinState!=='waiting';
     for (const [operation,button] of Object.entries(signinControls)) button.disabled=!active() || busy || signinBlocked
       || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
@@ -325,6 +339,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const signinBox=document.createElement('section'); element.append(signinBox);
     const signinStatus=document.createElement('p'); signinStatus.setAttribute('role','status'); signinBox.append(signinStatus);
     const signinLink=document.createElement('a'); signinLink.textContent='Open Claude sign-in'; signinLink.setAttribute('target','_blank'); signinLink.setAttribute('rel','noreferrer noopener'); signinBox.append(signinLink);
+    const signinCopyButton=document.createElement('button'); signinCopyButton.type='button'; signinCopyButton.textContent='Copy link'; signinCopyButton.className='pill ghost';
+    signinCopyButton.addEventListener('click',()=>{ void copySigninLink(); }); signinBox.append(signinCopyButton);
+    const signinCopyNote=document.createElement('span'); signinCopyNote.setAttribute('role','status'); signinBox.append(signinCopyNote);
+    const signinField=document.createElement('input'); signinField.type='text'; signinField.readOnly=true; signinField.className='signin-link-field'; signinField.setAttribute('aria-label','Claude sign-in link'); signinBox.append(signinField);
     const code=document.createElement('input'); code.type='password'; code.maxLength=2305; code.setAttribute('aria-label','Claude sign-in code'); code.setAttribute('autocomplete','off'); signinBox.append(code);
     const signinControls={};
     for (const [operation,label] of [['begin','Sign in to Claude'],['status','Check sign-in progress'],['code','Submit Claude code'],['cancel','Cancel sign-in']]) {
@@ -334,7 +352,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const disclosure = document.createElement('details'), title = document.createElement('summary'); title.textContent = 'Configuration changes and recovery identifiers'; disclosure.append(title);
     const details = document.createElement('pre'); disclosure.append(details); element.append(disclosure);
     const status = document.createElement('p'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite'); element.append(status);
-    mount = {area,status,declaration,authority,details,controls,summary,signinBox,signinStatus,signinLink,code,signinControls}; render();
+    mount = {area,status,declaration,authority,details,controls,summary,signinBox,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,signinControls}; render();
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
