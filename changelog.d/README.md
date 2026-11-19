@@ -36,9 +36,13 @@ head meets the live tip of its base branch, not the base the PR was opened again
 so a stacked PR is not charged with a PR its base has merged since. A PR whose head
 collects other PRs, merged with GitHub's merge commit (`Merge pull request #N from
 <owner>/<branch>`), may carry each one's fragment, named after that PR's own head
-branch, when that merge commit added it. A sub-PR squash-merged into the branch
-leaves no such commit, so its fragment is refused as misnamed: merge sub-PRs with a
-merge commit, or move the entry into the branch's own fragment.
+branch, when that merge commit added it. Such a PR still needs an entry in its own
+fragment, or a `Changelog: none — <why>` line, even when its other fragments came
+from sub-PRs. The exemption trusts GitHub's default merge-commit subject: a squash
+merge, a subject renamed at merge, or a repository setting that changes the default
+merge message leaves no subject it can read, so the fragment counts as misnamed and
+the check fails closed. Merge sub-PRs with GitHub's default merge commit, or move
+the entry into the branch's own fragment.
 
 ## The weekly roll-up
 
