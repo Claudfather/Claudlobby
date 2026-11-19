@@ -2080,3 +2080,328 @@ test('connected read client admits an SSH reference only with the browser carrie
   const client=createConnectedReadClient({...base,fetch:Object.defineProperty(async()=>{throw new Error('unused');},'browserOwnerTransport',{value:true})});
   assert.equal(typeof client.snapshot().state,'string');client.dispose();
 });
+
+// Browser carrier landing: the parent binds one saved reference, so the workspace opens on that computer.
+test('browser bridge names its bound reference only after the parent offer, and its settle marker never rejects',async t=>{
+  const h=await bridgeHarness(t),settled=[];
+  assert.equal(h.bridge.fetch.browserOwnerReference,null,'no reference before the offer');
+  void h.bridge.fetch.browserOwnerSettled.then(()=>settled.push('settled'));
+  h.admit({reference:{...h.doc.references[0],revision:2}});await flush();
+  assert.equal(h.bridge.fetch.browserOwnerReference,null,'a refused offer binds nothing');assert.deepEqual(settled,[]);
+  h.admit();await h.bridge.ready;await flush();
+  assert.equal(h.bridge.fetch.browserOwnerReference,h.doc.references[0].reference_id);assert.deepEqual(settled,['settled']);
+  assert.throws(()=>{h.bridge.fetch.browserOwnerReference='other';},TypeError,'the marker cannot be retargeted');
+  h.bridge.dispose();await assert.rejects(h.host('/api/owner/connected/status'));
+  assert.equal(h.bridge.fetch.browserOwnerReference,h.doc.references[0].reference_id,'retirement keeps the name but no request goes anywhere');
+  assert.equal(h.native.length,0);
+  const timers=[],lost=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});
+  timers.find(timer=>timer.delay===8000).fn();await lost.bridge.fetch.browserOwnerSettled;
+  assert.equal(lost.bridge.fetch.browserOwnerReference,null,'a carrier that never bound names no computer');
+});
+const landingRefs=['a','b','c'].map((n,i)=>({reference_id:id(i+4),endpoint_origin:`https://${n}.example.test`,revision:1}));
+// A browser-carrier fetch double: the same markers as browser-owner-transport.js over the harness fetch.
+function browserCarrier(h,bound=null) {
+  const settled=deferred();let reference=bound;
+  const fetch=Object.defineProperties((...args)=>h.dependencies.fetch(...args),{browserOwnerTransport:{value:true},
+    browserOwnerReference:{get:()=>reference},browserOwnerSettled:{value:settled.promise}});
+  return {fetch,bind(value){reference=value;settled.resolve();},settle(){settled.resolve();}};
+}
+// The frame's documentElement and window as a browser gives an embedded page; posts are recorded.
+// resize() delivers one ResizeObserver notification, as a browser does at most once per rendering frame.
+function framedPage(ui) {
+  const page={attributes:{},height:640,setAttribute(k,v){this.attributes[k]=String(v);},getAttribute(k){return this.attributes[k]??null;},
+    getBoundingClientRect(){return {height:this.height};}};
+  const posts=[],observers=[];
+  class ResizeObserver {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
+  const view={parent:{postMessage:(...args)=>posts.push(args)},ResizeObserver};
+  ui.document.documentElement=page;ui.document.defaultView=view;
+  return {page,view,posts,observers,
+    sizes:()=>posts.filter(([message])=>message.type==='claudfather.workspace.size'),
+    resize(height){page.height=height;for(const o of observers)if(!o.closed)o.fn([{target:o.targets[0]}],o);}};
+}
+// One localStorage per test, restored once after every landing in it closes (t.after runs first-in, first-out).
+const landingStorage=new WeakMap();
+function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata}={}) {
+  if(!landingStorage.has(t)){const restore=stubLocalStorage();landingStorage.set(t,[]);t.after(()=>{for(const close of landingStorage.get(t))close();restore();});}
+  const h=harness({references}),frame=framedPage(h.ui),carrier=browser?browserCarrier(h,bound):null;
+  if(metadata)h.metadata=metadata;
+  if(browser)h.api.dispose();
+  const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch}):h.api;
+  landingStorage.get(t).push(()=>workspace.dispose()); // the guide keeps its saved setup in localStorage, as in a browser
+  workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session'),onConnectionAttention:event=>attention.push(event)});
+  const cards=()=>h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
+  const rail=h.ui.get('rail-channel'),host=rail.children[0];
+  return {h,frame,carrier,workspace,cards,rail,host,attention,
+    panel:()=>host.children.find(n=>n.className==='setup-focus-panel'),
+    status:()=>host.children.find(n=>n.className==='setup-only-status'),
+    shownCards:()=>cards().filter(visible).map(card=>card.children[0].textContent),
+    // Every visible line of text in the setup view.
+    shownText:()=>descendants(host).filter(n=>visible(n)&&!n.children.length&&n.textContent).map(n=>n.textContent),
+    mutations:()=>h.calls.filter(c=>/\/api\/owner\/connected\/(?:challenge|issue|renew|logout|setup\/)/.test(c.url))};
+}
+const stepShape=panel=>stepsOf(panel).filter(visible).map(n=>[n.dataset.step,n.dataset.state,n.children.find(c=>c.className==='setup-step-number').textContent]);
+const stepNode=(panel,name,className)=>descendants(stepsOf(panel).find(n=>n.dataset.step===name)).find(n=>n.className===className);
+// Plain sentences only: no raw state names (not_connected, setup_only) and no builder vocabulary.
+const assertPlain=texts=>{for(const text of texts)assert.doesNotMatch(text,/\b[a-z]+_[a-z_]+\b|snapshot|summar(?:y|ies) are|remediation|host data/i,text);};
+test('browser carrier opens on its bound computer: a focused panel whose first step is an explicit Connect',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  assert.deepEqual(l.shownCards(),['a.example.test · Not connected'],'computers this carrier cannot reach are not listed');
+  assert.equal(l.cards().length,3,'every saved computer is still admitted; only the bound one is shown');
+  assert.equal(l.frame.page.attributes['data-workspace-view'],'setup','workspace.css shows only the setup panel under this marker');
+  assert.equal(l.host.hidden,false);assert.equal(l.rail.dataset.setupFocus,'only','the panel takes the main area before Connect');
+  assert.equal(l.status().hidden,true,'no waiting line beside the panel');
+  const panel=l.panel(),heading=panel.children.find(n=>n.tagName==='H2');
+  assertPlain(l.shownText());
+  assert.equal(heading.textContent,'Finish setting up a.example.test');
+  assert.deepEqual(stepShape(panel),[['connect','current','1'],['approve','upcoming','2'],['signin','upcoming','3'],['goal','upcoming','4'],['launch','upcoming','5']]);
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect'],[],[],[],[]],'Connect is the one filled action');
+  const connect=stepsOf(panel)[0],button=descendants(connect).find(n=>n.tagName==='BUTTON');
+  assert.equal(connect.children.find(n=>n.tagName==='H3').textContent,'Connect this computer');
+  assert.ok(descendants(connect).some(n=>n.textContent==='Connect so you can finish setup.'&&visible(n)));
+  assert.equal(button.textContent,'Connect');assert.equal(button.type,'button');assert.equal(button.disabled,false);
+  assert.equal(stepPart(panel,'connect','setup-progress').attributes.role,'status');
+  assert.equal(descendants(panel).find(n=>n.className==='setup-note').textContent,'','the step says what to do; no second Connect note');
+  const card=l.cards()[0];
+  assert.match(card.children[1].children[0].className,/connection-primary-quiet/,'the card keeps Connect, quietly; Go to setup leads');
+  assert.equal(card.children[1].children[1].hidden,false);assert.equal(card.children[2].textContent,'Finish setting up this computer in the setup panel.');
+  assert.match(l.h.ui.get('owner-session').children[0].children[0].textContent,/^Connect this computer to view its teams\./);
+  assert.deepEqual(l.attention.map(event=>event.state),['not_connected'],'only the listed computer asks for attention');
+  // No automatic sign-in: account rechecks and timers never connect.
+  await l.workspace.checkAccount();l.h.timer(30000);await flush();
+  assert.deepEqual(l.mutations(),[],'nothing is sent to a computer before the click');
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  button.focus();button.click();
+  assert.equal(button.disabled,true);assert.equal(stepPart(panel,'connect','setup-progress').textContent,'Connecting…');
+  await flush();
+  assert.deepEqual(l.mutations().map(c=>new URL(c.url).pathname.split('/').at(-1)),['challenge','issue'],'one click, one connect');
+  assert.equal(l.mutations().every(c=>c.url.startsWith(landingRefs[0].endpoint_origin)),true);
+  assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
+  assert.equal(l.panel(),panel,'the same panel continues the setup');assert.equal(l.rail.dataset.setupFocus,'only');
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','upcoming']]);
+  assert.ok(descendants(stepsOf(panel)[0]).some(n=>n.textContent==='✓ Connected'&&visible(n)));
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[],[]]);
+  assert.equal(l.h.ui.document.activeElement?.textContent,'Check setup approval','keyboard focus moves on to the next action');
+  assert.equal(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).length,0,'setup approval is still checked only on request');
+  assert.deepEqual(l.shownCards(),['a.example.test · First-team setup']);
+});
+test('a refused Connect from the panel keeps Connect, says why, and returns focus to it without retrying',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));
+  const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');
+  button.focus();button.click();await flush();
+  assert.equal(l.mutations().length,1,'one challenge, no retry');
+  assert.equal(stepShape(panel)[0][1],'current');assert.equal(button.disabled,false);assert.equal(button.textContent,'Connect');
+  assert.equal(stepNode(panel,'connect','setup-hint').textContent,'Could not connect to this computer. Make sure it is on and online, then choose Connect again.');
+  assertPlain(l.shownText());
+  assert.equal(l.h.ui.document.activeElement,button,'focus returns to Connect');
+  assert.equal(l.rail.dataset.setupFocus,'only');
+  l.h.timer(30000);await flush();assert.equal(l.mutations().length,1,'nothing retries automatically');
+});
+test('browser carrier reads and summaries leave out the computers it cannot reach',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  for(const path of ['/api/overview','/api/tasks','/api/channel?limit=120']) {
+    const value=await l.workspace.jget(path);
+    assert.equal(value.state,'unavailable',path);
+    assert.match(value.remediation,/^a\.example\.test: Not connected\./,path);
+    assert.doesNotMatch(value.remediation,/[bc]\.example\.test/,path+' names only the bound computer');
+  }
+  const overview=await l.workspace.jget('/api/overview');
+  assert.deepEqual(overview.data.sources.map(s=>s.label),['a.example.test']);assert.equal(overview.data.coverage.total,1);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  assert.equal(await l.workspace.act(0,'connect'),true);
+  assert.equal(l.host.hidden,false,'the panel stays in the main area through setup');
+  assert.equal(l.h.calls.filter(c=>/[bc]\.example\.test/.test(c.url)).length,0,'no request is sent toward a hidden computer');
+});
+test('an offer admitted after the account check collapses the list onto its computer and refreshes the boards',async t=>{
+  const l=landing(t,{bound:null});await l.workspace.checkAccount();await flush();
+  assert.equal(l.shownCards().length,3,'until the parent names a computer, every saved computer is listed');
+  assert.equal(l.host.hidden,false,'the setup view keeps the main area');assert.equal(l.panel(),undefined,'no computer is chosen for the parent');
+  assert.equal(l.status().hidden,false);assert.equal(l.status().textContent,'Opening the connection to your computer…');
+  assert.equal(l.status().attributes.role,'status');
+  const stream=l.workspace.createEventSource('/api/stream'),events=[];stream.onmessage=event=>events.push(JSON.parse(event.data));
+  l.carrier.bind(landingRefs[1].reference_id);await flush();
+  assert.deepEqual(l.shownCards(),['b.example.test · Not connected']);
+  assert.equal(l.status().hidden,true);assert.equal(l.panel().children.find(n=>n.tagName==='H2').textContent,'Finish setting up b.example.test');
+  assert.equal(events.at(-1)?.coverage_changed,true,'the boards read again with the new presentation');
+  assert.deepEqual(events.at(-1).overview.data.sources.map(s=>s.label),['b.example.test']);
+  assert.deepEqual(l.mutations(),[]);stream.close();
+  // A carrier that retires without an offer says so plainly, shows no computer and connects nothing.
+  const lost=landing(t,{bound:null});await lost.workspace.checkAccount();lost.carrier.settle();await flush();
+  assert.equal(lost.status().textContent,'This page could not reach your computer. Reopen setup from your workspace.');
+  assert.equal(lost.panel(),undefined);assert.deepEqual(lost.mutations(),[]);
+});
+test('native workspace keeps every saved computer and its setup panel exactly as before',async t=>{
+  const attention=[],l=landing(t,{browser:false,attention});await l.h.api.checkAccount();await flush();
+  assert.deepEqual(l.shownCards(),['a.example.test · Not connected','b.example.test · Not connected','c.example.test · Not connected']);
+  assert.equal(l.host.hidden,true);assert.equal(l.rail.dataset.setupFocus,undefined,'nothing takes the main area before setup-only');
+  assert.equal(l.frame.page.attributes['data-workspace-view'],undefined,'native keeps the whole workspace');assert.equal(l.status(),undefined);
+  assert.deepEqual(l.frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin]],'native posts only its ready message');
+  assert.equal(l.frame.observers.length,0,'native never measures itself for the parent');
+  const panel=descendants(l.cards()[0]).find(n=>n.className==='setup-focus-panel');
+  assert.deepEqual(stepShape(panel).map(row=>row[0]),['approve','signin','goal','launch'],'no Connect step');
+  assert.match(l.h.ui.get('owner-session').children[0].children[0].textContent,/^Connect each computer/);
+  assert.equal(attention.length,3);
+  assert.match((await l.h.api.jget('/api/tasks')).remediation,/a\.example\.test.*b\.example\.test.*c\.example\.test/);
+  // A reference marker without the browser-carrier marker is ignored.
+  const marked=harness({references:landingRefs}),fetch=Object.defineProperty((...args)=>marked.dependencies.fetch(...args),'browserOwnerReference',{value:landingRefs[0].reference_id});
+  const other=createConnectedWorkspace({...marked.dependencies,fetch});t.after(()=>other.dispose());
+  other.mountSessionControls({document:marked.ui.document,element:marked.ui.get('owner-session')});await other.checkAccount();await flush();
+  assert.equal(marked.ui.get('owner-session').children.filter(e=>e.className==='connection-card'&&visible(e)).length,3);
+  assert.equal(marked.ui.get('rail-channel').children[0].hidden,true);
+});
+test('the setup-only view hides the header, sidebar, rooms, composer and diagnostics, and nothing in it scrolls on its own',async()=>{
+  const css=(await read('workspace.css')).replace(/\/\*[\s\S]*?\*\//g,'').replace(/\s+/g,' '),html=await read('index.html');
+  const rules=[...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([,selectors,body])=>({selectors:selectors.split(',').map(s=>s.trim()),body}));
+  const ruleFor=selector=>rules.filter(rule=>rule.selectors.includes(selector)).map(rule=>rule.body).join(';');
+  const setup=':root[data-workspace-view="setup"]';
+  for(const selector of [`${setup} .plane-workspace > header`,`${setup} #rail-fleet`,`${setup} #rail-channel > :not(#setup-focus)`])
+    assert.match(ruleFor(selector),/display:none !important/,selector);
+  for(const selector of [setup,`${setup} body.plane-workspace`,`${setup} #rail-channel`,`${setup} .plane-workspace .setup-focus`])
+    assert.match(ruleFor(selector),/overflow:visible/,selector+' grows with its content');
+  assert.match(ruleFor(`${setup} .plane-workspace main`),/height:auto/);assert.match(ruleFor(`${setup} .setup-panel`),/max-width:none/,'the panel fills the frame width');
+  // What those rules hide, in the canonical page.
+  assert.match(html.slice(html.indexOf('<header>'),html.indexOf('</header>')),/id="view-nav"/,'Rooms, Tasks and More sit in the header');
+  const fleet=html.slice(html.indexOf('id="rail-fleet"'),html.indexOf('id="rail-channel"'));
+  for(const part of ['id="fleet-tabs"','id="owner-session"','id="overview"','id="rail-debug"'])assert.ok(fleet.includes(part),part+' is in the sidebar');
+  const channel=html.slice(html.indexOf('id="rail-channel"'),html.indexOf('</main>'));
+  for(const part of ['id="room-title"','id="search"','id="channel"','id="rail-right"','id="trust"','id="work-loop"'])assert.ok(channel.includes(part),part+' is beside the setup host');
+  assert.doesNotMatch(html,/id="setup-focus"/,'the workspace adds the setup host as the one shown child');
+});
+test('setup-only view shows only the bridged computer\'s panel and a plain line while it has none, and stays on the panel once connected',async t=>{
+  const l=landing(t);
+  assert.equal(l.status().textContent,'Checking your workspace…');assert.equal(l.panel(),undefined);
+  assert.equal(l.rail.children.length,1,'the setup host is the only thing the view adds');
+  await l.workspace.checkAccount();await flush();
+  const panel=l.panel(),text=l.shownText();
+  assert.deepEqual(l.host.children.filter(visible),[panel],'one panel; no other computer and no summary');
+  assert.equal(descendants(l.host).filter(n=>n.className==='setup-focus-panel').length,1);
+  for(const phrase of [/Message team/,/[Uu]navailable/,/Recorder/,/All teams/,/b\.example\.test|c\.example\.test/])
+    assert.equal(text.some(line=>phrase.test(line)),false,String(phrase));
+  assertPlain(text);
+  // Already set up: Connect gives a readable computer, and the view still shows only its panel.
+  descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(l.panel(),panel);assert.equal(l.rail.dataset.setupFocus,'only','the workspace is not revealed beside the panel');
+  assert.equal(stepShape(panel)[0][1],'done');assert.equal(l.status().hidden,true);
+  // An account change leaves a plain closing line, not the setup panel.
+  l.h.metadata=context([landingRefs[1]]);await l.workspace.checkAccount();await flush();
+  assert.equal(l.workspace.snapshot().phase,'denied');
+  assert.equal(l.h.ui.get('main').children.length,1,'only the closing line remains in the main area');
+  assertPlain(descendants(l.h.ui.get('main')).map(n=>n.textContent).filter(Boolean));
+});
+test('setup-only view posts its content height to the exact shell origin, once per observation and only when it changes',async t=>{
+  const l=landing(t),{frame}=l,ready=[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin];
+  assert.deepEqual(frame.posts,[ready],'the ready message comes first; no size before a measurement');
+  assert.equal(frame.observers.length,1);assert.deepEqual(frame.observers[0].targets,[frame.page],'the observer watches the root element');
+  await l.workspace.checkAccount();await flush();assert.equal(frame.sizes().length,0,'rendering alone posts nothing; the observer reports');
+  frame.resize(900.4);
+  assert.deepEqual(frame.sizes(),[[{type:'claudfather.workspace.size',version:1,height:901},documentContext.shell_origin]]);
+  assert.deepEqual(Object.keys(frame.sizes()[0][0]),['type','version','height'],'exactly these keys');
+  frame.resize(900.1);frame.resize(901);assert.equal(frame.sizes().length,1,'an unchanged height is not posted again');
+  for(const height of [0,-5,50000,20001,Number.NaN,Infinity,640])frame.resize(height);
+  assert.deepEqual(frame.sizes().map(([message])=>message.height),[901,1,20000,640],'whole CSS pixels between 1 and 20000');
+  assert.ok(frame.sizes().every(([message])=>Number.isInteger(message.height)));
+  assert.ok(frame.posts.every(([,origin])=>origin===documentContext.shell_origin),'never a wildcard target');
+  l.workspace.dispose();assert.equal(frame.observers[0].closed,true,'disposal stops observing');
+  frame.observers[0].fn([]);frame.page.height=700;frame.observers[0].fn([]);
+  assert.equal(frame.sizes().length,4,'nothing is posted after the view closes');
+});
+test('a framed setup-only view without ResizeObserver still announces ready and posts no size',async t=>{
+  const restore=stubLocalStorage(),h=harness({references:landingRefs}),frame=framedPage(h.ui),carrier=browserCarrier(h,landingRefs[0].reference_id);
+  h.api.dispose();delete frame.view.ResizeObserver;
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch});t.after(()=>{workspace.dispose();restore();});
+  workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
+  assert.deepEqual(frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin]]);
+  assert.equal(frame.page.attributes['data-workspace-view'],'setup');
+});
+test('a standalone panel ends on a done Launch step with a plain running line; the shared panel keeps its lead guidance',async()=>{
+  for(const standalone of [true,false]){
+    const h=setupHarness(),ui=dom(),panel=new ui.Element();
+    h.api.mountPanel({document:ui.document,element:panel,...(standalone?{standalone:true,connect:()=>{}}:{})});
+    assert.equal(await h.api.run('context'),true);h.api.setGoal('Improve checkout tests');assert.equal(await h.api.run('preview'),true);
+    await h.api.run('launch');await h.api.run('receipt');
+    const shape=stepShape(panel).map(row=>row.slice(0,2)),note=descendants(panel).find(n=>n.className==='setup-note').textContent;
+    if(standalone){
+      assert.deepEqual(shape,[['connect','done'],['approve','done'],['goal','done'],['launch','done']]);
+      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)));
+      assert.equal(note,'Team launched. Your team is running on this computer.');
+    } else {
+      assert.deepEqual(shape,[['approve','done'],['goal','done'],['launch','current']],'the shared panel is unchanged');
+      assert.match(note,/^Team launched\. Once its bots show as running, message the lead/);
+    }
+    assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+  }
+});
+test('a standalone managed launch ends on finished steps after its status check moves the connection on',async()=>{
+  for(const standalone of [true,false]){
+    const timers=[];let h=null;
+    h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+      client:{async setupReceipt(input){return {...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}};},
+        // As the connected read client: the same session's status check goes setup_only, checking, then ready.
+        async check(){h.change({state:'checking'});h.change({state:'ready',epoch:2});}}});
+    h.context.managed_owner=true;
+    const ui=dom(),panel=new ui.Element();
+    h.api.mountPanel({document:ui.document,element:panel,...(standalone?{standalone:true,connect:()=>{}}:{})});
+    await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');
+    while(timers.length){await timers.shift()();await flush();}
+    assert.equal(h.client.snapshot().state,'ready','the handoff promoted the connection and cleared the approval context');
+    const shape=stepShape(panel).map(row=>row.slice(0,2)),note=descendants(panel).find(n=>n.className==='setup-note').textContent;
+    const buttons=descendants(panel).filter(n=>n.tagName==='BUTTON'&&visible(n)).map(n=>n.textContent);
+    if(standalone){
+      assert.deepEqual(shape,[['connect','done'],['approve','done'],['goal','done'],['launch','done']]);
+      assert.deepEqual(buttons,[],'nothing is left to approve, check again or launch');
+      assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved'&&visible(n)));
+      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)));
+      assert.equal(note,'Team launched. Your team is running on this computer.');
+    } else {
+      assert.deepEqual(shape[0],['approve','current'],'the shared panel keeps its existing steps');
+      assert.match(note,/^Team launched\. Once its bots show as running/);
+    }
+    assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+  }
+});
+test('a rebound setup request is not shown as launched, so its launch status can be checked',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>{}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');await h.api.run('receipt');
+  assert.equal(stepShape(panel).at(-1)[1],'done');
+  Object.assign(h.context,{request:{...h.pending,request_id:id(11)},launch_reserved:true});
+  assert.equal(await h.api.run('context'),true);
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['goal','done'],['launch','current']]);
+  assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'the new request leads with its status check');
+  assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)),false);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+test('Connect moves keyboard focus on only while this frame has focus and nothing else took it',async t=>{
+  for(const away of ['element','frame']){
+    const l=landing(t);await l.workspace.checkAccount();await flush();
+    l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+    const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON'),heading=panel.children.find(n=>n.tagName==='H2');
+    button.focus();button.click();
+    if(away==='element')heading.focus();else l.h.ui.document.hasFocus=()=>false;
+    await flush();
+    assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
+    assert.equal(l.h.ui.document.activeElement,away==='element'?heading:null,'focus stays where the person left it: '+away);
+  }
+  // A refused Connect does not pull focus back once the person moved on.
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));
+  const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON'),heading=panel.children.find(n=>n.tagName==='H2');
+  button.focus();button.click();heading.focus();await flush();
+  assert.equal(button.disabled,false);assert.equal(l.h.ui.document.activeElement,heading);
+  assert.equal(l.mutations().length,1,'one challenge, no retry');
+});
+test('browser carrier: one saved computer opens its panel; an account listing only the bound computer of several is refused',async t=>{
+  // The document and account both list one computer: the ordinary single-computer setup.
+  const one=landing(t,{references:[landingRefs[0]]});await one.workspace.checkAccount();await flush();
+  assert.equal(one.workspace.snapshot().phase,'ready');
+  assert.equal(one.panel().children.find(n=>n.tagName==='H2').textContent,'Finish setting up a.example.test');
+  assert.deepEqual(stepShape(one.panel())[0].slice(0,2),['connect','current']);assert.deepEqual(one.mutations(),[]);
+  // The document saved three computers but the account lists only the bound one: the saved set changed, so nothing is admitted.
+  const partial=landing(t,{metadata:context([landingRefs[0]])});await partial.workspace.checkAccount();await flush();
+  assert.equal(partial.workspace.snapshot().phase,'denied','the complete saved-reference set is still required');
+  assert.equal(partial.panel(),undefined);assert.deepEqual(partial.mutations(),[]);
+  assert.equal(partial.h.calls.filter(c=>!c.url.startsWith(documentContext.shell_origin)).length,0,'no request reaches any computer');
+  assert.equal(partial.status().textContent,'Your account or saved computers changed. Reopen setup from your workspace.');
+  assert.equal(partial.h.ui.get('main').children.length,1,'only the closing line remains in the main area');
+});

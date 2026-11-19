@@ -54,13 +54,20 @@ export function createWorkspaceReadTransport({ sources }) {
   if (!Array.isArray(sources) || sources.length < 1 || sources.length > MAX_SAVED_COMPUTERS) throw new Error('One to eight core read handles are required.');
   const rooms = new Map(), streams = new Set();
   let disposed = false;
-  const entries = sources.map(({ key, label, savedLabel, reader, connectionState, readFailure }) => {
+  const entries = sources.map(({ key, label, savedLabel, reader, connectionState, readFailure, shown }) => {
     if (typeof key !== 'string' || !slug.test(key) || key.trim() !== key || typeof label !== 'string' || !label || label.length > 80 ||
         savedLabel !== undefined && (typeof savedLabel !== 'string' || !savedLabel.trim() || savedLabel.length > 80
           || !savedLabel.isWellFormed() || savedLabel.includes('\0')) ||
-        !isOwnerReadHandle(reader)) throw new Error('A named core read handle is required.');
-    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, overviewPending: null, unsubscribe: null };
+        !isOwnerReadHandle(reader) || shown !== undefined && typeof shown !== 'function') throw new Error('A named core read handle is required.');
+    return { key, label:savedLabel || label, savedLabel, reader, connectionState, readFailure, shown, epoch: 0, readerEpoch: null, host: null, state: 'checking', fleets: [], rosterRequest: 0, routingRevision: 0, overviewTimeout: null, overviewRevision: 0, overviewReadAt: null, overviewSnapshot: null, overviewPending: null, unsubscribe: null };
   });
+  // Presentation only: aggregate reads, facts, coverage and blocker text cover the sources the entry
+  // shows (a browser carrier serves one computer). Admission, routing and per-source reads are unchanged,
+  // and with nothing shown every source is presented.
+  function presented() {
+    const shown = entries.filter(e => { try { return e.shown?.() !== false; } catch { return true; } });
+    return shown.length ? shown : entries;
+  }
   if (new Set(entries.map(e => e.key)).size !== entries.length || new Set(entries.map(e => e.reader)).size !== entries.length)
     throw new Error('Sources must be distinct.');
   const admittedHosts = entries.map(e => e.reader.snapshot().read_profile?.host_uid).filter(Boolean);
@@ -193,19 +200,19 @@ export function createWorkspaceReadTransport({ sources }) {
     if (changed) notify({ routing_changed: true, routing_retired: retired,
       ...(invalidatesOverview ? {overview_invalidated:overviewSnapshot()} : {}) });
   }
-  function fleetChoices(values) {
-    return entries.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
+  function fleetChoices(list, values) {
+    return list.flatMap((e, i) => e.fleets.map(f => ({ ...f, alias: room(e, f.alias),
       uid: qualified(e, f.uid), display_label: `${e.label} / ${f.alias}`, source_state: values[i].state,
       overview_retained: values[i].state === 'checking' && values[i].overview_retained === true,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       read_state: values[i].state })));
   }
-  function coverage(values) {
+  function coverage(list, values) {
     const reachable = values.filter(v => v.state === 'ok').length;
-    return { total: entries.length, reachable, partial: reachable !== entries.length };
+    return { total: list.length, reachable, partial: reachable !== list.length };
   }
-  function sourceFacts(values, path) {
-    return entries.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
+  function sourceFacts(list, values, path) {
+    return list.map((e, i) => ({ key: e.key, label: e.label, host_uid: qualified(e, e.host), state: values[i].state,
       connection_state: e.connectionState?.() || (admitted(e) ? 'ready' : e.state),
       provenance: values[i].provenance, remediation: values[i].remediation,
       ...(path === '/api/overview' ? { host: values[i].state === 'ok' || values[i].overview_retained ? values[i].data.host : null,
@@ -226,14 +233,14 @@ export function createWorkspaceReadTransport({ sources }) {
       ? {...saved.value, state:'checking', overview_retained:true}
       : failed('checking', 'This source read is still in progress.');
   }
-  function combineOverview(values) {
-    const good = entries.flatMap((e, i) => values[i].state === 'ok' || values[i].overview_retained
+  function combineOverview(list, values) {
+    const good = list.flatMap((e, i) => values[i].state === 'ok' || values[i].overview_retained
       ? [{e, v:project(e, '/api/overview', values[i])}] : []);
     const totals = good.map(x => x.v.data.totals);
-    const data = {sources:sourceFacts(values, '/api/overview'), coverage:coverage(values),
-      windows:entries.map((e,i) => ({source:e.key,state:values[i].state,
+    const data = {sources:sourceFacts(list, values, '/api/overview'), coverage:coverage(list, values),
+      windows:list.map((e,i) => ({source:e.key,state:values[i].state,
         limit:values[i].data?.limit,truncated:values[i].data?.truncated,lineage:values[i].data?.lineage})),
-      fleet_choices:fleetChoices(values), default:null,
+      fleet_choices:fleetChoices(list, values), default:null,
       fleets:good.flatMap(x => x.v.data.fleets.map(f => ({...f,
         overview_retained:x.v.overview_retained === true, overview_read_at:x.v.overview_read_at}))),
       totals:Object.fromEntries(['fleets','bots','provisional','working','attention','overdue'].map(k => [k,sum(totals,k)]))};
@@ -241,10 +248,11 @@ export function createWorkspaceReadTransport({ sources }) {
     data.totals.recorder_gaps = totals.flatMap(t => t.recorder_gaps || []);
     data.totals.overview_retained = values.some(v => v.overview_retained);
     return {state:good.length ? 'ok' : 'unavailable', provenance:null, data,
-      ...(!good.length ? {remediation:blockers(entries, values)} : {})};
+      ...(!good.length ? {remediation:blockers(list, values)} : {})};
   }
   function overviewSnapshot() {
-    return combineOverview(entries.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
+    const list = presented();
+    return combineOverview(list, list.map(e => e.overviewSnapshot?.epoch === e.epoch && admitted(e)
       ? e.overviewPending === null ? e.overviewSnapshot.value : pendingOverview(e) : sourceFailure(e)));
   }
   // Optional accepted partial snapshots; the Promise still settles with the full read.
@@ -273,7 +281,7 @@ export function createWorkspaceReadTransport({ sources }) {
       if (!t || t.task_id !== raw || t.fleet !== owning.raw.alias || t.fleet_uid !== owning.raw.uid) return failed('denied', 'Task ownership did not match the selected source team.');
       return { ...result, data: { ...result.data, task: task(owning.e, t) } };
     }
-    const chosen = owning ? [owning.e] : entries;
+    const chosen = owning ? [owning.e] : presented();
     const taskCursor = path === '/api/tasks' ? url.searchParams.get('cursor') : null;
     const taskWindow = () => JSON.stringify([selected, chosen.map(e => [e.key, e.host, e.epoch, e.routingRevision, e.state])]);
     let continuation = null;
@@ -308,16 +316,16 @@ export function createWorkspaceReadTransport({ sources }) {
         }
       });
       if (owning && path !== '/api/tasks') return values[0].state === 'ok' ? projected.get(owning.e) : values[0];
-      if (path === '/api/overview') return combineOverview(values);
+      if (path === '/api/overview') return combineOverview(chosen, values);
       const good = chosen.flatMap((e, i) => {
         if (!projected.has(e)) return [];
         try { return [{e, v:project(e, path, values[i])}]; }
         catch { values[i] = failed('unavailable'); return []; }
       });
-      const data = { sources: owning ? [{key:owning.e.key,state:values[0].state}] : sourceFacts(values, path),
-        coverage: owning ? {total:1,reachable:values[0].state === 'ok' ? 1 : 0,partial:values[0].state !== 'ok'} : coverage(values),
+      const data = { sources: owning ? [{key:owning.e.key,state:values[0].state}] : sourceFacts(chosen, values, path),
+        coverage: owning ? {total:1,reachable:values[0].state === 'ok' ? 1 : 0,partial:values[0].state !== 'ok'} : coverage(chosen, values),
         windows: chosen.map((e, i) => ({ source: e.key, state: values[i].state, limit: values[i].data?.limit, truncated: values[i].data?.truncated, lineage: values[i].data?.lineage })) };
-      if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(values), default: null });
+      if (rosterRead) Object.assign(data, { fleet_choices: fleetChoices(chosen, values), default: null });
       if (path === '/api/fleets') data.fleets = data.fleet_choices;
       if (path === '/api/channel') Object.assign(data, { threads: good.flatMap(x => x.v.data.threads),
         checkins: good.flatMap(x => x.v.data.checkins || []).sort((a,b) =>
@@ -456,7 +464,9 @@ export function createWorkspaceReadTransport({ sources }) {
     streams.add(facade); return facade;
   }
   function dispose() { disposed = true; for (const s of [...streams]) s.close(); for (const e of entries) e.unsubscribe(); }
-  return Object.freeze({ jget, createEventSource, dispose, retryOverview,
+  // The entry changed which sources it shows: boards read again through the existing refresh door.
+  function presentationChanged() { if (!disposed && streams.size) notify({coverage_changed:true, overview:overviewSnapshot()}); }
+  return Object.freeze({ jget, createEventSource, dispose, retryOverview, presentationChanged,
     roomLabel(value) { const found = rooms.get(value); return found ? `${found.e.label} / ${found.raw.alias}` : value; },
     routeRoom(selected) {
       const value = !disposed && rooms.get(selected);

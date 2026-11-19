@@ -905,3 +905,25 @@ textarea.setup-input { min-height:96px; resize:vertical; }
   .setup-step-number { width:22px; height:22px; font-size:11px; }
   .plane-workspace .setup-panel .pill { flex:1 1 auto; justify-content:center; text-align:center; }
 }
+/* Setup-only view (browser carrier): the frame is the body of the website's setup step. Only the setup
+   panel shows, at the frame's full width, and the page grows with it: the parent sizes the frame to the
+   height this page reports, so nothing here scrolls on its own. */
+:root[data-workspace-view="setup"],
+:root[data-workspace-view="setup"] body.plane-workspace { height:auto; min-height:0; overflow:visible; }
+:root[data-workspace-view="setup"] body.plane-workspace { display:block; padding:0; background:var(--panel); }
+:root[data-workspace-view="setup"] .plane-workspace > header,
+:root[data-workspace-view="setup"] #rail-fleet,
+:root[data-workspace-view="setup"] #rail-channel > :not(#setup-focus) { display:none !important; }
+:root[data-workspace-view="setup"] .plane-workspace main { display:block; height:auto; min-height:0; padding:0; }
+:root[data-workspace-view="setup"] #rail-channel { display:block; height:auto; min-height:0; overflow:visible; }
+:root[data-workspace-view="setup"] .plane-workspace .setup-focus { overflow:visible; margin:0; }
+:root[data-workspace-view="setup"] .setup-focus .setup-focus-panel { padding:28px 32px 32px; border:0; border-radius:0; background:transparent; }
+:root[data-workspace-view="setup"] .setup-panel { max-width:none; }
+.setup-only-status { margin:0; padding:28px 32px; color:var(--dim); font-size:14px; line-height:1.55; }
+.setup-only-status:empty { display:none; }
+/* After an account change the view keeps only its plain closing line. */
+:root[data-workspace-view="setup"] main > .owner-session { display:block; padding:28px 32px; }
+@media(max-width:650px) {
+  :root[data-workspace-view="setup"] .setup-focus .setup-focus-panel { padding:20px 16px 24px; }
+  .setup-only-status, :root[data-workspace-view="setup"] main > .owner-session { padding:20px 16px; }
+}
