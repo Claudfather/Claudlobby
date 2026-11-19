@@ -18,10 +18,27 @@ def _text(value, name, *, cap=4096):
     return value
 
 
+_SLUG_ID = re.compile(r"ws-[a-z0-9][a-z0-9-]{0,127}")
+
+
 def _id(value):
-    if not isinstance(value, str) or not re.fullmatch(r"ws-[a-z0-9][a-z0-9-]{0,127}", value):
+    if not isinstance(value, str) or not _SLUG_ID.fullmatch(value):
         raise CommandFailure("invalid_argument", "workstream ID must use ws- followed by a slug")
     return value
+
+
+def _shown_id(value):
+    """The ID ``workstream show`` takes: ``_id``'s ``ws-<slug>``, or a task's own
+    workstream's, ``ws_`` and the task's 32 hex digits, which ``task admit`` opens
+    and ``workstream list`` shows. ``workstream open`` refuses that form for
+    ``--id`` and a task's own workstream ends with its task, so every verb that
+    changes a workstream still takes ``_id`` alone."""
+    from ..workstream_operations import TASK_WORKSTREAM_ID
+
+    if isinstance(value, str) and (_SLUG_ID.fullmatch(value) or TASK_WORKSTREAM_ID.fullmatch(value)):
+        return value
+    raise CommandFailure("invalid_argument",
+                         "workstream ID must use ws- followed by a slug, or ws_ and a task's 32 hex digits")
 
 
 def _inputs(args, destination):
@@ -90,7 +107,7 @@ def _read(args, destination, selected, bindings):
                    message='active workstream selection changed during read')
     entries = registry["workstreams"]
     if args.workstream_action == "show":
-        row = entries.get(_id(args.id))
+        row = entries.get(_shown_id(args.id))
         if row is None:
             raise CommandFailure("not_found", "workstream is not live in selected fleet")
         return CommandOutput({"fleet": destination.fleet.name, "workstream": row, **selected.provenance},
