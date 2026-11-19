@@ -7,6 +7,7 @@ compose_fleet_timers, the SWEEP_* env block in the owner's bot.conf, opt-out
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -14,6 +15,10 @@ import subprocess
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
+from claudlobby import known_values
+from claudlobby.__main__ import main
 from claudlobby.config import SweepConfig, _coerce_sweep, load_fleet
 from claudlobby.composer import compose_bot_conf, compose_fleet_timers
 from tests.package_fixtures import git_package
@@ -250,6 +255,184 @@ class TestSweepValidation:
         """
         report = self._errors(tmp_path, body)
         assert not any("sweep" in e for e in report.errors)
+
+
+# fleet.sweep.audit_types is the list of audit types the rotation hands the
+# code-audit-sweep skill, one per run. The skill runs only the types in its
+# table; for any other name it audits nothing and emits audit_failed (#2992).
+_SKILL = Path(__file__).resolve().parents[1] / "library/skills/code-audit-sweep/SKILL.md"
+_TYPES_RUN = "tech-debt, security, docs, product-enhance"
+
+
+def _skill_text() -> str:
+    return _SKILL.read_text(encoding="utf-8")
+
+
+def _skill_table_types() -> list[str]:
+    """The first cell of each row of the skill's `| audit-type | Finds |` table."""
+    types: list[str] = []
+    in_table = False
+    for line in _skill_text().splitlines():
+        if re.match(r"\|\s*audit-type\s*\|", line):
+            in_table = True
+        elif in_table and line.startswith("|"):
+            cell = line.split("|")[1].strip()
+            if cell.strip("-: "):  # the |---|---| rule has nothing else in it
+                types.append(cell.strip("`"))
+        elif in_table:
+            break
+    return types
+
+
+class TestSweepAuditTypes:
+    """`fleet.sweep.audit_types` is checked against the types the skill runs."""
+
+    def _report(self, tmp_path, audit_types, *, enabled=True):
+        root = tmp_path / "f"
+        body = (
+            "fleet:\n"
+            "  manager: astrid\n"
+            "  name: test-fleet\n"
+            "  service_prefix: com.test\n"
+            "  system_defaults: false\n"
+            "  bots:\n"
+            "    astrid:\n"
+            "      expertise: [software-engineering]\n"
+            "  sweep:\n"
+            f"    enabled: {'true' if enabled else 'false'}\n"
+            "    owner_bot: astrid\n"
+            "    repos: [acme/alpha]\n"
+        )
+        if audit_types is not None:
+            body += f"    audit_types: {audit_types}\n"
+        fleet, _md = load_fleet(_write(root, body))
+        return validate(fleet, _make_paths(root))
+
+    @staticmethod
+    def _warned(report):
+        return [message for kind, message in report.categorized() if kind == "audit-type"]
+
+    def test_a_name_the_skill_does_not_run_is_a_warning_never_a_refusal(self, tmp_path):
+        report = self._report(tmp_path, "[tech-debt, security-audit]")
+        warned = self._warned(report)
+        assert len(warned) == 1, report.categorized()
+        assert "'security-audit'" in warned[0]
+        assert _TYPES_RUN in warned[0]
+        assert "emits audit_failed" in warned[0]
+        assert not report.errors, report.errors
+
+    @pytest.mark.parametrize(
+        "name, closest",
+        [
+            ("tech_debt", "tech-debt"),
+            ("Security", "security"),
+            ("product-enhancement", "product-enhance"),
+        ],
+    )
+    def test_the_warning_names_the_closest_type(self, tmp_path, name, closest):
+        (warned,) = self._warned(self._report(tmp_path, f"[{name}]"))
+        assert warned.endswith(f"\u2014 did you mean '{closest}'?"), warned
+
+    def test_a_name_with_nothing_close_gets_no_suggestion(self, tmp_path):
+        (warned,) = self._warned(self._report(tmp_path, "[system]"))
+        assert "'system'" in warned and "did you mean" not in warned, warned
+
+    @pytest.mark.parametrize(
+        "old, successor",
+        [("security-audit", "security"), ("docs-review", "docs")],
+    )
+    def test_a_name_the_old_table_listed_names_the_type_that_replaced_it(
+        self, tmp_path, old, successor
+    ):
+        (warned,) = self._warned(self._report(tmp_path, f"[{old}]"))
+        assert f"'{old}' is not a type code-audit-sweep runs ({_TYPES_RUN})" in warned, warned
+        assert warned.endswith(f"\u2014 the skill renamed it to '{successor}'"), warned
+        assert "did you mean" not in warned, warned
+
+    def test_the_old_data_model_name_gets_the_by_hand_line(self, tmp_path):
+        (warned,) = self._warned(self._report(tmp_path, "[data-model-audit]"))
+        assert "'data-model-audit' runs only by hand" in warned, warned
+        assert "as /claudna:audit data-model in an attended session" in warned, warned
+        assert _TYPES_RUN in warned
+        for other in ("did you mean", "renamed it", "is not a type"):
+            assert other not in warned, warned
+
+    def test_data_model_is_named_as_a_lens_that_runs_only_by_hand(self, tmp_path):
+        (warned,) = self._warned(self._report(tmp_path, "[tech-debt, data-model]"))
+        assert "'data-model' runs only by hand" in warned, warned
+        assert "/claudna:audit data-model" in warned
+        assert _TYPES_RUN in warned
+        assert "did you mean" not in warned
+
+    def test_every_type_the_skill_runs_passes(self, tmp_path):
+        report = self._report(tmp_path, "[tech-debt, security, docs, product-enhance]")
+        assert self._warned(report) == [], report.categorized()
+
+    def test_the_default_types_pass(self, tmp_path):
+        assert self._warned(self._report(tmp_path, None)) == []
+
+    def test_a_disabled_sweep_is_not_checked(self, tmp_path):
+        report = self._report(tmp_path, "[security-audit]", enabled=False)
+        assert self._warned(report) == []
+
+    def test_a_name_listed_twice_warns_once(self, tmp_path):
+        report = self._report(tmp_path, "[security-audit, docs-review, security-audit]")
+        warned = self._warned(report)
+        assert [w.split("'")[1] for w in warned] == ["security-audit", "docs-review"], warned
+
+    def test_validate_exits_zero_and_tags_the_line(self, fleet_dir, capsys):
+        with (fleet_dir / "fleet.yaml").open("a") as f:
+            f.write(
+                "  sweep:\n"
+                "    owner_bot: lead\n"
+                "    repos: [acme/alpha]\n"
+                "    audit_types: [tech-debt, security-audit]\n"
+            )
+        rc = main(["--root", str(fleet_dir), "--json", "config", "validate"])
+        result = json.loads(capsys.readouterr().out)
+        assert rc == 0 and result["ok"] is True, result
+        assert result["data"]["warning_categories"].get("audit-type") == 1, result["data"]
+        assert any(
+            w.startswith("[audit-type] sweep.audit_types entry 'security-audit'")
+            for w in result["data"]["warnings"]
+        ), result["data"]["warnings"]
+
+
+class TestSweepAuditTypeList:
+    """The validator's list of types is the skill's table, and its by-hand lens is the skill's."""
+
+    def test_the_list_is_the_skills_table(self):
+        table = _skill_table_types()
+        assert table, "the audit-type table in the skill moved: update _skill_table_types"
+        assert list(known_values.CODE_AUDIT_SWEEP_TYPES) == table, (
+            "CODE_AUDIT_SWEEP_TYPES in claudlobby/known_values.py and the table in "
+            "library/skills/code-audit-sweep/SKILL.md must list the same types in the same order"
+        )
+
+    def test_the_by_hand_lens_is_named_by_the_skill_and_is_not_in_its_table(self):
+        text = _skill_text()
+        assert known_values.CODE_AUDIT_BY_HAND_TYPES == {"data-model"}
+        for lens in known_values.CODE_AUDIT_BY_HAND_TYPES:
+            assert f"/claudna:audit {lens}" in text and "by hand" in text
+            assert lens not in _skill_table_types()
+        assert known_values.CODE_AUDIT_BY_HAND_TYPES.isdisjoint(known_values.CODE_AUDIT_SWEEP_TYPES)
+
+    def test_every_old_name_maps_to_a_type_that_runs_or_runs_by_hand(self):
+        current = (*known_values.CODE_AUDIT_SWEEP_TYPES, *known_values.CODE_AUDIT_BY_HAND_TYPES)
+        assert known_values.CODE_AUDIT_RENAMED_TYPES, "the old table's names are mapped"
+        for old, successor in known_values.CODE_AUDIT_RENAMED_TYPES.items():
+            assert successor in current, f"{old} -> {successor}: not a type the skill runs"
+            assert old not in current, f"{old} is a current type, so it would never be read here"
+
+    def test_the_skill_stops_on_a_type_outside_its_table(self):
+        # The skill names audit_failed three times; this is the sentence every warning line
+        # rests on ("a run that picks it audits nothing and emits audit_failed"). The text
+        # wraps in the file, so its whitespace is joined before the match.
+        text = " ".join(_skill_text().split())
+        assert (
+            "If the type you were dispatched is not in the table, run no audit: "
+            "emit `audit_failed`"
+        ) in text
 
 
 class TestSweepSelector:

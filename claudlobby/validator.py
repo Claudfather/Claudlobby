@@ -38,6 +38,9 @@ from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
     CLAUDNA_SKILL_RENAMES,
+    CODE_AUDIT_BY_HAND_TYPES,
+    CODE_AUDIT_RENAMED_TYPES,
+    CODE_AUDIT_SWEEP_TYPES,
     DEPRECATED_ENV_TIERS,
     ENV_TIERS,
     EXPERTISE_CORE_TOOLS,
@@ -207,6 +210,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "briefing-no-source": "a briefing-equipped bot has no integration or MCP server to read",
     "repo-format": "a repos entry is not <org>/<repo>",
     "schedule-format": "sweep.schedule has no HH:MM time",
+    "audit-type": "a sweep.audit_types entry is not a type code-audit-sweep runs",
     "mission-file": "a mission_file is absolute, escapes its directory, or is missing",
     # fleet wiring
     "plugin-config": "default plugins are off, or a plugin or marketplace name is malformed",
@@ -1981,6 +1985,50 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
             f"sweep.schedule '{sweep.schedule}' has no HH:MM time — expected a "
             f"systemd OnCalendar expression like '*-*-* 03:00:00'"
         )
+
+    _validate_sweep_audit_types(sweep.audit_types, report)
+
+
+def _validate_sweep_audit_types(audit_types: list[str], report: ValidationReport) -> None:
+    """Warn on each ``sweep.audit_types`` entry the code-audit-sweep skill does not run.
+
+    The selector hands the skill one entry per run, by day of year. The skill runs
+    the types in its table (``CODE_AUDIT_SWEEP_TYPES``); for any other name it
+    audits nothing and emits ``audit_failed`` (a ``notice``) on the day the rotation
+    picks that entry. Said here instead, once per name, so it is read before any
+    run; a warning, never an error: an old manifest must load, as with a retired
+    key (#2992).
+
+    A name the skill's table listed before #2991 names the type that replaced it
+    (``CODE_AUDIT_RENAMED_TYPES``), read before the closest-type suggestion, which
+    misses two of the three.
+    """
+    runs = ", ".join(CODE_AUDIT_SWEEP_TYPES)
+    for entry in dict.fromkeys(audit_types):
+        if entry in CODE_AUDIT_SWEEP_TYPES:
+            continue
+        successor = CODE_AUDIT_RENAMED_TYPES.get(entry)
+        lens = successor or entry
+        if lens in CODE_AUDIT_BY_HAND_TYPES:
+            report.warn(
+                "audit-type",
+                f"sweep.audit_types entry '{entry}' runs only by hand, as "
+                f"/claudna:audit {lens} in an attended session: code-audit-sweep "
+                f"runs {runs}, so a run that picks it audits nothing and emits "
+                f"audit_failed",
+            )
+        else:
+            suffix = (
+                f" — the skill renamed it to '{successor}'"
+                if successor
+                else hint(entry, CODE_AUDIT_SWEEP_TYPES)
+            )
+            report.warn(
+                "audit-type",
+                f"sweep.audit_types entry '{entry}' is not a type code-audit-sweep "
+                f"runs ({runs}): a run that picks it audits nothing and emits "
+                f"audit_failed{suffix}",
+            )
 
 
 def _manifest_leading_comment(fleet_yaml: Path) -> str:
