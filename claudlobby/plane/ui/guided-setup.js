@@ -141,7 +141,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       void run('signin-status',{quiet:true}); // its completion schedules the next check
     },delay);
   }
-  const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval again, then check sign-in progress.';
+  const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
   function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
   function scheduleHandoff() {
@@ -363,7 +363,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
-          : operation === 'preview' ? 'Could not prepare the preview, so nothing was saved. Check setup approval again, then preview.'
+          : operation === 'preview' ? 'Could not prepare the preview, so nothing was saved. Check setup approval, then preview.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;
@@ -503,7 +503,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,context || finished ? 'Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
-    m.recheck.hidden = launchable || finished; // re-checking would retire a fresh preview's launch
+    // Only once approved (the step's own button checks otherwise), and never while launchable: re-checking would retire a fresh preview's launch.
+    m.recheck.hidden = states.approve !== 'done' || launchable || finished;
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
