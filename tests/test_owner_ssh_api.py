@@ -2885,3 +2885,11 @@ def test_mac_guide_captures_the_server_source_before_the_profile_environment(
     assert seen[0][1] is None, (
         "the tuple was captured before the fixed environment replaced it"
     )
+
+
+def test_signin_call_limit_covers_a_status_check_every_two_seconds_through_a_ten_minute_attempt():
+    from claudlobby.commands import owner_api_stdio
+    # The canonical UI checks status about every 2 s (guided-setup.js SIGNIN_POLL_MS); begin and a
+    # code are two more calls. A ten-minute attempt's conversation is 630 s; beyond it, revisit both.
+    assert owner_api_stdio.CONVERSATION_SECONDS <= 630
+    assert owner_api_stdio.CALL_LIMIT >= 2 + 630 // 2

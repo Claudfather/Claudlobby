@@ -109,7 +109,7 @@ exits. This has been checked with synthetic fixtures only; a real `setup-token`
 run over SSH has not been observed.
 
 **Calls.** Begin is call 1. Each later `call` names `setup-signin-status`,
-`setup-signin-code` or `setup-signin-cancel`, with `call_id` 2, 3, … up to 256
+`setup-signin-code` or `setup-signin-cancel`, with `call_id` 2, 3, … up to 512
 and the generation and attempt ID of the start. One call is outstanding at a
 time, and a call is outstanding until the final byte of its `reply` has been
 written and committed. Input reads and the final output write with its commit run

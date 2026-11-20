@@ -829,6 +829,13 @@ test('begin renews first only when the session cannot cover the bounded attempt,
   assert.equal(h.api.continuity().remainingSeconds, 900, 'the host lifetime was not extended locally');
   await h.api.renew(); assert.equal(renewals(h), 1, 'no further rotation while live');
   h.api.dispose();
+  // The session must also cover a ten-minute attempt's 630-second conversation, with a margin.
+  for (const [time, renews] of [[300000, true], [240000, false]]) { // 600 and 660 seconds left
+    const s = signinHarness(); await s.api.connect(); s.time = time;
+    await s.api.setupSignin('begin', attemptInput);
+    assert.equal(renewals(s), renews ? 1 : 0, `${(900000 - time) / 1000} seconds left`);
+    s.api.dispose();
+  }
   const failed = signinHarness(); await failed.api.connect();
   failed.overrides.set('renew', () => { throw new Error('lost renewal'); });
   failed.time = 600000;

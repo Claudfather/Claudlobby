@@ -91,7 +91,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let signinCodeSent=null, signinRefusal=null; // signinRefusal: null | 'code' | 'attempt'
   const codeSent = () => !!signinAttempt && signinCodeSent===signinAttempt.attempt_id;
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
-  // conversation, so the manual checks offered once it stops stay far inside the 256-call bound.
+  // conversation (315 in a 630-second one), so the manual checks offered once it stops stay
+  // inside the 512-call bound.
   // While this page is hidden (Claude's tab in front), a slower read-only check keeps the owning
   // conversation inside its 45-second idle bound, so it is not drained and cancelled meanwhile.
   const SIGNIN_POLL_MS=2000, SIGNIN_HIDDEN_POLL_MS=25000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
