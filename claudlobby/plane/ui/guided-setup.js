@@ -509,7 +509,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     setText(m.signinStatus,text);
     if (tone) m.signinStatus.dataset.tone = tone; else delete m.signinStatus.dataset.tone;
     const {begin,status:check,code:submit,cancel} = m.signinControls;
-    begin.hidden = !!signinAttempt || signinBlocked;
+    // While sign-in starts, Sign in to Claude stays in place, held and quiet, so a second click lands on it, never on Cancel sign-in.
+    const beginHeld = signinState === 'starting' && signinPolling();
+    begin.hidden = signinBlocked || !!signinAttempt && !beginHeld;
+    begin.className = beginHeld ? 'pill ghost' : 'pill setup-primary';
     check.hidden = !manualCheck;
     cancel.hidden = !signinAttempt || ended;
     m.codeRow.hidden = signinState !== 'waiting';
