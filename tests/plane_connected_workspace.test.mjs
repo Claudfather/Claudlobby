@@ -1458,22 +1458,27 @@ test('provider-required Preview needs this context\'s attempt confirmed connecte
 const stepsOf=panel=>descendants(panel).filter(n=>n.tagName==='LI'&&n.className==='setup-step');
 const filledIn=node=>descendants(node).filter(n=>/\bsetup-primary\b/.test(n.className||'')&&visible(n)).map(n=>n.textContent);
 const stepPart=(panel,name,className)=>stepsOf(panel).find(n=>n.dataset.step===name).children.find(n=>n.className===className);
-test('first-team setup is numbered steps in order, each with one filled action, collapsing to check lines',async()=>{
+test('first-team setup is unnumbered steps in order, each with one filled action, collapsing to check lines',async()=>{
   const p=pollHarness(['waiting','connected']),{h,panel}=p;
   const shown=()=>stepsOf(panel).filter(visible);
-  const shape=()=>shown().map(n=>[n.dataset.step,n.dataset.state,n.children.find(c=>c.className==='setup-step-number').textContent]);
+  const shape=()=>shown().map(n=>[n.dataset.step,n.dataset.state,n.children.find(c=>c.className==='setup-step-mark').textContent]);
   const filled=()=>Object.fromEntries(shown().map(n=>[n.dataset.step,filledIn(n)]));
   const says=text=>descendants(panel).some(n=>n.textContent===text&&visible(n));
-  assert.deepEqual(shape(),[['approve','current','1'],['signin','upcoming','2'],['goal','upcoming','3'],['launch','upcoming','4']]);
+  assert.deepEqual(shape(),[['approve','current',''],['signin','upcoming',''],['goal','upcoming',''],['launch','upcoming','']],'no step is numbered');
   assert.deepEqual(filled(),{approve:['Check setup approval'],signin:[],goal:[],launch:[]});
-  assert.ok(descendants(panel).filter(n=>n.tagName==='BUTTON').every(n=>/\b(pill|setup-text-button)\b/.test(n.className)),'no unstyled native buttons');
+  assert.ok(descendants(panel).filter(n=>n.tagName==='BUTTON').every(n=>/\bpill\b/.test(n.className)),'every action is a real button, none a text link');
   await h.api.run('context');
-  assert.deepEqual(shape().map(r=>r[1]),['done','current','upcoming','upcoming']);
-  assert.ok(says('✓ Setup approved for team shop'));
+  assert.deepEqual(shape().map(r=>r.slice(1)),[['done','✓'],['current',''],['upcoming',''],['upcoming','']],'a done step is checked off');
+  assert.ok(says('✓ Setup approved'));
+  const underDetails=new Set(descendants(panel.children.find(n=>n.tagName==='DETAILS')));
+  const named=()=>descendants(panel).filter(n=>visible(n)&&!underDetails.has(n)&&!n.children.length&&/\bshop\b/.test(n.textContent));
+  assert.deepEqual(named(),[],'the team\'s internal name stays under Details');
   assert.deepEqual(filled(),{approve:[],signin:['Sign in to Claude'],goal:[],launch:[]});
   await h.api.run('signin-begin');
   assert.deepEqual(filled().signin,[],'while starting, progress is checked automatically');
-  assert.equal(stepPart(panel,'signin','setup-progress').textContent,'This page checks for progress automatically.');
+  const starting=stepPart(panel,'signin','setup-signin-status'),note=stepPart(panel,'signin','setup-progress');
+  assert.equal(starting.textContent,'Starting Claude sign-in…');assert.equal(starting.dataset.tone,'waiting','a waiting line spins');
+  assert.equal(note.textContent,'This page checks for progress automatically.');assert.equal(note.dataset.waiting,undefined,'the passive note does not');
   await p.fire();
   assert.deepEqual(filled().signin,['Open Claude sign-in']);assert.equal(p.link.attributes.target,'_blank');
   const label=descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(p.code));
@@ -1497,7 +1502,7 @@ test('first-team setup is numbered steps in order, each with one filled action, 
   assert.deepEqual(shape().map(r=>r[1]),['done','done','done','current']);
   assert.ok(says('✓ Goal: Ship the signup form'));
   assert.deepEqual(filled().launch,['Launch team']);
-  assert.ok(says('Team shop is ready. Launching changes 0 generated files and starts or restarts 1 bot.'));
+  assert.ok(says('Your team is ready. Launching changes 0 generated files and starts or restarts 1 bot.'));
   await h.api.run('launch');
   assert.deepEqual(filled().launch,['Check launch status'],'after one launch only its status check remains');
   assert.equal(recheck.hidden,false,'once the launch is spent, approval can be checked again');
@@ -1529,7 +1534,7 @@ test('an ended Claude sign-in says what happened and offers no second attempt, w
     assert.equal(visible(button('Try again')),false,'without the host saying so, no Try again');
     assert.equal(status.dataset.tone,'attention');assert.equal(status.attributes.role,'status');
     assert.equal(visible(button('Sign in to Claude')),false);assert.equal(button('Sign in to Claude').disabled,true);
-    assert.equal(visible(button('Cancel sign-in')),false);assert.equal(button('Check sign-in progress').className,'setup-text-button');
+    assert.equal(visible(button('Cancel sign-in')),false);assert.equal(button('Check sign-in progress').className,'pill ghost setup-small');
     assert.deepEqual(filledIn(stepsOf(panel)[1]),[]);
     assert.equal(await h.api.run('signin-begin'),false);assert.deepEqual(calls,[],'no new attempt is sent');
     await h.api.run('signin-status');assert.deepEqual(calls,['status'],'checking only reads the original attempt');
@@ -1917,7 +1922,7 @@ test('a taken code holds Submit code and the field until the attempt leaves wait
   const status=stepPart(p.panel,'signin','setup-signin-status'),submit=descendants(p.panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Submit code');
   p.code.value='good#code';p.code.handlers.input();
   assert.equal(await p.h.api.run('signin-code'),true,'the host answers waiting until its worker uses the code');
-  assert.equal(status.textContent,'Code sent, finishing sign-in…');assert.equal(status.dataset.tone,undefined);
+  assert.equal(status.textContent,'Code sent, finishing sign-in…');assert.equal(status.dataset.tone,'waiting');
   assert.equal(visible(p.link),false,'sign-in is not offered again');
   assert.equal(p.code.disabled,true);assert.equal(submit.disabled,true);
   assert.deepEqual(filledIn(stepsOf(p.panel)[1]),[],'nothing to press while sign-in finishes');
@@ -1940,12 +1945,20 @@ test('buttons held by an automatic check look held once it takes a moment',async
   assert.match(rule[1],/transition:\s*opacity 0s \.4s/,'after a short delay, so quick checks do not flash');
   assert.match(css,/button:disabled\s*\{[^}]*opacity:\.5/);
 });
+test('a waiting line turns a ring beside its text, and stands still for reduced motion',async()=>{
+  const css=(await read('workspace.css')).replace(/\s+/g,' '),waiting='.setup-progress[data-waiting]::before, .setup-signin-status[data-tone="waiting"]::before';
+  assert.match(css.slice(css.indexOf(waiting+' {')),/^[^}]*animation:setup-spin \.8s linear infinite;/);
+  assert.ok(css.includes('@keyframes setup-spin { to { transform:rotate(360deg); } }'));
+  assert.ok(css.includes(`@media (prefers-reduced-motion:reduce) { ${waiting} { animation:none; } }`),'reduced motion keeps the ring, still');
+  assert.doesNotMatch(css,/setup-text-button|setup-step-number/,'no text-link actions or step numbers are styled');
+});
 test('every wait shows progress in its step; the automatic sign-in check neither flashes nor takes the code field',async()=>{
   const gate=deferred(),h=setupHarness({client:{setupContext:()=>gate.promise}});
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const reading=h.api.run('context'),progress=stepPart(panel,'approve','setup-progress');
   assert.equal(progress.textContent,'Checking setup approval…');assert.equal(progress.attributes.role,'status');
-  gate.resolve(h.context);await reading;assert.equal(progress.textContent,'');h.api.dispose();
+  assert.equal(progress.dataset.waiting,'true','an operation\'s wait spins beside its text');
+  gate.resolve(h.context);await reading;assert.equal(progress.textContent,'');assert.equal(progress.dataset.waiting,undefined);h.api.dispose();
   const polls=[deferred(),deferred(),deferred()],p=pollHarness(polls.map(d=>d.promise));
   await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
   assert.equal(p.panel.dataset.polling,'true','an automatic check is marked; workspace.css decides how held buttons look');
@@ -1953,6 +1966,7 @@ test('every wait shows progress in its step; the automatic sign-in check neither
   polls[0].resolve('waiting');await flush();assert.equal(p.panel.dataset.polling,undefined);
   const checking=p.h.api.run('signin-status');
   assert.equal(stepPart(p.panel,'signin','setup-progress').textContent,'Checking sign-in…','an explicit check shows its progress');
+  assert.equal(stepPart(p.panel,'signin','setup-progress').dataset.waiting,'true');
   assert.equal(p.panel.dataset.polling,undefined);
   polls[1].resolve('waiting');await checking;
   await p.fire();assert.equal(p.panel.dataset.polling,'true');
@@ -2270,7 +2284,7 @@ function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],
     shownText:()=>descendants(host).filter(n=>visible(n)&&!n.children.length&&n.textContent).map(n=>n.textContent),
     mutations:()=>h.calls.filter(c=>/\/api\/owner\/connected\/(?:challenge|issue|renew|logout|setup\/)/.test(c.url))};
 }
-const stepShape=panel=>stepsOf(panel).filter(visible).map(n=>[n.dataset.step,n.dataset.state,n.children.find(c=>c.className==='setup-step-number').textContent]);
+const stepShape=panel=>stepsOf(panel).filter(visible).map(n=>[n.dataset.step,n.dataset.state,n.children.find(c=>c.className==='setup-step-mark').textContent]);
 const stepNode=(panel,name,className)=>descendants(stepsOf(panel).find(n=>n.dataset.step===name)).find(n=>n.className===className);
 // Plain sentences only: no raw state names (not_connected, setup_only) and no builder vocabulary.
 const assertPlain=texts=>{for(const text of texts)assert.doesNotMatch(text,/\b[a-z]+_[a-z_]+\b|snapshot|summar(?:y|ies) are|remediation|host data/i,text);};
@@ -2284,7 +2298,7 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   const panel=l.panel(),heading=panel.children.find(n=>n.tagName==='H2');
   assertPlain(l.shownText());
   assert.equal(heading.textContent,'Finish setting up a.example.test');
-  assert.deepEqual(stepShape(panel),[['connect','current','1'],['approve','upcoming','2'],['signin','upcoming','3'],['goal','upcoming','4'],['launch','upcoming','5']]);
+  assert.deepEqual(stepShape(panel),[['connect','current',''],['approve','upcoming',''],['signin','upcoming',''],['goal','upcoming',''],['launch','upcoming','']]);
   assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect'],[],[],[],[]],'Connect is the one filled action');
   const connect=stepsOf(panel)[0],button=descendants(connect).find(n=>n.tagName==='BUTTON');
   assert.equal(connect.children.find(n=>n.tagName==='H3').textContent,'Connect this computer');
@@ -2304,6 +2318,7 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>reply(200,landingContext));
   button.focus();button.click();
   assert.equal(button.disabled,true);assert.equal(stepPart(panel,'connect','setup-progress').textContent,'Connecting…');
+  assert.equal(stepPart(panel,'connect','setup-progress').dataset.waiting,'true');
   await flush();
   assert.deepEqual(l.mutations().map(c=>new URL(c.url).pathname.split('/').at(-1)),['challenge','issue','context'],'one click, one connect, then one approval read');
   assert.equal(l.mutations().every(c=>c.url.startsWith(landingRefs[0].endpoint_origin)),true);
@@ -2311,7 +2326,7 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   assert.equal(l.panel(),panel,'the same panel continues the setup');assert.equal(l.rail.dataset.setupFocus,'only');
   assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
   assert.ok(descendants(stepsOf(panel)[0]).some(n=>n.textContent==='✓ Connected'&&visible(n)));
-  assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved for team shop'&&visible(n)));
+  assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved'&&visible(n)));
   assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],[],['Sign in to Claude'],[],[]]);
   assert.equal(l.h.ui.document.activeElement?.textContent,'Sign in to Claude','keyboard focus moves on to the next action');
   l.h.timer(30000);await flush();

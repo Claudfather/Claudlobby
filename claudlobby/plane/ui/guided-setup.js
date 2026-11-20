@@ -22,6 +22,8 @@ const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin
   'signin-status':['signin','Checking sign-in…'],'signin-code':['signin','Sending your code…'],'signin-cancel':['signin','Cancelling sign-in…'],
   preview:['goal','Preparing your team preview…'],launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
 // Skips unchanged writes, so a status region is not re-announced on every two-second check.
+// A secondary action: a small outlined button, filled only while it is the step's lead.
+const QUIET = 'pill ghost setup-small';
 const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
 // The control a visitor uses next: the filled action, else Sign in to Claude, the goal or Launch team, whichever
 // is shown and enabled. Null when none is, so focus is left where it is.
@@ -440,10 +442,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
     }
     if (!signinAttempt) return ['Connect your Claude account so your team can work.',''];
-    if (signinSent()) return ['Code sent, finishing sign-in…',''];
+    if (signinSent()) return ['Code sent, finishing sign-in…','waiting'];
     if (signinRefusal === 'code' && signinState === 'waiting') return [`The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.${pasteBy()}`,'attention'];
     if (signinLinkLive()) return [`Open Claude sign-in, approve access, then paste the code Claude shows you.${pasteBy()}`,''];
-    if (signinState === 'starting') return ['Starting Claude sign-in…',''];
+    if (signinState === 'starting') return ['Starting Claude sign-in…','waiting'];
     return ['A sign-in was already started in this browser. Check its progress.',''];
   }
   let detailsFor = null; // the plan, pending and identifier counts the Details JSON was last built from
@@ -468,24 +470,25 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // on and cleared the approval context: nothing is left to approve or check again.
     const finished = standalone && launched();
     if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
-    const progress = {approve:'',signin:'',goal:'',launch:''};
-    progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
-    if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
-    if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = 'This page checks for progress automatically.';
-    if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
-    let number = 0;
+    // [text, waiting]: a waiting line shows a spinner beside its text; the passive polling note does not.
+    const progress = {approve:[''],signin:[''],goal:[''],launch:['']};
+    progress.connect = [connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '',true];
+    if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = [text,true]; }
+    if (!progress.signin[0] && signinKnown && !pending && signinPolling()) progress.signin = ['This page checks for progress automatically.'];
+    if (!progress.launch[0] && managedHandoff) progress.launch = ['Checking automatically while your team connects…',true];
     for (const [name,step] of Object.entries(m.steps)) {
       const state = states[name]; step.root.hidden = state === null;
       if (state === null) continue;
-      step.root.dataset.state = state; setText(step.number,String(++number));
+      step.root.dataset.state = state; setText(step.mark,state === 'done' ? '✓' : '');
       if (step.done) step.done.hidden = state !== 'done';
       step.body.hidden = state !== 'current';
-      setText(step.progress,progress[name]);
+      const [text,waiting] = progress[name]; setText(step.progress,text);
+      if (text && waiting) step.progress.dataset.waiting = 'true'; else delete step.progress.dataset.waiting;
     }
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    setText(m.approveDone,context ? `✓ Setup approved for team ${context.fleet}` : finished ? '✓ Setup approved' : '');
+    setText(m.approveDone,context || finished ? '✓ Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
     m.recheck.hidden = launchable || finished; // re-checking would retire a fresh preview's launch
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
@@ -510,8 +513,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     controls.context.className = filled('context','pill ghost');
     m.signinLink.className = filled('link','pill ghost');
     submit.className = filled('code','pill ghost');
-    check.className = filled('status','setup-text-button');
-    controls.receipt.className = filled('receipt','setup-text-button');
+    check.className = filled('status',QUIET);
+    controls.receipt.className = filled('receipt',QUIET);
     m.signinLink.hidden = !waitingLink; if (signinUrl) m.signinLink.setAttribute('href',signinUrl); else m.signinLink.removeAttribute?.('href');
     m.signinCopyButton.hidden = !waitingLink;
     const copy = waitingLink && signinCopy?.url === signinUrl ? signinCopy : null;
@@ -530,11 +533,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     retry.disabled = !live || busy || !retryShown;
     m.lead = {context:controls.context,receipt:controls.receipt,code:submit,link:m.signinLink,retry,status:check}[lead] ?? null;
     setText(m.goalDone,pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '');
-    setText(m.goalText,context ? `Team ${context.fleet} works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
+    setText(m.goalText,context ? `Your team works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
     m.area.disabled = !live || busy || !!pending || legacyBlocked();
     controls.launch.hidden = !launchShown;
-    setText(m.summary,launchShown ? `Team ${plan.fleets[0]} is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
+    setText(m.summary,launchShown ? `Your team is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
       : 'Check launch status to see where setup stands. This page never sends a launch twice.');
     setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
     setText(m.status,[note, legacyBlocked() ? LEGACY : !live && !m.connect ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
@@ -581,7 +584,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectFocus = null; if (!m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
     }
   }
-  // Numbered steps; only the current step shows its body. Long approval text and identifiers sit under Details.
+  // Steps in order, each with a mark (✓ once done); only the current step shows its body. Long approval text and identifiers sit under Details.
   // connect: optional, from an entry that owns Connect for this computer; it adds a first "Connect this computer" step.
   // standalone: the panel is the whole view, so its notes never point at a computer card and a launch ends on a done step.
   function mountPanel({document,element,connect,standalone:alone = false}) {
@@ -596,11 +599,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     element.append(make('p','setup-lede','Nothing runs on this computer until you choose Launch team.'),status,list);
     const steps = {};
     const step = (name,title,{done = true, before = []} = {}) => {
-      const root = make('li','setup-step'), number = make('span','setup-step-number'), progress = make('p','setup-progress');
+      const root = make('li','setup-step'), mark = make('span','setup-step-mark'), progress = make('p','setup-progress');
       const doneLine = done ? make('div','setup-step-done') : null, body = make('div','setup-step-body');
-      root.dataset.step = name; number.setAttribute('aria-hidden','true'); progress.setAttribute('role','status');
-      root.append(number,make('h3','setup-step-title',title),...(doneLine ? [doneLine] : []),...before,body,progress); list.append(root);
-      return steps[name] = {root,number,done:doneLine,body,progress};
+      root.dataset.step = name; mark.setAttribute('aria-hidden','true'); progress.setAttribute('role','status');
+      root.append(mark,make('h3','setup-step-title',title),...(doneLine ? [doneLine] : []),...before,body,progress); list.append(root);
+      return steps[name] = {root,mark,done:doneLine,body,progress};
     };
     onConnect = typeof connect === 'function' ? connect : null;
     let connectStep = null;
@@ -617,7 +620,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectStep = {button,hint};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
-    const recheck = action('Check again','setup-text-button','context'), approveHint = make('p','setup-hint');
+    const recheck = action('Check again',QUIET,'context'), approveHint = make('p','setup-hint');
     const contextButton = action('Check setup approval','pill setup-primary','context');
     approve.done.append(approveDone,recheck);
     approve.body.append(make('p','setup-step-text','Check that this computer approved setup for this workspace.'),row(contextButton),approveHint);
@@ -636,7 +639,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     code.addEventListener('input',() => { if (!!code.value !== mount.codeHad) render(); });
     const codeLabel = make('label','setup-field'), submit = action('Submit code','pill ghost','signin-code'), codeRow = make('div','setup-code');
     codeLabel.append(make('span','setup-field-label','Code from Claude'),code); codeRow.append(codeLabel,submit);
-    const check = action('Check sign-in progress','setup-text-button','signin-status'), cancel = action('Cancel sign-in','setup-text-button','signin-cancel');
+    const check = action('Check sign-in progress',QUIET,'signin-status'), cancel = action('Cancel sign-in',QUIET,'signin-cancel');
     signin.body.append(row(begin,retry,signinLink,signinCopyButton,signinCopyNote),signinField,codeRow,row(check,cancel));
     const goalStep = step('goal','Describe the goal'), goalDone = make('span'), goalText = make('p','setup-step-text');
     goalStep.done.append(goalDone);
@@ -647,7 +650,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
     goalStep.body.append(goalText,goalField,row(preview),goalHint);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
-    const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','setup-text-button','receipt');
+    const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status',QUIET,'receipt');
     launchStep.body.append(summary,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
