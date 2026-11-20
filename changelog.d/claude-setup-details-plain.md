@@ -1,0 +1,3 @@
+### Changed — First-team setup Details say the approval in plain words
+
+The Details under first-team setup now say what the team does and what the approval covers in everyday words ("This approval covers reading and changing files in …, for app version … only", "Launching starts the team and the app’s background services on this computer", "Merging, deploying, extra spending and destructive changes each need your separate permission"), instead of terms such as "local approval covers", "native services" and "explicit human merge policy". The scope, the exact app version and every separate permission are still named.

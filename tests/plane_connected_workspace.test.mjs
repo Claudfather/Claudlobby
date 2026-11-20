@@ -1025,12 +1025,13 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   const detail=panel.children.find(e=>e.tagName==='DETAILS');detail.open=true;detail.focus();
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
-  const authority=descendants(panel).find(e=>e.textContent.includes('Local approval covers'));
+  const authority=descendants(panel).find(e=>e.textContent.includes('This approval covers'));
   assert.ok(descendants(detail).includes(authority),'approval scope lives under Details');
   assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
-  assert.match(authority.textContent,/starts native services.*configured provider accounts/);
-  assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
-  assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
+  assert.match(authority.textContent,/for app version \S+ only\./);
+  assert.match(authority.textContent,/starts the team and the app’s background services on this computer and may use the provider accounts you set up/);
+  assert.match(authority.textContent,/Some folders, tools or accounts may still need your approval on this computer/);
+  assert.match(authority.textContent,/Merging, deploying, extra spending and destructive changes each need your separate permission/);
   assert.ok(descendants(panel).some(e=>e.textContent==='Goal: Improve checkout tests'));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
@@ -1201,6 +1202,7 @@ test('local-project approval renders locally bound scope and preserves original 
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   assert.equal(await h.api.run('context'),true);
   assert.ok(descendants(panel).some(e=>e.textContent.includes('/example/local-project')));
+  assert.ok(descendants(panel).some(e=>e.textContent.startsWith('This approval covers reading and changing files in /example/local-project, for app version ')),'the local scope is disclosed');
   assert.equal(descendants(panel).filter(e=>e.tagName==='TEXTAREA').length,1,'only the goal is authored');
   h.api.setGoal('Review the approved local project');
   assert.equal(await h.api.run('preview'),true);
@@ -1521,7 +1523,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.ok(shown().every(n=>filledIn(n).length<=1));
   const details=panel.children.find(n=>n.tagName==='DETAILS');
   assert.equal(details.children[0].textContent,'Details');
-  assert.ok(descendants(details).some(n=>n.textContent.includes('Local approval covers')),'approval scope and identifiers sit under Details');
+  assert.ok(descendants(details).some(n=>n.textContent.includes('This approval covers')),'approval scope and identifiers sit under Details');
   h.api.dispose();
   const reopened=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000,setTimeout:()=>0,clearTimeout:()=>{}});
   const ui=dom(),again=new ui.Element();reopened.mountPanel({document:ui.document,element:again});

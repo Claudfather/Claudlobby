@@ -565,9 +565,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
     setText(m.status,[note, legacyBlocked() ? LEGACY : !live && !m.connect ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
     setText(m.declaration,context ? context.template === 'local-project'
-      ? `Team ${context.fleet} for local project ${context.project_directory}. After the team is ready and messages are locally approved, tell the lead what to do. The lead records the task and coordinates implementation and independent review.`
-      : `Team ${context.fleet} for ${context.repository}. Lead, engineer and reviewer; explicit human merge policy.` : '');
-    setText(m.authority,context ? `Local approval covers ${context.template === 'local-project' ? `read/write access to local project ${context.project_directory}` : context.repository} and source ${context.source_revision}. Launch starts native services and may use your configured provider accounts. Local folder, tool and account approvals may still be needed on this computer. Merge, deployment, additional spending and destructive changes need separate permission.` : '');
+      ? `Your team ${context.fleet} works in ${context.project_directory}. Once the team has finished starting and you’ve allowed messages to it, tell the lead what to do. The lead writes down the task and coordinates the work and an independent review.`
+      : `Your team ${context.fleet} works on ${context.repository}, with a lead, an engineer and a reviewer. The team needs your permission before it merges a pull request.` : '');
+    setText(m.authority,context ? `This approval covers ${context.template === 'local-project' ? `reading and changing files in ${context.project_directory}` : `work on ${context.repository}`}, for app version ${context.source_revision} only. Launching starts the team and the app’s background services on this computer and may use the provider accounts you set up. Some folders, tools or accounts may still need your approval on this computer. Merging, deploying, extra spending and destructive changes each need your separate permission.` : '');
     // conflicts and legacy only grow (retain), so their lengths track every change.
     const detailsKey = [plan, pending, conflicts.length, legacy.length];
     if (!detailsFor || detailsKey.some((value,index) => value !== detailsFor[index])) {
