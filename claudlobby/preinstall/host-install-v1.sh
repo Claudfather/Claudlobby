@@ -1189,7 +1189,7 @@ def in_use_data_check(data):
     except FileNotFoundError:
         raise Refusal("identity_changed", next_step="inspect") from None
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
-            or stat.S_IMODE(info.st_mode) != 0o600):
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size):
         raise Refusal("existing_installation", next_step="inspect")
 
 
@@ -1221,8 +1221,10 @@ def paths(home, create=False, in_use=False):
 
 def setup_started(family, data, staging):
     # Names only: anything beyond the inactive skeleton a preparation leaves.
+    # The state directory is admitted before it is listed, so a link is never followed.
+    state = data / "state"
     return bool(names(family) & SETUP_FAMILY or names(staging) or names(data) - {"state"}
-                or names(data / "state") - {"runtime-use.lock"})
+                or directory(state, private=True) and names(state) - {"runtime-use.lock"})
 
 
 def contents_check(install, data, staging):
