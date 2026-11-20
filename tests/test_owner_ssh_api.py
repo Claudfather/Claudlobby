@@ -2089,7 +2089,7 @@ def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(
 
     engine, grant, reader, program, _secret, env = synthetic_signin
     access, bearer = engine.store.access, reader.token
-    margin = provider_signin.CODE_MARGIN
+    seconds, margin = provider_signin.SECONDS, provider_signin.CODE_MARGIN
     monkeypatch.setattr(provider_signin, "SECONDS", 2)
     monkeypatch.setattr(provider_signin, "CODE_MARGIN", 0)  # a 2 s code window
     first = {"generation": grant.generation, "attempt_id": str(uuid4())}
@@ -2125,7 +2125,7 @@ def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(
     assert ordinary_status(access, monkeypatch, first, bearer) == (200, ended)
     # A later conversation names a new attempt ID: a new worker and link, one approval.
     program.with_name("synthetic-provider-state").write_text("c" * 32)
-    monkeypatch.setattr(provider_signin, "SECONDS", 300)
+    monkeypatch.setattr(provider_signin, "SECONDS", seconds)
     monkeypatch.setattr(provider_signin, "CODE_MARGIN", margin)
     second = {"generation": grant.generation, "attempt_id": str(uuid4())}
     again = Client()

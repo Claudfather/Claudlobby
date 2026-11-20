@@ -1082,7 +1082,7 @@ def test_provider_signin_late_code_is_refused_so_the_attempt_ends_as_a_clean_tim
                 engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
         assert refused.value.code=='signin_code_unavailable'
         engine.signin._thread.join(timeout=10)
-        assert not engine.signin._thread.is_alive(),'ended at the cutoff, long before its 300 seconds'
+        assert not engine.signin._thread.is_alive(),f'ended at the cutoff, long before its {provider_signin.SECONDS} seconds'
         ended=engine.signin_status(reader,grant.generation,attempt)
         assert (ended['state'],ended['reason'],ended.get('retryable'))==('needs_attention','timeout',True)
         assert _signin_row(engine,attempt)['code_delivered']==0,'nothing reached the CLI'
@@ -1474,7 +1474,7 @@ def test_provider_signin_timeout_before_code_admits_one_fresh_attempt(synthetic_
     import subprocess
     from claudlobby.plane import provider_signin
     engine,grant,reader,program,token,env=synthetic_signin
-    margin=provider_signin.CODE_MARGIN
+    seconds,margin=provider_signin.SECONDS,provider_signin.CODE_MARGIN
     monkeypatch.setattr(provider_signin,'SECONDS',2);monkeypatch.setattr(provider_signin,'CODE_MARGIN',0)  # a 2 s code window
     children=[];original_popen=subprocess.Popen
     def observed_popen(argv,*args,**kwargs):
@@ -1489,7 +1489,7 @@ def test_provider_signin_timeout_before_code_admits_one_fresh_attempt(synthetic_
             'state':'needs_attention','reason':'timeout','retryable':True}
         assert _signin_row(engine,first)['code_delivered']==0
         program.with_name('synthetic-provider-state').write_text('c'*32)  # the provider's next run: another OAuth state
-        monkeypatch.setattr(provider_signin,'SECONDS',300);monkeypatch.setattr(provider_signin,'CODE_MARGIN',margin)
+        monkeypatch.setattr(provider_signin,'SECONDS',seconds);monkeypatch.setattr(provider_signin,'CODE_MARGIN',margin)
         started=engine.signin_begin(reader,grant.generation,second)
         assert started['attempt_id']==second and started['state'] in {'starting','waiting'} and 'retryable' not in started
         new_link=_signin_until(engine,grant,reader,second,'waiting')['url']

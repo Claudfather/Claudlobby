@@ -1,0 +1,3 @@
+### Changed — Ten minutes to sign in to Claude
+
+First-team setup now gives the Claude sign-in ten minutes instead of five, so a newcomer who has to sign in to Claude with a password, a second factor or a new account can still paste the code in time. The step still shows the time the code must be pasted by, now about nine and a half minutes after the link appears. The sign-in conversation lasts up to 630 seconds (was 330) to cover the longer attempt. Publish a browser transport that allows the longer conversation before or with this version: one built for the five-minute attempt ends it at about 350 seconds.

@@ -24,7 +24,7 @@ status, code and cancel follow as numbered `call` frames, each checked afresh by
 the same policy route and answered by one `reply` holding the whole response. A
 reply is a receipt for one call only. `end` still means the complete drain,
 including the joined sign-in worker, and is sent once. A conversation lasts at
-most 330 seconds, with 20 seconds observed per call and 45 seconds idle; an
+most 630 seconds, with 20 seconds observed per call and 45 seconds idle; an
 expired bound starts the drain and is not proof that anything stopped. Ordinary
 one-operation processes still refuse begin, code and cancel, and still read
 status. This is checked with synthetic fixtures only: a real sign-in over SSH,

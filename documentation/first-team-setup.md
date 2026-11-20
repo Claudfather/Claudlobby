@@ -247,7 +247,7 @@ observations.
 
 Two endings can be retried from the browser, only before the code reached the
 Claude CLI and while the setup approval has at least 50 seconds left: an attempt
-that timed out (after five minutes), and one that was
+that timed out (after ten minutes), and one that was
 cancelled (**Cancel sign-in**, or a lost connection that closed the sign-in). The
 host records that a code was delivered before it types the code, so a restart
 cannot make a later ending look retryable. The panel then says **The sign-in took
