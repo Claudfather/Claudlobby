@@ -141,7 +141,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       void run('signin-status',{quiet:true}); // its completion schedules the next check
     },delay);
   }
-  const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval again, then check sign-in progress.';
+  const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
   function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
   function scheduleHandoff() {
@@ -363,7 +363,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
-          : operation === 'preview' ? 'Could not prepare the preview, so nothing was saved. Check setup approval again, then preview.'
+          : operation === 'preview' ? 'Could not prepare the preview, so nothing was saved. Check setup approval, then preview.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;
@@ -503,7 +503,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,context || finished ? 'Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
-    m.recheck.hidden = launchable || finished; // re-checking would retire a fresh preview's launch
+    // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
+    m.recheck.hidden = states.approve !== 'done' || launchable || finished;
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
@@ -642,9 +643,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectStep = {button,hint};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
-    const recheck = action('Check again','pill ghost','context'), approveHint = make('p','setup-hint');
+    const recheck = action('Check setup approval again','pill ghost','context'), approveHint = make('p','setup-hint');
     const contextButton = action('Check setup approval','pill setup-primary','context');
-    approve.done.append(approveDone,recheck);
+    approve.done.append(approveDone);
     approve.body.append(make('p','setup-step-text','Check that this computer approved setup for this workspace.'),row(contextButton),approveHint);
     const signinStatus = make('p','setup-signin-status'); signinStatus.setAttribute('role','status');
     const signin = step('signin','Sign in to Claude',{done:false,before:[signinStatus]});
@@ -676,7 +677,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     launchStep.body.append(summary,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
-    disclosure.append(make('summary','','Details'),declaration,authority,details); element.append(disclosure);
+    disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,launch,receipt:receiptButton}};
