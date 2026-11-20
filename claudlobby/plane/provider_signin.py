@@ -412,9 +412,10 @@ def discard_binary(parent, attempt):
     account owns is removed, then the directory if that left it empty; anything
     else is left alone. It never raises.
     """
-    from .owner_setup import _uuid  # the attempt-ID check begin's caller already applied
     try:
+        from .owner_setup import _uuid  # the attempt-ID check begin's caller already applied
         if not _uuid(attempt): return
+        _private_directory(parent)  # the same whole-path check stage_binary applies
         name=ATTEMPT_DIRECTORY+attempt
         parent_fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
         try:

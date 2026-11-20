@@ -193,7 +193,8 @@ Existing privately configured tokens remain supported; omit this option to keep
 that route. For a new subscription sign-in, the local operator can instead add
 `--provider-signin /absolute/path/to/claude` to `host owner setup`. This optional
 route currently accepts only the independently inspected Claude Code 2.1.325
-Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
+Darwin arm64, Linux arm64 glibc and Linux x86_64 glibc artifacts, verified by
+their exact file hash.
 Each attempt stages one verified public executable copy (roughly 350 MiB) in
 its private owner state, so an ordinary provider auto-update cannot replace the
 approved executable between verification and launch. **Try again** (below)
