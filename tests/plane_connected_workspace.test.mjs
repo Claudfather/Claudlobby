@@ -1505,8 +1505,10 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   const area=descendants(panel).find(n=>n.tagName==='TEXTAREA');
   assert.match(area.attributes.placeholder,/^For example: /);
   assert.equal(descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(area)).children[0].textContent,'What should your team work on first?');
-  const recheck=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check again');
+  const recheck=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again');
   assert.equal(recheck.hidden,false);
+  assert.ok(descendants(panel.children.find(n=>n.tagName==='DETAILS')).includes(recheck),'re-checking a held approval sits under Details');
+  assert.ok(!descendants(panel).some(n=>n.className==='setup-step-done'&&descendants(n).some(c=>c.tagName==='BUTTON')),'"Setup approved" stands alone');
   h.api.setGoal('Ship the signup form');await h.api.run('preview');
   assert.equal(recheck.hidden,true,'re-checking approval would retire a fresh preview, so it is not offered while launchable');
   assert.deepEqual(shape().map(r=>r[1]),['done','done','done','current']);

@@ -881,7 +881,6 @@ body.plane-workspace { padding:0 24px 24px; }
 .plane-workspace .setup-panel .pill.ghost:hover:not(:disabled) { border-color:#9ab18e; }
 /* A disabled pill keeps the not-allowed cursor that .pill.ghost would otherwise turn back into a pointer; an automatic check's progress cursor still wins. */
 .setup-panel .pill:disabled { cursor:not-allowed; }
-.plane-workspace .setup-step-done .pill { min-height:30px; padding:5px 12px; font-size:12px; }
 .signin-copy-note { color:var(--dim); font-size:12px; }
 .setup-panel .signin-link-field { margin-top:10px; padding:8px 10px; border:1px solid var(--edge); border-radius:8px; background:var(--bg); color:var(--ink); }
 .setup-code { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px 10px; margin-top:14px; }
@@ -910,7 +909,6 @@ textarea.setup-input { min-height:96px; resize:vertical; }
   .plane-workspace .setup-focus-panel .setup-focus-title { font-size:23px; }
   .setup-step { column-gap:10px; padding:12px; }
   .plane-workspace .setup-panel .pill { flex:1 1 auto; justify-content:center; text-align:center; }
-  .plane-workspace .setup-step-done .pill { flex:0 0 auto; }
 }
 /* Setup-only view (browser carrier): the frame is the body of the website's setup step. Only the setup
    panel shows, at the frame's full width, and the page grows with it: the parent sizes the frame to the

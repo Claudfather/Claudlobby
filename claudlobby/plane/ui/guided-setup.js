@@ -642,9 +642,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectStep = {button,hint};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
-    const recheck = action('Check again','pill ghost','context'), approveHint = make('p','setup-hint');
+    // Re-reading an approval that holds is rarely needed, so it sits under Details, not beside "Setup approved".
+    const recheck = action('Check setup approval again','pill ghost','context'), approveHint = make('p','setup-hint');
     const contextButton = action('Check setup approval','pill setup-primary','context');
-    approve.done.append(approveDone,recheck);
+    approve.done.append(approveDone);
     approve.body.append(make('p','setup-step-text','Check that this computer approved setup for this workspace.'),row(contextButton),approveHint);
     const signinStatus = make('p','setup-signin-status'); signinStatus.setAttribute('role','status');
     const signin = step('signin','Sign in to Claude',{done:false,before:[signinStatus]});
@@ -676,7 +677,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     launchStep.body.append(summary,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
-    disclosure.append(make('summary','','Details'),declaration,authority,details); element.append(disclosure);
+    disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,launch,receipt:receiptButton}};
