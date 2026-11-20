@@ -879,6 +879,8 @@ body.plane-workspace { padding:0 24px 24px; }
 .plane-workspace .setup-panel .pill.setup-primary:hover:not(:disabled) { background:#36523e; }
 .plane-workspace .setup-panel .pill.ghost { border:1px solid var(--edge); background:var(--panel); color:var(--ink); }
 .plane-workspace .setup-panel .pill.ghost:hover:not(:disabled) { border-color:#9ab18e; }
+/* A disabled pill keeps the not-allowed cursor that .pill.ghost would otherwise turn back into a pointer; an automatic check's progress cursor still wins. */
+.setup-panel .pill:disabled { cursor:not-allowed; }
 .plane-workspace .setup-step-done .pill { min-height:30px; padding:5px 12px; font-size:12px; }
 .signin-copy-note { color:var(--dim); font-size:12px; }
 .setup-panel .signin-link-field { margin-top:10px; padding:8px 10px; border:1px solid var(--edge); border-radius:8px; background:var(--bg); color:var(--ink); }

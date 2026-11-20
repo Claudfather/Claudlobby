@@ -1528,6 +1528,24 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.deepEqual(shownAgain.map(filledIn),[[],[],['Check launch status']],'a reopened launch leads with its status check');
   reopened.dispose();
 });
+test('a session renewal while Sign in to Claude is on its way moves nothing and offers no check',async()=>{
+  const gate=deferred();
+  const p=pollHarness(['waiting'],{begin:body=>gate.promise.then(()=>({...body,state:'starting',reason:null}))}),{h,panel}=p;
+  await h.api.run('context');
+  const button=text=>descendants(stepsOf(panel)[1]).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  const actions=()=>descendants(stepsOf(panel)[1]).filter(n=>['A','BUTTON'].includes(n.tagName)&&visible(n)).map(n=>n.textContent);
+  const status=stepPart(panel,'signin','setup-signin-status');
+  assert.equal(status.textContent,'Connect your Claude account.');
+  button('Sign in to Claude').click();await flush();
+  h.change({signinRenewal:true});await flush(); // the client renews the session before its begin, which re-renders the panel
+  assert.deepEqual(actions(),['Sign in to Claude','Cancel sign-in'],'no check for an attempt the computer has not answered');
+  assert.equal(button('Sign in to Claude').className,'pill ghost');assert.equal(button('Sign in to Claude').disabled,true);
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),[]);
+  assert.equal(status.textContent,'Connect your Claude account.','its line keeps its place until the computer answers');
+  gate.resolve();await flush();
+  assert.deepEqual(actions(),['Sign in to Claude','Cancel sign-in']);assert.equal(status.textContent,'Starting Claude sign-in…');
+  h.api.dispose();
+});
 test('an ended Claude sign-in says what happened and offers no second attempt, which the host refuses',async()=>{
   for(const [state,reason,said] of [['needs_attention','timeout',/^The sign-in took too long\. /],
       ['cancelled','effect_uncertain',/stopped before it finished; a sign-in Claude had already finished stays saved\./],
@@ -1613,6 +1631,8 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   gate.resolve({...fresh,state:'starting',reason:null});await flush();
   assert.deepEqual(JSON.parse(h.saved.get('test:claude')),fresh,'an answer for the new ID settles it');
   assert.equal(status.textContent,'Starting Claude sign-in…');assert.equal(visible(retry),false);
+  const held=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Sign in to Claude');
+  assert.ok(visible(held));assert.equal(held.className,'pill ghost','the new attempt holds Sign in to Claude in place, too');
   // The new attempt is followed like a first one: one poll, for its own ID, to its new link.
   answer=(_action,body)=>({...body,state:'waiting',reason:null,url:authorizeURL});
   assert.equal(live().length,1);const t=live()[0];t.live=false;t.fn();await flush();
