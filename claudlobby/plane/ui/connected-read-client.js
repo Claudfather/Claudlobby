@@ -20,8 +20,9 @@ const positive = v => Number.isSafeInteger(v) && v > 0;
 const referenceShape = v => keys(v, ['reference_id', 'endpoint_origin', 'revision'])
   || keys(v, ['reference_id', 'endpoint_origin', 'revision', 'transport']) && v.transport === 'mac_openssh';
 const RENEW_WINDOW = 120000, ACTIVITY_WINDOW = 300000;
-// A sign-in conversation lasts at most 330 seconds from begin; keep a margin for admission.
-const SIGNIN_LIFETIME = 345000, SIGNIN_TERMINAL = ['connected', 'needs_attention', 'cancelled'];
+// The session that begins a sign-in must outlive its conversation, so renew first unless it covers
+// 630 s (a ten-minute attempt's conversation) plus 15 s for admission. Today's hosts stop at 330 s.
+const SIGNIN_LIFETIME = 645000, SIGNIN_TERMINAL = ['connected', 'needs_attention', 'cancelled'];
 function origin(v) {
   if (typeof v !== 'string' || v.length > 2048) return false;
   try { const u = new URL(v); return u.protocol === 'https:' && u.origin === v && !u.hostname.includes('*') && !u.username && !u.password; }

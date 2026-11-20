@@ -819,7 +819,7 @@ test('an unknown begin result keeps the hold; only a completed refusal, disconne
   refused.api.dispose();
 });
 
-test('begin renews first only when the session cannot cover the bounded attempt, and refuses if that fails', async () => {
+test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
   const h = signinHarness(); await h.api.connect();
   h.time = 600000; // 300 seconds left: not enough for a 330-second attempt
   await h.api.setupSignin('begin', attemptInput);
@@ -829,6 +829,13 @@ test('begin renews first only when the session cannot cover the bounded attempt,
   assert.equal(h.api.continuity().remainingSeconds, 900, 'the host lifetime was not extended locally');
   await h.api.renew(); assert.equal(renewals(h), 1, 'no further rotation while live');
   h.api.dispose();
+  // The session must also cover a ten-minute attempt's 630-second conversation, with a margin.
+  for (const [left, renewed] of [[600, 1], [660, 0]]) { // seconds left of the 900-second session
+    const s = signinHarness(); await s.api.connect(); s.time = (900 - left) * 1000;
+    await s.api.setupSignin('begin', attemptInput);
+    assert.equal(renewals(s), renewed, `${left} seconds left`);
+    s.api.dispose();
+  }
   const failed = signinHarness(); await failed.api.connect();
   failed.overrides.set('renew', () => { throw new Error('lost renewal'); });
   failed.time = 600000;
