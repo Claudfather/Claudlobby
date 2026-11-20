@@ -44,9 +44,11 @@ SUPPORTED = {
 # (345 s) are sized around this; a longer attempt needs all three changed together.
 SECONDS = 300
 ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
-# Each attempt retains its own verified executable copy (roughly 350 MiB), so three
-# attempts per setup approval bound that to about 1 GiB.
-MAX_ATTEMPTS = 3
+# Each attempt stages its own verified executable copy (roughly 350 MiB). Try again
+# removes the replaced attempt's copy once the new attempt is admitted (discard_binary),
+# so one copy normally remains. Ten attempts per setup approval give a slow sign-in
+# room to finish, and bound the copies to about 3.5 GiB if every removal failed.
+MAX_ATTEMPTS = 10
 # The (state, reason) endings after which a new attempt may replace the current one,
 # and then only when the persisted record also says no code was delivered
 # (code_delivered is 0; a NULL from the single-attempt table never qualifies).
@@ -359,15 +361,23 @@ def store_token(root, token, admit):
         os.close(parent)
 
 
+ATTEMPT_DIRECTORY = "claude-signin-"  # + attempt ID, under staging(root)
+
+
+def staging(root):
+    """The private directory holding each attempt's staged executable copy."""
+    return root/'state/provider-signin'
+
+
 def stage_binary(parent, scope, attempt, source_fd, before):
     """Pin a public executable copy; an updater cannot swap the installed path.
 
-    One nonsecret copy is retained per attempt, never a credential or PTY log.
+    One nonsecret copy per attempt, never a credential or PTY log.
     No unverified executable path is used after the original descriptor read.
     """
     _private_directory(parent)
-    directory=parent/("claude-signin-"+attempt)
-    directory.mkdir(mode=0o700)  # Exclusive: retained/unknown attempts are never replayed.
+    directory=parent/(ATTEMPT_DIRECTORY+attempt)
+    directory.mkdir(mode=0o700)  # Exclusive: a retired ID is never admitted again (begin), so no attempt is replayed.
     _private_directory(directory)
     target=directory/"claude"
     fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
@@ -391,6 +401,32 @@ def stage_binary(parent, scope, attempt, source_fd, before):
     finally: os.close(fd)
     pinned,info=_open_file(target,executable=True)
     return target,pinned,info
+
+
+def discard_binary(parent, attempt):
+    """Best effort: remove a replaced attempt's staged copy and its directory.
+
+    Only for the attempt a retry retires: its record proves a RETRYABLE ending with
+    no code sent, and its worker wrote that row after reaping its child and closing
+    its descriptors. Nothing is followed. Only a single-link regular file this
+    account owns is removed, then the directory if that left it empty; anything
+    else is left alone. It never raises.
+    """
+    from .owner_setup import _uuid  # the attempt-ID check begin's caller already applied
+    try:
+        if not _uuid(attempt): return
+        name=ATTEMPT_DIRECTORY+attempt
+        parent_fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        try:
+            directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent_fd)
+            try:
+                info=os.stat("claude",dir_fd=directory,follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1:
+                    os.unlink("claude",dir_fd=directory)
+            finally: os.close(directory)
+            os.rmdir(name,dir_fd=parent_fd)  # refused unless empty
+        finally: os.close(parent_fd)
+    except Exception: pass
 
 
 class ProviderSignin:
@@ -540,6 +576,7 @@ class ProviderSignin:
                 self._attempt = attempt
                 self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
                 self._thread.start()
+                if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])
             return self.status(reader,grant,attempt)
 
     def status(self, reader, grant, attempt):
@@ -620,9 +657,9 @@ class ProviderSignin:
             scope=grant.provider_signin
             check_scope(scope,self.store.access.root)
             binary_fd,before=_open_file(Path(scope['binary']),executable=True,public_source=True)
-            staging=self.store.access.root/'state/provider-signin'
-            staging.mkdir(mode=0o700,exist_ok=True)
-            staged,staged_fd,staged_info=stage_binary(staging,scope,attempt,binary_fd,before)
+            parent=staging(self.store.access.root)
+            parent.mkdir(mode=0o700,exist_ok=True)
+            staged,staged_fd,staged_info=stage_binary(parent,scope,attempt,binary_fd,before)
             master,slave=pty.openpty()
             fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',64,4096,0,0))
             env={key:os.environ[key] for key in _ROUTING if key in os.environ}

@@ -1554,13 +1554,15 @@ def test_provider_signin_live_attempt_refuses_a_successor_from_any_process(synth
 @pytest.mark.parametrize('rows,retryable',[
     ([('needs_attention','timeout',0)],True),
     ([('needs_attention','timeout',0)]*2,True),
-    ([('needs_attention','timeout',0)]*3,False),  # MAX_ATTEMPTS used
+    ([('needs_attention','timeout',0)]*3,True),  # a slow sign-in keeps its Try again
+    ([('needs_attention','timeout',0)]*9,True),
+    ([('needs_attention','timeout',0)]*10,False),  # MAX_ATTEMPTS used
     ([('needs_attention','timeout',1)],False),  # the code reached the CLI
     ([('needs_attention','timeout',None)],False),  # a single-attempt-table row: delivery was never recorded
     ([('cancelled','effect_uncertain',0)],True),  # Cancel or a drained conversation before its code
     ([('cancelled','effect_uncertain',1)],False),  # cancelled after the code reached the CLI
     ([('cancelled','effect_uncertain',None)],False),
-    ([('cancelled','effect_uncertain',0)]*3,False),
+    ([('cancelled','effect_uncertain',0)]*10,False),
     ([('cancelled','provider_failed',0)],False),  # only the exact pairs
     ([('needs_attention','provider_failed',0)],False),
     ([('needs_attention','unsupported_output',0)],False),
@@ -1613,6 +1615,7 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
         assert _signin_row(engine,first)['retired']==0
         with pytest.raises(AccessDenied):engine.signin_status(reader,grant.generation,second)
         assert not (engine.root/'state/provider-signin'/('claude-signin-'+second)).exists()
+        assert (engine.root/'state/provider-signin'/('claude-signin-'+first)/'claude').is_file(), 'a refused Try again keeps the copy'
         assert env.read_text()==saved
         env.write_text('export ROUTE=private\n')
         engine.signin.shutdown()
@@ -1621,6 +1624,61 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
         assert _signin_row(engine,first)['retired']==0
         assert engine.signin_status(reader,grant.generation,first).get('retryable') is True
     finally:engine.signin.shutdown()
+
+
+def test_provider_signin_try_again_removes_only_the_replaced_attempts_copy(synthetic_signin,monkeypatch):
+    import shutil
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,*_=synthetic_signin
+    monkeypatch.setattr(provider_signin,'SECONDS',0.5)
+    staging=provider_signin.staging(engine.root)
+    copy=lambda attempt:staging/(provider_signin.ATTEMPT_DIRECTORY+attempt)
+    first,second,third,fourth=(str(uuid4()) for _ in range(4))
+    def attempt(owner,new):
+        assert owner.signin_begin(reader,grant.generation,new)['attempt_id']==new
+        assert _signin_ended(owner,grant,reader,new).get('retryable') is True
+    try:
+        attempt(engine,first)
+        assert (copy(first)/'claude').is_file(), 'an ended attempt keeps its copy until replaced'
+        attempt(engine,second)
+        assert sorted(staging.iterdir())==[copy(second)], 'Try again removed only the replaced copy'
+        shutil.rmtree(copy(second))
+        attempt(engine,third)  # a copy already gone still lets Try again through
+        assert _signin_row(engine,second)['retired']==1
+        engine.signin.shutdown()
+        restarted=SetupEngine(engine.store.access)  # the next engine removes the copy the first one staged
+        try:
+            attempt(restarted,fourth)
+            assert sorted(staging.iterdir())==[copy(fourth)]
+        finally:restarted.signin.shutdown()
+    finally:engine.signin.shutdown()
+
+
+def test_provider_signin_discard_binary_removes_only_a_plain_copy_and_follows_nothing(tmp_path):
+    import os
+    from claudlobby.plane.provider_signin import ATTEMPT_DIRECTORY,discard_binary
+    staging=tmp_path/'provider-signin'; staging.mkdir(mode=0o700)
+    outside=tmp_path/'outside'; outside.mkdir(); (outside/'claude').write_text('kept')
+    def staged(make,attempt=None):
+        attempt=attempt or str(uuid4())
+        directory=staging/(ATTEMPT_DIRECTORY+attempt); directory.mkdir(mode=0o700); make(directory/'claude')
+        return attempt,directory
+    attempt,directory=staged(lambda p:p.write_text('copy'))
+    discard_binary(staging,attempt)
+    assert not directory.exists()
+    linked=str(uuid4()); (staging/(ATTEMPT_DIRECTORY+linked)).symlink_to(outside)
+    discard_binary(staging,linked)  # a directory link is not opened
+    assert (staging/(ATTEMPT_DIRECTORY+linked)).is_symlink()
+    for make in (lambda p:p.symlink_to(outside/'claude'),lambda p:os.link(outside/'claude',p)):
+        attempt,directory=staged(make)
+        discard_binary(staging,attempt)
+        assert os.path.lexists(directory/'claude'), 'a link or second name is left alone'
+    assert (outside/'claude').read_text()=='kept'
+    attempt,directory=staged(lambda p:p.write_text('copy'),'not-an-attempt')
+    discard_binary(staging,attempt)  # only an attempt ID's shape is ever removed
+    assert (directory/'claude').exists()
+    discard_binary(tmp_path/'missing',str(uuid4()))
+    discard_binary(staging,None)  # never raises
 
 
 def test_provider_signin_two_racing_successors_admit_exactly_one(synthetic_signin):

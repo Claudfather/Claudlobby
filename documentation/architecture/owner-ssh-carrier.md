@@ -183,7 +183,7 @@ carrier. Status replies carry `"retryable": true` only when the attempt ended
 `effect_uncertain` (an explicit cancel, or the drain of a lost or idle
 conversation), its record says no code reached the CLI
 (the host commits that before it types a code; a row from before that column
-existed never qualifies), fewer than three attempts exist for the approval, and no
+existed never qualifies), fewer than ten attempts exist for the approval, and no
 worker of it is alive in the answering process. A worker writes its terminal row
 as its last act, after reaping its child (a reap it cannot prove reads `unknown`),
 so that row is the proof that an earlier process's attempt has stopped. A later

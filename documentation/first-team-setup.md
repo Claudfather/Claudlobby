@@ -194,10 +194,11 @@ that route. For a new subscription sign-in, the local operator can instead add
 `--provider-signin /absolute/path/to/claude` to `host owner setup`. This optional
 route currently accepts only the independently inspected Claude Code 2.1.325
 Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
-Each attempt retains one verified public executable copy (roughly 350 MiB) in
+Each attempt stages one verified public executable copy (roughly 350 MiB) in
 its private owner state, so an ordinary provider auto-update cannot replace the
-approved executable between verification and launch. One setup approval allows at
-most three attempts (below), so about 1 GiB at most. A matching version string
+approved executable between verification and launch. **Try again** (below)
+removes the replaced attempt's copy, so one copy normally remains. One setup
+approval allows at most ten attempts, so about 3.5 GiB even if every removal failed. A matching version string
 alone is insufficient. An unsupported binary is
 refused before invocation; use your existing private provider setup instead.
 
@@ -253,7 +254,7 @@ too long.** or **The sign-in stopped before a code was sent.**, followed by **Ch
 Try again for a new sign-in link.** **Try again** starts a new attempt, with a new
 attempt ID and a new sign-in link, under the same approval, and only when you
 choose it. The old link and its code stop working. A new attempt still refuses a
-saved credential, and one approval allows at most three attempts. If the computer
+saved credential, and one approval allows at most ten attempts. If the computer
 refuses Try again or it could not be sent, the page keeps following the ended
 attempt, also after a reload. If its answer was lost, the computer may still start
 it, so the page follows whichever of the two attempts the computer names next, also
