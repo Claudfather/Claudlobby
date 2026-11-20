@@ -1528,7 +1528,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.deepEqual(shownAgain.map(filledIn),[[],[],['Check launch status']],'a reopened launch leads with its status check');
   reopened.dispose();
 });
-test('a session renewal while Sign in to Claude is on its way moves nothing and offers no check',async()=>{
+test('Sign in to Claude says it is starting in one place, and a session renewal meanwhile moves nothing and offers no check',async()=>{
   const gate=deferred();
   const p=pollHarness(['waiting'],{begin:body=>gate.promise.then(()=>({...body,state:'starting',reason:null}))}),{h,panel}=p;
   await h.api.run('context');
@@ -1536,14 +1536,18 @@ test('a session renewal while Sign in to Claude is on its way moves nothing and 
   const actions=()=>descendants(stepsOf(panel)[1]).filter(n=>['A','BUTTON'].includes(n.tagName)&&visible(n)).map(n=>n.textContent);
   const status=stepPart(panel,'signin','setup-signin-status');
   assert.equal(status.textContent,'Connect your Claude account.');
+  const progress=stepPart(panel,'signin','setup-progress');
   button('Sign in to Claude').click();await flush();
+  assert.equal(status.textContent,'Starting Claude sign-in…','from the click on, above the buttons');assert.equal(status.dataset.tone,'working');
+  assert.equal(progress.textContent,'','not a second time below them');
   h.change({signinRenewal:true});await flush(); // the client renews the session before its begin, which re-renders the panel
   assert.deepEqual(actions(),['Sign in to Claude','Cancel sign-in'],'no check for an attempt the computer has not answered');
   assert.equal(button('Sign in to Claude').className,'pill ghost');assert.equal(button('Sign in to Claude').disabled,true);
   assert.deepEqual(filledIn(stepsOf(panel)[1]),[]);
-  assert.equal(status.textContent,'Connect your Claude account.','its line keeps its place until the computer answers');
+  assert.equal(status.textContent,'Starting Claude sign-in…','its line stays until the computer answers');assert.equal(progress.textContent,'');
   gate.resolve();await flush();
-  assert.deepEqual(actions(),['Sign in to Claude','Cancel sign-in']);assert.equal(status.textContent,'Starting Claude sign-in…');
+  assert.deepEqual(actions(),['Sign in to Claude','Cancel sign-in']);assert.equal(status.textContent,'Starting Claude sign-in…','the same line, in the same place');
+  assert.equal(progress.textContent,'This page checks for progress automatically.');
   h.api.dispose();
 });
 test('an ended Claude sign-in says what happened and offers no second attempt, which the host refuses',async()=>{
@@ -1614,6 +1618,7 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   assert.equal(visible(retry),true);assert.equal(retry.disabled,false);
   assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again is the one filled action');
   assert.equal(visible(button('Sign in to Claude')),false);assert.equal(visible(button('Cancel sign-in')),false);
+  assert.equal(visible(button('Check sign-in progress')),false,'the host already said this attempt may be replaced: nothing to check');
   // Nothing starts on its own: no timer, no begin from a resume, a re-check or the first-attempt door.
   h.api.resumeHandoff();await h.api.run('context');
   assert.equal(await h.api.run('signin-begin'),false);
@@ -1899,11 +1904,11 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
   await h.api.run('context');
   const status=stepPart(panel,'signin','setup-signin-status'),live=()=>timers.filter(t=>t.live);
   const local=seconds=>new Date(seconds*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-  const ASK='Open Claude sign-in, approve access, then paste the code Claude shows you.';
+  const ASK='Open Claude sign-in, then paste the code here.',by=time=>`Open Claude sign-in, then paste the code here by ${time}.`;
   const minute=1800000000-1800000000%60,deadline=minute+59; // 59 seconds into its minute
   reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL,expires_at:deadline});
   await h.api.run('signin-begin');
-  assert.equal(status.textContent,`${ASK} Paste the code by ${local(minute)}.`,'the minute it falls in, never rounded up');
+  assert.equal(status.textContent,by(local(minute)),'the minute it falls in, never rounded up');
   assert.match(local(minute),/\d:\d\d/);assert.notEqual(status.dataset.tone,'attention');
   assert.deepEqual(filledIn(stepsOf(panel)[1]),['Open Claude sign-in']);
   assert.equal(live().length,1,'only the ordinary status check is scheduled');
@@ -1913,10 +1918,10 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
   assert.equal(status.textContent,ASK);
   reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL,expires_at:minute+120});
   t=live()[0];t.live=false;t.fn();await flush();
-  assert.equal(status.textContent,`${ASK} Paste the code by ${local(minute+120)}.`);
+  assert.equal(status.textContent,by(local(minute+120)));
   reply=body=>({...body,state:'needs_attention',reason:'timeout'});
   t=live()[0];t.live=false;t.fn();await flush();
-  assert.equal(status.textContent.includes('Paste the code by'),false,'an ended attempt shows no deadline');
+  assert.equal(status.textContent.includes(local(minute+120)),false,'an ended attempt shows no deadline');
   h.api.dispose();
   // expires_at is refused away from a link and in any shape but whole positive seconds.
   for(const bad of [{state:'starting',reason:null,expires_at:deadline},{state:'waiting',reason:null,url:authorizeURL,expires_at:deadline+0.5},
@@ -1927,7 +1932,7 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
     const page=dom(),root=new page.Element();other.api.mountPanel({document:page.document,element:root});
     await other.api.run('context');await other.api.run('signin-begin');
     const line=stepPart(root,'signin','setup-signin-status').textContent;
-    assert.equal(line.includes('Paste the code by')||line===ASK,false,JSON.stringify(bad));
+    assert.equal(line.startsWith('Open Claude sign-in, then paste'),false,JSON.stringify(bad));
     other.api.dispose();
   }
 });
