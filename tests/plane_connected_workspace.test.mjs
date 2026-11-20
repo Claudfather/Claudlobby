@@ -1025,12 +1025,12 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   const detail=panel.children.find(e=>e.tagName==='DETAILS');detail.open=true;detail.focus();
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
-  const authority=descendants(panel).find(e=>e.textContent.includes('Local approval covers'));
+  const authority=descendants(panel).find(e=>e.textContent.includes('This approval lets the team'));
   assert.ok(descendants(detail).includes(authority),'approval scope lives under Details');
   assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
-  assert.match(authority.textContent,/starts native services.*configured provider accounts/);
-  assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
-  assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
+  assert.match(authority.textContent,/starts the team’s services on this computer and may use the provider accounts you set up/);
+  assert.match(authority.textContent,/may still ask you to approve folders, tools or accounts/);
+  assert.match(authority.textContent,/Merging, deploying, extra spending and destructive changes each need your separate permission/);
   assert.ok(descendants(panel).some(e=>e.textContent==='Goal: Improve checkout tests'));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
@@ -1521,7 +1521,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.ok(shown().every(n=>filledIn(n).length<=1));
   const details=panel.children.find(n=>n.tagName==='DETAILS');
   assert.equal(details.children[0].textContent,'Details');
-  assert.ok(descendants(details).some(n=>n.textContent.includes('Local approval covers')),'approval scope and identifiers sit under Details');
+  assert.ok(descendants(details).some(n=>n.textContent.includes('This approval lets the team')),'approval scope and identifiers sit under Details');
   h.api.dispose();
   const reopened=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000,setTimeout:()=>0,clearTimeout:()=>{}});
   const ui=dom(),again=new ui.Element();reopened.mountPanel({document:ui.document,element:again});
