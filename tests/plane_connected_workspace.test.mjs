@@ -1031,7 +1031,7 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   assert.match(authority.textContent,/starts native services.*configured provider accounts/);
   assert.match(authority.textContent,/Local folder, tool and account approvals may still be needed/);
   assert.match(authority.textContent,/Merge, deployment, additional spending and destructive changes need separate permission/);
-  assert.ok(descendants(panel).some(e=>e.textContent==='✓ Goal: Improve checkout tests'));
+  assert.ok(descendants(panel).some(e=>e.textContent==='Goal: Improve checkout tests'));
   h.storage.setItem=()=>{throw new Error('blocked');};assert.equal(await h.api.run('launch'),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
   assert.match(h.api.snapshot().note,/could not save the setup identifiers, so nothing was launched/);
@@ -1425,7 +1425,7 @@ test('Copy link sits beside the new-tab sign-in link and shows the link to copy 
   const renewed=authorizeURL+'&state=renewed';
   h.overrides.set(origin+'signin-status',init=>reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:renewed}));
   copy.click();await flush();
-  button('Check sign-in progress').click();await flush();
+  assert.equal(visible(button('Check sign-in progress')),false);h.timer(2000);await flush(); // the automatic check
   assert.equal(link.attributes.href,renewed);assert.equal(note().textContent,'','a new link clears the old copy state');assert.equal(field().hidden,true);
   pending[0].reject(new DOMException('blocked','NotAllowedError'));await flush();
   assert.equal(note().textContent,'','a stale rejection is ignored');assert.equal(field().hidden,true);
@@ -1472,7 +1472,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.ok(descendants(panel).filter(n=>n.tagName==='BUTTON').every(n=>/\bpill\b/.test(n.className)),'every action is a real button, none a text link');
   await h.api.run('context');
   assert.deepEqual(shape().map(r=>r[1]),['done','current','upcoming','upcoming']);assert.ok(unnumbered(panel));
-  assert.ok(says('✓ Setup approved'));
+  assert.ok(says('Setup approved'));
   const underDetails=new Set(descendants(panel.children.find(n=>n.tagName==='DETAILS')));
   assert.deepEqual(descendants(panel).filter(n=>visible(n)&&!underDetails.has(n)&&!n.children.length&&/\bteam shop\b/i.test(n.textContent)),[],
     'the team\'s internal name stays under Details');
@@ -1482,8 +1482,11 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   const starting=stepPart(panel,'signin','setup-signin-status'),note=stepPart(panel,'signin','setup-progress');
   assert.equal(starting.textContent,'Starting Claude sign-in…');assert.equal(starting.dataset.tone,'working','a line that waits on the computer turns a ring');
   assert.equal(note.textContent,'This page checks for progress automatically.');assert.equal(note.dataset.tone,undefined,'the passive note does not');
+  const actions=()=>descendants(stepsOf(panel)[1]).filter(n=>['A','BUTTON'].includes(n.tagName)&&visible(n)).map(n=>n.textContent);
+  assert.deepEqual(actions(),['Cancel sign-in'],'no manual check while the page checks by itself');
   await p.fire();
   assert.deepEqual(filled().signin,['Open Claude sign-in']);assert.equal(p.link.attributes.target,'_blank');
+  assert.deepEqual(actions(),['Open Claude sign-in','Copy link','Submit code','Cancel sign-in']);
   const label=descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(p.code));
   assert.equal(label.children[0].textContent,'Code from Claude','the code field has a visible label');
   assert.equal(p.code.attributes['aria-label'],undefined,'the visible label names it');assert.equal(p.code.type,'password');
@@ -1493,7 +1496,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   p.code.value='';p.code.handlers.input();
   await p.fire();
   assert.deepEqual(shape().map(r=>r[1]),['done','done','current','upcoming']);
-  assert.ok(says('✓ Claude connected'));assert.ok(says('Your team works in example-org/shop.'),'the goal step names the repository, not the team');
+  assert.ok(says('Claude connected'));assert.ok(says('Your team works in example-org/shop.'),'the goal step names the repository, not the team');
   assert.deepEqual(filled(),{approve:[],signin:[],goal:['Preview team'],launch:[]});
   const area=descendants(panel).find(n=>n.tagName==='TEXTAREA');
   assert.match(area.attributes.placeholder,/^For example: /);
@@ -1503,7 +1506,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   h.api.setGoal('Ship the signup form');await h.api.run('preview');
   assert.equal(recheck.hidden,true,'re-checking approval would retire a fresh preview, so it is not offered while launchable');
   assert.deepEqual(shape().map(r=>r[1]),['done','done','done','current']);
-  assert.ok(says('✓ Goal: Ship the signup form'));
+  assert.ok(says('Goal: Ship the signup form'));
   assert.deepEqual(filled().launch,['Launch team']);
   assert.ok(says('Your team is ready. Launching changes 0 generated files and starts or restarts 1 bot.'));
   await h.api.run('launch');
@@ -1933,7 +1936,7 @@ test('a taken code holds Submit code and the field until the attempt leaves wait
   p.code.value='second';assert.equal(await p.h.api.run('signin-code'),false);
   await p.fire();assert.equal(status.textContent,'Code sent, finishing sign-in…','still held while the host says waiting');
   assert.deepEqual(p.calls.map(c=>c[0]),['begin','status','code','status'],'no second code is sent');
-  await p.fire();assert.equal(status.textContent,'✓ Claude connected');
+  await p.fire();assert.equal(status.textContent,'Claude connected');
   assert.equal(p.code.value,'','leaving waiting empties the field');p.h.api.dispose();
 });
 test('the code field is emptied whenever the attempt is not waiting for one',async()=>{
@@ -2328,8 +2331,8 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
   assert.equal(l.panel(),panel,'the same panel continues the setup');assert.equal(l.rail.dataset.setupFocus,'only');
   assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
-  assert.ok(descendants(stepsOf(panel)[0]).some(n=>n.textContent==='✓ Connected'&&visible(n)));
-  assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved'&&visible(n)));
+  assert.ok(descendants(stepsOf(panel)[0]).some(n=>n.textContent==='Connected'&&visible(n)));
+  assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)));
   assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],[],['Sign in to Claude'],[],[]]);
   assert.equal(l.h.ui.document.activeElement?.textContent,'Sign in to Claude','keyboard focus moves on to the next action');
   l.h.timer(30000);await flush();
@@ -2554,7 +2557,7 @@ test('a standalone panel ends on a done Launch step with a plain running line; t
     const shape=stepShape(panel).map(row=>row.slice(0,2)),note=descendants(panel).find(n=>n.className==='setup-note').textContent;
     if(standalone){
       assert.deepEqual(shape,[['connect','done'],['approve','done'],['goal','done'],['launch','done']]);
-      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)));
+      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)));
       assert.equal(note,'Team launched. Your team is running on this computer.');
     } else {
       assert.deepEqual(shape,[['approve','done'],['goal','done'],['launch','current']],'the shared panel is unchanged');
@@ -2583,8 +2586,8 @@ test('a standalone managed launch ends on finished steps after its status check 
     if(standalone){
       assert.deepEqual(shape,[['connect','done'],['approve','done'],['goal','done'],['launch','done']]);
       assert.deepEqual(buttons,[],'nothing is left to approve, check again or launch');
-      assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='✓ Setup approved'&&visible(n)));
-      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)));
+      assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)));
+      assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)));
       assert.equal(note,'Team launched. Your team is running on this computer.');
     } else {
       assert.deepEqual(shape[0],['approve','current'],'the shared panel keeps its existing steps');
@@ -2602,7 +2605,7 @@ test('a rebound setup request is not shown as launched, so its launch status can
   assert.equal(await h.api.run('context'),true);
   assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['goal','done'],['launch','current']]);
   assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'the new request leads with its status check');
-  assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='✓ Team launched'&&visible(n)),false);
+  assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
 test('Connect moves keyboard focus on only while this frame has focus and nothing else took it',async t=>{

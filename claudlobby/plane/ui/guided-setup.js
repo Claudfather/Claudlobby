@@ -434,7 +434,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     : ` Paste the code by ${new Date(signinDeadline*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}.`;
   function signinStatusLine() { // [text, tone]
     if (signinBlocked) return ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention'];
-    if (signinState === 'connected') return ['✓ Claude connected','done'];
+    if (signinState === 'connected') return ['Claude connected','done'];
     if (signinNotice) return [signinNotice,'attention'];
     if (SIGNIN_ENDED.includes(signinState)) {
       const retry = signinRetryOffered(); // a replaceable cancel stopped before any code reached Claude
@@ -489,7 +489,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    setText(m.approveDone,context || finished ? '✓ Setup approved' : '');
+    setText(m.approveDone,context || finished ? 'Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
     m.recheck.hidden = launchable || finished; // re-checking would retire a fresh preview's launch
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
@@ -500,7 +500,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : !approved ? 'context'
       : states.signin !== 'current' ? null
       : typed ? 'code' : waitingLink ? 'link' : signinRetryOffered() ? 'retry'
-      : signinAttempt && !ended && signinRefusal !== 'attempt' && !signinWorking() ? 'status' : null;
+      : signinAttempt && !ended && signinRefusal !== 'attempt' && !signinWorking() && !signinPolling() ? 'status' : null;
     const filled = (name, quiet) => (connecting ? 'connect' : lead) === name ? 'pill setup-primary' : quiet;
     const [text,tone] = signinStatusLine();
     m.signinStatus.hidden = !['current','done'].includes(states.signin);
@@ -508,7 +508,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (tone) m.signinStatus.dataset.tone = tone; else delete m.signinStatus.dataset.tone;
     const {begin,status:check,code:submit,cancel} = m.signinControls;
     begin.hidden = !!signinAttempt || signinBlocked;
-    check.hidden = !signinAttempt || signinState === 'connected';
+    // While this page checks by itself a manual check only repeats it; it returns once automatic checks stop.
+    check.hidden = !signinAttempt || signinState === 'connected' || signinPolling();
     cancel.hidden = !signinAttempt || ended;
     m.codeRow.hidden = signinState !== 'waiting';
     controls.context.className = filled('context','pill ghost');
@@ -533,7 +534,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     retry.hidden = !retryShown; retry.className = filled('retry','pill ghost');
     retry.disabled = !live || busy || !retryShown;
     m.lead = {context:controls.context,receipt:controls.receipt,code:submit,link:m.signinLink,retry,status:check}[lead] ?? null;
-    setText(m.goalDone,pending ? planGoal ? `✓ Goal: ${planGoal}` : '✓ Team preview prepared' : '');
+    setText(m.goalDone,pending ? planGoal ? `Goal: ${planGoal}` : 'Team preview prepared' : '');
     setText(m.goalText,context ? `Your team works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
     m.area.disabled = !live || busy || !!pending || legacyBlocked();
@@ -566,7 +567,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       button.disabled = !connectView || !!connectView.disabled || !!connectView.busy;
       setText(hint,connecting && !connectView?.busy ? connectView?.hint || '' : '');
     }
-    if (m.launchDone) setText(m.launchDone,finished ? '✓ Team launched' : '');
+    if (m.launchDone) setText(m.launchDone,finished ? 'Team launched' : '');
     // After a Connect chosen in this panel, keyboard focus moves on with the steps instead of falling to the page,
     // but only while this document has focus and nothing else took it (focus is on the page or still on Connect).
     const focusFree = () => { const doc = m.document; if (doc?.hasFocus?.() === false) return false;
@@ -616,7 +617,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         connectFocus = 'sent'; try { onConnect(); } catch { /* the entry owns Connect and its outcome */ }
         if (connectFocus === 'sent') connectFocus = null; // the entry refused it, so nothing will move focus
       });
-      connectRow.done.append(make('span','','✓ Connected'));
+      connectRow.done.append(make('span','','Connected'));
       connectRow.body.append(make('p','setup-step-text','Connect so you can finish setup.'),row(button),hint);
       connectStep = {button,hint};
     }
