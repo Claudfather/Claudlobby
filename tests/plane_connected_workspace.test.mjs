@@ -1630,7 +1630,8 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   assert.equal(replaces,retryEnded.attempt_id,'the ID it replaces is kept beside it until the host answers');
   assert.deepEqual(calls[0][1],fresh,'the new attempt is retained before its one begin');
   assert.notEqual(fresh.attempt_id,retryEnded.attempt_id);assert.equal(fresh.generation,retryEnded.generation);
-  assert.equal(stepPart(panel,'signin','setup-progress').textContent,'Starting a new Claude sign-in…');
+  assert.equal(status.textContent,'Starting Claude sign-in…','from the click on, in the line above the buttons');assert.equal(status.dataset.tone,'working');
+  assert.equal(stepPart(panel,'signin','setup-progress').textContent,'','not a second time below them');
   assert.equal(retry.disabled,true,'held while it starts');retry.click();await flush();
   assert.equal(calls.length,1,'a second click while it starts sends nothing');
   gate.resolve({...fresh,state:'starting',reason:null});await flush();
@@ -1690,6 +1691,7 @@ test(`a Try again that was ${name} keeps following the ended attempt, here and a
   assert.deepEqual(JSON.parse(h.saved.get('test:claude')),original,'nothing was admitted, so the ended attempt is kept');
   if(name==='refused'){
     assert.equal(status.textContent,'This computer refused the new Claude sign-in. Choose Check sign-in progress to look again.');
+    assert.equal(visible(descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check sign-in progress')),true,'the check it names is there');
     assert.equal(visible(retry),false,'only the host\'s next answer offers it again');
     assert.equal(await h.api.run('signin-retry'),false);assert.equal(calls.length,1);
   } else {

@@ -108,6 +108,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const signinSending = () => signinState === null && ['signin-begin','signin-retry'].includes(busyOperation);
   // The same with its attempt already kept (a session renewal before it re-renders): nothing is known to check.
   const signinUnanswered = () => !!signinAttempt && signinSending();
+  // The line only: a Try again says so from its click, while the ended attempt it replaces is still the one kept.
+  const signinLineSending = () => signinSending() || busyOperation === 'signin-retry' && signinRetryOffered();
   // Try again: only for an ended attempt of this live approval that the host said a new attempt may replace.
   const signinRetryOffered = () => context?.provider_signin===true && context.expires_at>now() && !pending && !signinBlocked
     && !!signinAttempt && signinRetryable && retryableEnding(signinState,signinReason);
@@ -440,7 +442,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   function signinStatusLine() { // [text, tone]
     if (signinBlocked) return ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention'];
     if (signinState === 'connected') return ['Claude connected','done'];
-    if (signinSending()) return [PROGRESS[busyOperation][1],'working']; // over any earlier attempt's note
+    // The same words the computer's 'starting' answer shows, so the line neither changes nor is announced twice.
+    if (signinLineSending()) return ['Starting Claude sign-in…','working']; // over any earlier attempt's note
     if (signinNotice) return [signinNotice,'attention'];
     if (SIGNIN_ENDED.includes(signinState)) {
       const retry = signinRetryOffered(); // a replaceable cancel stopped before any code reached Claude
@@ -481,8 +484,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
     const progress = {approve:'',signin:'',goal:'',launch:''};
     progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
-    // A starting sign-in says so in its own line above the buttons instead.
-    if (busy && busyOperation && !signinSending()) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
+    // A starting sign-in says so in its own line above the buttons instead, wherever that line is shown.
+    const lineSaysIt = signinLineSending() && ['current','done'].includes(states.signin);
+    if (busy && busyOperation && !lineSaysIt) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
     if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = POLL_NOTE;
     if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
     for (const [name,step] of Object.entries(m.steps)) {
@@ -504,8 +508,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
     // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
-    // Nor beside Try again: the computer already said the ended attempt may be replaced, so there is nothing to check.
-    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling() && !signinUnanswered() && !signinRetryOffered();
+    // Nor beside Try again: the computer already said the ended attempt may be replaced, so there is nothing to check,
+    // unless an earlier Try again's ID was set aside and a check may find the computer took it after all.
+    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling() && !signinUnanswered()
+      && !(signinRetryOffered() && !signinSuccessor);
     // One filled action: the step that can move leads. Preview team and Launch team are filled whenever shown;
     // so is Sign in to Claude, except while it is held as sign-in starts.
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
