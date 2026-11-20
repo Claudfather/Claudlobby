@@ -6,7 +6,10 @@
 # single <=8192-byte result plus exit status; the current browser door cannot
 # carry this operation. Budgets: prepare 900s, status 15s including child drain.
 # recorded_complete is retained preparation evidence, never fresh runtime or
-# dependency readiness. After unknown dispatch, inspect only; absent is an
+# dependency readiness. Status alone reports recorded_in_use for that same
+# verified preparation once this product's own setup has added to it; it reads
+# none of that later state, and prepare still refuses it rather than adopt or
+# replace anything. After unknown dispatch, inspect only; absent is an
 # observation and cannot authorize an automatic retry or prove remote shutdown.
 operation=host-install-v1
 if [ "$#" -eq 1 ] && [ "$1" = status ]; then operation=host-install-status-v1; fi
@@ -47,6 +50,9 @@ BUDGETS = {"prepare": 900, "status": 15}
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_CHILD_OUTPUT = 2 * 1024 * 1024
+# The fixed directories this product's own setup guide adds beside a completed
+# preparation (commands/owner_setup_consent.py: policy, provider, account).
+SETUP_FAMILY = {"host-policy", "provider-bin", "provider-profile"}
 
 
 class Refusal(Exception):
@@ -1171,7 +1177,23 @@ def data_check(data, *, complete=False):
         raise Refusal("identity_changed", next_step="inspect")
 
 
-def paths(home, create=False):
+def in_use_data_check(data):
+    # Setup has gone on since preparation. The skeleton that completion created
+    # must still be there, checked by metadata alone; what setup and the app
+    # have added under it is theirs and is neither read nor locked here.
+    state = data / "state"
+    if not directory(data, private=True) or not directory(state, private=True):
+        raise Refusal("identity_changed", next_step="inspect")
+    try:
+        info = (state / "runtime-use.lock").lstat()
+    except FileNotFoundError:
+        raise Refusal("identity_changed", next_step="inspect") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise Refusal("existing_installation", next_step="inspect")
+
+
+def paths(home, create=False, in_use=False):
     for path in (home / ".local", home / ".local/share"):
         if not directory(path, create=create):
             return None
@@ -1184,12 +1206,23 @@ def paths(home, create=False):
         if profile.root != family / "runtime/profile":
             raise Refusal("identity_changed", next_step="inspect")
         allowed.add("runtime")
-    if {p.name for p in family.iterdir()} - allowed:
+    later = {p.name for p in family.iterdir()} - allowed
+    # Status alone may see the fixed directories setup adds beside a completed
+    # preparation. Prepare refuses them, and any other name refuses for both.
+    if later - (SETUP_FAMILY if in_use else set()):
         raise Refusal("existing_installation", next_step="inspect")
+    for name in later:
+        directory(family / name, private=True)
     install, data, staging = (family / name for name in ("install", "data", "staging"))
     for path in (install, data, staging):
         directory(path, private=True, create=create)
     return install, data, staging
+
+
+def setup_started(family, data, staging):
+    # Names only: anything beyond the inactive skeleton a preparation leaves.
+    return bool(names(family) & SETUP_FAMILY or names(staging) or names(data) - {"state"}
+                or names(data / "state") - {"runtime-use.lock"})
 
 
 def contents_check(install, data, staging):
@@ -1283,20 +1316,27 @@ def environment_check(environment, python, runner, env):
         raise Refusal("existing_installation", next_step="inspect")
 
 
-def inspect(install, data, expected, python, runner, env):
+def inspect(install, data, expected, python, runner, env, in_use=False):
     allowed = {"preparation.lock", "preparation.json", "installation.json", "src", "env", "bin", "cache"}
     if {p.name for p in install.iterdir()} - allowed:
         raise Refusal("existing_installation", next_step="inspect")
     record = install / "preparation.json"
     if not record.exists() and not record.is_symlink():
-        if {p.name for p in install.iterdir()} - {"preparation.lock"} or names(data):
+        if in_use or {p.name for p in install.iterdir()} - {"preparation.lock"} or names(data):
             raise Refusal("existing_installation", next_step="inspect")
         return None
     state = receipt(record, expected)
-    # Completion requires the original inactive launcher skeleton. Inspect it
-    # before prepare can create any missing data/staging paths. Never repair
-    # completed state loss or reinterpret it as a fresh/incomplete preparation.
-    data_check(data, complete=state["complete"])
+    if in_use:
+        # Later state beside anything but this exact completed preparation is
+        # unknown: never adopted, and never read as fresh or incomplete.
+        if not state["complete"]:
+            raise Refusal("existing_installation", next_step="inspect")
+        in_use_data_check(data)
+    else:
+        # Completion requires the original inactive launcher skeleton. Inspect it
+        # before prepare can create any missing data/staging paths. Never repair
+        # completed state loss or reinterpret it as a fresh/incomplete preparation.
+        data_check(data, complete=state["complete"])
     identity = read_json(install / "installation.json", 4096)
     if identity != {"schema": 1, "data_root": str(data)} or type(identity.get("schema")) is not int:
         raise Refusal("identity_changed", next_step="inspect")
@@ -1414,11 +1454,12 @@ def execute(action, value, deadline):
         foreign = shutil.which("claudlobby", path=os.environ.get("PATH", ""))
         if foreign and Path(foreign) != install / "bin/claudlobby":
             raise Refusal("existing_installation")
-        current = paths(home)
+        current = paths(home, in_use=action == "status")
         expected = binding(install, data, revision, python)
         binding_hash = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
         if action == "status" and (current is None or not (install / "preparation.lock").exists()):
-            if current is not None and (names(install) or names(data) or names(staging)):
+            if current is not None and (names(install) or names(data) or names(staging)
+                                        or names(family) & SETUP_FAMILY):
                 raise Refusal("existing_installation", next_step="inspect")
             return "absent", "none", "inspect", False, revision, uid, binding_hash
         if action == "prepare":
@@ -1435,14 +1476,19 @@ def execute(action, value, deadline):
         runner.descriptors = tuple(descriptors)
         # Only lock-path ancestors precede this flock. Staging/data creation
         # and all network or child work stay under its exclusive ownership.
-        paths(home)
-        contents_check(install, data, staging)
-        state = inspect(install, data, expected, python, runner, env)
+        paths(home, in_use=action == "status")
+        # Read-only status tells a completed preparation that setup has since
+        # used from unknown state. Prepare keeps requiring the untouched skeleton.
+        in_use = action == "status" and setup_started(family, data, staging)
+        if not in_use:
+            contents_check(install, data, staging)
+        state = inspect(install, data, expected, python, runner, env, in_use=in_use)
         if action == "status":
             if state is None:
                 return "absent", "none", "inspect", False, revision, uid, binding_hash
             if state["complete"]:
-                return "recorded_complete", "none", "continue_onboarding", True, revision, uid, binding_hash
+                return ("recorded_in_use" if in_use else "recorded_complete", "none", "continue_onboarding", True,
+                        revision, uid, binding_hash)
             return "incomplete", "preparation_incomplete", "resume_same", False, revision, uid, binding_hash
         if state is None or not state["complete"]:
             directory(data, private=True, create=True)
