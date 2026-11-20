@@ -1,0 +1,3 @@
+### Fixed — An ended Claude sign-in no longer leaves a 350 MiB copy behind
+
+Each Claude sign-in attempt runs from its own verified copy of the Claude executable (about 350 MiB). A copy used to stay on the computer after its attempt ended, until the next Try again or a reset, so a timed-out or cancelled sign-in kept it indefinitely. Now each attempt removes its copy once it has proven its sign-in process has exited: after a timeout, a cancel, a refusal or a successful sign-in. An attempt whose process could not be proven stopped keeps its copy. Try again still removes a replaced attempt's copy if one was left. What each attempt sends, and when, is unchanged.

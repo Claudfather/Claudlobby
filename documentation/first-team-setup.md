@@ -197,8 +197,9 @@ Darwin arm64, Linux arm64 glibc and Linux x86_64 glibc artifacts, verified by
 their exact file hash.
 Each attempt stages one verified public executable copy (roughly 350 MiB) in
 its private owner state, so an ordinary provider auto-update cannot replace the
-approved executable between verification and launch. **Try again** (below)
-removes the replaced attempt's copy, so one copy normally remains. One setup
+approved executable between verification and launch. The copy is removed when
+its attempt ends (signed in, timed out, cancelled or refused); **Try again**
+(below) also removes a replaced attempt's copy if one is left. One setup
 approval allows at most ten attempts, so about 3.5 GiB even if every removal failed. A matching version string
 alone is insufficient. An unsupported binary is
 refused before invocation; use your existing private provider setup instead.

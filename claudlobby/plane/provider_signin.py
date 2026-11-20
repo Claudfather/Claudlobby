@@ -44,10 +44,11 @@ SUPPORTED = {
 # it, and SIGNIN_LIFETIME and CALL_LIMIT follow from that (a relation test checks all three).
 SECONDS = 600
 ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
-# Each attempt stages its own verified executable copy (roughly 350 MiB). Try again
-# removes the replaced attempt's copy once the new attempt is admitted (discard_binary),
-# so one copy normally remains. Ten attempts per setup approval give a slow sign-in
-# room to finish, and bound the copies to about 3.5 GiB if every removal failed.
+# Each attempt stages its own verified executable copy (roughly 350 MiB). Its worker
+# removes it once it proves no child of it runs (every ending but unknown), and Try
+# again removes a replaced attempt's copy that is still there (discard_binary), so no
+# copy normally outlives its attempt. Ten attempts per setup approval give a slow
+# sign-in room to finish, and bound the copies to about 3.5 GiB if every removal failed.
 MAX_ATTEMPTS = 10
 # The (state, reason) endings after which a new attempt may replace the current one,
 # and then only when the persisted record also says no code was delivered
@@ -404,11 +405,11 @@ def stage_binary(parent, scope, attempt, source_fd, before):
 
 
 def discard_binary(parent, attempt):
-    """Best effort: remove a replaced attempt's staged copy and its directory.
+    """Best effort: remove an ended attempt's staged copy and its directory.
 
-    Only for the attempt a retry retires: its record proves a RETRYABLE ending with
-    no code sent, and its worker wrote that row after reaping its child and closing
-    its descriptors. Nothing is followed. Only a single-link regular file this
+    Only once no child of the attempt can run: its own worker, after reaping that
+    child and closing its descriptors, or a retry retiring it, whose record proves
+    the worker did. Nothing is followed. Only a single-link regular file this
     account owns is removed, then the directory if that left it empty; anything
     else is left alone. It never raises.
     """
@@ -761,6 +762,9 @@ class ProviderSignin:
                 state,reason="unknown","child_quiet_unproven"
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
+            # Reaped and closed above, so nothing runs this copy again; removed before the
+            # terminal row, which stays the worker's final write. Unknown keeps it.
+            if state!="unknown": discard_binary(staging(self.store.access.root),attempt)
             with self._lock:
                 self._code=self._url=self._expires_at=self._code_until=None
                 self._set(grant,attempt,state,reason)
