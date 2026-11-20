@@ -91,7 +91,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let signinCodeSent=null, signinRefusal=null; // signinRefusal: null | 'code' | 'attempt'
   const codeSent = () => !!signinAttempt && signinCodeSent===signinAttempt.attempt_id;
   // One status check at a time, about every two seconds: at most 165 calls in the 330-second
-  // conversation, so manual checks beside it stay far inside the 256-call bound.
+  // conversation, so the manual checks offered once it stops stay far inside the 256-call bound.
   // While this page is hidden (Claude's tab in front), a slower read-only check keeps the owning
   // conversation inside its 45-second idle bound, so it is not drained and cancelled meanwhile.
   const SIGNIN_POLL_MS=2000, SIGNIN_HIDDEN_POLL_MS=25000, SIGNIN_TERMINAL=['connected','needs_attention','cancelled'];
@@ -495,12 +495,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
+    // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
+    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling();
     // One filled action: the step that can move leads. Preview team, Launch team and Sign in to Claude are filled whenever shown.
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
       : !approved ? 'context'
       : states.signin !== 'current' ? null
       : typed ? 'code' : waitingLink ? 'link' : signinRetryOffered() ? 'retry'
-      : signinAttempt && !ended && signinRefusal !== 'attempt' && !signinWorking() && !signinPolling() ? 'status' : null;
+      : manualCheck && !ended && signinRefusal !== 'attempt' ? 'status' : null;
     const filled = (name, quiet) => (connecting ? 'connect' : lead) === name ? 'pill setup-primary' : quiet;
     const [text,tone] = signinStatusLine();
     m.signinStatus.hidden = !['current','done'].includes(states.signin);
@@ -508,8 +510,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (tone) m.signinStatus.dataset.tone = tone; else delete m.signinStatus.dataset.tone;
     const {begin,status:check,code:submit,cancel} = m.signinControls;
     begin.hidden = !!signinAttempt || signinBlocked;
-    // While this page checks by itself a manual check only repeats it; it returns once automatic checks stop.
-    check.hidden = !signinAttempt || signinState === 'connected' || signinPolling();
+    check.hidden = !manualCheck;
     cancel.hidden = !signinAttempt || ended;
     m.codeRow.hidden = signinState !== 'waiting';
     controls.context.className = filled('context','pill ghost');

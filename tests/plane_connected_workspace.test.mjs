@@ -1483,7 +1483,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.equal(starting.textContent,'Starting Claude sign-in…');assert.equal(starting.dataset.tone,'working','a line that waits on the computer turns a ring');
   assert.equal(note.textContent,'This page checks for progress automatically.');assert.equal(note.dataset.tone,undefined,'the passive note does not');
   const actions=()=>descendants(stepsOf(panel)[1]).filter(n=>['A','BUTTON'].includes(n.tagName)&&visible(n)).map(n=>n.textContent);
-  assert.deepEqual(actions(),['Cancel sign-in'],'no manual check while the page checks by itself');
+  assert.deepEqual(actions(),['Cancel sign-in'],'no manual check while the page checks by itself');assert.equal(p.live().length,1,'because a poll is scheduled');
   await p.fire();
   assert.deepEqual(filled().signin,['Open Claude sign-in']);assert.equal(p.link.attributes.target,'_blank');
   assert.deepEqual(actions(),['Open Claude sign-in','Copy link','Submit code','Cancel sign-in']);
