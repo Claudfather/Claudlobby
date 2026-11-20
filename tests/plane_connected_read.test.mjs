@@ -830,10 +830,10 @@ test('begin renews first unless the session covers a ten-minute attempt\'s conve
   await h.api.renew(); assert.equal(renewals(h), 1, 'no further rotation while live');
   h.api.dispose();
   // The session must also cover a ten-minute attempt's 630-second conversation, with a margin.
-  for (const [time, renews] of [[300000, true], [240000, false]]) { // 600 and 660 seconds left
-    const s = signinHarness(); await s.api.connect(); s.time = time;
+  for (const [left, renewed] of [[600, 1], [660, 0]]) { // seconds left of the 900-second session
+    const s = signinHarness(); await s.api.connect(); s.time = (900 - left) * 1000;
     await s.api.setupSignin('begin', attemptInput);
-    assert.equal(renewals(s), renews ? 1 : 0, `${(900000 - time) / 1000} seconds left`);
+    assert.equal(renewals(s), renewed, `${left} seconds left`);
     s.api.dispose();
   }
   const failed = signinHarness(); await failed.api.connect();
