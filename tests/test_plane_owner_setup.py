@@ -1296,7 +1296,7 @@ def test_provider_signin_linked_source_alias_write_during_copy_refuses(synthetic
         with pytest.raises(provider_signin.SigninRefused,match='unsupported_provider'):
             provider_signin.stage_binary(engine.store.access.path.parent,grant.provider_signin,str(uuid4()),fd,before)
         assert changed == [True]
-        assert not list(engine.store.access.path.parent.glob(provider_signin.ATTEMPT_DIRECTORY+'*')), 'a refused copy is removed'
+        assert _staged_copies(engine.store.access.path.parent)==[], 'a refused copy is removed'
     finally:os.close(fd)
 
 
@@ -1417,7 +1417,7 @@ def test_provider_signin_cancel_wins_before_effect_admission(synthetic_signin,mo
         if when.startswith('queued-code'):assert not code_writes
         if when=='ready-token':assert code_writes==[('accepted#'+'b'*32).encode(),b'\r']  # Enter is its own keypress
         assert env.read_text()=='export ROUTE=private\n'
-        assert not list(provider_signin.staging(engine.root).glob(provider_signin.ATTEMPT_DIRECTORY+'*')), 'a cancelled or revoked attempt removes its copy'
+        assert _staged_copies(provider_signin.staging(engine.root))==[], 'a cancelled or revoked attempt removes its copy'
     finally:
         release.set();engine.signin.shutdown()
         if cancel is not None:cancel.join(timeout=8)
@@ -1471,6 +1471,20 @@ def _signin_ended(engine,grant,reader,attempt):
 def _signin_row(engine,attempt):
     with engine.store.access._connection() as conn:
         return dict(conn.execute('SELECT * FROM setup_provider WHERE attempt_id=?',(attempt,)).fetchone())
+
+
+def _staged_copies(parent):
+    """Attempt directories holding a staged copy under parent, by attempt ID."""
+    from claudlobby.plane.provider_signin import ATTEMPT_DIRECTORY
+    return sorted(p.name[len(ATTEMPT_DIRECTORY):] for p in parent.glob(ATTEMPT_DIRECTORY+'*'))
+
+
+def _leave_staged_copy(parent,attempt):
+    """A copy as if its worker's own removal had failed."""
+    from claudlobby.plane.provider_signin import ATTEMPT_DIRECTORY
+    directory=parent/(ATTEMPT_DIRECTORY+attempt); directory.mkdir(mode=0o700)
+    (directory/'claude').write_bytes(b'staged'); (directory/'claude').chmod(0o500)
+    return directory/'claude'
 
 
 def test_provider_signin_timeout_before_code_admits_one_fresh_attempt(synthetic_signin,monkeypatch):
@@ -1609,9 +1623,9 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
     try:
         engine.signin_begin(reader,grant.generation,first)
         assert _signin_ended(engine,grant,reader,first).get('retryable') is True
-        kept=engine.root/'state/provider-signin'/('claude-signin-'+first)
-        assert not kept.exists(), 'the ended attempt removed its own copy'
-        kept.mkdir(mode=0o700);(kept/'claude').write_bytes(b'staged')  # as if that removal had failed
+        staging=provider_signin.staging(engine.root)
+        assert _staged_copies(staging)==[], 'the ended attempt removed its own copy'
+        kept=_leave_staged_copy(staging,first)
         saved="export ROUTE=private\nexport CLAUDE_CODE_OAUTH_TOKEN='saved-elsewhere'\n"
         env.write_text(saved)
         with pytest.raises(provider_signin.SigninRefused,match='credential_already_present'):
@@ -1621,7 +1635,7 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
         assert _signin_row(engine,first)['retired']==0
         with pytest.raises(AccessDenied):engine.signin_status(reader,grant.generation,second)
         assert not (engine.root/'state/provider-signin'/('claude-signin-'+second)).exists()
-        assert (kept/'claude').is_file(), 'a refused Try again leaves the current attempt alone'
+        assert kept.is_file(), 'a refused Try again leaves the current attempt alone'
         assert env.read_text()==saved
         env.write_text('export ROUTE=private\n')
         engine.signin.shutdown()
@@ -1637,9 +1651,6 @@ def test_provider_signin_an_ended_attempt_removes_its_copy_and_try_again_removes
     engine,grant,reader,*_=synthetic_signin
     monkeypatch.setattr(provider_signin,'SECONDS',0.5)
     staging=provider_signin.staging(engine.root)
-    copy=lambda attempt:staging/(provider_signin.ATTEMPT_DIRECTORY+attempt)
-    def left_behind(attempt):  # as if its worker's own removal had failed
-        copy(attempt).mkdir(mode=0o700); (copy(attempt)/'claude').write_bytes(b'staged'); (copy(attempt)/'claude').chmod(0o500)
     first,second,third,fourth,other=(str(uuid4()) for _ in range(5))
     def attempt(owner,new):
         assert owner.signin_begin(reader,grant.generation,new)['attempt_id']==new
@@ -1650,19 +1661,19 @@ def test_provider_signin_an_ended_attempt_removes_its_copy_and_try_again_removes
     monkeypatch.setattr(provider_signin,'discard_binary',discard)
     try:
         attempt(engine,first)
-        assert list(staging.iterdir())==[], 'a timed-out attempt removed its own copy'
+        assert _staged_copies(staging)==[], 'a timed-out attempt removed its own copy'
         assert [owner for owner,_ in seen]==[first] and seen[0][1] in ('starting','waiting'), 'before the terminal row a Try again reads'
-        left_behind(first); left_behind(other)
+        _leave_staged_copy(staging,first); _leave_staged_copy(staging,other)
         attempt(engine,second)
-        assert sorted(staging.iterdir())==[copy(other)], 'Try again removed only the replaced copy; the new attempt removed its own'
+        assert _staged_copies(staging)==[other], 'Try again removed only the replaced copy; the new attempt removed its own'
         attempt(engine,third)  # a copy already gone still lets Try again through
         assert _signin_row(engine,second)['retired']==1
-        left_behind(third)
+        _leave_staged_copy(staging,third)
         engine.signin.shutdown()
         restarted=SetupEngine(engine.store.access)  # the next engine removes a copy the first one left
         try:
             attempt(restarted,fourth)
-            assert sorted(staging.iterdir())==[copy(other)]
+            assert _staged_copies(staging)==[other]
         finally:restarted.signin.shutdown()
     finally:engine.signin.shutdown()
 

@@ -411,9 +411,7 @@ def stage_binary(parent, scope, attempt, source_fd, before):
 def discard_binary(parent, attempt):
     """Best effort: remove an ended attempt's staged copy and its directory.
 
-    Only once the attempt's own child is reaped: by its worker, after that reap and
-    closing its descriptors; by a retry retiring it, whose record proves the worker
-    did; or by stage_binary for a copy it could not finish. Nothing is followed. Only a single-link regular file this
+    Only once the attempt's own child is reaped (or never started). Nothing is followed. Only a single-link regular file this
     account owns is removed, then the directory if that left it empty; anything
     else is left alone. It never raises.
     """
@@ -583,7 +581,7 @@ class ProviderSignin:
                 self._attempt = attempt
                 self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
                 self._thread.start()
-                if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])
+                if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])  # fallback: a copy its worker left
             return self.status(reader,grant,attempt)
 
     def status(self, reader, grant, attempt):
@@ -767,8 +765,7 @@ class ProviderSignin:
                 state,reason="unknown","child_quiet_unproven"
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
-            # Only the copy this worker staged, its child reaped and descriptors closed above;
-            # removed before the terminal row, which stays the worker's final write. Unknown keeps it.
+            # Its own copy, child reaped above; before the terminal row, which stays the final write.
             if staged is not None and state!="unknown": discard_binary(staging(self.store.access.root),attempt)
             with self._lock:
                 self._code=self._url=self._expires_at=self._code_until=None
