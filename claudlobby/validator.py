@@ -54,6 +54,7 @@ from .known_values import (
     VALID_TIERS,
     closest_match,
     hint,
+    is_known_model,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths, _iter_fleet_dirs, detect_vault
@@ -1371,7 +1372,7 @@ def _validate_bots(
                                           f"rename or remove it", bot_name)
 
         # Model validation (warn + pass-through)
-        if bot.model and bot.model not in KNOWN_MODELS:
+        if bot.model and not is_known_model(bot.model):
             suggestion = closest_match(bot.model, KNOWN_MODELS)
             hint = f" — did you mean '{suggestion}'?" if suggestion else ""
             report.warn(
@@ -1387,7 +1388,7 @@ def _validate_bots(
                 ("base", bot.model_strategy.base),
                 ("escalate_to", bot.model_strategy.escalate_to),
             ]:
-                if val and val not in KNOWN_MODELS:
+                if val and not is_known_model(val):
                     suggestion = closest_match(val, KNOWN_MODELS)
                     hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                     report.warn(

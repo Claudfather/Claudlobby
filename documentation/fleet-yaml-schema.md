@@ -24,7 +24,7 @@ fleet:
 
   defaults:                             # applied to every bot unless overridden
     model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
-    effort: low | medium | high | max
+    effort: low | medium | high | xhigh | max
     agent_cli: claude | codex            # agent CLI (default: claude; codex refused until #2149)
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)

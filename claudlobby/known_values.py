@@ -17,28 +17,71 @@ from types import MappingProxyType
 SHELL_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 # ── Models ───────────────────────────────────────────────────────
-# Short aliases that Claude Code accepts, plus full model IDs for
-# explicit version pinning.
+# What Claude Code's --model accepts, from code.claude.com/docs/en/model-config
+# (read 2026-11-20), checked against `claude --help` (Claude Code 2.1.281),
+# whose --model help names fable, opus, sonnet and claude-fable-5. A soft list:
+# validator.py warns on a name outside it and passes the name through, since a
+# newer Claude Code may know more. is_known_model() below adds the [1m] forms.
 KNOWN_MODELS: frozenset[str] = frozenset(
     {
-        # Short aliases (what fleet.yaml typically uses)
+        # The page's model aliases. `default` returns to the account's default
+        # model, `best` is opus, and `opusplan` plans on opus, then runs sonnet.
+        "default",
+        "best",
+        "fable",
         "opus",
         "sonnet",
         "haiku",
-        "fable",
-        # Full model IDs (for explicit version pinning) — refresh to the
-        # current GA roster when the lineup moves (canonical IDs live in the
-        # claude-api skill / Anthropic model docs).
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-haiku-4-5-20251001",
+        "opusplan",
+        # Full model IDs the page names on the Anthropic API: the models the
+        # aliases resolve to now (it gives no full ID for Sonnet 5.5), ...
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        # ... and the earlier models it still names.
+        "claude-fable-5-1",
         "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5",
+        # Not on the page, and kept: the repo's own harness pins it.
+        "claude-haiku-4-5-20251001",
+        # Left out: claude-opus-4-1, which the page names only to say that a
+        # session on it runs on the model `opus` resolves to, and provider or
+        # gateway forms (us.anthropic.<id>, <id>@<date>, <gateway>/<id>).
     }
 )
 
+# A 1M context variant is a known name plus this suffix: one rule, in place of
+# a doubled list. The page says to "append the `[1m]` suffix to a model alias or
+# a full model name" (its examples: opus[1m], sonnet[1m], opusplan[1m] and
+# claude-opus-4-6[1m]). `default` takes none: it is "not itself a model alias".
+ONE_M_CONTEXT_SUFFIX = "[1m]"
+
+
+def is_known_model(name: str) -> bool:
+    """True for a KNOWN_MODELS name, or for one of them but `default` plus [1m]."""
+    if name in KNOWN_MODELS:
+        return True
+    base = name.removesuffix(ONE_M_CONTEXT_SUFFIX)
+    return base != name and base != "default" and base in KNOWN_MODELS
+
+
 # ── Effort ───────────────────────────────────────────────────────
-# Claude Code --effort accepts exactly these.
-KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
+# What Claude Code's --effort accepts: low, medium, high, xhigh and max, in
+# `claude --help` (Claude Code 2.1.281) and on code.claude.com/docs/en/
+# model-config (read 2026-11-20). A hard enum: config._parse_enum refuses any
+# other value. The composer passes the level as --effort, so the page's note
+# that its effortLevel and modelSettings settings keys refuse max does not
+# apply here. The page's `--effort ultracode`, which `claude --help` does not
+# list, turns on the ultracode setting at xhigh; it stays out.
+KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 # ── Agent CLI ────────────────────────────────────────────────────
 # The agent CLI a bot runs under (fleet.yaml `agent_cli:`, and the same name in
