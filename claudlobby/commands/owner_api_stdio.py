@@ -63,6 +63,7 @@ _SIGNIN_CALLS = frozenset({'setup-signin-status', 'setup-signin-code', 'setup-si
 # Admission and observation bounds for one conversation. None of them proves
 # that a process or thread stopped: every expiry still runs the full drain.
 CALL_LIMIT = 512             # begin is call 1; room for a status check every 2 s through 630 s
+                             # (a ~300-byte status frame each: well inside the 262144-byte input cap)
 REPLY_BYTES = 16384          # one complete decoded body
 CALL_SECONDS = 20            # carrier observation; the canonical handler keeps its own 15 s
 IDLE_SECONDS = 45            # between a reply and the next call

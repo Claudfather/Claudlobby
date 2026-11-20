@@ -819,7 +819,7 @@ test('an unknown begin result keeps the hold; only a completed refusal, disconne
   refused.api.dispose();
 });
 
-test('begin renews first only when the session cannot cover the bounded attempt, and refuses if that fails', async () => {
+test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
   const h = signinHarness(); await h.api.connect();
   h.time = 600000; // 300 seconds left: not enough for a 330-second attempt
   await h.api.setupSignin('begin', attemptInput);

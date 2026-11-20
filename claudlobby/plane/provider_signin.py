@@ -40,8 +40,9 @@ SUPPORTED = {
     "7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67": "2.1.325",  # Linux arm64 glibc
     "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf": "2.1.325",  # Linux x86_64 glibc
 }
-# The owner-signin-v1 conversation (330 s) and the browser's pre-begin session margin
-# (345 s) are sized around this; a longer attempt needs all three changed together.
+# The owner-signin-v1 conversation (330 s) is sized around this. The browser's pre-begin
+# session margin (645 s) and the call limit (512) already have room for a 600 s attempt in a
+# 630 s conversation; a longer attempt still needs this and CONVERSATION_SECONDS changed together.
 SECONDS = 300
 ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
 # Each attempt stages its own verified executable copy (roughly 350 MiB). Try again

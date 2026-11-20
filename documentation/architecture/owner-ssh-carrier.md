@@ -139,7 +139,8 @@ binding, grant, generation and expiry are checked again each time. The carrier
 keeps nothing from an earlier call as authority, and adds no session renewal.
 The canonical browser client therefore holds its own renewal while a conversation
 is admitted or live (explicit, automatic and setup-only alike), renews once
-before begin only if the session would end inside the bounded attempt, and does
+before begin unless at least 645 seconds remain (room for a 630-second
+conversation plus admission), and does
 not begin if that renewal is not confirmed. Begin waits for any renewal already in
 flight (a redundant request never replaces it), and the guided panel keeps its
 approved context across that confirmed pre-begin renewal; real expiry, sign-out,
