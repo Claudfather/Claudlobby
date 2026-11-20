@@ -103,6 +103,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
   // The computer is finishing on its own (starting, or a code was taken): nothing to press, and its line turns a ring.
   const signinWorking = () => (signinState === 'starting' || signinSent()) && !signinHalted;
+  // This page's own Sign in to Claude or Try again is on its way and the computer has not answered yet
+  // (a session renewal before it re-renders meanwhile): nothing is known to check, and nothing moves.
+  const signinUnanswered = () => !!signinAttempt && signinState === null && ['signin-begin','signin-retry'].includes(busyOperation);
   // Try again: only for an ended attempt of this live approval that the host said a new attempt may replace.
   const signinRetryOffered = () => context?.provider_signin===true && context.expires_at>now() && !pending && !signinBlocked
     && !!signinAttempt && signinRetryable && retryableEnding(signinState,signinReason);
@@ -443,7 +446,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       const why = !ending ? '' : context.expires_at <= now() ? 'Setup approval expired. ' : 'Setup approval ends too soon for a new sign-in. ';
       return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
     }
-    if (!signinAttempt) return ['Connect your Claude account so your team can work.',''];
+    if (!signinAttempt || signinUnanswered()) return ['Connect your Claude account.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',signinWorking() ? 'working' : ''];
     if (signinRefusal === 'code' && signinState === 'waiting') return [`The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.${pasteBy()}`,'attention'];
     if (signinLinkLive()) return [`Open Claude sign-in, approve access, then paste the code Claude shows you.${pasteBy()}`,''];
@@ -496,8 +499,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
     // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
-    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling();
-    // One filled action: the step that can move leads. Preview team, Launch team and Sign in to Claude are filled whenever shown.
+    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling() && !signinUnanswered();
+    // One filled action: the step that can move leads. Preview team and Launch team are filled whenever shown;
+    // so is Sign in to Claude, except while it is held as sign-in starts.
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
       : !approved ? 'context'
       : states.signin !== 'current' ? null
@@ -509,7 +513,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     setText(m.signinStatus,text);
     if (tone) m.signinStatus.dataset.tone = tone; else delete m.signinStatus.dataset.tone;
     const {begin,status:check,code:submit,cancel} = m.signinControls;
-    begin.hidden = !!signinAttempt || signinBlocked;
+    // While sign-in starts, Sign in to Claude stays in place, held and quiet, so a second click lands on it, never on Cancel sign-in.
+    const beginHeld = signinState === 'starting' && signinPolling() || signinUnanswered();
+    begin.hidden = signinBlocked || !!signinAttempt && !beginHeld;
+    begin.className = beginHeld ? 'pill ghost' : 'pill setup-primary';
     check.hidden = !manualCheck;
     cancel.hidden = !signinAttempt || ended;
     m.codeRow.hidden = signinState !== 'waiting';
