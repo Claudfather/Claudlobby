@@ -45,9 +45,9 @@ SUPPORTED = {
 SECONDS = 600
 ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
 # Each attempt stages its own verified executable copy (roughly 350 MiB). Its worker
-# removes it once it proves no child of it runs (every ending but unknown), and Try
-# again removes a replaced attempt's copy that is still there (discard_binary), so no
-# copy normally outlives its attempt. Ten attempts per setup approval give a slow
+# removes it once its own child is reaped (every ending but unknown), and Try again
+# removes a replaced attempt's copy that is still there (discard_binary), so no copy
+# normally outlives its attempt. Ten attempts per setup approval give a slow
 # sign-in room to finish, and bound the copies to about 3.5 GiB if every removal failed.
 MAX_ATTEMPTS = 10
 # The (state, reason) endings after which a new attempt may replace the current one,
@@ -379,37 +379,41 @@ def stage_binary(parent, scope, attempt, source_fd, before):
     _private_directory(parent)
     directory=parent/(ATTEMPT_DIRECTORY+attempt)
     directory.mkdir(mode=0o700)  # Exclusive: a retired ID is never admitted again (begin), so no attempt is replayed.
-    _private_directory(directory)
-    target=directory/"claude"
-    fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
-    digest=hashlib.sha256()
     try:
-        os.lseek(source_fd,0,os.SEEK_SET)
-        while True:
-            data=os.read(source_fd,1024*1024)
-            if not data: break
-            digest.update(data)
-            pending=memoryview(data)
-            while pending:
-                written=os.write(fd,pending)
-                if not written: raise SigninRefused("artifact_copy_failed")
-                pending=pending[written:]
-        os.fsync(fd)
-        if (digest.hexdigest()!=scope['sha256'] or _node(before)!=_node(os.fstat(source_fd))
-                or _node(before)!=_node(Path(scope['binary']).lstat())):
-            raise SigninRefused("unsupported_provider")
-        os.fchmod(fd,0o500)
-    finally: os.close(fd)
-    pinned,info=_open_file(target,executable=True)
+        _private_directory(directory)
+        target=directory/"claude"
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        digest=hashlib.sha256()
+        try:
+            os.lseek(source_fd,0,os.SEEK_SET)
+            while True:
+                data=os.read(source_fd,1024*1024)
+                if not data: break
+                digest.update(data)
+                pending=memoryview(data)
+                while pending:
+                    written=os.write(fd,pending)
+                    if not written: raise SigninRefused("artifact_copy_failed")
+                    pending=pending[written:]
+            os.fsync(fd)
+            if (digest.hexdigest()!=scope['sha256'] or _node(before)!=_node(os.fstat(source_fd))
+                    or _node(before)!=_node(Path(scope['binary']).lstat())):
+                raise SigninRefused("unsupported_provider")
+            os.fchmod(fd,0o500)
+        finally: os.close(fd)
+        pinned,info=_open_file(target,executable=True)
+    except BaseException:
+        discard_binary(parent,attempt)  # only what this call just created; it never raises
+        raise
     return target,pinned,info
 
 
 def discard_binary(parent, attempt):
     """Best effort: remove an ended attempt's staged copy and its directory.
 
-    Only once no child of the attempt can run: its own worker, after reaping that
-    child and closing its descriptors, or a retry retiring it, whose record proves
-    the worker did. Nothing is followed. Only a single-link regular file this
+    Only once the attempt's own child is reaped: by its worker, after that reap and
+    closing its descriptors; by a retry retiring it, whose record proves the worker
+    did; or by stage_binary for a copy it could not finish. Nothing is followed. Only a single-link regular file this
     account owns is removed, then the directory if that left it empty; anything
     else is left alone. It never raises.
     """
@@ -422,8 +426,9 @@ def discard_binary(parent, attempt):
         try:
             directory=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent_fd)
             try:
-                info=os.stat("claude",dir_fd=directory,follow_symlinks=False)
-                if stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1:
+                try: info=os.stat("claude",dir_fd=directory,follow_symlinks=False)
+                except FileNotFoundError: info=None  # an emptied directory is still removed
+                if info is not None and stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1:
                     os.unlink("claude",dir_fd=directory)
             finally: os.close(directory)
             os.rmdir(name,dir_fd=parent_fd)  # refused unless empty
@@ -762,9 +767,9 @@ class ProviderSignin:
                 state,reason="unknown","child_quiet_unproven"
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
-            # Reaped and closed above, so nothing runs this copy again; removed before the
-            # terminal row, which stays the worker's final write. Unknown keeps it.
-            if state!="unknown": discard_binary(staging(self.store.access.root),attempt)
+            # Only the copy this worker staged, its child reaped and descriptors closed above;
+            # removed before the terminal row, which stays the worker's final write. Unknown keeps it.
+            if staged is not None and state!="unknown": discard_binary(staging(self.store.access.root),attempt)
             with self._lock:
                 self._code=self._url=self._expires_at=self._code_until=None
                 self._set(grant,attempt,state,reason)

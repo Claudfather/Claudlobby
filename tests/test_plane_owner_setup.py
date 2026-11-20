@@ -1296,6 +1296,7 @@ def test_provider_signin_linked_source_alias_write_during_copy_refuses(synthetic
         with pytest.raises(provider_signin.SigninRefused,match='unsupported_provider'):
             provider_signin.stage_binary(engine.store.access.path.parent,grant.provider_signin,str(uuid4()),fd,before)
         assert changed == [True]
+        assert not list(engine.store.access.path.parent.glob(provider_signin.ATTEMPT_DIRECTORY+'*')), 'a refused copy is removed'
     finally:os.close(fd)
 
 
@@ -1416,6 +1417,7 @@ def test_provider_signin_cancel_wins_before_effect_admission(synthetic_signin,mo
         if when.startswith('queued-code'):assert not code_writes
         if when=='ready-token':assert code_writes==[('accepted#'+'b'*32).encode(),b'\r']  # Enter is its own keypress
         assert env.read_text()=='export ROUTE=private\n'
+        assert not list(provider_signin.staging(engine.root).glob(provider_signin.ATTEMPT_DIRECTORY+'*')), 'a cancelled or revoked attempt removes its copy'
     finally:
         release.set();engine.signin.shutdown()
         if cancel is not None:cancel.join(timeout=8)
@@ -1607,6 +1609,9 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
     try:
         engine.signin_begin(reader,grant.generation,first)
         assert _signin_ended(engine,grant,reader,first).get('retryable') is True
+        kept=engine.root/'state/provider-signin'/('claude-signin-'+first)
+        assert not kept.exists(), 'the ended attempt removed its own copy'
+        kept.mkdir(mode=0o700);(kept/'claude').write_bytes(b'staged')  # as if that removal had failed
         saved="export ROUTE=private\nexport CLAUDE_CODE_OAUTH_TOKEN='saved-elsewhere'\n"
         env.write_text(saved)
         with pytest.raises(provider_signin.SigninRefused,match='credential_already_present'):
@@ -1616,7 +1621,7 @@ def test_provider_signin_retry_still_refuses_a_saved_credential_and_a_closing_pr
         assert _signin_row(engine,first)['retired']==0
         with pytest.raises(AccessDenied):engine.signin_status(reader,grant.generation,second)
         assert not (engine.root/'state/provider-signin'/('claude-signin-'+second)).exists()
-        assert not (engine.root/'state/provider-signin'/('claude-signin-'+first)).exists(), 'the ended attempt removed its own copy'
+        assert (kept/'claude').is_file(), 'a refused Try again leaves the current attempt alone'
         assert env.read_text()==saved
         env.write_text('export ROUTE=private\n')
         engine.signin.shutdown()
@@ -1639,9 +1644,14 @@ def test_provider_signin_an_ended_attempt_removes_its_copy_and_try_again_removes
     def attempt(owner,new):
         assert owner.signin_begin(reader,grant.generation,new)['attempt_id']==new
         assert _signin_ended(owner,grant,reader,new).get('retryable') is True
+    seen=[];original_discard=provider_signin.discard_binary
+    def discard(parent,owner):
+        seen.append((owner,_signin_row(engine,owner)['state']));original_discard(parent,owner)
+    monkeypatch.setattr(provider_signin,'discard_binary',discard)
     try:
         attempt(engine,first)
-        assert list(staging.iterdir())==[], 'a timed-out attempt removed its own copy before reporting its end'
+        assert list(staging.iterdir())==[], 'a timed-out attempt removed its own copy'
+        assert [owner for owner,_ in seen]==[first] and seen[0][1] in ('starting','waiting'), 'before the terminal row a Try again reads'
         left_behind(first); left_behind(other)
         attempt(engine,second)
         assert sorted(staging.iterdir())==[copy(other)], 'Try again removed only the replaced copy; the new attempt removed its own'
@@ -1658,20 +1668,33 @@ def test_provider_signin_an_ended_attempt_removes_its_copy_and_try_again_removes
 
 
 def test_provider_signin_an_unproven_reap_keeps_its_copy(synthetic_signin,monkeypatch):
+    import os,signal,subprocess
     from claudlobby.plane import provider_signin
     engine,grant,reader,*_=synthetic_signin
-    removed=[]
-    monkeypatch.setattr(provider_signin,'discard_binary',lambda parent,attempt:removed.append(attempt))
     monkeypatch.setattr(provider_signin,'SECONDS',0.5)
-    def unproven(*args,**kwargs): raise OSError('reap not proven')
-    monkeypatch.setattr(provider_signin.os,'getpgid',unproven)
+    children=[];original_popen=subprocess.Popen;original_getpgid=os.getpgid
+    def observed_popen(argv,*args,**kwargs):
+        child=original_popen(argv,*args,**kwargs)
+        if argv[1:]==['setup-token']:children.append(child)
+        return child
+    def getpgid(pid):  # only the sign-in child's reap goes unproven
+        if any(child.pid==pid for child in children): raise OSError('reap not proven')
+        return original_getpgid(pid)
+    monkeypatch.setattr(provider_signin.subprocess,'Popen',observed_popen)
+    monkeypatch.setattr(provider_signin.os,'getpgid',getpgid)
     attempt=str(uuid4())
     try:
         engine.signin_begin(reader,grant.generation,attempt)
         ended=_signin_ended(engine,grant,reader,attempt)
         assert (ended['state'],ended.get('reason'))==('unknown','child_quiet_unproven')
-        assert removed==[], 'a copy whose child may still run is left alone'
-    finally:engine.signin.shutdown()
+        copy=provider_signin.staging(engine.root)/(provider_signin.ATTEMPT_DIRECTORY+attempt)/'claude'
+        assert copy.is_file(), 'a copy whose child may still run is left alone'
+    finally:
+        engine.signin.shutdown()
+        for child in children:
+            try: os.killpg(child.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+            child.wait(timeout=5)
 
 
 def test_provider_signin_discard_binary_removes_only_a_plain_copy_and_follows_nothing(tmp_path):
