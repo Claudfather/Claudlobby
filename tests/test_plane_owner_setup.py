@@ -1704,7 +1704,7 @@ def test_provider_signin_an_unproven_reap_keeps_its_copy(synthetic_signin,monkey
         engine.signin.shutdown()
         for child in children:
             try: os.killpg(child.pid,signal.SIGKILL)
-            except ProcessLookupError: pass
+            except (ProcessLookupError,PermissionError): pass  # ESRCH; EPERM on macOS for an unreaped group
             child.wait(timeout=5)
 
 
