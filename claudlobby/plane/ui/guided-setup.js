@@ -103,9 +103,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const signinPolling = () => signinAttempt && ['starting','waiting'].includes(signinState) && !signinHalted;
   // The computer is finishing on its own (starting, or a code was taken): nothing to press, and its line turns a ring.
   const signinWorking = () => (signinState === 'starting' || signinSent()) && !signinHalted;
-  // This page's own Sign in to Claude or Try again is on its way and the computer has not answered yet
-  // (a session renewal before it re-renders meanwhile): nothing is known to check, and nothing moves.
-  const signinUnanswered = () => !!signinAttempt && signinState === null && ['signin-begin','signin-retry'].includes(busyOperation);
+  // This page's own Sign in to Claude or Try again is on its way and the computer has not answered yet.
+  // Its line says so above the buttons from the click on, so nothing moves when the answer arrives.
+  const signinSending = () => signinState === null && ['signin-begin','signin-retry'].includes(busyOperation);
+  // The same with its attempt already kept (a session renewal before it re-renders): nothing is known to check.
+  const signinUnanswered = () => !!signinAttempt && signinSending();
+  // The line only: a Try again says so from its click, while the ended attempt it replaces is still the one kept.
+  const signinLineSending = () => signinSending() || busyOperation === 'signin-retry' && signinRetryOffered();
   // Try again: only for an ended attempt of this live approval that the host said a new attempt may replace.
   const signinRetryOffered = () => context?.provider_signin===true && context.expires_at>now() && !pending && !signinBlocked
     && !!signinAttempt && signinRetryable && retryableEnding(signinState,signinReason);
@@ -433,11 +437,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   const signinSent = () => signinState === 'waiting' && codeSent();
   const signinLinkLive = () => signinState === 'waiting' && !!signinUrl && !signinSent();
   // The host's own deadline in this viewer's local time (minutes, never rounded up); no client-side timer.
-  const pasteBy = () => signinDeadline === null ? ''
-    : ` Paste the code by ${new Date(signinDeadline*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}.`;
+  const pasteTime = () => signinDeadline === null ? ''
+    : new Date(signinDeadline*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
   function signinStatusLine() { // [text, tone]
     if (signinBlocked) return ['This browser cannot keep track of a Claude sign-in. Allow site storage for this page, then reopen it.','attention'];
     if (signinState === 'connected') return ['Claude connected','done'];
+    // The same words the computer's 'starting' answer shows, so the line neither changes nor is announced twice.
+    if (signinLineSending()) return ['Starting Claude sign-in…','working']; // over any earlier attempt's note
     if (signinNotice) return [signinNotice,'attention'];
     if (SIGNIN_ENDED.includes(signinState)) {
       const retry = signinRetryOffered(); // a replaceable cancel stopped before any code reached Claude
@@ -446,10 +452,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       const why = !ending ? '' : context.expires_at <= now() ? 'Setup approval expired. ' : 'Setup approval ends too soon for a new sign-in. ';
       return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
     }
-    if (!signinAttempt || signinUnanswered()) return ['Connect your Claude account.',''];
+    if (!signinAttempt) return ['Connect your Claude account.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',signinWorking() ? 'working' : ''];
-    if (signinRefusal === 'code' && signinState === 'waiting') return [`The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.${pasteBy()}`,'attention'];
-    if (signinLinkLive()) return [`Open Claude sign-in, approve access, then paste the code Claude shows you.${pasteBy()}`,''];
+    if (signinRefusal === 'code' && signinState === 'waiting') return [`The computer did not accept that code. Copy the whole code Claude shows you and submit it again; if a code was already sent, wait while sign-in finishes.${pasteTime() && ` Paste the code by ${pasteTime()}.`}`,'attention'];
+    // One short line, so Open Claude sign-in takes the held button's place without moving down.
+    if (signinLinkLive()) return [`Open Claude sign-in, then paste the code here${pasteTime() && ` by ${pasteTime()}`}.`,''];
     if (signinState === 'starting') return ['Starting Claude sign-in…',signinWorking() ? 'working' : ''];
     return ['A sign-in was already started in this browser. Check its progress.',''];
   }
@@ -477,7 +484,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
     const progress = {approve:'',signin:'',goal:'',launch:''};
     progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
-    if (busy && busyOperation) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
+    // A starting sign-in says so in its own line above the buttons instead, wherever that line is shown.
+    const lineSaysIt = signinLineSending() && ['current','done'].includes(states.signin);
+    if (busy && busyOperation && !lineSaysIt) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
     if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = POLL_NOTE;
     if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
     for (const [name,step] of Object.entries(m.steps)) {
@@ -499,7 +508,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
     // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
-    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling() && !signinUnanswered();
+    // Nor beside Try again: the computer already said the ended attempt may be replaced, so there is nothing to check,
+    // unless an earlier Try again's ID was set aside and a check may find the computer took it after all.
+    const manualCheck = !!signinAttempt && signinState !== 'connected' && !signinPolling() && !signinUnanswered()
+      && !(signinRetryOffered() && !signinSuccessor);
     // One filled action: the step that can move leads. Preview team and Launch team are filled whenever shown;
     // so is Sign in to Claude, except while it is held as sign-in starts.
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
