@@ -2089,7 +2089,7 @@ def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(
 
     engine, grant, reader, program, _secret, env = synthetic_signin
     access, bearer = engine.store.access, reader.token
-    margin = provider_signin.CODE_MARGIN
+    seconds, margin = provider_signin.SECONDS, provider_signin.CODE_MARGIN
     monkeypatch.setattr(provider_signin, "SECONDS", 2)
     monkeypatch.setattr(provider_signin, "CODE_MARGIN", 0)  # a 2 s code window
     first = {"generation": grant.generation, "attempt_id": str(uuid4())}
@@ -2125,7 +2125,7 @@ def test_a_timeout_before_its_code_is_replaced_only_by_a_later_conversation(
     assert ordinary_status(access, monkeypatch, first, bearer) == (200, ended)
     # A later conversation names a new attempt ID: a new worker and link, one approval.
     program.with_name("synthetic-provider-state").write_text("c" * 32)
-    monkeypatch.setattr(provider_signin, "SECONDS", 300)
+    monkeypatch.setattr(provider_signin, "SECONDS", seconds)
     monkeypatch.setattr(provider_signin, "CODE_MARGIN", margin)
     second = {"generation": grant.generation, "attempt_id": str(uuid4())}
     again = Client()
@@ -2891,10 +2891,13 @@ def test_signin_bounds_cover_a_status_check_and_the_session_through_the_whole_co
     import re
     from pathlib import Path
     from claudlobby.commands import owner_api_stdio
+    from claudlobby.plane import provider_signin
     ui = Path(owner_api_stdio.__file__).resolve().parents[1]/'plane/ui'
     poll = int(re.search(r'SIGNIN_POLL_MS=(\d+)', (ui/'guided-setup.js').read_text()).group(1))
     lifetime = int(re.search(r'SIGNIN_LIFETIME = (\d+)', (ui/'connected-read-client.js').read_text()).group(1))
     conversation = owner_api_stdio.CONVERSATION_SECONDS
+    # The conversation outlives the attempt, with room for begin, staging and the call that sees its end.
+    assert conversation >= provider_signin.SECONDS + 30
     # The canonical UI's status check every poll for the whole conversation, plus begin and a code.
     assert owner_api_stdio.CALL_LIMIT >= 2 + conversation*1000//poll
     # The session that begins a sign-in outlives its conversation, with 15 s for admission.

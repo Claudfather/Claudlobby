@@ -140,8 +140,8 @@ keeps nothing from an earlier call as authority, and adds no session renewal.
 The canonical browser client therefore holds its own renewal while a conversation
 is admitted or live (explicit, automatic and setup-only alike), renews once
 before begin unless at least 645 seconds remain, and does not begin if that
-renewal is not confirmed. That margin already covers a ten-minute attempt's
-630-second conversation plus admission; today's conversation is 330 seconds. Begin waits for any renewal already in
+renewal is not confirmed. That margin covers the 630-second conversation plus
+admission. Begin waits for any renewal already in
 flight (a redundant request never replaces it), and the guided panel keeps its
 approved context across that confirmed pre-begin renewal; real expiry, sign-out,
 reference change or disposal still clear it. It never extends a session locally;
@@ -209,8 +209,8 @@ expired bound or a failed drain sends `error`, exits 4 and sends no `end`.
 | Start frame | 15 s |
 | One call, observed by the carrier | 20 s (the policy route keeps its own 15 s) |
 | Idle between a reply and the next call | 45 s |
-| Whole conversation, from the admitted start | 330 s; no frame renews it |
-| Provider attempt | 300 s, unchanged |
+| Whole conversation, from the admitted start | 630 s; no frame renews it |
+| Provider attempt | 600 s |
 
 These bound what the carrier admits and waits for. They are not proof that a
 process stopped: an expired bound starts the drain, and the drain still joins
@@ -219,7 +219,7 @@ releases its runtime reader, while that worker is alive.
 
 **Progress in the canonical UI.** While the original attempt is `starting` or
 `waiting`, the setup panel sends one status call about every two seconds (at most
-165 in 330 seconds), never overlapping a code, cancel or manual check. While the
+315 in 630 seconds), never overlapping a code, cancel or manual check. While the
 page is hidden (the Claude sign-in tab in front) it keeps the same read-only call
 every 25 seconds instead, inside the 45-second idle bound, so authorizing at the
 provider does not drain the conversation and cancel the attempt. Polling

@@ -821,7 +821,7 @@ test('an unknown begin result keeps the hold; only a completed refusal, disconne
 
 test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
   const h = signinHarness(); await h.api.connect();
-  h.time = 600000; // 300 seconds left: not enough for a 330-second attempt
+  h.time = 600000; // 300 seconds left: not enough for a 630-second conversation
   await h.api.setupSignin('begin', attemptInput);
   const order = h.calls.map(c => new URL(c.url).pathname.split('/').pop()).filter(x => ['renew', 'signin-begin'].includes(x));
   assert.deepEqual(order, ['renew', 'signin-begin']);
