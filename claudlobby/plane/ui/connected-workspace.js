@@ -71,14 +71,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     changed();
   }, () => {});
   // The browser carrier's frame is the body of the website's setup step: a setup-only view of the bound
-  // computer (workspace.css hides the rest). Its line says, in plain sentences, why no panel shows yet.
+  // computer (workspace.css hides the rest). Its line says, in plain sentences, why no panel shows yet;
+  // [text, working]: a line that waits on a check turns a ring beside it.
   function setupOnlyNote() {
-    return phase === 'checking' ? 'Checking your workspace…'
-      : phase === 'unavailable' ? 'Your account could not be checked yet. This page tries again shortly.'
-      : phase === 'empty' ? 'No computer is saved in your workspace yet.'
-      : phase === 'denied' ? 'Your account or saved computers changed. Reopen setup from your workspace.'
-      : bridgeSettled ? 'This page could not reach your computer. Reopen setup from your workspace.'
-      : 'Opening the connection to your computer…';
+    return phase === 'checking' ? ['Checking your workspace…',true]
+      : phase === 'unavailable' ? ['Your account could not be checked yet. This page tries again shortly.']
+      : phase === 'empty' ? ['No computer is saved in your workspace yet.']
+      : phase === 'denied' ? ['Your account or saved computers changed. Reopen setup from your workspace.']
+      : bridgeSettled ? ['This page could not reach your computer. Reopen setup from your workspace.']
+      : ['Opening the connection to your computer…',true];
   }
   // The Connect step's hint in the setup-only view: what happened and what to choose, without builder detail.
   function connectHint(status, connection, continuity, expired) {
@@ -544,8 +545,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         // Setup-only view: the host is the whole main area, with a plain line until the panel shows.
         // Retirement keeps the line in its host; a closed view writes nothing more.
         if (phase !== 'disposed') {
-          const text = focusing ? '' : setupOnlyNote(); mount.setupStatus.hidden = focusing;
+          const [text,working] = focusing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = focusing;
           if (mount.setupStatus.textContent !== text) mount.setupStatus.textContent = text; // no repeated announcement
+          if (working) mount.setupStatus.dataset.tone = 'working'; else delete mount.setupStatus.dataset.tone;
         }
         mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
       } else {
