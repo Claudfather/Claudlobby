@@ -527,6 +527,155 @@ def test_completed_preparation_missing_inactive_skeleton_refuses_without_repair(
     assert snapshot(home) == before and record.read_bytes() == receipt_bytes
 
 
+def add_setup_state(family):
+    """What this product's own setup guide adds beside and inside a completed preparation."""
+    for name in ("host-policy", "provider-bin", "provider-profile"):
+        (family / name).mkdir(mode=0o700)
+    for name, mode in (("host-policy/system.yaml", 0o600), ("provider-bin/claude", 0o500),
+                       ("data/.env", 0o600), ("data/state/host-uid", 0o600)):
+        (family / name).write_text("FIXTURE-LATER-STATE"); (family / name).chmod(mode)
+    (family / "data/state/owner").mkdir(mode=0o700)
+    (family / "data/state/owner/owner.sock.lock").touch(mode=0o600)
+    (family / "staging/app-temporary").write_text("in flight")
+
+
+def test_status_reports_its_own_completed_preparation_in_use_once_setup_has_started(tmp_path, local_install_source):
+    import fcntl
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert (result["state"], result["code"], result["next"]) == ("recorded_in_use", "none", "continue_onboarding")
+    assert result["prepared"] and not result["activated"] and status.stderr == b""
+    assert result["source_revision"] == local_install_source[2] and snapshot(home) == before
+    # A running app holds the runtime lock; status reads around it.
+    held = os.open(family / "data/state/runtime-use.lock", os.O_RDWR)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status = invoke_fixture(tmp_path, home, local_install_source, "status")
+        assert status.returncode == 0 and json.loads(status.stdout)["state"] == "recorded_in_use"
+    finally:
+        os.close(held)
+    # The preparation itself is still verified exactly.
+    tracked = family / "install/src/requirements-runtime.lock"
+    original = tracked.read_bytes(); tracked.write_bytes(original + b"# changed\n")
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 4 and json.loads(status.stdout)["code"] == "source_mismatch"
+    tracked.write_bytes(original)
+    # Prepare never adopts or replaces what setup has added.
+    before = snapshot(home)
+    again = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    result = json.loads(again.stdout)
+    assert again.returncode == 4 and result["code"] == "existing_installation" and not result["prepared"]
+    assert snapshot(home) == before
+
+
+def _incomplete_record(family):
+    record = family / "install/preparation.json"
+    value = json.loads(record.read_text())
+    value.update(revision=None, lock_sha256=None, environment_owned=False, complete=False)
+    record.write_text(json.dumps(value))
+
+
+def _replace(path, make):
+    import shutil
+    shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+    make(path)
+
+
+UNKNOWN_BESIDE_STARTED_SETUP = {
+    "family-name": (lambda f: (f / "other").mkdir(mode=0o700), "existing_installation"),
+    "family-symlink": (lambda f: _replace(f / "provider-profile", lambda p: p.symlink_to(f.parent)), "existing_installation"),
+    "family-dangling": (lambda f: _replace(f / "provider-profile", lambda p: p.symlink_to(f / "absent")), "existing_installation"),
+    "family-file": (lambda f: _replace(f / "provider-bin", lambda p: p.write_text("not a folder")), "existing_installation"),
+    "family-shared": (lambda f: (f / "host-policy").chmod(0o755), "existing_installation"),
+    "no-record": (lambda f: (f / "install/preparation.json").unlink(), "existing_installation"),
+    "incomplete-record": (_incomplete_record, "existing_installation"),
+    "lock-missing": (lambda f: (f / "data/state/runtime-use.lock").unlink(), "identity_changed"),
+    "lock-symlink": (lambda f: _replace(f / "data/state/runtime-use.lock", lambda p: p.symlink_to(f / "data/.env")), "existing_installation"),
+    "lock-linked": (lambda f: os.link(f / "data/state/runtime-use.lock", f / "data/state/second-name"), "existing_installation"),
+    "lock-shared": (lambda f: (f / "data/state/runtime-use.lock").chmod(0o644), "existing_installation"),
+    "lock-written": (lambda f: (f / "data/state/runtime-use.lock").write_text("foreign"), "existing_installation"),
+    "state-symlink": (lambda f: ((f / "data/state").rename(f / "data/moved"), (f / "data/state").symlink_to(f / "data/moved")), "existing_installation"),
+    "state-missing": (lambda f: _replace(f / "data/state", lambda p: None), "identity_changed"),
+    "data-missing": (lambda f: _replace(f / "data", lambda p: None), "identity_changed"),
+    "launcher-changed": (lambda f: (f / "install/bin/claudlobby").write_text("#!/bin/false\n"), "identity_changed"),
+    "environment-missing": (lambda f: _replace(f / "install/env", lambda p: None), "identity_changed"),
+}
+
+
+@pytest.mark.parametrize("unknown", sorted(UNKNOWN_BESIDE_STARTED_SETUP))
+def test_status_refuses_unknown_state_beside_a_started_setup(tmp_path, local_install_source, unknown):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    change, code = UNKNOWN_BESIDE_STARTED_SETUP[unknown]
+    change(family)
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 4, (status.stdout, status.stderr)
+    assert result["code"] == code and result["next"] == "inspect" and not result["prepared"]
+    assert status.stderr == b"" and snapshot(home) == before
+
+
+@pytest.mark.parametrize("later", ["staging/app-temporary", "data/.env", "data/state/host-uid"])
+def test_any_later_state_under_the_private_roots_means_in_use(tmp_path, local_install_source, later):
+    # The guide runs with its temporary files in staging, so it can leave one
+    # there before it has created any folder of its own.
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    (family / later).write_text("FIXTURE-LATER-STATE")
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert json.loads(status.stdout)["state"] == "recorded_in_use" and snapshot(home) == before
+
+
+def test_untouched_completed_preparation_keeps_its_strict_status(tmp_path, local_install_source):
+    import fcntl
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    state = home / ".local/share/claudlobby-browser/data/state"
+    # With nothing added since, a held runtime lock still means busy.
+    held = os.open(state / "runtime-use.lock", os.O_RDWR)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status = invoke_fixture(tmp_path, home, local_install_source, "status")
+        result = json.loads(status.stdout)
+        assert status.returncode == 4 and (result["state"], result["code"]) == ("busy", "preparation_in_progress")
+    finally:
+        os.close(held)
+    # A state path that is not a directory refuses by name, and is never listed.
+    (state / "runtime-use.lock").unlink(); state.rmdir(); state.write_text("not a folder")
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 4 and result["code"] == "existing_installation" and snapshot(home) == before
+
+
+def test_status_never_reports_absent_beside_setup_state(tmp_path, monkeypatch):
+    module = payload(); home, _python = profile(module, tmp_path, monkeypatch)
+    family = home / ".local/share/claudlobby-browser"
+    family.mkdir(mode=0o700, parents=True)
+    (family / "provider-bin").mkdir(mode=0o700)
+    before = snapshot(home)
+    with pytest.raises(module.Refusal) as error:
+        module.execute("status", json.loads(frame()), time.monotonic() + 15)
+    assert (error.value.code, error.value.next_step) == ("existing_installation", "inspect")
+    assert snapshot(home) == before
+
+
 def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
     canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
     entry = (ROOT / "claudlobby/preinstall/darwin-runtime-v1.sh").read_text()
