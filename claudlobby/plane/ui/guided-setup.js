@@ -503,7 +503,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,context || finished ? 'Setup approved' : '');
     setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
-    // Only once approved (the step's own button checks otherwise), and never while launchable: re-checking would retire a fresh preview's launch.
+    // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
     m.recheck.hidden = states.approve !== 'done' || launchable || finished;
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
@@ -643,7 +643,6 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectStep = {button,hint};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
-    // Re-reading an approval that holds is rarely needed, so it sits under Details, not beside "Setup approved".
     const recheck = action('Check setup approval again','pill ghost','context'), approveHint = make('p','setup-hint');
     const contextButton = action('Check setup approval','pill setup-primary','context');
     approve.done.append(approveDone);
