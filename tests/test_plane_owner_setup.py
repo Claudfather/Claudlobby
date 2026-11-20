@@ -1082,7 +1082,7 @@ def test_provider_signin_late_code_is_refused_so_the_attempt_ends_as_a_clean_tim
                 engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
         assert refused.value.code=='signin_code_unavailable'
         engine.signin._thread.join(timeout=10)
-        assert not engine.signin._thread.is_alive(),f'ended at the cutoff, long before its {provider_signin.SECONDS} seconds'
+        assert not engine.signin._thread.is_alive(),'ended at the cutoff, long before its deadline'
         ended=engine.signin_status(reader,grant.generation,attempt)
         assert (ended['state'],ended['reason'],ended.get('retryable'))==('needs_attention','timeout',True)
         assert _signin_row(engine,attempt)['code_delivered']==0,'nothing reached the CLI'

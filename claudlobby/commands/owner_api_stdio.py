@@ -67,7 +67,8 @@ CALL_LIMIT = 512             # begin is call 1; room for a status check every 2 
 REPLY_BYTES = 16384          # one complete decoded body
 CALL_SECONDS = 20            # carrier observation; the canonical handler keeps its own 15 s
 IDLE_SECONDS = 45            # between a reply and the next call
-CONVERSATION_SECONDS = 630   # from the admitted start; no frame renews it (a 600 s attempt plus its drain)
+CONVERSATION_SECONDS = 630   # from the admitted start; no frame renews it. Covers the 600 s attempt,
+                             # timed from after staging, plus room to report its end
 _SECRET = re.compile(r'[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]')
 _UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}')
 
