@@ -268,7 +268,16 @@ and an interrupted attempt, keeps the single attempt: recover setup on the compu
 While the Claude tab is in front, the setup page keeps checking every 25 seconds so
 the sign-in is not closed while you approve.
 
-Before downgrading Claudlobby, finish or recover setup first. This version adds two
+When the computer cannot read Claude's reply (`unsupported_output`,
+`ambiguous_output` or `output_limit`), its sign-in record also names which of its
+rules refused the reply, in a `detail` column: a short fixed phrase such as
+`csi final z 5` or `exit 0 without token`, never Claude's text, the code or a
+token. The setup page is not sent it. Read it on the computer, for example with
+`sqlite3 -readonly` on `state/plane/owner-access.db` under the data root:
+`SELECT state, reason, detail, code_delivered FROM setup_provider;`
+
+Before downgrading Claudlobby, finish or recover setup first. This version adds
 columns to the host's sign-in record (`setup_provider`) when it approves setup or
-starts a sign-in, and older versions refuse that table: their sign-in steps answer
-unavailable until the record is recovered on the computer.
+starts a sign-in (two for Try again, then `detail`), and older versions refuse that
+table: their sign-in steps answer unavailable until the record is recovered on the
+computer.

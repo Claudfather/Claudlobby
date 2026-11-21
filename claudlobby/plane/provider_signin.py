@@ -74,8 +74,11 @@ CODE_MARGIN = 20
 # A begin needs at least this long for a code inside the approval's remaining time,
 # or it would only spend an attempt (and its executable copy).
 MIN_CODE_WINDOW = 30
-_LEGACY_COLUMNS = ["attempt_id","generation","state","reason"]
-_COLUMNS = _LEGACY_COLUMNS + ["code_delivered","retired"]
+_LEGACY_COLUMNS = ["attempt_id","generation","state","reason"]  # the single-attempt table
+_RETRY_COLUMNS = _LEGACY_COLUMNS + ["code_delivered","retired"]  # the table before the refusal detail
+_COLUMNS = _RETRY_COLUMNS + ["detail"]
+_SHAPES = (_LEGACY_COLUMNS, _RETRY_COLUMNS, _COLUMNS)  # oldest first; ProviderSignin._schema answers with the index
+_DETAIL_SHAPE = _SHAPES.index(_COLUMNS)  # the shape that has the detail column
 MAX_OUTPUT = 131072
 _ROUTING = ("PATH","TMPDIR","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_STATE_HOME","XDG_DATA_HOME",
     "HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy",
@@ -85,8 +88,58 @@ _SCOPE_FIELDS = {"binary", "sha256", "version", "home", "account_directory", "en
 _TERMINAL = {"connected", "needs_attention", "cancelled", "unknown"}
 
 
+# The closed vocabulary of a refusal's detail: the NAME of the rule that refused the
+# reply, never anything Claude printed. These forms are the whole of it. Each is fixed
+# ASCII words; a few add a value read from the refused control sequence itself, each
+# held to a small safe set too narrow for printed text, a pasted code or a token:
+#   0xNN  an unhandled control character below 32, as two hex digits
+#   X     the one character after ESC, only when it is printable ASCII (else "other")
+#   F     a CSI's final ASCII letter ("csi malformed" may also name "~", which ends a CSI too)
+#   P     a CSI's parameter string: digits ; ? > only, at most 16 characters
+#   N     an erase mode, a number within the CSI bound
+# refusal_detail() below is the only place a detail string is built, and it returns
+# nothing DETAIL does not match. A detail is kept with its attempt (setup_provider.detail)
+# for someone at the computer; it is never put in a status, a response, a frame or a log line.
+_DETAIL_FORMS = (
+    r"utf8",                                   # unsupported_output: undecodable bytes
+    r"control 0x[01][0-9a-f]",                 # a control character that is not handled
+    r"escape (?:[!-~]|other)",                 # an escape that is not CSI, OSC or a handled one
+    r"csi malformed(?: [A-Za-z~])?",           # not the expected CSI form
+    r"csi private [?>][0-9;]{0,15} [A-Za-z]",  # a ? or > CSI outside the allowed sets: P, then F
+    r"csi range",                              # a number above the bound
+    r"csi [KJ] [0-9]{1,4}",                    # an erase mode that is not handled
+    r"csi final [A-Za-z](?: [0-9;]{1,16})?",   # a final letter that is not handled: F, then a short P
+    r"token shape",                            # the success text, with a value that is not a token
+    r"token changed", r"url changed",          # ambiguous_output
+    r"bytes", r"escape length",                # output_limit
+    r"exit 0 without token",                   # unsupported_output: status 0 and no success text
+)
+DETAIL = re.compile("(?:" + "|".join(_DETAIL_FORMS) + r")\Z")
+
+
+def refusal_detail(rule, *values):
+    """Build one detail of the vocabulary above; the only place a detail string is made.
+
+    ``rule`` is a fixed phrase written at the call, never data. A value outside its safe
+    set is dropped with any after it (the form without it); None when no form is left.
+    """
+    parts = [rule, *(value for value in values if isinstance(value, str) and value)]
+    while parts:
+        text = " ".join(parts)
+        if DETAIL.fullmatch(text): return text
+        parts.pop()
+    return None
+
+
 class SigninRefused(AccessDenied):
-    """Finite redacted failure category, never a provider error or output."""
+    """Finite redacted failure category, never a provider error or output.
+
+    ``detail`` is None or one refusal_detail() value. It is carried beside the category,
+    never in it: ``str(exc)`` and ``code`` stay the category alone.
+    """
+    def __init__(self, code, detail=None):
+        super().__init__(code)
+        self.detail = detail if isinstance(detail, str) and DETAIL.fullmatch(detail) else None
 
 
 def _node(info):
@@ -209,17 +262,17 @@ class TokenScreen:
     def _csi(self, value):
         match = re.fullmatch(r"\x1b\[([?>]?[0-9;]*)([A-Za-z])", value)
         if not match:
-            raise SigninRefused("unsupported_output")
+            raise SigninRefused("unsupported_output", refusal_detail("csi malformed", value[-1]))
         raw, final = match.groups()
         if (raw, final) in _IGNORED_CSI:
             return
         if raw[:1] == "?" and final in "hl" and set(raw[1:].split(";")) <= _PRIVATE_MODES:
             return
         if raw[:1] in {"?", ">"}:
-            raise SigninRefused("unsupported_output")
+            raise SigninRefused("unsupported_output", refusal_detail("csi private", raw[:16], final))
         numbers = [int(v or 0) for v in raw.split(";")]
         if any(v > 4096 for v in numbers):
-            raise SigninRefused("unsupported_output")
+            raise SigninRefused("unsupported_output", refusal_detail("csi range"))
         n = numbers[0] or 1
         if final == "m": return  # Color only; never expose the underlying bytes.
         if final == "A": self._row = max(0, self._row - n)
@@ -234,31 +287,31 @@ class TokenScreen:
             elif numbers[0] == 1:
                 row = self._rows[self._row]
                 row[:self._col+1] = [" "] * min(len(row), self._col+1)
-            else: raise SigninRefused("unsupported_output")
+            else: raise SigninRefused("unsupported_output", refusal_detail("csi K", str(numbers[0])))
         elif final == "J":
             if numbers[0] == 2: self._rows = [[] for _ in range(64)]
             elif numbers[0] == 0:
                 self._rows[self._row] = self._rows[self._row][:self._col]
                 self._rows[self._row+1:] = [[] for _ in range(63-self._row)]
-            else: raise SigninRefused("unsupported_output")
-        elif final not in {"h", "l"}: raise SigninRefused("unsupported_output")
+            else: raise SigninRefused("unsupported_output", refusal_detail("csi J", str(numbers[0])))
+        elif final not in {"h", "l"}: raise SigninRefused("unsupported_output", refusal_detail("csi final", final, raw))
 
     def feed(self, data):
         self._bytes += len(data)
-        if self._bytes > MAX_OUTPUT: raise SigninRefused("output_limit")
+        if self._bytes > MAX_OUTPUT: raise SigninRefused("output_limit", refusal_detail("bytes"))
         try: text = self._decoder.decode(data)
-        except UnicodeError: raise SigninRefused("unsupported_output") from None
+        except UnicodeError: raise SigninRefused("unsupported_output", refusal_detail("utf8")) from None
         for c in text:
             if self._escape:
                 self._escape += c
-                if len(self._escape) > 8192: raise SigninRefused("output_limit")
+                if len(self._escape) > 8192: raise SigninRefused("output_limit", refusal_detail("escape length"))
                 if self._escape.startswith("\x1b]"):
                     if c == "\x07" or self._escape.endswith("\x1b\\"):
                         payload = self._escape[2:-1] if c == "\x07" else self._escape[2:-2]
                         link = re.fullmatch(r"8;(?:id=[A-Za-z0-9_.-]{1,128})?;(.*)", payload, re.S)
                         url = link.group(1) if link else None
                         if url and manual_url(url):
-                            if self.url is not None and self.url != url: raise SigninRefused("ambiguous_output")
+                            if self.url is not None and self.url != url: raise SigninRefused("ambiguous_output", refusal_detail("url changed"))
                             self.url = url
                         self._escape = ""
                 elif self._escape.startswith("\x1b["):
@@ -267,7 +320,9 @@ class TokenScreen:
                 elif self._escape == "\x1b8": self._row, self._col = self._saved; self._escape = ""  # DECRC
                 elif self._escape == "\x1b(": pass  # Awaiting the G0 character set designator.
                 elif self._escape == "\x1b(B": self._escape = ""  # G0 = US-ASCII; nothing to model.
-                else: raise SigninRefused("unsupported_output")
+                else:
+                    after = self._escape[1]  # the one character after ESC, and nothing that follows it
+                    raise SigninRefused("unsupported_output", refusal_detail("escape", after if "!" <= after <= "~" else "other"))
                 continue
             if c == "\x1b": self._escape = c
             elif c == "\r": self._col = 0
@@ -276,7 +331,7 @@ class TokenScreen:
                 if self._row == 64: self._rows.pop(0); self._rows.append([]); self._row = 63
             elif c == "\b": self._col = max(0, self._col-1)
             elif c in "\x07\x0f": pass  # Bell; shift-in to the (US-ASCII) G0 set.
-            elif ord(c) < 32: raise SigninRefused("unsupported_output")
+            elif ord(c) < 32: raise SigninRefused("unsupported_output", refusal_detail("control", "0x%02x" % ord(c)))
             else:
                 row = self._rows[self._row]
                 while len(row) <= self._col: row.append(" ")
@@ -285,7 +340,7 @@ class TokenScreen:
                 if self._col >= 4096: self._col = 0; self._row = min(63, self._row+1)
         candidate = self.token()
         if candidate:
-            if self._candidate and candidate != self._candidate: raise SigninRefused("ambiguous_output")
+            if self._candidate and candidate != self._candidate: raise SigninRefused("ambiguous_output", refusal_detail("token changed"))
             self._candidate = candidate
 
     def token(self):
@@ -294,10 +349,10 @@ class TokenScreen:
         if marker not in text: return self._candidate
         matches = re.findall(r"Long-lived authentication token created successfully!\s*Your OAuth token \(valid for[^\n]*\):\s*([A-Za-z0-9_.\-\s]+?)\s*Store this token securely\. You won't be able to see it again\.", text)
         values = {re.sub(r"\s", "", item) for item in matches}
-        if len(values) > 1: raise SigninRefused("ambiguous_output")
+        if len(values) > 1: raise SigninRefused("ambiguous_output", refusal_detail("token changed"))
         if values:
             value = values.pop()
-            if not _TOKEN.fullmatch(value): raise SigninRefused("unsupported_output")
+            if not _TOKEN.fullmatch(value): raise SigninRefused("unsupported_output", refusal_detail("token shape"))
             return value
         return self._candidate
 
@@ -324,7 +379,7 @@ def environment_ready(root):
 
 def store_token(root, token, admit):
     """Append exactly one literal token, preserving private routing bytes/inode."""
-    if not _TOKEN.fullmatch(token): raise SigninRefused("unsupported_output")
+    if not _TOKEN.fullmatch(token): raise SigninRefused("unsupported_output", refusal_detail("token shape"))
     _private_directory(root)
     parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     fd = None
@@ -453,27 +508,32 @@ class ProviderSignin:
 
     @staticmethod
     def initialize(conn):
-        conn.execute("CREATE TABLE IF NOT EXISTS setup_provider(attempt_id TEXT PRIMARY KEY,generation TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,code_delivered INTEGER,retired INTEGER NOT NULL DEFAULT 0)")
+        conn.execute("CREATE TABLE IF NOT EXISTS setup_provider(attempt_id TEXT PRIMARY KEY,generation TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,code_delivered INTEGER,retired INTEGER NOT NULL DEFAULT 0,detail TEXT)")
         ProviderSignin._migrate(conn)
 
     @staticmethod
     def _schema(conn):
-        """True for the current table, False for the single-attempt table it extends."""
+        """Which table this is, oldest first: 0 the single-attempt table, 1 the table
+        before the refusal detail, 2 the current one. Only 0 lacks code_delivered and retired."""
         columns=[row[1] for row in conn.execute("PRAGMA table_info(setup_provider)")]
-        if columns not in (_COLUMNS,_LEGACY_COLUMNS): raise AccessUnavailable()
-        return columns == _COLUMNS
+        if columns not in _SHAPES: raise AccessUnavailable()
+        return _SHAPES.index(columns)
 
     @staticmethod
     def _migrate(conn):
-        """Upgrade only inside a write transaction (allow, begin); reads accept either shape.
+        """Upgrade only inside a write transaction (allow, begin); reads accept every shape.
 
         A row from the single-attempt table never recorded whether its code was
-        delivered, so it keeps NULL there, which no retry accepts.
+        delivered, so it keeps NULL there, which no retry accepts. A row from before
+        the refusal detail keeps NULL there: nothing about its reply was ever stored.
         """
-        if not ProviderSignin._schema(conn):
+        shape = ProviderSignin._schema(conn)
+        if not shape:
             conn.execute("ALTER TABLE setup_provider ADD COLUMN code_delivered INTEGER")
             conn.execute("ALTER TABLE setup_provider ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
-            if not ProviderSignin._schema(conn): raise AccessUnavailable()
+        if shape != _DETAIL_SHAPE:
+            conn.execute("ALTER TABLE setup_provider ADD COLUMN detail TEXT")
+            if ProviderSignin._schema(conn) != _DETAIL_SHAPE: raise AccessUnavailable()
 
     @staticmethod
     def _current(conn):
@@ -492,10 +552,15 @@ class ProviderSignin:
             raise AccessDenied("signin_original_attempt_required")
         return row
 
-    def _set(self, grant, attempt, state, reason=None):
+    def _set(self, grant, attempt, state, reason=None, detail=None):
         with self.store.access._connection(write=True) as conn:
             self._row(conn,grant,attempt)
             conn.execute("UPDATE setup_provider SET state=?,reason=? WHERE attempt_id=?", (state,reason,attempt))
+            # The rule behind a refused reply, else NULL; stored here and read back by nothing
+            # (status names its own keys). A worker runs only after begin upgraded the table;
+            # were the column missing all the same, the ending above is still written.
+            if self._schema(conn) == _DETAIL_SHAPE:
+                conn.execute("UPDATE setup_provider SET detail=? WHERE attempt_id=?", (detail,attempt))
 
     def _mark_delivered(self, grant, attempt):
         # Committed before the first code byte reaches the CLI: from then on a token may
@@ -569,7 +634,7 @@ class ProviderSignin:
                     environment_ready(self.store.access.root)  # A saved credential still refuses any attempt.
                     if current is not None:
                         conn.execute("UPDATE setup_provider SET retired=1 WHERE attempt_id=?", (current['attempt_id'],))
-                    conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0)", (attempt,grant.generation,"starting"))
+                    conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0,NULL)", (attempt,grant.generation,"starting"))
                     started, replaces = True, current is not None
             if started:
                 # Only after the commit, so a refused or rolled-back admission leaves no worker.
@@ -655,6 +720,7 @@ class ProviderSignin:
         staged = staged_info = None
         screen = TokenScreen()
         state,reason = "needs_attention","provider_failed"
+        detail = None  # a refusal_detail(), only beside the output refusal that carried it
         try:
             self._admit(reader,grant)
             with self._lock:
@@ -745,9 +811,9 @@ class ProviderSignin:
                         # An admitted completed commit remains true even if a
                         # cancellation is accepted immediately after this lock.
                         token=None;state,reason="connected",None
-                elif process.poll()==0: reason="unsupported_output"
+                elif process.poll()==0: reason,detail="unsupported_output",refusal_detail("exit 0 without token")
         except SigninRefused as exc:
-            reason=str(exc)
+            reason,detail=str(exc),exc.detail
             if reason=="effect_uncertain" and self._cancel.is_set(): state="cancelled"
         except BaseException:
             # Provider text, code, output and filesystem exceptions are never serialized.
@@ -762,11 +828,11 @@ class ProviderSignin:
                         if process.poll() is None and os.getpgid(process.pid)==process.pid: os.killpg(process.pid,signal.SIGKILL)
                         process.wait(timeout=2)
             except (OSError,subprocess.TimeoutExpired):
-                state,reason="unknown","child_quiet_unproven"
+                state,reason,detail="unknown","child_quiet_unproven",None
             for fd in (slave,master,binary_fd,staged_fd):
                 if fd is not None: os.close(fd)
             # Its own copy, child reaped above; before the terminal row, which stays the final write.
             if staged is not None and state!="unknown": discard_binary(staging(self.store.access.root),attempt)
             with self._lock:
                 self._code=self._url=self._expires_at=self._code_until=None
-                self._set(grant,attempt,state,reason)
+                self._set(grant,attempt,state,reason,detail)
