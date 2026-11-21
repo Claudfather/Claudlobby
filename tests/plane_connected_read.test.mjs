@@ -897,3 +897,71 @@ test('sign-in admission waits for a renewal already in flight and then uses the 
   assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
   assert.equal(renewals(h), 1); h.api.dispose();
 });
+
+// A synthetic first-team plan of the measured real shape (about 63 KB): 76 changes, 70 units without their
+// working data, and the bot and fleet lists. The Context answer that repeats it carries it under `preview`.
+const SETUP_LIMIT = 131072;
+const setupRequest = { generation: uuid(9), request_id: uuid(10), config_fingerprint: 'a'.repeat(64), source_revision: 'b'.repeat(40) };
+function realisticPlan() {
+  const sha = 'c'.repeat(64);
+  return { ...setupRequest, version: 2, expires_at: 1800000600, fleets: ['shop'],
+    changes: Array.from({ length: 76 }, (_, i) => ({ target: `/home/example/fleets/shop/units/unit-${i}/config.toml`,
+      before: { kind: 'file', mode: '0644', sha256: sha },
+      after: { kind: 'directory', mode: '0755', files: Object.fromEntries(Array.from({ length: 4 }, (_, f) => [`file-${f}.toml`, sha])) } })),
+    effects: { units: Array.from({ length: 70 }, (_, i) => ({ bot: `shop/bot-${i}`, enroll: false, fleet: 'shop', phase: 'start',
+        platform: 'linux', scope: 'user', service: `claudlobby-bot-${i}.service`, sha256: sha, source: `/home/example/fleets/shop/units/unit-${i}` })),
+      restart_bots: ['shop/a', 'shop/b', 'shop/c'], reload_supervision: true, fleet_sources: { shop: '/home/example/fleets/shop' },
+      bot_paths: { a: '/home/example/a', b: '/home/example/b' }, coverage: { bots: 70, units: 70 },
+      fleet_manifests: { shop: sha }, restart_reason: 'units changed' },
+    dispatch: 'prepared', phase: 'quiesce' };
+}
+const readyContext = plan => ({ version: 2, template: 'revenue-web-app', fleet: 'shop', repository: 'example-org/shop',
+  source_revision: setupRequest.source_revision, generation: setupRequest.generation, expires_at: 1800003600, request: { ...setupRequest },
+  launch_reserved: false, provider_signin: true, signin_attempt: { attempt_id: uuid(11), generation: setupRequest.generation, state: 'connected', reason: null }, continuation: "'/example/cli' host update continue",
+  preview_state: 'ready', preview: { ...plan, goal: 'Improve tests' } });
+const bytesOf = value => new TextEncoder().encode(JSON.stringify(value)).length;
+// The same answer padded (inside one string field) to exactly `size` bytes.
+const padded = (value, size) => ({ ...value, pad: 'x'.repeat(size - bytesOf({ ...value, pad: '' })) });
+async function setupOnlyHarness() {
+  const h = harness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  h.overrides.set('issue', () => reply(200, setup(TOKEN))); h.overrides.set('status', () => reply(200, setup()));
+  assert.equal(await h.api.connect(), true); return h;
+}
+
+test('a realistic first-team Preview answer and the Context answer that repeats it pass the setup ceiling; one byte over is refused', async () => {
+  const plan = realisticPlan(), context = readyContext(plan);
+  assert.ok(bytesOf(plan) > 55000 && bytesOf(plan) < 75000, String(bytesOf(plan)));
+  assert.ok(bytesOf(context) > 55000 && bytesOf(context) < 75000, String(bytesOf(context)));
+  for (const [operation, call, answer] of [['preview', h => h.api.setupPreview({ generation: setupRequest.generation, goal: 'Improve tests' }), plan],
+      ['context', h => h.api.setupContext(), context]]) {
+    const h = await setupOnlyHarness();
+    h.overrides.set('setup/' + operation, () => reply(200, answer));
+    assert.deepEqual(await call(h), answer, operation + ' at the intended size');
+    h.overrides.set('setup/' + operation, () => reply(200, padded(answer, SETUP_LIMIT)));
+    assert.equal(bytesOf(await call(h)), SETUP_LIMIT, operation + ' exactly at the limit');
+    h.overrides.set('setup/' + operation, () => reply(200, padded(answer, SETUP_LIMIT + 1)));
+    await assert.rejects(call(h), operation + ' one byte over the limit');
+    h.api.dispose();
+  }
+});
+
+test('the setup panel reaches the ready state from a realistic Context answer; one over the limit says it could not get an answer and offers Check preview', async () => {
+  const { createGuidedSetup } = await import(new URL('../claudlobby/plane/ui/guided-setup.js', import.meta.url));
+  const none = { ...readyContext(realisticPlan()), request: null, preview_state: 'none', preview: undefined };
+  const panelFor = async (previewAnswer, laterContext) => {
+    const h = await setupOnlyHarness(), saved = new Map(); let reads = 0;
+    h.overrides.set('setup/context', () => reply(200, reads++ === 0 ? none : laterContext));
+    h.overrides.set('setup/preview', () => reply(200, previewAnswer));
+    const setup = createGuidedSetup({ client: h.api, storage: { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) },
+      storageKey: 'size', now: () => 1800000000 });
+    await setup.run('context'); setup.setGoal('Improve tests'); await setup.run('preview'); await flush(); return { h, setup };
+  };
+  const plan = realisticPlan(), ready = await panelFor(plan, readyContext(plan));
+  assert.equal(ready.setup.snapshot().plan.changes.length, 76); assert.deepEqual(ready.setup.snapshot().pending, setupRequest);
+  ready.setup.dispose(); ready.h.api.dispose();
+  const over = await panelFor(padded(plan, SETUP_LIMIT + 1), padded(readyContext(plan), SETUP_LIMIT + 1));
+  assert.equal(over.setup.snapshot().plan, null);
+  assert.equal(over.setup.snapshot().note, 'Could not get an answer from your computer about the preview. Choose Check preview to look again.');
+  over.setup.dispose(); over.h.api.dispose();
+});
