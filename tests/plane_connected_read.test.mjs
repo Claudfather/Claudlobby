@@ -681,6 +681,22 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
 
+test('setup requests wait 15 s, except Preview 95 s (past the listener\'s 90 s) and Launch 45 s', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  for (const operation of ['context','preview','launch','receipt']) h.overrides.set('setup/'+operation,()=>reply(200,{version:2}));
+  assert.equal(await h.api.connect(),true);
+  const waits={};
+  for (const [operation,call] of [['context',()=>h.api.setupContext()],['preview',()=>h.api.setupPreview({})],
+      ['launch',()=>h.api.setupLaunch({})],['receipt',()=>h.api.setupReceipt({})]]) {
+    const before=h.timers.length; await call();
+    waits[operation]=h.timers.slice(before).find(t=>[15000,45000,95000].includes(t.ms))?.ms;
+  }
+  assert.deepEqual(waits,{context:15000,preview:95000,launch:45000,receipt:15000});
+  h.api.dispose();
+});
+
 test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
   const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
     setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});

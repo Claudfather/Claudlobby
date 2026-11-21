@@ -622,8 +622,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
+    // Preview waits 95 s: the listener gives it 90 (owner_setup_http.py), and this side must never give up first.
     const result = await http(ref.endpoint_origin + '/api/owner/connected/setup/' + operation,
-      {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : 15000,limit:131072});
+      {method:'POST',body:input,timeout:operation === 'launch' ? 45000 : operation === 'preview' ? 95000 : 15000,limit:131072});
     if (result.status !== 200) {
       const error = new Error('Setup unavailable or refused. A lost launch must be inspected, never repeated.');
       error.status = result.status; throw error;

@@ -20,7 +20,9 @@ class SetupHTTP(ConnectedActionsHTTP):
         WorkspaceBootstrapHTTP.__init__(self,access,config=config,authority=authority,verify_principal=verify_principal)
         self.engine=SetupEngine(access)
 
-    def response_seconds(self,scope): return 45 if scope.get("setup_operation")=="launch" else 15
+    # Preview runs core's updater: three stage processes and a systemctl check per unit, on a computer that may
+    # have two cores, so it gets twice Launch's wait. The browser waits slightly longer (95 s) so it never gives up first.
+    def response_seconds(self,scope): return {"launch":45,"preview":90}.get(scope.get("setup_operation"),15)
 
     async def _perform_action(self,scope,receive,operation,progress):
         if scope["method"]=="OPTIONS":
