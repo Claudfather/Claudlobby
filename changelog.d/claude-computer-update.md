@@ -9,3 +9,7 @@ The hidden flag `--expected-request <request_id>` makes `host update continue` r
 ### Changed — the update actions run in an environment of their own (#3079)
 
 The three actions build a fresh environment: the guide script's four pinned selectors, so a render reads this computer's settings and keeps its lasting owner service, and on Linux `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, so the operator check and the cutover reach the account's user manager. They never set `PLANE_EMIT_DISABLED`. Tests pin each reason: without the settings variable the updater refuses the render because it would remove the lasting service, and without the user bus the operator check cannot verify its ancestry and refuses.
+
+### Changed — `host update apply` no longer dispatches a team preparation nobody launched (#3079)
+
+While a Preview, a prepared first team or a prepared addition is pending and undispatched, `host update apply`, with that record's target or with no target, now exits 7 before any dispatch instead of dispatching it. Only its Launch dispatches it. A person or wrapper that ran `host update apply` to carry such a record on, as the `host update apply FULL_COMMIT_SHA` lines composed in `claudlobby/switches.py` suggest after a `fleet.yaml` edit, gets that refusal now. `host update continue` is unchanged, and `apply` for another target is refused as before.
