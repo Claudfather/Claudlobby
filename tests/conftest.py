@@ -111,7 +111,8 @@ def _isolate_home(patch, base):
 
 def _silence_plane(patch):
     patch.setenv("PLANE_EMIT_DISABLED", "1")
-    for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_CLI", "PLANE_SOCKET", "PLANE_EMIT_CLI"):
+    for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_CLI", "PLANE_SOCKET", "PLANE_EMIT_CLI",
+                "FLEET_NAME", "CLAUDLOBBY_FLEET"):
         patch.delenv(key, raising=False)
 
 
