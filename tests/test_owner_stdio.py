@@ -890,8 +890,12 @@ while True: time.sleep(.01)
     finally:
         under_test[0] = False
         sender.join(15)
-        for sig, handler in outer.items(): signal.signal(sig, handler)
-    assert not sender.is_alive() and not failures and not late, (failures, late)
+        # Only once the sender has finished. A sender still running has a signal
+        # left to send, which must find these handlers and not pytest's own; the
+        # test then fails below and the handlers stay for the rest of the session.
+        if not sender.is_alive():
+            for sig, handler in outer.items(): signal.signal(sig, handler)
+    assert not sender.is_alive() and not failures and not late, (sender.is_alive(), failures, late)
 
 
 @pytest.fixture
