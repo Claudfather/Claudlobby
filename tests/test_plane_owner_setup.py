@@ -897,8 +897,10 @@ def test_typed_guide_preserves_original_launch_and_exits_without_terminal_handof
     assert len(setup_authority[-1].dispatches) == 1
 
 
-def _typed_reopen(fixture, monkeypatch, wait, **request):
-    """The typed guide started again on this computer, as the embedding page starts it; wait stands in for the pane."""
+def _typed_reopen(fixture, monkeypatch, wait, *, ssh=None, on_serve=None, **request):
+    """The typed guide started again on this computer, as the embedding page starts it; wait stands in for the pane.
+
+    ssh carries the guide over SSH instead of the browser; on_serve runs as serving starts."""
     from contextlib import contextmanager
     import sys
     from claudlobby.commands import host_owner_setup as guide
@@ -919,6 +921,7 @@ def _typed_reopen(fixture, monkeypatch, wait, **request):
     @contextmanager
     def serving(*_args, **_kwargs):
         served.append(True)
+        if on_serve is not None: on_serve()
         class Child:
             def wait(self, timeout): return wait(timeout)
         yield Child()
@@ -928,7 +931,7 @@ def _typed_reopen(fixture, monkeypatch, wait, **request):
         provider=Path("/fixed/provider"))
     def run():
         return guide.run(SimpleNamespace(**request), resolve_paths(root=access.root), access, None,
-                         consent=Consent(), profile=profile)
+                         consent=Consent(), profile=profile, **({"ssh": ssh} if ssh is not None else {}))
     return run, frames, served
 
 
@@ -972,8 +975,9 @@ def test_typed_guide_started_again_after_the_preview_window_says_expired(setup_a
     assert store.local() == grant and not setup_authority[-1].dispatches
 
 
-@pytest.mark.parametrize("case", ["reserved", "launched", "dispatched", "phase", "stage_error", "committed",
-    "request_id", "fingerprint", "no_preview_row", "expired", "revoked", "no_approval", "finish_setup"])
+@pytest.mark.parametrize("case", ["reserved", "launched", "dispatched", "quiet_support", "notice_support", "phase",
+    "unfinalized", "stage_error", "committed", "request_id", "fingerprint", "target", "scope", "not_initialize",
+    "no_preview_row", "expired", "revoked", "replaced", "no_approval", "finish_setup", "ssh"])
 def test_typed_guide_started_again_refuses_anything_but_a_kept_unlaunched_preview(setup_authority, monkeypatch, case):
     import sqlite3
     store, access, grant, reader, clock, args = setup_authority
@@ -983,6 +987,24 @@ def test_typed_guide_started_again_refuses_anything_but_a_kept_unlaunched_previe
     if case == "reserved": store.reserve(reader, grant, binding(preview))
     elif case == "launched": engine.launch(reader, **binding(preview))
     elif case == "dispatched": record["job_dispatch"] = {"state": "pending", "attempt": 1}  # e.g. a local continue
+    # A local continue saves quiet (and notice) support before job support: one that failed between those saves.
+    elif case == "quiet_support": record["quiet_support"] = {"supervisor.sh": "0" * 64}
+    elif case == "notice_support": record["notice_support"] = {"path": "/synthetic/notice"}
+    # Defence only: the updater's own validation refuses an unfinalized record past prepare.
+    elif case == "unfinalized": record["finalized"] = False
+    elif case == "target": record["target"] = "c" * 40
+    elif case == "scope": record["initialization_scope"] = {"directory": "/different", "manifests": []}
+    elif case == "not_initialize": record["initialize"] = False
+    elif case == "replaced":
+        # The approval is replaced between the entry read and the guide's second read of it.
+        from claudlobby.plane.owner_setup import _snapshot
+        operation = OwnerSetup.operation
+        def replacing(self, observed):
+            found = operation(self, observed)
+            with sqlite3.connect(access.path) as conn:
+                conn.execute("UPDATE setup_grant SET snapshot=?", (_snapshot(replace(grant, generation=str(uuid4()))),))
+            return found
+        monkeypatch.setattr(OwnerSetup, "operation", replacing)
     elif case == "phase": record["phase"] = "commit"
     elif case == "stage_error": record["stage_error"] = {"stage": "prepare", "detail": "synthetic"}
     elif case == "committed": record["config_committed"] = True
@@ -994,7 +1016,9 @@ def test_typed_guide_started_again_refuses_anything_but_a_kept_unlaunched_previe
         with sqlite3.connect(access.path) as conn:
             conn.execute("DELETE FROM " + ("setup_previews" if case == "no_preview_row" else "setup_grant"))
     request = {"finish_setup": list(binding(preview).values())} if case == "finish_setup" else {}
-    run, frames, served = _typed_reopen(setup_authority, monkeypatch, lambda _timeout: pytest.fail("waited"), **request)
+    carried = {"ssh": object()} if case == "ssh" else {}  # the SSH guide never needed this run alive
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, lambda _timeout: pytest.fail("waited"),
+                                        **carried, **request)
     with pytest.raises(CommandFailure) as refused:
         run()
     assert refused.value.error.code == "conflict"
@@ -1003,6 +1027,26 @@ def test_typed_guide_started_again_refuses_anything_but_a_kept_unlaunched_previe
     assert refused.value.data == {"request_id": record["request_id"]}
     assert frames == [] and served == []
     assert len(setup_authority[-1].dispatches) == int(case == "launched")
+
+
+def test_typed_guide_started_again_refuses_when_the_approval_lapses_before_it_is_read_again(setup_authority, monkeypatch):
+    """Lapsing after the entry check never reaches the approval cards or the settings file."""
+    from claudlobby.commands import host_owner
+    store, access, grant, reader, clock, args = setup_authority
+    engine, grant, reader = allow(setup_authority)
+    engine.preview(reader, grant.generation, "Review checkout")
+    monkeypatch.setattr(host_owner, "_allow_setup", lambda *_a, **_k: pytest.fail("asked to allow setup again"))
+    def lapse(): clock[0] = grant.expires_at
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, lambda _timeout: pytest.fail("waited"), on_serve=lapse)
+    with pytest.raises(CommandFailure) as refused:
+        run()
+    assert served == [True] and frames == []
+    assert refused.value.error.code == "conflict"
+    assert str(refused.value.error.message) == (
+        "a first-team operation is retained; inspect its original receipt and continue locally")
+    assert refused.value.data == {"request_id": args.retained["record"]["request_id"]}
+    assert "host update continue" in refused.value.error.hint
+    assert store.retained_state().grant == grant and not setup_authority[-1].dispatches
 
 
 def test_typed_completion_reopen_only_offers_optional_messages_for_original_done(setup_authority, monkeypatch):

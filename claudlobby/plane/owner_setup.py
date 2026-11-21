@@ -454,7 +454,7 @@ class OwnerSetup:
         The guide may start again over it (the page that embedded the last run closed it before
         Launch). The approval is active and holds no launch; the record is the one operation()
         accepts for it, finalized at quiesce with no stage error, its configuration not committed and
-        never dispatched; and the Preview row kept for this approval names exactly that record, as
+        never dispatched (nothing a continue saves first: quiet or notice support, job support or dispatch); and the Preview row kept for this approval names exactly that record, as
         retain() binds it, whether or not its window has passed. Anything else is not a Preview.
         """
         if (retained is None or retained.state != "allowed" or not retained.effective_active
@@ -474,7 +474,7 @@ class OwnerSetup:
         return (kept is not None and kept == _binding(grant, record)
                 and record.get("phase") == "quiesce" and record.get("finalized", True) is True
                 and not record.get("stage_error") and not record.get("config_committed")
-                and all(record.get(key) is None for key in ("job_dispatch", "updater_job", "job_support")))
+                and all(record.get(key) is None for key in ("quiet_support", "notice_support", "job_dispatch", "updater_job", "job_support")))
 
     def _request(self, conn, grant):
         row=conn.execute("SELECT payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
