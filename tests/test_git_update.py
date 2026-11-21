@@ -2018,6 +2018,25 @@ def test_initialization_rejects_malformed_scope_before_record_or_native_effects(
     assert read_update(installation) is None
 
 
+def test_initialization_scope_may_name_no_team_files(update):
+    """A computer may be started with no team: an empty list is a scope, and every other check stays."""
+    from claudlobby.git_update import _initialization_scope
+    installation, _, target, _ = update
+    scope = {"directory": str(installation.data_root.parent / "native"), "manifests": []}
+    assert _initialization_scope(scope) == scope
+    for defect in ({**scope, "directory": "relative"}, {**scope, "manifests": ()},
+                   {**scope, "release_id": "r-" + "a" * 64}, {"directory": scope["directory"]}):
+        with pytest.raises(UpdateError, match="initialization"):
+            _initialization_scope(defect)
+    with UpdateStore(installation) as store:
+        staged = store.prepare_target(target, request_id="00000000-0000-4000-8000-000000000001",
+                                      initialization_scope=scope)
+        assert staged["initialization_scope"] == scope
+        with pytest.raises(UpdateError, match="original frozen"):
+            store.prepare_target(target, request_id=staged["request_id"], initialization_scope={
+                **scope, "manifests": [str(installation.data_root / "fleet.yaml")]})
+
+
 @pytest.mark.parametrize("defect", [None, "bot", "active-config", "unobserved-directory"])
 def test_initial_authority_uses_cold_operator_gate_and_observed_native_placement(update, monkeypatch, defect):
     import platform

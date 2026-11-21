@@ -864,3 +864,136 @@ def test_conversion_last_check_allows_scheduled_finish_but_preserves_enrollment(
         operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
     assert store.history == []
     assert store.load()["consumers"]["job.service"]["intent"] == original
+
+
+@pytest.mark.parametrize("owner", [None, "on", "off"])
+def test_a_computer_starts_with_no_team(tmp_path, monkeypatch, owner):
+    """Phase 1's proof: the first activation, without a team, dispatched by a run that holds a lease.
+
+    The run that asks for the start holds the runtime reader lease, as every guide
+    run does. The updater drains it before its cutover: nothing is committed
+    while that run lives, and the start finishes once it has exited.
+    """
+    import sqlite3
+    from claudlobby import git_update as updater
+    from claudlobby.active_config import read_current_config
+    from claudlobby.git_update import read_update
+    from claudlobby.installation import _runtime_lock
+    from claudlobby.plane.owner_source import inspect_source
+    from tests.no_team_start import Case, default_on_jobs, job_name
+    case = Case(tmp_path, monkeypatch, owner=owner)
+    lease = _runtime_lock(case.installation)  # the guide's reader lease
+    dispatched = updater.apply_or_continue(case.installation, target=case.target, initialization=case.scope)
+    assert dispatched["job"] == {"dispatch": "started"}
+    assert case.dispatches == [dispatched["update"]["request_id"]]
+    assert dispatched["update"]["phase"] == "quiesce" and dispatched["update"]["initialization_scope"] == case.scope
+    assert not operation.db_file(case.root).exists() and not (case.root / "state/config.json").exists()
+    seen = []
+
+    def guide_exits():
+        record = read_update(case.installation)
+        seen.append((record["phase"], record.get("runtime_waits", []), "quiesce" in case.trace,
+                     operation.db_file(case.root).exists(), (case.root / "state/config.json").exists()))
+        os.close(lease)
+    result = case.run_job(at={3: guide_exits})
+    # While the run that dispatched it lived, the updater polled at its drain and changed
+    # nothing: at the third poll no gate had been taken and nothing was quiesced or written.
+    assert seen == [("quiesce", [], False, False, False)]
+    assert result["phase"] == "done" and result["health_errors"] == {}
+    # It took the drain only after the lease closed at that poll, and the cutover found
+    # the lock free. Counted in polls, not seconds: a fast runner records a 0.0 s wait.
+    drain, cutover = result["runtime_waits"]
+    assert drain["gate"] == "drain" and drain["outcome"] == "taken" and case.polls == 3
+    assert cutover["gate"] == "cutover" and cutover["outcome"] == "taken"
+    assert case.installation.preflight() == case.target
+    # A bound plane.db that holds no team.
+    assert inspect_source(case.root) == case.host_uid and not case.access.first_fleet_pending()
+    connection = sqlite3.connect(operation.db_file(case.root))
+    try:
+        assert connection.execute("SELECT count(*) FROM identity_registry WHERE kind != 'host'").fetchone() == (0,)
+    finally:
+        connection.close()
+    # A committed configuration that lists no team, and no identities.
+    config = read_current_config(case.root, installation=case.installation, revision=case.target)
+    assert config["fleets"] == {} and config["identities"] is None
+    # Exactly the default-on jobs, and the lasting service only where the settings switch it on.
+    expected = default_on_jobs() | ({"plane-owner"} if owner == "on" else set())
+    assert {job_name(key) for key in result["consumers"]} == expected
+    assert all(item["restore"] == "done" for item in result["consumers"].values())
+    assert {path.name for path in case.directory.iterdir() if path.is_file()} == set(result["consumers"])
+
+
+def test_an_ordinary_update_of_a_computer_started_with_no_team_reaches_done(tmp_path, monkeypatch):
+    """The ground phase 2 stands on: a started computer with no team is updated from one revision to the next."""
+    from claudlobby.active_config import read_current_config
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch)
+    started = case.start()
+    assert started["phase"] == "done" and started["health_errors"] == {}
+    first = read_current_config(case.root, installation=case.installation, revision=case.target)
+    later = case.add_target()
+    calls = len(case.native.calls)
+    seen = []
+    real = operation.prepare_operation
+
+    def prepare(store, rendered, *args, **kwargs):
+        seen.append((rendered.fleets, kwargs["initialize"]))
+        return real(store, rendered, *args, **kwargs)
+    monkeypatch.setattr(operation, "prepare_operation", prepare)
+    updated = case.update(later)
+    assert updated["phase"] == "done" and updated["health_errors"] == {}
+    assert updated["previous_config"] == first["fingerprint"] and not updated.get("initialize")
+    assert seen == [((), False)]
+    assert case.installation.preflight() == later
+    second = read_current_config(case.root, installation=case.installation, revision=later)
+    # A start and the ordinary update after it hold the same identities: None.
+    assert first["identities"] is None and second["identities"] is None
+    assert second["fleets"] == {} and second["units"] == first["units"]
+    assert set(updated["consumers"]) == set(started["consumers"])
+    assert all(item["restore"] == "done" for item in updated["consumers"].values())
+    # Every unit the start installed was stopped for the cutover and brought back as it was.
+    paused = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_pause"}
+    resumed = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_resume"}
+    assert paused == resumed == {key for key in updated["consumers"] if "@." not in key}
+    assert all(case.native.states[key] == updated["consumers"][key]["intent"]["restore_native"] for key in resumed)
+    assert operation.db_file(case.root).exists()
+
+
+def test_a_computer_started_with_no_team_is_admitted_and_checked_like_any_other(tmp_path, monkeypatch):
+    """Runtime admission and the operator check each read the empty configuration.
+
+    Update authorization (`update_entry.main`'s authorize stage) is not run here: it
+    checks its own process's source and interpreter. This checks what it reads after
+    the operator check: the committed configuration's native placement.
+    """
+    from claudlobby import context, supervision_inventory
+    from claudlobby.commands.operator_context import require_operator_context
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.runtime_admission import RuntimeIdentity, mutation_admission
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    package = case.package(case.target)
+    identity = RuntimeIdentity(case.installation.cli, case.installation.native, "", case.installation, case.target)
+    monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: identity))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(case.installation.directory))
+    with mutation_admission(case.root, identity=identity) as current:
+        assert current.snapshot["fleets"] == {} and current.revision == case.target
+    # The operator check finds the started computer's own units and asks each about its caller.
+    monkeypatch.setattr(context, "resolve_paths", lambda root=None, **_: SimpleNamespace(package=package))
+    installed = sorted(path for path in case.directory.iterdir() if path.is_file())
+    monkeypatch.setattr(supervision_inventory, "collect_enrollment", lambda *_args, **_kwargs: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=tuple(
+            SimpleNamespace(target=path.name, installed=(SimpleNamespace(path=path),)) for path in installed))))
+    before = len(case.native.calls)
+    require_operator_context(case.root)
+    asked = [args[1] for name, args in case.native.calls[before:] if name == "svc_activation_assert_external"]
+    assert asked == [path.name for path in installed if "@." not in path.name] and asked
+    monkeypatch.setenv("BOT_ID", "worker")
+    with pytest.raises(CommandFailure, match="operator shell"):
+        require_operator_context(case.root)
+    monkeypatch.delenv("BOT_ID")
+    # The native placement update authorization reads after that operator check.
+    from claudlobby.active_config import read_current_config
+    snapshot = read_current_config(case.root, installation=case.installation, revision=package.source_revision)
+    assert snapshot["supervision"] == {"manager": "Linux", "domain": "", "directory": str(case.directory)}
