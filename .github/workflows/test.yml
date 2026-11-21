@@ -357,19 +357,24 @@ jobs:
   # Linux. It also requires the native macOS evidence: each case ran in exactly
   # one shard and passed.
   #
-  # Where the lane does not run (a draft without the label) this job is skipped
-  # under another name. A run creates this job only once its shards have
-  # finished. So after a draft is marked ready, a skipped result under the
-  # gate's own name would stand on the commit for as long as the new run's
-  # macOS shards take, and a required check reads a skipped job as met. Under
-  # another name, no result called `supported (macos-latest, py3.11)` exists on
-  # a commit until a run that ran the lane has judged it.
+  # Its name comes from a matrix of one value, for what happens where the lane
+  # does not run (a draft without the label). A run creates this job only once
+  # its shards have finished. So after a draft is marked ready, a skipped result
+  # under the gate's own name would stand on the commit for as long as the new
+  # run's macOS shards take, and a required check reads a skipped job as met.
+  # GitHub does not expand the matrix of a job its `if` skips, so a skipped gate
+  # shows as the matrix key below, never as the check name: no result called
+  # `supported (macos-latest, py3.11)` exists on a commit until a run that ran
+  # the lane has judged it.
   supported-macos:
-    name: "${{ (github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft')) && 'supported (macos-latest, py3.11)' || 'macos lane not run (draft pull request)' }}"
+    name: ${{ matrix.macos-not-run-on-a-draft-pull-request }}
     needs: [supported-macos-shard]
     if: always() && (github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      matrix:
+        macos-not-run-on-a-draft-pull-request: ['supported (macos-latest, py3.11)']
     steps:
       - name: Require every shard to have passed
         env:
