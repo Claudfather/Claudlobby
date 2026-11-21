@@ -1,0 +1,3 @@
+### Changed — CI splits the suite by this month's test times
+
+`.test_durations`, the file pytest-split reads to share the suite out between the four shards of each platform, was last refreshed on 2026-10-21 and held times for 9,562 of today's 13,935 tests. A test with no recorded time counts as average, so newer and slower tests piled into the first shards. The file now holds a time for 13,887 tests: each one's median across eight green pull-request runs on macOS from 2026-11-21. Timed against three other runs, the slowest macOS shard's tests take 146 seconds less on average and the slowest Linux shard's 45 seconds less. Which shard runs a test changes; every test still runs exactly once.
