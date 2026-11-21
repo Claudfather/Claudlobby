@@ -329,6 +329,93 @@ today: the receipt's shape, the binding, the system Python and the installed
 source exactly at the requested revision. `setup`, `status` and `api` keep
 their request keys and their own admission; one more key refuses them.
 
+## Updating a started computer
+
+The preparation script `host-install-v1.sh` has three more actions. Each reads
+one canonical line, then EOF: `schema_version` 1, `expected_uid` and the
+action's own keys. Another key, a missing key or a line that is not canonical
+is `invalid_request` (exit 2). Each answer is one line of at most 8192 bytes:
+`schema_version`, `operation`, then the answer's fields, or `state` and `code`.
+
+| Action | Operation | Request keys | Answer |
+|---|---|---|---|
+| `update-status` | `host-update-status-v1` | `compare_revision` (optional) | `state` (`absent` or `recorded`), `recorded_revision`, `installed_revision`, `receipt_is_ancestor`, `binding_sha256`, `setup` (`untouched`, `in_use` or `started`), `interpreter` (`same` or `changed`), `update`, and `relation` (`same`, `ahead` or `other`) when asked |
+| `update` | `host-update-v1` | `expected_installed_revision`, `target_revision` | `state` `updating`, `request_id`, `target` |
+| `update-continue` | `host-update-continue-v1` | `request_id` | `state` `updating`, `request_id`, `target` |
+
+`update` in a status answer is `null` or the update record in the names a
+client reads: `request_id`, `kind` (`update`, `start`, `first_team` or
+`addition`), `phase`, `target`, `maintenance`, `dispatched`, `failed` and
+`health_errors` (unit names only). The receipt is checked against its own
+revision, never against one a client sent; the installed revision is whatever
+the updater moved the checkout to. `setup` is `started` once the computer's
+configuration is committed. A record is unfinished by core's rule: not `done`,
+or `done` with health errors.
+
+No action waits for the updater, rewrites the receipt or asks a card. Each runs
+the installed launcher as `host update`, which goes round the maintenance
+check, so all three answer while an update is in maintenance.
+
+`update` runs `host update apply <target>`: forward only, from the receipt's
+remote, on a started computer. The same target in flight is asked for again
+and attaches or continues. Under its own lock the updater refuses, with exit 7
+and before any dispatch, to apply a Preview or a prepared first team or
+addition for that same target that no Launch dispatched; the script answers
+that as `update_in_progress`. A Launch never takes this route. Its refusals are `installed_changed` (the installed
+revision is not the one shown), `update_in_progress` (an unfinished record for
+another target, or a team preparation that no Launch dispatched),
+`already_current`, `needs_reset` (prepared but not started: an untouched
+computer or one partway through its cards), `not_forward` (the target is not a
+descendant of the installed revision) and `not_prepared`.
+
+`update-continue` runs `host update continue --expected-request <request_id>`.
+The updater holds the same id under its own lock and exits 7, before any
+dispatch, for a Preview, a prepared first team or a prepared addition that no
+Launch dispatched; only its Launch dispatches it. A start (dispatched or not),
+an ordinary update and any dispatched record are continued, a `done` record
+with health errors included. Its refusals are `no_such_request`,
+`nothing_to_continue`, `not_continuable` and `not_prepared`. Without the flag
+`host update continue` is unchanged.
+
+Those are the only codes the three actions answer, beside `invalid_request`
+(exit 2). Anything else is `unavailable` (exit 6): the shell's own refusals (no
+system Python, a Mac runtime that is not admitted), every check of the
+installation itself (another installation, a changed identity or source, a
+preparation in progress, an unusable prerequisite, an unsupported platform), a
+record the updater cannot read, an updater that refuses or does not know the
+flag, and a budget that runs out. A client reads `update-status` again after
+any of them.
+
+A team preparation is told by two keys of the update record: an
+`initialization_scope` whose `manifests` list is not empty (a first team) and
+`addition_scope` (an addition). `addition_scope` is part of this contract: the
+phase that writes additions must use that key, or an undispatched addition
+would read as an ordinary update and could be continued or applied.
+"Dispatched" means the record has `job_dispatch`.
+
+What `update` installs is decided by its caller. The updater installs any
+commit the caller names that is a fast-forward of the checkout and that the
+receipt's remote serves; nothing checks that the commit is on a particular
+branch. The client's pinned revision is the trust root, as it is for
+`prepare`.
+
+`update-continue` serves an unfinished record whatever happened to its approval
+after dispatch: withdrawing an approval does not stop it, by design. The request
+id it is held to proves only that the record has not been replaced since the
+client read it; it is not proof that anyone approved it.
+
+The three actions build a fresh environment: the guide script's four pinned
+selectors (`CLAUDLOBBY_ROOT`, `CLAUDLOBBY_INSTALLATION`,
+`CLAUDLOBBY_HOST_SYSTEM_YAML`, `CLAUDE_CONFIG_DIR`), so a render reads this
+computer's own settings and keeps its lasting owner service; on Linux
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, so the operator check and the
+cutover reach the account's user manager; and never `PLANE_EMIT_DISABLED`. On
+a Mac it is the managed runtime's environment without `PLANE_EMIT_DISABLED`,
+plus the selectors. `prepare` and `status` keep their own. A system Python
+replaced since preparation is reported as `interpreter: changed`; on Linux the
+trusted system Python is admitted by trust rather than bytes, so every action
+goes on and the receipt keeps its digest.
+
 ## Launch
 
 The updater cannot advance while any process still holds a runtime reader. The
