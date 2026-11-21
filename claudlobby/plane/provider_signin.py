@@ -100,7 +100,7 @@ _TERMINAL = {"connected", "needs_attention", "cancelled", "unknown"}
 #   F     a CSI's final ASCII letter ("csi malformed" may also name "~", which ends a CSI too)
 #   B     what stood between "ESC [" and F in a CSI of an unexpected form: ASCII digits and
 #         punctuation only (space written as _), at most 16 characters
-#   P     a CSI's parameter string: digits ; ? > only, at most 16 characters
+#   P     a CSI's parameter string: digits ; ? > < = only, at most 16 characters
 #   N     an erase mode, a number within the CSI bound
 # refusal_detail() below is the only place a detail string is built, and it returns
 # nothing DETAIL does not match. A detail is kept with its attempt (setup_provider.detail)
@@ -110,7 +110,7 @@ _DETAIL_FORMS = (
     r"control 0x[01][0-9a-f]",                 # a control character that is not handled
     r"escape (?:[!-~]|other)",                 # an escape that is not CSI, OSC or a handled one
     r"csi malformed(?: [A-Za-z~](?: [!-?_]{1,16})?)?",  # not the expected CSI form: F, then B
-    r"csi private [?>][0-9;]{0,15} [A-Za-z]",  # a ? or > CSI outside the allowed sets: P, then F
+    r"csi private [?><=][0-9;]{0,15} [A-Za-z]",  # a ? > < or = CSI outside the allowed sets: P, then F
     r"csi range",                              # a number above the bound
     r"csi [KJ] [0-9]{1,4}",                    # an erase mode that is not handled
     r"csi final [A-Za-z](?: [0-9;]{1,16})?",   # a final letter that is not handled: F, then a short P
@@ -248,6 +248,15 @@ _PRIVATE_MODES = frozenset({"25", "1004", "1049", "2004", "2031"})
 # Unanswered queries (kitty keyboard, XTVERSION, primary device attributes)
 # and the full-screen scroll-region reset; none changes the modelled screen.
 _IGNORED_CSI = frozenset({("?", "u"), (">", "q"), (">0", "q"), ("", "c"), ("0", "c"), ("", "r")})
+# Keyboard-mode switch-offs: they stop a way of reporting key presses to the program and
+# never change what the screen shows. XTMODKEYS reset, "CSI > 4 m": Claude 2.1.325 sends it
+# once the code is entered (seen on a real sign-in through the refusal detail
+# "csi private >4 m"); "CSI > 4 ; 0 m" is the same reset written out. The kitty keyboard
+# protocol's pop, "CSI < [n] u", is its twin, sent on the same way out; it has not been
+# seen from Claude here. The forms that turn a reporting mode ON stay refused
+# ("CSI > 4 ; 1-2 m", kitty push "CSI > n u" and set "CSI = n ; m u"): after one of
+# those the program would expect keys in another encoding than the bytes typed here.
+_KEYBOARD_MODES = re.compile(r"(?:>4(?:;0)?m|<[0-9]{0,2}u)\Z")
 
 
 class TokenScreen:
@@ -265,7 +274,7 @@ class TokenScreen:
         return "<private Claude sign-in screen>"
 
     def _csi(self, value):
-        match = re.fullmatch(r"\x1b\[([?>]?[0-9;]*)([A-Za-z])", value)
+        match = re.fullmatch(r"\x1b\[([?><=]?[0-9;]*)([A-Za-z])", value)
         if not match:
             body = value[2:-1].replace(" ", "_")  # digits and punctuation only, or it is left out
             raise SigninRefused("unsupported_output", refusal_detail("csi malformed", value[-1], body))
@@ -274,7 +283,9 @@ class TokenScreen:
             return
         if raw[:1] == "?" and final in "hl" and set(raw[1:].split(";")) <= _PRIVATE_MODES:
             return
-        if raw[:1] in {"?", ">"}:
+        if _KEYBOARD_MODES.match(raw + final):
+            return
+        if raw[:1] in {"?", ">", "<", "="}:
             raise SigninRefused("unsupported_output", refusal_detail("csi private", raw[:16], final))
         numbers = [int(v or 0) for v in raw.split(";")]
         if any(v > 4096 for v in numbers):
