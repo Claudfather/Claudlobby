@@ -44,7 +44,9 @@ finished one with health errors. It never dispatches a Preview, a prepared first
 team or a prepared addition; only its Launch does. A computer that is prepared
 but not started, untouched or partway through its cards, is not moved: it
 answers `needs_reset`. None of the three waits for the updater, rewrites the
-receipt or asks a card. The [owner SSH carrier](architecture/owner-ssh-carrier.md)
+receipt or asks a card. `update` installs whatever fast-forward commit the
+client names: the client's pinned revision decides what is installed, as it
+does for preparation. The [owner SSH carrier](architecture/owner-ssh-carrier.md)
 lists their requests, answers and refusals.
 
 ## Browser connection remains a separate gate

@@ -27,7 +27,8 @@ refuse() {
     case "$operation" in
         host-install-v1|host-install-status-v1)
             printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"%s","next":"%s","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"%s"}\n' "$1" "$2" "$operation" "$3" ;;
-        *) printf '{"code":"%s","operation":"%s","schema_version":1,"state":"%s"}\n' "$1" "$operation" "$3" ;;
+        *) case "$1" in invalid_request) ;; *) set -- unavailable "$2" unavailable ;; esac
+           printf '{"code":"%s","operation":"%s","schema_version":1,"state":"%s"}\n' "$1" "$operation" "$3" ;;
     esac
 }
 if [ "$#" -ne 1 ]; then refuse invalid_request stop refused; exit 2; fi
@@ -67,8 +68,15 @@ UPDATE_ACTIONS = {"update-status": "host-update-status-v1", "update": "host-upda
 UPDATE_KEYS = {"update-status": ({"schema_version", "expected_uid"}, {"compare_revision"}),
                "update": ({"schema_version", "expected_uid", "expected_installed_revision", "target_revision"}, set()),
                "update-continue": ({"schema_version", "expected_uid", "request_id"}, set())}
-# The updater's exit for continue --expected-request on an undispatched team.
+# The updater's exit, before any dispatch, for an undispatched team preparation:
+# continue --expected-request, and apply for that team's own target.
 NOT_CONTINUABLE_EXIT = 7
+# Each update action's refusals; any other code is answered as unavailable (exit 6),
+# and a malformed request as invalid_request (exit 2).
+UPDATE_REFUSALS = {"update-status": set(),
+                   "update": {"not_prepared", "installed_changed", "already_current", "update_in_progress",
+                              "not_forward", "needs_reset"},
+                   "update-continue": {"not_prepared", "no_such_request", "nothing_to_continue", "not_continuable"}}
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -1772,6 +1780,9 @@ def update_execute(action, value, deadline):
             answer = dispatched(result, target=target)
             if answer is not None:
                 return answer
+            if result.returncode == NOT_CONTINUABLE_EXIT:
+                # A team preparation for this target appeared after the read above.
+                raise Refusal("update_in_progress")
             # The updater refuses anything but a fast-forward to a commit it fetched.
             if (git(runner, reads, source, "cat-file", "-e", target + "^{commit}", check=False).returncode == 0
                     and not ancestor(runner, reads, source, head, target)):
@@ -1815,8 +1826,12 @@ def update_main(action, fd=0):
     try:
         answer = update_execute(action, request(fd, deadline, action), deadline)
     except Refusal as error:
-        code = "unavailable" if error.state == "unavailable" and error.code == "inspection_unavailable" else error.code
-        answer, exit_code = {"state": error.state, "code": code}, error.exit_code
+        if error.code == "invalid_request":
+            answer, exit_code = {"state": "refused", "code": "invalid_request"}, 2
+        elif error.state == "refused" and error.code in UPDATE_REFUSALS[action]:
+            answer, exit_code = {"state": "refused", "code": error.code}, 4
+        else:
+            answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
     except Exception:
         answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
     finally:
@@ -1968,7 +1983,7 @@ if ! darwin_existing_python "$(/usr/bin/id -u)"; then
     case "$operation" in
         host-install-v1|host-install-status-v1)
             printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"runtime_not_admitted","next":"inspect","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"unavailable"}\n' "$operation" ;;
-        *) printf '{"code":"runtime_not_admitted","operation":"%s","schema_version":1,"state":"unavailable"}\n' "$operation" ;;
+        *) printf '{"code":"unavailable","operation":"%s","schema_version":1,"state":"unavailable"}\n' "$operation" ;;
     esac
     exit 6
 fi

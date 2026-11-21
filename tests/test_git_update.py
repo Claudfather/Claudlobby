@@ -2903,3 +2903,39 @@ def test_the_expected_request_is_accepted_only_by_continue(update, monkeypatch):
     for argv in (["apply", "--expected-request", REQUEST], ["status", "--expected-request", REQUEST]):
         with pytest.raises(UpdateError, match="only by continue"):
             _main_continue(installation, monkeypatch, *argv)
+
+
+@pytest.mark.parametrize("kind", ["first_team", "addition"])
+def test_apply_never_dispatches_an_undispatched_team_for_its_own_target(update, monkeypatch, kind):
+    """A Preview for target T made after a client read the record: `apply T`
+    refuses it under the lock, before authorization or any dispatch."""
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    _held_record(installation, target, kind)
+    path = installation.data_root / "state/update.json"
+    raw = path.read_bytes()
+    monkeypatch.setattr(updater, "_dispatch_locked", lambda *_a: pytest.fail("dispatched"))
+    monkeypatch.setattr(updater, "_application_stage", lambda *_a, **_k: pytest.fail("authorized"))
+    with pytest.raises(updater.NotContinuable, match="never dispatched"):
+        updater.apply_or_continue(installation, target=target, from_prepared_remote=True)
+    assert path.read_bytes() == raw
+    # The installed updater's own exit status for it.
+    install_launcher(installation, interpreter=Path(sys.executable).resolve())
+    install_updater(installation, interpreter=Path(sys.executable).resolve())
+    result = subprocess.run([str(installation.bin / "claudlobby-update"), "--root", str(installation.data_root),
+                             "host", "update", "apply", target],
+                            env=constructed_env(), capture_output=True, text=True, timeout=60)
+    assert result.returncode == 7 and "never dispatched" in result.stderr and result.stdout == ""
+    assert path.read_bytes() == raw
+
+
+def test_a_launch_still_dispatches_its_own_prepared_team(update, monkeypatch):
+    """A Launch resolves no prepared remote: its call passes the new refusal."""
+    import types
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    _held_record(installation, target, "first_team")
+    monkeypatch.setattr(updater, "runpy", types.SimpleNamespace(run_path=lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("past the refusal"))))
+    with pytest.raises(RuntimeError, match="past the refusal"):
+        updater.apply_or_continue(installation, expected_request_id=REQUEST)

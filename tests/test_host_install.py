@@ -1146,7 +1146,8 @@ def test_the_shell_answers_each_update_action_in_its_own_names(tmp_path, action,
         result = subprocess.run([shell, str(script), action], input=b"", env=constructed_env(),
                                 capture_output=True, timeout=5)
         assert result.returncode == 6 and result.stderr == b"", (shell, result)
-        assert json.loads(result.stdout) == {"code": "prerequisite_missing", "operation": operation,
+        # A code outside the action's contract is answered as unavailable.
+        assert json.loads(result.stdout) == {"code": "unavailable", "operation": operation,
                                              "schema_version": 1, "state": "unavailable"}
         # Two arguments name no action: the preparation's own refusal.
         result = subprocess.run([shell, str(SCRIPT), action, "extra"], input=b"", env=constructed_env(),
@@ -1161,7 +1162,7 @@ def test_the_shell_answers_each_update_action_in_its_own_names(tmp_path, action,
         result = subprocess.run([shell, str(script), action], input=b"", env=constructed_env(),
                                 capture_output=True, timeout=5)
         assert result.returncode == 6, (shell, result)
-        assert json.loads(result.stdout) == {"code": "runtime_not_admitted", "operation": operation,
+        assert json.loads(result.stdout) == {"code": "unavailable", "operation": operation,
                                              "schema_version": 1, "state": "unavailable"}
 
 
@@ -1334,7 +1335,7 @@ def _rewrite(home, record, **changes):
 
 @pytest.mark.parametrize("case", ["stale", "current", "not_started", "untouched", "other_target", "health_errors",
                                   "undispatched_other", "preview_same_target", "addition", "not_forward",
-                                  "refused"])
+                                  "raced_preview", "refused"])
 def test_update_refuses_by_name(tmp_path, local_install_source, case):
     _remote, _wheels, revision = local_install_source
     setup = {"not_started": "in_use", "untouched": "untouched"}.get(case, "started")
@@ -1362,16 +1363,21 @@ def test_update_refuses_by_name(tmp_path, local_install_source, case):
     elif case == "not_forward":
         later, _git = _commit(family / "install/src", message="unrelated")
         expected = "not_forward"
+    elif case == "raced_preview":
+        # Nothing on disk when the script read; under its lock the updater found a
+        # Preview for this target and refused it (exit 7) before any dispatch.
+        expected = "update_in_progress"
     else:
         later, expected, exit_code = "c" * 40, "unavailable", 6
     path = family / "data/state/update.json"
     before = path.read_bytes() if path.exists() else None
     result, answer, children = invoke_update(tmp_path, home, "update", update_frame(
-        expected_installed_revision=shown, target_revision=later), {"apply": [6, ""]})
+        expected_installed_revision=shown, target_revision=later),
+        {"apply": [7 if case == "raced_preview" else 6, ""]})
     assert (result.returncode, answer) == (exit_code, {"schema_version": 1, "operation": "host-update-v1",
                                                        "state": "refused" if exit_code == 4 else "unavailable",
                                                        "code": expected}), answer
-    assert len(_launched(children, "apply")) == (1 if case in {"not_forward", "refused"} else 0)
+    assert len(_launched(children, "apply")) == (1 if case in {"not_forward", "raced_preview", "refused"} else 0)
     assert (path.read_bytes() if path.exists() else None) == before
     assert git("rev-parse", "HEAD") == revision
 
@@ -1440,3 +1446,90 @@ def test_update_continue_refuses_by_name(tmp_path, local_install_source, case):
     assert len(continued) == (1 if case in {"raced_team", "raced_record", "updater_failed", "old_updater"} else 0)
     if case != "raced_record":
         assert (path.read_bytes() if path.exists() else None) == before
+
+
+CONTRACT = {"update-status": set(),
+            "update": {"not_prepared", "installed_changed", "already_current", "update_in_progress", "not_forward",
+                       "needs_reset"},
+            "update-continue": {"not_prepared", "no_such_request", "nothing_to_continue", "not_continuable"}}
+
+
+def _every_refusal_code():
+    import re
+    codes = set(re.findall(r'Refusal\("([a-z_]+)"', BODY)) | set(re.findall(r'unavailable\("([a-z_]+)"\)', BODY))
+    # update_refusal and continue_refusal return theirs, raised as Refusal(code).
+    return codes | {"inspection_unavailable"} | set().union(*CONTRACT.values())
+
+
+@pytest.mark.parametrize("action", sorted(CONTRACT))
+def test_every_code_an_update_action_can_answer_is_its_contract(action, monkeypatch):
+    """Whatever the script raises, an update action answers only its own listed
+    refusals, invalid_request (exit 2) or unavailable (exit 6)."""
+    module = payload()
+    assert module.UPDATE_REFUSALS == CONTRACT
+    monkeypatch.setattr(module, "signal", types.SimpleNamespace(
+        signal=lambda *_a: None, setitimer=lambda *_a: None, SIGTERM=15, SIGINT=2, SIGALRM=14, ITIMER_REAL=0))
+    monkeypatch.setattr(module, "request", lambda *_a: {"schema_version": 1, "expected_uid": os.getuid()})
+    seen = set()
+    codes = _every_refusal_code()
+    assert {"existing_installation", "identity_changed", "source_mismatch", "invalid_request"} <= codes
+    for code in sorted(codes):
+        for state, exit_code in (("refused", 4), ("unavailable", 6)):
+            def execute(*_a, code=code, state=state, exit_code=exit_code):
+                raise module.Refusal(code, state, exit_code=exit_code)
+            monkeypatch.setattr(module, "update_execute", execute)
+            buffer = types.SimpleNamespace(data=b"")
+            monkeypatch.setattr(module.sys, "stdout", types.SimpleNamespace(
+                buffer=types.SimpleNamespace(write=lambda raw, buffer=buffer: setattr(buffer, "data", raw))))
+            returned = module.update_main(action)
+            answer = json.loads(buffer.data)
+            assert set(answer) == {"schema_version", "operation", "state", "code"}
+            if code == "invalid_request":
+                assert (returned, answer["state"], answer["code"]) == (2, "refused", "invalid_request")
+            elif state == "refused" and code in CONTRACT[action]:
+                assert (returned, answer["state"], answer["code"]) == (4, "refused", code)
+            else:
+                assert (returned, answer["state"], answer["code"]) == (6, "unavailable", "unavailable"), code
+            seen.add(answer["code"])
+    assert seen == CONTRACT[action] | {"invalid_request", "unavailable"}
+    # The carrier document lists the same codes.
+    carrier = (ROOT / "documentation/architecture/owner-ssh-carrier.md").read_text()
+    section = carrier.split("## Updating a started computer\n", 1)[1].split("\n## ", 1)[0]
+    for code in CONTRACT[action] | {"invalid_request", "unavailable"}:
+        assert f"`{code}`" in section, code
+
+
+def test_the_budget_alarm_answers_unavailable(tmp_path):
+    """An update action whose budget runs out answers unavailable; the record is left to say the truth."""
+    driver = tmp_path / "budget-driver.py"
+    driver.write_text('''import sys,types,time
+from pathlib import Path
+body=Path(sys.argv[1]).read_text().split("# BEGIN EMBEDDED PYTHON\\n",1)[1].split("# END EMBEDDED PYTHON\\n",1)[0]
+m=types.ModuleType("isolated_operation");exec(compile(body,sys.argv[1],"exec"),m.__dict__)
+m.BUDGETS["update"]=time.monotonic()-m.STARTED+4.2
+m.request=lambda *_a: {"schema_version":1,"expected_uid":1001,"expected_installed_revision":"a"*40,"target_revision":"b"*40}
+def execute(*_a):
+    time.sleep(120)
+m.update_execute=execute
+raise SystemExit(m.update_main("update"))
+''')
+    result = subprocess.run([sys._base_executable, "-I", "-B", str(driver), str(SCRIPT)], input=b"",
+                            env=constructed_env(), capture_output=True, timeout=60)
+    assert result.returncode == 6, result
+    assert json.loads(result.stdout) == {"code": "unavailable", "operation": "host-update-v1",
+                                         "schema_version": 1, "state": "unavailable"}
+
+
+def test_update_status_reading_a_corrupt_record_answers_unavailable(tmp_path, local_install_source):
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    path = family / "data/state/update.json"
+    path.write_text("{not json"); path.chmod(0o600)
+    before = snapshot(home)
+    for action, value in (("update-status", {}), ("update", {"expected_installed_revision": "a" * 40,
+                                                            "target_revision": "b" * 40}),
+                          ("update-continue", {"request_id": REQUEST_ID})):
+        result, answer, children = invoke_update(tmp_path, home, action, update_frame(**value))
+        assert (result.returncode, answer) == (6, {"schema_version": 1, "operation": UPDATE_OPERATIONS[action],
+                                                   "state": "unavailable", "code": "unavailable"}), answer
+        assert _launched(children, "apply") == [] and _launched(children, "continue") == []
+    assert snapshot(home) == before

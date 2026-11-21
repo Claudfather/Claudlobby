@@ -358,7 +358,10 @@ check, so all three answer while an update is in maintenance.
 
 `update` runs `host update apply <target>`: forward only, from the receipt's
 remote, on a started computer. The same target in flight is asked for again
-and attaches or continues. Its refusals are `installed_changed` (the installed
+and attaches or continues. Under its own lock the updater refuses, with exit 7
+and before any dispatch, to apply a Preview or a prepared first team or
+addition for that same target that no Launch dispatched; the script answers
+that as `update_in_progress`. A Launch never takes this route. Its refusals are `installed_changed` (the installed
 revision is not the one shown), `update_in_progress` (an unfinished record for
 another target, or a team preparation that no Launch dispatched),
 `already_current`, `needs_reset` (prepared but not started: an untouched
@@ -372,7 +375,34 @@ Launch dispatched; only its Launch dispatches it. A start (dispatched or not),
 an ordinary update and any dispatched record are continued, a `done` record
 with health errors included. Its refusals are `no_such_request`,
 `nothing_to_continue`, `not_continuable` and `not_prepared`. Without the flag
-`host update continue` is unchanged. Anything else is `unavailable` (exit 6).
+`host update continue` is unchanged.
+
+Those are the only codes the three actions answer, beside `invalid_request`
+(exit 2). Anything else is `unavailable` (exit 6): the shell's own refusals (no
+system Python, a Mac runtime that is not admitted), every check of the
+installation itself (another installation, a changed identity or source, a
+preparation in progress, an unusable prerequisite, an unsupported platform), a
+record the updater cannot read, an updater that refuses or does not know the
+flag, and a budget that runs out. A client reads `update-status` again after
+any of them.
+
+A team preparation is told by two keys of the update record: an
+`initialization_scope` whose `manifests` list is not empty (a first team) and
+`addition_scope` (an addition). `addition_scope` is part of this contract: the
+phase that writes additions must use that key, or an undispatched addition
+would read as an ordinary update and could be continued or applied.
+"Dispatched" means the record has `job_dispatch`.
+
+What `update` installs is decided by its caller. The updater installs any
+commit the caller names that is a fast-forward of the checkout and that the
+receipt's remote serves; nothing checks that the commit is on a particular
+branch. The client's pinned revision is the trust root, as it is for
+`prepare`.
+
+`update-continue` serves an unfinished record whatever happened to its approval
+after dispatch: withdrawing an approval does not stop it, by design. The request
+id it is held to proves only that the record has not been replaced since the
+client read it; it is not proof that anyone approved it.
 
 The three actions build a fresh environment: the guide script's four pinned
 selectors (`CLAUDLOBBY_ROOT`, `CLAUDLOBBY_INSTALLATION`,

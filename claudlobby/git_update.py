@@ -1619,6 +1619,12 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
         raise UpdateError("prepare-only requires an undispatched first-install operation")
     if pending and target is not None and target != record["target"]:
         raise UpdateError("continue the existing frozen target before requesting another")
+    if pending and from_prepared_remote and team_preparation(record) and record.get("job_dispatch") is None:
+        # `host update apply`, under the lock: a Preview or a prepared first team
+        # or addition for this same target is never dispatched by apply. Only its
+        # Launch dispatches it, and a Launch never resolves a prepared remote.
+        raise NotContinuable(f"update request {record['request_id']} is a team preparation that was never "
+                             "dispatched; only its Launch dispatches it")
     if pending and record["phase"] != "prepare" and record.get("job_support") is not None:
         jobs, independent, adapter = _retained_job(store)
         _authorize_retained_operator(store, adapter)
