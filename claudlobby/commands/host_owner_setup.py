@@ -198,9 +198,9 @@ def _commit_owner_override(plan):
         temporary.unlink(missing_ok=True)
 
 
-def _configuration(args, paths, terminal, cli):
+def _serving_configuration(args, paths, terminal, cli):
+    """The owner listener's exact settings, validated by the service's own builder."""
     from ..plane.owner_service import service_command
-    from .setup import _template_config, _local_project, _account_directory
     config = {
         "origin": _input(terminal, args.origin, "This computer's exact private HTTPS origin"),
         "tailscale": _input(terminal, args.tailscale, "Absolute native Tailscale executable"),
@@ -215,6 +215,12 @@ def _configuration(args, paths, terminal, cli):
         service_command(paths.root, cli, config)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "local serving configuration is invalid; review exact HTTPS origins and absolute native paths") from exc
+    return config
+
+
+def _configuration(args, paths, terminal, cli):
+    from .setup import _template_config, _local_project, _account_directory
+    config = _serving_configuration(args, paths, terminal, cli)
     fleet = _input(terminal, args.target_fleet, "First team name", "web-app")
     template = getattr(args, "template", "revenue-web-app")
     project = getattr(args, "project_directory", None)
