@@ -181,8 +181,7 @@ def prepare_operation(store, rendered, adapter, install_directory, interpreter, 
     if baseline is not None and initialize:
         raise UpdateError('sealed conversion cannot initialize existing storage')
     if initialize:
-        if not rendered.fleets:
-            raise UpdateError("initialization requires a frozen first-team fleet")
+        # A computer may be started with no team: an empty roster has nothing to scan.
         _fresh_root(store)
         current = None
         preflight_registry_scan(context_from_plan(rendered, fleet, package=adapter.package)
