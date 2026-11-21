@@ -1672,8 +1672,8 @@ def progress(record, dispatch, now):
     # looks at the native job. A key the updater did not write, or wrote in another
     # shape, reads as null or false and refuses nothing.
     error = record.get("stage_error")
-    stage = (None if not error else error.get("stage") if isinstance(error, dict) and error.get("stage") in STAGES
-             else "other")
+    named = error.get("stage") if isinstance(error, dict) else None
+    stage = None if not error else named if isinstance(named, str) and named in STAGES else "other"
     units, field, consumers = None, UNIT_FIELDS.get(record["phase"]), record.get("consumers")
     if field and isinstance(consumers, dict) and consumers:
         # A unit with a restore error has not finished: the updater's own count.
@@ -1686,13 +1686,14 @@ def progress(record, dispatch, now):
         at = clock.get(key)
         return max(0, int(now) - at) if type(at) is int else None
     outcome = record.get("job_outcome")
-    # Only the outcome of the current dispatch speaks for it.
-    outcome = (outcome["result"] if isinstance(outcome, dict) and outcome.get("result") in OUTCOMES
-               and outcome.get("attempt") == attempt else None)
+    # Only the outcome of the current dispatch speaks for it; with no dispatch, none does.
+    outcome = (outcome["result"] if isinstance(outcome, dict) and isinstance(outcome.get("result"), str)
+               and outcome["result"] in OUTCOMES and type(attempt) is int and outcome.get("attempt") == attempt
+               else None)
     waits = record.get("runtime_waits")
     latest = waits[-1] if isinstance(waits, list) and waits else None
     errors = record.get("health_errors") or {}
-    return {"stage": stage, "units": units, "runner": state if state in RUNNERS else "none",
+    return {"stage": stage, "units": units, "runner": state if isinstance(state, str) and state in RUNNERS else "none",
             "pending_seconds": age("pending_at"), "entered_seconds": age("entered_at"), "outcome": outcome,
             "waiting": isinstance(record.get("runtime_wait"), dict),
             "runtime_busy": isinstance(latest, dict) and latest.get("outcome") == "refused",

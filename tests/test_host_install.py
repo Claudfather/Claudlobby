@@ -1314,6 +1314,13 @@ PROGRESS = {
                       "runtime_waits": [{"gate": "drain", "outcome": "taken"}, {"gate": "cutover", "outcome": "refused"}]},
                      {"waiting": False, "runtime_busy": True, "failed": True}),
     "busy_before": ({"runtime_waits": [{"outcome": "refused"}, {"outcome": "taken"}]}, {"runtime_busy": False}),
+    # An outcome with no dispatch to speak for (the updater writes none) says nothing.
+    "no_dispatch_outcome": ({"job_outcome": {"attempt": None, "at": NOW, "result": "refused"}},
+                            {"runner": "none", "outcome": None, "failed": False}),
+    # Unhashable values where a code belongs read as `other` or nothing, and refuse nothing.
+    "unhashable": ({"stage_error": {"stage": ["restore"]}, "job_dispatch": {"state": ["entered"], "attempt": 1},
+                    "job_outcome": {"attempt": 1, "at": NOW, "result": ["refused"]}},
+                   {"stage": "other", "runner": "none", "outcome": None}),
     "unhealthy": ({"phase": "done", "health_errors": {"b.service": "x", "a.timer": "y"}},
                   {"unhealthy_units": 2, "failed": True}),
     # Keys in a shape this script does not know read as nothing, and refuse nothing.
@@ -1344,11 +1351,26 @@ def test_update_status_reports_where_the_update_is_from_the_record_alone(name):
     assert "secret text" not in json.dumps(update)
 
 
-def test_the_carrier_document_names_every_update_field():
+def test_the_carrier_document_names_exactly_the_update_fields():
+    import re
     carrier = (ROOT / "documentation/architecture/owner-ssh-carrier.md").read_text()
     section = carrier.split("## Updating a started computer\n", 1)[1].split("\n## ", 1)[0]
-    for key in UPDATE_KEYS | payload().STAGES | payload().OUTCOMES:
+    listed = re.sub(r"\([^)]*\)", "", section.split("in the names a\nclient reads: ", 1)[1].split(", then where", 1)[0])
+    table = [line.split("|")[1] for line in section.splitlines() if line.startswith("| `")
+             and "`" in line.split("|")[1] and line.split("|")[2].strip() != ""]
+    progress = [line for line in table if not line.strip().startswith(("`update-status`", "`update`",
+                                                                       "`update-continue`"))]
+    named = set(re.findall(r"`([a-z_]+)`", listed)) | {key for line in progress
+                                                        for key in re.findall(r"`([a-z_]+)`", line)}
+    assert named == UPDATE_KEYS
+    for key in payload().STAGES | payload().OUTCOMES:
         assert f"`{key}`" in section, key
+    # A record of each shape still yields only those fields, and update/continue's own reads work on it.
+    module = payload()
+    for changes, _expected in PROGRESS.values():
+        update = module.summary({**SUMMARY_BASE, **changes}, now=NOW)
+        assert set(update) == UPDATE_KEYS
+        module.unfinished(update), module.undispatched_team(update)
 
 
 def test_the_stage_codes_are_the_updaters_own_stages():

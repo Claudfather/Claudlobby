@@ -368,12 +368,16 @@ text, unit names beyond `health_errors`, or a credential, and a key in a shape
 the script does not know reads as `null` or false and refuses nothing.
 
 The updater's job writes those keys. Each dispatch saves `job_clock` with
-`pending_at` and drops any earlier `job_outcome`; the job adds `entered_at` when
-it enters the update. A job run that has shown it is the job then saves, in one
-write with its dispatch `finished` when it entered, `job_outcome`: `attempt`,
-`at` (epoch seconds) and `result` (`finished` when it returned, `unfinished`
-when it raised after entering, `refused` when it was refused before). Its
-notice that the update did not finish is sent even when that save fails.
+`pending_at` and drops any earlier `job_outcome`; the job adds `entered_at` and
+drops any earlier `job_outcome` when it enters the update, so a run again on
+the same dispatch is judged by its own end. A job run that has shown it is the
+job then saves, in one write with its dispatch `finished` when it entered,
+`job_outcome`: `attempt`, `at` (epoch seconds) and `result` (`finished` when it
+returned, `unfinished` when it entered and did not return, an interruption
+included, `refused` when it was refused before entering). A process refused
+before it has shown it is the job, and a record with no dispatch, get no
+outcome; so `outcome` is `null` whenever there is no dispatch. The notice that
+the update did not finish is sent even when that save fails.
 
 The receipt is checked against its own
 revision, never against one a client sent; the installed revision is whatever

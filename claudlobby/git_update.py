@@ -439,7 +439,7 @@ def _validate(installation, record):
         outcome = record.get("job_outcome")
         if outcome is not None and (type(outcome) is not dict or set(outcome) != {"attempt", "at", "result"}
                 or outcome["result"] not in JOB_RESULTS or type(outcome["at"]) is not int or outcome["at"] < 0
-                or outcome["attempt"] is not None and (type(outcome["attempt"]) is not int or outcome["attempt"] < 1)):
+                or type(outcome["attempt"]) is not int or outcome["attempt"] < 1):
             raise ValueError()
         for name, identity in record["scope"].items():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}", name) or not _SHA.fullmatch(identity):
@@ -2007,21 +2007,23 @@ def _notify_unfinished(store, failure):
     _notify(store, "this update did not finish", lambda record: _unfinished_text(store.root, record, failure))
 
 
-def _record_outcome(store, failure, *, entered):
+def _record_outcome(store, *, returned, entered):
     """Save how this job run ended, with its dispatch finished when it entered: one write.
 
     The outcome is decided here, by the job itself, and read from the record
-    alone: `finished` when the run returned, `unfinished` when it raised after
-    entering the update, `refused` when it was refused before entering it.
+    alone: `finished` when the run returned, `unfinished` when it entered the
+    update and did not return (an interruption included), `refused` when it was
+    refused before entering it. A record with no dispatch gets none: the run
+    spoke for no dispatch.
     """
     record = store.load()
-    if record is None:
+    dispatch = record.get("job_dispatch") if record is not None else None
+    if dispatch is None:
         return
-    dispatch = record.get("job_dispatch")
     if entered:
         record["job_dispatch"] = dispatch = {**dispatch, "state": "finished"}
-    record["job_outcome"] = {"attempt": dispatch["attempt"] if dispatch is not None else None, "at": _epoch(),
-                             "result": "finished" if failure is None else "unfinished" if entered else "refused"}
+    record["job_outcome"] = {"attempt": dispatch["attempt"], "at": _epoch(),
+                             "result": "finished" if returned else "unfinished" if entered else "refused"}
     store.save(record)
 
 
@@ -2030,12 +2032,15 @@ def _run_native_update(installation):
 
     A run that leaves the update unfinished posts one notice before it exits, a
     refused run included (#2715), unless the refusal says this process may not
-    be the update's job. A run that speaks records its outcome first, and a
-    record that cannot be saved never stops the notice or replaces the run's
-    own error.
+    be the update's job. A run that has shown it is the job records its outcome
+    first, and a record that cannot be saved never stops the notice or replaces
+    the run's own error.
     """
     with UpdateStore(installation, wait=True) as store:
         failure, speaks, entered = None, True, False
+        # Only a process that has shown it is the job writes an outcome for the
+        # job's dispatch; one refused before that may be a hand-run `_run`.
+        proven, returned = False, False
         try:
             jobs, independent, adapter = _retained_job(store)
             record = store.load()
@@ -2048,26 +2053,30 @@ def _run_native_update(installation):
                 raise UpdateError("independent native job has no retained binding")
             jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
                                           native_target=binding["target"])
-            speaks = True
+            speaks = proven = True
             _check_bound_job(store, jobs, independent, adapter)
             dispatch = record.get("job_dispatch")
             if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
                 raise UpdateError("native updater lacks its original dispatch intent")
             record["job_dispatch"] = {**dispatch, "state": "entered"}
             record["job_clock"] = {**record.get("job_clock", {}), "entered_at": _epoch()}
+            # A run again on the same dispatch is not the run that ended before it.
+            record.pop("job_outcome", None)
             store.save(record)
             entered = True
-            return run_prepared_update(store)
+            result = run_prepared_update(store)
+            returned = True
+            return result
         except Exception as exc:
             failure = exc
             raise
         finally:
             try:
-                if speaks:
-                    _record_outcome(store, failure, entered=entered)
+                if proven:
+                    _record_outcome(store, returned=returned, entered=entered)
             except Exception as exc:
                 print(f"claudlobby update: this run's outcome was not recorded: {type(exc).__name__}", file=sys.stderr)
-                if failure is None:
+                if returned:
                     raise
             finally:
                 if speaks:
