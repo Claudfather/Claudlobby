@@ -167,11 +167,12 @@ seed_workspace_trust "$BOT_DIR" || true
 # --- end workspace trust -----------------------------------------------------
 
 # --- First-run onboarding in a profile kept for the bots ----------------------
-# A Claude profile that only a sign-in has touched (website setup gives the bots
-# one, CLAUDE_CONFIG_DIR from bot.conf) opens claude on its first-run screens: a
-# colour theme, then a notice. Headless, they wait for a key nobody presses and
-# the start times out. Neither is a consent, so mark onboarding done for the
-# version this bot launches. The operator default ~/.claude is left alone.
+# On a browser installation, website setup signs the bots profile in
+# (CLAUDE_CONFIG_DIR from bot.conf) and nothing else ever opens it, so claude
+# starts on its first-run screens: a colour theme, then a notice. Headless,
+# they wait for a key nobody presses and the start times out. Neither is a
+# consent, so mark onboarding done for the version this bot launches. Every
+# terminal installation, and any default ~/.claude, is left alone.
 # Merges two keys, never rewrites the file. Non-fatal.
 seed_account_onboarding || true
 # --- end first-run onboarding --------------------------------------------------
@@ -280,9 +281,10 @@ TGTOKEOF
 
 # The launched binary comes from fleet_claude_bin (lib-common): CLAUDE_BIN when
 # set, so the validation harness (validate-bot-change.sh) can inject a stub for
-# a hermetic, auth-free start; else the staged fleet link, once the OPT-IN
-# staged update (#1768) has verified and linked a version; else `claude` on
-# PATH inside the session, as before.
+# a hermetic, auth-free start; else, on a browser installation, its pinned
+# provider-bin/claude (fleet_provider_claude), never replaced from PATH; else
+# the staged fleet link, once the OPT-IN staged update (#1768) has verified and
+# linked a version; else `claude` on PATH inside the session, as before.
 # The plugin-management calls below honor the same override: the PATH rebuild
 # above discards any harness-prepended stub dir, so this seam is the only way
 # to drive that block hermetically (without it, tests can only skip the block

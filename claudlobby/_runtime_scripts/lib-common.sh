@@ -7127,23 +7127,27 @@ seed_workspace_trust() {
 # is a consent: the theme is a display preference and the notice is
 # information; the account owner consented when they signed in.
 #
-# Only an explicit CLAUDE_CONFIG_DIR (bot.conf sets one for every named or
-# non-default account) is touched; the operator's own default ~/.claude is
-# theirs, and start-bot.sh calls this with no argument. The argument is the
-# config JSON file, for a test. lastOnboardingVersion is the version of the
+# Only a browser installation (fleet_provider_claude) is touched, and only its
+# explicit CLAUDE_CONFIG_DIR: website setup signed that profile in before any
+# bot starts. A terminal installation is left alone even with an explicit
+# CLAUDE_CONFIG_DIR (bot.conf sets one for every named or non-default
+# account): a named account nobody has signed in to yet needs the wizard and
+# its login step. start-bot.sh calls this with no argument; the argument is
+# the config JSON file, for a test. A zero-byte file counts as no file. lastOnboardingVersion is the version of the
 # claude the fleet launches (measure_claude_version, #1772); one that cannot
 # report a version seeds nothing. A profile already onboarded is not read
 # further and its claude is not run. An unreadable file is not ours to repair.
 # Locked with seed_workspace_trust (same lock file), never fatal.
 seed_account_onboarding() {
     local json="${1:-}"
+    fleet_provider_claude >/dev/null || return 0
     if [ -z "$json" ]; then
         [ -n "${CLAUDE_CONFIG_DIR:-}" ] || return 0
         json="$CLAUDE_CONFIG_DIR/.claude.json"
     fi
     command -v jq >/dev/null 2>&1 || return 0
     [ -d "$(dirname "$json")" ] || return 0
-    if [ -f "$json" ]; then
+    if [ -s "$json" ]; then
         jq -e '.' "$json" >/dev/null 2>&1 || return 0
         jq -e '.hasCompletedOnboarding == true' "$json" >/dev/null 2>&1 && return 0
     fi
@@ -7152,7 +7156,7 @@ seed_account_onboarding() {
     _do_onboarding_seed() {
         local tmp
         tmp=$(safe_mktemp) || return 1
-        if [ -f "$json" ]; then
+        if [ -s "$json" ]; then
             jq -e '.' "$json" >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
             jq --arg v "$version" '.hasCompletedOnboarding = true
                 | .lastOnboardingVersion = $v' "$json" > "$tmp" && mv "$tmp" "$json"

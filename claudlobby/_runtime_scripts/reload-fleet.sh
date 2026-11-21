@@ -223,8 +223,9 @@ _reload_critical() {
     # happened to run first. A timer env resolves neither by default, and an
     # unresolvable tool is an install/PATH fault — naming it is the whole
     # difference between a 5-minute fix and a two-day silent outage.
-    # The binary the fleet launches (fleet_claude_bin: CLAUDE_BIN, else the
-    # staged link #1768, else PATH) -- a plugin refreshed through a different
+    # The binary the fleet launches (fleet_claude_bin: CLAUDE_BIN, else a
+    # browser installation pinned provider-bin/claude, else the staged link
+    # #1768, else PATH) -- a plugin refreshed through a different
     # binary than the bots run is a refresh nobody boots with.
     local _claude
     _claude="$(fleet_claude_bin)"

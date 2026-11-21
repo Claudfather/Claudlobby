@@ -12,7 +12,9 @@ one, so the bot never reaches its prompt and its start times out.
 start-bot.sh already trusts the bot's own folder (seed_workspace_trust); this
 marks first-run onboarding done the same way, merging two keys and nothing
 else. Neither screen is a consent: the theme is a display preference and the
-notice is information. The harness helper seed_claude_auth_and_trust writes the
+notice is information. Only a browser installation is touched: a terminal
+installation's named profile may never have been signed in to, and the wizard
+is where that happens. The harness helper seed_claude_auth_and_trust writes the
 same two keys, but writes the whole file, so it is for throwaway profiles only.
 """
 
@@ -47,8 +49,15 @@ def _claude(tmp_path, body='echo "2.1.325 (Claude Code)"'):
     return stub, marker
 
 
-def _seed(tmp_path, claude, *args, config_dir=None):
-    env = constructed_env(HOME=tmp_path / "home", CLAUDE_BIN=claude)
+def _seed(tmp_path, claude, *args, config_dir=None, browser=True):
+    """``browser`` gives the run a browser installation's exact context; the
+    seed acts only there (fleet_provider_claude)."""
+    home = tmp_path / "home"
+    env = constructed_env(HOME=home, CLAUDE_BIN=claude)
+    if browser:
+        family = home / ".local/share/claudlobby-browser"
+        env["CLAUDLOBBY_ROOT"] = str(family / "data")
+        env["CLAUDLOBBY_INSTALLATION"] = str(family / "install")
     if config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     quoted = "".join(f' "{a}"' for a in args)
@@ -114,6 +123,31 @@ def test_the_operators_default_account_is_left_alone(tmp_path):
     assert r.stdout.strip() == "rc=0", r.stderr
     assert list(home.rglob("*")) == []
     assert not marker.exists()
+
+
+def test_a_terminal_installation_with_an_explicit_profile_is_left_alone(tmp_path):
+    # bot.conf sets CLAUDE_CONFIG_DIR for every named or non-default account. On
+    # a computer set up from a terminal such a profile may never have been signed
+    # in to, and the wizard (its login step included) is how that happens.
+    cfg = _profile(tmp_path)
+    before = (cfg / ".claude.json").read_bytes()
+    claude, marker = _claude(tmp_path)
+    r = _seed(tmp_path, claude, config_dir=cfg, browser=False)
+    assert r.stdout.strip() == "rc=0", r.stderr
+    assert (cfg / ".claude.json").read_bytes() == before
+    assert not marker.exists()
+
+
+def test_an_empty_profile_file_is_treated_as_no_file(tmp_path):
+    cfg = _profile(tmp_path)
+    (cfg / ".claude.json").write_bytes(b"")
+    claude, _ = _claude(tmp_path)
+    r = _seed(tmp_path, claude, config_dir=cfg)
+    assert r.stdout.strip() == "rc=0", r.stderr
+    assert json.loads((cfg / ".claude.json").read_text()) == {
+        "hasCompletedOnboarding": True,
+        "lastOnboardingVersion": "2.1.325",
+    }
 
 
 def test_a_claude_that_cannot_report_its_version_seeds_nothing(tmp_path):
