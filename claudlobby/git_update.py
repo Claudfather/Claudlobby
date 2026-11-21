@@ -1642,15 +1642,30 @@ def _apply_or_continue(installation, *, target=None, initialization=None, prepar
             return {"update": record, "dispatch": "nothing_pending"}
         if prepare_only:
             return {"update": record, "dispatch": "prepared"}
-        if record.get("updater_job") is None:
-            jobs, independent, adapter = _prepare_job_support(store)
-            directory = Path(record["native_install_directory"])
-            jobs.prepare_update_job(independent, adapter, directory)
-            jobs.bind_update_job(store, adapter, directory)
-        observed, dispatch = _dispatch_update_job(store)
+        observed, dispatch = _dispatch_locked(store, record)
         dispatched_request_id = record["request_id"]
         if dispatch is None:
             return {"update": store.load(), "job": observed}
+    return _run_dispatched(installation, dispatch, dispatched_request_id)
+
+
+def _dispatch_locked(store, record):
+    """Bind the independent job when it is not yet bound, then freeze one dispatch.
+
+    The caller holds the update lock and runs the returned dispatch only after
+    releasing it.
+    """
+    store._assert_locked()
+    if record.get("updater_job") is None:
+        jobs, independent, adapter = _prepare_job_support(store)
+        directory = Path(record["native_install_directory"])
+        jobs.prepare_update_job(independent, adapter, directory)
+        jobs.bind_update_job(store, adapter, directory)
+    return _dispatch_update_job(store)
+
+
+def _run_dispatched(installation, dispatch, dispatched_request_id):
+    """Start the frozen dispatch with the update lock released."""
     # The native job may acquire update.lock immediately. Never hold it while
     # starting or waiting for the manager's acknowledgement.
     jobs, independent, adapter, directory, native_target = dispatch
