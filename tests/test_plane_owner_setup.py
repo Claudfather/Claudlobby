@@ -973,6 +973,8 @@ def synthetic_signin(setup_authority,monkeypatch,tmp_path):
     program=tmp_path/'synthetic-provider'
     # Each run's OAuth state is 'b'*32 unless a test writes another here (a fresh link).
     state_file=tmp_path/'synthetic-provider-state'
+    # After the code each run prints the success screen, unless a test writes another reply here.
+    reply_file=tmp_path/'synthetic-provider-reply'
     url=('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
          '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
          '&scope=user%3Ainference&code_challenge='+'a'*43+'&code_challenge_method=S256&state=')
@@ -996,6 +998,7 @@ while not typed.endswith(b'\\r'):
     typed+=ch
 code=typed[:-1].decode()
 assert code=='accepted#'+state
+if os.path.exists({str(reply_file)!r}):os.write(1,open({str(reply_file)!r},'rb').read());sys.exit(0)
 sys.stdout.write('\\x1b[2K\\r✓ Long-lived authentication token created successfully!\\r\\nYour OAuth token (valid for 1 year):\\r\\n'+{token!r}+'\\r\\nStore this token securely. You won\\\'t be able to see it again.\\r\\nUse this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\\r\\n');sys.stdout.flush()
 '''
     program.write_text(body);program.chmod(0o700)
@@ -1149,7 +1152,7 @@ def test_provider_signin_retryable_is_reported_exactly_when_the_approval_lets_be
     access=engine.store.access
     ended,successor=str(uuid4()),str(uuid4())
     with access._connection(write=True) as conn:
-        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?)',(ended,grant.generation,'needs_attention','timeout',0,0))
+        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',(ended,grant.generation,'needs_attention','timeout',0,0))
     left=grant.expires_at-access._now()  # the host clock is frozen here
     try:
         monkeypatch.setattr(provider_signin,'MIN_CODE_WINDOW',left-provider_signin.CODE_MARGIN+1)  # one second short
@@ -1597,7 +1600,7 @@ def test_provider_signin_only_a_recorded_timeout_before_code_admits_a_successor(
     ids=[str(uuid4()) for _ in rows]
     with engine.store.access._connection(write=True) as conn:
         for number,(attempt,(state,reason,delivered)) in enumerate(zip(ids,rows),1):
-            conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?)',
+            conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',
                          (attempt,grant.generation,state,reason,delivered,int(number<len(rows))))
     restarted=SetupEngine(engine.store.access)  # every check is read from the record, as after a restart
     status=restarted.signin_status(reader,grant.generation,ids[-1])
@@ -1740,7 +1743,7 @@ def test_provider_signin_two_racing_successors_admit_exactly_one(synthetic_signi
     engine,grant,reader,*_=synthetic_signin
     ended=str(uuid4())
     with engine.store.access._connection(write=True) as conn:
-        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?)',(ended,grant.generation,'needs_attention','timeout',0,0))
+        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',(ended,grant.generation,'needs_attention','timeout',0,0))
     owners=[SetupEngine(engine.store.access) for _ in range(2)]  # two processes, one record
     ids=[str(uuid4()) for _ in owners]
     gate,outcomes=threading.Barrier(2),[None,None]
@@ -1778,7 +1781,7 @@ def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_re
         assert [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]==['attempt_id','generation','state','reason']
     assert restarted.signin_begin(reader,grant.generation,attempt)==ended  # re-reading the original upgrades the table
     with engine.store.access._connection() as conn:
-        assert [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]==['attempt_id','generation','state','reason','code_delivered','retired']
+        assert [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]==['attempt_id','generation','state','reason','code_delivered','retired','detail']
         assert tuple(conn.execute('SELECT code_delivered,retired FROM setup_provider').fetchone())==(None,0)
     with pytest.raises(AccessDenied):restarted.signin_begin(reader,grant.generation,str(uuid4()))
     assert restarted.signin._thread is None
@@ -1789,6 +1792,194 @@ def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_re
     with pytest.raises(AccessUnavailable):restarted.signin_status(reader,grant.generation,attempt)
     with pytest.raises(AccessUnavailable):
         with engine.store.access._connection(write=True) as conn:ProviderSignin.initialize(conn)
+
+
+# --- Which rule refused Claude's reply: named from a closed vocabulary, stored, never sent ---
+
+# Every detail the product makes must fit this. Written here on its own, not imported.
+_DETAIL=(r'(?:utf8|control 0x[01][0-9a-f]|escape (?:[!-~]|other)|csi malformed(?: [A-Za-z~](?: [!-?_]{1,16})?)?'
+         r'|csi private [?>][0-9;]{0,15} [A-Za-z]|csi range|csi [KJ] [0-9]{1,4}'
+         r'|csi final [A-Za-z](?: [0-9;]{1,16})?|token shape|token changed|url changed'
+         r'|bytes|escape length|exit 0 without token)')
+_SIGNIN_URL=('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+             '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+             '&scope=user%3Ainference&code_challenge='+'a'*43+'&code_challenge_method=S256&state=')
+_SIGNIN_TOKENS=['sk-ant-oat01-'+letter*80 for letter in 'ab']
+
+
+def _success_screen(value,clear=True):
+    return (('\r\x1b[2J\x1b[H' if clear else '')+'Long-lived authentication token created successfully!\r\n'
+            'Your OAuth token (valid for 1 year):\r\n'+value+'\r\n'
+            "Store this token securely. You won't be able to see it again.\r\n").encode()
+
+
+def _refusal(*chunks):
+    """What a fresh private screen refuses these chunks with: (reason, detail)."""
+    import re
+    from claudlobby.plane.provider_signin import DETAIL,TokenScreen,SigninRefused
+    screen=TokenScreen()
+    with pytest.raises(SigninRefused) as refused:
+        for chunk in chunks:screen.feed(chunk)
+    reason,detail=refused.value.code,refused.value.detail
+    assert str(refused.value)==reason and refused.value.args==(reason,), 'the message stays the category alone'
+    assert isinstance(detail,str) and re.fullmatch(_DETAIL,detail) and DETAIL.fullmatch(detail), detail
+    assert len(detail)<=48 and detail.isascii()
+    return reason,detail
+
+
+@pytest.mark.parametrize('chunks,reason,detail',[
+    pytest.param([b'ok\xff'],'unsupported_output','utf8',id='utf8'),
+    pytest.param([b'\x0e'],'unsupported_output','control 0x0e',id='control'),
+    pytest.param([b'\x00'],'unsupported_output','control 0x00',id='control-lowest'),
+    pytest.param([b'\x1f'],'unsupported_output','control 0x1f',id='control-highest'),
+    pytest.param([b'\x1b='],'unsupported_output','escape =',id='escape'),
+    pytest.param([b'\x1bM'],'unsupported_output','escape M',id='escape-letter'),
+    pytest.param([b'\x1b#8'],'unsupported_output','escape #',id='escape-names-one-character'),
+    pytest.param([b'\x1b(0'],'unsupported_output','escape (',id='escape-unhandled-character-set'),
+    pytest.param([b'\x1b\x01'],'unsupported_output','escape other',id='escape-other-control'),
+    pytest.param([b'\x1b '],'unsupported_output','escape other',id='escape-other-space'),
+    pytest.param(['\x1bé'.encode()],'unsupported_output','escape other',id='escape-other-not-ascii'),
+    pytest.param(['\x1b[5é'.encode()],'unsupported_output','csi malformed',id='csi-malformed'),
+    pytest.param([b'\x1b[1>2A'],'unsupported_output','csi malformed A 1>2',id='csi-malformed-letter'),
+    pytest.param([b'\x1b[<u'],'unsupported_output','csi malformed u <',id='csi-malformed-other-prefix'),
+    pytest.param([b'\x1b[0 q'],'unsupported_output','csi malformed q 0_',id='csi-malformed-intermediate'),
+    pytest.param([b'\x1b['+b'9'*17+b'!p'],'unsupported_output','csi malformed p',id='csi-malformed-long-body'),
+    pytest.param([b'\x1b[200~'],'unsupported_output','csi malformed ~ 200',id='csi-malformed-tilde'),
+    pytest.param([b'\x1b[?2031;x'],'unsupported_output','csi private ?2031; x',id='csi-private'),
+    pytest.param([b'\x1b[>1q'],'unsupported_output','csi private >1 q',id='csi-private-greater-than'),
+    pytest.param([b'\x1b[?3h'],'unsupported_output','csi private ?3 h',id='csi-private-mode-not-allowed'),
+    pytest.param([b'\x1b[?h'],'unsupported_output','csi private ? h',id='csi-private-no-number'),
+    pytest.param([b'\x1b[999999999A'],'unsupported_output','csi range',id='csi-range'),
+    pytest.param([b'\x1b[3K'],'unsupported_output','csi K 3',id='csi-K'),
+    pytest.param([b'\x1b[1J'],'unsupported_output','csi J 1',id='csi-J'),
+    pytest.param([b'\x1b[z'],'unsupported_output','csi final z',id='csi-final'),
+    pytest.param([b'\x1b[1;2;3z'],'unsupported_output','csi final z 1;2;3',id='csi-final-parameters'),
+    pytest.param([b'\x1b[5c'],'unsupported_output','csi final c 5',id='csi-final-query-not-ignored'),
+    pytest.param([_success_screen('not-a-token')],'unsupported_output','token shape',id='token-shape'),
+    pytest.param([_success_screen(value) for value in _SIGNIN_TOKENS],'ambiguous_output','token changed',id='token-changed'),
+    pytest.param([b''.join(_success_screen(value,clear=False) for value in _SIGNIN_TOKENS)],
+                 'ambiguous_output','token changed',id='token-changed-two-on-screen'),
+    pytest.param([''.join('\x1b]8;;'+_SIGNIN_URL+state*32+'\x07open\x1b]8;;\x07' for state in 'bc').encode()],
+                 'ambiguous_output','url changed',id='url-changed'),
+    pytest.param([b'x'*131073],'output_limit','bytes',id='bytes'),
+    pytest.param([b'\x1b]'+b'a'*8200],'output_limit','escape length',id='escape-length'),
+])
+def test_provider_signin_parser_names_the_rule_that_refused(chunks,reason,detail):
+    assert _refusal(*chunks)==(reason,detail)
+
+
+def test_provider_signin_refusal_detail_never_carries_reply_text_a_code_or_a_token():
+    from claudlobby.plane.provider_signin import SigninRefused,refusal_detail
+    # Upper case, so two neighbouring characters of either would show in a detail: its words are lower case.
+    secret,code='SK-ANT-OAT01-'+'QZ'*40,'PASTED-CODE-XY#'+'B'*32
+    def clean(detail):
+        return not any(text[at:at+2] in detail for text in (secret,code) for at in range(len(text)-1))
+    hostile=[  # the reply, and the whole of the detail it may leave
+        ([b'\x1b'+secret.encode()],'escape S'),  # the one character after ESC, never the rest
+        ([b'\x1b[ !"$%&'+secret.encode()],'csi malformed S _!"$%&'),  # a sequence stuffed with letters ends at its first
+        ([b'\x1b['+secret.encode()],'csi final S'),
+        ([b'\x1b[12;'+secret.encode()],'csi final S 12;'),
+        ([b'\x1b[?'+code.encode()+b'h'],'csi private ? P'),
+        ([b'\x1b]'+(secret+code).encode()*60],'escape length'),  # an unending sequence full of letters
+        ([b'\x1b[?'+b'9'*300+b'h'],'csi private ?'+'9'*15+' h'),  # a long parameter string is cut to 16 characters
+        ([b'\x1b[>'+b';'*5000+b'q'],'csi private >'+';'*15+' q'),
+        ([b'\x1b['+b'7;'*200+b'z'],'csi final z'),  # too long to give beside the final letter: left out
+        ([_success_screen(secret[:39])],'token shape'),  # nothing about the value, not even its length
+        ([_success_screen(secret),_success_screen(secret[::-1])],'token changed'),
+        ([code.encode()+b'\x0e'],'control 0x0e'),  # a code shown as text, then an unhandled control
+        ([secret.encode()+b'\xff'],'utf8'),
+    ]
+    for chunks,expected in hostile:
+        detail=_refusal(*chunks)[1]  # also held to the strict expression and the 48 characters
+        assert detail==expected and clean(detail),chunks[0][:16]
+    # The one builder leaves out whatever is outside a value's safe set, and a refusal carries only a built detail.
+    assert refusal_detail(secret) is None and refusal_detail('escape',secret) is None
+    assert refusal_detail('csi final',secret) is None and refusal_detail('csi final','z','1;'+secret)=='csi final z'
+    assert refusal_detail('csi private','?1','h',code)=='csi private ?1 h'
+    assert refusal_detail('token shape',secret)=='token shape' and refusal_detail('control','0x20') is None
+    assert SigninRefused('unsupported_output',secret).detail is None
+    assert SigninRefused('unsupported_output','csi range').detail=='csi range'
+    assert SigninRefused('timeout').detail is None and str(SigninRefused('timeout','bytes'))=='timeout'
+
+
+@pytest.mark.parametrize('reply,detail',[
+    pytest.param(b'\x1b[5z','csi final z 5',id='unknown-sequence'),
+    pytest.param(b'Signed in.\r\n','exit 0 without token',id='exit-0-without-token'),
+])
+def test_provider_signin_refused_reply_stores_its_rule_and_reports_only_the_reason(synthetic_signin,reply,detail):
+    import re
+    engine,grant,reader,program,_token,env=synthetic_signin
+    program.with_name('synthetic-provider-reply').write_bytes(reply)  # after the code, in place of the success screen
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        # Exactly the keys a refused attempt had before the detail: the browser's carrier checks them as a set.
+        refused={'attempt_id':attempt,'generation':grant.generation,'state':'needs_attention','reason':'unsupported_output'}
+        assert _signin_ended(engine,grant,reader,attempt)==refused
+        row=_signin_row(engine,attempt)
+        assert row=={**refused,'code_delivered':1,'retired':0,'detail':detail} and re.fullmatch(_DETAIL,row['detail'])
+        restarted=SetupEngine(engine.store.access)  # a later process has only the record
+        for owner in (engine,restarted):
+            assert owner.signin_status(reader,grant.generation,attempt)==refused
+            context=owner.context(reader)
+            assert context['signin_attempt']==refused
+            assert 'detail' not in json.dumps(context) and detail not in json.dumps(context)
+        assert env.read_text()=='export ROUTE=private\n'
+    finally:engine.signin.shutdown()
+
+
+@pytest.mark.parametrize('ending',['connected','timeout'])
+def test_provider_signin_success_and_timeout_record_no_refusal_detail(synthetic_signin,monkeypatch,ending):
+    from claudlobby.plane import provider_signin
+    engine,grant,reader,*_=synthetic_signin
+    if ending=='timeout':monkeypatch.setattr(provider_signin,'SECONDS',0.5)
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        if ending=='connected':
+            _signin_until(engine,grant,reader,attempt,'waiting')
+            engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        ended=_signin_ended(engine,grant,reader,attempt)
+        assert (ended['state'],ended['reason'])==(('connected',None) if ending=='connected' else ('needs_attention','timeout'))
+        row=_signin_row(engine,attempt)
+        assert 'detail' in row and row['detail'] is None
+    finally:engine.signin.shutdown()
+
+
+def test_provider_signin_table_from_before_the_refusal_detail_gains_the_column_and_still_works(synthetic_signin):
+    from claudlobby.plane.provider_signin import ProviderSignin
+    engine,grant,reader,program,_token,_env=synthetic_signin
+    before=['attempt_id','generation','state','reason','code_delivered','retired']
+    ended,successor=str(uuid4()),str(uuid4())
+    def columns():
+        with engine.store.access._connection() as conn:
+            return [row[1] for row in conn.execute('PRAGMA table_info(setup_provider)')]
+    def as_before():
+        with engine.store.access._connection(write=True) as conn:
+            conn.execute('DROP TABLE setup_provider')  # the table as the version before this column made it
+            conn.execute('CREATE TABLE setup_provider(attempt_id TEXT PRIMARY KEY,generation TEXT NOT NULL,state TEXT NOT NULL,reason TEXT,code_delivered INTEGER,retired INTEGER NOT NULL DEFAULT 0)')
+            conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?)',(ended,grant.generation,'needs_attention','timeout',0,0))
+    timed_out={'attempt_id':ended,'generation':grant.generation,'state':'needs_attention','reason':'timeout','retryable':True}
+    restarted=SetupEngine(engine.store.access)
+    as_before()
+    assert restarted.signin_status(reader,grant.generation,ended)==timed_out and columns()==before, 'a read upgrades nothing'
+    with engine.store.access._connection(write=True) as conn:ProviderSignin.initialize(conn)  # approving setup upgrades it
+    assert columns()==before+['detail']
+    assert _signin_row(engine,ended)=={'attempt_id':ended,'generation':grant.generation,'state':'needs_attention',
+        'reason':'timeout','code_delivered':0,'retired':0,'detail':None}, 'its row is kept, with no detail'
+    as_before()
+    program.with_name('synthetic-provider-reply').write_bytes(b'\x1b[5z')
+    try:  # Try again on the older table: begin upgrades it, and the new attempt's refusal is recorded
+        assert restarted.signin_begin(reader,grant.generation,successor)['attempt_id']==successor
+        assert columns()==before+['detail']
+        _signin_until(restarted,grant,reader,successor,'waiting')
+        restarted.signin_code(reader,grant.generation,successor,'accepted#'+'b'*32)
+        refused=_signin_ended(restarted,grant,reader,successor)
+        assert (refused['state'],refused['reason'])==('needs_attention','unsupported_output')
+        assert [(row['retired'],row['code_delivered'],row['detail']) for row in map(lambda a:_signin_row(engine,a),(ended,successor))]==[(1,0,None),(0,1,'csi final z 5')]
+    finally:restarted.signin.shutdown()
 
 
 def completed_setup(fixture,monkeypatch):
