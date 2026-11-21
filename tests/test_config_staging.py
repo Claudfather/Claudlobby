@@ -595,8 +595,16 @@ def test_a_team_plan_renders_the_same_with_the_computer_named(staging_case):
     explicit = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision,
                                                        root=case.root, package=case.package)
     assert explicit.fleets == implicit.fleets and explicit.effects == implicit.effects
-    assert [(change.target, change.after) for change in explicit.changes] == [
-        (change.target, change.after) for change in implicit.changes]
+
+    def outputs(plan):
+        # composed.json is a compose-time snapshot: it carries the second it was
+        # written, so two renders differ there and nowhere else.
+        return [(change.target, change.after) for change in plan.changes
+                if Path(change.target).name != "composed.json"]
+
+    assert [change.target for change in explicit.changes] == [change.target for change in implicit.changes]
+    assert any(Path(change.target).name == "composed.json" for change in explicit.changes)
+    assert outputs(explicit) == outputs(implicit)
     other = replace(case.package, source_revision="b" * 40)
     with pytest.raises(PlanError):
         config_staging.render_git_configuration([case.paths], revision="b" * 40, root=case.root, package=other)
