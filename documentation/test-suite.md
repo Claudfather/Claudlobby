@@ -93,6 +93,7 @@ exactly one CI lane, chosen by its markers (pinned by `tests/test_ci_lanes.py`).
 request, `test.yml` runs `-m "not quarantine and not harness"` on each supported platform, Linux
 with Python 3.10 and macOS with Python 3.11, in shards (below); a `harness` job runs the
 validation harness (`@pytest.mark.harness`) beside them, on Linux with Python 3.11 and on macOS;
+the macOS jobs run once the pull request is ready for review (next paragraph);
 and `quarantine.yml` runs every test marked `@pytest.mark.quarantine(issue=<N>)`. The `pytest`
 job runs the shards' selection on Linux with Python 3.11, on push to main only. The `[vault]`
 tests skip in the shards and in `pytest`, and run in conformance's `vault-tests`. Fix a flaky
@@ -104,6 +105,20 @@ stops matching deselects nothing and says so nowhere. The suite still runs every
 and `pytest -m "not quarantine and not harness"` mirrors the required lanes. A quarantined test
 that shows up in your before/after name diff is a known flake, so rerun it on both arms before
 attributing it.
+
+**macOS runs once a pull request is ready for review.** Open a pull request as a draft while
+you iterate, and mark it ready when its Linux lanes are green. A draft runs the Linux lanes
+only: its macOS shards, its macOS harness and `supported (macos-latest, py3.11)` read skipped,
+and a skipped check is not a pass. Marking the draft ready starts a new run with every lane, and
+every later push runs every lane too. A pull request opened ready runs macOS on every push, as
+before, and so does a push to main. Until a pull request is ready, nothing has run its change on
+macOS or on Python 3.11 (the Linux lanes of a pull request use 3.10). The reason is the runner
+limit: the account runs five macOS jobs at once and one run uses all five, and with macOS on
+every push the jobs waited a median of 19 minutes for a runner (14 runs, 2026-11-21). Re-running
+a run that was made while the pull request was a draft skips macOS again, because a re-run
+replays the draft's event; mark it ready, or push, for a run that includes macOS. After merging a
+pull request whose run is still going, cancel that run: nothing else does, and its macOS jobs
+keep their runners.
 
 **CI's shards.** Each supported platform's suite runs in `TEST_SPLITS` shard jobs (`test.yml`),
 `supported (ubuntu-latest, py3.10) shard 1` to `shard 4` and the same for macOS, and pytest-split
