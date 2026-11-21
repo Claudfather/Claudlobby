@@ -284,6 +284,32 @@ def test_fixed_profile_ignores_caller_home_and_uses_same_private_policy(fixed_pr
     assert os.environ["HOME"] == "/untrusted-home"
 
 
+def test_linux_fixed_owner_environment_lets_first_team_setup_record(fixed_profile, monkeypatch):
+    # A browser Preview refused at prepare on a real computer: the guide's own
+    # fixed environment carried the harness silencer, the listener it starts
+    # inherited it, and first-fleet setup refuses under it by design (#2611).
+    import subprocess
+    import sys
+    from claudlobby import env_tiers as tiers
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.plane import registry_emit as registry
+    paths, request, _home, _ = fixed_profile
+    fleet = SimpleNamespace(name="first-team")
+    monkeypatch.setattr(tiers, "resolve", lambda *a, **k: {})
+    silenced = "PLANE_EMIT_DISABLED=1 in this command's environment silences"
+    # An operator who exports the switch is still refused, here and after the guide.
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
+    child = [sys.executable, "-c", "import os; print(os.environ.get('PLANE_EMIT_DISABLED'))"]
+    profile = FixedOwnerProfile(paths, request)
+    with profile.environment():
+        assert registry.activation_scan_refusal(paths, fleet) is None
+        assert "PLANE_EMIT_DISABLED" not in os.environ
+        # The listener and the update's stages are children that inherit this.
+        assert subprocess.run(child, capture_output=True, text=True, check=True).stdout.strip() == "None"
+    assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
+
+
 @pytest.mark.parametrize("change", ["uid", "binding", "source", "incomplete", "receipt_link"])
 def test_fixed_profile_refuses_changed_installation_without_writes(fixed_profile, change):
     from claudlobby.commands.owner_setup_consent import FixedOwnerProfile

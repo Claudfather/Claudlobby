@@ -126,6 +126,29 @@ def test_an_interrupted_stage_keeps_why_until_the_same_stage_succeeds(update, mo
         assert "stage_error" not in recovered and store.load() == original
 
 
+@pytest.mark.parametrize("exported", [None, "1"])
+def test_application_stage_runs_under_its_callers_silencer_and_adds_none(update, monkeypatch, exported):
+    # First-fleet setup refuses under PLANE_EMIT_DISABLED=1 (#2611). The stage must see
+    # exactly what its caller exported: an operator's switch still reaches the refusal,
+    # and a caller without one (the owner guide) gets a stage without one.
+    from claudlobby import git_update as updater
+    installation, _before, target, _ = update
+    seen = {}
+    def stage(_store, _stage, _command, **options):
+        seen.update(options["env"])
+        return subprocess.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(updater, "_run_stage", stage)
+    if exported is None:
+        monkeypatch.delenv("PLANE_EMIT_DISABLED", raising=False)
+    else:
+        monkeypatch.setenv("PLANE_EMIT_DISABLED", exported)
+    with UpdateStore(installation) as store:
+        prepare(store, target)
+        updater._application_stage(store, "prepare", python=Path(sys.executable).resolve())
+    assert seen["CLAUDLOBBY_ROOT"] == str(installation.data_root)
+    assert seen.get("PLANE_EMIT_DISABLED") == exported
+
+
 def test_invalid_authorization_response_keeps_original_stage_error(update, monkeypatch):
     from claudlobby import git_update as updater
     installation, before, target, _ = update

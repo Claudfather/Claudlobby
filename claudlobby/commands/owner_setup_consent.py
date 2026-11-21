@@ -139,7 +139,12 @@ class FixedOwnerProfile:
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
-            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1", "PLANE_EMIT_DISABLED": "1"}
+            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1"}
+        # No PLANE_EMIT_DISABLED here. Preparation silences incidental recording
+        # (bootstrap._browser_environment); the guide is past preparation. The listener
+        # it starts inherits this environment and runs first-team setup from it, and
+        # first-fleet setup refuses under that harness exemption (#2611,
+        # registry_emit.activation_scan_refusal). No guide step records by itself.
         if self.runtime is not None:
             from ..installation import managed_browser_environment
             managed = managed_browser_environment(self.installation)
