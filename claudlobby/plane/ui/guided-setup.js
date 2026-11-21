@@ -15,6 +15,12 @@ const continuation = value => value === undefined || typeof value === 'string' &
   && value.length <= 16384 && !/[\x00-\x1f\x7f]/.test(value);
 const localContinue = value => value.continuation ? `Continue locally: ${value.continuation}.`
   : 'Use this installation’s stable CLI with host update continue.';
+// A prepared Preview, whether it came as Preview's own response or inside the context read after a lost one.
+const badPlan = (value, selected) => !value || value.version !== selected.version || !request(binding(value)) || value.generation !== selected.generation
+  || value.source_revision !== selected.source_revision || 'plan_id' in value || 'release_id' in value || 'release_seal' in value
+  || value.fleets?.length !== 1 || value.fleets[0] !== selected.fleet || value.dispatch !== 'prepared' || value.phase !== 'quiesce'
+  || !Array.isArray(value.changes) || !value.effects || typeof value.effects !== 'object' || Array.isArray(value.effects)
+  || !Number.isFinite(value.expires_at);
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
 // Presentation only: the step that shows each operation's progress, and its text.
 const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin':['signin','Starting Claude sign-in…'],
@@ -246,9 +252,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     changed(); scheduleHandoff();
   }
-  async function run(operation, {quiet = false} = {}) { // quiet: the automatic poll shows steady text, not a progress flash
+  // quiet: the automatic poll shows steady text, not a progress flash.
+  // afterPreview: the read that follows a Preview that did not answer; it keeps the approval and the steps already
+  // done on screen, and asks the computer what became of the Preview.
+  async function run(operation, {quiet = false, afterPreview = false} = {}) {
     if (disposed || busy || !active()) return false;
-    if (operation === 'context') { context = null; launchable = false; }
+    if (operation === 'context' && !afterPreview) { context = null; launchable = false; }
     const ticket = epoch; busy = true; busyOperation = quiet || !Object.hasOwn(PROGRESS,operation) ? null : operation; changed();
     try {
       if (operation === 'context') {
@@ -263,14 +272,26 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
               || value.request.source_revision !== value.source_revision)) throw new Error();
+        // A Preview the computer finished and kept: offered while its window is open, never beside a reserved launch.
+        const kept = value.preview && !value.launch_reserved && value.request && value.preview.expires_at > now() ? value.preview : null;
+        if (value.preview !== undefined && (!value.request || value.launch_reserved
+            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000))) throw new Error();
         context = Object.freeze({...value}); plan = null;
         if (value.provider_signin === true && value.signin_attempt) signinReceipt(value.signin_attempt);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
         }
+        if (kept) {
+          const {goal:keptGoal,...prepared} = kept;
+          plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true;
+        }
         // A null request or new grant is never proof that an original request vanished.
-        note = pending ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.` : '';
+        note = !pending ? (afterPreview ? 'The preview did not finish. Your goal is still here. Choose Preview team to try again.' : '')
+          : kept ? 'Preview ready. Review it below, then choose Launch team.'
+          : value.preview ? 'This preview expired. Inspect the update on the computer.'
+          : value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
+          : `Your computer began preparing your team but did not finish, and only the computer can restart that. ${localContinue(value)}`;
         if (value.managed_owner && value.launch_reserved) { managedHandoff = true; handoffUntil = now()+600; handoffReads=0; }
       } else if (operation.startsWith('signin-')) {
         if (!context?.provider_signin || pending || signinBlocked) return false;
@@ -313,11 +334,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         const selected = context, authored = goal;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
-        if (!value || value.version !== selected.version || !request(binding(value)) || value.generation !== selected.generation
-            || value.source_revision !== selected.source_revision || 'plan_id' in value || 'release_id' in value || 'release_seal' in value
-            || value.fleets?.length !== 1 || value.fleets[0] !== selected.fleet || value.dispatch !== 'prepared' || value.phase !== 'quiesce'
-            || !Array.isArray(value.changes) || !value.effects || typeof value.effects !== 'object' || Array.isArray(value.effects)
-            || !Number.isFinite(value.expires_at) || value.expires_at <= now()) throw new Error();
+        if (badPlan(value,selected) || value.expires_at <= now()) throw new Error();
         pending = binding(value); plan = Object.freeze({...value}); planGoal = authored;
         save(pending); launchable = true;
         note = 'Preview ready. Review it below, then choose Launch team.';
@@ -340,7 +357,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       const restored = operation==='signin-retry' ? restoreRetry(error) : ''; // even if the connection moved on meanwhile
       if (!disposed && ticket === epoch) {
         // A failed read leaves no approval shown beside its "could not confirm" note.
-        if (operation === 'preview' || operation === 'context') { context = null; launchable = false; }
+        // A Preview that failed leaves the approval and the finished steps as they were; one read then asks the computer
+        // what became of it. Only a read of the approval itself, made from a click, drops it.
+        if (operation === 'preview') launchable = false;
+        if (operation === 'context' && !afterPreview) { context = null; launchable = false; }
         if (operation === 'receipt') launchable = false;
         if (operation.startsWith('signin-')) {
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
@@ -361,9 +381,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             : 'Could not reach this computer to check sign-in. Choose Check sign-in progress to look again; it never starts a second sign-in.');
           return false;
         }
+        if (operation === 'preview' && !pending && error?.code !== 'setup_storage_unavailable') {
+          note = 'Checking what happened to the preview…';
+          queueMicrotask(() => { if (!disposed && ticket === epoch) void run('context',{afterPreview:true}); });
+          return false;
+        }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
-          : operation === 'preview' ? 'Could not prepare the preview, so nothing was saved. Check setup approval, then preview.'
+          : operation === 'context' && afterPreview
+          ? 'Could not confirm the preview. It may still be finishing on your computer. Choose Check setup approval again to look for it.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;

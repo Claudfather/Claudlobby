@@ -247,3 +247,10 @@ def test_provider_signin_real_http_and_shutdown_drain(synthetic_signin,profile,f
     assert not worker.is_alive()
     if finish=='shutdown':assert env.read_text()=='export ROUTE=private\n'
     else:assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=')==1
+
+
+def test_preview_gets_time_for_its_stage_processes_and_launch_keeps_its_own(setup_http):
+    app,*_=setup_http
+    seconds=lambda operation:app.connected_setup.response_seconds({"setup_operation":operation})
+    assert seconds("preview")==90 and seconds("launch")==45
+    assert {seconds(op) for op in ("context","receipt","signin-begin","signin-status","signin-code","signin-cancel")}=={15}

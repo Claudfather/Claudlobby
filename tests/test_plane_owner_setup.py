@@ -300,6 +300,42 @@ def test_lost_preview_response_recovers_frozen_original_without_new_work(setup_a
     assert not setup_authority[-1].dispatches
 
 
+def test_context_carries_the_retained_preview_so_a_page_that_lost_the_response_can_launch(setup_authority,monkeypatch):
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    assert engine.context(reader)["preview"]=={**preview,"goal":"Improve checkout tests"}
+
+
+def test_context_carries_the_preview_recovered_from_a_response_lost_before_it_was_kept(setup_authority,monkeypatch):
+    engine,grant,reader=allow(setup_authority)
+    monkeypatch.setattr(engine.store,"retain",lambda *_: (_ for _ in ()).throw(RuntimeError("lost preview")))
+    with pytest.raises(RuntimeError):engine.preview(reader,grant.generation,"Improve checkout tests")
+    preview=engine.context(reader)["preview"]
+    assert preview["request_id"]==setup_authority[-1].retained["record"]["request_id"]
+    assert preview["goal"]=="Improve checkout tests" and preview["phase"]=="quiesce" and preview["dispatch"]=="prepared"
+
+
+def test_context_has_no_preview_when_preparation_did_not_finish_or_launch_is_reserved(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    engine.preview(reader,grant.generation,"Improve checkout tests")
+    record=setup_authority[-1].retained["record"]
+    record["phase"]="prepare"  # a preparation the computer holds as not finished
+    context=engine.context(reader)
+    assert context["request"] is not None and "preview" not in context and context["continuation"]
+    record["phase"]="quiesce"
+    assert "preview" in engine.context(reader)
+    setup_authority[0].reserve(reader,grant,engine.context(reader)["request"])
+    assert "preview" not in engine.context(reader)
+
+
+def test_context_offers_no_preview_past_its_window(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    setup_authority[4][0]=preview["expires_at"]  # the window is [created, expires)
+    context=engine.context(reader)
+    assert "preview" not in context and context["request"] is not None
+
+
 @pytest.mark.parametrize("field,value",[("target","c"*40),("config_fingerprint","d"*64),
                                         ("initialization_scope",{"directory":"/different","manifests":[]})])
 def test_original_request_mismatch_refuses_without_dispatch(setup_authority,field,value):

@@ -389,6 +389,13 @@ class OwnerSetup:
                 raise AccessDenied("setup_original_operation_changed")
         return actual
 
+    def retained_preview(self, reader):
+        """The goal and window of the retained preview row, or None when there is none."""
+        with self.access._connection() as conn:
+            grant,_=self._admit(conn,reader)
+            row=conn.execute("SELECT payload,expires_at FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
+            return None if row is None else (json.loads(row["payload"])["goal"],row["expires_at"])
+
     def retained_request(self, reader):
         with self.access._connection() as conn:
             grant,row=self._admit(conn,reader)
@@ -461,16 +468,36 @@ class SetupEngine:
             if runtime.is_symlink() or runtime.exists() and (not runtime.is_dir() or next(runtime.iterdir(),None) is not None):
                 raise AccessDenied("setup_existing_runtime")
 
+    def _plan(self,grant,request,expires_at,phase):
+        from ..config_plan import read_rendered
+        rendered=read_rendered(self.root,request["config_fingerprint"])
+        return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
+            "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
+            "effects":rendered.effects,"dispatch":"prepared","phase":phase}
+
+    def _retained_plan(self,reader,grant,request):
+        """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
+        try:
+            record=self.store.operation(grant)
+            kept=self.store.retained_preview(reader)
+            if record is None or record["phase"]!="quiesce" or kept is None: return None
+            goal,expires_at=kept
+            if not self.store.access._now()<expires_at: return None
+            return {**self._plan(grant,request,expires_at,record["phase"]),"goal":goal}
+        except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): return None
+
     def context(self,reader):
         grant=self.store.authorize(reader)
         managed_setup(self.root,grant,current=False)
         request,reserved=self.store.retained_request(reader)
+        preview=self._retained_plan(reader,grant,request) if request is not None and not reserved else None
         return {"version":3 if grant.template == "local-project" else 2,"template":grant.template,"fleet":grant.fleet,
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
             **({"managed_owner":True} if grant.managed_owner is not None else {}),
             **({"provider_signin":True,"signin_attempt":self.signin.summary(reader,grant) if request is None else None} if grant.provider_signin is not None else {}),
             "request":request,"launch_reserved":reserved,
+            **({"preview":preview} if preview is not None else {}),
             **({"continuation":_continuation(self.root,grant)} if request and not reserved else {})}
 
     def _signin_grant(self,reader,generation,attempt_id):
@@ -513,7 +540,6 @@ class SetupEngine:
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
         try:
             from ..commands.setup import _fleet_setup, _template_config
-            from ..config_plan import read_rendered
             grant=self.store.authorize(reader,effects=True)
             if grant.generation!=generation: raise AccessDenied("setup_denied")
             managed_setup(self.root,grant)
@@ -529,10 +555,7 @@ class SetupEngine:
                 install_directory=grant.install_directory,account_directory=grant.account_directory))
             record=output.data["update"]
             request,expires_at=self.store.retain(reader,grant,record)
-            rendered=read_rendered(self.root,request["config_fingerprint"])
-            return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
-                "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
-                "effects":rendered.effects,"dispatch":"prepared","phase":record["phase"]}
+            return self._plan(grant,request,expires_at,record["phase"])
         finally: self._effects_lock.release()
 
     def launch(self,reader,generation,request_id,config_fingerprint,source_revision):

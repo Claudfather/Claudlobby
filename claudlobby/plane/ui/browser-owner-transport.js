@@ -257,7 +257,7 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
         limit:stream?Infinity:request.operation==='action-context'?2*1024*1024:request.operation.startsWith('action-')?32768:request.operation.startsWith('read-')?8*1024*1024:request.operation.startsWith('setup-')?131072:16384};
       active.abort=()=>{if(requests.has(id)) fail(active,true);};requests.set(id,active);
       active.signal?.addEventListener('abort',active.abort,{once:true});
-      active.timer=setTimeout(()=>fail(active,true),['setup-launch','action-send'].includes(request.operation)?45000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
+      active.timer=setTimeout(()=>fail(active,true),['setup-launch','action-send'].includes(request.operation)?45000:request.operation === 'setup-preview'?95000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
       try {post('request',{id,request,credit:4});} catch {dispose();}
     });
   }

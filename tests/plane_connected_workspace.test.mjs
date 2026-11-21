@@ -1009,16 +1009,68 @@ test('changed connection fences held preview, preserves goal and never launches'
   assert.equal(h.api.snapshot().plan,null);assert.equal(h.api.snapshot().goal,'Improve checkout tests');
   assert.equal(await h.api.run('launch'),false);h.api.dispose();
 });
-test('lost preview requires context recovery and offers local continuation without another preview or launch',async()=>{
-  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);throw new Error('lost preview');}}});
-  await h.api.run('context');h.api.setGoal('Improve tests');assert.equal(await h.api.run('preview'),false);
-  assert.equal(h.api.snapshot().context,null);assert.equal(await h.api.run('preview'),false);
-  h.context.request={...h.pending};h.context.continuation="'/example/managed cli' --root '/example/data root' host update continue";await h.api.run('context');
-  assert.deepEqual(h.api.snapshot().pending,h.pending);
-  assert.ok(h.api.snapshot().note.includes(h.context.continuation));
-  assert.equal(await h.api.run('launch'),false);
-  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
-  h.api.dispose();
+const signedIn=h=>{h.context.provider_signin=true;h.context.signin_attempt={attempt_id:id(11),generation:id(9),state:'connected',reason:null};};
+const refused=()=>Object.assign(new Error('refused'),{status:403});
+test('a failed preview keeps the finished steps, the goal and the sign-in, and says what is true',async()=>{
+  const ui=dom(),panel=new ui.Element();
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);throw refused();}}});signedIn(h);
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve tests');
+  const before=stepShape(panel);
+  assert.equal(await h.api.run('preview'),false);await flush();
+  assert.notEqual(h.api.snapshot().context,null,'a failed preview never clears the approval');
+  assert.deepEqual(stepShape(panel).map(r=>r[1]).slice(0,2),before.map(r=>r[1]).slice(0,2));
+  const shape=Object.fromEntries(stepShape(panel));
+  assert.equal(shape.approve,'done');assert.equal(shape.signin,'done','Sign in to Claude stays ticked');assert.equal(shape.goal,'current');
+  assert.equal(h.api.snapshot().goal,'Improve tests');
+  assert.equal(h.api.snapshot().note,'The preview did not finish. Your goal is still here. Choose Preview team to try again.');
+  assert.doesNotMatch(h.api.snapshot().note,/nothing was saved|setup approval/i);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1,'the page never previews again by itself');
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
+});
+test('a failed preview the computer cannot undo says only the computer can restart it, and keeps the finished steps',async()=>{
+  const ui=dom(),panel=new ui.Element();
+  const h=setupHarness({client:{async setupPreview(){
+    h.context.request={...h.pending};h.context.continuation="'/example/cli' --root '/example/data' host update continue";throw refused();}}});signedIn(h);
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
+  const note=h.api.snapshot().note;
+  assert.match(note,/^Your computer began preparing your team but did not finish, and only the computer can restart that\./);
+  assert.ok(note.includes(h.context.continuation));assert.doesNotMatch(note,/Check setup approval/);
+  const shape=Object.fromEntries(stepShape(panel));assert.equal(shape.approve,'done');assert.equal(shape.signin,'done');
+  assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
+});
+test('a preview that finished on the computer after this page gave up is picked up and can be launched',async()=>{
+  const ui=dom(),panel=new ui.Element();
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);
+    h.context.request={...h.pending};h.context.preview={...h.preview,goal:'Improve tests'};throw new Error('timed out');}}});signedIn(h);
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
+  const snap=h.api.snapshot();
+  assert.deepEqual(snap.pending,h.pending);assert.equal(snap.plan.phase,'quiesce');assert.equal(snap.goal,'Improve tests');
+  assert.equal(snap.note,'Preview ready. Review it below, then choose Launch team.');
+  const launch=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Launch team');
+  assert.equal(launch.hidden,false);assert.equal(launch.disabled,false);
+  assert.equal(Object.fromEntries(stepShape(panel)).signin,'done');
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1,'picking it up never previews a second time');
+  await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);h.api.dispose();
+});
+test('reloading the approval shows a retained preview and offers Launch, never a second preview',async()=>{
+  const h=setupHarness();signedIn(h);h.context.request={...h.pending};h.context.preview={...h.preview,goal:'Improve tests'};
+  await h.api.run('context');
+  assert.equal(h.api.snapshot().plan.request_id,h.pending.request_id);assert.equal(h.api.snapshot().goal,'Improve tests');
+  assert.equal(await h.api.run('preview'),false);await h.api.run('launch');
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,0);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+test('a preview that cannot be confirmed leaves the steps in place and names the one thing to press',async()=>{
+  const ui=dom(),panel=new ui.Element();let reads=0;
+  const h=setupHarness({client:{async setupContext(){reads++;if(reads>1)throw new Error('unreachable');return h.context;},
+    async setupPreview(){throw new Error('timed out');}}});signedIn(h);
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
+  assert.notEqual(h.api.snapshot().context,null);assert.equal(Object.fromEntries(stepShape(panel)).signin,'done');
+  assert.equal(h.api.snapshot().note,'Could not confirm the preview. It may still be finishing on your computer. Choose Check setup approval again to look for it.');
+  assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
 });
 test('setup panel retains disclosure/focus and refuses launch without durable original identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
@@ -2175,6 +2227,15 @@ test('admitted browser bridge survives redemption expiry while canonical account
   await assert.rejects(h.host('/api/owner/connected/status'));assert.equal(h.native.length,1);
 });
 
+test('browser bridge waits for Preview 95 s (past the listener\'s 90 s), Launch 45 s and a setup read 15 s',async t=>{
+  const timers=[];const h=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});h.admit();await h.bridge.ready;
+  const waits={};
+  for(const [operation,body] of [['context',{}],['preview',{generation:id(8),goal:'g'}],['launch',{generation:id(8),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)}]]){
+    void h.host('/api/owner/connected/setup/'+operation,body).catch(()=>{});await flush();
+    waits[operation]=timers.at(-1).delay;
+  }
+  assert.deepEqual(waits,{context:15000,preview:95000,launch:45000});
+});
 const ordinaryMetadata=()=>({request_id:id(81),kind:'message',scope:{workspace:'workspace',host:'host_'+'a'.repeat(32),fleet:'team',viewer:'original viewer'},target:{recipient:'actor_'+'c'.repeat(32),task_id:null},submitted_at:'2026-11-15T20:30:00.123Z'});
 test('browser ordinary message facade preserves exact original metadata, finite bounds and unknown receipts',async t=>{
   const timers=[];const h=await bridgeHarness(t,{setTimeout:(fn,delay)=>{timers.push({fn,delay});return timers.length;},clearTimeout:()=>{}});h.admit();await h.bridge.ready;
