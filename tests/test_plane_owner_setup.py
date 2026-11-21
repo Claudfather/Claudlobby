@@ -2440,14 +2440,14 @@ def test_provider_signin_reads_the_token_after_the_keyboard_mode_switch_claude_s
 def _real_sized_plan():
     """A plan the size a real first team renders: 76 generated files and 70 units, as measured on a
     fresh Ubuntu computer at the first browser Preview (changes about 38 KB, units about 115 KB)."""
-    changes=[{"target":f"/home/person/claudlobby/data/runtime/bots/builder/file-{index:03}.conf",
+    changes=[{"target":f"/home/example/claudlobby/data/runtime/bots/builder/file-{index:03}.conf",
               "before":None,"after":{"kind":"file","mode":420,"sha256":"a"*64},"padding":"p"*330}
              for index in range(76)]
     unit={"bot":"builder","enroll":True,"fleet":"web-app","phase":"start","platform":"linux","scope":"bot",
-          "service":None,"sha256":"b"*64,"source":"/home/person/claudlobby/data/runtime/units/claudlobby-builder.service",
-          "mode":420,"working_directory":"/home/person/projects/first-team",
+          "service":None,"sha256":"b"*64,"source":"/home/example/claudlobby/data/runtime/units/claudlobby-builder.service",
+          "mode":420,"working_directory":"/home/example/projects/first-team",
           "environment":{f"CLAUDLOBBY_SETTING_{index:02}":"v"*40 for index in range(12)},
-          "admission":{"release":"r"*64,"paths":["/home/person/claudlobby/install"]*6}}
+          "admission":{"release":"r"*64,"paths":["/home/example/claudlobby/install"]*6}}
     effects={"units":[dict(unit) for _ in range(70)],"restart_bots":["builder","reviewer","tester"],
              "reload_supervision":True,"coverage":{"fleets":["web-app"]}}
     return changes,effects
