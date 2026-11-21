@@ -383,6 +383,13 @@ def _ssh_origin(source):
         raise StdioRefused("ssh_identity_prerequisite_missing") from None
 
 
+def _operation_retained(root, retained, record):
+    from ..plane.owner_setup import _continuation
+    return CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
+        data={"request_id":record["request_id"]},
+        hint=_continuation(root,retained.grant) if retained and retained.grant else "host update status")
+
+
 def _original_launch(state):
     raise CommandFailure("conflict", "a first-team launch is already retained; inspect its original receipt before continuing",
                          data={"launch_id": state.launch_id, "launch_plan": state.launch_plan,
@@ -444,12 +451,16 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
     installation = package.installation
     record = read_update(installation)
     selected = os.path.lexists(paths.root / "state/config.json")
-    if record is not None:
+    # The one record a typed guide over the browser carrier may start again over: this approval's own
+    # prepared Preview with nothing launched (its page closed before Launch). It goes on as a returning
+    # run does. The SSH guide never needed a run alive between Preview and Launch.
+    reopened = (record is not None and consent is not None and ssh is None
+                and getattr(args, "finish_setup", None) is None
+                and OwnerSetup(store).kept_preview(retained, record))
+    if record is not None and not reopened:
         if (not retained or retained.grant is None or record.get("request_id") != retained.launch_id
                 or record.get("config_fingerprint") != retained.launch_plan or record.get("phase") != "done"):
-            raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
-                data={"request_id":record["request_id"]},
-                hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
+            raise _operation_retained(paths.root, retained, record)
         snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
         if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
@@ -528,7 +539,10 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
                     or binding.operational_origin != config["workspace_origin"]):
                 raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
             _say(terminal, "Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
-            retained = OwnerSetup(store).retained_state()
+            entry, retained = retained, OwnerSetup(store).retained_state()
+            if reopened and retained.state != "allowed":
+                # The kept Preview's approval lapsed after the entry check: never ask to allow again.
+                raise _operation_retained(paths.root, retained if retained.grant else entry, record)
             # A browser may retain this invocation's approved Launch as soon as
             # serving is ready. Entry checks already refused pre-existing work;
             # compare the same grant below, then use the normal handoff loop.

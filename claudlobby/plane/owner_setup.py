@@ -24,6 +24,21 @@ from .owner_connected import OwnerConnected
 from .owner_source import source_host_uid, fresh_owner_setup
 
 PLAN_SECONDS = 600
+#: The most a browser accepts as one setup answer (the pane's own bound, ui/browser-owner-transport.js).
+SETUP_ANSWER_BYTES=131072
+#: What a unit keeps in the plan a person is shown. A unit's environment and admission are the
+#: computer's own working data: most of a plan's bytes, and nothing a person reads. With them a real
+#: first team's plan is larger than SETUP_ANSWER_BYTES, so no browser could ever show its Preview.
+#: Launch never reads this answer: the computer launches its own rendered plan, by fingerprint.
+SHOWN_UNIT=("bot","enroll","fleet","phase","platform","scope","service","sha256","source")
+
+def shown_effects(effects):
+    """A rendered plan's effects as a Preview answers them: each unit without its working data."""
+    units=effects.get("units") if isinstance(effects,dict) else None
+    if not isinstance(units,list): return effects
+    return {**effects,"units":[{key:unit[key] for key in SHOWN_UNIT if key in unit} if isinstance(unit,dict) else unit
+                               for unit in units]}
+
 GRANT_SECONDS = 86400
 
 
@@ -433,6 +448,34 @@ class OwnerSetup:
             raise AccessDenied("setup_original_operation_changed")
         return record
 
+    def kept_preview(self, retained, record):
+        """True only when ``record`` is this approval's own prepared Preview and nothing was launched.
+
+        The guide may start again over it (the page that embedded the last run closed it before
+        Launch). The approval is active and holds no launch; the record is the one operation()
+        accepts for it, finalized at quiesce with no stage error, its configuration not committed and
+        never dispatched (nothing a continue saves first: quiet or notice support, job support or dispatch); and the Preview row kept for this approval names exactly that record, as
+        retain() binds it, whether or not its window has passed. Anything else is not a Preview.
+        """
+        if (retained is None or retained.state != "allowed" or not retained.effective_active
+                or retained.grant is None or retained.launch_id is not None or retained.launch_plan is not None):
+            return False
+        grant = retained.grant
+        try:
+            if self.operation(grant) != record:
+                return False
+            with self.access._connection() as conn:
+                if self._retained_state(conn) != retained:
+                    return False
+                row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+                kept = json.loads(row["payload"]).get("request") if row is not None else None
+        except (AccessDenied, AccessUnavailable, OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        return (kept is not None and kept == _binding(grant, record)
+                and record.get("phase") == "quiesce" and record.get("finalized", True) is True
+                and not record.get("stage_error") and not record.get("config_committed")
+                and all(record.get(key) is None for key in ("quiet_support", "notice_support", "job_dispatch", "updater_job", "job_support")))
+
     def _request(self, conn, grant):
         row=conn.execute("SELECT payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
         if row is None: return None
@@ -576,7 +619,7 @@ class SetupEngine:
         rendered=read_rendered(self.root,request["config_fingerprint"])
         return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
             "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
-            "effects":rendered.effects,"dispatch":"prepared","phase":phase}
+            "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase}
 
     def _retained_plan(self,grant,request,kept):
         """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""

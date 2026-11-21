@@ -40,7 +40,10 @@ assert_eq() {
     fi
 }
 
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+# Stop when the directory cannot be made: with T empty, "$T/..." names paths
+# under the filesystem root.
+T="$(mktemp -d)" && [ -d "$T" ] || { echo "FATAL: mktemp -d made no directory. Nothing was removed." >&2; exit 3; }
+trap 'rm -rf "$T"' EXIT
 BOTDIR="$T/bots/canary"
 mkdir -p "$BOTDIR/data"
 

@@ -68,7 +68,11 @@ fi
 
 [ "$(uname -s)" = "Linux" ] || { echo "Linux only (/proc sampling)" >&2; exit 2; }
 
-WORK="$(mktemp -d)"
+# A work folder that cannot be made ends the run here: with WORK empty the
+# canary root was /root.
+# shellcheck source=harness/scratch-dir.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scratch-dir.sh" || exit 3
+scratch_dir WORK
 ROOT="$WORK/root"
 PASS=0; FAIL=0
 PY="$SRC/.venv/bin/python"; [ -x "$PY" ] || PY="python3"
@@ -120,7 +124,7 @@ cleanup() {
     [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null
     [ -n "$RO_PID" ] && kill "$RO_PID" 2>/dev/null
     pkill -f "plane-durability-driver.py --socket $CANARY_SOCK" 2>/dev/null
-    case "$WORK" in /tmp/*) rm -rf "$WORK" ;; esac
+    case "$WORK" in /tmp/*) scratch_remove "$WORK" ;; esac
 }
 trap cleanup EXIT INT TERM
 

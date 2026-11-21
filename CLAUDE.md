@@ -241,7 +241,7 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Apply the reviewed commit with `host update apply FULL_COMMIT`; inspect status and behavior. First installation follows the getting-started guide.
 5. Commit to a branch, PR, review
 
-**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
+**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it. Open a pull request as a draft while you iterate: a draft runs the Linux lanes only, and marking it ready for review starts the run that adds macOS.
 
 ### Adding or modifying claudlobby/_runtime_scripts/ scripts
 

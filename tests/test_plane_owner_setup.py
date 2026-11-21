@@ -897,6 +897,158 @@ def test_typed_guide_preserves_original_launch_and_exits_without_terminal_handof
     assert len(setup_authority[-1].dispatches) == 1
 
 
+def _typed_reopen(fixture, monkeypatch, wait, *, ssh=None, on_serve=None, **request):
+    """The typed guide started again on this computer, as the embedding page starts it; wait stands in for the pane.
+
+    ssh carries the guide over SSH instead of the browser; on_serve runs as serving starts."""
+    from contextlib import contextmanager
+    import sys
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    store, access, grant, *_ = fixture
+    config = {"origin": "https://host.example.test", "socket": str(access.root / "state/owner/owner.sock"),
+        "tailscale": sys.executable, "tailscale_socket": None,
+        "workspace_issuer": "https://accounts.example.test", "workspace_origin": "https://plane.example.test"}
+    approval = SimpleNamespace(**{name: getattr(grant, name) for name in ("template", "repository", "project_directory",
+        "account_directory", "managed_owner", "provider_signin")}, target_fleet=grant.fleet,
+        install_directory=Path(grant.install_directory))
+    monkeypatch.setattr(guide, "_configuration", lambda *_: (config, approval))
+    frames, served = [], []
+    class Consent:
+        def state(self, state, **data): frames.append((state, data))
+        def check_cancel(self): pass
+        def approve(self, *_args, **_kwargs): pytest.fail("a card was asked again")
+    @contextmanager
+    def serving(*_args, **_kwargs):
+        served.append(True)
+        if on_serve is not None: on_serve()
+        class Child:
+            def wait(self, timeout): return wait(timeout)
+        yield Child()
+    monkeypatch.setattr(guide, "_serving", serving)
+    profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None, origin=lambda: config["origin"],
+        project=Path("/fixed/project"), account=Path("/fixed/profile"), units=Path(grant.install_directory),
+        provider=Path("/fixed/provider"))
+    def run():
+        return guide.run(SimpleNamespace(**request), resolve_paths(root=access.root), access, None,
+                         consent=Consent(), profile=profile, **({"ssh": ssh} if ssh is not None else {}))
+    return run, frames, served
+
+
+def test_typed_guide_started_again_after_preview_serves_the_kept_preview_and_its_launch(setup_authority, monkeypatch):
+    """The workspace was closed after Preview: the guide run ended, the Preview was kept and nothing was launched."""
+    import subprocess
+    store, access, grant, reader, *_ = setup_authority
+    engine, grant, reader = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Review checkout")
+    seen = {}
+    def wait(timeout):
+        seen["context"] = engine.context(reader)
+        engine.launch(reader, **seen["context"]["request"])
+        raise subprocess.TimeoutExpired("owner", timeout)
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, wait)
+    result = run()
+    assert served == [True]
+    assert frames == [("preview_launch_ready", {"origin": "https://host.example.test", "generation": grant.generation})]
+    assert seen["context"]["preview_state"] == "ready" and not seen["context"]["launch_reserved"]
+    assert seen["context"]["preview"] == {**preview, "goal": "Review checkout"}
+    assert result.data == {"state": "launch_handoff", **binding(preview)}
+    assert store.retained_state().grant == grant and len(setup_authority[-1].dispatches) == 1
+
+
+def test_typed_guide_started_again_after_the_preview_window_says_expired(setup_authority, monkeypatch):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    store, access, grant, reader, clock, _ = setup_authority
+    engine, grant, reader = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Review checkout")
+    clock[0] = preview["expires_at"]  # the window is [created, expires); the approval itself still holds
+    seen = {}
+    def wait(_timeout):
+        seen["context"] = engine.context(reader)
+        raise KeyboardInterrupt
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, wait)
+    with pytest.raises(StdioRefused, match="interrupted_unknown"):
+        run()
+    assert served == [True]
+    assert frames == [("preview_launch_ready", {"origin": "https://host.example.test", "generation": grant.generation})]
+    assert seen["context"]["preview_state"] == "expired" and "preview" not in seen["context"]
+    assert store.local() == grant and not setup_authority[-1].dispatches
+
+
+@pytest.mark.parametrize("case", ["reserved", "launched", "dispatched", "quiet_support", "notice_support", "phase",
+    "unfinalized", "stage_error", "committed", "request_id", "fingerprint", "target", "scope", "not_initialize",
+    "no_preview_row", "expired", "revoked", "replaced", "no_approval", "finish_setup", "ssh"])
+def test_typed_guide_started_again_refuses_anything_but_a_kept_unlaunched_preview(setup_authority, monkeypatch, case):
+    import sqlite3
+    store, access, grant, reader, clock, args = setup_authority
+    engine, grant, reader = allow(setup_authority)
+    preview = engine.preview(reader, grant.generation, "Review checkout")
+    record = args.retained["record"]
+    if case == "reserved": store.reserve(reader, grant, binding(preview))
+    elif case == "launched": engine.launch(reader, **binding(preview))
+    elif case == "dispatched": record["job_dispatch"] = {"state": "pending", "attempt": 1}  # e.g. a local continue
+    # A local continue saves quiet (and notice) support before job support: one that failed between those saves.
+    elif case == "quiet_support": record["quiet_support"] = {"supervisor.sh": "0" * 64}
+    elif case == "notice_support": record["notice_support"] = {"path": "/synthetic/notice"}
+    # Defence only: the updater's own validation refuses an unfinalized record past prepare.
+    elif case == "unfinalized": record["finalized"] = False
+    elif case == "target": record["target"] = "c" * 40
+    elif case == "scope": record["initialization_scope"] = {"directory": "/different", "manifests": []}
+    elif case == "not_initialize": record["initialize"] = False
+    elif case == "replaced":
+        # The approval is replaced between the entry read and the guide's second read of it.
+        from claudlobby.plane.owner_setup import _snapshot
+        operation = OwnerSetup.operation
+        def replacing(self, observed):
+            found = operation(self, observed)
+            with sqlite3.connect(access.path) as conn:
+                conn.execute("UPDATE setup_grant SET snapshot=?", (_snapshot(replace(grant, generation=str(uuid4()))),))
+            return found
+        monkeypatch.setattr(OwnerSetup, "operation", replacing)
+    elif case == "phase": record["phase"] = "commit"
+    elif case == "stage_error": record["stage_error"] = {"stage": "prepare", "detail": "synthetic"}
+    elif case == "committed": record["config_committed"] = True
+    elif case == "request_id": record["request_id"] = str(uuid4())
+    elif case == "fingerprint": record["config_fingerprint"] = "d" * 64
+    elif case == "expired": clock[0] = grant.expires_at
+    elif case == "revoked": store.revoke(grant)
+    elif case in ("no_preview_row", "no_approval"):
+        with sqlite3.connect(access.path) as conn:
+            conn.execute("DELETE FROM " + ("setup_previews" if case == "no_preview_row" else "setup_grant"))
+    request = {"finish_setup": list(binding(preview).values())} if case == "finish_setup" else {}
+    carried = {"ssh": object()} if case == "ssh" else {}  # the SSH guide never needed this run alive
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, lambda _timeout: pytest.fail("waited"),
+                                        **carried, **request)
+    with pytest.raises(CommandFailure) as refused:
+        run()
+    assert refused.value.error.code == "conflict"
+    assert str(refused.value.error.message) == (
+        "a first-team operation is retained; inspect its original receipt and continue locally")
+    assert refused.value.data == {"request_id": record["request_id"]}
+    assert frames == [] and served == []
+    assert len(setup_authority[-1].dispatches) == int(case == "launched")
+
+
+def test_typed_guide_started_again_refuses_when_the_approval_lapses_before_it_is_read_again(setup_authority, monkeypatch):
+    """Lapsing after the entry check never reaches the approval cards or the settings file."""
+    from claudlobby.commands import host_owner
+    store, access, grant, reader, clock, args = setup_authority
+    engine, grant, reader = allow(setup_authority)
+    engine.preview(reader, grant.generation, "Review checkout")
+    monkeypatch.setattr(host_owner, "_allow_setup", lambda *_a, **_k: pytest.fail("asked to allow setup again"))
+    def lapse(): clock[0] = grant.expires_at
+    run, frames, served = _typed_reopen(setup_authority, monkeypatch, lambda _timeout: pytest.fail("waited"), on_serve=lapse)
+    with pytest.raises(CommandFailure) as refused:
+        run()
+    assert served == [True] and frames == []
+    assert refused.value.error.code == "conflict"
+    assert str(refused.value.error.message) == (
+        "a first-team operation is retained; inspect its original receipt and continue locally")
+    assert refused.value.data == {"request_id": args.retained["record"]["request_id"]}
+    assert "host update continue" in refused.value.error.hint
+    assert store.retained_state().grant == grant and not setup_authority[-1].dispatches
+
+
 def test_typed_completion_reopen_only_offers_optional_messages_for_original_done(setup_authority, monkeypatch):
     from claudlobby.commands import host_owner_setup as guide
     from claudlobby.commands.owner_stdio import StdioRefused
@@ -1267,6 +1419,104 @@ def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synt
         assert SetupEngine(engine.store.access).signin_status(reader,grant.generation,attempt)['state']=='connected'
         assert engine.preview(reader,grant.generation,'Requested local work')['dispatch']=='prepared'
         with pytest.raises(AccessDenied):engine.signin_begin(reader,grant.generation,attempt)
+    finally:engine.signin.shutdown()
+
+
+def _prepared_record(engine,args,**changes):
+    """The update record a prepared first-team Preview leaves on disk: at quiesce, so native startup is fenced.
+
+    The fixture's update store keeps the record in memory only; the real one writes it here."""
+    record={**args.retained['record'],'schema':1,'maintenance':False,'finalized':True,**changes}
+    (engine.root/'state/update.json').write_text(json.dumps(record))
+
+
+def _signed_in_preview(engine,grant,reader,args):
+    """Signed in through the real PTY and the synthetic provider, then a prepared Preview with its record on disk."""
+    from claudlobby import resources
+    from claudlobby.installation import _check_maintenance,FencedError
+    attempt=str(uuid4())
+    engine.signin_begin(reader,grant.generation,attempt)
+    _signin_until(engine,grant,reader,attempt,'waiting')
+    engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+    _signin_until(engine,grant,reader,attempt,'connected')
+    preview=engine.preview(reader,grant.generation,'Requested local work')
+    assert preview['dispatch']=='prepared' and preview['phase']=='quiesce'
+    _prepared_record(engine,args)
+    installation=resources.get_resources().installation
+    _check_maintenance(installation)  # A read passes ...
+    with pytest.raises(FencedError):_check_maintenance(installation,native=True)  # ... a native start does not.
+    return attempt,binding(preview)
+
+
+def _nothing_launched(engine,args):
+    assert not args.dispatches
+    with engine.store.access._connection() as conn:
+        assert conn.execute('SELECT launch_id FROM setup_grant').fetchone()[0] is None
+
+
+def test_signed_in_first_team_launches_its_own_prepared_preview(synthetic_signin,setup_authority):
+    """Found live: Launch asked the native-start fence, which this approval's own Preview had raised."""
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        _,request=_signed_in_preview(engine,grant,reader,args)
+        result=engine.launch(reader,**request)
+        assert result['state']=='quiesce' and result['launch_reserved']
+        assert [record['request_id'] for record in args.dispatches]==[request['request_id']]
+        assert engine.launch(reader,**request)==result and engine.receipt(reader,**request)==result
+        assert engine.context(reader)['launch_reserved'] and len(args.dispatches)==1
+    finally:engine.signin.shutdown()
+
+
+def test_signed_in_first_team_launch_still_refuses_a_signin_that_is_not_connected(synthetic_signin,setup_authority):
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        attempt,request=_signed_in_preview(engine,grant,reader,args)
+        for ending in ('needs_attention','cancelled','unknown','missing'):  # missing last: it deletes the row
+            with engine.store.access._connection(write=True) as conn:
+                conn.execute("UPDATE setup_provider SET state='connected' WHERE attempt_id=?",(attempt,))
+            engine.signin.ready(reader,grant)  # each ending starts from a connected sign-in
+            with engine.store.access._connection(write=True) as conn:
+                if ending=='missing':conn.execute('DELETE FROM setup_provider')
+                else:conn.execute('UPDATE setup_provider SET state=? WHERE attempt_id=?',(ending,attempt))
+            with pytest.raises(AccessDenied,match='signin_not_complete'):engine.launch(reader,**request)
+            assert not engine.context(reader)['launch_reserved']
+            _nothing_launched(engine,args)
+    finally:engine.signin.shutdown()
+
+
+def test_signed_in_first_team_launch_still_refuses_during_maintenance(synthetic_signin,setup_authority):
+    """ready() skips only the native-start fence: active maintenance still refuses before anything is reserved."""
+    from claudlobby.installation import InstallationError
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        _,request=_signed_in_preview(engine,grant,reader,args)
+        _prepared_record(engine,args,maintenance=True)
+        with pytest.raises(InstallationError,match='maintenance is active'):engine.launch(reader,**request)
+        _nothing_launched(engine,args)
+    finally:engine.signin.shutdown()
+
+
+def test_signin_calls_stay_fenced_while_the_prepared_preview_quiesces(synthetic_signin,setup_authority):
+    """Only ready() reads past the native-start fence; every call the browser or worker makes still asks it."""
+    from claudlobby.installation import FencedError
+    engine,grant,reader,*_=synthetic_signin
+    try:
+        attempt,_=_signed_in_preview(engine,grant,reader,setup_authority[-1])
+        engine.signin.ready(reader,grant)
+        signin=engine.signin
+        # The browser's own calls end earlier, at the retained Preview; under them the fence still holds.
+        with pytest.raises(AccessDenied,match='signin_preview_retained'):engine.signin_status(reader,grant.generation,attempt)
+        for call in (lambda:signin.status(reader,grant,attempt),lambda:signin.begin(reader,grant,attempt),
+                     lambda:signin.begin(reader,grant,str(uuid4())),lambda:signin.code(reader,grant,attempt,'accepted#'+'b'*32),
+                     lambda:signin.cancel(reader,grant,attempt),lambda:signin.summary(reader,grant),
+                     lambda:signin._admit(reader,grant)):
+            with pytest.raises(FencedError):call()
+        with pytest.raises(FencedError):
+            with engine.signin._runtime(reader,grant):pytest.fail('a fenced runtime was entered')
+        assert engine.signin._thread is not None and not engine.signin._thread.is_alive()
     finally:engine.signin.shutdown()
 
 
@@ -2684,3 +2934,58 @@ def test_todays_guide_is_unchanged_on_the_wire_at_the_profile(fixed_profile, pip
     os.write(pipes[2], wire(start(hello["session_id"], update_record=None)))
     with pytest.raises(StdioRefused):
         console.start()
+
+
+def _real_sized_plan():
+    """A plan the size a real first team renders: 76 generated files and 70 units, as measured on a
+    fresh Ubuntu computer at the first browser Preview (changes about 38 KB, units about 115 KB)."""
+    changes=[{"target":f"/home/example/claudlobby/data/runtime/bots/builder/file-{index:03}.conf",
+              "before":None,"after":{"kind":"file","mode":420,"sha256":"a"*64},"padding":"p"*330}
+             for index in range(76)]
+    unit={"bot":"builder","enroll":True,"fleet":"web-app","phase":"start","platform":"linux","scope":"bot",
+          "service":None,"sha256":"b"*64,"source":"/home/example/claudlobby/data/runtime/units/claudlobby-builder.service",
+          "mode":420,"working_directory":"/home/example/projects/first-team",
+          "environment":{f"CLAUDLOBBY_SETTING_{index:02}":"v"*40 for index in range(12)},
+          "admission":{"release":"r"*64,"paths":["/home/example/claudlobby/install"]*6}}
+    effects={"units":[dict(unit) for _ in range(70)],"restart_bots":["builder","reviewer","tester"],
+             "reload_supervision":True,"coverage":{"fleets":["web-app"]}}
+    return changes,effects
+
+
+def test_a_preview_answer_fits_what_a_browser_accepts():
+    """A real first team's plan, answered whole, is larger than any browser accepts as a setup answer,
+    so its Preview could never be shown. Answered without each unit's working data it fits with room."""
+    from claudlobby.plane.owner_setup import SETUP_ANSWER_BYTES, SHOWN_UNIT, shown_effects
+    changes,effects=_real_sized_plan()
+    size=lambda shown:len(json.dumps({"changes":changes,"effects":shown}).encode())
+    assert size(effects)>SETUP_ANSWER_BYTES
+    shown=shown_effects(effects)
+    assert size(shown)<SETUP_ANSWER_BYTES//2
+    assert all(set(unit)<=set(SHOWN_UNIT) and "environment" not in unit and "admission" not in unit
+               for unit in shown["units"])
+    assert [unit["sha256"] for unit in shown["units"]]==[unit["sha256"] for unit in effects["units"]]
+    assert {key:value for key,value in shown.items() if key!="units"}=={
+        key:value for key,value in effects.items() if key!="units"}
+    assert "environment" in effects["units"][0]  # the rendered plan itself is left as it was
+    assert shown_effects({"restart_bots":[]})=={"restart_bots":[]}
+
+
+def test_preview_and_the_context_read_answer_units_without_their_working_data(setup_authority, monkeypatch):
+    """Both answers a page can read the plan from are built by one function; the computer's own
+    rendered plan stays whole."""
+    from claudlobby import config_plan
+    from claudlobby.plane.owner_setup import SETUP_ANSWER_BYTES, SHOWN_UNIT
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    rendered=config_plan.read_rendered(engine.root,preview["config_fingerprint"])
+    changes,effects=_real_sized_plan()
+    whole=SimpleNamespace(fleets=rendered.fleets,changes=rendered.changes,effects={**rendered.effects,**effects})
+    monkeypatch.setattr(config_plan,"read_rendered",lambda root,fingerprint:whole)
+    request=binding(preview)
+    answers=[engine._plan(grant,request,preview["expires_at"],"quiesce"),engine.context(reader)["preview"]]
+    for answer in answers:
+        assert len(answer["effects"]["units"])==70
+        assert all(set(unit)<=set(SHOWN_UNIT) for unit in answer["effects"]["units"])
+        assert len(json.dumps(answer).encode())<SETUP_ANSWER_BYTES
+        assert answer["effects"]["restart_bots"]==effects["restart_bots"] and answer["dispatch"]=="prepared"
+    assert "environment" in whole.effects["units"][0]
