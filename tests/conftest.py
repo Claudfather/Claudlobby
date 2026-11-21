@@ -63,7 +63,27 @@ def _require_prepared_resources():
         raise pytest.UsageError(f"{guidance}: {exc}") from exc
 
 
-_require_prepared_resources()
+# The variables git itself scopes to one repository.
+_GIT_REPOSITORY_VARIABLES = subprocess.check_output(
+    ["git", "rev-parse", "--local-env-vars"], text=True, timeout=10).split()
+
+
+def _forget_ambient_git(patch):
+    """Drop the repository variables the suite inherited.
+
+    An exported GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE (from a hook, a wrapper
+    or a test runner) redirects every repository a fixture builds, and
+    GIT_CONFIG_COUNT adds config above every composed gitconfig; either failure
+    reads as a flake or a stale checkout (#1015). The list is git's own: a
+    caller's GIT_CONFIG_GLOBAL or GIT_TRACE is not on it, and stays theirs."""
+    for key in _GIT_REPOSITORY_VARIABLES:
+        patch.delenv(key, raising=False)
+
+
+# The resource check runs git before any fixture exists to isolate it.
+with pytest.MonkeyPatch.context() as _import_patch:
+    _forget_ambient_git(_import_patch)
+    _require_prepared_resources()
 
 
 _HOME_KEYS = ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR")
@@ -110,6 +130,7 @@ def _isolate_plane_session(tmp_path_factory, request):
     with pytest.MonkeyPatch.context() as patch:
         _isolate_home(patch, base)
         _silence_plane(patch)
+        _forget_ambient_git(patch)
         # Installed-wheel subprocesses must import their own package, not a
         # source tree inherited from the parent validation environment (#1316).
         patch.delenv("PYTHONPATH", raising=False)
