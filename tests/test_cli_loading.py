@@ -66,7 +66,7 @@ def _run(code, *argv, tmp_path):
     (("plane", "view", "--help"), "--host"),
     (("host", "setup", "--help"), "--installation"),
     (("fleet", "setup", "--help"), "--install-directory"),
-    (("migration", "data", "--help"), "--source"),
+    (("migration", "workstreams", "--help"), "--archive"),
     (("message", "show", "--help"), "MESSAGE_ID"),
     (("message", "send", "--help"), "--request-id"),
     (("message", "reply", "--help"), "MESSAGE_ID"),
@@ -147,6 +147,9 @@ def test_main_passes_namespace_to_only_selected_handler_and_returns_its_result(t
 @pytest.mark.parametrize("old", (
     "env-migrate", "data-migrate", "cron-migrate", "memory-migrate",
     "lessons-migrate", "plane import-workstreams",
+    # The five one-shot layout converters are retired (#2959), under either spelling.
+    "migration env", "migration data", "migration cron", "migration memory",
+    "migration lessons",
 ))
 def test_retired_converter_spellings_are_not_aliases(old, tmp_path):
     result = _run(PARSE, *old.split(), "--help", tmp_path=tmp_path)
@@ -154,10 +157,10 @@ def test_retired_converter_spellings_are_not_aliases(old, tmp_path):
 
 
 def test_converter_syntax_error_uses_public_result_without_echoing_values(tmp_path):
-    result = _run(PARSE, "--json", "migration", "env", "--source", "private-value",
-                  "--map", "bad", "--unexpected", tmp_path=tmp_path)
+    result = _run(PARSE, "--json", "migration", "workstreams", "--file", "private-value",
+                  "--unexpected", tmp_path=tmp_path)
     assert result.returncode == 2
-    assert '"command":"migration.env"' in result.stdout
+    assert '"command":"migration.workstreams"' in result.stdout
     assert "private-value" not in result.stdout + result.stderr
 
 

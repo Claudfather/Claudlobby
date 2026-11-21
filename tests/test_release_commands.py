@@ -181,42 +181,25 @@ def test_config_reads_report_unbuilt_resources_as_unavailable(tmp_path, capsys, 
         assert "private build detail" not in capture.out + capture.err
 
 
-def test_converter_failure_preserves_cron_backup_without_provider_stderr(monkeypatch):
+def test_workstream_import_failure_keeps_owner_text_out_of_the_result(monkeypatch):
     import logging
     from types import SimpleNamespace
     from claudlobby.command_result import CommandFailure
     from claudlobby.commands import migration_converters
 
     def owner(_args):
-        logging.getLogger("claudlobby").error(
-            "your old crontab is preserved as /tmp/crontab-backup-123.txt")
-        logging.getLogger("claudlobby").error("`crontab -` install failed: SECRET-provider-error")
-        return 4
+        logging.getLogger("claudlobby").error("registry row rejected: SECRET-source-bytes")
+        return 3
 
-    monkeypatch.setattr(migration_converters, "import_module", lambda *_: SimpleNamespace(cmd_cron_migrate=owner))
-    args = SimpleNamespace(migration_command="cron", archive=False, apply=True)
+    monkeypatch.setattr(migration_converters, "import_module",
+                        lambda *_: SimpleNamespace(cmd_plane_import_workstreams=owner))
+    args = SimpleNamespace(migration_command="workstreams", archive=False, apply=True)
     with pytest.raises(CommandFailure) as failure:
         migration_converters.dispatch(args)
-    assert failure.value.data["backup_path"] == "/tmp/crontab-backup-123.txt"
-    assert "SECRET-provider-error" not in str(failure.value.data) + str(failure.value.error)
-
-
-def test_converter_copy_failure_keeps_item_status_without_exception_text(monkeypatch):
-    import logging
-    from types import SimpleNamespace
-    from claudlobby.command_result import CommandFailure
-    from claudlobby.commands import migration_converters
-
-    def owner(_args):
-        logging.getLogger("claudlobby").error("FAILED  /private/old/notes.txt: SECRET-copy-error")
-        return 1
-
-    monkeypatch.setattr(migration_converters, "import_module", lambda *_: SimpleNamespace(cmd_data_migrate=owner))
-    with pytest.raises(CommandFailure) as failure:
-        migration_converters.dispatch(SimpleNamespace(migration_command="data", apply=True))
-    assert failure.value.data["diagnostics"] == [
-        {"status": "failed", "source": "/private/old/notes.txt"}]
-    assert "SECRET-copy-error" not in str(failure.value.data) + str(failure.value.error)
+    assert failure.value.error.code == "unavailable"
+    assert failure.value.data == {"mode": "apply", "converter": "workstreams",
+                                  "backup_path": None, "diagnostics": [], "failure_count": 0}
+    assert "SECRET-source-bytes" not in str(failure.value.data) + str(failure.value.error)
 
 
 def test_migration_status_reads_historical_progress_without_execution(releases, capsys):
