@@ -16,10 +16,10 @@
 >
 > **Existing files are retained** as the composition fallback for **non-vault** fleets (a fleet with
 > no `claudron_vault_path` still renders the lessons it lists in `fleet.yaml`). They also carry the
-> provenance behind the protocols/guardrails they motivated. The referential subset has been
-> migrated to the vault via `claudlobby migration lessons`; the per-note verdicts are the
-> classification in `claudlobby/commands/lessons_migrate.py`. Removal of these files is a
-> later, scheduled release — not this one.
+> provenance behind the protocols/guardrails they motivated. The referential subset was
+> captured into the vault by a one-time converter, `claudlobby migration lessons`, which is
+> now retired (#2959); its per-note verdicts are the **Triage record** at the end of this
+> file. Removal of these files is a later, scheduled release — not this one.
 
 "We learned this the hard way" notes. Specific incidents, retro findings, or empirically-discovered failure modes that bots should know about — distinct from rules (guardrails) or workflow patterns (protocols).
 
@@ -72,3 +72,39 @@ A nested lesson follows the same shape, just filed under a topic folder — see 
 ## Tone
 
 Lessons should read like postmortem notes — what happened, why it surprised us, what we changed. Not commands; observations.
+
+## Triage record
+
+The verdict each note got when this directory was frozen. A **referential** note was captured
+into the vault with the tags `lesson`, its topic folder, and any listed here. A **behavior** note
+was not: a vault pointer cannot steer behavior, so it stays in context through the protocol
+named. `tests/test_lessons_frozen.py` holds the directory to this table: a note with no row, or
+a row with no note, fails.
+
+| Note | Verdict | Extra vault tags, or the in-context home |
+|---|---|---|
+| `dbt/dim-first-architecture.md` | referential |  |
+| `dbt/incremental-unique-key-discipline.md` | referential |  |
+| `dbt/parse-vs-execute-time.md` | referential |  |
+| `dbt/semantic-layer-discipline.md` | referential |  |
+| `design/addition-earns-place.md` | referential |  |
+| `design/whitespace-earns-weight.md` | referential |  |
+| `migration/dotenv-export-prefix.md` | referential | `env` |
+| `migration/preserve-existing-env.md` | referential | `env` |
+| `migration/tmux-server-env-inheritance.md` | referential | `tmux`, `env` |
+| `railway/fail-loud.md` | referential |  |
+| `raspberry-pi/sdhci-uhs-quirk.md` | referential | `hardware` |
+| `review/empirical-verification.md` | referential |  |
+| `review/mutation-testing-default.md` | referential |  |
+| `review/root-cause-not-symptom.md` | referential |  |
+| `review/stacked-pr-squash-corruption.md` | referential | `git` |
+| `snowflake/clustering-earns-its-cost.md` | referential |  |
+| `snowflake/transient-table-recovery.md` | referential |  |
+| `telegram/mcp-drops.md` | referential |  |
+| `telegram/orphaned-poller-single-consumer.md` | referential |  |
+| `telegram/plain-text-escape-incident.md` | referential |  |
+| `private-repo-screenshots.md` | referential | `github`, `screenshots` |
+| `telegram-bot-group-setup.md` | referential | `telegram`, `setup` |
+| `messaging-channel-discipline.md` | behavior | `protocols/messaging-channel-discipline`, written for it |
+| `tmux-dispatch-shell-expansion.md` | behavior | `protocols/dispatch`, which already carried `set +H;` |
+| `orchestration/consensus-before-escalation.md` | behavior | `protocols/consensus-loop`, which already carried the loop |

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from pathlib import Path
 
 from .. import dotenv
 from ..context import load_context, resolve_paths
@@ -27,7 +26,7 @@ def _resolve_paths(args) -> Paths:
 def _load_env(paths: Paths) -> None:
     """Load .env file into os.environ (without overriding existing vars).
     Handles both `VAR=value` and `export VAR=value` formats — the latter is
-    what migration env writes and what hand-edited .env files commonly use."""
+    what hand-edited .env files commonly use."""
     for k, v in dotenv.read(paths.env_file).items():
         if k not in os.environ:
             os.environ[k] = v
@@ -74,41 +73,6 @@ def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> boo
         log.error("validation failed — fix the errors above, then %s", context)
         return False
     return True
-
-
-def _parse_rename_map(entries: list[str]) -> dict[str, str]:
-    """Parse --map entries ('fleet-bot=src-dir'). Raises ValueError on bad format."""
-    rename_map: dict[str, str] = {}
-    for entry in entries:
-        if "=" not in entry:
-            raise ValueError(f"--map expects 'fleet-bot=src-dir', got: {entry}")
-        fleet_bot, src_name = entry.split("=", 1)
-        rename_map[fleet_bot.strip()] = src_name.strip()
-    return rename_map
-
-
-def _migration_preamble(
-    args,
-) -> tuple[Paths, "FleetConfig", Path, dict[str, str]]:
-    """Shared preamble for migration commands.
-
-    Calls sys.exit(1) on failure — callers can unpack the result directly.
-    """
-    paths = _resolve_paths(args)
-    fleet, _md = _load_fleet_or_exit(paths)
-    source_dir = Path(args.source).expanduser().resolve()
-
-    if not source_dir.is_dir():
-        log.error("source directory not found: %s", source_dir)
-        sys.exit(1)
-
-    try:
-        rename_map = _parse_rename_map(args.map or [])
-    except ValueError as e:
-        log.error("%s", e)
-        sys.exit(1)
-
-    return paths, fleet, source_dir, rename_map
 
 
 def refuse_unreachable(command: str, note: str) -> int:

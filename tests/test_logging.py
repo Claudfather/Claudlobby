@@ -10,14 +10,12 @@ from __future__ import annotations
 import logging
 import json
 import types
-from pathlib import Path
 from unittest.mock import patch  # noqa: F401 — used in generate tests
 
 from claudlobby.__main__ import main
 from claudlobby.commands.core import cmd_generate
 from claudlobby.paths import Paths
 from tests.package_fixtures import git_package
-from claudlobby.commands.memory_migrate import cmd_memory_migrate
 
 
 def _args(**kwargs):
@@ -163,23 +161,6 @@ class TestGenerateCommandLogging:
             result = cmd_generate(args)
         assert result == 0
         assert "lead" in caplog.text
-
-
-# ── cmd_memory_migrate ────────────────────────────────────────────────────────
-
-
-class TestMemoryMigrateLogging:
-    def test_memory_migrate_logs_error_when_no_projects_dir(
-        self, fleet_dir, monkeypatch, tmp_path, caplog
-    ):
-        """Logs error (not print to stderr) when ~/.claude/projects/ missing."""
-        # Point home to tmp_path so there's definitely no .claude/projects
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        args = _args(root=str(fleet_dir), map=None, force=False)
-        with caplog.at_level(logging.ERROR, logger="claudlobby"):
-            result = cmd_memory_migrate(args)
-        assert result == 1
-        assert "projects" in caplog.text.lower() or "claude" in caplog.text.lower()
 
 
 # ── No-print audit ────────────────────────────────────────────────────────────

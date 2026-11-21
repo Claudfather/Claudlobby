@@ -45,6 +45,6 @@ claudlobby checkin selection <verify|focus-refs> FILE  # offline selection check
 
 # Scaffolding and one-time migrations (see each --help)
 claudlobby library create --kind <skill|guardrail>
-claudlobby migration <env|data|cron|memory|lessons|workstreams>
+claudlobby --fleet F migration workstreams [--apply]  # import a residual workstream registry; default is preview
 claudlobby --fleet F migration workstream-backfill [--apply --request-id UUID]  # once per fleet after the update: each open task with no open workstream gets its own
 ```
