@@ -146,10 +146,30 @@ def _commit(installation, message):
     return installation.preflight()
 
 
+def _family_installation(family, tmp_path):
+    """tests/test_package_resources.py's tiny checkout, at the preparation script's paths."""
+    from claudlobby.installation import Installation, write_installation
+
+    fixture = _source_installation(tmp_path / "layout")
+    installation = Installation(family / "install", family / "data")
+    shutil.copytree(fixture.source, installation.source, symlinks=True)
+    installation.bin.mkdir(mode=0o700)
+    installation.cli.write_text("# fixture launcher\n")
+    installation.data_root.mkdir(mode=0o700)
+    write_installation(installation)
+    shutil.rmtree(tmp_path / "layout")
+    return installation
+
+
 class Case:
     """One paired, fresh computer: a managed checkout at `before`, with `target` ahead of it."""
 
-    def __init__(self, tmp_path, monkeypatch, *, owner=None, real_job=False, stub_extras=True):
+    def __init__(
+        self, tmp_path, monkeypatch, *, owner=None, real_job=False, stub_extras=True, home=None
+    ):
+        """`home`: lay the computer out as the preparation script does, under
+        `home/.local/share/claudlobby-browser` (`install`, `data`, and the
+        settings at `host-policy/system.yaml`)."""
         import platform
         from claudlobby import composer, env_tiers, supervision_inventory
         from claudlobby.commands import operator_context
@@ -157,7 +177,13 @@ class Case:
         from claudlobby.plane.owner_access import OwnerAccess
 
         self.monkeypatch = monkeypatch
-        installation = _source_installation(tmp_path)
+        self.home = home
+        if home is None:
+            installation = _source_installation(tmp_path)
+        else:
+            family = home / ".local/share/claudlobby-browser"
+            family.mkdir(parents=True, mode=0o700)
+            installation = _family_installation(family, tmp_path)
         source = installation.source
         shutil.copy2(
             REPO / "claudlobby/runtime_versions.py",
@@ -192,7 +218,11 @@ class Case:
         # Paired: the owner preparation a guide leaves before the first activation.
         self.host_uid = ensure_host_uid(self.root / "state")
         self.access = OwnerAccess.initialize(self.root, before_first_fleet=True)
-        settings = tmp_path / "private" / "host.yaml"
+        settings = (
+            tmp_path / "private" / "host.yaml"
+            if home is None
+            else home / ".local/share/claudlobby-browser/host-policy/system.yaml"
+        )
         settings.parent.mkdir(mode=0o700)
         if owner == "on":
             settings.write_text(

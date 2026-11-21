@@ -997,3 +997,398 @@ def test_a_computer_started_with_no_team_is_admitted_and_checked_like_any_other(
     from claudlobby.active_config import read_current_config
     snapshot = read_current_config(case.root, installation=case.installation, revision=package.source_revision)
     assert snapshot["supervision"] == {"manager": "Linux", "domain": "", "directory": str(case.directory)}
+
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+
+# Phase 2, step 7: the proofs for the update actions of the preparation script.
+#
+# The computer is tests/no_team_start.py's, laid out where the preparation script
+# lays one out (`Case(home=...)`), with a receipt at the revision it was started at
+# and the source that receipt recorded holding a later commit. Every `host update`
+# command runs with the update actions' own environment, built by the script's own
+# `update_environment`, through the launcher's update route into the updater's
+# `main`. The stand-ins are the fixture's: the native layer, the operator gate and
+# the updater's job, whose stages run in this process.
+
+#: The maintenance phases the updater enters. `migrate` is in its list of phases
+#: but no stage sets it (publication goes from `publish` to `commit`), so the
+#: fourth phase a job can stop in with maintenance on is `commit`.
+MAINTENANCE = ("git", "environment", "publish", "commit")
+
+
+def _script():
+    from tests.test_host_install import payload
+    return payload()
+
+
+def _recorded_source(case, tmp_path, *, at=None):
+    """The preparation's receipt at `at` (the installed revision), its source holding a later commit."""
+    import json as _json
+    from claudlobby import git_update as updater
+    from tests.no_team_start import LOCK
+    from tests.test_package_resources import _run
+    at = at or updater._head(case.installation)
+    remote = tmp_path / "recorded-source"
+    _run(["git", "clone", "--quiet", "--no-hardlinks", case.installation.source, remote], tmp_path)
+    _run(["git", "-C", remote, "config", "maintenance.auto", "false"], tmp_path)
+    _run(["git", "-C", remote, "checkout", "--quiet", "-B", "later", case.target], tmp_path)
+    (remote / "templates/candidate.txt").write_text("later bytes\n")
+    _run(["git", "-C", remote, "add", "."], tmp_path)
+    _run(["git", "-C", remote, "-c", "user.name=Example", "-c", "user.email=example@example.invalid",
+          "commit", "--quiet", "-m", "Later source"], tmp_path)
+    later = _run(["git", "-C", remote, "rev-parse", "HEAD"], tmp_path).strip()
+    python = Path(sys.executable).resolve()
+    receipt = {"schema": 1, "purpose": "installation-preparation-only",
+               "installation": str(case.installation.directory), "data_root": str(case.root),
+               "remote": str(remote), "ref": at, "interpreter": str(python),
+               "interpreter_sha256": updater._digest(python.read_bytes()), "revision": at,
+               "lock_sha256": updater._digest(LOCK), "environment_owned": True, "complete": True}
+    path = case.installation.directory / "preparation.json"
+    path.write_text(_json.dumps(receipt, sort_keys=True))
+    path.chmod(0o600)
+    return later, path.read_bytes()
+
+
+def _as_the_script_runs(case, monkeypatch, *argv, without=()):
+    """`host update <argv>` in the update actions' environment, through the launcher's update route."""
+    import contextlib
+    import io
+    import json as _json
+    from claudlobby import git_update as updater, installation as launcher
+    environment = _script().update_environment(case.home)
+    for key in without:
+        environment.pop(key)
+    arguments = ["--root", str(case.root), "host", "update", *argv]
+    output = io.StringIO()
+    with monkeypatch.context() as patch:
+        for key in list(os.environ):
+            patch.delenv(key)
+        for key, value in environment.items():
+            patch.setenv(key, value)
+        assert launcher._update_route(arguments)
+        assert launcher._bound_arguments(case.installation, arguments) == arguments
+        patch.setattr(updater, "__file__", str(case.installation.bin / "claudlobby-update"))
+        with contextlib.redirect_stdout(output):
+            code = updater.main(arguments)
+    return code, _json.loads(output.getvalue())
+
+
+def _launcher(case, *argv):
+    """An ordinary command through the real stable launcher, in the update actions' environment."""
+    return subprocess.run([sys.executable, "-I", "-S", "-B", str(case.installation.cli), "--root", str(case.root),
+                           *argv], env=_script().update_environment(case.home), capture_output=True, text=True,
+                          timeout=120)
+
+
+def _fail_once(monkeypatch, phase):
+    """The updater's job stops once in `phase`, with maintenance on."""
+    from claudlobby.git_update import UpdateStore
+    owner, name = {"git": (UpdateStore, "cutover_git"), "environment": (UpdateStore, "cutover_environment"),
+                   "publish": (operation, "apply_publication"),
+                   "commit": (operation, "publish_current_config")}[phase]
+    real, failed = getattr(owner, name), []
+
+    def once(*args, **kwargs):
+        if not failed:
+            failed.append(phase)
+            raise RuntimeError(f"fixture job failure in {phase}")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(owner, name, once)
+    return failed
+
+
+def _measured(label, seconds):
+    print(f"\nMEASURED {label}: {seconds:.3f} s")
+
+
+def _owner_computer(tmp_path, monkeypatch, home):
+    """tests/test_owner_computer_run.py's computer, laid out as the preparation script lays one out."""
+    import functools
+    from tests import test_owner_computer_run as computer_run
+    from tests.no_team_start import Case
+    monkeypatch.setattr(computer_run, "Case", functools.partial(Case, home=home))
+    return computer_run.Computer(tmp_path, monkeypatch)
+
+
+LASTING = "claudlobby-plane-owner.service"
+
+
+@pytest.mark.parametrize("owner", ["on", "off"])
+def test_a_started_computer_moves_to_a_named_revision(tmp_path, monkeypatch, owner):
+    """`host update apply Y` from the update actions' process moves a started computer with no team to Y.
+
+    The process that asks holds no lease and, in the real world, is outside every
+    managed unit (the operator gate is the fixture's; the gate's own dependence on
+    the environment is the next test's). With the settings switching the lasting
+    service on, the computer is started by the computer run; with them saying
+    `enroll: false`, by phase 1's start.
+    """
+    import time as _time
+    from claudlobby.git_update import read_update
+    from claudlobby.plane.owner_source import start_state
+    from tests.no_team_start import Case
+    home = tmp_path / "account"
+    if owner == "on":
+        computer = _owner_computer(tmp_path, monkeypatch, home)
+        case = computer.case
+        started = _time.monotonic()
+        assert computer.run().data["state"] == "computer_starting"
+        case.run_job()
+        _measured("start (computer run to done)", _time.monotonic() - started)
+    else:
+        case = Case(tmp_path, monkeypatch, owner="off", home=home)
+        case.start()
+    assert start_state(case.root, case.installation) == "started"
+    later, receipt = _recorded_source(case, tmp_path)
+    database = operation.db_file(case.root).stat()
+    calls = len(case.native.calls)
+    started = _time.monotonic()
+    code, dispatched = _as_the_script_runs(case, monkeypatch, "apply", later)
+    before_dispatch = _time.monotonic() - started
+    assert code == 0 and dispatched["job"] == {"dispatch": "started"}
+    record = dispatched["update"]
+    assert (record["target"], record["phase"], record["maintenance"]) == (later, "quiesce", False)
+    assert case.dispatches[-1] == record["request_id"] and not record.get("initialization_scope")
+    finished = case.run_job()
+    whole = _time.monotonic() - started
+    assert finished["phase"] == "done" and finished["health_errors"] == {}
+    assert finished["request_id"] == record["request_id"]
+    # The process that asked held no lease: the job took both gates at its first try.
+    assert case.polls == 0 and [row["outcome"] for row in finished["runtime_waits"]] == ["taken", "taken"]
+    assert case.installation.preflight() == later
+    assert (case.installation.directory / "preparation.json").read_bytes() == receipt
+    assert start_state(case.root, case.installation) == "started"
+    after = operation.db_file(case.root).stat()
+    assert (after.st_dev, after.st_ino) == (database.st_dev, database.st_ino)
+    paused = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_pause"}
+    resumed = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_resume"}
+    if owner == "on":
+        # The settings file reached the render: the lasting service was stopped and restored.
+        assert LASTING in finished["consumers"] and LASTING in paused and LASTING in resumed
+    else:
+        assert LASTING not in finished["consumers"] and not (case.directory / LASTING).exists()
+    _measured(f"update, the part of apply before dispatch (owner {owner})", before_dispatch)
+    _measured(f"update, apply to done (owner {owner})", whole)
+    if owner == "on":
+        # A computer run at Y that names the finished record is admitted and asks nothing.
+        from tests.test_owner_computer_run import HOST, lasting_service
+        computer.revision = later
+        computer.profile.receipt_revision = _json_loads(receipt)["ref"]
+        with lasting_service(computer):
+            again = computer.run(update_record=[record["request_id"], later])
+        assert again.data == {"state": "computer_ready", "origin": HOST}
+        assert computer.channel.cards == [] and read_update(case.installation)["request_id"] == record["request_id"]
+
+
+def _json_loads(raw):
+    import json as _json
+    return _json.loads(raw)
+
+
+def test_the_update_renders_this_computers_settings_through_the_built_environment(tmp_path, monkeypatch):
+    """Without the settings variable the render takes the packaged default and drops the lasting service.
+
+    The updater then refuses the update before maintenance (it never removes a
+    consumer), and leaves its record at `prepare`. With the variable, the same
+    computer's update renders the service and reaches `done`
+    (`test_a_started_computer_moves_to_a_named_revision`).
+    """
+    from claudlobby.git_update import read_update
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, owner="on", home=tmp_path / "account")
+    started = case.start()
+    assert LASTING in started["consumers"]
+    later, _ = _recorded_source(case, tmp_path)
+    with pytest.raises(UpdateError, match="candidate removes native consumers"):
+        _as_the_script_runs(case, monkeypatch, "apply", later, without=("CLAUDLOBBY_HOST_SYSTEM_YAML",))
+    record = read_update(case.installation)
+    assert (record["target"], record["phase"], record["maintenance"]) == (later, "prepare", False)
+    assert record.get("job_dispatch") is None and case.installation.preflight() == case.target
+
+
+@pytest.mark.parametrize("kind", ["update", "start"])
+@pytest.mark.parametrize("phase", MAINTENANCE)
+def test_a_failure_in_maintenance_is_continued(tmp_path, monkeypatch, kind, phase):
+    """A job that stops in maintenance: every ordinary command and a guide run refused; continue finishes it."""
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import read_update
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, home=tmp_path / "account")
+    if kind == "update":
+        case.start()
+        later, _ = _recorded_source(case, tmp_path)
+        _code, dispatched = _as_the_script_runs(case, monkeypatch, "apply", later)
+        request = dispatched["update"]["request_id"]
+    else:
+        request = updater.apply_or_continue(case.installation, target=case.target,
+                                            initialization=case.scope)["update"]["request_id"]
+    failed = _fail_once(monkeypatch, phase)
+    with pytest.raises(RuntimeError, match=f"failure in {phase}"):
+        case.run_job()
+    record = read_update(case.installation)
+    assert failed == [phase]
+    assert (record["request_id"], record["phase"], record["maintenance"]) == (request, phase, True)
+    for argv in (["host", "status"], ["host", "owner", "setup", "--stdio-computer"]):
+        refused = _launcher(case, *argv)
+        assert refused.returncode == 6 and "maintenance is active" in refused.stderr, refused.stderr
+    dispatches = len(case.dispatches)
+    code, continued = _as_the_script_runs(case, monkeypatch, "continue", "--expected-request", request)
+    assert code == 0 and continued["update"]["request_id"] == request
+    assert case.dispatches[dispatches:] == [request]
+    finished = case.run_job()
+    assert (finished["request_id"], finished["phase"], finished["health_errors"]) == (request, "done", {})
+    assert case.installation.preflight() == (later if kind == "update" else case.target)
+
+
+def _team_preparation(case, kind, bound):
+    """A team preparation left undispatched: a Preview, or (`bound`) a prepared team whose Launch never dispatched.
+
+    The record's render is a no-team render, made the way a start makes one; only
+    its scope names a team file (a first install's manifests, or phase 10's
+    `addition_scope`). What `continue` decides reads that scope and the dispatch.
+    """
+    import json
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import UpdateStore, read_update
+    # Outside `local/`: a team file there that the no-team render does not name
+    # is refused by every later render ("host plan omits local fleet declarations").
+    team = case.root.parent / "authored-team/fleet.yaml"
+    if kind == "first_team":
+        team.parent.mkdir(parents=True)
+        team.write_text("# a fixture team file\n")
+        with UpdateStore(case.installation) as store:
+            record = updater._prepare_update_locked(store, target=case.target, initialization=case.scope,
+                                                    prepare_only=True)
+            # The store refuses to change a frozen scope, so the record is written as the store writes it.
+            record["initialization_scope"] = {**record["initialization_scope"], "manifests": [str(team)]}
+            updater._write(store.state / "update.json",
+                           json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+    else:
+        case.start()
+        later = case.add_target()
+        team.parent.mkdir(parents=True)
+        team.write_text("# a fixture team file\n")
+        with UpdateStore(case.installation) as store:
+            record = updater._prepare_update_locked(store, target=later)
+            record["addition_scope"] = {"manifests": [str(team)]}
+            store.save(record)
+    if bound:
+        with UpdateStore(case.installation) as store:
+            case._job_support(store)
+    record = read_update(case.installation)
+    assert record["phase"] == "quiesce" and record.get("job_dispatch") is None
+    assert (record.get("updater_job") is not None) is bound
+    return record
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["preview", "prepared"])
+@pytest.mark.parametrize("kind", ["first_team", "addition"])
+def test_continue_never_dispatches_a_team_nobody_approved(tmp_path, monkeypatch, kind, bound):
+    """`host update continue --expected-request` refuses an undispatched team preparation and changes nothing.
+
+    Only its Launch card dispatches it. Once dispatched, a stage that fails is
+    continued by the same command to `done`.
+    """
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import NotContinuable, read_update
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, home=tmp_path / "account")
+    record = _team_preparation(case, kind, bound)
+    path = case.root / "state/update.json"
+    raw, dispatches = path.read_bytes(), list(case.dispatches)
+    for _ in range(2):
+        with pytest.raises(NotContinuable):
+            _as_the_script_runs(case, monkeypatch, "continue", "--expected-request", record["request_id"])
+        assert path.read_bytes() == raw and case.dispatches == dispatches
+    # The Launch card: after its grant is reserved, the Launch dispatches the same record.
+    launched = updater.apply_or_continue(case.installation, expected_request_id=record["request_id"])
+    assert launched["job"] == {"dispatch": "started"} and case.dispatches[len(dispatches):] == [record["request_id"]]
+    _fail_once(monkeypatch, "git")
+    with pytest.raises(RuntimeError, match="failure in git"):
+        case.run_job()
+    assert read_update(case.installation)["phase"] == "git"
+    code, continued = _as_the_script_runs(case, monkeypatch, "continue", "--expected-request", record["request_id"])
+    assert code == 0 and continued["update"]["request_id"] == record["request_id"]
+    finished = case.run_job()
+    assert (finished["request_id"], finished["phase"], finished["health_errors"]) == (record["request_id"], "done", {})
+
+
+def test_continue_serves_a_start_nothing_dispatched(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import UpdateStore
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, home=tmp_path / "account")
+    with UpdateStore(case.installation) as store:
+        record = updater._prepare_update_locked(store, target=case.target, initialization=case.scope,
+                                                prepare_only=True)
+    assert record["phase"] == "quiesce" and record.get("job_dispatch") is None
+    code, continued = _as_the_script_runs(case, monkeypatch, "continue", "--expected-request", record["request_id"])
+    assert code == 0 and case.dispatches == [record["request_id"]]
+    finished = case.run_job()
+    assert (finished["request_id"], finished["phase"], finished["health_errors"]) == (record["request_id"], "done", {})
+
+
+def test_a_done_record_with_health_errors_is_continued(tmp_path, monkeypatch):
+    """A start whose restore fails for the lasting service is `done` with health errors: unfinished."""
+    from claudlobby.git_update import UpdateError
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, owner="on", home=tmp_path / "account")
+    real, failed = operation.restore_consumer, []
+
+    def restore(store, key, *args, **kwargs):
+        if key == LASTING and not failed:
+            failed.append(key)
+            raise RuntimeError("fixture: the lasting service did not start")
+        return real(store, key, *args, **kwargs)
+    monkeypatch.setattr(operation, "restore_consumer", restore)
+    finished = case.start()
+    request = finished["request_id"]
+    assert finished["phase"] == "done" and finished["health_errors"][LASTING].startswith("fixture:")
+    # Core's own rule: a schedule is restored only after every service is.
+    assert all(key.endswith(".timer") and line == "restore services before new schedules"
+               for key, line in finished["health_errors"].items() if key != LASTING)
+    later, _ = _recorded_source(case, tmp_path)
+    script = _script()
+    code, status = _as_the_script_runs(case, monkeypatch, "status", "--json")
+    shown = case.installation.preflight()
+    update = script.summary(status["update"])
+    assert (update["kind"], update["phase"], update["failed"]) == ("start", "done", True)
+    assert script.update_refusal(update, shown, shown, later, True) == "update_in_progress"
+    assert script.continue_refusal(update, request) is None
+    # The updater's own refusal, which a client could not read.
+    with pytest.raises(UpdateError, match="continue the existing frozen target"):
+        _as_the_script_runs(case, monkeypatch, "apply", later)
+    code, continued = _as_the_script_runs(case, monkeypatch, "continue", "--expected-request", request)
+    assert code == 0 and continued["update"]["request_id"] == request
+    again = case.run_job()
+    assert (again["request_id"], again["phase"], again["health_errors"]) == (request, "done", {})
+    _code, status = _as_the_script_runs(case, monkeypatch, "status", "--json")
+    assert script.continue_refusal(script.summary(status["update"]), request) == "nothing_to_continue"
+
+
+@pytest.mark.parametrize("stage", ["untouched", "mid-cards"])
+def test_a_prepared_computer_that_is_not_started_refuses(tmp_path, monkeypatch, stage):
+    """No committed configuration: `host update apply Y` is refused at authorization, before any fetch.
+
+    Known from code (update_entry.py authorizes against the committed
+    configuration). Fork S2-R's lean decides what the product says: `needs_reset`.
+    The fixture's authorization reads the same committed configuration.
+    """
+    from claudlobby.config_plan import PlanError
+    from claudlobby.git_update import read_update
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch, home=tmp_path / "account")
+    if stage == "untouched":
+        for path in case.access.path.parent.glob(case.access.path.name + "*"):
+            path.unlink()
+        (case.root / "state/host-uid").unlink()
+    later, receipt = _recorded_source(case, tmp_path)
+    with pytest.raises(PlanError, match="effective configuration is missing"):
+        _as_the_script_runs(case, monkeypatch, "apply", later)
+    assert read_update(case.installation) is None and case.installation.preflight() == case.before
+    assert (case.installation.directory / "preparation.json").read_bytes() == receipt
+    assert not (case.installation.source / ".git/FETCH_HEAD").exists()
+    assert _script().update_refusal(None, case.before, case.before, later, False) == "needs_reset"
