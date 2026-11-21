@@ -250,6 +250,55 @@ def test_a_started_computer_returns_started_and_changes_nothing(tmp_path, monkey
     assert again.calls == [] and _files(case.root) == before
 
 
+def test_a_start_that_finishes_after_the_unlocked_read_is_started(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+
+    case, paths = _computer(tmp_path, monkeypatch)
+    _start(case, paths, Consent())
+    read = owner_source.start_state
+
+    def then_finished(root, installation):
+        state = read(root, installation)
+        case.run_job()
+        return state
+    monkeypatch.setattr(owner_source, "start_state", then_finished)
+    assert _start(case, paths, Consent()) == ("started", None)
+
+
+def test_a_start_record_gone_after_the_unlocked_read_reads_as_start_state_now_does(tmp_path, monkeypatch):
+    from claudlobby.plane import owner_source
+
+    case, paths = _computer(tmp_path, monkeypatch)
+    _start(case, paths, Consent())
+    read, calls = owner_source.start_state, []
+
+    def then_gone(root, installation):
+        calls.append(1)
+        state = read(root, installation)
+        if len(calls) == 1:
+            assert state == "starting"
+            (case.root / "state/update.json").unlink()
+        return state
+    monkeypatch.setattr(owner_source, "start_state", then_gone)
+    again = Consent()
+    assert _start(case, paths, again) == (read(case.root, case.installation), None)
+    assert again.calls == [] and len(calls) == 2
+
+
+@pytest.mark.parametrize("job_state,expected", [("running", "starting"), ("inactive", "failed")])
+def test_reading_a_start_in_progress_writes_nothing(tmp_path, monkeypatch, job_state, expected):
+    case, paths = _computer(tmp_path, monkeypatch)
+    _start(case, paths, Consent())
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        record["job_dispatch"] = {**record["job_dispatch"], "state": "entered"}
+        store.save(record)
+    case.job_state = job_state
+    before = _files(case.root)
+    assert _start(case, paths, Consent())[0] == expected
+    assert _files(case.root) == before
+
+
 def test_a_started_computer_with_an_ordinary_update_pending_returns_started(tmp_path, monkeypatch):
     case, paths = _computer(tmp_path, monkeypatch)
     _start(case, paths, Consent())
@@ -345,12 +394,15 @@ def test_planned_settings_for_another_workspace_or_file_are_refused(tmp_path, mo
     _untouched(case, before, settings)
 
 
-@pytest.mark.parametrize("where", ["absent", "outside the catalog"])
+@pytest.mark.parametrize("where", ["outside the catalog", "a symlink"])
 def test_the_native_directory_is_checked_before_the_card(tmp_path, monkeypatch, where):
     case, paths = _computer(tmp_path, monkeypatch)
-    if where == "absent":
+    directory = case.directory
+    if where == "a symlink":
+        real = tmp_path / "real-units"
+        real.mkdir()
         case.directory.rmdir()
-        directory = case.directory
+        case.directory.symlink_to(real)
     else:
         directory = tmp_path / "elsewhere"
         directory.mkdir()
@@ -359,16 +411,93 @@ def test_the_native_directory_is_checked_before_the_card(tmp_path, monkeypatch, 
         _start(case, paths, consent, directory=directory)
     assert consent.calls == [] and _files(case.root) == before and _settings(case) == settings
     assert not (case.root / "state/update.json").exists()
-    assert case.directory.exists() is (where != "absent")
+
+
+def test_an_absent_native_directory_is_created_only_after_approval(tmp_path, monkeypatch):
+    """A fresh account often has no user unit directory yet; the card says the start creates it."""
+    case, paths = _computer(tmp_path, monkeypatch)
+    case.directory.rmdir()
+    declined = Consent(answer=False)
+    with pytest.raises(CommandFailure, match="declined"):
+        _start(case, paths, declined)
+    ((_action, scope),) = declined.calls
+    assert scope["native_directory_created"] is True and not case.directory.exists()
+    assert not (case.root / "state/update.json").exists()
+    consent = Consent()
+    state, _ids = _start(case, paths, consent)
+    assert state == "starting" and case.directory.is_dir() and not case.directory.is_symlink()
+    case.run_job()
+    assert start_state(case.root, case.installation) == "started"
+
+
+def test_an_existing_native_directory_is_not_created(tmp_path, monkeypatch):
+    case, paths = _computer(tmp_path, monkeypatch)
+    consent = Consent(answer=False)
+    with pytest.raises(CommandFailure, match="declined"):
+        _start(case, paths, consent)
+    assert consent.calls[0][1]["native_directory_created"] is False
 
 
 def test_a_start_refuses_while_another_update_holds_the_lock(tmp_path, monkeypatch):
     case, paths = _computer(tmp_path, monkeypatch)
     with UpdateStore(case.installation):
-        with pytest.raises(CommandFailure, match="did not complete") as refused:
+        with pytest.raises(CommandFailure, match="another update is running; nothing was changed") as refused:
             _start(case, paths, Consent())
-    assert refused.value.data == {} and "host update status" in refused.value.error.hint
+    assert refused.value.data == {}
     assert not (case.root / "state/update.json").exists() and case.dispatches == []
+
+
+def test_a_pairing_revoked_while_the_card_waits_is_refused_with_nothing_written(tmp_path, monkeypatch):
+    case, paths = _computer(tmp_path, monkeypatch, owner="off")
+    before, settings = _files(case.root), _settings(case)
+
+    def revoke():
+        case.access.revoke_owner(expected_revision=case.access.current_grant().revision)
+        before[:] = _files(case.root)  # the revocation's own write
+    with pytest.raises(CommandFailure, match="pairing and linked workspace"):
+        _start(case, paths, Consent(during=revoke), owner_plan=_owner_plan(case))
+    # Taking the update lock may create its lock file; nothing else is written.
+    assert [row for row in _files(case.root) if row[0].name != "update.lock"] == before
+    assert _settings(case) == settings
+    assert not (case.root / "state/update.json").exists() and case.dispatches == []
+
+
+@pytest.mark.parametrize("error", [OSError("disk"), KeyError("render"), TypeError("value"), "sqlite"])
+def test_a_preparation_that_fails_after_its_record_reports_the_record(tmp_path, monkeypatch, error):
+    """`prepare_target` writes the record before the render and prepare stages run."""
+    import sqlite3
+
+    case, paths = _computer(tmp_path, monkeypatch)
+    raised = sqlite3.OperationalError("database is locked") if error == "sqlite" else error
+
+    def refuse(*_args, **_kwargs):
+        raise raised
+    monkeypatch.setattr(updater, "prepare_application_operation", refuse)
+    with pytest.raises(CommandFailure, match="retained state requires inspection") as refused:
+        _start(case, paths, Consent())
+    record = read_update(case.installation)
+    assert record is not None and refused.value.data == {"request_id": record["request_id"]}
+    assert "host update continue" in refused.value.error.hint and refused.value.__cause__ is raised
+    assert case.dispatches == []
+
+
+def test_settings_saved_then_refused_authorization_says_so_and_names_no_operation(tmp_path, monkeypatch):
+    case, paths = _computer(tmp_path, monkeypatch, owner="off")
+    plan = _owner_plan(case)
+    stage = updater._application_stage
+
+    def refuse(store, name, **kwargs):
+        if name == "authorize":
+            raise UpdateError("operator authorization refused")
+        return stage(store, name, **kwargs)
+    monkeypatch.setattr(updater, "_application_stage", refuse)
+    with pytest.raises(CommandFailure, match="settings were saved and nothing was started") as refused:
+        _start(case, paths, Consent(), owner_plan=plan)
+    assert "build the settings plan again" in str(refused.value.error.message)
+    assert refused.value.data in ({}, None) and not refused.value.error.hint
+    assert case.settings.read_bytes() == plan["content"]
+    assert not (case.root / "state/update.json").exists()
+    assert start_state(case.root, case.installation) == "fresh"
 
 
 def test_a_computer_with_a_team_is_not_started(current_runtime):

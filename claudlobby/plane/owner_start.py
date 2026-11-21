@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 
@@ -20,8 +21,6 @@ from ..command_result import CommandFailure
 WORD = "START-WORKSPACE"
 ACTION = "start_workspace"
 HINT = "inspect the original operation with host update status; resume it with host update continue"
-#: What may fail once the card is approved; each is reported with the record's request id.
-_AFTER_APPROVAL = (OSError, ValueError, RuntimeError)
 
 
 def _identifiers(record):
@@ -39,16 +38,23 @@ def _failed(root, record):
 
 
 def _progress(root, installation):
-    """`starting` or `failed` for an unfinished start record, by core's own reads.
+    """`starting` or `failed` for an unfinished start record, by core's own reads. Writes nothing.
 
     A held update lock is a coordinator or the updater job at work. With the
-    lock free, the record and a read-only look at its native job decide.
+    lock free, the record and a read-only look at its native job decide. A start
+    that finished cleanly since the unlocked read is `started`; a record gone
+    since then reads as `start_state` now reads.
     """
     from ..git_update import UpdateBusyError, UpdateError, UpdateStore, _retained_job, read_update
+    from .owner_source import start_state
 
     try:
         with UpdateStore(installation) as updates:
             record = updates.load()
+            if record is None:
+                return start_state(root, installation), None
+            if record["phase"] == "done" and not record.get("health_errors"):
+                return "started", None
             if (record.get("stage_error") is not None
                     or (record["phase"] == "done" and record.get("health_errors"))):
                 return _failed(root, record)
@@ -117,6 +123,7 @@ def start_scope(paths, *, directory, manager, owner_plan=None) -> dict:
     return {
         "database": str(db_file(paths.root)),
         "native_directory": str(directory),
+        "native_directory_created": not os.path.lexists(directory),
         "services": sorted(host_unit_name(name, prefix=prefix)
                            for name, item in armed.items() if item.get("unit") == "service"),
         "jobs": sorted(host_unit_name(name, prefix=prefix)
@@ -131,7 +138,10 @@ def start_scope(paths, *, directory, manager, owner_plan=None) -> dict:
 
 
 def _directory(directory, directories):
-    """An existing native directory the user manager searches; never created here."""
+    """A native directory the user manager searches: a real directory, or absent.
+
+    An absent one is normal on a fresh account; the start creates it after approval.
+    """
     if directory is None:
         from ..commands.host_owner_setup import _default_install_directory
 
@@ -141,8 +151,8 @@ def _directory(directory, directories):
     directory = Path(directory).expanduser()
     if directory not in directories:
         raise CommandFailure("conflict", "the native directory is not one this computer's service manager reads")
-    if directory.is_symlink() or not directory.is_dir():
-        raise CommandFailure("conflict", "the native directory does not exist; nothing was changed")
+    if os.path.lexists(directory) and (directory.is_symlink() or not directory.is_dir()):
+        raise CommandFailure("conflict", "the native directory is not a real directory; nothing was changed")
     return directory
 
 
@@ -173,17 +183,69 @@ def _admit(store, owner_plan):
             raise CommandFailure("conflict", "the planned settings name a different workspace than the one linked")
 
 
+def _approved(paths, store, installation, *, owner_plan, selected, scope, done):
+    """Under one update lock: admit again, refuse any record, settle settings, prepare, dispatch.
+
+    `done` records how far this call got, for the caller's report of a failure.
+    """
+    from ..commands.host_owner_setup import _commit_owner_override
+    from ..git_update import UpdateBusyError, UpdateStore, _dispatch_locked, _prepare_update_locked
+
+    try:
+        updates = UpdateStore(installation).__enter__()
+    except UpdateBusyError as exc:
+        raise CommandFailure("conflict", "another update is running; nothing was changed") from exc
+    try:
+        _admit(store, owner_plan)
+        if updates.load() is not None:
+            raise CommandFailure("conflict", "a start refuses an existing update operation", hint=HINT)
+        if owner_plan is None and _digest(scope["settings"]["path"]) != scope["settings"]["sha256"]:
+            raise CommandFailure("conflict", "this computer's settings changed after approval; nothing was started")
+        selected.mkdir(parents=True, exist_ok=True)
+        if selected.is_symlink() or not selected.is_dir():
+            raise CommandFailure("conflict", "the native directory is not a real directory; nothing was started")
+        if owner_plan is not None:
+            _commit_owner_override(owner_plan)
+            done["committed"] = True
+        record = _prepare_update_locked(updates, target=paths.package.source_revision,
+                                        initialization={"directory": str(selected), "manifests": []},
+                                        prepare_only=True)
+        done["request_id"] = record["request_id"]
+        return _dispatch_locked(updates, record)[1]
+    finally:
+        updates.__exit__(None, None, None)
+
+
+def _after_approval(installation, done, exc):
+    """The failure of an approved start, said as it stands: a record, saved settings, or nothing."""
+    from ..git_update import read_update
+
+    request_id, readable = done["request_id"], True
+    if request_id is None:
+        try:
+            current = read_update(installation)
+        except Exception:
+            current, readable = None, False
+        request_id = current["request_id"] if current is not None else None
+    if request_id is not None or not readable:
+        return CommandFailure("conflict", "the start did not complete; retained state requires inspection",
+                              data={"request_id": request_id} if request_id is not None else {}, hint=HINT)
+    if done["committed"]:
+        return CommandFailure("conflict", "this computer's settings were saved and nothing was started; "
+                                          "build the settings plan again and call again")
+    return CommandFailure("conflict", "the start did not complete; nothing was started")
+
+
 def start(paths, store, terminal, *, consent=None, owner_plan=None, directory=None):
     """Return ("started", None), ("starting", identifiers) or ("failed", {"line", "request_id"}).
 
-    After a failure that follows the settings commit, rebuild `owner_plan` from
-    the current settings file before calling again: the old plan object is
-    refused as changed.
+    A start record that vanished while this call read it returns what
+    `start_state` then says, with None. After a failure that follows the
+    settings commit, rebuild `owner_plan` from the current settings file before
+    calling again: the old plan object is refused as changed.
     """
     from ..commands.host_owner import _consent, _say
-    from ..commands.host_owner_setup import _commit_owner_override
-    from ..git_update import UpdateStore, _dispatch_locked, _prepare_update_locked, _run_dispatched, read_update
-    from .owner_access import AccessDenied
+    from ..git_update import _run_dispatched, read_update
     from .owner_source import start_state
 
     package = paths.package
@@ -203,26 +265,14 @@ def start(paths, store, terminal, *, consent=None, owner_plan=None, directory=No
     scope = start_scope(paths, directory=selected, manager=manager, owner_plan=owner_plan)
     _say(terminal, json.dumps(scope, ensure_ascii=True) + "\n")
     _consent(terminal, WORD, consent, ACTION, scope)
-    request_id, dispatch = None, None
+    done = {"request_id": None, "committed": False}
     try:
-        with UpdateStore(installation) as updates:
-            if updates.load() is not None:
-                raise CommandFailure("conflict", "a start refuses an existing update operation", hint=HINT)
-            if owner_plan is not None:
-                _commit_owner_override(owner_plan)
-            elif _digest(scope["settings"]["path"]) != scope["settings"]["sha256"]:
-                raise CommandFailure("conflict", "this computer's settings changed after approval; nothing was started")
-            record = _prepare_update_locked(updates, target=package.source_revision,
-                                            initialization={"directory": str(selected), "manifests": []},
-                                            prepare_only=True)
-            request_id = record["request_id"]
-            _observed, dispatch = _dispatch_locked(updates, record)
+        dispatch = _approved(paths, store, installation, owner_plan=owner_plan, selected=selected,
+                             scope=scope, done=done)
         if dispatch is not None:
-            _run_dispatched(installation, dispatch, request_id)
+            _run_dispatched(installation, dispatch, done["request_id"])
     except CommandFailure:
         raise
-    except (*_AFTER_APPROVAL, AccessDenied) as exc:
-        raise CommandFailure("conflict", "the start did not complete; retained state requires inspection",
-                             data={"request_id": request_id} if request_id is not None else {},
-                             hint=HINT) from exc
+    except Exception as exc:
+        raise _after_approval(installation, done, exc) from exc
     return "starting", _identifiers(read_update(installation))
