@@ -1798,7 +1798,7 @@ def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_re
 
 # Every detail the product makes must fit this. Written here on its own, not imported.
 _DETAIL=(r'(?:utf8|control 0x[01][0-9a-f]|escape (?:[!-~]|other)|csi malformed(?: [A-Za-z~](?: [!-?_]{1,16})?)?'
-         r'|csi private [?>][0-9;]{0,15} [A-Za-z]|csi range|csi [KJ] [0-9]{1,4}'
+         r'|csi private [?><=][0-9;]{0,15} [A-Za-z]|csi range|csi [KJ] [0-9]{1,4}'
          r'|csi final [A-Za-z](?: [0-9;]{1,16})?|token shape|token changed|url changed'
          r'|bytes|escape length|exit 0 without token)')
 _SIGNIN_URL=('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
@@ -1841,12 +1841,17 @@ def _refusal(*chunks):
     pytest.param(['\x1bé'.encode()],'unsupported_output','escape other',id='escape-other-not-ascii'),
     pytest.param(['\x1b[5é'.encode()],'unsupported_output','csi malformed',id='csi-malformed'),
     pytest.param([b'\x1b[1>2A'],'unsupported_output','csi malformed A 1>2',id='csi-malformed-letter'),
-    pytest.param([b'\x1b[<u'],'unsupported_output','csi malformed u <',id='csi-malformed-other-prefix'),
+    pytest.param([b'\x1b[!p'],'unsupported_output','csi malformed p !',id='csi-malformed-other-prefix'),
     pytest.param([b'\x1b[0 q'],'unsupported_output','csi malformed q 0_',id='csi-malformed-intermediate'),
     pytest.param([b'\x1b['+b'9'*17+b'!p'],'unsupported_output','csi malformed p',id='csi-malformed-long-body'),
     pytest.param([b'\x1b[200~'],'unsupported_output','csi malformed ~ 200',id='csi-malformed-tilde'),
     pytest.param([b'\x1b[?2031;x'],'unsupported_output','csi private ?2031; x',id='csi-private'),
     pytest.param([b'\x1b[>1q'],'unsupported_output','csi private >1 q',id='csi-private-greater-than'),
+    pytest.param([b'\x1b[>4;3m'],'unsupported_output','csi private >4;3 m',id='csi-private-modkeys-out-of-range'),
+    pytest.param([b'\x1b[>5m'],'unsupported_output','csi private >5 m',id='csi-private-other-xterm-resource'),
+    pytest.param([b'\x1b[<5;5M'],'unsupported_output','csi private <5;5 M',id='csi-private-less-than'),
+    pytest.param([b'\x1b[=1;9u'],'unsupported_output','csi private =1;9 u',id='csi-private-equals'),
+    pytest.param([b'\x1b[>123u'],'unsupported_output','csi private >123 u',id='csi-private-kitty-too-long'),
     pytest.param([b'\x1b[?3h'],'unsupported_output','csi private ?3 h',id='csi-private-mode-not-allowed'),
     pytest.param([b'\x1b[?h'],'unsupported_output','csi private ? h',id='csi-private-no-number'),
     pytest.param([b'\x1b[999999999A'],'unsupported_output','csi range',id='csi-range'),
@@ -2135,3 +2140,33 @@ def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(setup_
     assert len(setup_authority[-1].dispatches) == int(retained_launch)
     if retained_launch:
         assert retained.launch_id == original['request_id'] and retained.launch_plan == original['config_fingerprint']
+
+
+# --- Keyboard-mode switches are ignored: they never change the screen ---
+@pytest.mark.parametrize('sequence',[b'\x1b[>4m',b'\x1b[>4;0m',b'\x1b[>4;1m',b'\x1b[>4;2m',
+                                     b'\x1b[>u',b'\x1b[>1u',b'\x1b[<u',b'\x1b[<1u',b'\x1b[=1u',b'\x1b[=1;1u',b'\x1b[=31;3u'])
+def test_provider_signin_parser_ignores_keyboard_mode_switches(sequence):
+    from claudlobby.plane.provider_signin import TokenScreen
+    screen=TokenScreen()
+    screen.feed(b'ab'+sequence+b'c')
+    assert ''.join(screen._rows[0])=='abc'
+
+
+def test_provider_signin_reads_the_token_after_the_keyboard_mode_switch_claude_sends(synthetic_signin):
+    # What a real Claude 2.1.325 did after the code: "CSI > 4 m", then its success screen.
+    engine,grant,reader,program,token,env=synthetic_signin
+    success=('\x1b[2K\r\u2713 Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n'
+             +token+"\r\nStore this token securely. You won't be able to see it again.\r\n"
+             'Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\r\n')
+    program.with_name('synthetic-provider-reply').write_bytes(b'\x1b[>4m'+success.encode()+b'\x1b[<u\x1b[?25h')
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        ended=_signin_ended(engine,grant,reader,attempt)
+        assert (ended['state'],ended['reason'])==('connected',None)
+        row=_signin_row(engine,attempt)
+        assert row['code_delivered']==1 and row['detail'] is None
+        assert env.read_text()=="export ROUTE=private\nexport CLAUDE_CODE_OAUTH_TOKEN='"+token+"'\n"
+    finally:engine.signin.shutdown()
