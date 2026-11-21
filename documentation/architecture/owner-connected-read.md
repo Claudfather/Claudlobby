@@ -235,7 +235,8 @@ shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
 computer cards, overview, diagnostics), the room heading and search, activity,
 tasks, Recorder and the Message team composer are all hidden. The page grows
 with its content and has no internal scroll container, and the panel fills the
-frame width. The bound computer's panel is the view in every connection state.
+frame width. The bound computer's panel is the view in every connection state,
+except that a started computer shows its parts instead ("A started computer's parts").
 Its first step, Connect this computer, mirrors that computer's own Connect or
 Check connection. One click sends one connect. Nothing connects, signs in or
 retries a session mutation automatically, and failures say what to choose next
@@ -294,6 +295,52 @@ shape-checked publisher lifetime bound; fresh website membership/session checks
 and canonical host session admission determine current access, not client clock
 interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
 this core entry does not mint or verify its document ticket.
+
+## A started computer's parts
+
+A `ready` session on a started computer offers the dashboard reads as before and
+one more read that needs no setup approval: the **parts read**, `POST
+/api/owner/connected/setup/state` with body `{}` (`setup-state`, input `{}`, on the
+SSH route and in the browser carrier's closed list). It is admitted by the
+connected session alone, checked before and after, and it writes nothing. It
+answers
+
+`{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
+
+`computer` is `started` for a computer started with no team (`start_state`) or
+one whose committed configuration lists a team; `teams` counts those teams.
+`provider` is `linked` exactly when a Claude sign-in line is saved on this
+computer, by the check every sign-in attempt already makes; the line's value is
+never read out, and no approval and no attempt's record decides it. `helper` is
+`asleep` until Claude is linked, then `later`. Later versions add keys and states
+inside a part and entries in `bots`; `version` stays 1 while nothing is removed
+or renamed.
+
+The pane (`workspace-parts.js`) sends the parts read once for each new `ready`
+connection to a shown computer, and again whenever the window regains focus.
+Nothing else repeats it, nothing retries it, and the pane still connects only
+when the person chooses Connect. A `setup_only` session is never sent it. When the
+answer says `started`, the computer's parts show in the setup host: this
+computer, Claude, bots and, only when the embedding page names it, the helper.
+Each part is one element with `data-part` and `data-state`, a name, one status
+sentence and at most one control; the only control is a "Create a bot" that is
+visibly not available. With no team the parts are the whole view; with a team
+they stay as a strip above its teams. Over the browser carrier the five-step
+panel is the view only while the parts read has no answer or says `not_started`,
+and while that panel follows a launch this browser asked for (today's guide).
+A refusal, a lost answer, an answer the pane cannot use, or a computer whose core
+has no parts read leaves the view exactly as it was.
+
+The connected document may carry `part_names`: an object whose keys are from
+`computer`, `provider`, `bots` and `helper`, and whose values are 1 to 40
+printable ASCII characters with no space at either end. The pane uses
+`part_names[<part>]` as that part's name when the whole field passes; anything
+else drops the whole field, never one name, and the document is still admitted.
+Without it the computer's saved name, "Claude" and "Bots" are used, and the
+helper row is not drawn: core holds no name for it. The browser carrier admits a
+document with the field and never sends it to the parent. A pane older than this
+refuses any document with the field, so the embedding page adds it only once it
+serves this pane.
 
 ## First-use workspace approval in the connected document
 

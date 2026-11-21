@@ -3001,3 +3001,25 @@ def test_ssh_computer_run_on_a_started_computer_is_ready_with_its_transport(monk
         "transport": "mac_openssh",
     }
     assert world.calls == [("origin", "captured-source")] and world.states == []
+
+
+def test_setup_state_is_the_parts_read_over_the_ssh_route():
+    from claudlobby.commands.owner_api_stdio import operation_request
+
+    method, path, query, body, headers = operation_request(
+        "setup-state", {}, "A" * 43, None
+    )
+    assert (method, path, query, body) == (
+        "POST",
+        "/api/owner/connected/setup/state",
+        b"",
+        b"{}",
+    )
+    assert headers == [
+        (b"authorization", b"Bearer " + b"A" * 43),
+        (b"content-type", b"application/json"),
+        (b"x-claudlobby-owner", b"1"),
+    ]
+    for value, token in [({"generation": "x"}, "A" * 43), ({}, None)]:
+        with pytest.raises(ValueError):
+            operation_request("setup-state", value, token, None)

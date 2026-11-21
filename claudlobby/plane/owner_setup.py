@@ -363,6 +363,12 @@ class OwnerSetup:
         with self.access._connection() as conn:
             return self._admit(conn,reader,expected=expected,effects=effects)[0]
 
+    def session(self, reader):
+        """The connected session alone, with no setup approval: the parts read's whole admission."""
+        with self.access._connection() as conn:
+            return self.connected._admit(conn,reader.token,reader.principal,source_host_uid(self.access.root),
+                self.access.workspace()._active_binding(conn,reader.principal).operational_origin)
+
     @property
     def _lease_path(self):
         # In state/, as state/provider-signin is: the owner storage directory admits only its own files.
@@ -670,6 +676,33 @@ class SetupEngine:
             **({"preview_state":state} if state is not None else {}),
             **({"preview":preview} if preview is not None else {}),
             **({"continuation":_continuation(self.root,grant)} if request and not reserved or recorded else {})}
+
+    def state(self,reader):
+        """The parts read: what this computer has, for the workspace's parts view. Reads only; writes nothing.
+
+        Admitted by a connected session alone (the HTTP door checks it before and after). ``computer`` is
+        ``started`` for a computer started with no team (phase 1's ``start_state``) or one whose committed
+        configuration lists a team; ``teams`` counts the committed configuration's teams. ``provider`` is
+        ``linked`` exactly when a Claude sign-in line is saved on this computer, by the check every sign-in
+        attempt already makes (the line's value is never read out); no approval and no attempt's record
+        decides it. Later versions add keys inside a part; ``version`` stays 1 while nothing is removed.
+        """
+        from ..active_config import read_current_config
+        from ..config_plan import PlanError
+        from .owner_source import start_state
+        from .provider_signin import SigninRefused, environment_ready
+        self.store.session(reader)
+        installation=managed_setup(self.root).installation
+        try: teams=len(read_current_config(self.root,installation=installation)["fleets"])
+        except (PlanError,OSError,ValueError,KeyError,TypeError): teams=0
+        started=start_state(self.root,installation)=="started" or teams>0
+        try:
+            environment_ready(self.root); linked=False
+        except SigninRefused as exc: linked=exc.code=="credential_already_present"
+        except OSError: linked=False  # no environment file: nothing saved
+        return {"version":1,"computer":"started" if started else "not_started",
+            "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
+            "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
 
     def _signin_grant(self,reader,generation,attempt_id):
         grant=self.store.authorize(reader,effects=True)

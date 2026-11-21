@@ -14,7 +14,7 @@ const fields = {
   'action-receipt':['request_id','kind','scope','target','submitted_at'],
   pair:[], 'workspace-challenge':[], 'workspace-stage':['nonce','assertion'],
   'session-challenge':[], 'session-issue':['nonce','assertion'], 'session-status':[], 'session-renew':[], 'session-logout':[],
-  'setup-context':[], 'setup-signin-begin':['generation','attempt_id'], 'setup-signin-status':['generation','attempt_id'],
+  'setup-context':[], 'setup-state':[], 'setup-signin-begin':['generation','attempt_id'], 'setup-signin-status':['generation','attempt_id'],
   'setup-signin-cancel':['generation','attempt_id'], 'setup-signin-code':['generation','attempt_id','code'],
   'setup-preview':['generation','goal'], 'setup-launch':['generation','request_id','config_fingerprint','source_revision'],
   'setup-receipt':['generation','request_id','config_fingerprint','source_revision'],
@@ -218,8 +218,9 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
     try {post('ready');bound=value.reference.reference_id;resolveReady();} catch {dispose();}
   }
   try {
-    const d=documentContext;
-    if (!keys(d,['version','user_id','workspace_id','context_generation','shell_origin','operational_origin','references','expires_at'])
+    const d=documentContext, base=['version','user_id','workspace_id','context_generation','shell_origin','operational_origin','references','expires_at'];
+    // part_names is presentation for the parts view only (connected-workspace.js checks it); it never reaches the parent.
+    if (!keys(d,base) && !keys(d,[...base,'part_names'])
       || encoder.encode(JSON.stringify(d)).length > 24576
       || d.version !== 1 || d.shell_origin !== SHELL || d.operational_origin !== PLANE || window?.location?.origin !== PLANE
       || !window.parent || window.parent === window || ![d.user_id,d.workspace_id,d.context_generation].every(uuid)

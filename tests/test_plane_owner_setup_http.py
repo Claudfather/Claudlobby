@@ -275,3 +275,55 @@ def test_context_answers_during_preparation_and_still_refuses_a_foreign_record(s
             assert context.json()['preview_state']=='preparing' and context.json()['request'] is None
             setup_authority[-1].retained["record"]={**record,"target":"c"*40}
             assert post(client,'context',token).status_code==403
+
+
+def test_state_answers_a_session_with_no_approval_and_changes_nothing(setup_http):
+    app,access,_,_,_,_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http)
+        assert post(client,'context',s['token']).status_code==503  # the read that needs an approval
+        before=access.path.read_bytes()
+        answer=post(client,'state',s['token'])
+        assert answer.status_code==200,answer.text
+        assert answer.json()=={"version":1,"computer":"not_started","provider":{"state":"not_linked"},"team":{"state":"none"},
+            "teams":0,"bots":[],"helper":{"state":"asleep"}}
+        assert 'set-cookie' not in answer.headers and access.path.read_bytes()==before
+        assert not (access.root/'local').exists() and not (access.root/'state/setup-preview.lock').exists()
+
+
+@pytest.mark.parametrize('computer',['fresh','started','linked','launched'])
+def test_state_answers_for_each_kind_of_computer(setup_http,monkeypatch,computer):
+    from claudlobby import active_config
+    from claudlobby.plane import owner_source
+    app,access,_,_,_,_=setup_http
+    token='sk-ant-oat01-'+'x'*80
+    if computer in ('started','linked'):monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    if computer=='launched':
+        monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'other')
+        monkeypatch.setattr(active_config,'read_current_config',lambda root,*,installation,revision=None:{"fleets":["shop"]})
+    env=access.root/'.env'
+    env.write_text("export ROUTE=private\n"+(f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n" if computer=='linked' else ''))
+    env.chmod(0o600)
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,answer.text
+    assert token not in answer.text and 'ROUTE' not in answer.text
+    linked=computer=='linked'
+    assert answer.json()=={"version":1,"computer":"not_started" if computer=='fresh' else "started",
+        "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
+        "teams":1 if computer=='launched' else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
+
+
+def test_state_needs_a_live_session_and_takes_no_input(setup_http):
+    app,*_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        assert post(client,'state',None).status_code==403
+        assert post(client,'state','A'*43).status_code==403
+        s=session(client,setup_http)
+        assert post(client,'state',s['token'],{'generation':'x'}).status_code==403
+        assert post(client,'state',s['token'],extra={'X-Claudlobby-Owner':'0'}).status_code==403
+        assert post(client,'state',s['token']).status_code==200
+        from tests.test_plane_owner_connected_http import post as connected
+        assert connected(client,'logout',token=s['token']).status_code==200
+        assert post(client,'state',s['token']).status_code==403
+    assert app.connected_setup.response_seconds({"setup_operation":"state"})==15

@@ -2,6 +2,7 @@
 import { createConnectedReadClient } from "./connected-read-client.js";
 import { createWorkspaceEnrollment } from "./workspace-enrollment.js";
 import { createGuidedSetup } from "./guided-setup.js";
+import { createWorkspaceParts, partNames } from "./workspace-parts.js";
 import { createWorkspaceReadTransport, MAX_SAVED_COMPUTERS, MAX_WORKSPACE_CONTEXT_BYTES } from "./two-source-read.js";
 
 export { MAX_WORKSPACE_CONTEXT_BYTES };
@@ -40,7 +41,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   clearTimeout = globalThis.clearTimeout, onRetire = () => {}, now = () => Date.now() / 1000,
   monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver } = {}) {
   const browserTransport = fetch.browserOwnerTransport === true; // Presentation only; core remains the grant authority.
-  const validDocument = keys(documentContext, ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'])
+  // part_names is optional: the embedding page's names for the parts view. A malformed value is dropped whole
+  // (partNames), never the document.
+  const documentFields = ['version', 'user_id', 'workspace_id', 'context_generation', 'shell_origin', 'operational_origin', 'references', 'expires_at'];
+  const validDocument = (keys(documentContext, documentFields) || keys(documentContext, [...documentFields, 'part_names']))
     && documentContext.version === 1 && [documentContext.user_id, documentContext.workspace_id, documentContext.context_generation].every(uuid)
     && origin(documentContext.shell_origin) && origin(documentContext.operational_origin)
     && documentContext.operational_origin === documentOrigin && documentContext.shell_origin !== documentOrigin
@@ -49,6 +53,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     && (browserTransport || documentContext.references.every(ref => ref.transport === undefined));
   // Copy before asynchronous work; callers cannot retarget a live document.
   const doc = validDocument ? JSON.parse(JSON.stringify(documentContext)) : null;
+  const partLabels = doc ? partNames(doc.part_names) : null;
   let current = null, transport = null, clients = [], unsubscribes = [], mount = null;
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
@@ -105,7 +110,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     clearTimeout(refreshTimer); refreshTimer = null;
     for (const request of requests) request.abort();
     for (const stop of unsubscribes) stop(); unsubscribes = [];
-    for (const {client,enrollment,setup} of clients) { setup?.dispose(); enrollment.dispose(); client.dispose(); }
+    for (const {client,enrollment,setup,parts} of clients) { parts?.dispose(); setup?.dispose(); enrollment.dispose(); client.dispose(); }
     transport?.dispose(); transport = null;
     for (const stream of streams) stream.detach();
     paused = true; invoke(mount?.onPause);
@@ -208,6 +213,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         row.setup = createGuidedSetup({client:row.client,setTimeout,clearTimeout,
           visible:() => !mount || mount.document.visibilityState !== 'hidden',
           storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
+        row.parts = createWorkspaceParts({client:row.client, key:row.key, names:partLabels, onChange:changed,
+          name:() => row.label || computerLabel(reference)});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -219,10 +226,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         label:computerLabel(reference), savedLabel:label, reader:client.readHandle, shown:() => shown(reference),
         connectionState:() => client.connectionState?.() || client.snapshot().state,
         readFailure:url => client.readFailure?.(url)}))});
-      for (const {client,actions,key,setup} of nextClients) {
+      for (const {client,actions,key,setup,parts,reference} of nextClients) {
         let previous = client.snapshot();
         nextSubscriptions.push(client.subscribe(state => {
           setup.connectionChanged(state);
+          if (shown(reference)) parts.connectionChanged(state); // a computer the carrier cannot reach is never read
           if (state.epoch !== previous.epoch || state.state !== previous.state) {
             previous = state; actions.invalidate(); invoke(mount?.onActionSourceChange,key);
           }
@@ -237,8 +245,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const stream of streams) stream.detach();
       for (const stop of nextSubscriptions) invoke(stop);
       invoke(() => nextTransport?.dispose());
-      for (const {client,enrollment,setup} of nextClients) {
-        invoke(() => setup?.dispose());
+      for (const {client,enrollment,setup,parts} of nextClients) {
+        invoke(() => parts?.dispose()); invoke(() => setup?.dispose());
         invoke(() => enrollment?.dispose()); invoke(() => client.dispose());
       }
       current = null; clients = []; transport = null; unsubscribes = [];
@@ -445,6 +453,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const setupEyebrow = document.createElement('p'); setupEyebrow.className = 'eyebrow setup-focus-eyebrow'; setupEyebrow.textContent = 'First-team setup';
       const setupHeading = document.createElement('h2'); setupHeading.className = 'setup-focus-title'; setupHeading.tabIndex = -1;
       const setupBody = document.createElement('div'); setupPanel.append(setupEyebrow,setupHeading,setupBody); help.append(setupPanel);
+      clients[index].parts.mountView(document); // joins the setup host the first time it is shown (below)
       // In the browser carrier the panel is the whole view, and its first step is this computer's explicit Connect.
       clients[index].setup.mountPanel({document,element:setupBody,...(browserTransport ? {standalone:true,connect:() => {
         const operation = mount?.controls?.rows[index]?.panelOperation;
@@ -459,7 +468,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
@@ -470,11 +479,25 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const connection = client.connectionState?.() || status.state;
       const expired = status.state === 'unavailable' && continuity?.reconnectRequired;
       const name = clients[index].label || computerLabel(reference);
-      // In the browser carrier the bridged computer's panel is the view in every state, so Connect is its first step.
-      const bridged = bound === reference.reference_id;
-      const focused = phase === 'ready' && !!mount.setupHost && !row.hidden
+      // A started computer shows its parts: the whole view with no team, a strip above its teams with one. Only a ready
+      // session reads them, so a computer in first-team setup keeps today's panel. In the browser carrier the bridged
+      // computer's panel is the view whenever the parts read has no answer or says not started, so Connect is its
+      // first step; and it stays while it follows a launch this browser asked for (today's guide).
+      const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
+      const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
+        && !(browserTransport && setup.snapshot().pending);
+      const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
         && (browserTransport ? bridged : status.state === 'setup_only');
+      let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead
+      for (let node = document.activeElement; node; node = node.parentNode) if (node === setupPanel) { panelFocus = true; break; }
       if (focused !== controls.focused) { (focused ? mount.setupHost : help).append(setupPanel); controls.focused = focused; }
+      // The parts sit in the setup host ahead of any panel; a host that never showed them has none.
+      if (partsShown && parts.root && parts.root.parentNode !== mount.setupHost) mount.setupHost.prepend(parts.root);
+      parts.render(partsShown);
+      if (partsShown !== controls.partsShown) {
+        controls.partsShown = partsShown;
+        if (partsShown && panelFocus && !focused) parts.root?.focus?.({preventScroll:true});
+      }
       setupHeading.textContent = focused ? `Finish setting up ${name}` : 'First-team setup';
       goto.hidden = !focused;
       const labels = {ready:'Connected',setup_only:'First-team setup',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
@@ -541,19 +564,22 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     });
     if (mount.setupHost) {
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
+      const showing = focusing || controls.rows.some(row => row.partsShown);
       if (mount.setupStatus) {
-        // Setup-only view: the host is the whole main area, with a plain line until the panel shows.
+        // Setup-only view: the host is the whole main area, with a plain line until the panel or the parts show.
         // Retirement keeps the line in its host; a closed view writes nothing more.
         if (phase !== 'disposed') {
-          const [text,working] = focusing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = focusing;
+          const [text,working] = showing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = showing;
           if (mount.setupStatus.textContent !== text) mount.setupStatus.textContent = text; // no repeated announcement
           if (working) mount.setupStatus.dataset.tone = 'working'; else delete mount.setupStatus.dataset.tone;
         }
         mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
       } else {
-        mount.setupHost.hidden = !focusing;
+        mount.setupHost.hidden = !showing;
         // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
-        if (focusing) rail.dataset.setupFocus = clients.some(({client,reference}) => shown(reference) && client.snapshot().state === 'ready') ? 'shared' : 'only';
+        // A started computer with no team has no teams to sit above, so its parts alone count as nothing readable.
+        if (showing) rail.dataset.setupFocus = clients.some(({client,reference,parts},index) => shown(reference) && client.snapshot().state === 'ready'
+          && !(controls.rows[index]?.partsShown && parts.teams() === 0)) ? 'shared' : 'only';
         else delete rail.dataset.setupFocus;
       }
     }
@@ -614,7 +640,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     document.addEventListener('visibilitychange',active);
     const inputs = ['pointerdown','keydown','input','wheel','touchmove'];
     for (const name of inputs) document.addEventListener(name,activity,true);
+    // The parts read is sent again whenever the window regains focus, to each shown computer already connected.
+    const frame = document.defaultView;
+    const regained = () => {
+      if (disposed || phase !== 'ready') return;
+      for (const {client,parts,reference} of clients) if (shown(reference) && client.snapshot().state === 'ready') void parts.refresh();
+    };
+    invoke(() => frame?.addEventListener?.('focus',regained));
     mount.cleanup = () => {
+      invoke(() => frame?.removeEventListener?.('focus',regained));
       document.removeEventListener('visibilitychange',active);
       for (const name of inputs) document.removeEventListener(name,activity,true);
       observer?.disconnect();
