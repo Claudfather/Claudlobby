@@ -359,7 +359,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       }
       notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
     } else if (!contextsByKind.size) notice = selectedRoom === "all" ? "Choose a team to see its available actions."
-      : checkingTaskContexts.size ? "Checking available actions…" : deniedContexts.size ? "" : "Browser action access is unavailable for this team. Check the task and activity panels for read status.";
+      : checkingTaskContexts.size ? "Checking available actions…" : deniedContexts.size ? "" : "Actions could not be confirmed for this team. This may be temporary, an incompatible response, or recorded history for a team no longer configured. Check connection, then choose Check action access. If this persists, ask the local operator to check the current team configuration and connection compatibility.";
     if (selected) { $("task-detail-refresh").hidden = false; updateDetailActions(); }
     paint(); // An unrelated context result must not replace an authored draft.
   }
