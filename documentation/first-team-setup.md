@@ -271,8 +271,9 @@ the sign-in is not closed while you approve.
 When the computer cannot read Claude's reply (`unsupported_output`,
 `ambiguous_output` or `output_limit`), its sign-in record also names which of its
 rules refused the reply, in a `detail` column: a short fixed phrase such as
-`csi final z 5` or `exit 0 without token`, never Claude's text, the code or a
-token. The setup page is not sent it. Read it on the computer, for example with
+`csi final z 5` or `exit 0 without token`. Claude's reply itself is not kept: the
+most a phrase can hold of it is one letter and 16 digits or punctuation marks of
+what followed an escape character. The setup page is not sent it. Read it on the computer, for example with
 `sqlite3 -readonly` on `state/plane/owner-access.db` under the data root:
 `SELECT state, reason, detail, code_delivered FROM setup_provider;`
 

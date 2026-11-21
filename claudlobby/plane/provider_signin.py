@@ -89,14 +89,17 @@ _TERMINAL = {"connected", "needs_attention", "cancelled", "unknown"}
 
 
 # The closed vocabulary of a refusal's detail: the NAME of the rule that refused the
-# reply, never anything Claude printed. These forms are the whole of it. Each is fixed
-# ASCII words; a few add a value read from the refused control sequence itself, each
-# held to a small safe set too narrow for printed text, a pasted code or a token:
+# reply. These forms are the whole of it. Each is fixed ASCII words; a few add a value
+# read from the refused control sequence itself. The reader takes everything after an
+# escape as that sequence until a letter ends it, so such a value can be printed text
+# that followed a stray escape. Each is therefore held to a small set, and the most a
+# detail can ever hold of the reply is one ASCII letter and 16 ASCII digits or
+# punctuation marks of what followed an escape character:
 #   0xNN  an unhandled control character below 32, as two hex digits
 #   X     the one character after ESC, only when it is printable ASCII (else "other")
 #   F     a CSI's final ASCII letter ("csi malformed" may also name "~", which ends a CSI too)
-#   B     what stood between "ESC [" and F in a CSI of an unexpected form: digits and ASCII
-#         punctuation only (space written as _), at most 16 characters, never a letter
+#   B     what stood between "ESC [" and F in a CSI of an unexpected form: ASCII digits and
+#         punctuation only (space written as _), at most 16 characters
 #   P     a CSI's parameter string: digits ; ? > only, at most 16 characters
 #   N     an erase mode, a number within the CSI bound
 # refusal_detail() below is the only place a detail string is built, and it returns
