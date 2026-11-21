@@ -4,8 +4,9 @@ The default suite runs on three GitHub-hosted platforms: Ubuntu with Python
 3.10 (the declared Python minimum) on every pull request and push to main, as
 `supported (ubuntu-latest, py3.10)`; macOS with Python 3.11 on every push to
 main and on every pull request that is ready for review, as
-`supported (macos-latest, py3.11)` (a draft runs no macOS job, and marking it
-ready starts a run that does: [test-suite.md](test-suite.md)); and Ubuntu with
+`supported (macos-latest, py3.11)` (a draft runs no macOS job unless it
+carries the `macos-on-draft` label, and marking it ready starts a run that
+does: [test-suite.md](test-suite.md)); and Ubuntu with
 Python 3.11 as `pytest`, on push to main only (#1945). Each supported
 platform's suite runs in four shards,
 behind a gate job that carries its check name ([test-suite.md](test-suite.md)).
@@ -55,11 +56,14 @@ merge policy. At implementation start, `Protect Main` required one approving
 review and no status checks; enforcement of these three names is pending
 operator approval. On a pull request `pytest` is skipped (it runs on push to
 main), and each `supported` name is a gate job over its platform's shards: a
-rule that requires a check names the gate, never a shard. On a draft pull
-request the macOS gate is skipped with its shards, and a required check reads
-a skipped job as met: such a rule holds because a draft cannot merge and
-marking it ready starts a run where the gate runs, except for the seconds
-before that run appears. Removing a lane later
+rule that requires a check names the gate, never a shard. Where the macOS
+lane does not run, on a draft without the label, its gate job is skipped under
+another name, `macos lane not run (draft pull request)`. A required check
+reads a skipped job as met, and a run creates its gate job only once its
+shards have finished: a skipped result under the gate's own name would stand
+on the commit for the whole macOS run after a draft is marked ready. Under
+another name, a rule that requires `supported (macos-latest, py3.11)` waits
+until a run that ran macOS has judged the commit. Removing a lane later
 requires updating its required-check rule together with the workflow so a
 nonexistent check does not block every merge.
 
