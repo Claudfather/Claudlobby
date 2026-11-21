@@ -67,6 +67,11 @@ def run_host_update(root: Path, action: str, *, dry_run: bool = False,
             env.pop("CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED", None)
             if value is not None:
                 env[flag] = value
+        if action == "runtime" and not release.snapshot["fleets"]:
+            # The script cannot see the team list; with no team there is no
+            # Claude program to keep current, so it is not called at all.
+            return HostUpdateResult(action, runtime_release_id(release), dry_run, "no_fleet",
+                                    **runtime_provenance(release))
         command = [str(script), "--admitted-runtime"]
         if dry_run:
             command.append("--dry-run")
