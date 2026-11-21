@@ -739,9 +739,8 @@ class ProviderSignin:
         return None if row is None else self.status(reader,grant,row["attempt_id"])
 
     def ready(self, reader, grant):
-        # A read that starts no process, so it skips only the native-start fence: by Launch this
-        # approval's own prepared Preview holds the update at quiesce, which fences native starts.
-        # Every other check stands, and the sign-in calls (and their worker) still ask the fence.
+        # native=False: this read starts no process, and by Launch this approval's own prepared
+        # Preview holds the update at quiesce, which fences only native starts.
         with self.store.access._connection() as conn:
             row,_=self._current(conn)
         if row is None or self.status(reader,grant,row['attempt_id'],native=False)['state'] != 'connected':
