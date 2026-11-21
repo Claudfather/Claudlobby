@@ -631,6 +631,47 @@ def test_real_sql_timeout_signal_is_sanitized_and_closing_admission_wins(connect
         assert "data" not in result.json() and "provenance" not in result.json()
 
 
+
+@pytest.mark.parametrize("closing_loss", [None, "expired", "revoked", "source"])
+def test_overview_real_timeout_diagnostic_respects_closing_admission(connected_http, monkeypatch, closing_loss):
+    from claudlobby.plane import view
+
+    app, access, _, clock, _ = connected_http
+    ticks = []
+    def now():
+        ticks.append(len(ticks) * 0.25)
+        return ticks[-1]
+    def expensive(conn, paths, live, live_poll, *, diagnostic):
+        try:
+            return diagnostic.run("reports_since", lambda: conn.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                " SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n").fetchone())
+        finally:
+            if closing_loss == "expired":
+                clock[0] += 3600
+            elif closing_loss == "revoked":
+                _, binding = access.workspace().status()
+                access.workspace().revoke(expected_binding=binding, expected_owner=binding.owner)
+            elif closing_loss == "source":
+                (paths.root / "state" / "host-uid").unlink()
+    with TestClient(app, base_url=HOST) as client:
+        ready = login(client, connected_http)
+        monkeypatch.setattr(view, "time", types.SimpleNamespace(monotonic=now))
+        monkeypatch.setattr(view, "_fetch_overview", expensive)
+        result = client.get(PREFIX + "read/overview", headers=headers(ready["token"]))
+        if closing_loss is None:
+            assert result.status_code == 200
+            detail = result.json()["query_diagnostic"]
+            assert (detail["phase"], detail["statement"]) == ("reports_since", "_REPORTS_SINCE_SQL")
+            assert type(detail["elapsed_ms"]) is int and detail["elapsed_ms"] >= 10_000
+            assert detail["progress_callbacks"] > 0
+            assert set(result.json()) == {"state", "reason", "remediation", "query_diagnostic"}
+        else:
+            assert result.status_code == (503 if closing_loss == "source" else 403)
+            assert "query_diagnostic" not in result.json() and "reason" not in result.json()
+        assert "data" not in result.json() and "provenance" not in result.json()
+
+
 def test_head_runs_real_canonical_get_queries_not_static_fallback(connected_http, monkeypatch):
     import claudlobby.plane.view as view
     calls = []

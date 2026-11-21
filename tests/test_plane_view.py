@@ -271,6 +271,104 @@ def test_envelope_budget_includes_success_and_error_provenance(tmp_path, monkeyp
     assert set(result["provenance"]) == {"db", "checked_at"}
 
 
+
+@pytest.mark.parametrize("phase,statement", [
+    ("reports_since", "_REPORTS_SINCE_SQL"),
+    ("task_summary", None),
+])
+def test_overview_timeout_diagnostic_retains_real_interrupted_phase(tmp_path, monkeypatch, phase, statement):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    ticks = []
+    def clock():
+        ticks.append(len(ticks) * 0.25)
+        return ticks[-1]
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=clock))
+    diagnostic = view._OverviewQueryDiagnostic()
+    def expensive(conn):
+        return diagnostic.run(phase, lambda: conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+            " SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n").fetchone())
+    result = view._envelope(tmp_path, expensive, diagnostic=diagnostic)
+    assert result["reason"] == "query_timeout" and "data" not in result
+    detail = result["query_diagnostic"]
+    assert set(detail) == {"version", "phase", "statement", "elapsed_ms",
+                           "phase_elapsed_ms", "progress_callbacks"}
+    assert detail["version"] == 1
+    assert (detail["phase"], detail["statement"]) == (phase, statement)
+    assert 10_000 <= detail["elapsed_ms"] <= 86_400_000
+    assert 0 <= detail["phase_elapsed_ms"] <= detail["elapsed_ms"]
+    assert 0 < detail["progress_callbacks"] <= 1_000_000
+    assert all(type(detail[k]) is int for k in
+               ("elapsed_ms", "phase_elapsed_ms", "progress_callbacks"))
+    # A fresh request neither inherits the failed phase nor exposes timings.
+    ticks.clear()
+    healthy = view._envelope(tmp_path, lambda c: c.execute("SELECT 7").fetchone()[0],
+                             diagnostic=view._OverviewQueryDiagnostic())
+    assert healthy["state"] == "ok" and healthy["data"] == 7
+    assert "query_diagnostic" not in healthy
+
+
+@pytest.mark.parametrize("outcome", ["ok", "unknown", "detail", "short"])
+def test_overview_diagnostic_provenance_keeps_the_shared_deadline(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from claudlobby.plane import view
+
+    initialize_plane(tmp_path)
+    elapsed = 0.0
+    monkeypatch.setattr(view, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    def body(conn):
+        nonlocal elapsed
+        elapsed = 9.0
+        if outcome == "unknown":
+            raise view.UnknownFleet("private fleet must not escape")
+        if outcome == "detail":
+            raise view.TaskDetailError("unknown", "private task must not escape")
+        return {"private": "must not escape"}
+    def provenance(root, conn):
+        nonlocal elapsed
+        elapsed = 10.0
+        if outcome == "short":
+            return {"head": conn.execute("SELECT 1").fetchone()[0]}
+        return conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL"
+                            " SELECT x+1 FROM n WHERE x<1000000000)"
+                            " SELECT sum(x) FROM n").fetchone()[0]
+    monkeypatch.setattr(view, "_provenance", provenance)
+    result = view._envelope(tmp_path, body, diagnostic=view._OverviewQueryDiagnostic())
+    assert result["reason"] == "query_timeout" and "data" not in result
+    detail = result["query_diagnostic"]
+    assert (detail["phase"], detail["statement"]) == ("provenance", None)
+    assert (detail["elapsed_ms"], detail["phase_elapsed_ms"]) == (10_000, 1_000)
+    # Explicit deadline checks are not SQLite VM callback invocations.
+    assert (detail["progress_callbacks"] == 0) == (outcome == "short")
+
+
+@pytest.mark.parametrize("bad", [None, [], {"phase": "private"},
+    {"version": 1, "phase": "reports_since", "statement": "private SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": True,
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": float("nan"),
+     "phase_elapsed_ms": 1, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 2, "progress_callbacks": 0},
+    {"version": 1, "phase": "reports_since", "statement": "_REPORTS_SINCE_SQL", "elapsed_ms": 1,
+     "phase_elapsed_ms": 1, "progress_callbacks": 1_000_001},
+], ids=["missing", "array", "unknown", "sql", "boolean", "nan", "phase-time", "work-bound"])
+def test_overview_timeout_diagnostic_rejects_noncanonical_fields(bad):
+    from claudlobby.plane import view
+
+    assert view._safe_query_diagnostic(bad) is None
+    class DoNotStringify:
+        def __str__(self):
+            pytest.fail("diagnostic stringified arbitrary data")
+    assert view._safe_query_diagnostic({"version": 1, "phase": DoNotStringify(),
+        "statement": None, "elapsed_ms": 1, "phase_elapsed_ms": 1,
+        "progress_callbacks": 0}) is None
+
+
 def test_ok_with_empty_data_is_ok(tmp_path):
     _full_capture(tmp_path)
     initialize_plane(tmp_path)
@@ -1751,6 +1849,139 @@ def test_overview_summary_skips_board_presentation_and_delivery_evidence(tmp_pat
         assert fleets[alias]["attention_truncated"] == board["truncated"]
     assert (fleets["a"]["attention"], fleets["a"]["overdue"]) == (2, 1)
     assert fleets["b"]["attention"] == 0
+
+
+def _add_unrelated_summary_constructs(root, count, *, fleet_uid=None):
+    """Only synthetic constructs in this test's private database."""
+    import sqlite3
+    conn = sqlite3.connect(root / "state" / "plane" / "plane.db")
+    conn.executemany(
+        "INSERT INTO work_items (ingest_seq,event_id,schema_version,occurred_at,"
+        "ingested_at,host_uid,fleet_uid,emitter,work_item_id,title,created_by_uid) "
+        "SELECT ?,?,'1',occurred_at,ingested_at,host_uid,?,'claudlobby.tasks.v999',?,'synthetic',"
+        "created_by_uid FROM work_items LIMIT 1",
+        [(1000000 + n, f"ev_{n:032x}", fleet_uid or "fleet_" + "f" * 32,
+          f"wi_{n:032x}") for n in range(count)])
+    conn.commit()
+    conn.close()
+
+
+def test_overview_aggregate_task_selection_work_is_shared(tmp_path):
+    from claudlobby.plane import view
+    for n in range(8):
+        _dispatch(tmp_path, f"{n + 1:x}a", fleet=f"team{n}",
+                  expected_by=FUTURE, tx_state="pane_submitted")
+    _dispatch(tmp_path, "e1", fleet="empty", expected_by=FUTURE,
+              tx_state=None, title=None)
+    def measure():
+        conn = view._ro_conn(tmp_path / "state" / "plane" / "plane.db")
+        ticks = 0
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+        conn.set_progress_handler(progress, 1000)
+        try:
+            conn.execute("BEGIN")
+            rows = view._fetch_overview(conn, view.Paths(tmp_path, package=source_package()),
+                                        [], "unavailable")["fleets"]
+            conn.set_progress_handler(None, 0)
+            for row in rows:
+                board = view._fetch_tasks(conn, row["alias"], root=tmp_path)
+                assert row["attention"] == board["attention_count"]
+                assert row["overdue"] == sum("overdue" in t["attention_reason"]
+                                              for t in board["tasks"])
+                assert row["attention_truncated"] == board["truncated"]
+                if row["alias"] == "empty":
+                    assert board["tasks"] == [] and board["issue_count"] > 0
+                    assert board["issue_scope"] == "fleet"
+        finally:
+            conn.close()
+        return ticks
+    before = measure()
+    _add_unrelated_summary_constructs(tmp_path, 12000)
+    after = measure()
+    print(f"aggregate overview SQLite callbacks/1000: {before} -> {after}")
+    # One shared traversal and the deliberately retained empty-fleet audit
+    # fit this generous allowance; nine repeated candidate scans do not.
+    assert after - before < 150
+
+
+def test_local_overview_candidate_page_and_reducer_share_snapshot(tmp_path, monkeypatch):
+    """A committed competing prune must not split selection from reduction."""
+    import sqlite3
+    from claudlobby.plane import view
+
+    _dispatch(tmp_path, "a1", fleet="owned", expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "b1", fleet="other", expected_by=FUTURE, tx_state=None)
+    db = tmp_path / "state" / "plane" / "plane.db"
+    task_id = "wi_" + "a1" * 16
+    with sqlite3.connect(db) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        uid = writer.execute("SELECT fleet_uid FROM work_items WHERE work_item_id=?",
+                             (task_id,)).fetchone()[0]
+    original_pages, original_read = view.task_board_candidate_pages, view.read_tasks
+    retained = []
+    writes = []
+    def concurrent_prune(conn, *, fleet_uids):
+        pages = original_pages(conn, fleet_uids=fleet_uids)
+        assert task_id in {tid for tid, _uid in pages[uid][0]}
+        with sqlite3.connect(db) as writer:
+            writes.append(writer.execute("DELETE FROM work_items WHERE work_item_id=?",
+                                         (task_id,)).rowcount)
+        return pages
+    def observed_read(conn, *, fleet_uid, task_ids=None):
+        snapshot = original_read(conn, fleet_uid=fleet_uid, task_ids=task_ids)
+        if fleet_uid == uid:
+            retained.append(any(task.task_id == task_id for task in snapshot.tasks))
+        return snapshot
+    monkeypatch.setattr(view, "task_board_candidate_pages", concurrent_prune)
+    monkeypatch.setattr(view, "read_tasks", observed_read)
+    # No owner admission callback: this is the ordinary localhost route.
+    result = TestClient(create_app(tmp_path, package=source_package())).get("/api/overview").json()
+    assert result["state"] == "ok"
+    assert writes == [1]  # The competing writer actually committed.
+    assert retained == [True]
+    with sqlite3.connect(db) as reader:
+        assert reader.execute("SELECT 1 FROM work_items WHERE work_item_id=?",
+                              (task_id,)).fetchone() is None
+
+
+def test_overview_batched_task_pages_preserve_reducer_and_board_pagination(tmp_path, monkeypatch):
+    from claudlobby.plane import view
+    _seed_conversation(tmp_path)  # completed task, linked report history
+    _dispatch(tmp_path, "a1", fleet="many", expected_by=PAST, tx_state=None)
+    _dispatch(tmp_path, "e1", fleet="empty", expected_by=FUTURE,
+              tx_state=None, title=None)
+    conn = view._ro_conn(tmp_path / "state" / "plane" / "plane.db")
+    uid = conn.execute("SELECT uid FROM identity_registry WHERE kind='fleet' AND alias='many'").fetchone()[0]
+    conn.close()
+    _add_unrelated_summary_constructs(tmp_path, 205, fleet_uid=uid)
+    original_read = view.read_tasks
+    empty_audits = []
+    def audited(conn, *, fleet_uid, task_ids=None):
+        if task_ids is None:
+            empty_audits.append(fleet_uid)
+        return original_read(conn, fleet_uid=fleet_uid, task_ids=task_ids)
+    monkeypatch.setattr(view, "read_tasks", audited)
+    client = TestClient(create_app(tmp_path, package=source_package()))
+    overview = client.get("/api/overview").json()
+    assert overview["state"] == "ok"
+    for row in overview["data"]["fleets"]:
+        board = client.get(f"/api/tasks?fleet={row['alias']}").json()["data"]
+        assert row["attention"] == board["attention_count"]
+        assert row["overdue"] == sum("overdue" in t["attention_reason"] for t in board["tasks"])
+        assert row["attention_truncated"] == board["truncated"]
+        if row["alias"] == "empty":
+            assert row["uid"] in empty_audits
+            assert board["issue_count"] > 0 and board["issue_scope"] == "fleet"
+        if row["alias"] == "many":
+            assert len(board["tasks"]) == 200 and board["truncated"]
+            assert all(not task["resolved"] for task in board["tasks"])
+            cursor = board["task_page"]["next_cursor"]
+            older = client.get("/api/tasks", params={"fleet": "many", "cursor": cursor}).json()["data"]
+            assert len(older["tasks"]) == 6 and not older["truncated"]
+            assert not {t["task_id"] for t in board["tasks"]} & {t["task_id"] for t in older["tasks"]}
 
 
 def test_host_samples_seek_latest_values_without_sorting_metric_history(tmp_path):
