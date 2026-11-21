@@ -260,6 +260,12 @@ def fixed_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(Installation, "preflight", lambda self, **kwargs: "a" * 40)
+    # The running Linux interpreter, trusted from this directory and owner as
+    # /usr/bin and root are on a real computer.
+    from claudlobby import bootstrap
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path)
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid())
+    monkeypatch.setattr(sys, "executable", str(interpreter))
     return SimpleNamespace(root=family / "data", package=package), request, home, path
 
 
@@ -294,7 +300,8 @@ def test_linux_fixed_owner_environment_lets_first_team_setup_record(fixed_profil
     # An operator who exports the switch is still refused, here and after the guide.
     monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
     assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
-    child = [sys.executable, "-c", "import os; print(os.environ.get('PLANE_EMIT_DISABLED'))"]
+    # A shell child, not sys.executable: this fixture stands a file in for the interpreter.
+    child = ["/bin/sh", "-c", 'printf %s "${PLANE_EMIT_DISABLED-None}"']
     profile = FixedOwnerProfile(paths, request)
     with profile.environment():
         assert registry.activation_scan_refusal(paths, fleet) is None
@@ -980,3 +987,86 @@ def test_darwin_owner_ingress_remains_explicit_native_gate(darwin_fixed_profile,
     profile = FixedOwnerProfile(paths, request)
     monkeypatch.setattr(owner_ingress, "ServePrincipalVerifier", lambda **_kw: pytest.fail("executed Linux native path"))
     with pytest.raises(StdioRefused, match="native_ingress_prerequisite_missing"): profile.origin()
+
+
+def test_linux_system_python_update_keeps_the_recorded_binding(fixed_profile):
+    """Ubuntu replaces /usr/bin/python3.x on a security update; setup goes on."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, home, path = fixed_profile
+    receipt, binding = path.read_bytes(), request["binding_sha256"]
+    interpreter = Path(json.loads(receipt)["interpreter"])
+    interpreter.write_bytes(b"synthetic interpreter after a security update; never executed")
+    assert hashlib.sha256(interpreter.read_bytes()).hexdigest() != json.loads(receipt)["interpreter_sha256"]
+    before = sorted(str(p) for p in home.rglob("*"))
+    FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and request["binding_sha256"] == binding
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("defect", ["owner", "group-writable", "other-writable", "not-executable",
+                                    "outside", "running-python", "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
+def test_linux_system_python_must_stay_trusted(fixed_profile, monkeypatch, tmp_path, defect):
+    from claudlobby import bootstrap  # holds the shared trust check
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, path = fixed_profile
+    interpreter = Path(json.loads(path.read_bytes())["interpreter"])
+    if defect == "owner":
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid() + 1)
+    elif defect == "group-writable":
+        interpreter.chmod(0o775)
+    elif defect == "other-writable":
+        interpreter.chmod(0o757)
+    elif defect == "not-executable":
+        interpreter.chmod(0o644)
+    elif defect == "outside":
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
+    elif defect == "running-python":
+        other = tmp_path / "other-python"; other.write_bytes(b"other"); other.chmod(0o755)
+        monkeypatch.setattr(sys, "executable", str(other))
+    else:
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", _fake_folder(tmp_path, defect))
+    receipt, before = path.read_bytes(), sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and sorted(str(p) for p in home.rglob("*")) == before
+
+
+def test_darwin_managed_python_bytes_stay_pinned(darwin_fixed_profile):
+    """Claudlobby's own Mac runtime is its own file: a changed byte still refuses."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, receipt_path, runtime, _env = darwin_fixed_profile
+    FixedOwnerProfile(paths, request)
+    runtime.python.write_bytes(b"changed managed interpreter; never executed")
+    receipt = receipt_path.read_bytes()
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert receipt_path.read_bytes() == receipt
+
+
+def _fake_folder(path, defect):
+    """The trusted folder as lstat reports it, with at most one property faked."""
+    if not (defect or "").startswith("folder-"):
+        return path
+    import stat as stat_module
+    class Folder(type(Path("/"))):
+        def lstat(self):
+            info = super().lstat()
+            mode = stat_module.S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return SimpleNamespace(st_mode=mode, st_uid=info.st_uid + (defect == "folder-owner"))
+    return Folder(path)
+
+
+def test_linux_recorded_python_digest_is_never_compared(fixed_profile):
+    """Only the recorded digest changes, and the binding the website holds agrees."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, _home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["interpreter_sha256"] = "e" * 64
+    path.write_text(json.dumps(receipt, sort_keys=True))
+    binding = {key: value for key, value in receipt.items()
+               if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
+    request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    FixedOwnerProfile(paths, request)

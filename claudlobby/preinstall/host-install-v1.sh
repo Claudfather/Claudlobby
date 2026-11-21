@@ -935,11 +935,14 @@ def independent_python():
         if python != profile.python or sys.prefix != sys.base_prefix:
             raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
         return python
+    folder = Path("/usr/bin").lstat()
     if (sys.implementation.name != "cpython" or sys.version_info < (3, 10)
-            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")):
+            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")
+            or not stat.S_ISDIR(folder.st_mode) or folder.st_uid != 0 or folder.st_mode & 0o022):
         raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
     info = python.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+            or not os.access(python, os.X_OK)):
         raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
     return python
 
@@ -1119,10 +1122,20 @@ def binding(install, data, revision, python):
             "interpreter_sha256": digest(python)}
 
 
+def bound(expected):
+    return hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+
+
 def receipt(path, expected):
     value = read_json(path)
+    # The managed Mac Python keeps its byte pin. The Ubuntu /usr/bin Python is
+    # admitted by independent_python instead: security updates replace it, so
+    # its bytes are not compared and inspect keeps the digest recorded here.
+    pinned = {key: item for key, item in expected.items()
+              if key != "interpreter_sha256" or platform.system() == "Darwin"}
     if (not isinstance(value, dict) or set(value) != FIELDS
-            or any(value.get(key) != item for key, item in expected.items())
+            or not isinstance(value["interpreter_sha256"], str) or not DIGEST.fullmatch(value["interpreter_sha256"])
+            or any(value.get(key) != item for key, item in pinned.items())
             or type(value["schema"]) is not int or type(value["complete"]) is not bool
             or type(value["environment_owned"]) is not bool
             or value["revision"] not in (None, expected["ref"])
@@ -1328,6 +1341,8 @@ def inspect(install, data, expected, python, runner, env, in_use=False):
             raise Refusal("existing_installation", next_step="inspect")
         return None
     state = receipt(record, expected)
+    # The binding reported and resumed is the one recorded at preparation.
+    expected["interpreter_sha256"] = state["interpreter_sha256"]
     if in_use:
         # Later state beside anything but this exact completed preparation is
         # unknown: never adopted, and never read as fresh or incomplete.
@@ -1445,7 +1460,7 @@ def stage_and_prepare(install, data, staging, expected, python, runner, env, loc
 def execute(action, value, deadline):
     descriptors = []
     runner = Runner(deadline)
-    uid, revision, binding_hash = None, None, None
+    uid, revision, binding_hash, expected = None, None, None, None
     try:
         home = account_profile(value["expected_uid"])
         uid, revision = value["expected_uid"], value["source_revision"]
@@ -1458,7 +1473,7 @@ def execute(action, value, deadline):
             raise Refusal("existing_installation")
         current = paths(home, in_use=action == "status")
         expected = binding(install, data, revision, python)
-        binding_hash = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+        binding_hash = bound(expected)
         if action == "status" and (current is None or not (install / "preparation.lock").exists()):
             if current is not None and (names(install) or names(data) or names(staging)
                                         or names(family) & SETUP_FAMILY):
@@ -1485,6 +1500,7 @@ def execute(action, value, deadline):
         if not in_use:
             contents_check(install, data, staging)
         state = inspect(install, data, expected, python, runner, env, in_use=in_use)
+        binding_hash = bound(expected)
         if action == "status":
             if state is None:
                 return "absent", "none", "inspect", False, revision, uid, binding_hash
@@ -1499,13 +1515,14 @@ def execute(action, value, deadline):
             observed = inspect(install, data, expected, python, runner, env)
             if observed is None or not observed["complete"]:
                 raise unavailable("preparation_incomplete")
+            binding_hash = bound(expected)
         return "prepared", "none", "continue_onboarding", True, revision, uid, binding_hash
     except Refusal as error:
-        error.identity = (revision, uid, binding_hash)
+        error.identity = (revision, uid, binding_hash if expected is None else bound(expected))
         raise
     except Exception:
         error = Refusal("preparation_refused", "refused", "inspect")
-        error.identity = (revision, uid, binding_hash)
+        error.identity = (revision, uid, binding_hash if expected is None else bound(expected))
         raise error from None
     finally:
         runner.close()

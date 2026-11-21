@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 
+from ..bootstrap import trusted_system_python
 from ..plane.owner_consent import TrustedWorkspacePresenter
 from .owner_stdio import StdioRefused, _unique
 
@@ -102,7 +103,12 @@ class FixedOwnerProfile:
             if (not interpreter.is_absolute() or interpreter.resolve() != interpreter
                     or self.runtime is None and interpreter.is_relative_to(self.family)
                     or self.runtime is not None and interpreter != self.runtime.python
-                    or not interpreter.is_file() or _digest(interpreter) != receipt["interpreter_sha256"]):
+                    or not interpreter.is_file() or not isinstance(receipt["interpreter_sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", receipt["interpreter_sha256"]) is None
+                    or self.runtime is not None and _digest(interpreter) != receipt["interpreter_sha256"]):
+                raise StdioRefused("installation_changed")
+            # Linux: trusted by place and ownership; the recorded digest stays bound.
+            if self.runtime is None and not trusted_system_python(interpreter):
                 raise StdioRefused("installation_changed")
             if (request["finish_setup"] is None and not updated_source
                     and receipt["ref"] != request["source_revision"]):

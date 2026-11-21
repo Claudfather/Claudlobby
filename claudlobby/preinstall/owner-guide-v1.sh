@@ -927,8 +927,10 @@ def independent_python():
         if python != profile.python or sys.prefix != sys.base_prefix:
             raise Refusal("prerequisite_unusable", 6)
         return python
+    folder = Path("/usr/bin").lstat()
     if (sys.implementation.name != "cpython" or sys.version_info < (3, 10)
-            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")):
+            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")
+            or not stat.S_ISDIR(folder.st_mode) or folder.st_uid != 0 or folder.st_mode & 0o022):
         raise Refusal("prerequisite_unusable", 6)
     trusted_executable(python)
     return python
@@ -945,6 +947,17 @@ def trusted_executable(path):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def recorded_python(state, python):
+    # The receipt names this running interpreter. The managed Mac Python keeps
+    # its byte pin. The Ubuntu /usr/bin Python is admitted by trusted_executable
+    # instead: security updates replace it, so its bytes are not compared and
+    # the digest recorded at preparation stays in the receipt and binding.
+    recorded = state["interpreter_sha256"]
+    return (state["interpreter"] == str(python) and isinstance(recorded, str)
+            and re.fullmatch(DIGEST, recorded) is not None
+            and (platform.system() != "Darwin" or recorded == digest(python)))
 
 
 def git_environment(home):
@@ -1053,7 +1066,7 @@ def validate(value, deadline, action="setup"):
                 or not isinstance(state["ref"], str) or not re.fullmatch(SHA, state["ref"])
                 or state["revision"] != state["ref"] or state["complete"] is not True or state["environment_owned"] is not True
                 or not isinstance(state["lock_sha256"], str) or not re.fullmatch(DIGEST, state["lock_sha256"])
-                or state["interpreter"] != str(python) or state["interpreter_sha256"] != digest(python)
+                or not recorded_python(state, python)
                 or hashlib.sha256(json.dumps({key: state[key] for key in BINDING_FIELDS}, sort_keys=True).encode()).hexdigest() != value["binding_sha256"]
                 or value["finish_setup"] is None and action != "api" and state["ref"] != value["source_revision"]):
             # Only the fixed api mode carries no finish tuple: it is admitted at the

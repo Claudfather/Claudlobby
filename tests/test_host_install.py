@@ -749,3 +749,200 @@ def test_darwin_runtime_refusal_precedes_installer_paths_and_children(tmp_path, 
             module.execute(action, {"expected_uid": os.geteuid(), "source_revision": REVISION}, time.monotonic() + 15)
         assert error.value.code == "unsupported_architecture"
     assert snapshot(home) == before
+
+
+def _bound(expected):
+    return hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+
+
+def test_status_after_a_system_python_update_keeps_the_recorded_binding(tmp_path, monkeypatch):
+    """A security update replaces Ubuntu's /usr/bin Python between two reads."""
+    module = payload(); home, _python = profile(module, tmp_path, monkeypatch)
+    python = tmp_path / "system-bin/python3.12"  # stands in for the admitted file
+    python.parent.mkdir()
+    python.write_bytes(b"synthetic interpreter before a security update; never executed")
+    python.chmod(0o755)
+    monkeypatch.setattr(module, "independent_python", lambda: python)
+    install, data, _staging = create_paths(module, home)
+    lock = module.lock_open(install / "preparation.lock", True, True); os.close(lock)
+    expected = module.binding(install, data, REVISION, python)
+    state = {**expected, "revision": None, "lock_sha256": None, "environment_owned": False, "complete": False}
+    for path, value in [(install / "preparation.json", state),
+                        (install / "installation.json", {"schema": 1, "data_root": str(data)})]:
+        path.write_text(json.dumps(value)); path.chmod(0o600)
+    python.write_bytes(b"synthetic interpreter after a security update; never executed")
+    assert module.digest(python) != expected["interpreter_sha256"]
+    receipt, before = (install / "preparation.json").read_bytes(), snapshot(home)
+    result = module.execute("status", json.loads(frame()), time.monotonic() + 15)
+    assert result[:4] == ("incomplete", "preparation_incomplete", "resume_same", False)
+    assert result[6] == _bound(expected)
+    assert (install / "preparation.json").read_bytes() == receipt and snapshot(home) == before
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_receipt_compares_python_bytes_only_for_the_managed_mac_runtime(tmp_path, monkeypatch, system):
+    module = payload(); home, python = profile(module, tmp_path, monkeypatch)
+    install, data, _staging = create_paths(module, home)
+    expected = module.binding(install, data, REVISION, python)
+    state = {**expected, "interpreter_sha256": "e" * 64, "revision": REVISION, "lock_sha256": "b" * 64,
+             "environment_owned": True, "complete": True}
+    path = install / "preparation.json"; path.write_text(json.dumps(state)); path.chmod(0o600)
+    monkeypatch.setattr(module.platform, "system", lambda: system)
+    if system == "Linux":
+        assert module.receipt(path, expected) == state
+    else:
+        with pytest.raises(module.Refusal) as error:
+            module.receipt(path, expected)
+        assert (error.value.code, error.value.next_step) == ("identity_changed", "inspect")
+    for change in ({"interpreter": str(tmp_path / "other-python")}, {"interpreter_sha256": "E" * 64},
+                   {"interpreter_sha256": None}):
+        path.write_text(json.dumps({**state, **change}))
+        with pytest.raises(module.Refusal) as error:
+            module.receipt(path, expected)
+        assert error.value.code == "identity_changed"
+
+
+@pytest.mark.parametrize("defect", [None, "owner", "group-writable", "other-writable", "outside",
+                                    "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
+def test_linux_system_python_is_admitted_only_while_trusted(monkeypatch, tmp_path, defect):
+    module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(module.sys, "prefix", module.sys.base_prefix)
+    executable = Path("/usr/bin/true")  # a root-owned stand-in; never executed
+    if defect == "outside":
+        executable = tmp_path / "python3"; executable.write_bytes(b"outside"); executable.chmod(0o755)
+    monkeypatch.setattr(module.sys, "executable", str(executable))
+    class Observed(type(Path("/"))):
+        def stat(self, **kwargs):
+            info = super().stat(**kwargs)
+            mode, uid = info.st_mode, (1001 if defect == "owner" else info.st_uid)
+            mode |= {"group-writable": 0o020, "other-writable": 0o002}.get(defect, 0)
+            return types.SimpleNamespace(st_mode=mode, st_uid=uid)
+        def lstat(self):
+            info = super().lstat()
+            if str(self) != "/usr/bin":
+                return info
+            mode = __import__("stat").S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return types.SimpleNamespace(st_mode=mode, st_uid=1001 if defect == "folder-owner" else info.st_uid)
+    monkeypatch.setattr(module, "Path", Observed)
+    if defect is None:
+        assert module.independent_python() == executable.resolve()
+        return
+    with pytest.raises(module.Refusal) as error:
+        module.independent_python()
+    assert (error.value.code, error.value.state, error.value.exit_code) == ("prerequisite_unusable", "unavailable", 6)
+
+
+def _record_older_python(family):
+    """The digest a preparation recorded before this Python was updated."""
+    record = family / "install/preparation.json"
+    value = json.loads(record.read_text())
+    value["interpreter_sha256"] = hashlib.sha256(b"the interpreter before its security update").hexdigest()
+    record.write_text(json.dumps(value, sort_keys=True)); record.chmod(0o600)
+    return value
+
+
+def test_actual_status_in_use_after_a_system_python_update(tmp_path, local_install_source):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    value = _record_older_python(family)
+    add_setup_state(family)
+    record = (family / "install/preparation.json").read_bytes()
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert (result["state"], result["code"], result["next"]) == ("recorded_in_use", "none", "continue_onboarding")
+    assert result["binding_sha256"] == _bound({key: value[key] for key in (
+        "schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256")})
+    assert (family / "install/preparation.json").read_bytes() == record and snapshot(home) == before
+
+
+def test_actual_resume_after_a_python_change_refuses_an_untrusted_interpreter(tmp_path, local_install_source):
+    """The fixture Python is the account's own file outside /usr/bin: bootstrap
+    itself refuses to resume across changed bytes, after host-install's check."""
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    failed = invoke_fixture(tmp_path, home, local_install_source, "prepare", fail_download=True)
+    assert failed.returncode == 4 and json.loads(failed.stdout)["next"] == "inspect"
+    family = home / ".local/share/claudlobby-browser"
+    _record_older_python(family)
+    record = (family / "install/preparation.json").read_bytes()
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 0 and json.loads(status.stdout)["next"] == "resume_same", status.stdout
+    resumed = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    result = json.loads(resumed.stdout)
+    assert resumed.returncode == 4 and (result["state"], result["code"]) == ("refused", "preparation_refused")
+    assert not result["prepared"] and (family / "install/preparation.json").read_bytes() == record
+
+
+def _fake_folder(path, defect):
+    """The trusted folder as lstat reports it, with at most one property faked."""
+    if not (defect or "").startswith("folder-"):
+        return path
+    import stat as stat_module
+    class Folder(type(Path("/"))):
+        def lstat(self):
+            info = super().lstat()
+            mode = stat_module.S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return types.SimpleNamespace(st_mode=mode, st_uid=info.st_uid + (defect == "folder-owner"))
+    return Folder(path)
+
+
+@pytest.mark.parametrize("defect", [None, "same-bytes-untrusted", "owner", "group-writable", "other-writable",
+                                    "outside", "running-python", "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
+def test_bootstrap_resume_admits_changed_python_bytes_only_for_the_trusted_system_python(tmp_path, monkeypatch, defect):
+    from claudlobby import bootstrap
+    from claudlobby import installation as locations
+    monkeypatch.setattr(__import__("platform"), "system", lambda: "Linux")
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    monkeypatch.setattr(bootstrap.pwd, "getpwuid", lambda _uid: types.SimpleNamespace(pw_dir=str(home), pw_name="fixture"))
+    family = home / ".local/share/claudlobby-browser"
+    install, data = family / "install", family / "data"
+    for path in (install, data):
+        path.mkdir(parents=True); path.chmod(0o700)
+    folder = tmp_path / "system-bin"; folder.mkdir(); folder.chmod(0o755)
+    python = folder / "python3.12"  # stands in for the trusted system file
+    python.write_bytes(b"synthetic interpreter; never executed"); python.chmod(0o755)
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", _fake_folder(folder, defect))
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER",
+                        os.getuid() + (defect in ("owner", "same-bytes-untrusted")))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "other-python" if defect == "running-python" else python))
+    if defect == "group-writable":
+        python.chmod(0o775)
+    elif defect == "other-writable":
+        python.chmod(0o757)
+    elif defect == "outside":
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
+    recorded = bootstrap._digest(python) if defect == "same-bytes-untrusted" else "e" * 64
+    state = {"schema": 1, "purpose": "installation-preparation-only", "installation": str(install),
+             "data_root": str(data), "remote": bootstrap._BROWSER_REMOTE, "ref": "a" * 40,
+             "interpreter": str(python), "interpreter_sha256": recorded, "revision": None,
+             "lock_sha256": None, "environment_owned": False, "complete": False}
+    receipt = install / "preparation.json"
+    receipt.write_text(json.dumps(state, sort_keys=True)); receipt.chmod(0o600)
+    raw = receipt.read_bytes()
+    lock = install / "preparation.lock"; lock.write_bytes(b""); lock.chmod(0o600)
+    class Admitted(Exception):
+        pass
+    def admitted(_installation):
+        raise Admitted()
+    monkeypatch.setattr(locations, "write_installation", admitted)
+    descriptor = os.open(lock, os.O_RDWR)
+    try:
+        def resume():
+            bootstrap.prepare_git_installation(install, data, remote=bootstrap._BROWSER_REMOTE, ref="a" * 40,
+                interpreter=python, _preparation_lock_fd=descriptor,
+                _browser_runner=lambda *_a, **_k: pytest.fail("no child before receipt admission"))
+        if defect in (None, "same-bytes-untrusted"):
+            with pytest.raises(Admitted):
+                resume()
+        else:
+            with pytest.raises(bootstrap.BundleError, match="different explicit inputs"):
+                resume()
+    finally:
+        os.close(descriptor)
+    assert receipt.read_bytes() == raw
