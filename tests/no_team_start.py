@@ -392,6 +392,8 @@ class Case:
         updater._prepare_quiet_support(store)
         record = store.load()
         job = self._job(store)
+        # As the real support records it, so a later continue takes the retained job.
+        record["job_support"] = {"fixture": updater._digest(job.content)}
         record["updater_job"] = {
             "manager": job.manager,
             "target": job.target,

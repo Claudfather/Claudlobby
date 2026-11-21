@@ -285,3 +285,59 @@ def test_todays_guide_still_refuses_a_computer_it_did_not_start(tmp_path, monkey
     assert refused.value.data == {
         "request_id": read_update(case.installation)["request_id"]
     }
+
+
+def _job_ended(case):
+    """What the updater job's own wrapper records when its run ends, finished or not."""
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
+        store.save(record)
+
+
+def test_a_start_interrupted_after_its_database_is_continued_by_its_request(tmp_path, monkeypatch):
+    from claudlobby import update_operation
+
+    case, paths = _computer(tmp_path, monkeypatch)
+    _state, ids = _start(case, paths, Consent())
+    identities = update_operation._initialize_identities
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("synthetic interruption after the database is published")
+        return identities(*args, **kwargs)
+
+    monkeypatch.setattr(update_operation, "_initialize_identities", interrupted)
+    with pytest.raises(Exception):
+        case.run_job()
+    _job_ended(case)
+    database = case.root / "state/plane/plane.db"
+    published = database.stat().st_ino
+    assert start_state(case.root, case.installation) == "starting"
+    again = Consent()
+    state, failure = _start(case, paths, again)
+    assert (state, failure["request_id"]) == ("failed", ids["request_id"])
+    assert again.calls == [] and len(case.dispatches) == 1
+    # Phase 2's `host update continue --expected-request <id>`, with no card.
+    updater.apply_or_continue(case.installation, expected_request_id=ids["request_id"])
+    case.run_job()
+    assert start_state(case.root, case.installation) == "started"
+    assert database.stat().st_ino == published and len(calls) == 2
+    assert read_update(case.installation)["request_id"] == ids["request_id"]
+
+
+def test_a_start_done_with_health_errors_is_cleared_by_its_request(tmp_path, monkeypatch):
+    case, paths = _computer(tmp_path, monkeypatch)
+    _state, ids = _start(case, paths, Consent())
+    case.run_job()
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    assert _start(case, paths, Consent())[0] == "failed"
+    updater.apply_or_continue(case.installation, expected_request_id=ids["request_id"])
+    case.run_job()
+    assert start_state(case.root, case.installation) == "started"
+    assert _start(case, paths, Consent()) == ("started", None)
