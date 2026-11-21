@@ -248,13 +248,15 @@ _PRIVATE_MODES = frozenset({"25", "1004", "1049", "2004", "2031"})
 # Unanswered queries (kitty keyboard, XTVERSION, primary device attributes)
 # and the full-screen scroll-region reset; none changes the modelled screen.
 _IGNORED_CSI = frozenset({("?", "u"), (">", "q"), (">0", "q"), ("", "c"), ("0", "c"), ("", "r")})
-# Keyboard-mode switches: they change how key presses are reported to the program, never
-# what the screen shows. XTMODKEYS, "CSI > 4 [; 0-2] m": Claude 2.1.325 sends "CSI > 4 m"
+# Keyboard-mode switch-offs: they stop a way of reporting key presses to the program and
+# never change what the screen shows. XTMODKEYS reset, "CSI > 4 m": Claude 2.1.325 sends it
 # once the code is entered (seen on a real sign-in through the refusal detail
-# "csi private >4 m"). The kitty keyboard protocol's push, pop and set, "CSI > n u",
-# "CSI < [n] u" and "CSI = n [; 1-3] u", is the same kind of switch, sent by the same
-# programs at the same moments; it has not been seen from Claude here.
-_KEYBOARD_MODES = re.compile(r"(?:>4(?:;[0-2])?m|>[0-9]{0,2}u|<[0-9]{0,2}u|=[0-9]{1,2}(?:;[1-3])?u)\Z")
+# "csi private >4 m"); "CSI > 4 ; 0 m" is the same reset written out. The kitty keyboard
+# protocol's pop, "CSI < [n] u", is its twin, sent on the same way out; it has not been
+# seen from Claude here. The forms that turn a reporting mode ON stay refused
+# ("CSI > 4 ; 1-2 m", kitty push "CSI > n u" and set "CSI = n ; m u"): after one of
+# those the program would expect keys in another encoding than the bytes typed here.
+_KEYBOARD_MODES = re.compile(r"(?:>4(?:;0)?m|<[0-9]{0,2}u)\Z")
 
 
 class TokenScreen:

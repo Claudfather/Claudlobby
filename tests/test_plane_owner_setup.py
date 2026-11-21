@@ -1851,7 +1851,7 @@ def _refusal(*chunks):
     pytest.param([b'\x1b[>5m'],'unsupported_output','csi private >5 m',id='csi-private-other-xterm-resource'),
     pytest.param([b'\x1b[<5;5M'],'unsupported_output','csi private <5;5 M',id='csi-private-less-than'),
     pytest.param([b'\x1b[=1;9u'],'unsupported_output','csi private =1;9 u',id='csi-private-equals'),
-    pytest.param([b'\x1b[>123u'],'unsupported_output','csi private >123 u',id='csi-private-kitty-too-long'),
+    pytest.param([b'\x1b[>123u'],'unsupported_output','csi private >123 u',id='csi-private-kitty-push'),
     pytest.param([b'\x1b[?3h'],'unsupported_output','csi private ?3 h',id='csi-private-mode-not-allowed'),
     pytest.param([b'\x1b[?h'],'unsupported_output','csi private ? h',id='csi-private-no-number'),
     pytest.param([b'\x1b[999999999A'],'unsupported_output','csi range',id='csi-range'),
@@ -2143,13 +2143,28 @@ def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(setup_
 
 
 # --- Keyboard-mode switches are ignored: they never change the screen ---
-@pytest.mark.parametrize('sequence',[b'\x1b[>4m',b'\x1b[>4;0m',b'\x1b[>4;1m',b'\x1b[>4;2m',
-                                     b'\x1b[>u',b'\x1b[>1u',b'\x1b[<u',b'\x1b[<1u',b'\x1b[=1u',b'\x1b[=1;1u',b'\x1b[=31;3u'])
-def test_provider_signin_parser_ignores_keyboard_mode_switches(sequence):
+@pytest.mark.parametrize('sequence',[b'\x1b[>4m',b'\x1b[>4;0m',b'\x1b[<u',b'\x1b[<1u',b'\x1b[<12u'])
+def test_provider_signin_parser_ignores_keyboard_mode_switch_offs(sequence):
     from claudlobby.plane.provider_signin import TokenScreen
     screen=TokenScreen()
     screen.feed(b'ab'+sequence+b'c')
     assert ''.join(screen._rows[0])=='abc'
+
+
+# Turning a key-reporting mode ON stays refused, by name, and so does every near miss.
+@pytest.mark.parametrize('sequence,detail',[
+    (b'\x1b[>4;1m','csi private >4;1 m'),(b'\x1b[>4;2m','csi private >4;2 m'),
+    (b'\x1b[>u','csi private > u'),(b'\x1b[>1u','csi private >1 u'),
+    (b'\x1b[=1u','csi private =1 u'),(b'\x1b[=1;1u','csi private =1;1 u'),(b'\x1b[=u','csi private = u'),
+    (b'\x1b[>4;2u','csi private >4;2 u'),(b'\x1b[<1;1u','csi private <1;1 u'),(b'\x1b[<1m','csi private <1 m'),
+    (b'\x1b[>44m','csi private >44 m'),(b'\x1b[>4;m','csi private >4; m'),(b'\x1b[<123u','csi private <123 u'),
+])
+def test_provider_signin_parser_still_refuses_switching_a_keyboard_mode_on(sequence,detail):
+    import re
+    from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
+    with pytest.raises(SigninRefused) as refused:
+        TokenScreen().feed(b'ab'+sequence+b'c')
+    assert str(refused.value)=='unsupported_output' and refused.value.detail==detail and re.fullmatch(_DETAIL,detail)
 
 
 def test_provider_signin_reads_the_token_after_the_keyboard_mode_switch_claude_sends(synthetic_signin):
