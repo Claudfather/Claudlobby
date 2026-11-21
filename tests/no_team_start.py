@@ -32,7 +32,7 @@ from claudlobby import (
 from claudlobby.active_config import read_current_config
 from claudlobby.config_plan import read_rendered
 from claudlobby.git_update import UpdateStore, read_update
-from claudlobby.installation import install_launcher
+from claudlobby.installation import install_launcher, install_updater
 from tests.package_fixtures import source_package
 from tests.test_package_resources import _run, _source_installation
 
@@ -149,7 +149,7 @@ def _commit(installation, message):
 class Case:
     """One paired, fresh computer: a managed checkout at `before`, with `target` ahead of it."""
 
-    def __init__(self, tmp_path, monkeypatch, *, owner=None):
+    def __init__(self, tmp_path, monkeypatch, *, owner=None, real_job=False, stub_extras=True):
         import platform
         from claudlobby import composer, env_tiers, supervision_inventory
         from claudlobby.commands import operator_context
@@ -181,6 +181,11 @@ class Case:
         self.installation, self.root = installation, installation.data_root
         self.python = Path(sys.executable).resolve()
         install_launcher(installation, interpreter=self.python)
+        # `real_job`: the updater's own job definition, published where the
+        # start publishes it; only its enrollment and run stay stand-ins.
+        self.real_job = real_job
+        if real_job:
+            install_updater(installation, interpreter=self.python)
         self.directory = tmp_path / "native-units"
         self.directory.mkdir()
         self.scope = {"directory": str(self.directory), "manifests": []}
@@ -202,6 +207,8 @@ class Case:
         self.native = Native(self.directory, self.package(self.before))
         self.trace, self.dispatches = [], []
         self.job_state = "inactive"
+        #: An exception the native layer raises for the next job run, once.
+        self.refuse_run = None
         # The rendering environment of tests/test_config_staging.py.
         monkeypatch.setattr(
             env_tiers,
@@ -216,7 +223,8 @@ class Case:
         )
         monkeypatch.setattr(composer, "_host_cpu_count", lambda: 4)
         monkeypatch.setattr(composer, "_git", lambda *_: None)
-        monkeypatch.setattr(composer._switches, "missing_extra", lambda *_: None)
+        if stub_extras:
+            monkeypatch.setattr(composer._switches, "missing_extra", lambda *_: None)
         # The native layer.
         monkeypatch.setattr(platform, "system", lambda: "Linux")
         monkeypatch.setattr(
@@ -361,6 +369,12 @@ class Case:
 
     def _job(self, store):
         directory = Path(store.load()["native_install_directory"])
+        if self.real_job:
+            from claudlobby.update_job import update_job_definition
+
+            return update_job_definition(
+                self.installation, manager="Linux", domain="", install_directory=directory
+            )
         return SimpleNamespace(
             manager="Linux",
             target="claudlobby-update-job.service",
@@ -373,12 +387,23 @@ class Case:
         job = self._job(store)
 
         def run(*_args, **_kwargs):
+            if self.refuse_run is not None:
+                refused, self.refuse_run = self.refuse_run, None
+                raise refused
             self.dispatches.append(read_update(self.installation)["request_id"])
             return {"dispatch": "started"}
 
+        def prepare(*_args):
+            if self.real_job:
+                # update_job.prepare_update_job's two writes; enrollment is native.
+                from claudlobby.update_job import _publish_missing
+
+                _publish_missing(job.source, job.content)
+                _publish_missing(job.installed, job.content)
+
         jobs = SimpleNamespace(
             _definition=lambda *_args, **_kwargs: job,
-            prepare_update_job=lambda *_args: None,
+            prepare_update_job=prepare,
             bind_update_job=lambda *_args: None,
             run_update_job=run,
             observe_update_job=lambda *_args, **_kwargs: {
