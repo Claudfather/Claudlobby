@@ -32,6 +32,21 @@ A paired computer whose workspace is linked can also be started with no team. Th
 
 The hidden typed run `host owner setup --stdio-computer` (prelude mode `computer`) is the way a client adds a computer and starts it with no team. It asks the folders card, the access list and pairing, one storage card (`initialize_link_storage`) and the workspace link, each only when an earlier run has not, then the start card, dispatches the start, answers `computer_starting` and exits; its exit is what lets the updater proceed. Run again it asks nothing: `computer_ready` once the computer is started and, on Linux, its lasting service answers; `computer_starting` while the start is under way; `start_failed` with core's line when it stopped. It never continues a start: a stopped start is continued by its request id with `host update continue`. A computer today's guide set up answers `use_full_guide`, and today's guide is unchanged. A computer updated after its start is admitted at the later revision only when the run names the finished update record that moved it there; the preparation receipt keeps its first revision and is never rewritten.
 
+## Updating a started computer
+
+The preparation script reads and moves a computer it prepared with three
+actions. `update-status` reports the receipt's revision, the installed revision,
+whether the computer is started and the update record, if any. `update` moves a
+started computer forward to a named revision from the receipt's remote and
+exits; the updater carries on alone. `update-continue` continues the unfinished
+record it names: a start, an ordinary update, any dispatched record, or a
+finished one with health errors. It never dispatches a Preview, a prepared first
+team or a prepared addition; only its Launch does. A computer that is prepared
+but not started, untouched or partway through its cards, is not moved: it
+answers `needs_reset`. None of the three waits for the updater, rewrites the
+receipt or asks a card. The [owner SSH carrier](architecture/owner-ssh-carrier.md)
+lists their requests, answers and refusals.
+
 ## Browser connection remains a separate gate
 
 The existing workspace/owner boundary requires native identity and private ingress, explicit pairing, workspace binding and exact local launch/action grants. Managed Git preparation grants none of those. Browser reading does not grant messages, task feedback or permission decisions, and those grants do not authorize repository merges or deployments.
