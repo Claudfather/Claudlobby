@@ -1014,8 +1014,8 @@ def fixed_environment(home):
 def update_environment(home):
     # The update actions' own map, built fresh: the guide script's pinned
     # selectors (owner-guide-v1.sh selectors), so a render reads this
-    # computer's own settings, and on Linux the two systemctl --user needs,
-    # as the guide's profile sets them. Never PLANE_EMIT_DISABLED: a team
+    # computer's own settings, and on Linux the two variables the account's
+    # user manager needs, as the guide's profile sets them. Never PLANE_EMIT_DISABLED: a team
     # continued here runs its identity scan in this process.
     family = home / ".local/share/claudlobby-browser"
     selected = {"CLAUDLOBBY_ROOT": str(family / "data"), "CLAUDLOBBY_INSTALLATION": str(family / "install"),
