@@ -38,7 +38,7 @@ const PREVIEW_NOTES = {
     ? `To retry it there, and launch your team if that works, run: ${value.continuation}` : 'This setup cannot go on from this page.'),
   refused:'Your computer refused to start the preview, so nothing was prepared.',
   notStarted:'The preview did not start on your computer, so nothing was prepared.',
-  readRefused:'Your computer refused this setup: its setup approval is no longer in force there, so this page cannot go on with it.',
+  readRefused:'Your computer refused this setup, so this page cannot go on with it.',
   readExpired:'Setup approval on your computer has ended, so this page cannot go on with this setup.',
   readRejected:'Your computer’s answer about this setup did not match what this page expects. Choose Check preview to look again.',
   readLost:'Could not get an answer from your computer about the preview. Choose Check preview to look again.',
@@ -576,6 +576,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let detailsFor = null; // the plan, pending and identifier counts the Details JSON was last built from
   const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Details.';
   function render() {
+    // Check preview needs a live approval: once this page's clock says it ended, a note offering it says so instead.
+    if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
     if (!mount) return;
     const m = mount, live = active(), time = now();
     const approved = !!context && context.expires_at > time;

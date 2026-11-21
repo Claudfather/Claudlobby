@@ -459,6 +459,23 @@ def test_a_preview_that_fails_or_whose_process_dies_reads_failed_from_another_en
     assert other.context(reader)["preview_state"]=="failed"
 
 
+def test_a_preview_finishing_between_the_status_read_and_the_lease_test_reads_ready(setup_authority,monkeypatch):
+    engine,grant,reader=allow(setup_authority)
+    engine.preview(reader,grant.generation,"Improve checkout tests")  # finished: request kept, lease released
+    real=engine.store.preview_status;calls=[]
+    def interleaved(reader):
+        calls.append(1)
+        if len(calls)==1:  # the view read just before that Preview kept its request
+            return "preparing",None,False,{"goal":"Improve checkout tests","created_at":setup_authority[4][0],
+                "expires_at":setup_authority[4][0]+600,"record":_preparing(engine,grant)}
+        return real(reader)
+    monkeypatch.setattr(engine.store,"preview_status",interleaved)
+    assert engine.store.preview_running() is False
+    context=engine.context(reader)
+    assert context["preview_state"]=="ready" and context["preview"]["goal"]=="Improve checkout tests"
+    assert len(calls)==2
+
+
 def test_expiry_after_a_local_launch_reads_as_before_not_as_an_expired_preview(setup_authority):
     engine,grant,reader=allow(setup_authority)
     preview=engine.preview(reader,grant.generation,"Improve checkout tests")

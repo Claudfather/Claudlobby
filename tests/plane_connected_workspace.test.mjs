@@ -1112,8 +1112,16 @@ test('a check that gets no answer or an unusable one invites looking again; the 
     assert.deepEqual(doneSteps(panel),['done','done']);h.api.dispose();
   }
 });
+test('an approval that ends with no read in between replaces a note offering Check preview',async()=>{
+  const p=previewHarness({answers:[fail(timedOut())]}),{h,panel}=p;
+  await p.start();
+  assert.match(h.api.snapshot().note,/Choose Check preview/);assert.equal(offered(panel,'Check preview'),true);
+  p.clock.t=h.context.expires_at;h.api.showConnect({operation:'check'});
+  assert.equal(h.api.snapshot().note,'Setup approval on your computer has ended, so this page cannot go on with this setup.');
+  assert.equal(offered(panel,'Check preview'),false);h.api.dispose();
+});
 test('a refused check and an ended approval say this page cannot go on, and invite no retry',async()=>{
-  for (const [answer,note] of [[fail(refused()),'Your computer refused this setup: its setup approval is no longer in force there, so this page cannot go on with it.'],
+  for (const [answer,note] of [[fail(refused()),'Your computer refused this setup, so this page cannot go on with it.'],
       [()=>({expires_at:1800000000}),'Setup approval on your computer has ended, so this page cannot go on with this setup.']]) {
     const p=previewHarness({answers:[answer]}),{h,panel}=p;
     await p.start();

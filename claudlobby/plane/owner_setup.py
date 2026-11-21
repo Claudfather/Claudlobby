@@ -586,13 +586,12 @@ class SetupEngine:
             return {**self._plan(grant,request,kept["expires_at"],record["phase"]),"goal":kept["goal"]}
         except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): return None
 
-    def _preview_state(self,grant,request,reserved,state,kept):
+    def _preview_state(self,grant,request,reserved,state,kept,running):
         """preview_state for the context read (none, preparing, ready, expired, failed), or None beside a
-        reserved launch or a kept request the computer cannot show as a plan; and the plan when ready."""
+        reserved launch or a kept request the computer cannot show as a plan; and the plan when ready.
+        running is the preview lease's answer, read after the status (see context)."""
         now=self.store.access._now()
         if state=="preparing":
-            # The lease works across processes: each SSH call is its own process, the listener one for many.
-            running=self.store.preview_running()
             if running is False or running is None and now>=kept["created_at"]+preparing_seconds():
                 return "failed",None
             return state,None
@@ -609,7 +608,15 @@ class SetupEngine:
         grant=self.store.authorize(reader)
         managed_setup(self.root,grant,current=False)
         state,request,reserved,kept=self.store.preview_status(reader)
-        state,preview=self._preview_state(grant,request,reserved,state,kept)
+        running=None
+        if state=="preparing":
+            # The lease works across processes: each SSH call is its own process, the listener one for many.
+            running=self.store.preview_running()
+            if running is False:
+                # A Preview may have finished between that read and this test. Its request is filled only while it
+                # holds the lease, and no second row can begin, so a second read is final.
+                state,request,reserved,kept=self.store.preview_status(reader)
+        state,preview=self._preview_state(grant,request,reserved,state,kept,running)
         recorded=state=="failed" and kept["record"] is not None  # a failed preparation the computer can continue
         return {"version":3 if grant.template == "local-project" else 2,"template":grant.template,"fleet":grant.fleet,
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
