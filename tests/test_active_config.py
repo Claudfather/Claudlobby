@@ -508,3 +508,55 @@ def test_unmanaged_read_stamp_never_uses_historical_selection(frozen, monkeypatc
     monkeypatch.setattr(activation_state,"read_selection",lambda *_:pytest.fail("historical selection read"))
     with pytest.raises(PlanError,match="managed Git installation"):
         active_config.runtime_read_stamp(root,package=replace(package,installation=None))
+
+
+@pytest.fixture
+def no_team(tmp_path):
+    """A committed plan for a computer with no team: host resources only."""
+    root = tmp_path / "data"
+    root.mkdir()
+    installation = Installation(tmp_path / "installation", root)
+    package = replace(source_package(), installation=installation, source_revision="a" * 40,
+                      artifact_id="", content_sha256="")
+    builder = ConfigPlanBuilder(root, fleets=(), effects={"fleet_manifests": {}, "fleet_sources": {}, "units": []})
+    builder.file(root / "runtime/_host/bot-handles", b"", mode=0o644)
+    builder.tree(root / "runtime/_host/timers", {"claudlobby-plane-daemon.service": (b"[Service]\n", 0o644)})
+    plan = builder.freeze(package.source_revision)
+    return root, plan, installation, package
+
+
+def test_a_configuration_with_no_team_commits_and_reads(no_team):
+    root, plan, installation, package = no_team
+    snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision)
+    assert snapshot["fleets"] == {} and snapshot["identities"] is None
+    active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    assert active_config.read_current_config(root, installation=installation,
+                                             revision=package.source_revision) == snapshot
+    assert active_config.runtime_read_stamp(root, package=package).config_fingerprint == snapshot["fingerprint"]
+    # No team to select, and no team that a read could name.
+    with pytest.raises(PlanError, match="select --fleet"):
+        active_config.load_active_context(root, None, package=package)
+    with pytest.raises(PlanError, match="no selected frozen fleet"):
+        active_config.load_active_context(root, "example", package=package)
+
+
+@pytest.mark.parametrize("fleets", [None, [], "example"])
+def test_a_configuration_whose_fleet_table_is_not_a_table_is_refused(no_team, fleets):
+    root, plan, installation, package = no_team
+    snapshot = active_config.snapshot_from_plan(plan, installation, package.source_revision)
+    snapshot["fleets"] = fleets
+    snapshot["fingerprint"] = active_config._fingerprint(snapshot)
+    with pytest.raises(PlanError, match="no frozen fleet table"):
+        active_config.publish_current_config(snapshot, installation=installation, expected_previous=None)
+    assert not (root / "state/config.json").exists()
+
+
+def test_a_configuration_with_no_team_owns_no_team_output(no_team):
+    root, plan, installation, package = no_team
+    from claudlobby.config_plan import ConfigChange
+    bad = replace(plan, changes=(*plan.changes, ConfigChange(
+        str(root / "runtime/bots/worker/bot.conf"), {"node": {"kind": "absent"}},
+        {"kind": "file", "mode": 0o600, "sha256": "0" * 64})))
+    with pytest.raises(PlanError, match="escapes generated"):
+        active_config.snapshot_from_plan(bad, installation, package.source_revision)
+
