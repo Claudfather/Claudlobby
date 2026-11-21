@@ -833,13 +833,19 @@ def test_typed_real_child_drain_records_repeated_signals_before_success(tmp_path
     import sys
     from claudlobby.commands import host_owner_setup as guide
     from claudlobby.commands.owner_stdio import StdioRefused
-    ready, draining, drained = (tmp_path / name for name in ('ready', 'draining', 'drained'))
+    ready, draining, sent, drained = (tmp_path / name for name in ('ready', 'draining', 'sent', 'drained'))
+    # The child drains until the sender says both signals are out (ten seconds at
+    # most), so both arrive during the owned cleanup however late a busy runner
+    # schedules the sender. With a fixed drain time, a stalled sender's signal
+    # arrived after the handlers were restored and ended the whole pytest process.
     child = '''import signal,time,sys
 from pathlib import Path
-ready,draining,drained=map(Path,sys.argv[1:4])
+ready,draining,sent,drained=map(Path,sys.argv[1:5])
 def stop(*_):
     draining.touch()
-    time.sleep(.15)
+    until=time.monotonic()+10
+    while not sent.exists() and time.monotonic()<until: time.sleep(.005)
+    time.sleep(.05)
     drained.touch()
     raise SystemExit(0)
 signal.signal(signal.SIGTERM,stop)
@@ -847,28 +853,45 @@ ready.touch()
 while True: time.sleep(.01)
 '''
     monkeypatch.setattr(guide, '_ready', lambda *_: ready.exists())
-    failures = []
+    failures, late, under_test = [], [], [True]
     def send_stops():
         try:
-            until = time.monotonic() + 3
+            until = time.monotonic() + 10
             while not draining.exists() and time.monotonic() < until: time.sleep(.005)
             assert draining.exists()
             os.kill(os.getpid(), getattr(signal, stop))
             time.sleep(.02)
             os.kill(os.getpid(), getattr(signal, stop))
         except BaseException as exc: failures.append(exc)
+        finally: sent.touch()
     sender = threading.Thread(target=send_stops)
-    sender.start()
+    # A signal that still arrives after the code under test has returned is
+    # recorded here and fails this test. Left to pytest's own handlers it would
+    # end the session. Inside the code under test SIGINT keeps Python's meaning.
+    def stray(number, frame):
+        if number == signal.SIGINT and under_test[0]: signal.default_int_handler(number, frame)
+        late.append(number)
+    outer = {sig: signal.signal(sig, stray) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        with guide.interrupted(), pytest.raises(StdioRefused, match='interrupted_unknown'):
-            with guide._serving([sys.executable, '-I', '-B', '-c', child, str(ready), str(draining), str(drained)],
-                    tmp_path / 'owner.sock', 'https://host.example.test',
-                    consent=SimpleNamespace(check_cancel=lambda: None)):
-                pass  # Interrupt during owned cleanup, after a possible Launch return.
+        sender.start()
+        try:
+            try:
+                with guide.interrupted(), pytest.raises(StdioRefused, match='interrupted_unknown'):
+                    with guide._serving([sys.executable, '-I', '-B', '-c', child, str(ready), str(draining), str(sent), str(drained)],
+                            tmp_path / 'owner.sock', 'https://host.example.test',
+                            consent=SimpleNamespace(check_cancel=lambda: None)):
+                        pass  # Interrupt during owned cleanup, after a possible Launch return.
+            finally:
+                under_test[0] = False
+        except KeyboardInterrupt:
+            under_test[0] = False
+            late.append('KeyboardInterrupt left the owned cleanup')
         assert drained.exists()
     finally:
-        sender.join(4)
-    assert not sender.is_alive() and not failures
+        under_test[0] = False
+        sender.join(15)
+        for sig, handler in outer.items(): signal.signal(sig, handler)
+    assert not sender.is_alive() and not failures and not late, (failures, late)
 
 
 @pytest.fixture
