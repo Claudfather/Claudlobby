@@ -31,9 +31,13 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def run():
+def run(tmp_path_factory):
+    # Started in a private directory, never the checkout: the instrument removes
+    # directories, and one that took its start directory for its own root
+    # removed a checkout (2026-11-21, tests/test_harness_scratch_dir.py).
     return subprocess.run(
-        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=600
+        ["bash", str(HARNESS)], capture_output=True, text=True, timeout=600,
+        cwd=tmp_path_factory.mktemp("held-push"),
     )
 
 

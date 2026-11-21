@@ -33,8 +33,11 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not available"; exit
 # so a push never shows there; without it, a push shows and Enter submits it.
 STUB="$(printf '%q %q' "$(type -P python3)" "$REPO/tests/fixtures/input-box-stub.py")"
 
-ROOT="$(mktemp -d)"
-ROOT="$(cd "$ROOT" && pwd -P)"
+# A root that cannot be made ends the run here, with nothing removed.
+# scratch-dir.sh says what the two lines this replaces cost (2026-11-21).
+# shellcheck source=harness/scratch-dir.sh
+. "$REPO/harness/scratch-dir.sh" || exit 3
+scratch_dir ROOT
 FLEET="rhp$$"
 MGR_SOCK="rhpm$$"
 MGR="mgr$$"
@@ -51,8 +54,7 @@ check () { # <label> <expected> <actual>
 }
 cleanup () {
     tmux -L "$MGR_SOCK" kill-server 2>/dev/null || true
-    rm -rf "$ROOT"
-    rm -rf "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
+    scratch_remove "$ROOT" "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
 }
 trap cleanup EXIT
 

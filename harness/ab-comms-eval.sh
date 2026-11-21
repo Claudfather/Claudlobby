@@ -44,6 +44,8 @@ set -euo pipefail
 
 HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$HARNESS/.." && pwd)"
+# shellcheck source=harness/scratch-dir.sh
+. "$HARNESS/scratch-dir.sh"
 LIB="$SRC/claudlobby/_runtime_scripts"
 # shellcheck source=lib-common.sh
 . "$LIB/lib-common.sh"
@@ -904,8 +906,9 @@ tmux() {
 
 # [2] throwaway ROOT + per-run private TMUX namespace (validate-bot-change.sh
 #     :60-74). Literal /tmp so socket sun_path stays under 108 bytes.
-ROOT="$(mktemp -d /tmp/ab-comms-eval.XXXXXX)"
-TMUX_TMPDIR="$(mktemp -d /tmp/ab-comms-eval-sock.XXXXXX)"
+# Each stops the run by its own test, not by set -e, which a caller can suspend.
+ROOT="$(mktemp -d /tmp/ab-comms-eval.XXXXXX)" && [ -d "$ROOT" ] || { echo "FATAL: no temporary directory for this run. Is the disk full? Nothing was removed." >&2; exit 3; }
+TMUX_TMPDIR="$(mktemp -d /tmp/ab-comms-eval-sock.XXXXXX)" && [ -d "$TMUX_TMPDIR" ] || { echo "FATAL: no temporary directory for this run. Is the disk full? Nothing was removed." >&2; exit 3; }
 export TMUX_TMPDIR
 
 # [3] cleanup trap (validate-bot-change.sh :80-91). The trap fires on EVERY
@@ -919,7 +922,8 @@ cleanup() {
     done
     local _f
     for _f in $CLEANUP_SCRUB; do rm -f "$_f" 2>/dev/null || true; done
-    [ "$KEEP" = 1 ] || rm -rf "$ROOT" "$TMUX_TMPDIR"
+    # scratch_remove refuses what a run must never take (scratch-dir.sh).
+    [ "$KEEP" = 1 ] || scratch_remove "$ROOT" "$TMUX_TMPDIR" || true
     return 0
 }
 trap cleanup EXIT
