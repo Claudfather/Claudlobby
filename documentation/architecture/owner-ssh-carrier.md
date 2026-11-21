@@ -13,8 +13,8 @@ ones every other transport uses.
 
 ## Entry
 
-The immutable prelude `claudlobby/preinstall/owner-guide-v1.sh` has three closed
-modes: `setup`, `status` and `api`. `api` reads the same one-line installation
+The immutable prelude `claudlobby/preinstall/owner-guide-v1.sh` has four closed
+modes: `setup`, `status`, `api` and `computer` (the computer run, below). `api` reads the same one-line installation
 admission as the guide, refuses when the session has no `SSH_CONNECTION`, and
 then executes the admitted stable launcher as `host owner api --stdio`. The
 prelude passes the server's `SSH_CONNECTION` through without reading it for
@@ -279,6 +279,48 @@ its fixed profile is the managed Mac runtime. It then runs without a listener:
 
 No owner service is enrolled to keep the computer reachable. Reopening after the
 handoff means a fresh authenticated SSH connection.
+
+## The computer run
+
+`computer` (operation `owner-guide-computer-v1`) executes the admitted launcher
+as `host owner setup --stdio-computer`. It asks the cards that add a computer,
+in this order and each only if an earlier run has not: `prepare_directories`,
+`initialize_owner`, `pair_owner`, `initialize_link_storage` (one card for both
+storages a workspace link needs) and `bind_workspace`. Then it drains its own
+listener and asks `start_workspace`, which dispatches the start with no team.
+It never asks a Claude card or a team card. Its state frames are the existing
+`pairing_ready` and `workspace_ready`, then one result:
+
+| Result | Fields beyond the common four | Meaning |
+|---|---|---|
+| `computer_starting` | `state`, `request_id`, `config_fingerprint`, `target` | The start is dispatched or under way; the run exits so the updater can proceed |
+| `computer_ready` | `state`, `origin`, and `transport` over SSH | The computer is started; on Linux its lasting service answered `/owner` |
+
+Run again, it is the way back in and asks no card: on a started computer it
+answers `computer_ready`, and while the start is under way `computer_starting`
+with the same identifiers. It never waits for the updater, never continues a
+record and never answers `computer_ready` in the process that dispatched a
+start. Its refusals are an `error` frame: `use_full_guide` when today's guide
+retains a first-team approval or Launch, or the computer is in any other state;
+`start_failed`, with core's `line` and the record's `request_id`, when the
+start stopped or a started computer's lasting service did not answer within 15
+seconds; `revision_differs`, from the prelude itself, when the installed
+revision is not the requested one. A stopped start is continued by its request
+id over the account channel, never by a run: while its record is in maintenance
+no run can begin.
+
+Its admission line and its `start` frame carry one more key than today's guide,
+`update_record`: `null`, or the `request_id` and `target` of the update record
+the client read. A computer's receipt keeps the revision it was prepared at for
+good and is never rewritten. The computer run is admitted at that revision as
+today's guide is, or at a later installed revision only when `update_record`
+names the record on disk, that record is `done` with no health errors, it ends
+at the installed revision, and the receipt's revision is an ancestor of it. The
+prelude only skips the receipt's revision for this mode; the record and
+ancestry checks are the profile's and the run's. Everything else is checked as
+today: the receipt's shape, the binding, the system Python and the installed
+source exactly at the requested revision. `setup`, `status` and `api` keep
+their request keys and their own admission; one more key refuses them.
 
 ## Launch
 
