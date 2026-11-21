@@ -553,3 +553,50 @@ def test_stage_requires_local_coverage_and_includes_explicit_external_fleet(stag
     assert set(plan.content(changes[host / "mention-allowlist"]).decode().splitlines()) == {
         f"{name}-human" for name in plan.fleets}
     plan.check_fresh()
+
+
+def test_an_empty_plan_renders_the_computers_host_resources_only(staging_case):
+    """A computer started with no team renders its own host jobs and nothing of any team."""
+    case = staging_case
+    case.paths.fleet_yaml.unlink()
+    with pytest.raises(PlanError, match="select the declared host fleets"):
+        config_staging.render_git_configuration([], revision=case.package.source_revision)
+    with pytest.raises(PlanError, match="exact candidate installation"):
+        config_staging.render_git_configuration([], revision="b" * 40, root=case.root, package=case.package)
+    plan = config_staging.render_git_configuration([], revision=case.package.source_revision,
+                                                   root=case.root, package=case.package)
+    host = case.root / "runtime/_host"
+    assert plan.fleets == () and plan.effects["fleet_sources"] == {} and plan.effects["restart_bots"] == []
+    assert {Path(change.target) for change in plan.changes} == {host / "timers", host / "bot-handles",
+                                                                host / "mention-allowlist"}
+    assert plan.content(_changes(plan)[host / "bot-handles"]) == b""
+    units = _units(case, plan, "Linux")
+    assert units and {declaration.scope for declaration, _ in units} == {"host"}
+    assert snapshot_from_plan(plan, case.package.installation, plan.revision)["fleets"] == {}
+
+
+@pytest.mark.parametrize("where", ["root", "local"])
+def test_an_empty_plan_still_refuses_a_team_file_on_disk(staging_case, where):
+    case = staging_case
+    if where == "local":
+        case.paths.fleet_yaml.unlink()
+        _fleet(case.root, case.root / "local/forgotten", "forgotten", case.package)
+    with pytest.raises(PlanError, match="omits local fleet declarations"):
+        config_staging.render_git_configuration([], revision=case.package.source_revision,
+                                                root=case.root, package=case.package)
+    assert not (case.root / "state/update-work/render").exists()
+
+
+def test_a_team_plan_renders_the_same_with_the_computer_named(staging_case):
+    """Naming the root and package explicitly changes nothing for a computer with a team."""
+    case = staging_case
+    implicit = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision)
+    shutil.rmtree(implicit.directory)
+    explicit = config_staging.render_git_configuration([case.paths], revision=case.package.source_revision,
+                                                       root=case.root, package=case.package)
+    assert explicit.fleets == implicit.fleets and explicit.effects == implicit.effects
+    assert [(change.target, change.after) for change in explicit.changes] == [
+        (change.target, change.after) for change in implicit.changes]
+    other = replace(case.package, source_revision="b" * 40)
+    with pytest.raises(PlanError):
+        config_staging.render_git_configuration([case.paths], revision="b" * 40, root=case.root, package=other)
