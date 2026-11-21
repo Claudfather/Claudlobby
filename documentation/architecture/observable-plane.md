@@ -496,9 +496,12 @@ This recovery does not start a service, renew authority or configure Serve.
 There is no TCP fallback. A daemon unable to reach this socket leaves access
 unavailable; it is not a reason to expose an unprotected loopback backend.
 
-**Persistent serving after setup.** Once the host is activated, paired and its
-recorder bound, the existing host-job compositor can supervise the same owner
-server. In this host's `system.yaml` override, configure:
+**Persistent serving after setup.** Once the computer is started, with or
+without a team, paired and its recorder bound, the existing host-job compositor
+can supervise the same owner server. A computer started with no team already
+runs its recorder and its scheduled host jobs; its owner service runs when this
+host's settings turn it on, either before the start or in the start's own
+approved settings change. In this host's `system.yaml` override, configure:
 
 ```yaml
 host:
@@ -522,8 +525,8 @@ extra no unit is composed, as reported by the switch table.
 
 Stage and inspect a normal configuration plan, stop the foreground server with
 Ctrl-C, then activate that plan through the existing operator CLI. This is an
-explicit handover after first-team setup, not a second server during guided
-launch. A foreground collision refuses activation before pausing the fleet.
+explicit handover after the computer is started or after first-team setup, not
+a second server during guided launch. A foreground collision refuses activation before pausing the fleet.
 Upgrades quiesce an already-managed owner service through the normal producer
 phase and recheck socket availability before starting its replacement. Startup
 still repeats socket ownership and liveness checks.

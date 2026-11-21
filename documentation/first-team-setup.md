@@ -24,6 +24,10 @@ Review the original request ID, target revision, configuration fingerprint, team
 
 If a response is lost, inspect and continue the original operation. Do not rerun fleet setup, invent replacement identifiers, or resend an unknown action. Separately observe `host doctor`, `host status` and a bounded reviewed task; a committed configuration or launch receipt is not proof of useful work or restart durability.
 
+## Starting a computer with no team
+
+A paired computer whose workspace is linked can also be started with no team. The start is one first install that names no team files. It lays down the computer's own database, recorder, view and scheduled host jobs, and the owner service when this host's settings turn it on. The committed configuration holds an empty team table. No agent starts and no Claude program is installed: the daily `claude-update` job does nothing until a team exists. The start's approval lists the database, the native directory, and each service and job it installs, before anything is written. A declined start leaves the computer as it was. There is no terminal command for it yet. A start that stops is read with `host update status` and continued with `host update continue`, like any other update. This follows the workspace-first setup flow approved on 2026-11-21. Today's guided first-team setup still refuses a computer it did not start.
+
 ## Browser connection remains a separate gate
 
 The existing workspace/owner boundary requires native identity and private ingress, explicit pairing, workspace binding and exact local launch/action grants. Managed Git preparation grants none of those. Browser reading does not grant messages, task feedback or permission decisions, and those grants do not authorize repository merges or deployments.

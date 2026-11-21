@@ -1,0 +1,7 @@
+### Added — start a paired, linked computer with no team
+
+`claudlobby/plane/owner_start.py` adds `start(paths, store, terminal, *, consent=None, owner_plan=None, directory=None)`. It starts a fresh computer whose owner is paired and whose workspace is linked. One `START-WORKSPACE` approval covers it. Before anything is written, the approval lists the database, the native directory, each resident service and each scheduled job, read from this computer's host jobs with any planned settings change applied, and that settings file's path and hash. A declined approval leaves no update record, database, configuration or settings change. An approved start commits the planned settings, then prepares and dispatches one first install that names no team files. It does not wait for that install. Called again, it returns the same request while the start runs, `started` once it is done, and core's own unfinished-update line with the request id when the start stopped. It never continues a record: that is `host update continue`. No terminal command calls `start` yet, and the guided first-team setup still refuses a computer it did not start. This follows the workspace-first setup flow approved on 2026-11-21.
+
+### Docs — lasting owner serving once a computer is started
+
+`documentation/architecture/observable-plane.md` now says lasting owner serving begins once the computer is started, with or without a team. `documentation/first-team-setup.md` describes starting a computer with no team.
