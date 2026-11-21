@@ -5,7 +5,8 @@ on:
     branches: [main]
   pull_request:
     # The event's three defaults, and ready_for_review: marking a draft ready
-    # starts the run that includes the macOS lane (below).
+    # starts the run that includes the macOS lane (below). Not labeled: the
+    # macos-on-draft label is read when a run starts and starts none itself.
     types: [opened, synchronize, reopened, ready_for_review]
 
 # A push to a pull request cancels the run for the commit it replaced. A push
@@ -25,8 +26,10 @@ env:
 # Every pull request runs the suite outside quarantine on Linux with Python 3.10
 # (the floor version), in TEST_SPLITS shards. A pull request that is ready for
 # review also runs it on macOS with Python 3.11, and so does every push to main.
-# A draft runs no macOS job: its macOS checks read skipped until it is marked
-# ready, which starts a new run. The account runs five macOS jobs at once and
+# A draft runs no macOS job until it is marked ready, which starts a new run. A
+# draft that carries the macos-on-draft label runs macOS like a ready pull
+# request: that is for a long-lived draft other pull requests merge into, such
+# as an integration branch's own. The account runs five macOS jobs at once and
 # one run needs all five, so with macOS on every push of every draft the jobs
 # waited a median of 19 minutes for a runner (2026-11-21). Each platform's gate
 # job carries the platform's check name and passes only when every shard did
@@ -248,11 +251,12 @@ jobs:
             --splits "$TEST_SPLITS" shards
 
   # The macOS 3.11 suite, sharded as the Linux one is above. Not on a draft
-  # pull request. The condition holds on a push to main, which has no pull
-  # request, and on a pull request opened ready.
+  # pull request, unless it carries the macos-on-draft label. The condition
+  # holds on a push to main, which has no pull request, and on a pull request
+  # opened ready. The macOS harness and gate below carry the same one.
   supported-macos-shard:
     name: supported (macos-latest, py3.11) shard ${{ matrix.group }}
-    if: github.event.pull_request.draft != true
+    if: github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft')
     runs-on: macos-latest
     # A shard runs about a quarter of the suite (around thirteen minutes).
     timeout-minutes: 40
@@ -351,14 +355,19 @@ jobs:
 
   # The check name the merge gate reads for macOS, as supported-ubuntu is for
   # Linux. It also requires the native macOS evidence: each case ran in exactly
-  # one shard and passed. On a draft it is skipped with its shards, and a
-  # skipped check is not a pass: nothing merges a draft, and a merger reads the
-  # run that marking it ready starts. A required check would read a skipped job
-  # as met, for the seconds before that run appears.
+  # one shard and passed.
+  #
+  # Where the lane does not run (a draft without the label) this job is skipped
+  # under another name. A run creates this job only once its shards have
+  # finished. So after a draft is marked ready, a skipped result under the
+  # gate's own name would stand on the commit for as long as the new run's
+  # macOS shards take, and a required check reads a skipped job as met. Under
+  # another name, no result called `supported (macos-latest, py3.11)` exists on
+  # a commit until a run that ran the lane has judged it.
   supported-macos:
-    name: supported (macos-latest, py3.11)
+    name: "${{ (github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft')) && 'supported (macos-latest, py3.11)' || 'macos lane not run (draft pull request)' }}"
     needs: [supported-macos-shard]
-    if: always() && github.event.pull_request.draft != true
+    if: always() && (github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -448,10 +457,10 @@ jobs:
 
   # The harness on macOS, out of the macOS shards: it took about 3.5 minutes
   # inside the one macOS job the suite ran in before the shards (#1945). Not on
-  # a draft pull request, as the shards.
+  # a draft pull request without the label, as the shards.
   harness-macos:
     name: harness (macos-latest, py3.11)
-    if: github.event.pull_request.draft != true
+    if: github.event.pull_request.draft != true || contains(github.event.pull_request.labels.*.name, 'macos-on-draft')
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
