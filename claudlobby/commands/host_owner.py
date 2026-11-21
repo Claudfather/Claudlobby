@@ -476,6 +476,24 @@ def _initialize_connected(store, terminal, *, prepare_workspace=False, consent=N
     return CommandOutput({"state": "initialized"}, lines=(line,))
 
 
+def _initialize_link_storage(store, terminal, *, consent):
+    """The computer run's one storage card: both storages a workspace link needs.
+
+    Its scope lists both, with the effect lines of today's two cards, and the
+    approval makes the writes of ``_initialize_connected(prepare_workspace=True)``
+    in its one transaction. Typed guide only."""
+    if consent is None:
+        raise CommandFailure("invalid_argument", "the computer run is the typed guide only")
+    owner = _active_owner(store)
+    _describe(terminal, owner)
+    _consent(terminal, None, consent, "initialize_link_storage", {
+        "owner": asdict(owner), "storages": ["workspace", "connected"],
+        "effects": ["prepare workspace storage; no binding or grant",
+                    "prepare connected storage; no session or grant"]})
+    store.connected().initialize(expected_owner=owner, prepare_workspace=True)
+    return CommandOutput({"state": "initialized"})
+
+
 def _confirm_workspace(store, terminal, owner, *, recover=False, consent=None):
     workspace = store.workspace()
     original_binding = workspace.status()

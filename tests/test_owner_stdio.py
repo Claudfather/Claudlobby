@@ -1089,3 +1089,186 @@ def test_stdio_proposes_the_computer_runs_cards(pipes, action):
         "digest": proposal["digest"], "approve": True}))
     thread.join(2)
     assert not thread.is_alive() and outcome == ["approved"]
+
+
+DONE = {"request_id": "33333333-3333-4333-8333-333333333333", "target": "a" * 40, "phase": "done",
+        "health_errors": {}}
+
+
+@pytest.fixture
+def moved_profile(fixed_profile, monkeypatch):
+    """Receipt at X ("e"), installed and requested at Y ("a"); the record on disk and Git are stand-ins.
+
+    tests/test_owner_computer_run.py checks admitted_update against the updater's own records.
+    """
+    from claudlobby import git_update
+    paths, request, home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["ref"] = receipt["revision"] = "e" * 40
+    path.write_bytes(json.dumps(receipt, sort_keys=True).encode())
+    fields = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256")
+    request["binding_sha256"] = hashlib.sha256(json.dumps({key: receipt[key] for key in fields},
+                                                          sort_keys=True).encode()).hexdigest()
+    world = SimpleNamespace(record=dict(DONE), git=[], ancestor=True)
+    monkeypatch.setattr(git_update, "read_update", lambda installation: world.record and dict(world.record))
+    def git(installation, *args, check=True):
+        world.git.append(args)
+        return SimpleNamespace(returncode=0 if world.ancestor and args == (
+            "merge-base", "--is-ancestor", "e" * 40, "a" * 40) else 1)
+    monkeypatch.setattr(git_update, "_git", git)
+    return paths, request, home, world
+
+
+def test_the_computer_run_is_admitted_at_a_later_revision_naming_its_finished_update(moved_profile):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, world = moved_profile
+    before = sorted(str(p) for p in home.rglob("*"))
+    computer = dict(request, update_record=[DONE["request_id"], "a" * 40])
+    profile = FixedOwnerProfile(paths, computer, computer=True)
+    assert profile.receipt_revision == "e" * 40
+    assert world.git == [("merge-base", "--is-ancestor", "e" * 40, "a" * 40)]
+    # Today's guide keeps its rule: the same computer, without a finish tuple, is refused.
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("change", ["health_errors", "another_id", "nothing_named", "no_record", "not_done",
+                                    "another_target", "not_an_ancestor", "binding", "finish_tuple"])
+def test_the_computer_run_at_a_later_revision_refuses_anything_else(moved_profile, change):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, world = moved_profile
+    computer = dict(request, update_record=[DONE["request_id"], "a" * 40])
+    if change == "health_errors":
+        world.record["health_errors"] = {"claudlobby-plane-owner.service": "unit failed to start"}
+    elif change == "another_id":
+        computer["update_record"] = ["44444444-4444-4444-8444-444444444444", "a" * 40]
+    elif change == "nothing_named":
+        computer["update_record"] = None
+    elif change == "no_record":  # a checkout moved by hand
+        world.record = None
+    elif change == "not_done":
+        world.record["phase"] = "restore"
+    elif change == "another_target":
+        world.record["target"] = computer["update_record"][1] = "b" * 40
+    elif change == "not_an_ancestor":
+        world.ancestor = False
+    elif change == "binding":
+        computer["binding_sha256"] = "f" * 64
+    else:
+        computer["finish_setup"] = ["11111111-1111-4111-8111-111111111111", DONE["request_id"], "b" * 64, "a" * 40]
+    before = sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, computer, computer=True)
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+def test_the_computer_run_at_the_receipts_revision_needs_no_record(fixed_profile, monkeypatch):
+    from claudlobby import git_update
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, _home, _ = fixed_profile
+    monkeypatch.setattr(git_update, "read_update", lambda *_: pytest.fail("read a record at the receipt's revision"))
+    assert FixedOwnerProfile(paths, dict(request, update_record=None), computer=True).receipt_revision == "a" * 40
+
+
+@pytest.mark.parametrize("mutation", [
+    {}, {"update_record": ["33333333-3333-4333-8333-333333333333"]},
+    {"update_record": ["not-an-id", "a" * 40]}, {"update_record": ["33333333-3333-4333-8333-333333333333", "A" * 40]},
+    {"update_record": "33333333-3333-4333-8333-333333333333"},
+    {"update_record": None, "finish_setup": ["11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222", "b" * 64, "c" * 40]},
+])
+def test_stdio_computer_start_takes_one_more_key_and_nothing_else(pipes, mutation):
+    from claudlobby.commands.owner_stdio import OwnerStdio, StdioRefused
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    value = start(hello["session_id"], **mutation)
+    os.write(pipes[2], wire(value))
+    with pytest.raises(StdioRefused):
+        console.start(computer=True)
+
+
+@pytest.mark.parametrize("known", [None, ["33333333-3333-4333-8333-333333333333", "a" * 40]])
+def test_stdio_computer_start_returns_the_named_record(pipes, known):
+    from claudlobby.commands.owner_stdio import OwnerStdio
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    os.write(pipes[2], wire(start(hello["session_id"], update_record=known)))
+    assert console.start(computer=True)["update_record"] == known
+
+
+@pytest.mark.parametrize("outcome", ["ready", "start_failed"])
+def test_dispatch_runs_the_computer_run_for_its_flag(fixed_profile, monkeypatch, outcome):
+    """`--stdio-computer` reaches run_computer with the computer admission, never today's run."""
+    from claudlobby.command_result import CommandOutput
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    from claudlobby.commands import owner_setup_consent
+    paths, request, *_ = fixed_profile
+    seen = []
+    real = owner_setup_consent.FixedOwnerProfile
+
+    def profile(admitted, value, **kwargs):
+        seen.append(("profile", kwargs))
+        return real(admitted, value, **kwargs)
+
+    def run_computer(args, admitted, store, *, consent, profile):
+        seen.append(("run", args.update_record))
+        if outcome == "start_failed":
+            raise owner_stdio.StdioRefused("start_failed", data={"line": "core's line", "request_id": "id"})
+        return CommandOutput({"state": "computer_ready", "origin": "https://host.example.test"})
+
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", profile)
+    monkeypatch.setattr(host_owner_setup, "run", lambda *a, **k: pytest.fail("ran today's guide"))
+    monkeypatch.setattr(host_owner_setup, "run_computer", run_computer)
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            assert computer is True
+            return dict(request, update_record=None)
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=True, root=str(paths.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    assert seen == [("profile", {"computer": True}), ("run", None)]
+    if outcome == "ready":
+        assert code == 0 and frames[-1]["type"] == "result" and frames[-1]["state"] == "computer_ready"
+    else:
+        assert code == 4 and {key: frames[-1][key] for key in ("type", "code", "line", "request_id")} == {
+            "type": "error", "code": "start_failed", "line": "core's line", "request_id": "id"}
+
+
+def test_stdio_computer_is_one_more_hidden_mode_of_the_same_exclusive_group(monkeypatch):
+    import argparse
+    from claudlobby.commands import _host_owner_parsers as parsers
+    parser = argparse.ArgumentParser(exit_on_error=False)
+    parsers.register_host_owner(parser.add_subparsers(dest="host_command"))
+    args = parser.parse_args(["owner", "setup", "--stdio-computer"])
+    assert args.stdio_computer is True and args.stdio is False and args.stdio_status is False
+    setup = parser._subparsers._group_actions[0].choices["owner"]._subparsers._group_actions[0].choices["setup"]
+    (group,) = [group for group in setup._mutually_exclusive_groups
+                if "--stdio" in [flag for action in group._group_actions for flag in action.option_strings]]
+    modes = {action.option_strings[0]: action.help for action in group._group_actions}
+    assert modes == {"--stdio": argparse.SUPPRESS, "--stdio-status": argparse.SUPPRESS,
+                     "--stdio-computer": argparse.SUPPRESS}
+    routed = []
+    monkeypatch.setattr(parsers, "import_module", lambda name, package: SimpleNamespace(
+        dispatch=lambda value: routed.append(name) or 0))
+    assert parsers._dispatch(args) == 0 and routed == [".owner_stdio"]

@@ -8,7 +8,8 @@ from ..command_result import execute
 
 
 def _dispatch(args):
-    if args.owner_action == "setup" and (getattr(args, "stdio", False) or getattr(args, "stdio_status", False)):
+    if args.owner_action == "setup" and (getattr(args, "stdio", False) or getattr(args, "stdio_status", False)
+                                         or getattr(args, "stdio_computer", False)):
         return import_module(".owner_stdio", __package__).dispatch(args)
     if args.owner_action == "api":
         # Owns stdout completely, like the typed guide: no result wrapper.
@@ -88,6 +89,7 @@ def register_host_owner(hosts):
     mode = guided.add_mutually_exclusive_group()
     mode.add_argument("--stdio", action="store_true", help=SUPPRESS)
     mode.add_argument("--stdio-status", action="store_true", help=SUPPRESS)
+    mode.add_argument("--stdio-computer", action="store_true", help=SUPPRESS)
     guided.add_argument("--provider-signin", type=Path, help="Separately approve browser-mediated setup-token using this reviewed Claude executable")
     guided.add_argument("--managed-owner", action="store_true", help="Locally approve a managed connection service in this team's original Launch")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):

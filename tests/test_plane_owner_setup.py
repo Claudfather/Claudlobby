@@ -2508,7 +2508,7 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
     # The fixed profile's own two cards, run on this fixture's directories.
     family = home / ".local/share/claudlobby-browser"
     family.mkdir(parents=True, mode=0o700)
-    profile = SimpleNamespace(project=home / "claudfather-projects/first-team", account=family / "provider-profile",
+    profile = SimpleNamespace(project=home / "projects/first-team", account=family / "provider-profile",
         policy=family / "host-policy/system.yaml", provider=family / "provider-bin/claude", units=units,
         data=root, account_name="example-account", uid=os.getuid(),
         request={"source_revision": "a" * 40, "binding_sha256": "b" * 64},
