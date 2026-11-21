@@ -24,8 +24,6 @@
 #                                  — rc 0/1: is a unit/plist installed. An
 #                                    explicit label uses the caller's sourced
 #                                    bot.conf snapshot, including empty.
-#   svc_state <bot_dir>           — prints loaded-active | loaded-inactive |
-#                                    not-loaded | unknown.
 #   svc_kick <bot_dir> [...]      — restart/kickstart; SVC_KICK_SELECTED=0
 #                                    and rc 2 if no branch applies. A selected
 #                                    action preserves native status (also 2).
@@ -33,17 +31,11 @@
 #   svc_enroll <bot_dir>          — installs + starts the composed unit.
 #   svc_disenroll <bot_dir>       — removes supervision + the tmux server the
 #                                    unit/plist cannot hook.
-#   svc_job_hosts_caller <label>  — rc 0/1: is the loaded launchd job <label>
-#                                    running the caller (fails closed).
-#   svc_enroll_agent <label> <src_plist>
-#                                  — installs + (re)loads a composed launchd
-#                                    plist, never stopping the job that is
-#                                    running the caller (#1924).
 #
 # Every verb resolves the OS through $_OS (set by detect_os). An OS neither
 # Linux nor Darwin invokes no external binary and reports the fact in the
-# shape each verb already defines (svc_state prints "unknown"; svc_is_registered
-# returns 1; svc_kick / svc_enroll return 2) rather than guessing.
+# shape each verb already defines (svc_is_registered returns 1; svc_kick /
+# svc_enroll return 2) rather than guessing.
 #
 # bash 3.2 safe (tests/test_bash_parse.py covers claudlobby/_runtime_scripts/): no apostrophes inside
 # $( ), printf '%s' for values, and every probing external call guarded with
@@ -111,7 +103,7 @@ svc_bot_unit_owned_by() {
 }
 
 # svc_unit_name <bot_dir>
-# The shared label resolver. svc_is_registered and svc_state build on it;
+# The shared label resolver. svc_is_registered builds on it;
 # svc_kick and svc_disenroll read BOT_SERVICE inline, as the code they were
 # moved from did, and svc_enroll needs no label at all. BOT_SERVICE is
 # the source of truth; when it is unset (or explicitly empty — bot_conf_get's
@@ -157,67 +149,6 @@ svc_is_registered() {
     esac
 }
 
-# svc_state <bot_dir>
-# Prints exactly one of: loaded-active | loaded-inactive | not-loaded | unknown.
-# Linux reads ActiveState + LoadState from ONE `systemctl --user show` (never
-# two calls — service_is_starting's own comment explains why: two calls can
-# straddle a state change), parsed by NAME, never by position — the same
-# defensive shape service_is_starting uses just above this file's source
-# point, because systemctl does not promise to emit properties in request
-# order. Darwin has no cheap sub-state query; `launchctl print` exiting
-# nonzero means not loaded at all, and a loaded agent is active only while a
-# `state = running` line is present — matched with a bash `case` pattern,
-# never piped to `grep -q`: `grep -q` exits the instant it finds a match,
-# without draining the rest of stdin, so on a large `launchctl print` output
-# (~120KB, measured) the upstream `printf` can still be writing when `grep`
-# closes its read end, SIGPIPEs, and hands the pipeline a nonzero status
-# under the caller's `pipefail` — inverting a MATCHING "running" verdict to
-# "not running" for exactly the bots whose launchd output is biggest.
-svc_state() {
-    local bot_dir="${1:?Usage: svc_state <bot_dir>}"
-    local label
-    label="$(svc_unit_name "$bot_dir")"
-    if [ -z "$label" ]; then
-        printf 'unknown'
-        return 0
-    fi
-    case "$_OS" in
-        Linux)
-            local active="" loaded="" _k _v
-            while IFS='=' read -r _k _v; do
-                case "$_k" in
-                    ActiveState) active=$_v ;;
-                    LoadState) loaded=$_v ;;
-                esac
-            done <<EOF
-$(systemctl --user show -p ActiveState -p LoadState "$label.service" 2>/dev/null | tr -d '\r')
-EOF
-            if [ -z "$loaded" ] || [ "$loaded" = "not-found" ]; then
-                printf 'not-loaded'
-            elif [ "$active" = "active" ]; then
-                printf 'loaded-active'
-            else
-                printf 'loaded-inactive'
-            fi
-            ;;
-        Darwin)
-            local out
-            if out=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null); then
-                case "$out" in
-                    *'state = running'*) printf 'loaded-active' ;;
-                    *)                   printf 'loaded-inactive' ;;
-                esac
-            else
-                printf 'not-loaded'
-            fi
-            ;;
-        *)
-            printf 'unknown'
-            ;;
-    esac
-    return 0
-}
-
 # svc_kick <bot_dir> [before_action_function [loaded_service [loaded_name]]]
 # Resolve once, then announce before acting. With a callback, it owns output;
 # without one, preserve the original printed-description contract. Explicit
@@ -256,25 +187,6 @@ svc_kick() {
         launchd) launchctl kickstart -k "$target" || rc=$? ;;
     esac
     return "$rc"
-}
-
-# svc_restart_host <unit>
-# Restart an installed HOST service by its composed name (claudlobby-plane-daemon,
-# claudlobby-plane-view). svc_kick resolves a BOT's label from bot.conf; a host service has
-# no bot.conf, and its unit name IS its label. rc 0 restarted; the supervisor's
-# own rc when it refused; rc 2 when no unit by that name is installed here, so
-# nothing was invoked -- a host that never enrolled the service is not a failed
-# restart.
-svc_restart_host() {
-    local unit="${1:?Usage: svc_restart_host <unit>}" rc=0
-    if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$unit.service" ]; then
-        systemctl --user restart "$unit.service" || rc=$?
-        return "$rc"
-    elif [ "$_OS" = "Darwin" ] && [ -f "$HOME/Library/LaunchAgents/$unit.plist" ]; then
-        launchctl kickstart -k "gui/$(id -u)/$unit" || rc=$?
-        return "$rc"
-    fi
-    return 2
 }
 
 # Request one already-loaded, inactive host timer's service. The selected
@@ -411,128 +323,6 @@ svc_enroll() {
             return 2
             ;;
     esac
-}
-
-# svc_job_hosts_caller <label>
-# rc 0 when the loaded launchd job <label> is running THIS process: launchd
-# reports a pid for it, and that pid is this shell or one of its ancestors.
-# Stopping such a job stops the caller mid-run -- a bootout ends the job and
-# launchd takes its process group with it, so nothing after the bootout runs.
-# That is #1924: the nightly reload-fleet re-enrolled every fleet job, itself
-# included, and its own bootout killed the run before the bootstrap meant to
-# follow it, leaving the job unloaded and the nightly reload dead, unalerted.
-#
-# FAILS CLOSED: rc 0 too when the job is running and the answer cannot be
-# established -- no pid line, a pid that is not a number, or an ancestry walk
-# that broke off before reaching init. The two wrong answers cost different
-# things: a job wrongly held is one deferred re-enroll, said out loud by the
-# caller; a job wrongly stopped is the silent outage this exists to prevent.
-# Every pid line in the output is compared, not only the first, so a nested
-# section that ever carried one can only make the answer more conservative.
-# rc 1 when it definitely is not: not loaded, loaded but not running, or the
-# walk reached init without meeting any of its pids.
-#
-# The pid is launchd's own answer, from the same `print` output svc_state
-# reads, and the walk goes UP from the caller, the direction
-# claude-session-pid.sh walks: it asks which job is running me, and never
-# searches the process table for one.
-#
-# launchd only; rc 1 on any other OS, where a re-enroll (daemon-reload +
-# enable --now of the timer) never stops the service the timer belongs to --
-# which is why the same nightly reload runs to completion on Linux.
-svc_job_hosts_caller() {
-    local label="${1:?Usage: svc_job_hosts_caller <label>}"
-    [ "$_OS" = "Darwin" ] || return 1
-    local out line pids="" running=0 p pp hops=0 chain=" "
-    # A print that fails means not loaded. The fallback keeps the failing
-    # command inside an || list, so an ERR trap armed with errtrace cannot
-    # fire in this substitution whatever context the caller is in.
-    out=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null || printf '%s' '__svc_not_loaded__')
-    case "$out" in *__svc_not_loaded__) return 1 ;; esac
-    while IFS= read -r line; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        case "$line" in
-            'state = running'*) running=1 ;;
-            'pid = '*) pids="$pids ${line#pid = }" ;;
-        esac
-    done <<EOF
-$out
-EOF
-    if [ -z "$pids" ]; then
-        [ "$running" = 1 ] && return 0   # running, with no pid to compare
-        return 1                          # loaded, not running
-    fi
-    p="$$"
-    while :; do
-        chain="$chain$p "
-        case "$p" in 0|1) break ;; esac
-        hops=$((hops + 1))
-        [ "$hops" -le 64 ] || return 0
-        pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)
-        case "$pp" in ''|*[!0-9]*) return 0 ;; esac
-        [ "$pp" != "$p" ] || return 0
-        p="$pp"
-    done
-    for p in $pids; do
-        case "$p" in ''|*[!0-9]*) return 0 ;; esac
-        case "$chain" in *" $p "*) return 0 ;; esac
-    done
-    return 1
-}
-
-# svc_enroll_agent <label> <src_plist>
-# Install a composed launchd plist into ~/Library/LaunchAgents and load it:
-# copy, bootout, bootstrap -- the sequence the legacy timer installer ran
-# inline with an absolute /bin/launchctl, moved here so the refusal below
-# guards every caller, and resolved through PATH like every verb in this file
-# so the whole sequence is fakeable (tests/test_supervisor_adapter.sh).
-#
-# It never stops a job that is running the caller (svc_job_hosts_caller). That
-# job keeps the definition it was loaded from, and:
-#   rc 0  its installed plist already matches <src_plist>, so there is nothing
-#         to apply -- the nightly case, reload-fleet re-enrolling its own
-#         unchanged job.
-#   rc 4  it does not, and NOTHING is touched, the installed copy included. A
-#         copy without the reload would leave a file that no longer describes
-#         the loaded job; every later enrollment would compare equal against
-#         it and never reload -- one deferral silently made permanent. Left
-#         alone, the difference waits for the next enrollment run from outside
-#         the job, which applies it the ordinary way.
-# Otherwise: rc 0 installed + loaded; rc 1 the copy or the bootstrap failed
-# (launchctl's own status is printed rather than returned, because its values
-# could collide with 4); rc 2 not launchd, nothing invoked. Prints one line
-# saying what it did, for the caller's own log.
-svc_enroll_agent() {
-    local label="${1:?Usage: svc_enroll_agent <label> <src_plist>}"
-    local src="${2:?Usage: svc_enroll_agent <label> <src_plist>}"
-    if [ "$_OS" != "Darwin" ]; then
-        printf 'svc_enroll_agent: launchd only (saw %s) -- nothing invoked\n' "$_OS" >&2
-        return 2
-    fi
-    local dest="$HOME/Library/LaunchAgents/$label.plist" uid rc=0
-    if svc_job_hosts_caller "$label"; then
-        if cmp -s "$src" "$dest"; then
-            printf 'current: %s is running this enrollment and its installed plist already matches -- left loaded\n' "$label"
-            return 0
-        fi
-        printf 'DEFERRED: %s is running this enrollment, so re-enrolling it now would stop it mid-run (#1924).\n' "$label" >&2
-        printf '  Its composed plist differs from the installed one, and nothing was changed.\n' >&2
-        printf '  The next enrollment run from outside the job applies it.\n' >&2
-        return 4
-    fi
-    uid="$(id -u)"
-    mkdir -p "${dest%/*}" 2>/dev/null || true
-    if ! cp "$src" "$dest"; then
-        printf 'svc_enroll_agent: could not copy %s to %s\n' "$src" "$dest" >&2
-        return 1
-    fi
-    launchctl bootout "gui/$uid/$label" 2>/dev/null || true
-    launchctl bootstrap "gui/$uid" "$dest" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        printf 'svc_enroll_agent: launchctl bootstrap of %s failed (rc %s)\n' "$label" "$rc" >&2
-        return 1
-    fi
-    printf 'installed + loaded: %s\n' "$label"
 }
 
 # svc_disenroll <bot_dir> [log_function [loaded_service [launchctl_command]]]
