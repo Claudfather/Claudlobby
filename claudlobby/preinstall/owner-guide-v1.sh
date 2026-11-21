@@ -1,16 +1,17 @@
 #!/bin/sh
 # Immutable non-PTY admission prelude, then the ordinary installed owner guide.
 # One canonical <=1024-byte admission line; no EOF and no success prefix.
-# Only setup/status/api. Trusted authenticated account; no same-UID/root sandbox.
+# Only setup/status/api/computer. Trusted authenticated account; no same-UID/root sandbox.
 # api: one typed owner operation; the server SSH_CONNECTION passes through unread.
 operation=owner-guide-v1
 if [ "$#" -eq 1 ] && [ "$1" = status ]; then operation=owner-guide-status-v1; fi
 if [ "$#" -eq 1 ] && [ "$1" = api ]; then operation=owner-api-v1; fi
+if [ "$#" -eq 1 ] && [ "$1" = computer ]; then operation=owner-guide-computer-v1; fi
 refuse() {
     printf '{"code":"%s","operation":"%s","retry":false,"schema_version":1,"state":"refused"}\n' "$1" "$operation"
 }
 if [ "$#" -ne 1 ]; then refuse invalid_request; exit 2; fi
-case "$1" in setup|status|api) ;; *) refuse invalid_request; exit 2 ;; esac
+case "$1" in setup|status|api|computer) ;; *) refuse invalid_request; exit 2 ;; esac
 exec 3<<'FIXED_OPERATION_PYTHON'
 # BEGIN EMBEDDED PYTHON
 import configparser
@@ -61,7 +62,7 @@ def unique(pairs):
     return value
 
 
-def request(fd, deadline):
+def request(fd, deadline, action="setup"):
     # A single-byte read deliberately leaves all guide input on inherited stdin.
     raw = bytearray()
     end = min(deadline, time.monotonic() + 5)
@@ -79,7 +80,7 @@ def request(fd, deadline):
         value = json.loads(raw, object_pairs_hook=unique,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         if (not isinstance(value, dict)
-                or set(value) != {"schema_version", "expected_uid", "source_revision", "binding_sha256", "finish_setup"}
+                or set(value) != {"schema_version", "expected_uid", "source_revision", "binding_sha256", "finish_setup"} | ({"update_record"} if action == "computer" else set())
                 or type(value["schema_version"]) is not int or value["schema_version"] != 1
                 or type(value["expected_uid"]) is not int or not 0 < value["expected_uid"] < 2**32 - 1
                 or not isinstance(value["source_revision"], str) or not re.fullmatch(SHA, value["source_revision"])
@@ -91,6 +92,10 @@ def request(fd, deadline):
                 or not all(isinstance(v, str) for v in finish)
                 or not all(re.fullmatch(UUID, v) for v in finish[:2])
                 or not re.fullmatch(DIGEST, finish[2]) or not re.fullmatch(SHA + r"|[0-9a-f]{64}", finish[3])):
+            raise ValueError()
+        known = value.get("update_record")  # The computer run's only extra key.
+        if known is not None and (type(known) is not list or len(known) != 2
+                or not re.fullmatch(UUID, known[0]) or not re.fullmatch(SHA, known[1])):
             raise ValueError()
         return value
     except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -973,7 +978,7 @@ def git_environment(home):
             "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false"}
 
 
-def source_check(source, revision, env, deadline):
+def source_check(source, revision, env, deadline, differs=False):
     # Match the canonical preparer: explicit private clone, finite local Git,
     # no selectors, includes, filters, remotes, hooks or interrupted Git state.
     directory(source, True)
@@ -1011,6 +1016,8 @@ def source_check(source, revision, env, deadline):
         if result.returncode or len(result.stdout) > 2 * 1024 * 1024 or len(result.stderr) > 65536:
             raise Refusal("source_mismatch")
         return result.stdout
+    if differs and git("rev-parse", "--verify", "HEAD^{commit}").decode().strip() != revision:
+        raise Refusal("revision_differs")
     if (git("rev-parse", "--show-toplevel").decode().strip() != str(source)
             or git("rev-parse", "--verify", "HEAD^{commit}").decode().strip() != revision
             or git("status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
@@ -1068,16 +1075,17 @@ def validate(value, deadline, action="setup"):
                 or not isinstance(state["lock_sha256"], str) or not re.fullmatch(DIGEST, state["lock_sha256"])
                 or not recorded_python(state, python)
                 or hashlib.sha256(json.dumps({key: state[key] for key in BINDING_FIELDS}, sort_keys=True).encode()).hexdigest() != value["binding_sha256"]
-                or value["finish_setup"] is None and action != "api" and state["ref"] != value["source_revision"]):
-            # Only the fixed api mode carries no finish tuple: it is admitted at the
+                or value["finish_setup"] is None and action not in {"api", "computer"} and state["ref"] != value["source_revision"]):
+            # The api and computer modes carry no finish tuple: each is admitted at the
             # exact current installed source (source_check below) while the original
-            # preparation binding, ref and receipt above stay verified unchanged.
+            # preparation binding, ref and receipt above stay verified unchanged; a
+            # computer run at a later revision is admitted by its record in Python.
             raise Refusal()
         identity = read_json(install / "installation.json", 4096)
         if identity != {"schema": 1, "data_root": str(data)} or type(identity.get("schema")) is not int:
             raise Refusal()
         source = install / "src"
-        source_check(source, value["source_revision"], git_environment(home), deadline)
+        source_check(source, value["source_revision"], git_environment(home), deadline, action == "computer")
         environment_check(install / "env", python)
         directory(install / "bin", True)
         launcher = install / "bin/claudlobby"
@@ -1100,26 +1108,26 @@ def validate(value, deadline, action="setup"):
 
 
 def main(action, fd=0):
-    operation = {"status": "owner-guide-status-v1", "api": "owner-api-v1"}.get(action, "owner-guide-v1")
+    operation = {"status": "owner-guide-status-v1", "api": "owner-api-v1", "computer": "owner-guide-computer-v1"}.get(action, "owner-guide-v1")
     deadline = time.monotonic() + 15
     def interrupted(_number, _frame):
         raise Refusal("inspection_unavailable")
     signal.signal(signal.SIGALRM, interrupted)
     signal.setitimer(signal.ITIMER_REAL, 15)
     try:
-        if action not in {"setup", "status", "api"} or os.isatty(fd) or os.isatty(1):
+        if action not in {"setup", "status", "api", "computer"} or os.isatty(fd) or os.isatty(1):
             raise Refusal("invalid_request", 2)
         if action == "api" and not os.environ.get("SSH_CONNECTION"):
             # Presence only. The admitted CLI alone parses and binds the server
             # tuple; nothing here supplies, rewrites or defaults it.
             raise Refusal("ssh_source_missing")
-        value = request(fd, deadline)
+        value = request(fd, deadline, action)
         python, launcher, data, environment = validate(value, deadline, action)
         # Exec the canonical stable launcher normally: its existing reader
         # lock, maintenance fence, parser and operator-context checks all run.
         signal.setitimer(signal.ITIMER_REAL, 0)
         route = (["api", "--stdio"] if action == "api" else
-                 ["setup", "--stdio-status" if action == "status" else "--stdio"])
+                 ["setup", {"status": "--stdio-status", "computer": "--stdio-computer"}.get(action, "--stdio")])
         os.execve(python, [str(python), "-I", "-S", "-B", str(launcher), "--root", str(data),
             "host", "owner", *route], environment)
     except Refusal as error:
@@ -1235,6 +1243,7 @@ darwin_existing_python() {
 operation=owner-guide-v1
 [ "$1" != status ] || operation=owner-guide-status-v1
 [ "$1" != api ] || operation=owner-api-v1
+[ "$1" != computer ] || operation=owner-guide-computer-v1
 if ! darwin_existing_python "$(/usr/bin/id -u)"; then
     printf '{"code":"runtime_not_admitted","operation":"%s","retry":false,"schema_version":1,"state":"refused"}\n' "$operation"
     exit 6

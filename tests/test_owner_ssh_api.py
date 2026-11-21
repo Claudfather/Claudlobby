@@ -2902,3 +2902,102 @@ def test_signin_bounds_cover_a_status_check_and_the_session_through_the_whole_co
     assert owner_api_stdio.CALL_LIMIT >= 2 + conversation*1000//poll
     # The session that begins a sign-in outlives its conversation, with 15 s for admission.
     assert lifetime >= (conversation + 15)*1000
+
+
+def _computer_world(monkeypatch, tmp_path, state):
+    from claudlobby.commands import host_owner, host_owner_setup
+    from claudlobby.plane import owner_source, owner_start
+
+    world = GuideWorld(monkeypatch, tmp_path)
+    world.launch_after = 10**6
+    world.profile.receipt_revision = "a" * 40
+    monkeypatch.setattr(owner_source, "start_state", lambda root, installation: state)
+    monkeypatch.setattr(
+        host_owner_setup,
+        "_serving_configuration",
+        lambda args, paths, terminal, cli: world.calls.append("serving_configuration")
+        or {
+            "origin": args.origin,
+            "socket": str(args.socket),
+            "workspace_issuer": args.workspace_issuer,
+            "workspace_origin": args.workspace_origin,
+        },
+    )
+    monkeypatch.setattr(
+        host_owner_setup,
+        "_owner_override_plan",
+        lambda *a: pytest.fail("planned the lasting service over SSH"),
+    )
+    monkeypatch.setattr(
+        host_owner_setup, "_ready", lambda *a: pytest.fail("waited for a listener over SSH")
+    )
+    monkeypatch.setattr(
+        host_owner,
+        "_initialize_link_storage",
+        lambda *a, **k: world.calls.append("_initialize_link_storage"),
+    )
+
+    def start(paths, store, terminal, *, consent, owner_plan=None, directory=None):
+        world.calls.append(("start", owner_plan, directory))
+        return "starting", {
+            "request_id": "req",
+            "config_fingerprint": "plan",
+            "target": "a" * 40,
+        }
+
+    monkeypatch.setattr(owner_start, "start", start)
+    return world
+
+
+def test_ssh_computer_run_pairs_links_and_starts_without_a_listener(monkeypatch, tmp_path):
+    from claudlobby.commands import host_owner_setup
+
+    world = _computer_world(monkeypatch, tmp_path, "fresh")
+    result = host_owner_setup.run_computer(
+        SimpleNamespace(update_record=None),
+        world.paths,
+        world.store,
+        consent=world.consent,
+        profile=world.profile,
+        ssh="captured-source",
+    )
+    assert world.calls == [
+        ("directories", {"ssh_policy": True}),
+        ("origin", "captured-source"),
+        "serving_configuration",
+        "_initialize_first_owner",
+        "_confirm_owner",
+        "_initialize_link_storage",
+        "_confirm_workspace",
+        ("start", None, tmp_path / "units"),
+    ]
+    assert [state for state, _ in world.states] == ["pairing_ready", "workspace_ready"]
+    assert all(
+        data == {"origin": ORIGIN, "transport": "mac_openssh"} for _, data in world.states
+    )
+    assert result.data == {
+        "state": "computer_starting",
+        "request_id": "req",
+        "config_fingerprint": "plan",
+        "target": "a" * 40,
+    }
+
+
+def test_ssh_computer_run_on_a_started_computer_is_ready_with_its_transport(monkeypatch, tmp_path):
+    from claudlobby.commands import host_owner_setup
+
+    world = _computer_world(monkeypatch, tmp_path, "started")
+    result = host_owner_setup.run_computer(
+        SimpleNamespace(update_record=None),
+        world.paths,
+        world.store,
+        consent=world.consent,
+        profile=world.profile,
+        ssh="captured-source",
+    )
+    assert result.data == {
+        "state": "computer_ready",
+        "origin": ORIGIN,
+        "transport": "mac_openssh",
+    }
+    assert world.calls == [("origin", "captured-source")] and world.states == []

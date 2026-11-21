@@ -50,11 +50,44 @@ def _private_file(path, *, read=False):
         os.close(fd)
 
 
+def admitted_update(installation, receipt_revision, revision, named):
+    """The finished update that moved this computer from its receipt's revision to ``revision``.
+
+    ``named`` is the computer run's ``update_record``: the request id and target
+    the client read. Admitted only when that is the record on disk, the record
+    is ``done`` as strictly as today's finish tuple reads one (health errors an
+    empty table, out of maintenance, configuration committed, no stage error),
+    it ends at ``revision``, and the receipt's revision is an ancestor of
+    ``revision``. Anything else refuses. Reads only.
+    """
+    from ..git_update import UpdateError, _git, read_update
+    try:
+        record = read_update(installation)
+        if (type(named) is not list or record is None
+                or [record.get("request_id"), record.get("target")] != named
+                or record.get("phase") != "done"
+                or type(record.get("health_errors")) is not dict or record["health_errors"]
+                or record.get("maintenance") is not False or record.get("config_committed") is not True
+                or record.get("stage_error") is not None
+                or record["target"] != revision):
+            raise ValueError()
+        if _git(installation, "merge-base", "--is-ancestor", receipt_revision, revision, check=False).returncode:
+            raise ValueError()
+    except (UpdateError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise StdioRefused("installation_changed") from None
+    return record
+
+
 class FixedOwnerProfile:
     """One account-database profile; a preparation receipt never licenses repair."""
-    def __init__(self, paths, request, *, updated_source=False):
+    def __init__(self, paths, request, *, updated_source=False, computer=False):
         """``updated_source`` is the one-operation SSH API only: it carries no
-        finish tuple, and the installed revision is still compared exactly."""
+        finish tuple, and the installed revision is still compared exactly.
+
+        ``computer`` is the computer run. It carries no finish tuple. At the
+        receipt's revision it is admitted as today's guide is; at a later
+        installed revision only when its ``update_record`` names the finished
+        update that moved the computer there (``admitted_update``)."""
         try:
             uid = os.getuid()
             if (uid == 0 or uid != os.geteuid() or uid != request["expected_uid"]
@@ -110,9 +143,12 @@ class FixedOwnerProfile:
             # Linux: trusted by place and ownership; the recorded digest stays bound.
             if self.runtime is None and not trusted_system_python(interpreter):
                 raise StdioRefused("installation_changed")
-            if (request["finish_setup"] is None and not updated_source
+            if computer and request["finish_setup"] is not None:
+                raise StdioRefused("installation_changed")
+            if (request["finish_setup"] is None and not updated_source and not computer
                     and receipt["ref"] != request["source_revision"]):
                 raise StdioRefused("installation_changed")
+            self.receipt_revision = receipt["ref"]
             self.project = self.home / "claudfather-projects/first-team"
             self.account = self.family / "provider-profile"
             self.policy = self.family / "host-policy/system.yaml"
@@ -122,6 +158,8 @@ class FixedOwnerProfile:
             with self.environment():
                 if installation.preflight(expected_revision=request["source_revision"]) != request["source_revision"]:
                     raise StdioRefused("installation_changed")
+                if computer and receipt["ref"] != request["source_revision"]:
+                    admitted_update(installation, receipt["ref"], request["source_revision"], request["update_record"])
         except (OSError, ValueError, KeyError, TypeError):
             raise StdioRefused("installation_changed") from None
 
