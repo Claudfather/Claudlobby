@@ -2855,12 +2855,12 @@ test('browser carrier: one saved computer opens its panel; an account listing on
 const SETUP_LIMIT=131072;
 const realisticPlan=pending=>{const sha='c'.repeat(64);
   return {...pending,version:2,expires_at:1800000600,fleets:['shop'],
-    changes:Array.from({length:76},(_,i)=>({target:`/home/synthetic/fleets/shop/units/unit-${i}/config.toml`,before:{kind:'file',mode:'0644',sha256:sha},
+    changes:Array.from({length:76},(_,i)=>({target:`/home/example/fleets/shop/units/unit-${i}/config.toml`,before:{kind:'file',mode:'0644',sha256:sha},
       after:{kind:'directory',mode:'0755',files:Object.fromEntries(Array.from({length:4},(_,f)=>[`file-${f}.toml`,sha]))}})),
     effects:{units:Array.from({length:70},(_,i)=>({bot:`shop/bot-${i}`,enroll:false,fleet:'shop',phase:'start',platform:'linux',scope:'user',
-        service:`claudlobby-bot-${i}.service`,sha256:sha,source:`/home/synthetic/fleets/shop/units/unit-${i}`})),
-      restart_bots:['shop/a','shop/b','shop/c'],reload_supervision:true,fleet_sources:{shop:'/home/synthetic/fleets/shop'},
-      bot_paths:{a:'/home/synthetic/a',b:'/home/synthetic/b'},coverage:{bots:70,units:70},fleet_manifests:{shop:sha},restart_reason:'units changed'},
+        service:`claudlobby-bot-${i}.service`,sha256:sha,source:`/home/example/fleets/shop/units/unit-${i}`})),
+      restart_bots:['shop/a','shop/b','shop/c'],reload_supervision:true,fleet_sources:{shop:'/home/example/fleets/shop'},
+      bot_paths:{a:'/home/example/a',b:'/home/example/b'},coverage:{bots:70,units:70},fleet_manifests:{shop:sha},restart_reason:'units changed'},
     dispatch:'prepared',phase:'quiesce'};};
 const bytesOf=value=>Buffer.byteLength(JSON.stringify(value));
 const padded=(value,size)=>({...value,pad:'x'.repeat(size-bytesOf({...value,pad:''}))});
