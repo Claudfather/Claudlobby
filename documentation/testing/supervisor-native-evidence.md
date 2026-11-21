@@ -29,8 +29,9 @@ The unified-CLI integration reuses the final net change from #1862 at
 `14339b1a759ed884e6cdc7566ad632f0ead52a6f`. Its four production-file changes
 are unchanged from `58fdd43adc5903019188fdcdb6805e6440d7560c`; the retained
 lifecycle fixture includes `db58d73887d38d9ba69ec96fe01669778451f79e`'s
-action-only failure injection. The existing `svc_restart_host` remains in the
-adapter. This attribution records reuse, not a new native acceptance result.
+action-only failure injection. The existing `svc_restart_host` remained in the
+adapter at that integration; it was removed later, when nothing called it (#1607).
+This attribution records reuse, not a new native acceptance result.
 
 Installer stale-unit selection also reuses [#1835](https://github.com/Claudfather/Claudlobby/pull/1835),
 single commit `beb4e35dcdfa51b51a17b306f0421d274c701698`: the stdlib
