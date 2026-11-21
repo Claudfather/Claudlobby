@@ -400,3 +400,63 @@ exit 0
     result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
                             env=constructed_env(), capture_output=True, timeout=5)
     assert result.returncode == 0 and result.stdout == b"" and result.stderr == b""
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_replaced_python_bytes_admit_only_the_linux_system_python(installed, monkeypatch, tmp_path, system):
+    """A security update replaces Ubuntu's /usr/bin Python; a Mac runtime stays pinned."""
+    module, home, install, value, _python = installed
+    python = tmp_path / "system-bin/python3.12"  # stands in for the admitted file
+    python.parent.mkdir()
+    python.write_bytes(b"synthetic interpreter before a security update; never executed")
+    python.chmod(0o755)
+    (install / "env/bin/python").unlink(); (install / "env/bin/python").symlink_to(python)
+    config = install / "env/pyvenv.cfg"
+    config.write_text("home = " + str(python.parent) + "\n" + config.read_text().split("\n", 1)[1])
+    launcher = install / "bin/claudlobby"
+    launcher.write_bytes(b"#!" + str(python).encode() + b"\n" + launcher.read_bytes().split(b"\n", 1)[1])
+    path = install / "preparation.json"
+    state = json.loads(path.read_text())
+    state.update(interpreter=str(python), interpreter_sha256=module.digest(python))
+    path.write_text(json.dumps(state)); path.chmod(0o600)
+    value["binding_sha256"] = hashlib.sha256(json.dumps(
+        {key: state[key] for key in module.BINDING_FIELDS}, sort_keys=True).encode()).hexdigest()
+    monkeypatch.setattr(module, "independent_python", lambda: python)
+    assert module.validate(value, time.monotonic() + 10)[0] == python
+    python.write_bytes(b"synthetic interpreter after a security update; never executed")
+    assert module.digest(python) != state["interpreter_sha256"]
+    monkeypatch.setattr(module.platform, "system", lambda: system)
+    if system == "Darwin":
+        monkeypatch.setattr(module, "git_environment", lambda _home: pytest.fail("changed bytes admitted"))
+    receipt, before = path.read_bytes(), snapshot(home)
+    if system == "Linux":
+        assert module.validate(value, time.monotonic() + 10)[0] == python
+    else:
+        with pytest.raises(module.Refusal) as error:
+            module.validate(value, time.monotonic() + 10)
+        assert error.value.code == "installation_changed"
+    assert path.read_bytes() == receipt and snapshot(home) == before
+
+
+@pytest.mark.parametrize("defect", [None, "owner", "group-writable", "other-writable", "outside"])
+def test_linux_system_python_is_admitted_only_while_trusted(monkeypatch, tmp_path, defect):
+    module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(module.sys, "prefix", module.sys.base_prefix)
+    executable = Path("/usr/bin/true")  # a root-owned stand-in; never executed
+    if defect == "outside":
+        executable = tmp_path / "python3"; executable.write_bytes(b"outside"); executable.chmod(0o755)
+    monkeypatch.setattr(module.sys, "executable", str(executable))
+    class Observed(type(Path("/"))):
+        def stat(self, **kwargs):
+            info = super().stat(**kwargs)
+            mode, uid = info.st_mode, (1001 if defect == "owner" else info.st_uid)
+            mode |= {"group-writable": 0o020, "other-writable": 0o002}.get(defect, 0)
+            return types.SimpleNamespace(st_mode=mode, st_uid=uid)
+    monkeypatch.setattr(module, "Path", Observed)
+    if defect is None:
+        assert module.independent_python() == executable.resolve()
+        return
+    with pytest.raises(module.Refusal) as error:
+        module.independent_python()
+    assert (error.value.code, error.value.exit_code) == ("prerequisite_unusable", 6)

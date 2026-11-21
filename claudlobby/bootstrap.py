@@ -237,7 +237,15 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             raise BundleError("Git preparation receipt is redirected")
         if receipt.exists():
             state = _browser_receipt(receipt) if isolated else json.loads(receipt.read_bytes())
-            if not isinstance(state, dict) or any(state.get(key) != value for key, value in binding.items()):
+            # A Linux browser preparation resumes across a security update of the
+            # system Python: host-install admitted that root-owned /usr/bin file
+            # before calling here, its bytes are not compared, and the receipt
+            # keeps the digest it recorded. A managed Mac Python stays pinned.
+            pinned = {key: value for key, value in binding.items()
+                      if key != 'interpreter_sha256' or not isolated or profile is not None}
+            if (not isinstance(state, dict) or any(state.get(key) != value for key, value in pinned.items())
+                    or not isinstance(state.get('interpreter_sha256'), str)
+                    or re.fullmatch(r'[0-9a-f]{64}', state['interpreter_sha256']) is None):
                 raise BundleError("existing preparation belongs to different explicit inputs")
         else:
             state = {**binding, 'revision': None, 'lock_sha256': None, 'environment_owned': False,

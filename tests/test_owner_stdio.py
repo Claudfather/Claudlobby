@@ -260,6 +260,12 @@ def fixed_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(Installation, "preflight", lambda self, **kwargs: "a" * 40)
+    # The running Linux interpreter, trusted from this directory and owner as
+    # /usr/bin and root are on a real computer.
+    from claudlobby.commands import owner_setup_consent
+    monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_DIRECTORY", tmp_path, raising=False)
+    monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_OWNER", os.getuid(), raising=False)
+    monkeypatch.setattr(sys, "executable", str(interpreter))
     return SimpleNamespace(root=family / "data", package=package), request, home, path
 
 
@@ -954,3 +960,57 @@ def test_darwin_owner_ingress_remains_explicit_native_gate(darwin_fixed_profile,
     profile = FixedOwnerProfile(paths, request)
     monkeypatch.setattr(owner_ingress, "ServePrincipalVerifier", lambda **_kw: pytest.fail("executed Linux native path"))
     with pytest.raises(StdioRefused, match="native_ingress_prerequisite_missing"): profile.origin()
+
+
+def test_linux_system_python_update_keeps_the_recorded_binding(fixed_profile):
+    """Ubuntu replaces /usr/bin/python3.x on a security update; setup goes on."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, home, path = fixed_profile
+    receipt, binding = path.read_bytes(), request["binding_sha256"]
+    interpreter = Path(json.loads(receipt)["interpreter"])
+    interpreter.write_bytes(b"synthetic interpreter after a security update; never executed")
+    assert hashlib.sha256(interpreter.read_bytes()).hexdigest() != json.loads(receipt)["interpreter_sha256"]
+    before = sorted(str(p) for p in home.rglob("*"))
+    FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and request["binding_sha256"] == binding
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("defect", ["owner", "group-writable", "other-writable", "not-executable",
+                                    "outside", "running-python"])
+def test_linux_system_python_must_stay_trusted(fixed_profile, monkeypatch, tmp_path, defect):
+    from claudlobby.commands import owner_setup_consent
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, path = fixed_profile
+    interpreter = Path(json.loads(path.read_bytes())["interpreter"])
+    if defect == "owner":
+        monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_OWNER", os.getuid() + 1)
+    elif defect == "group-writable":
+        interpreter.chmod(0o775)
+    elif defect == "other-writable":
+        interpreter.chmod(0o757)
+    elif defect == "not-executable":
+        interpreter.chmod(0o644)
+    elif defect == "outside":
+        monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
+    else:
+        other = tmp_path / "other-python"; other.write_bytes(b"other"); other.chmod(0o755)
+        monkeypatch.setattr(sys, "executable", str(other))
+    receipt, before = path.read_bytes(), sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and sorted(str(p) for p in home.rglob("*")) == before
+
+
+def test_darwin_managed_python_bytes_stay_pinned(darwin_fixed_profile):
+    """Claudlobby's own Mac runtime is its own file: a changed byte still refuses."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, receipt_path, runtime, _env = darwin_fixed_profile
+    FixedOwnerProfile(paths, request)
+    runtime.python.write_bytes(b"changed managed interpreter; never executed")
+    receipt = receipt_path.read_bytes()
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert receipt_path.read_bytes() == receipt
