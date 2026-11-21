@@ -59,15 +59,27 @@ class TestLoadEnv:
         env_file = tmp_path / ".env"
         env_file.write_text("MY_TEST_VAR=hello\nexport MY_OTHER_VAR=world\n")
         paths = SimpleNamespace(env_file=env_file)
-        # Ensure clean state
-        monkeypatch.delenv("MY_TEST_VAR", raising=False)
-        monkeypatch.delenv("MY_OTHER_VAR", raising=False)
+        # setenv records each variable's state before the test, so teardown
+        # also undoes what _load_env sets; delenv leaves it unset for the load.
+        for name in ("MY_TEST_VAR", "MY_OTHER_VAR"):
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
         _load_env(paths)
         assert os.environ["MY_TEST_VAR"] == "hello"
         assert os.environ["MY_OTHER_VAR"] == "world"
-        # Cleanup
-        monkeypatch.delenv("MY_TEST_VAR")
-        monkeypatch.delenv("MY_OTHER_VAR")
+
+    def test_next_test_does_not_see_loaded_vars(self, tmp_path, monkeypatch):
+        names = ("MY_TEST_VAR", "MY_OTHER_VAR")
+        # Start from both unset; teardown puts back any value the caller set.
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        # Leaving the context undoes its MonkeyPatch as the fixture's teardown
+        # does, so whatever is still set is what the next test would see. The
+        # pop keeps a failure here from reaching later tests.
+        with pytest.MonkeyPatch.context() as inner:
+            self.test_loads_env_vars(tmp_path, inner)
+        still_set = {name: os.environ.pop(name) for name in names if name in os.environ}
+        assert still_set == {}
 
     def test_does_not_override_existing(self, tmp_path, monkeypatch):
         env_file = tmp_path / ".env"
