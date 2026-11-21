@@ -346,7 +346,36 @@ is `invalid_request` (exit 2). Each answer is one line of at most 8192 bytes:
 `update` in a status answer is `null` or the update record in the names a
 client reads: `request_id`, `kind` (`update`, `start`, `first_team` or
 `addition`), `phase`, `target`, `maintenance`, `dispatched`, `failed` and
-`health_errors` (unit names only). The receipt is checked against its own
+`health_errors` (unit names only), then where the update is:
+
+| Field | Values | Read from the record |
+|---|---|---|
+| `stage` | an updater stage (`authorize`, `retire-render`, `render`, `prepare`, `conversion-check`, `quiesce`, `quiet`, `publish`, `restore`), `other`, or `null` | `stage_error.stage`; `null` when there is no stage error |
+| `units` | `{"done": n, "total": n}` or `null` | `consumers`: during `quiesce` the units whose `stop` is done, during `restore` those whose `restore` is done; a unit with a `restore_error` is not done. `null` in any other phase or with no units |
+| `runner` | `none`, `pending`, `entered` or `finished` | `job_dispatch.state` |
+| `pending_seconds`, `entered_seconds` | whole seconds, or `null` | the computer's clock less `job_clock.pending_at` / `job_clock.entered_at` |
+| `outcome` | `finished`, `unfinished`, `refused` or `null` | `job_outcome.result`, only when its `attempt` is the current dispatch's |
+| `waiting` | boolean | `runtime_wait` is present: the updater is waiting now for the runtime lock |
+| `runtime_busy` | boolean | the latest `runtime_waits` row ended `refused` |
+| `unhealthy_units` | count | the number of `health_errors` |
+
+Nothing here looks at the native job: a slow look never reads as stopped.
+`failed` is true for a stage error, for `done` with health errors, for a
+dispatch that `finished` before `done`, and for an `outcome` of `unfinished` or
+`refused` before `done`. A `runner` that `entered` with no outcome is running,
+however old it is; a hard stop of the job leaves it so. No field carries record
+text, unit names beyond `health_errors`, or a credential, and a key in a shape
+the script does not know reads as `null` or false and refuses nothing.
+
+The updater's job writes those keys. Each dispatch saves `job_clock` with
+`pending_at` and drops any earlier `job_outcome`; the job adds `entered_at` when
+it enters the update. A job run that has shown it is the job then saves, in one
+write with its dispatch `finished` when it entered, `job_outcome`: `attempt`,
+`at` (epoch seconds) and `result` (`finished` when it returned, `unfinished`
+when it raised after entering, `refused` when it was refused before). Its
+notice that the update did not finish is sent even when that save fails.
+
+The receipt is checked against its own
 revision, never against one a client sent; the installed revision is whatever
 the updater moved the checkout to. `setup` is `started` once the computer's
 configuration is committed. A record is unfinished by core's rule: not `done`,
