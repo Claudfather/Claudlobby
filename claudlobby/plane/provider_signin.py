@@ -621,12 +621,12 @@ class ProviderSignin:
             thread.join(timeout=1)
         return thread is None or not thread.is_alive()
 
-    def _admit(self, reader, grant):
+    def _admit(self, reader, grant, *, native=True):
         self.store.authorize(reader,expected=grant,effects=True)
         from .owner_setup import managed_setup
         package=managed_setup(self.store.access.root,grant)
         from ..installation import _check_maintenance
-        _check_maintenance(package.installation,native=True)
+        _check_maintenance(package.installation,native=native)
 
     @contextmanager
     def _runtime(self,reader,grant):
@@ -679,8 +679,8 @@ class ProviderSignin:
                 if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])  # fallback: a copy its worker left
             return self.status(reader,grant,attempt)
 
-    def status(self, reader, grant, attempt):
-        self._admit(reader,grant)
+    def status(self, reader, grant, attempt, *, native=True):
+        self._admit(reader,grant,native=native)
         with self._lock, self.store.access._connection() as conn:
             row = self._row(conn,grant,attempt)
             state, reason = row['state'], row['reason']
@@ -739,9 +739,12 @@ class ProviderSignin:
         return None if row is None else self.status(reader,grant,row["attempt_id"])
 
     def ready(self, reader, grant):
+        # A read that starts no process, so it skips only the native-start fence: by Launch this
+        # approval's own prepared Preview holds the update at quiesce, which fences native starts.
+        # Every other check stands, and the sign-in calls (and their worker) still ask the fence.
         with self.store.access._connection() as conn:
             row,_=self._current(conn)
-        if row is None or self.status(reader,grant,row['attempt_id'])['state'] != 'connected':
+        if row is None or self.status(reader,grant,row['attempt_id'],native=False)['state'] != 'connected':
             raise AccessDenied("signin_not_complete")
 
     def _run(self, reader, grant, attempt):
