@@ -917,3 +917,39 @@ def test_a_computer_starts_with_no_team(tmp_path, monkeypatch, owner):
     assert {job_name(key) for key in result["consumers"]} == expected
     assert all(item["restore"] == "done" for item in result["consumers"].values())
     assert {path.name for path in case.directory.iterdir() if path.is_file()} == set(result["consumers"])
+
+
+def test_an_ordinary_update_of_a_computer_started_with_no_team_reaches_done(tmp_path, monkeypatch):
+    """The ground phase 2 stands on: a started computer with no team is updated from one revision to the next."""
+    from claudlobby.active_config import read_current_config
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch)
+    started = case.start()
+    assert started["phase"] == "done" and started["health_errors"] == {}
+    first = read_current_config(case.root, installation=case.installation, revision=case.target)
+    later = case.add_target()
+    calls = len(case.native.calls)
+    seen = []
+    real = operation.prepare_operation
+
+    def prepare(store, rendered, *args, **kwargs):
+        seen.append((rendered.fleets, kwargs["initialize"]))
+        return real(store, rendered, *args, **kwargs)
+    monkeypatch.setattr(operation, "prepare_operation", prepare)
+    updated = case.update(later)
+    assert updated["phase"] == "done" and updated["health_errors"] == {}
+    assert updated["previous_config"] == first["fingerprint"] and not updated.get("initialize")
+    assert seen == [((), False)]
+    assert case.installation.preflight() == later
+    second = read_current_config(case.root, installation=case.installation, revision=later)
+    # A start and the ordinary update after it hold the same identities: None.
+    assert first["identities"] is None and second["identities"] is None
+    assert second["fleets"] == {} and second["units"] == first["units"]
+    assert set(updated["consumers"]) == set(started["consumers"])
+    assert all(item["restore"] == "done" for item in updated["consumers"].values())
+    # Every unit the start installed was stopped for the cutover and brought back as it was.
+    paused = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_pause"}
+    resumed = {args[1] for name, args in case.native.calls[calls:] if name == "svc_activation_resume"}
+    assert paused == resumed == {key for key in updated["consumers"] if "@." not in key}
+    assert all(case.native.states[key] == updated["consumers"][key]["intent"]["restore_native"] for key in resumed)
+    assert operation.db_file(case.root).exists()

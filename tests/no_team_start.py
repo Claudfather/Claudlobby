@@ -3,14 +3,18 @@
 Rendering, preparation, the reader lease's drain, the Git cutover, publication,
 the database, the committed configuration and restore are the code a computer
 runs. Only the native layer is a stand-in: units are written to a temporary
-directory, and the operator gate, the native catalog and the updater's native
-job are fakes. The application stages run in this process instead of in a
-fresh one, with this checkout's resources bound to the fixture's revision.
+directory and a table answers for the user manager, and the operator gate, the
+native catalog, the enrollment inventory and the updater's native job are
+fakes. The application stages run in this process instead of in a fresh one,
+with this checkout's resources bound to the fixture's revision.
 """
 
 from __future__ import annotations
 
+import base64
+from copy import deepcopy
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 import shutil
 import sys
@@ -20,7 +24,6 @@ from types import SimpleNamespace
 import yaml
 
 from claudlobby import (
-    config_staging,
     git_update as updater,
     update_entry,
     update_operation,
@@ -65,6 +68,19 @@ def job_name(target: str) -> str:
     return name
 
 
+def _snapshot(path):
+    """An inventory's record of one file."""
+    content = path.read_bytes()
+    return {
+        "path": str(path),
+        "resolved": str(path.resolve()),
+        "mode": path.stat().st_mode & 0o777,
+        "link": None,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "content": {"base64": base64.b64encode(content).decode()},
+    }
+
+
 class Native:
     """A Linux user manager's unit table, keyed by unit name."""
 
@@ -78,6 +94,15 @@ class Native:
         assert function == "svc_inventory_catalog", function
         return f"manager\tLinux\ndirectory\t{self.directory}\n"
 
+    def state(self, installed, target):
+        if target in self.states:
+            return self.states[target]
+        return (
+            "enabled loaded inactive"
+            if Path(installed).exists()
+            else "not-found not-found inactive"
+        )
+
     def call(self, function, *args, timeout=30):
         self.calls.append((function, args))
         output = ""
@@ -85,9 +110,18 @@ class Native:
             output = self.read(function)
         elif function == "svc_activation_start":
             self.states[args[1]] = "enabled loaded active"
-        elif function == "svc_inventory_state":
-            installed = Path(args[0]).exists()
-            output = self.states.get(args[1], "enabled loaded inactive") if installed else "not-found not-found inactive"
+        elif function == "svc_activation_pause":
+            self.states[args[1]] = "masked-runtime masked inactive"
+        elif function == "svc_activation_resume":
+            self.states[args[1]] = args[2]
+        elif function in {"svc_inventory_state", "svc_activation_snapshot"}:
+            output = self.state(args[0], args[1])
+        elif function == "svc_activation_quiet":
+            output = (
+                "inactive\tcgroup-empty"
+                if self.state(args[0], args[1]).endswith(" inactive")
+                else "unknown"
+            )
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
 
@@ -191,11 +225,10 @@ class Case:
         monkeypatch.setattr(
             supervision_inventory, "Adapter", lambda _package: self.native
         )
-        monkeypatch.setattr(
-            update_services,
-            "collect_enrollment",
-            lambda *_args, **_kwargs: SimpleNamespace(require_complete=lambda: None),
-        )
+        monkeypatch.setattr(update_services, "collect_enrollment", self._inventory)
+        # A timer restored to running is held past its catch-up run; that has its
+        # own tests in tests/test_update_timer_catch_up.py.
+        monkeypatch.setattr(update_services, "_held_start", lambda *_args: None)
         monkeypatch.setattr(updater, "_application_stage", self.stage)
         monkeypatch.setattr(updater, "_independent_quiet", lambda store: None)
         monkeypatch.setattr(updater, "_prepare_job_support", self._job_support)
@@ -221,6 +254,44 @@ class Case:
         later = _commit(self.installation, message)
         _run(["git", "-C", source, "checkout", "--quiet", head], self.root)
         return later
+
+    def _inventory(
+        self, data_root, declarations, *, adapter=None, only_names=None, **_kwargs
+    ):
+        """The enrollment inventory of the native directory, as the unit table reads it."""
+        rows = []
+        for declaration in declarations:
+            name = declaration.source.name
+            if only_names is not None and name not in only_names:
+                continue
+            installed = self.directory / name
+            state = self.native.state(installed, name)
+            rows.append(
+                {
+                    "target": name,
+                    "installed": [_snapshot(installed)] if installed.exists() else [],
+                    "generated": _snapshot(declaration.source),
+                    "declaration": {
+                        "source": str(declaration.source),
+                        "scope": declaration.scope,
+                        "working_directory": str(declaration.working_directory),
+                        "environment": [list(item) for item in declaration.environment],
+                        "fleet": declaration.fleet,
+                        "bot": declaration.bot,
+                        "service": declaration.service,
+                    },
+                    "properties": [
+                        [key, value]
+                        for key, value in zip(
+                            ("UnitFileState", "LoadState", "ActiveState"), state.split()
+                        )
+                    ],
+                }
+            )
+        payload = {"units": rows, "observed_files": []}
+        return SimpleNamespace(
+            require_complete=lambda: SimpleNamespace(payload=lambda: deepcopy(payload))
+        )
 
     def stage(
         self,
@@ -263,13 +334,7 @@ class Case:
         if stage == "retire-render":
             update_entry._retire_completed_render(store)
         elif stage == "render":
-            package = self.package(record["target"])
-            paths = update_entry._render_paths(store, record, package)
-            rendered = config_staging.render_git_configuration(
-                paths, revision=record["target"], root=store.root, package=package
-            )
-            record["candidate_render"] = rendered.fingerprint
-            store.save(record)
+            update_entry._render_candidate(store, record, self.package(record["target"]))
         elif stage == "prepare":
             update_operation.prepare_operation(
                 store,
@@ -363,5 +428,11 @@ class Case:
         dispatched = updater.apply_or_continue(
             self.installation, target=self.target, initialization=self.scope
         )
+        assert dispatched["job"] == {"dispatch": "started"}
+        return self.run_job()
+
+    def update(self, target):
+        """Dispatch an ordinary update to `target` and run its job to its end."""
+        dispatched = updater.apply_or_continue(self.installation, target=target)
         assert dispatched["job"] == {"dispatch": "started"}
         return self.run_job()
