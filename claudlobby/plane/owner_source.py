@@ -290,6 +290,65 @@ def fresh_owner_setup(root: Path, *, allow_absent: bool = False) -> None:
         raise SourceUnavailable("fresh owner setup unavailable") from exc
 
 
+def started_without_team(root: Path, installation) -> bool:
+    """Committed configuration lists no team, no team runtime holds anything, recorder bound.
+
+    Reads only. The host's own runtime (`runtime/_host`) is not a team's.
+    """
+    from ..active_config import read_current_config
+    from ..config_plan import PlanError
+    from ..paths import _iter_fleet_dirs
+
+    root = Path(root).absolute()
+    try:
+        if read_current_config(root, installation=installation)["fleets"]:
+            return False
+        runtime = root / "runtime"
+        if os.path.lexists(runtime):
+            if runtime.resolve() != runtime or not runtime.is_dir():
+                return False
+            if any(path.name != "_host" for path in runtime.iterdir()):
+                return False
+        for overlay in _iter_fleet_dirs(root / "local"):
+            path = overlay / "runtime"
+            if os.path.lexists(path) and (path.resolve() != path or not path.is_dir()
+                                          or next(path.iterdir(), None) is not None):
+                return False
+        inspect_source(root)
+    except (PlanError, SourceUnavailable, SourceDenied, OSError, ValueError):
+        return False
+    return True
+
+
+def start_state(root: Path, installation) -> str:
+    """`fresh`, `starting`, `started` or `other`: where a no-team start stands. Reads only.
+
+    A start is unfinished by the update record's own rule: not `done`, or `done`
+    with health errors.
+    """
+    from ..git_update import UpdateError, read_update
+
+    root = Path(root).absolute()
+    try:
+        record = read_update(installation)
+    except FileNotFoundError:
+        record = None
+    except (UpdateError, OSError, ValueError):
+        return "other"
+    if record is not None and (record["phase"] != "done" or record.get("health_errors")):
+        scope = record.get("initialization_scope")
+        return "starting" if isinstance(scope, dict) and scope.get("manifests") == [] else "other"
+    if started_without_team(root, installation):
+        return "started"
+    if record is None:
+        try:
+            fresh_owner_setup(root, allow_absent=True)
+        except SourceUnavailable:
+            return "other"
+        return "fresh"
+    return "other"
+
+
 def inspect_owner_setup(root: Path) -> str:
     """Setup-only admission; private reads/actions always use inspect_source."""
     if os.path.lexists(db_file(root)):
