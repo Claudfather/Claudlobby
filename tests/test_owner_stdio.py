@@ -1258,6 +1258,51 @@ def test_dispatch_runs_the_computer_run_for_its_flag(fixed_profile, monkeypatch,
             "type": "error", "code": "start_failed", "line": "core's line", "request_id": "id"}
 
 
+@pytest.mark.parametrize("refusal, extra", [
+    ("declined", []), ("source_mismatch", []), ("provider_install_failed", ["next"]),
+    ("interrupted_unknown", ["next"]), ("conflict", []),
+])
+def test_todays_error_frame_keeps_its_keys(fixed_profile, monkeypatch, refusal, extra):
+    """Today's `--stdio` refusal on the wire: the error frame's keys, exactly, for each kind of refusal."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    paths, request, *_ = fixed_profile
+
+    def run(*_args, **_kwargs):
+        if refusal == "conflict":
+            raise CommandFailure("conflict", "the original setup is not current healthy DONE",
+                                 data={"request_id": "id"}, hint="host update status")
+        raise owner_stdio.StdioRefused(refusal)
+
+    monkeypatch.setattr(host_owner_setup, "run", run)
+    monkeypatch.setattr(host_owner_setup, "run_computer", lambda *a, **k: pytest.fail("ran the computer run"))
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            assert computer is False
+            return dict(request)
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=False, root=str(paths.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    assert code == 4 and frames[-1]["type"] == "error" and frames[-1]["code"] == refusal
+    assert sorted(frames[-1]) == sorted(["code", "retry", "seq", "session_id", "state", "type", "version", *extra])
+
+
 def test_stdio_computer_is_one_more_hidden_mode_of_the_same_exclusive_group(monkeypatch):
     import argparse
     from claudlobby.commands import _host_owner_parsers as parsers

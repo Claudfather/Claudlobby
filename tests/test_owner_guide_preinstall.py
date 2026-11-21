@@ -637,3 +637,8 @@ def test_shell_computer_mode_is_one_exact_word(arguments):
     assert result.returncode == 2 and result.stderr == b""
     assert json.loads(result.stdout) == {"schema_version": 1, "operation": "owner-guide-v1", "state": "refused",
                                          "code": "invalid_request", "retry": False}
+
+
+def test_the_guide_script_stays_within_its_byte_bound():
+    """The guide script's hard bound, 64 KiB; no existing check is trimmed to meet it."""
+    assert SCRIPT.stat().st_size <= 65536
