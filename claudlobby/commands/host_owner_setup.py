@@ -482,7 +482,7 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
             args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
         else:
             args.origin = profile.origin()
-            args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
+            args.tailscale, args.tailscale_socket = LINUX_TAILSCALE, ""
         args.workspace_issuer, args.workspace_origin = _WORKSPACE_ORIGINS
         args.socket = paths.root / "state/owner/owner.sock"
         args.template, args.target_fleet, args.repository = "local-project", "web-app", None
