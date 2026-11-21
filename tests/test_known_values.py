@@ -20,6 +20,7 @@ from claudlobby.known_values import (
     OUTCOME_KEYS,
     VALID_PERMISSION_MODES,
     closest_match,
+    is_known_model,
 )
 
 
@@ -66,19 +67,25 @@ class TestClosestMatch:
 
 class TestSetsPopulated:
     def test_known_models(self):
-        assert len(KNOWN_MODELS) >= 3
-        assert "sonnet" in KNOWN_MODELS
-        assert "opus" in KNOWN_MODELS
-        assert "haiku" in KNOWN_MODELS
-        assert "fable" in KNOWN_MODELS
-        assert "claude-fable-5" in KNOWN_MODELS
-        # Current GA full-ID pins (#771): a bot pinning the live model must
-        # not trip the "not in known models" warning.
-        assert "claude-opus-4-8" in KNOWN_MODELS
-        assert "claude-sonnet-5" in KNOWN_MODELS
+        # Pinned literally, as an independent copy of what --model accepts on
+        # code.claude.com/docs/en/model-config (read 2026-11-20): its aliases,
+        # the Anthropic API IDs it names, and the harness's dated Haiku 4.5 pin.
+        # A bot pinning a current model must not trip the "not in known
+        # models" warning (#771).
+        assert KNOWN_MODELS == frozenset(
+            {
+                "default", "best", "fable", "opus", "sonnet", "haiku", "opusplan",
+                "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2",
+                "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+                "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+                "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929",
+                "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+            }
+        )
 
     def test_known_efforts(self):
-        assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "max"})
+        # What --effort accepts (`claude --help`, Claude Code 2.1.281).
+        assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "xhigh", "max"})
 
     def test_known_hook_events(self):
         # The full authoritative Claude Code hook-event set
@@ -244,6 +251,25 @@ class TestClaudnaRenameSSOT:
             assert not _DEAD_SESSION_CMD.search(benign), benign
 
 
+# ── is_known_model: the [1m] rule ───────────────────────────────
+
+
+class TestIsKnownModel:
+    def test_opusplan_is_known(self):
+        assert is_known_model("opusplan")
+
+    def test_a_known_name_plus_1m_is_known(self):
+        for name in ("opus[1m]", "sonnet[1m]", "opusplan[1m]", "claude-opus-4-6[1m]",
+                     "claude-sonnet-4-6[1m]"):
+            assert is_known_model(name), name
+
+    def test_the_1m_rule_needs_a_known_name(self):
+        # `default` takes no suffix, the suffix alone names nothing, and the
+        # rule strips one suffix only.
+        for name in ("default[1m]", "[1m]", "gpt-4[1m]", "opus[1m][1m]", "opus[2m]"):
+            assert not is_known_model(name), name
+
+
 # ── _parse_enum (config.py) ──────────────────────────────────────
 
 
@@ -255,6 +281,13 @@ class TestParseEnum:
         assert _parse_enum("effort", "low", KNOWN_EFFORTS) == "low"
         assert _parse_enum("effort", "medium", KNOWN_EFFORTS) == "medium"
         assert _parse_enum("effort", "max", KNOWN_EFFORTS) == "max"
+
+    def test_xhigh_parses(self):
+        # --effort takes xhigh (`claude --help`, Claude Code 2.1.281). Before the
+        # list carried it, `effort: xhigh` raised here.
+        from claudlobby.config import _parse_enum
+
+        assert _parse_enum("effort", "xhigh", KNOWN_EFFORTS) == "xhigh"
 
     def test_valid_permission_modes(self):
         from claudlobby.config import _parse_enum
@@ -352,13 +385,42 @@ class TestValidatorModelCheck:
         assert len(model_warnings) == 0
 
     def test_current_full_id_pins_no_warning(self, tmp_path):
-        # A bot pinning a current GA full model ID must not warn (#771).
-        for i, model in enumerate(("claude-opus-4-8", "claude-sonnet-5")):
+        # A bot pinning a current full model ID must not warn (#771).
+        for i, model in enumerate(("claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2",
+                                   "claude-opus-4-8", "claude-sonnet-5")):
             sub = tmp_path / f"case{i}"
             sub.mkdir()
             report = self._make_fleet_and_validate(sub, {"model": model})
             model_warnings = [w for w in report.warnings if "known models" in w]
             assert model_warnings == [], f"{model} unexpectedly warned"
+
+    def test_opusplan_and_1m_forms_no_warning(self, tmp_path):
+        for i, model in enumerate(("opusplan", "opus[1m]", "claude-opus-4-6[1m]")):
+            sub = tmp_path / f"m{i}"
+            sub.mkdir()
+            report = self._make_fleet_and_validate(sub, {"model": model})
+            model_warnings = [w for w in report.warnings if "known models" in w]
+            assert model_warnings == [], f"{model} unexpectedly warned"
+
+    def test_1m_on_an_unknown_name_warns(self, tmp_path):
+        report = self._make_fleet_and_validate(tmp_path, {"model": "gpt-4[1m]"})
+        model_warnings = [w for w in report.warnings if "known models" in w]
+        assert len(model_warnings) == 1
+        assert "gpt-4[1m]" in model_warnings[0]
+
+    def test_model_strategy_takes_the_same_rule(self, tmp_path):
+        from claudlobby.config import ModelStrategyConfig
+
+        known = ModelStrategyConfig(base="sonnet[1m]", escalate_to="opusplan")
+        report = self._make_fleet_and_validate(tmp_path, {"model_strategy": known})
+        assert [w for w in report.warnings if "known models" in w] == []
+        sub = tmp_path / "unknown"
+        sub.mkdir()
+        unknown = ModelStrategyConfig(base="sonnet", escalate_to="gpt-4[1m]")
+        report = self._make_fleet_and_validate(sub, {"model_strategy": unknown})
+        warnings = [w for w in report.warnings if "known models" in w]
+        assert len(warnings) == 1
+        assert "model_strategy.escalate_to 'gpt-4[1m]'" in warnings[0]
 
 
 class TestValidatorHookEventCheck:
