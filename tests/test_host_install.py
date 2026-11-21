@@ -946,3 +946,497 @@ def test_bootstrap_resume_admits_changed_python_bytes_only_for_the_trusted_syste
     finally:
         os.close(descriptor)
     assert receipt.read_bytes() == raw
+
+
+# The update actions (phase 2, step 8): update-status, update and update-continue.
+
+UPDATE_DRIVER = '''import sys,types,json,os,pwd,platform
+platform.system=lambda: "Linux"
+from pathlib import Path
+body=Path(sys.argv[1]).read_text().split("# BEGIN EMBEDDED PYTHON\\n",1)[1].split("# END EMBEDDED PYTHON\\n",1)[0]
+m=types.ModuleType("isolated_operation");exec(compile(body,sys.argv[1],"exec"),m.__dict__)
+home=Path(sys.argv[2]);action=sys.argv[3];updater=json.loads(sys.argv[4]);log=Path(sys.argv[5])
+python=Path(sys.executable).resolve()
+m.account_profile=lambda uid: home
+m.independent_python=lambda: python
+pwd.getpwuid=lambda uid: types.SimpleNamespace(pw_dir=str(home))
+original=m.Runner
+class LocalRunner(original):
+ def __call__(self,args,*,env,timeout=300):
+  args=[str(a) for a in args]
+  launcher=args[:2]==[str(python),"-I"]
+  with log.open("a") as stream: stream.write(json.dumps({"args":args,"launcher":launcher,
+   "env":env==(m.update_environment(home) if launcher else m.fixed_environment(home))})+"\\n")
+  if launcher and args[9] in updater:
+   # The stand-in for host update apply|continue: an exit, its output and
+   # optionally the record the updater left.
+   code,out,*left=updater[args[9]]
+   if left: Path(left[0][0]).write_text(left[0][1])
+   return m.subprocess.CompletedProcess(args,code,out.encode(),b"")
+  assert not launcher or args[9:]==["status","--json"], args
+  return super().__call__(args,env=env,timeout=timeout)
+m.Runner=LocalRunner
+raise SystemExit(m.update_main(action))
+'''
+
+
+def update_frame(**value):
+    return (json.dumps({"schema_version": 1, "expected_uid": os.getuid(), **value}, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode()
+
+
+def invoke_update(tmp_path, home, action, request, updater=None):
+    """One update action against the fixture preparation. The real launcher answers
+    `host update status --json`; `updater` stands in for `host update apply|continue`."""
+    driver, log = tmp_path / "update-driver.py", tmp_path / "children.jsonl"
+    driver.write_text(UPDATE_DRIVER)
+    log.write_text("")
+    started = time.monotonic()
+    result = subprocess.run([sys._base_executable, "-I", "-B", str(driver), str(SCRIPT), str(home), action,
+                             json.dumps(updater or {}), str(log)], input=request,
+                            env=constructed_env(PATH="/nonexistent", HOME=str(tmp_path / "untrusted-home"),
+                                                PLANE_EMIT_DISABLED="1"), capture_output=True, timeout=120)
+    print(f"MEASURED {action} {time.monotonic() - started:.2f}s")
+    children = [json.loads(line) for line in log.read_text().splitlines()]
+    assert all(child["env"] for child in children), children
+    assert result.stdout.count(b"\n") == 1 and len(result.stdout) <= 8192, (result.stdout, result.stderr)
+    return result, json.loads(result.stdout), children
+
+
+def _launched(children, *action):
+    """The launcher's update commands, after `--root <data> host update`."""
+    return [child["args"][9:] for child in children if child["launcher"] and child["args"][9:9 + len(action)] == list(action)]
+
+
+def _installation(home):
+    from claudlobby.installation import Installation
+    family = home / ".local/share/claudlobby-browser"
+    return Installation(family / "install", family / "data")
+
+
+def _prepared(tmp_path, local_install_source, *, setup="untouched"):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    if setup != "untouched":
+        add_setup_state(family)
+    if setup == "started":
+        (family / "data/state/config.json").write_text("{}"); (family / "data/state/config.json").chmod(0o600)
+    return home, family
+
+
+def _record(home, revision, kind="update", **changes):
+    """A record of `kind` as the updater would read it; the store makes the base."""
+    from claudlobby import git_update as updater
+    from tests.test_git_update import prepare
+    installation = _installation(home)
+    with updater.UpdateStore(installation) as store:
+        record = prepare(store, revision)
+    record.update({"phase": "quiesce", **changes})
+    if kind in {"start", "first_team"}:
+        record["initialization_scope"] = {"directory": str(home / "native"), "manifests": (
+            [] if kind == "start" else [str(home / "authored-team/fleet.yaml")])}
+    if kind == "addition":
+        record["addition_scope"] = {"manifests": [str(home / "authored-team/fleet.yaml")]}
+    record["maintenance"] = record["phase"] in {"git", "environment", "publish", "commit"}
+    updater._write(installation.data_root / "state/update.json",
+                   json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+    assert updater.read_update(installation) == record
+    return record
+
+
+def _outcome(record, **job):
+    return json.dumps({"update": record, "job": job or {"dispatch": "started"}})
+
+
+STATUS_KEYS = {"schema_version", "operation", "state", "recorded_revision", "installed_revision",
+               "receipt_is_ancestor", "binding_sha256", "setup", "interpreter", "update"}
+REQUEST_ID = "00000000-0000-4000-8000-000000000001"
+
+
+def test_the_update_actions_build_their_own_environment(tmp_path, monkeypatch):
+    module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    home = tmp_path / "account"
+    family = home / ".local/share/claudlobby-browser"
+    env = module.update_environment(home)
+    uid = str(os.getuid())
+    assert {key: env[key] for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_HOST_SYSTEM_YAML",
+                                      "CLAUDE_CONFIG_DIR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")} == {
+        "CLAUDLOBBY_ROOT": str(family / "data"), "CLAUDLOBBY_INSTALLATION": str(family / "install"),
+        "CLAUDLOBBY_HOST_SYSTEM_YAML": str(family / "host-policy/system.yaml"),
+        "CLAUDE_CONFIG_DIR": str(family / "provider-profile"), "XDG_RUNTIME_DIR": "/run/user/" + uid,
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/" + uid + "/bus"}
+    assert "PLANE_EMIT_DISABLED" not in env and env["PATH"] == "/usr/bin:/bin" and env["HOME"] == str(home)
+    # The guide script pins the same four selectors.
+    guide = (ROOT / "claudlobby/preinstall/owner-guide-v1.sh").read_text()
+    for key in ("CLAUDLOBBY_ROOT", "CLAUDLOBBY_INSTALLATION", "CLAUDLOBBY_HOST_SYSTEM_YAML", "CLAUDE_CONFIG_DIR"):
+        assert f'"{key}": str(family / ' in guide
+    # prepare and status keep theirs.
+    assert module.fixed_environment(home)["PLANE_EMIT_DISABLED"] == "1"
+    assert "CLAUDLOBBY_ROOT" not in module.fixed_environment(home)
+    # On a Mac: the managed runtime's map without PLANE_EMIT_DISABLED, and no user bus.
+    home.mkdir(mode=0o700)
+    _profile, _policy, environment = _darwin_policy_fixture(module, home, monkeypatch)
+    environment["PLANE_EMIT_DISABLED"] = "1"
+    mac = module.update_environment(home)
+    assert "PLANE_EMIT_DISABLED" not in mac and "XDG_RUNTIME_DIR" not in mac and "DBUS_SESSION_BUS_ADDRESS" not in mac
+    assert mac["CLAUDLOBBY_HOST_SYSTEM_YAML"] == str(family / "host-policy/system.yaml")
+    assert mac["PATH"] == environment["PATH"]
+
+
+@pytest.mark.parametrize("action, request_value", [
+    ("update-status", {}), ("update-status", {"compare_revision": "a" * 40}),
+    ("update", {"expected_installed_revision": "a" * 40, "target_revision": "b" * 40}),
+    ("update-continue", {"request_id": REQUEST_ID}),
+])
+def test_each_update_action_reads_exactly_its_own_request(action, request_value):
+    module = payload()
+    def read(raw, named=action):
+        reader, writer = os.pipe()
+        os.write(writer, raw); os.close(writer)
+        try:
+            return module.request(reader, time.monotonic() + 10, named)
+        finally:
+            os.close(reader)
+    assert read(update_frame(**request_value)) == {"schema_version": 1, "expected_uid": os.getuid(), **request_value}
+    bad = [update_frame(**request_value, source_revision="a" * 40), frame(),
+           update_frame(**request_value)[:-1], update_frame(**request_value).replace(b",", b", ", 1),
+           update_frame(**request_value, schema_version=2), update_frame(**request_value, expected_uid="1")]
+    if request_value:
+        bad.append(update_frame(**{key: "A" * 40 for key in request_value}))
+        bad.append(update_frame(**{key: "a" * 39 for key in request_value}))
+    if action != "update-status":
+        bad.append(update_frame())  # every key the action names is required
+    for raw in bad:
+        with pytest.raises(module.Refusal) as refused:
+            read(raw)
+        assert (refused.value.code, refused.value.exit_code) == ("invalid_request", 2)
+    # Another action's keys are refused, and prepare and status read only their own.
+    for other in {"update-status", "update", "update-continue"} - {action}:
+        if request_value:
+            with pytest.raises(module.Refusal):
+                read(update_frame(**request_value), other)
+    with pytest.raises(Exception) as refused:
+        parse(update_frame(**request_value))  # its own payload, its own Refusal
+    assert (type(refused.value).__name__, refused.value.code) == ("Refusal", "invalid_request")
+
+
+def _bashes():
+    import shutil
+    found = {Path("/bin/bash").resolve()}
+    other = shutil.which("bash")
+    if other:
+        found.add(Path(other).resolve())
+    return sorted(str(path) for path in found)
+
+
+@pytest.mark.parametrize("action, operation", [("update-status", "host-update-status-v1"),
+                                               ("update", "host-update-v1"),
+                                               ("update-continue", "host-update-continue-v1")])
+def test_the_shell_answers_each_update_action_in_its_own_names(tmp_path, action, operation):
+    text = SCRIPT.read_text()
+    # The portable head: the operation is named, then a refusal in the action's own keys.
+    head = text.split("exec 3<<'FIXED_OPERATION_PYTHON'\n", 1)[0]
+    shells = ["/bin/sh", *_bashes()]
+    for shell in shells:
+        script = tmp_path / "head.sh"
+        script.write_text(head.replace('if [ "$#" -ne 1 ]', 'refuse prerequisite_missing stop unavailable; exit 6\nif [ "$#" -ne 1 ]', 1))
+        result = subprocess.run([shell, str(script), action], input=b"", env=constructed_env(),
+                                capture_output=True, timeout=5)
+        assert result.returncode == 6 and result.stderr == b"", (shell, result)
+        assert json.loads(result.stdout) == {"code": "prerequisite_missing", "operation": operation,
+                                             "schema_version": 1, "state": "unavailable"}
+        # Two arguments name no action: the preparation's own refusal.
+        result = subprocess.run([shell, str(SCRIPT), action, "extra"], input=b"", env=constructed_env(),
+                                capture_output=True, timeout=5)
+        assert result.returncode == 2 and json.loads(result.stdout)["operation"] == "host-install-v1"
+    # The Mac launcher, under every bash here (3.2 on a Mac, 5 on Linux).
+    launcher = text.split("<<'DARWIN_OPERATION_LAUNCHER' 2>/dev/null\n", 1)[1].split("\nDARWIN_OPERATION_LAUNCHER\n", 1)[0]
+    launcher = launcher.replace('if ! darwin_existing_python', 'darwin_existing_python() { return 6; }\nif ! darwin_existing_python', 1)
+    for shell in _bashes():
+        script = tmp_path / "launcher.sh"
+        script.write_text(launcher)
+        result = subprocess.run([shell, str(script), action], input=b"", env=constructed_env(),
+                                capture_output=True, timeout=5)
+        assert result.returncode == 6, (shell, result)
+        assert json.loads(result.stdout) == {"code": "runtime_not_admitted", "operation": operation,
+                                             "schema_version": 1, "state": "unavailable"}
+
+
+def test_update_status_on_an_absent_computer(tmp_path, local_install_source):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    before = snapshot(home)
+    result, answer, children = invoke_update(tmp_path, home, "update-status", update_frame())
+    assert result.returncode == 0 and set(answer) == STATUS_KEYS and children == []
+    assert answer["state"] == "absent" and answer["operation"] == "host-update-status-v1"
+    assert all(answer[key] is None for key in STATUS_KEYS - {"schema_version", "operation", "state"})
+    for action, value in (("update", {"expected_installed_revision": "a" * 40, "target_revision": "b" * 40}),
+                          ("update-continue", {"request_id": REQUEST_ID})):
+        result, answer, children = invoke_update(tmp_path, home, action, update_frame(**value))
+        assert result.returncode == 4 and answer == {"schema_version": 1, "operation": UPDATE_OPERATIONS[action],
+                                                     "state": "refused", "code": "not_prepared"}
+        assert children == []
+    assert snapshot(home) == before
+
+
+UPDATE_OPERATIONS = {"update-status": "host-update-status-v1", "update": "host-update-v1",
+                     "update-continue": "host-update-continue-v1"}
+
+
+@pytest.mark.parametrize("setup", ["untouched", "in_use", "started"])
+def test_update_status_reads_the_recorded_and_installed_revisions(tmp_path, local_install_source, setup):
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup=setup)
+    receipt = json.loads((family / "install/preparation.json").read_text())
+    before = snapshot(home)
+    result, answer, children = invoke_update(tmp_path, home, "update-status", update_frame())
+    assert result.returncode == 0, answer
+    assert set(answer) == STATUS_KEYS and answer["state"] == "recorded"
+    assert (answer["recorded_revision"], answer["installed_revision"]) == (revision, revision)
+    assert answer["receipt_is_ancestor"] is True and answer["setup"] == setup and answer["interpreter"] == "same"
+    assert answer["binding_sha256"] == _bound({key: receipt[key] for key in (
+        "schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256")})
+    assert answer["update"] is None and snapshot(home) == before
+    # The record is the updater's own read, through the launcher's update route.
+    assert [child["args"][5:] for child in children if child["launcher"]] == [
+        ["--root", str(family / "data"), "host", "update", "status", "--json"]]
+    for compare, relation in ((revision, "same"), ("f" * 40, "other")):
+        result, answer, _children = invoke_update(tmp_path, home, "update-status",
+                                                  update_frame(compare_revision=compare))
+        assert result.returncode == 0 and answer["relation"] == relation
+    assert snapshot(home) == before
+
+
+def _commit(source, *parents, message="later"):
+    def git(*args):
+        return subprocess.run(["/usr/bin/git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                               "-C", str(source), *args], env=constructed_env(GIT_CONFIG_GLOBAL="/dev/null"),
+                              capture_output=True, check=True, timeout=15).stdout.decode().strip()
+    return git("commit-tree", "HEAD^{tree}", *[item for parent in parents for item in ("-p", parent)], "-m", message), git
+
+
+def test_update_status_reports_an_installed_revision_ahead_of_its_receipt(tmp_path, local_install_source):
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    later, git = _commit(family / "install/src", "HEAD")
+    git("update-ref", "--no-deref", "HEAD", later)
+    receipt = (family / "install/preparation.json").read_bytes()
+    result, answer, _children = invoke_update(tmp_path, home, "update-status", update_frame(compare_revision=revision))
+    assert result.returncode == 0, answer
+    assert (answer["recorded_revision"], answer["installed_revision"]) == (revision, later)
+    assert answer["receipt_is_ancestor"] is True and answer["relation"] == "ahead"
+    assert (family / "install/preparation.json").read_bytes() == receipt
+
+
+RECORDS = {
+    "start": ("start", {}, {"kind": "start", "dispatched": False, "failed": False, "maintenance": False}),
+    "first_team": ("first_team", {}, {"kind": "first_team", "dispatched": False, "failed": False}),
+    "addition": ("addition", {}, {"kind": "addition", "dispatched": False}),
+    "maintenance": ("update", {"phase": "environment", "job_dispatch": {"state": "entered", "attempt": 1}},
+                    {"kind": "update", "maintenance": True, "dispatched": True, "failed": False}),
+    "failed": ("update", {"phase": "environment", "job_dispatch": {"state": "finished", "attempt": 1},
+                          "stage_error": {"stage": "publish", "detail": "x"}},
+               {"kind": "update", "failed": True}),
+    "health_errors": ("start", {"phase": "done", "job_dispatch": {"state": "finished", "attempt": 1},
+                                "health_errors": {"b.service": "x", "a.timer": "y"}},
+                      {"kind": "start", "phase": "done", "failed": True, "health_errors": ["a.timer", "b.service"]}),
+    "done": ("update", {"phase": "done", "job_dispatch": {"state": "finished", "attempt": 1}},
+             {"kind": "update", "phase": "done", "failed": False, "health_errors": []}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RECORDS))
+def test_update_status_reports_the_record_and_its_kind(tmp_path, local_install_source, name):
+    _remote, _wheels, revision = local_install_source
+    home, _family = _prepared(tmp_path, local_install_source, setup="started")
+    kind, changes, expected = RECORDS[name]
+    record = _record(home, revision, kind, **changes)
+    result, answer, _children = invoke_update(tmp_path, home, "update-status", update_frame())
+    assert result.returncode == 0, answer
+    update = answer["update"]
+    assert set(update) == {"request_id", "kind", "phase", "target", "maintenance", "dispatched", "failed",
+                           "health_errors"}
+    assert update["request_id"] == record["request_id"] and update["target"] == revision
+    assert {key: update[key] for key in expected} == expected
+
+
+def test_update_status_after_a_system_python_update_reports_it_and_every_action_goes_on(tmp_path, local_install_source):
+    """Step 10: the system Python replaced after preparation. Linux admits it by trust, not bytes."""
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    _record_older_python(family)
+    receipt = (family / "install/preparation.json").read_bytes()
+    result, answer, _children = invoke_update(tmp_path, home, "update-status", update_frame())
+    assert result.returncode == 0 and answer["interpreter"] == "changed" and answer["state"] == "recorded", answer
+    later, _git = _commit(family / "install/src", "HEAD")
+    result, answer, children = invoke_update(tmp_path, home, "update", update_frame(
+        expected_installed_revision=revision, target_revision=later), {"apply": [0, _outcome(
+            {**_record_shape(home, revision), "target": later})]})
+    assert result.returncode == 0 and answer["state"] == "updating", answer
+    assert _launched(children, "apply") == [["apply", later]]
+    record = _record(home, revision)
+    result, answer, _children = invoke_update(tmp_path, home, "update-continue", update_frame(
+        request_id=record["request_id"]), {"continue": [0, _outcome(record)]})
+    assert result.returncode == 0 and answer["state"] == "updating", answer
+    assert (family / "install/preparation.json").read_bytes() == receipt
+    # prepare's status still answers as before.
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 0 and json.loads(status.stdout)["state"] == "recorded_in_use"
+
+
+def _record_shape(home, revision):
+    """A record of an ordinary update the stand-in reports, without writing one."""
+    record = _record(home, revision)
+    (_installation(home).data_root / "state/update.json").unlink()
+    return record
+
+
+def test_update_dispatches_and_exits(tmp_path, local_install_source):
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    later, _git = _commit(family / "install/src", "HEAD")
+    record = {**_record_shape(home, revision), "target": later}
+    receipt = (family / "install/preparation.json").read_bytes()
+    result, answer, children = invoke_update(tmp_path, home, "update", update_frame(
+        expected_installed_revision=revision, target_revision=later), {"apply": [0, _outcome(record)]})
+    assert result.returncode == 0, answer
+    assert answer == {"schema_version": 1, "operation": "host-update-v1", "state": "updating",
+                      "request_id": record["request_id"], "target": later}
+    assert _launched(children, "apply") == [["apply", later]]
+    assert [child["args"][5:9] for child in children if child["launcher"]] == [
+        ["--root", str(family / "data"), "host", "update"]] * 2
+    assert (family / "install/preparation.json").read_bytes() == receipt
+    # Asked again for the same target in flight: the same command runs again, and
+    # the answer is the record the updater reports.
+    in_flight = _record(home, revision, phase="git", job_dispatch={"state": "entered", "attempt": 1})
+    in_flight = _rewrite(home, in_flight, target=later)
+    result, answer, children = invoke_update(tmp_path, home, "update", update_frame(
+        expected_installed_revision=revision, target_revision=later),
+        {"apply": [0, _outcome(in_flight, dispatch="attached")]})
+    assert result.returncode == 0 and answer["request_id"] == in_flight["request_id"], answer
+    assert _launched(children, "apply") == [["apply", later]]
+    # An updater that answers for another target is not a dispatch of this one.
+    result, answer, _children = invoke_update(tmp_path, home, "update", update_frame(
+        expected_installed_revision=revision, target_revision=later),
+        {"apply": [0, _outcome({**in_flight, "target": "e" * 40})]})
+    assert (result.returncode, answer["code"]) == (6, "unavailable"), answer
+
+
+def _rewrite(home, record, **changes):
+    from claudlobby import git_update as updater
+    record = {**record, **changes}
+    updater._write(_installation(home).data_root / "state/update.json",
+                   json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+    return record
+
+
+@pytest.mark.parametrize("case", ["stale", "current", "not_started", "untouched", "other_target", "health_errors",
+                                  "undispatched_other", "preview_same_target", "addition", "not_forward",
+                                  "refused"])
+def test_update_refuses_by_name(tmp_path, local_install_source, case):
+    _remote, _wheels, revision = local_install_source
+    setup = {"not_started": "in_use", "untouched": "untouched"}.get(case, "started")
+    home, family = _prepared(tmp_path, local_install_source, setup=setup)
+    later, git = _commit(family / "install/src", "HEAD")
+    shown, exit_code = revision, 4
+    if case == "stale":
+        shown, expected = "d" * 40, "installed_changed"
+    elif case == "current":
+        later, expected = revision, "already_current"
+    elif case in {"not_started", "untouched"}:
+        expected = "needs_reset"
+    elif case == "other_target":
+        _rewrite(home, _record(home, revision, phase="git", job_dispatch={"state": "entered", "attempt": 1}),
+                 target="e" * 40)
+        expected = "update_in_progress"
+    elif case == "health_errors":
+        _record(home, revision, phase="done", health_errors={"a.service": "x"}); expected = "update_in_progress"
+    elif case == "undispatched_other":
+        _record(home, revision, "update"); expected = "update_in_progress"
+    elif case == "preview_same_target":
+        _record(home, revision, "first_team"); later, expected = revision, "update_in_progress"
+    elif case == "addition":
+        _record(home, revision, "addition"); expected = "update_in_progress"
+    elif case == "not_forward":
+        later, _git = _commit(family / "install/src", message="unrelated")
+        expected = "not_forward"
+    else:
+        later, expected, exit_code = "c" * 40, "unavailable", 6
+    path = family / "data/state/update.json"
+    before = path.read_bytes() if path.exists() else None
+    result, answer, children = invoke_update(tmp_path, home, "update", update_frame(
+        expected_installed_revision=shown, target_revision=later), {"apply": [6, ""]})
+    assert (result.returncode, answer) == (exit_code, {"schema_version": 1, "operation": "host-update-v1",
+                                                       "state": "refused" if exit_code == 4 else "unavailable",
+                                                       "code": expected}), answer
+    assert len(_launched(children, "apply")) == (1 if case in {"not_forward", "refused"} else 0)
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert git("rev-parse", "HEAD") == revision
+
+
+@pytest.mark.parametrize("case", ["start", "failed_update", "health_errors", "dispatched_team", "dispatched_addition"])
+def test_update_continue_serves_what_is_unfinished(tmp_path, local_install_source, case):
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    finished = {"job_dispatch": {"state": "finished", "attempt": 1}}
+    record = {"start": lambda: _record(home, revision, "start"),
+              "failed_update": lambda: _record(home, revision, phase="environment", **finished),
+              "health_errors": lambda: _record(home, revision, phase="done", health_errors={"a.service": "x"},
+                                               **finished),
+              "dispatched_team": lambda: _record(home, revision, "first_team", **finished),
+              "dispatched_addition": lambda: _record(home, revision, "addition", **finished)}[case]()
+    before = (family / "data/state/update.json").read_bytes()
+    result, answer, children = invoke_update(tmp_path, home, "update-continue",
+                                             update_frame(request_id=record["request_id"]),
+                                             {"continue": [0, _outcome(record)]})
+    assert result.returncode == 0, answer
+    assert answer == {"schema_version": 1, "operation": "host-update-continue-v1", "state": "updating",
+                      "request_id": record["request_id"], "target": revision}
+    assert _launched(children, "continue") == [["continue", "--expected-request", record["request_id"]]]
+    assert (family / "data/state/update.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ["done", "other_id", "none", "preview", "prepared_team", "addition",
+                                  "raced_team", "raced_record", "updater_failed", "old_updater"])
+def test_update_continue_refuses_by_name(tmp_path, local_install_source, case):
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    path = family / "data/state/update.json"
+    request, updater, exit_code, expected = REQUEST_ID, {"continue": [6, ""]}, 4, None
+    if case == "done":
+        _record(home, revision, phase="done"); expected = "nothing_to_continue"
+    elif case == "other_id":
+        _record(home, revision); request, expected = "00000000-0000-4000-8000-0000000000ff", "no_such_request"
+    elif case == "none":
+        expected = "no_such_request"
+    elif case == "preview":
+        _record(home, revision, "first_team"); expected = "not_continuable"
+    elif case == "prepared_team":
+        _record(home, revision, "first_team", phase="restore"); expected = "not_continuable"
+    elif case == "addition":
+        _record(home, revision, "addition"); expected = "not_continuable"
+    elif case == "raced_team":
+        # The script read a start; the updater, held to the id, found a team preparation.
+        _record(home, revision, "start"); updater, expected = {"continue": [7, ""]}, "not_continuable"
+    elif case == "raced_record":
+        # Between the script's read and the updater's, another request replaced it.
+        record = _record(home, revision, "start")
+        replaced = json.dumps({**record, "request_id": "00000000-0000-4000-8000-0000000000ee"}, sort_keys=True)
+        updater, expected = {"continue": [6, "", [str(path), replaced]]}, "no_such_request"
+    elif case == "updater_failed":
+        _record(home, revision, "start"); expected, exit_code = "unavailable", 6
+    else:
+        # An updater that does not know the flag stops at its parser.
+        _record(home, revision, "start"); updater, expected, exit_code = {"continue": [2, ""]}, "unavailable", 6
+    before = path.read_bytes() if path.exists() else None
+    result, answer, children = invoke_update(tmp_path, home, "update-continue", update_frame(request_id=request),
+                                             updater)
+    assert (result.returncode, answer) == (exit_code, {"schema_version": 1, "operation": "host-update-continue-v1",
+                                                       "state": "refused" if exit_code == 4 else "unavailable",
+                                                       "code": expected}), answer
+    continued = _launched(children, "continue")
+    assert len(continued) == (1 if case in {"raced_team", "raced_record", "updater_failed", "old_updater"} else 0)
+    if case != "raced_record":
+        assert (path.read_bytes() if path.exists() else None) == before

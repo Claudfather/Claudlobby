@@ -11,16 +11,30 @@
 # none of that later state, and prepare still refuses it rather than adopt or
 # replace anything. After unknown dispatch, inspect only; absent is an
 # observation and cannot authorize an automatic retry or prove remote shutdown.
+# The update actions (update-status, update, update-continue) read and move an
+# installation this script prepared: one canonical line naming expected_uid and
+# the action's own keys; their answers carry the action's own names.
 operation=host-install-v1
-if [ "$#" -eq 1 ] && [ "$1" = status ]; then operation=host-install-status-v1; fi
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        status) operation=host-install-status-v1 ;;
+        update-status) operation=host-update-status-v1 ;;
+        update) operation=host-update-v1 ;;
+        update-continue) operation=host-update-continue-v1 ;;
+    esac
+fi
 refuse() {
-    printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"%s","next":"%s","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"%s"}\n' "$1" "$2" "$operation" "$3"
+    case "$operation" in
+        host-install-v1|host-install-status-v1)
+            printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"%s","next":"%s","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"%s"}\n' "$1" "$2" "$operation" "$3" ;;
+        *) printf '{"code":"%s","operation":"%s","schema_version":1,"state":"%s"}\n' "$1" "$operation" "$3" ;;
+    esac
 }
 if [ "$#" -ne 1 ]; then refuse invalid_request stop refused; exit 2; fi
-case "$1" in prepare|status) ;; *) refuse invalid_request stop refused; exit 2 ;; esac
+case "$1" in prepare|status|update-status|update|update-continue) ;; *) refuse invalid_request stop refused; exit 2 ;; esac
 exec 3<<'FIXED_OPERATION_PYTHON'
 # BEGIN EMBEDDED PYTHON
-# Embedded stdlib operation. The shell selects only prepare or status.
+# Embedded stdlib operation. The shell selects prepare, status or an update action.
 import sys
 import time
 STARTED = time.monotonic()
@@ -46,8 +60,17 @@ FIELDS = {"schema", "purpose", "installation", "data_root", "remote", "ref", "in
 GIT_FLAGS = ["--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
              "-c", "credential.helper=", "-c", "core.askPass=/bin/false", "-c", "http.sslVerify=true",
              "-c", "maintenance.auto=false", "-c", "gc.auto=0"]
-BUDGETS = {"prepare": 900, "status": 15}
+BUDGETS = {"prepare": 900, "status": 15, "update-status": 15, "update": 900, "update-continue": 900}
+UPDATE_ACTIONS = {"update-status": "host-update-status-v1", "update": "host-update-v1",
+                  "update-continue": "host-update-continue-v1"}
+# Required, then optional, request keys of each update action.
+UPDATE_KEYS = {"update-status": ({"schema_version", "expected_uid"}, {"compare_revision"}),
+               "update": ({"schema_version", "expected_uid", "expected_installed_revision", "target_revision"}, set()),
+               "update-continue": ({"schema_version", "expected_uid", "request_id"}, set())}
+# The updater's exit for continue --expected-request on an undispatched team.
+NOT_CONTINUABLE_EXIT = 7
 SHA = re.compile(r"[0-9a-f]{40}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_CHILD_OUTPUT = 2 * 1024 * 1024
 # The fixed directories this product's own setup guide adds beside a completed
@@ -81,7 +104,7 @@ def unique(pairs):
     return result
 
 
-def request(fd, deadline):
+def request(fd, deadline, action=None):
     raw = bytearray()
     limit = min(deadline - 4, time.monotonic() + 5)
     import select
@@ -99,6 +122,11 @@ def request(fd, deadline):
         if not raw.endswith(b"\n") or raw.count(b"\n") != 1 or any(c < 32 or c > 126 for c in raw[:-1]):
             raise ValueError()
         value = json.loads(raw, object_pairs_hook=unique)
+        if action in UPDATE_ACTIONS:
+            if (not update_request(action, value)
+                    or raw != (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")):
+                raise ValueError()
+            return value
         if (not isinstance(value, dict) or set(value) != {"schema_version", "source_revision", "expected_uid"}
                 or type(value["schema_version"]) is not int or value["schema_version"] != 1
                 or not isinstance(value["source_revision"], str) or not SHA.fullmatch(value["source_revision"])
@@ -108,6 +136,17 @@ def request(fd, deadline):
         return value
     except (ValueError, TypeError, UnicodeError):
         raise Refusal("invalid_request", exit_code=2) from None
+
+
+def update_request(action, value):
+    required, optional = UPDATE_KEYS[action]
+    return (isinstance(value, dict) and required <= set(value) <= required | optional
+            and type(value["schema_version"]) is int and value["schema_version"] == 1
+            and type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1
+            and all(isinstance(value[key], str) and SHA.fullmatch(value[key]) for key in value
+                    if key in {"compare_revision", "expected_installed_revision", "target_revision"})
+            and ("request_id" not in value or isinstance(value["request_id"], str)
+                 and UUID.fullmatch(value["request_id"]) is not None))
 
 
 def plain_file(path, limit, mode=0o600, owner=None):
@@ -964,6 +1003,33 @@ def fixed_environment(home):
             "TMPDIR": str(home / ".local/share/claudlobby-browser/staging")}
 
 
+def update_environment(home):
+    # The update actions' own map, built fresh: the guide script's pinned
+    # selectors (owner-guide-v1.sh selectors), so a render reads this
+    # computer's own settings, and on Linux the two systemctl --user needs,
+    # as the guide's profile sets them. Never PLANE_EMIT_DISABLED: a team
+    # continued here runs its identity scan in this process.
+    family = home / ".local/share/claudlobby-browser"
+    selected = {"CLAUDLOBBY_ROOT": str(family / "data"), "CLAUDLOBBY_INSTALLATION": str(family / "install"),
+                "CLAUDLOBBY_HOST_SYSTEM_YAML": str(family / "host-policy/system.yaml"),
+                "CLAUDE_CONFIG_DIR": str(family / "provider-profile"), "TMPDIR": str(family / "staging"),
+                "LANG": "C.UTF-8", "TERM": "dumb", "PYTHONNOUSERSITE": "1"}
+    if platform.system() == "Darwin":
+        profile = admitted_darwin_profile()
+        if profile.home != home:
+            raise Refusal("account_changed")
+        managed = _darwin_runtime().environment(profile)
+        return {**{key: item for key, item in managed.items() if key != "PLANE_EMIT_DISABLED"}, **selected}
+    uid = str(os.getuid())
+    return {"PATH": "/usr/bin:/bin", "HOME": str(home), **selected,
+            "XDG_CONFIG_HOME": str(home / ".config"), "XDG_CACHE_HOME": str(home / ".cache"),
+            "XDG_RUNTIME_DIR": "/run/user/" + uid, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/" + uid + "/bus",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
+            "PIP_NO_INPUT": "1"}
+
+
 class Runner:
     """One owner of finite child groups; the canonical flock follows children."""
     def __init__(self, deadline, descriptors=()):
@@ -1530,6 +1596,240 @@ def execute(action, value, deadline):
             os.close(descriptor)
 
 
+BINDING_KEYS = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter",
+                "interpreter_sha256")
+PHASES = {"prepare", "quiesce", "git", "environment", "publish", "migrate", "commit", "restore", "done"}
+
+
+def installed(home, python, runner, env):
+    # A completed preparation as setup and the updater have left it. Its receipt
+    # is checked against itself, never against a revision a client sent; the
+    # installed revision is whatever the updater moved the checkout to. Holds
+    # the preparation lock shared for these reads only.
+    family = home / ".local/share/claudlobby-browser"
+    install, data, staging = (family / name for name in ("install", "data", "staging"))
+    current = paths(home, in_use=True)
+    if current is None or not (install / "preparation.lock").exists():
+        if current is not None and (names(install) or names(data) or names(staging) or names(family) & SETUP_FAMILY):
+            raise Refusal("existing_installation", next_step="inspect")
+        return None
+    lock = lock_open(install / "preparation.lock", False, False)
+    try:
+        paths(home, in_use=True)
+        record = install / "preparation.json"
+        if not record.exists() and not record.is_symlink():
+            raise Refusal("not_prepared")
+        value = read_json(record)
+        if not isinstance(value, dict) or not isinstance(value.get("ref"), str) or not SHA.fullmatch(value["ref"]):
+            raise Refusal("identity_changed", next_step="inspect")
+        state = receipt(record, binding(install, data, value["ref"], python))
+        if not state["complete"]:
+            raise Refusal("not_prepared")
+        touched = setup_started(family, data, staging)
+        if touched:
+            in_use_data_check(data)
+        else:
+            data_check(data, complete=True)
+        if read_json(install / "installation.json", 4096) != {"schema": 1, "data_root": str(data)}:
+            raise Refusal("identity_changed", next_step="inspect")
+        source = install / "src"
+        directory(source, private=True)
+        if not directory(source / ".git", private=True):
+            raise Refusal("source_mismatch", next_step="inspect")
+        git_available()
+        head = git(runner, env, source, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
+        if not SHA.fullmatch(head):
+            raise Refusal("source_mismatch", next_step="inspect")
+        directory(install / "bin", private=True)
+        for name in ("claudlobby", "claudlobby-update"):
+            if not plain_file(install / "bin" / name, 1024 * 1024, 0o755).startswith(("#!" + str(python) + "\n").encode()):
+                raise Refusal("identity_changed", next_step="inspect")
+        setup = ("started" if os.path.lexists(data / "state/config.json") else "in_use" if touched else "untouched")
+        return {"receipt": state, "head": head, "setup": setup, "install": install, "data": data, "source": source,
+                "binding": bound({key: state[key] for key in BINDING_KEYS}),
+                "interpreter": "same" if digest(python) == state["interpreter_sha256"] else "changed"}
+    finally:
+        os.close(lock)
+
+
+def summary(record):
+    # The update record as `host update status --json` prints it, in the names a client reads.
+    if record is None:
+        return None
+    if (not isinstance(record, dict) or not isinstance(record.get("request_id"), str)
+            or not UUID.fullmatch(record["request_id"]) or record.get("phase") not in PHASES
+            or not isinstance(record.get("target"), str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["target"])
+            or type(record.get("maintenance")) is not bool or not isinstance(record.get("health_errors") or {}, dict)):
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    scope, dispatch = record.get("initialization_scope"), record.get("job_dispatch")
+    kind = ("addition" if record.get("addition_scope") is not None else "update" if not isinstance(scope, dict)
+            else "first_team" if scope.get("manifests") else "start")
+    errors = record.get("health_errors") or {}
+    failed = bool(record.get("stage_error") or record["phase"] == "done" and errors
+                  or isinstance(dispatch, dict) and dispatch.get("state") == "finished" and record["phase"] != "done")
+    return {"request_id": record["request_id"], "kind": kind, "phase": record["phase"], "target": record["target"],
+            "maintenance": record["maintenance"], "dispatched": dispatch is not None, "failed": failed,
+            "health_errors": sorted(errors)}
+
+
+def unfinished(update):
+    # Core's own rule: not done, or done with health errors.
+    return update is not None and (update["phase"] != "done" or bool(update["health_errors"]))
+
+
+def undispatched_team(update):
+    # A Preview, a prepared first team or a prepared addition: only a Launch dispatches it.
+    return update["kind"] in {"first_team", "addition"} and not update["dispatched"]
+
+
+def update_refusal(update, head, shown, target, started):
+    if head != shown:
+        return "installed_changed"
+    if unfinished(update):
+        # The same target in flight is asked for again: apply attaches or continues.
+        return "update_in_progress" if undispatched_team(update) or update["target"] != target else None
+    if head == target:
+        return "already_current"
+    return None if started else "needs_reset"
+
+
+def continue_refusal(update, request_id):
+    if update is None or update["request_id"] != request_id:
+        return "no_such_request"
+    if not unfinished(update):
+        return "nothing_to_continue"
+    return "not_continuable" if undispatched_team(update) else None
+
+
+def launch(runner, env, python, found, *arguments, timeout=15):
+    # The stable launcher, as the guide script starts it; host update goes round maintenance.
+    return runner([python, "-I", "-S", "-B", found["install"] / "bin/claudlobby", "--root", found["data"],
+                   "host", "update", *arguments], env=env, timeout=timeout)
+
+
+def read_record(runner, env, python, found):
+    result = launch(runner, env, python, found, "status", "--json")
+    try:
+        value = json.loads(result.stdout, object_pairs_hook=unique)
+        if result.returncode or not isinstance(value, dict) or value.get("read_only") is not True:
+            raise ValueError()
+    except (ValueError, TypeError, UnicodeError):
+        raise Refusal("unavailable", "unavailable", "inspect", 6) from None
+    return summary(value.get("update"))
+
+
+def ancestor(runner, env, source, older, newer):
+    return git(runner, env, source, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
+
+
+def dispatched(result, request_id=None, target=None):
+    try:
+        update = summary(json.loads(result.stdout, object_pairs_hook=unique)["update"])
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        update = None
+    if (result.returncode or update is None or request_id is not None and update["request_id"] != request_id
+            or target is not None and update["target"] != target):
+        return None
+    return {"state": "updating", "request_id": update["request_id"], "target": update["target"]}
+
+
+def update_execute(action, value, deadline):
+    runner = Runner(deadline)
+    try:
+        home = account_profile(value["expected_uid"])
+        python = independent_python()
+        foreign = shutil.which("claudlobby", path=os.environ.get("PATH", ""))
+        family = home / ".local/share/claudlobby-browser"
+        if foreign and Path(foreign) != family / "install/bin/claudlobby":
+            raise Refusal("existing_installation")
+        reads, env = fixed_environment(home), update_environment(home)
+        found = installed(home, python, runner, reads)
+        if found is None:
+            if action != "update-status":
+                raise Refusal("not_prepared")
+            return {"state": "absent", "recorded_revision": None, "installed_revision": None,
+                    "receipt_is_ancestor": None, "binding_sha256": None, "setup": None, "interpreter": None,
+                    "update": None, **({"relation": None} if "compare_revision" in value else {})}
+        head, source = found["head"], found["source"]
+        update = read_record(runner, env, python, found)
+        if action == "update-status":
+            answer = {"state": "recorded", "recorded_revision": found["receipt"]["ref"], "installed_revision": head,
+                      "receipt_is_ancestor": ancestor(runner, reads, source, found["receipt"]["ref"], head),
+                      "binding_sha256": found["binding"], "setup": found["setup"],
+                      "interpreter": found["interpreter"], "update": update}
+            if "compare_revision" in value:
+                compare = value["compare_revision"]
+                answer["relation"] = ("same" if compare == head else "ahead"
+                                      if ancestor(runner, reads, source, compare, head) else "other")
+            return answer
+        if action == "update":
+            target = value["target_revision"]
+            code = update_refusal(update, head, value["expected_installed_revision"], target,
+                                  found["setup"] == "started")
+            if code:
+                raise Refusal(code)
+            result = launch(runner, env, python, found, "apply", target, timeout=BUDGETS[action])
+            answer = dispatched(result, target=target)
+            if answer is not None:
+                return answer
+            # The updater refuses anything but a fast-forward to a commit it fetched.
+            if (git(runner, reads, source, "cat-file", "-e", target + "^{commit}", check=False).returncode == 0
+                    and not ancestor(runner, reads, source, head, target)):
+                raise Refusal("not_forward")
+            raise Refusal("unavailable", "unavailable", "inspect", 6)
+        request_id = value["request_id"]
+        code = continue_refusal(update, request_id)
+        if code:
+            raise Refusal(code)
+        result = launch(runner, env, python, found, "continue", "--expected-request", request_id, timeout=BUDGETS[action])
+        answer = dispatched(result, request_id=request_id)
+        if answer is not None:
+            return answer
+        if result.returncode == NOT_CONTINUABLE_EXIT:
+            raise Refusal("not_continuable")
+        if continue_refusal(read_record(runner, env, python, found), request_id) == "no_such_request":
+            raise Refusal("no_such_request")
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    except Refusal:
+        raise
+    except Exception:
+        raise Refusal("unavailable", "unavailable", "inspect", 6) from None
+    finally:
+        runner.close()
+
+
+def update_main(action, fd=0):
+    # update-status reads; update and update-continue have the updater already on
+    # this computer move it, dispatch and exit. None waits for the updater,
+    # rewrites the receipt or asks anything.
+    os.umask(0o077)
+    operation = UPDATE_ACTIONS[action]
+    deadline = STARTED + BUDGETS[action]
+    exit_code = 0
+    def interrupted(_number, _frame):
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGALRM, interrupted)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic() - 4))
+    try:
+        answer = update_execute(action, request(fd, deadline, action), deadline)
+    except Refusal as error:
+        code = "unavailable" if error.state == "unavailable" and error.code == "inspection_unavailable" else error.code
+        answer, exit_code = {"state": error.state, "code": code}, error.exit_code
+    except Exception:
+        answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    output = (json.dumps({"schema_version": 1, "operation": operation, **answer}, sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(output) > 8192:
+        output, exit_code = (json.dumps({"schema_version": 1, "operation": operation, "state": "unavailable",
+                                         "code": "unavailable"}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"), 6
+    sys.stdout.buffer.write(output)
+    return exit_code
+
+
 def main(action, fd=0):
     os.umask(0o077)
     operation = "host-install-v1" if action == "prepare" else "host-install-status-v1"
@@ -1564,7 +1864,7 @@ def main(action, fd=0):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1]))
+    raise SystemExit(update_main(sys.argv[1]) if sys.argv[1] in UPDATE_ACTIONS else main(sys.argv[1]))
 # END EMBEDDED PYTHON
 FIXED_OPERATION_PYTHON
 if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
@@ -1658,9 +1958,18 @@ darwin_existing_python() {
 }
 # END DARWIN EXISTING PYTHON SHELL
 operation=host-install-v1
-[ "$1" != status ] || operation=host-install-status-v1
+case "$1" in
+    status) operation=host-install-status-v1 ;;
+    update-status) operation=host-update-status-v1 ;;
+    update) operation=host-update-v1 ;;
+    update-continue) operation=host-update-continue-v1 ;;
+esac
 if ! darwin_existing_python "$(/usr/bin/id -u)"; then
-    printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"runtime_not_admitted","next":"inspect","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"unavailable"}\n' "$operation"
+    case "$operation" in
+        host-install-v1|host-install-status-v1)
+            printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"runtime_not_admitted","next":"inspect","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"unavailable"}\n' "$operation" ;;
+        *) printf '{"code":"runtime_not_admitted","operation":"%s","schema_version":1,"state":"unavailable"}\n' "$operation" ;;
+    esac
     exit 6
 fi
 exec "$DARWIN_RUNTIME_PYTHON" -I -B /dev/fd/3 "$1" 4<&-
