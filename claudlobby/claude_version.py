@@ -68,6 +68,11 @@ def measure(paths: Paths, binary: str | None = None, *, launch_path: str | None 
         "CLAUDLOBBY_ROOT": str(paths.root),
         "FLEET_ROOT": str(paths.fleet_config_dir),
     }
+    installation = getattr(paths.package, "installation", None)
+    if installation is not None:
+        # The runtime's own context: a browser installation's units carry it,
+        # and fleet_claude_bin selects that family's pinned provider from it.
+        env["CLAUDLOBBY_INSTALLATION"] = str(installation.directory)
     if os.environ.get("CLAUDE_BIN"):
         env["CLAUDE_BIN"] = os.environ["CLAUDE_BIN"]
     argv = ["bash", str(script)] + ([] if binary is None else [binary])

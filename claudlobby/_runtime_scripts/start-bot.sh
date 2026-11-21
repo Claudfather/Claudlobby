@@ -166,6 +166,16 @@ fi
 seed_workspace_trust "$BOT_DIR" || true
 # --- end workspace trust -----------------------------------------------------
 
+# --- First-run onboarding in a profile kept for the bots ----------------------
+# A Claude profile that only a sign-in has touched (website setup gives the bots
+# one, CLAUDE_CONFIG_DIR from bot.conf) opens claude on its first-run screens: a
+# colour theme, then a notice. Headless, they wait for a key nobody presses and
+# the start times out. Neither is a consent, so mark onboarding done for the
+# version this bot launches. The operator default ~/.claude is left alone.
+# Merges two keys, never rewrites the file. Non-fatal.
+seed_account_onboarding || true
+# --- end first-run onboarding --------------------------------------------------
+
 # --- Pre-trust MCP servers in this bot dev checkouts -------------------------
 # Seed each projects/ checkout with this bot composed MCP allowlist so a `claude`
 # session rooted there boots clean instead of stalling on the MCP-server-trust

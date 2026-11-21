@@ -422,3 +422,63 @@ def test_updater_precondition_accepts_only_safe_version_bounder(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "UPDATE skipped" in result.stdout
     assert "MEASURED" not in result.stdout
+
+
+# --- a browser installation's pinned binary is website setup's to change --------------
+
+
+def test_a_browser_installations_pinned_binary_is_skipped_quietly(tmp_path):
+    """Website setup pins one hash-checked Claude at provider-bin/claude, and that
+    account has no node or npm. `npm install -g` could not update the pin even
+    with npm, and without it the in-place path fails and alerts every day. When
+    the fleet launches the pin, the job says so in its log and stops: no npm,
+    no sudo, no alert, rc 0. The recording plane stays off (the constructed
+    env's default): the skip records nothing, and the old path's alert still
+    reaches the captured Telegram stub."""
+    home = tmp_path / "home"
+    family = home / ".local/share/claudlobby-browser"
+    root = family / "data"
+    bot = root / "runtime" / "bots" / "tbot"
+    bot.mkdir(parents=True)
+    (bot / "bot.conf").write_text('export TELEGRAM_GROUP_CHAT_ID="-100123"\n')
+    (family / "install").mkdir()
+    pinned = family / "provider-bin" / "claude"
+    pinned.parent.mkdir()
+    _write_exec(pinned, healthy("2.1.325"))
+    native = _native_fixture(tmp_path, "update-claude-code.sh")
+    (home / ".local" / "bin").mkdir(parents=True)
+    _write_exec(home / ".local" / "bin" / "npm", NPM_STUB)
+    _write_exec(home / ".local" / "bin" / "sudo", SUDO_STUB)
+    cli = tmp_path / "cli" / "claudlobby"
+    cli.parent.mkdir()
+    _write_exec(cli, "#!/bin/sh\nexit 99\n")
+    (tmp_path / "empty").mkdir()
+    calls, sudo_calls = tmp_path / "npm.calls", tmp_path / "sudo.calls"
+    env = constructed_env(
+        PATH=_path_without(tmp_path / "hostbin"),
+        HOME=home,
+        NPM_CALLS=calls,
+        SUDO_CALLS=sudo_calls,
+        TG_CAPTURE=tmp_path / "tg-capture",
+        CLAUDLOBBY_ROOT=root,
+        CLAUDLOBBY_INSTALLATION=family / "install",
+        CLAUDLOBBY_CLI=cli,
+        CLAUDLOBBY_NATIVE_DIR=native,
+        CLAUDLOBBY_NATIVE_ADMITTED="1",
+        CLAUDE_UPDATE_FLEET_PATH=tmp_path / "empty",
+    )
+    r = subprocess.run(
+        ["bash", str(native / "update-claude-code.sh"), "--admitted-runtime"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    log_file = root / "state" / "claude-update.log"
+    log = log_file.read_text() if log_file.exists() else ""
+    assert r.returncode == 0, (r.stderr, log)
+    assert not calls.exists(), calls.read_text()
+    assert not sudo_calls.exists(), sudo_calls.read_text()
+    assert "UPDATE skipped" in log and str(pinned) in log, log
+    assert "UPDATE FAILED" not in log and "ALERT" not in log, log
+    assert _captured(tmp_path) == ""
