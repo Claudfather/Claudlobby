@@ -560,3 +560,19 @@ def test_a_configuration_with_no_team_owns_no_team_output(no_team):
     with pytest.raises(PlanError, match="escapes generated"):
         active_config.snapshot_from_plan(bad, installation, package.source_revision)
 
+
+def test_an_empty_roster_binds_no_identities_and_scans_nothing(no_team, monkeypatch):
+    from claudlobby.plane import registry_emit
+    root, plan, installation, package = no_team
+    render = RenderedConfiguration(plan.directory, root, package.source_revision, plan.fleets,
+                                   plan.inputs, plan.changes, plan.effects)
+    monkeypatch.setattr(registry_emit, "run_generate_scan", lambda *_args, **_kwargs: pytest.fail("scan"))
+    monkeypatch.setattr(operation_context, "bind_task_context", lambda *_args, **_kwargs: pytest.fail("bind"))
+    assert activation_identity.scan_registry(render, package=package) == []
+    assert activation_identity.identity_bindings_from_registry(render, [], package=package) is None
+    assert activation_identity.read_registry_identity_bindings(render, package=package) is None
+    with pytest.raises(activation_state.ActivationError, match="do not cover"):
+        activation_identity.identity_bindings_from_registry(render, [{"fleet": "example", "bindings": {}}],
+                                                            package=package)
+    with pytest.raises(activation_state.ActivationError, match="managed Git installation"):
+        activation_identity.identity_bindings_from_registry(render, [], package=replace(package, installation=None))
