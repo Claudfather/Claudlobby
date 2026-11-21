@@ -2684,3 +2684,58 @@ def test_todays_guide_is_unchanged_on_the_wire_at_the_profile(fixed_profile, pip
     os.write(pipes[2], wire(start(hello["session_id"], update_record=None)))
     with pytest.raises(StdioRefused):
         console.start()
+
+
+def _real_sized_plan():
+    """A plan the size a real first team renders: 76 generated files and 70 units, as measured on a
+    fresh Ubuntu computer at the first browser Preview (changes about 38 KB, units about 115 KB)."""
+    changes=[{"target":f"/home/example/claudlobby/data/runtime/bots/builder/file-{index:03}.conf",
+              "before":None,"after":{"kind":"file","mode":420,"sha256":"a"*64},"padding":"p"*330}
+             for index in range(76)]
+    unit={"bot":"builder","enroll":True,"fleet":"web-app","phase":"start","platform":"linux","scope":"bot",
+          "service":None,"sha256":"b"*64,"source":"/home/example/claudlobby/data/runtime/units/claudlobby-builder.service",
+          "mode":420,"working_directory":"/home/example/projects/first-team",
+          "environment":{f"CLAUDLOBBY_SETTING_{index:02}":"v"*40 for index in range(12)},
+          "admission":{"release":"r"*64,"paths":["/home/example/claudlobby/install"]*6}}
+    effects={"units":[dict(unit) for _ in range(70)],"restart_bots":["builder","reviewer","tester"],
+             "reload_supervision":True,"coverage":{"fleets":["web-app"]}}
+    return changes,effects
+
+
+def test_a_preview_answer_fits_what_a_browser_accepts():
+    """A real first team's plan, answered whole, is larger than any browser accepts as a setup answer,
+    so its Preview could never be shown. Answered without each unit's working data it fits with room."""
+    from claudlobby.plane.owner_setup import SETUP_ANSWER_BYTES, SHOWN_UNIT, shown_effects
+    changes,effects=_real_sized_plan()
+    size=lambda shown:len(json.dumps({"changes":changes,"effects":shown}).encode())
+    assert size(effects)>SETUP_ANSWER_BYTES
+    shown=shown_effects(effects)
+    assert size(shown)<SETUP_ANSWER_BYTES//2
+    assert all(set(unit)<=set(SHOWN_UNIT) and "environment" not in unit and "admission" not in unit
+               for unit in shown["units"])
+    assert [unit["sha256"] for unit in shown["units"]]==[unit["sha256"] for unit in effects["units"]]
+    assert {key:value for key,value in shown.items() if key!="units"}=={
+        key:value for key,value in effects.items() if key!="units"}
+    assert "environment" in effects["units"][0]  # the rendered plan itself is left as it was
+    assert shown_effects({"restart_bots":[]})=={"restart_bots":[]}
+
+
+def test_preview_and_the_context_read_answer_units_without_their_working_data(setup_authority, monkeypatch):
+    """Both answers a page can read the plan from are built by one function; the computer's own
+    rendered plan stays whole."""
+    from claudlobby import config_plan
+    from claudlobby.plane.owner_setup import SETUP_ANSWER_BYTES, SHOWN_UNIT
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    rendered=config_plan.read_rendered(engine.root,preview["config_fingerprint"])
+    changes,effects=_real_sized_plan()
+    whole=SimpleNamespace(fleets=rendered.fleets,changes=rendered.changes,effects={**rendered.effects,**effects})
+    monkeypatch.setattr(config_plan,"read_rendered",lambda root,fingerprint:whole)
+    request=binding(preview)
+    answers=[engine._plan(grant,request,preview["expires_at"],"quiesce"),engine.context(reader)["preview"]]
+    for answer in answers:
+        assert len(answer["effects"]["units"])==70
+        assert all(set(unit)<=set(SHOWN_UNIT) for unit in answer["effects"]["units"])
+        assert len(json.dumps(answer).encode())<SETUP_ANSWER_BYTES
+        assert answer["effects"]["restart_bots"]==effects["restart_bots"] and answer["dispatch"]=="prepared"
+    assert "environment" in whole.effects["units"][0]

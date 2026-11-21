@@ -24,6 +24,21 @@ from .owner_connected import OwnerConnected
 from .owner_source import source_host_uid, fresh_owner_setup
 
 PLAN_SECONDS = 600
+#: The most a browser accepts as one setup answer (the pane's own bound, ui/browser-owner-transport.js).
+SETUP_ANSWER_BYTES=131072
+#: What a unit keeps in the plan a person is shown. A unit's environment and admission are the
+#: computer's own working data: most of a plan's bytes, and nothing a person reads. With them a real
+#: first team's plan is larger than SETUP_ANSWER_BYTES, so no browser could ever show its Preview.
+#: Launch never reads this answer: the computer launches its own rendered plan, by fingerprint.
+SHOWN_UNIT=("bot","enroll","fleet","phase","platform","scope","service","sha256","source")
+
+def shown_effects(effects):
+    """A rendered plan's effects as a Preview answers them: each unit without its working data."""
+    units=effects.get("units") if isinstance(effects,dict) else None
+    if not isinstance(units,list): return effects
+    return {**effects,"units":[{key:unit[key] for key in SHOWN_UNIT if key in unit} if isinstance(unit,dict) else unit
+                               for unit in units]}
+
 GRANT_SECONDS = 86400
 
 
@@ -576,7 +591,7 @@ class SetupEngine:
         rendered=read_rendered(self.root,request["config_fingerprint"])
         return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
             "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
-            "effects":rendered.effects,"dispatch":"prepared","phase":phase}
+            "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase}
 
     def _retained_plan(self,grant,request,kept):
         """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
