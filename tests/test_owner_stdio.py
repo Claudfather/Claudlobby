@@ -300,7 +300,8 @@ def test_linux_fixed_owner_environment_lets_first_team_setup_record(fixed_profil
     # An operator who exports the switch is still refused, here and after the guide.
     monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
     assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
-    child = [sys.executable, "-c", "import os; print(os.environ.get('PLANE_EMIT_DISABLED'))"]
+    # A shell child, not sys.executable: this fixture stands a file in for the interpreter.
+    child = ["/bin/sh", "-c", 'printf %s "${PLANE_EMIT_DISABLED-None}"']
     profile = FixedOwnerProfile(paths, request)
     with profile.environment():
         assert registry.activation_scan_refusal(paths, fleet) is None
