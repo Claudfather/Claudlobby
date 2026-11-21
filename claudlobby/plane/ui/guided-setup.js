@@ -38,11 +38,15 @@ const PREVIEW_NOTES = {
     ? `To retry it there, and launch your team if that works, run: ${value.continuation}` : 'This setup cannot go on from this page.'),
   refused:'Your computer refused to start the preview, so nothing was prepared.',
   notStarted:'The preview did not start on your computer, so nothing was prepared.',
-  readRefused:'Your computer refused to show this setup. Choose Check preview to look again.',
+  readRefused:'Your computer refused this setup: its setup approval is no longer in force there, so this page cannot go on with it.',
+  readExpired:'Setup approval on your computer has ended, so this page cannot go on with this setup.',
+  readRejected:'Your computer’s answer about this setup did not match what this page expects. Choose Check preview to look again.',
   readLost:'Could not get an answer from your computer about the preview. Choose Check preview to look again.',
   lost:'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.',
   kept:'Choose Check launch status to see where setup stands on your computer.'};
 const refusal = error => [400,401,403,409].includes(error?.status);
+// An answer this page will not use; an approval past its end comes apart from a malformed one.
+const rejected = (code = 'setup_answer_rejected') => Object.assign(new Error('Setup answer not used.'), {code});
 // Presentation only: the step that shows each operation's progress, and its text.
 const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin':['signin','Starting Claude sign-in…'],
   'signin-retry':['signin','Starting a new Claude sign-in…'],
@@ -174,7 +178,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
   // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
   // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
-  // previewProblem: the last read about it was refused ('refused') or got no answer ('lost'). previewChecking: the
+  // previewProblem: the last read about it was refused ('refused'), showed the approval ended ('expired'), was not
+  // usable ('rejected') or got no answer ('lost'); only the last two are worth looking again. previewChecking: the
   // read that follows a failed Preview is queued. previewUntil/previewStopped: the bound on automatic checks.
   let previewState = null, previewWatch = false, previewTried = null, previewProblem = null, previewChecking = false;
   let previewTimer = null, previewUntil = 0, previewStopped = false;
@@ -318,6 +323,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (reading) {
         const value = await client.setupContext();
         if (disposed || ticket !== epoch || !active()) return false;
+        if (Number.isFinite(value?.expires_at) && value.expires_at <= now()) throw rejected('setup_approval_expired');
         if (!value || !(value.version === 2 && value.template === 'revenue-web-app' && typeof value.repository === 'string' && !('project_directory' in value)
             || value.version === 3 && value.template === 'local-project' && typeof value.project_directory === 'string'
               && value.project_directory.startsWith('/') && !('repository' in value)) || !uuid(value.generation)
@@ -326,17 +332,17 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             || 'release_id' in value || 'release_seal' in value || 'plan_id' in value
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
-              || value.request.source_revision !== value.source_revision)) throw new Error();
+              || value.request.source_revision !== value.source_revision)) throw rejected();
         // The computer's word on this approval's Preview: none and preparing and failed keep no request; ready and expired
         // keep one; nothing is said beside a reserved launch; a plan comes only with ready.
         const said = value.preview_state;
         if (said !== undefined && (!PREVIEW_STATES.includes(said) || value.launch_reserved
             || ['none','preparing','failed'].includes(said) === (value.request !== null))
-            || (value.preview !== undefined) !== (said === 'ready')) throw new Error();
+            || (value.preview !== undefined) !== (said === 'ready')) throw rejected();
         // A Preview the computer finished and kept: offered while its window is open, never beside a reserved launch.
         const kept = value.preview && !value.launch_reserved && value.request && value.preview.expires_at > now() ? value.preview : null;
         if (value.preview !== undefined && (!value.request || value.launch_reserved
-            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000))) throw new Error();
+            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000))) throw rejected();
         context = Object.freeze({...value}); plan = null; launchable = false; previewProblem = null;
         previewState = said ?? null;
         if (said !== undefined && said !== 'none') previewWatch = true;
@@ -432,9 +438,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (reading && !keep) { context = null; launchable = false; }
         if (reading && keep) {
           // The approval and the steps already done stay; the computer's next answer decides what is true.
-          previewProblem = refusal(error) ? 'refused' : 'lost';
+          previewProblem = refusal(error) ? 'refused' : error?.code === 'setup_approval_expired' ? 'expired'
+            : error?.code === 'setup_answer_rejected' ? 'rejected' : 'lost';
           note = error?.code === 'setup_storage_unavailable' ? error.message
-            : previewProblem === 'refused' ? PREVIEW_NOTES.readRefused : PREVIEW_NOTES.readLost;
+            : {refused:PREVIEW_NOTES.readRefused,expired:PREVIEW_NOTES.readExpired,rejected:PREVIEW_NOTES.readRejected}[previewProblem]
+              ?? PREVIEW_NOTES.readLost;
           return false;
         }
         if (operation === 'receipt') launchable = false;
@@ -609,14 +617,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
     setText(m.approveDone,context || finished ? 'Setup approved' : '');
-    setText(m.approveHint,context && !approved ? 'Setup approval expired. Check it again to continue.' : '');
+    // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
+    setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
     m.recheck.hidden = states.approve !== 'done' || launchable || finished;
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
     // Check preview: once the computer said a preview exists that this page cannot move on, and it is not checking by itself.
-    const checkShown = approved && !pending && previewWatch && !previewOpen() && !previewPolling() && !previewChecking;
+    const checkShown = approved && !pending && previewWatch && !previewOpen() && !previewPolling() && !previewChecking
+      && !['refused','expired'].includes(previewProblem); // a refusal or an ended approval cannot change by looking again
     // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
     // Nor beside Try again: the computer already said the ended attempt may be replaced, so there is nothing to check,
     // unless an earlier Try again's ID was set aside and a check may find the computer took it after all.

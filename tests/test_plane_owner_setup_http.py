@@ -269,11 +269,9 @@ def test_context_answers_during_preparation_and_still_refuses_a_foreign_record(s
         from claudlobby.plane.owner_access import VerifiedReader
         engine.store.begin_preview(VerifiedReader(OWNER,token),grant,"Improve checkout tests")
         setup_authority[-1].retained["record"]=record
-        assert engine._effects_lock.acquire(blocking=False)
-        try:
+        with engine.store.preview_lease():
             context=post(client,'context',token)
             assert context.status_code==200,context.text
             assert context.json()['preview_state']=='preparing' and context.json()['request'] is None
             setup_authority[-1].retained["record"]={**record,"target":"c"*40}
             assert post(client,'context',token).status_code==403
-        finally:engine._effects_lock.release()

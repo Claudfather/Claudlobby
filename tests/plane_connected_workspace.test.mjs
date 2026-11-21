@@ -1098,9 +1098,9 @@ test('a refused Preview and one that never arrived read differently when the com
     assert.equal(offered(panel,'Check preview'),false);assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
   }
 });
-test('a check the computer refuses and one that gets no answer read differently, keep the steps and offer Check preview',async()=>{
-  for (const [answer,note] of [[fail(refused()),'Your computer refused to show this setup. Choose Check preview to look again.'],
-      [fail(timedOut()),'Could not get an answer from your computer about the preview. Choose Check preview to look again.']]) {
+test('a check that gets no answer or an unusable one invites looking again; the steps stay',async()=>{
+  for (const [answer,note] of [[fail(timedOut()),'Could not get an answer from your computer about the preview. Choose Check preview to look again.'],
+      [()=>({preview_state:'later'}),'Your computer’s answer about this setup did not match what this page expects. Choose Check preview to look again.']]) {
     const p=previewHarness({answers:[answer,said.preparing]}),{h,panel}=p;
     await p.start();
     assert.equal(h.api.snapshot().note,note);assert.notEqual(h.api.snapshot().context,null);
@@ -1110,6 +1110,18 @@ test('a check the computer refuses and one that gets no answer read differently,
     buttonOf(panel,'Check setup approval again').click();await flush();
     assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
     assert.deepEqual(doneSteps(panel),['done','done']);h.api.dispose();
+  }
+});
+test('a refused check and an ended approval say this page cannot go on, and invite no retry',async()=>{
+  for (const [answer,note] of [[fail(refused()),'Your computer refused this setup: its setup approval is no longer in force there, so this page cannot go on with it.'],
+      [()=>({expires_at:1800000000}),'Setup approval on your computer has ended, so this page cannot go on with this setup.']]) {
+    const p=previewHarness({answers:[answer]}),{h,panel}=p;
+    await p.start();
+    assert.equal(h.api.snapshot().note,note);assert.doesNotMatch(note,/look again|try again|check it again/i);
+    assert.equal(offered(panel,'Check preview'),false);assert.equal(offered(panel,'Preview team'),false);
+    const hint=descendants(stepsOf(panel).find(n=>n.dataset.step==='approve')).find(n=>n.className==='setup-hint');
+    assert.ok(hint);assert.equal(hint.textContent,'','no hint invites checking an ended approval again');
+    assert.equal(p.live().length,0);h.api.dispose();
   }
 });
 test('a reload during preparation shows it, and a connection change says the checks stopped instead of a stuck check line',async()=>{

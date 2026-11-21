@@ -351,8 +351,11 @@ def _preparing(engine,grant,**changes):
     return {key:value for key,value in record.items() if value is not ...}
 
 
-def _begun(fixture,record):
+def _begun(fixture,record,*,lease=True):
+    """A Preview row begun as Preview begins it; lease=True also leaves the lease file a Preview creates."""
     engine,grant,reader=allow(fixture)
+    if lease:
+        with engine.store.preview_lease():pass
     engine.store.begin_preview(reader,grant,"Improve checkout tests")
     fixture[-1].retained["record"]=record(engine,grant) if callable(record) else record
     return engine,grant,reader
@@ -373,52 +376,97 @@ def test_context_says_none_before_any_preview(setup_authority):
 ])
 def test_context_answers_preparing_while_this_approvals_own_preview_runs(setup_authority,record):
     engine,grant,reader=_begun(setup_authority,record)
-    assert engine._effects_lock.acquire(blocking=False)  # Preview holds it for as long as it runs
-    try:
+    with engine.store.preview_lease():  # Preview holds it for as long as it runs
         context=engine.context(reader)
         assert context["preview_state"]=="preparing" and context["request"] is None
         assert not context["launch_reserved"] and "preview" not in context and "continuation" not in context
         # Only the read answers: Launch's own checks still refuse an unfinished preparation.
         with pytest.raises((AccessDenied,AccessUnavailable)):engine.store.retained_request(reader)
         with pytest.raises(AccessDenied):engine.store.begin_preview(reader,grant,"Another goal")
-    finally:engine._effects_lock.release()
     assert not setup_authority[-1].dispatches
 
 
 def test_context_says_failed_on_a_stage_error_and_names_the_local_command(setup_authority):
     engine,grant,reader=_begun(setup_authority,lambda engine,grant:_preparing(engine,grant,
         stage_error={"stage":"render","detail":"refused"}))
-    assert engine._effects_lock.acquire(blocking=False)
-    try:context=engine.context(reader)
-    finally:engine._effects_lock.release()
+    with engine.store.preview_lease():context=engine.context(reader)
     assert context["preview_state"]=="failed" and context["request"] is None and "preview" not in context
     assert context["continuation"].endswith("host update continue")
 
 
 def test_context_says_failed_once_no_preview_runs_here_and_offers_a_command_only_for_a_recorded_operation(setup_authority):
     engine,grant,reader=_begun(setup_authority,_preparing)
-    context=engine.context(reader)  # Nothing holds the effects lock: this listener's Preview has ended.
+    context=engine.context(reader)  # Nothing holds the preview lease: no Preview runs on this computer.
     assert context["preview_state"]=="failed" and context["continuation"].endswith("host update continue")
     setup_authority[-1].retained["record"]=None  # it ended before any update record was written
     context=engine.context(reader)
     assert context["preview_state"]=="failed" and "continuation" not in context and context["request"] is None
 
 
-def test_preparing_is_bounded_by_the_preview_stages_own_timeouts(setup_authority,monkeypatch):
+def test_an_unreadable_lease_reads_preparing_up_to_the_bound_and_a_held_one_past_it(setup_authority,monkeypatch):
     from claudlobby import git_update
     from claudlobby.plane import owner_setup
     assert owner_setup.preparing_seconds()==3*git_update._STAGE_TIMEOUT+300  # authorize, render, prepare, plus Git and file steps
     # The connected session lasts less than that bound, so the clock walks a shortened one.
     monkeypatch.setattr(owner_setup,"preparing_seconds",lambda:120)
-    engine,grant,reader=_begun(setup_authority,_preparing)
+    engine,grant,reader=_begun(setup_authority,_preparing,lease=False)  # no lease file: the signal cannot be read
+    assert engine.store.preview_running() is None
     started=setup_authority[4][0]
-    assert engine._effects_lock.acquire(blocking=False)
+    setup_authority[4][0]=started+119
+    assert engine.context(reader)["preview_state"]=="preparing","unknown is never failed inside the bound"
+    setup_authority[4][0]=started+120
+    assert engine.context(reader)["preview_state"]=="failed"
+    with engine.store.preview_lease():
+        assert engine.context(reader)["preview_state"]=="preparing","a Preview shown alive is never failed"
+
+
+def test_a_second_engine_sees_a_preview_another_engine_runs_and_then_what_its_record_says(setup_authority,monkeypatch):
+    """Each SSH call is a fresh process and engine; the listener is one engine. Both read the same lease."""
+    from claudlobby import git_update
+    engine,grant,reader=allow(setup_authority)
+    other=SetupEngine(setup_authority[1])
+    seen=[];prepared=git_update._prepare_update_locked
+    def slow(store,**kwargs):
+        setup_authority[-1].retained["record"]=_preparing(engine,grant)
+        seen.append(other.context(reader)["preview_state"])
+        return prepared(store,**kwargs)
+    monkeypatch.setattr(git_update,"_prepare_update_locked",slow)
+    engine.preview(reader,grant.generation,"Improve checkout tests")
+    assert seen==["preparing"]
+    assert other.context(reader)["preview_state"]=="ready"
+
+
+def test_a_preview_that_fails_or_whose_process_dies_reads_failed_from_another_engine(setup_authority,monkeypatch):
+    import subprocess,sys
+    from claudlobby import git_update
+    engine,grant,reader=allow(setup_authority)
+    other=SetupEngine(setup_authority[1])
+    def refused(store,**kwargs):
+        setup_authority[-1].retained["record"]=_preparing(engine,grant,stage_error={"stage":"render","detail":"refused"})
+        raise git_update.UpdateError("application stage render refused")
+    monkeypatch.setattr(git_update,"_prepare_update_locked",refused)
+    with pytest.raises(Exception):engine.preview(reader,grant.generation,"Improve checkout tests")
+    assert other.context(reader)["preview_state"]=="failed"
+    # A Preview process that dies holding the lease: the operating system releases it, and no marker stays.
+    setup_authority[-1].retained["record"]=_preparing(engine,grant)
+    holder=subprocess.Popen([sys.executable,"-c","import fcntl,os,sys,time;fd=os.open(sys.argv[1],os.O_RDWR);"
+        "fcntl.flock(fd,fcntl.LOCK_EX);print('held',flush=True);time.sleep(60)",str(other.store._lease_path)],
+        stdout=subprocess.PIPE,text=True)
     try:
-        setup_authority[4][0]=started+119
-        assert engine.context(reader)["preview_state"]=="preparing"
-        setup_authority[4][0]=started+120
-        assert engine.context(reader)["preview_state"]=="failed"
-    finally:engine._effects_lock.release()
+        assert holder.stdout.readline().strip()=="held"
+        assert other.context(reader)["preview_state"]=="preparing"
+    finally:holder.kill();holder.wait()
+    assert other.context(reader)["preview_state"]=="failed"
+
+
+def test_expiry_after_a_local_launch_reads_as_before_not_as_an_expired_preview(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    setup_authority[-1].retained["record"]["phase"]="git"  # the continue command on the computer moved it on
+    setup_authority[4][0]=preview["expires_at"]
+    context=engine.context(reader)
+    assert "preview_state" not in context and "preview" not in context
+    assert context["request"]==binding(preview) and not context["launch_reserved"] and context["continuation"]
 
 
 def test_context_says_ready_with_the_plan_and_nothing_once_launch_is_reserved(setup_authority):
@@ -436,10 +484,8 @@ def test_context_says_ready_with_the_plan_and_nothing_once_launch_is_reserved(se
     {"finalized":True},{"finalized":False,"config_fingerprint":"b"*64}],ids=str)
 def test_a_foreign_or_changed_record_mid_preparation_is_still_refused(setup_authority,changes):
     engine,grant,reader=_begun(setup_authority,lambda engine,grant:_preparing(engine,grant,**changes))
-    assert engine._effects_lock.acquire(blocking=False)
-    try:
+    with engine.store.preview_lease():
         with pytest.raises(AccessDenied):engine.context(reader)
-    finally:engine._effects_lock.release()
 
 
 def test_another_approval_never_sees_this_approvals_preview_state(setup_authority):

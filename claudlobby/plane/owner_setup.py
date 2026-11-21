@@ -4,7 +4,9 @@ The connected credential is identity evidence, not setup authority. Optional
 setup storage is initialized only by explicit local approval. No HTTP read or
 constructor repairs it. Same-UID file mutation remains outside this boundary.
 """
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import fcntl
 import json
 import hashlib
 import math
@@ -12,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 import shlex
@@ -25,9 +28,13 @@ GRANT_SECONDS = 86400
 
 
 def preparing_seconds():
-    """How long a Preview may honestly still be preparing: its three stage processes (authorize,
-    render, prepare) each get git_update's whole stage timeout, plus 300 s for the Git and file
-    steps between them. Past this the context read says it failed instead."""
+    """How long the context read keeps saying "preparing" when it cannot tell whether Preview runs.
+
+    Only that case uses it: while the preview lease shows Preview alive the answer is "preparing"
+    however long it takes, and once the lease shows it gone the answer is "failed" at once. Not a real
+    limit: three stage processes (authorize, render, prepare) each get git_update's stage timeout, plus
+    300 s for the Git and file steps between them, and a stage's deadline restarts whenever a unit
+    finishes. Past it, an unreadable lease reads as "failed"."""
     from ..git_update import _STAGE_TIMEOUT
     return 3 * _STAGE_TIMEOUT + 300
 
@@ -341,6 +348,59 @@ class OwnerSetup:
         with self.access._connection() as conn:
             return self._admit(conn,reader,expected=expected,effects=effects)[0]
 
+    @property
+    def _lease_path(self):
+        # In state/, as state/provider-signin is: the owner storage directory admits only its own files.
+        state = Path(self.access.root) / "state"
+        if state.resolve() != state.absolute():
+            raise AccessUnavailable("setup state directory is not a plain directory")
+        return state / "setup-preview.lock"
+
+    @contextmanager
+    def preview_lease(self):
+        """Held, by whichever process runs Preview, for exactly as long as it runs.
+
+        An advisory flock on a private file that is never removed: the operating system releases it when
+        the holder closes it or dies, so a crash leaves no marker that reads as running. flock belongs to
+        the open file, so a second open in the same process sees it held too. A context read's probe
+        holds it only for an instant, so a starting Preview tries for a moment before calling it busy.
+        """
+        fd = os.open(self._lease_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise AccessUnavailable("setup preview lease is not a private regular file")
+            for attempt in range(50):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                except BlockingIOError:
+                    if attempt == 49: raise AccessUnavailable() from None
+                    time.sleep(0.01)
+            yield
+        finally:
+            os.close(fd)  # Closing releases the lock.
+
+    def preview_running(self):
+        """True while a process holds the preview lease, False when none does, None when it cannot be read."""
+        try:
+            fd = os.open(self._lease_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except (OSError, AccessUnavailable):
+            return None  # Absent (no Preview took it on this root yet) or unreadable: unknown, never "gone".
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                return None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            except OSError:
+                return None
+            return False
+        finally:
+            os.close(fd)
+
     def _scope(self, grant):
         return {"directory":grant.install_directory,
                 "manifests":[str(self.access.root/"local"/grant.fleet/"fleet.yaml")]}
@@ -530,10 +590,17 @@ class SetupEngine:
         """preview_state for the context read (none, preparing, ready, expired, failed), or None beside a
         reserved launch or a kept request the computer cannot show as a plan; and the plan when ready."""
         now=self.store.access._now()
-        if state=="preparing" and (not self._effects_lock.locked() or now>=kept["created_at"]+preparing_seconds()):
-            # Preview holds the effects lock for as long as it runs: unheld, no Preview of this listener is running.
-            return "failed",None
+        if state=="preparing":
+            # The lease works across processes: each SSH call is its own process, the listener one for many.
+            running=self.store.preview_running()
+            if running is False or running is None and now>=kept["created_at"]+preparing_seconds():
+                return "failed",None
+            return state,None
         if state is not None or reserved: return state,None
+        try: record=self.store.operation(grant)
+        except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): record=None
+        # Only a prepared, unlaunched operation is a preview; one a local continue moved on is read as before.
+        if record is None or record["phase"]!="quiesce": return None,None
         if not now<kept["expires_at"]: return "expired",None
         preview=self._retained_plan(grant,request,kept)
         return ("ready",preview) if preview is not None else (None,None)
@@ -593,24 +660,29 @@ class SetupEngine:
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
         try:
-            from ..commands.setup import _fleet_setup, _template_config
-            grant=self.store.authorize(reader,effects=True)
-            if grant.generation!=generation: raise AccessDenied("setup_denied")
-            managed_setup(self.root,grant)
-            if grant.provider_signin is not None: self.signin.ready(reader,grant)
-            self._first_team(grant)
-            self._project_scope(grant)
-            _template_config(grant.template,grant.fleet,grant.repository,goal,
-                **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}),
-                **({"account_directory":grant.account_directory} if grant.account_directory is not None else {}))
-            self.store.begin_preview(reader,grant,goal)
-            output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
-                config=None,repository=grant.repository,project_directory=grant.project_directory,goal=goal,replace_config=False,plan_only=True,
-                install_directory=grant.install_directory,account_directory=grant.account_directory))
-            record=output.data["update"]
-            request,expires_at=self.store.retain(reader,grant,record)
-            return self._plan(grant,request,expires_at,record["phase"])
+            with self.store.preview_lease():
+                return self._preview(reader,generation,goal)
         finally: self._effects_lock.release()
+
+    def _preview(self,reader,generation,goal):
+        """The Preview itself, run under the effects lock and the preview lease."""
+        from ..commands.setup import _fleet_setup, _template_config
+        grant=self.store.authorize(reader,effects=True)
+        if grant.generation!=generation: raise AccessDenied("setup_denied")
+        managed_setup(self.root,grant)
+        if grant.provider_signin is not None: self.signin.ready(reader,grant)
+        self._first_team(grant)
+        self._project_scope(grant)
+        _template_config(grant.template,grant.fleet,grant.repository,goal,
+            **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}),
+            **({"account_directory":grant.account_directory} if grant.account_directory is not None else {}))
+        self.store.begin_preview(reader,grant,goal)
+        output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
+            config=None,repository=grant.repository,project_directory=grant.project_directory,goal=goal,replace_config=False,plan_only=True,
+            install_directory=grant.install_directory,account_directory=grant.account_directory))
+        record=output.data["update"]
+        request,expires_at=self.store.retain(reader,grant,record)
+        return self._plan(grant,request,expires_at,record["phase"])
 
     def launch(self,reader,generation,request_id,config_fingerprint,source_revision):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
