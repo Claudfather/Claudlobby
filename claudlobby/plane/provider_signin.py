@@ -257,6 +257,16 @@ _IGNORED_CSI = frozenset({("?", "u"), (">", "q"), (">0", "q"), ("", "c"), ("0", 
 # ("CSI > 4 ; 1-2 m", kitty push "CSI > n u" and set "CSI = n ; m u"): after one of
 # those the program would expect keys in another encoding than the bytes typed here.
 _KEYBOARD_MODES = re.compile(r"(?:>4(?:;0)?m|<[0-9]{0,2}u)\Z")
+# Mouse reporting and its encodings (X10, normal, highlight, button, any-motion; UTF-8, SGR,
+# urxvt, SGR-pixel). On its way out, after the code, Claude switches these OFF:
+# "CSI ? 1016 l" was seen on a real sign-in through the refusal detail, and a capture of the
+# program's own exit showed it followed by 1006, 1003, 1002 and 1000. Switching mouse
+# reporting off never changes what the screen shows; 9, 1001, 1005 and 1015 are the rest of
+# the same family and have not been seen. Switching any of them ON stays refused.
+_MOUSE_MODES = frozenset({"9", "1000", "1001", "1002", "1003", "1005", "1006", "1015", "1016"})
+# Line wrap back ON, "CSI ? 7 h", comes in the same exit. It is the default this screen
+# already models (see feed: a full row wraps). Line wrap OFF stays refused.
+_AUTOWRAP = frozenset({"7"})
 
 
 class TokenScreen:
@@ -281,8 +291,11 @@ class TokenScreen:
         raw, final = match.groups()
         if (raw, final) in _IGNORED_CSI:
             return
-        if raw[:1] == "?" and final in "hl" and set(raw[1:].split(";")) <= _PRIVATE_MODES:
-            return
+        if raw[:1] == "?" and final in "hl":
+            modes = set(raw[1:].split(";"))
+            if (modes <= _PRIVATE_MODES or final == "l" and modes <= _MOUSE_MODES
+                    or final == "h" and modes == _AUTOWRAP):
+                return
         if _KEYBOARD_MODES.match(raw + final):
             return
         if raw[:1] in {"?", ">", "<", "="}:

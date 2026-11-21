@@ -2167,13 +2167,52 @@ def test_provider_signin_parser_still_refuses_switching_a_keyboard_mode_on(seque
     assert str(refused.value)=='unsupported_output' and refused.value.detail==detail and re.fullmatch(_DETAIL,detail)
 
 
+@pytest.mark.parametrize('sequence',[b'\x1b[?1016l',b'\x1b[?1006l',b'\x1b[?1003l',b'\x1b[?1002l',b'\x1b[?1000l',
+    b'\x1b[?9l',b'\x1b[?1001l',b'\x1b[?1005l',b'\x1b[?1015l',b'\x1b[?1000;1006l',b'\x1b[?7h'])
+def test_provider_signin_parser_ignores_mouse_reporting_switch_offs_and_line_wrap_on(sequence):
+    # Claude's exit: mouse reporting off (1016, 1006, 1003, 1002, 1000 seen), then line wrap on.
+    from claudlobby.plane.provider_signin import TokenScreen
+    plain,switched=TokenScreen(),TokenScreen()
+    plain.feed(b'ab\r\ncd'); switched.feed(b'ab'+sequence+b'\r\n'+sequence+b'cd')
+    assert switched._rows==plain._rows and (switched._row,switched._col)==(plain._row,plain._col)
+
+
+@pytest.mark.parametrize('sequence,detail',[
+    (b'\x1b[?1000h','csi private ?1000 h'),(b'\x1b[?1006h','csi private ?1006 h'),(b'\x1b[?1016h','csi private ?1016 h'),
+    (b'\x1b[?7l','csi private ?7 l'),(b'\x1b[?7;25h','csi private ?7;25 h'),(b'\x1b[?25;1000l','csi private ?25;1000 l'),
+    (b'\x1b[?1007l','csi private ?1007 l'),(b'\x1b[?6h','csi private ?6 h'),(b'\x1b[?3l','csi private ?3 l'),
+    (b'\x1b[?47l','csi private ?47 l'),(b'\x1b[?10160l','csi private ?10160 l')])
+def test_provider_signin_parser_still_refuses_other_private_mode_switches(sequence,detail):
+    import re
+    from claudlobby.plane.provider_signin import TokenScreen, SigninRefused
+    with pytest.raises(SigninRefused) as refused:
+        TokenScreen().feed(b'ab'+sequence+b'c')
+    assert str(refused.value)=='unsupported_output' and refused.value.detail==detail and re.fullmatch(_DETAIL,detail)
+
+
+# The control sequences a real Claude sends on its way out after a sign-in, in its own order
+# (captured from the program's exit; the first two unknown ones were also named by real
+# sign-in attempts): focus reports off, key reporting off, kitty pop, theme reports off,
+# bracketed paste off, US-ASCII, mouse reporting off five ways, line wrap on, cursor shown,
+# the scroll region reset between a cursor save and restore, and an empty window title.
+_CLAUDE_EXIT=(b'\x1b[?1004l\x1b[>4m\x1b[<u\x1b[?2031l\x1b[?2004l\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l'
+              b'\x1b[?1002l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x07')
+
+
+def test_provider_signin_parser_reads_claudes_whole_exit_without_changing_the_screen():
+    from claudlobby.plane.provider_signin import TokenScreen
+    plain,exited=TokenScreen(),TokenScreen()
+    plain.feed(b'ab\r\ncd'); exited.feed(b'ab\r\ncd'+_CLAUDE_EXIT)
+    assert exited._rows==plain._rows and (exited._row,exited._col)==(plain._row,plain._col)
+
+
 def test_provider_signin_reads_the_token_after_the_keyboard_mode_switch_claude_sends(synthetic_signin):
     # What a real Claude 2.1.325 did after the code: "CSI > 4 m", then its success screen.
     engine,grant,reader,program,token,env=synthetic_signin
     success=('\x1b[2K\r\u2713 Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n'
              +token+"\r\nStore this token securely. You won't be able to see it again.\r\n"
              'Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\r\n')
-    program.with_name('synthetic-provider-reply').write_bytes(b'\x1b[>4m'+success.encode()+b'\x1b[<u\x1b[?25h')
+    program.with_name('synthetic-provider-reply').write_bytes(b'\x1b[>4m'+success.encode()+_CLAUDE_EXIT)
     attempt=str(uuid4())
     try:
         engine.signin_begin(reader,grant.generation,attempt)
