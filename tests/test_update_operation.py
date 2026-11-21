@@ -953,3 +953,39 @@ def test_an_ordinary_update_of_a_computer_started_with_no_team_reaches_done(tmp_
     assert paused == resumed == {key for key in updated["consumers"] if "@." not in key}
     assert all(case.native.states[key] == updated["consumers"][key]["intent"]["restore_native"] for key in resumed)
     assert operation.db_file(case.root).exists()
+
+
+def test_a_computer_started_with_no_team_is_admitted_and_checked_like_any_other(tmp_path, monkeypatch):
+    """Runtime admission, the operator check and update authorization each read the empty configuration."""
+    from claudlobby import context, supervision_inventory
+    from claudlobby.commands.operator_context import require_operator_context
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.runtime_admission import RuntimeIdentity, mutation_admission
+    from tests.no_team_start import Case
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    package = case.package(case.target)
+    identity = RuntimeIdentity(case.installation.cli, case.installation.native, "", case.installation, case.target)
+    monkeypatch.setattr(RuntimeIdentity, "current", classmethod(lambda cls: identity))
+    monkeypatch.setenv("CLAUDLOBBY_INSTALLATION", str(case.installation.directory))
+    with mutation_admission(case.root, identity=identity) as current:
+        assert current.snapshot["fleets"] == {} and current.revision == case.target
+    # The operator check finds the started computer's own units and asks each about its caller.
+    monkeypatch.setattr(context, "resolve_paths", lambda root=None, **_: SimpleNamespace(package=package))
+    installed = sorted(path for path in case.directory.iterdir() if path.is_file())
+    monkeypatch.setattr(supervision_inventory, "collect_enrollment", lambda *_args, **_kwargs: SimpleNamespace(
+        require_complete=lambda: SimpleNamespace(units=tuple(
+            SimpleNamespace(target=path.name, installed=(SimpleNamespace(path=path),)) for path in installed))))
+    before = len(case.native.calls)
+    require_operator_context(case.root)
+    asked = [args[1] for name, args in case.native.calls[before:] if name == "svc_activation_assert_external"]
+    assert asked == [path.name for path in installed if "@." not in path.name] and asked
+    monkeypatch.setenv("BOT_ID", "worker")
+    with pytest.raises(CommandFailure, match="operator shell"):
+        require_operator_context(case.root)
+    monkeypatch.delenv("BOT_ID")
+    # Update authorization (update_entry.main) is that operator check, then the
+    # committed configuration's native placement.
+    from claudlobby.active_config import read_current_config
+    snapshot = read_current_config(case.root, installation=case.installation, revision=package.source_revision)
+    assert snapshot["supervision"] == {"manager": "Linux", "domain": "", "directory": str(case.directory)}
