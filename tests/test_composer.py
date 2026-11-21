@@ -3418,20 +3418,27 @@ class TestComposeBotConfObservability:
         return compose_bot_conf(bot, fleet, paths)
 
     def test_default_observability_values(self, tmp_path):
-        # After system defaults merge, fields are populated.
-        # Simulate by passing explicit values matching system.yaml defaults.
-        from claudlobby.config import ObservabilityConfig
-
-        obs = ObservabilityConfig(
-            pulse_interval=300,
-            activity_stuck_threshold=1800,
-            dispatch_deadline=1800,
-        )
-        conf = self._compose(tmp_path, observability=obs)
+        """A fleet.yaml with no `observability:` stanza composes
+        `claudlobby/system.yaml`'s observability tier into bot.conf."""
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "fleet.yaml").write_text(dedent("""\
+            fleet:
+              name: test-fleet
+              manager: worker
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, _make_paths(root))
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
         assert "OBSERVABILITY_REAP_DAYS" not in conf          # the knob is retired (F18 closure): never composed
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
-        assert "export OBSERVABILITY_DISPATCH_DEADLINE=1800" in conf
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
 
     def test_custom_observability_values(self, tmp_path):
         from claudlobby.config import ObservabilityConfig
