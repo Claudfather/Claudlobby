@@ -213,8 +213,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         row.setup = createGuidedSetup({client:row.client,setTimeout,clearTimeout,
           visible:() => !mount || mount.document.visibilityState !== 'hidden',
           storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
+        // On a bridged page the panel stays, and nothing is read for the parts, while it follows a launch this page sent.
         row.parts = createWorkspaceParts({client:row.client, key:row.key, names:partLabels, onChange:changed,
-          name:() => row.label || computerLabel(reference)});
+          hold:() => browserTransport && row.setup.following(), name:() => row.label || computerLabel(reference)});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
           onSourceChange:() => { row.actionRecoveryPending = {}; invoke(mount?.onActionSourceChange,row.key); }});
@@ -482,10 +483,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // A started computer shows its parts: the whole view with no team, a strip above its teams with one. Only a ready
       // session reads them, so a computer in first-team setup keeps today's panel. In the browser carrier the bridged
       // computer's panel is the view whenever the parts read has no answer or says not started, so Connect is its
-      // first step; and it stays while it follows a launch this browser asked for (today's guide).
+      // first step; and it stays while it follows a launch this page sent or followed (today's guide and its ending).
       const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
       const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
-        && !(browserTransport && setup.snapshot().pending);
+        && !(browserTransport && setup.following());
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead
@@ -578,8 +579,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         mount.setupHost.hidden = !showing;
         // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
         // A started computer with no team has no teams to sit above, so its parts alone count as nothing readable.
-        if (showing) rail.dataset.setupFocus = clients.some(({client,reference,parts},index) => shown(reference) && client.snapshot().state === 'ready'
-          && !(controls.rows[index]?.partsShown && parts.teams() === 0)) ? 'shared' : 'only';
+        // A computer whose parts show counts by its teams, so a renewal of its session does not move the layout.
+        if (showing) rail.dataset.setupFocus = clients.some(({client,reference,parts},index) => shown(reference)
+          && (controls.rows[index]?.partsShown ? parts.teams() !== 0 : client.snapshot().state === 'ready')) ? 'shared' : 'only';
         else delete rail.dataset.setupFocus;
       }
     }

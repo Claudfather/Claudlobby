@@ -117,6 +117,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // standalone: the panel is the whole view (no computer card or workspace beside it).
   // launchedFor: the binding a clean done receipt was for; a rebound request is not launched.
   let onConnect=null, connectView=null, connectFocus=null, standalone=false, launchedFor=null;
+  // followed: in this page's lifetime the panel sent a Launch, sent a launch status check or followed a hand-off.
+  // Never saved: a request kept in storage from an earlier page is not followed until this page acts on it.
+  let followed=false;
   const launched = () => !!launchedFor && !!pending && same(launchedFor,pending);
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
   // this attempt's code was taken; and whether the computer refused (not merely missed) a code or the attempt.
@@ -366,7 +369,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           : shown === 'failed' ? PREVIEW_NOTES.failed(value)
           : pending ? value.request ? PREVIEW_NOTES.kept : `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
           : previewTried ? previewTried === 'refused' ? PREVIEW_NOTES.refused : PREVIEW_NOTES.notStarted : '';
-        if (value.managed_owner && value.launch_reserved) { managedHandoff = true; handoffUntil = now()+600; handoffReads=0; }
+        if (value.managed_owner && value.launch_reserved) { managedHandoff = true; followed = true; handoffUntil = now()+600; handoffReads=0; }
       } else if (operation.startsWith('signin-')) {
         if (!context?.provider_signin || pending || signinBlocked) return false;
         const action=operation.slice(7);
@@ -417,12 +420,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (!context || !plan || !pending || !launchable || legacyBlocked() || !signinReady() || !same(plan,pending)
             || planGoal !== goal || plan.expires_at <= now() || context.expires_at <= now()) return false;
         save(pending); launchable = false; // Retain the preview's original identity before the one launch POST.
-        managedHandoff = context.managed_owner === true;
+        managedHandoff = context.managed_owner === true; followed = true;
         const result = await client.setupLaunch(pending);
         if (disposed || ticket !== epoch || !active()) return false;
         receipt(result);
       } else if (operation === 'receipt') {
         if (!pending) return false;
+        followed = true;
         const original = pending, result = await client.setupReceipt(original);
         if (disposed || ticket !== epoch || original !== pending || !active()) return false;
         receipt(result);
@@ -812,6 +816,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal,previewState}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
     resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); schedulePreviewPoll(); },
+    // Whether this page sent a Launch or follows one (see followed); the entry keeps the panel while it does.
+    following:() => followed,
     // Presentation only: how the entry's Connect looks now. It never connects or sends anything itself.
     showConnect(value) {
       const next = value && typeof value === 'object' ? {operation:value.operation === 'check' ? 'check' : 'connect',

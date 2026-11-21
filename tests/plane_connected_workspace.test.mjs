@@ -869,7 +869,8 @@ test('setup-only computer stays visible without blocking the other admitted dash
   assert.ok(!h.ui.get('owner-session').children[2].children.at(-1).open,'another computer is not expanded');
   assert.equal(h.ui.document.activeElement,summary);
   // The parts read a ready computer gets is neither an approval check nor a launch.
-  const setupCalls=()=>h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')&&!c.url.endsWith('/setup/state'));
+  // Only computer B, which is ready, is sent it.
+  const setupCalls=()=>h.calls.filter(c=>c.url.includes('/api/owner/connected/setup/')&&c.url!==refs[1].endpoint_origin+'/api/owner/connected/setup/state');
   assert.equal(setupCalls().length,0,'revealing guidance never checks approval or launches setup');
   assert.equal(h.api.snapshot().computers[0].state,'setup_only');
   const fleets=await h.api.jget('/api/fleets');
@@ -2476,7 +2477,8 @@ function framedPage(ui) {
     getBoundingClientRect(){return {height:this.height};}};
   const posts=[],observers=[];
   class ResizeObserver {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
-  const view={parent:{postMessage:(...args)=>posts.push(args)},ResizeObserver};
+  const listeners=new Map(),view={parent:{postMessage:(...args)=>posts.push(args)},ResizeObserver,listeners,
+    addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)};
   ui.document.documentElement=page;ui.document.defaultView=view;
   return {page,view,posts,observers,
     sizes:()=>posts.filter(([message])=>message.type==='claudfather.workspace.size'),
@@ -2919,10 +2921,10 @@ async function partsWorkspace(t,{answer=partsAnswer(),document={},view}={}) {
   const rail=h.ui.get('rail-channel'),host=rail.children[0];
   return {h,workspace,rail,host,parts:()=>partsOf(host)};
 }
-test('the parts view says only the drafted sentences awaiting approval (slice A, with B17 and C7)',()=>{
-  assert.deepEqual({...PART_TEXT,teams:[1,2].map(PART_TEXT.teams)},{linked:'Linked',provider:'Claude',notLinked:'Not linked',bots:'Bots',
+test('the parts view says only the drafted sentences awaiting approval (slice A, with B15 and B17)',()=>{
+  assert.deepEqual({...PART_TEXT},{linked:'Linked',provider:'Claude',notLinked:'Not linked',bots:'Bots',
     none:'None yet',create:'Create a bot',createReason:'Creating bots here is coming. There is nothing to do yet.',
-    asleep:'Asleep until Claude is linked',later:'Coming soon',teams:['1 team running','2 teams running']});
+    asleep:'Asleep until Claude is linked',later:'Coming soon'});
 });
 test('a started computer with no team shows its parts in order, with no working control',async t=>{
   const w=await partsWorkspace(t),parts=w.parts();
@@ -2959,7 +2961,9 @@ test('a computer with a team keeps its parts as a strip above the dashboard',asy
   const w=await partsWorkspace(t,{answer:partsAnswer({teams:1})}),parts=w.parts();
   assert.equal(w.host.hidden,false);assert.equal(w.rail.dataset.setupFocus,'shared','its teams stay readable below');
   assert.equal(w.host.children[0],parts,'the parts lead the setup host');
-  assert.deepEqual(partRows(parts)[2],['bots','teams','Bots','1 team running']);
+  // The count is the saved configuration's (also true mid-Launch, after a failed Launch and after a stop): no status sentence.
+  assert.deepEqual(partRows(parts)[2],['bots','teams','Bots','']);assert.equal(parts.dataset.teams,'1');
+  assert.ok(descendants(parts).every(n=>!/running/i.test(n.textContent)),'nothing says a team is running');
   assert.equal(descendants(parts).some(n=>n.tagName==='BUTTON'&&visible(n)),false,'Create a bot shows only with no team');
   const fleets=await w.workspace.jget('/api/fleets');assert.equal(fleets.data.fleets.length,1,'the dashboard still reads');
 });
@@ -2995,16 +2999,53 @@ test('on a bridged page a started computer shows its parts instead of the five-s
   await l.workspace.act(0,'logout');await flush();
   assert.equal(l.panel(),panel);assert.equal(parts.hidden,true);
 });
-test('on a bridged page the five-step panel stays while it follows a launch this browser asked for',async t=>{
-  landing(t); // stubs this test's localStorage, where the guide keeps the setup it submitted
-  const a=landingRefs[0].endpoint_origin,saved={version:2,pending:settingUp,conflicts:[],legacy:[]};
-  globalThis.localStorage.setItem(`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`,JSON.stringify(saved));
-  const other=landing(t);await other.workspace.checkAccount();await flush();
-  other.h.overrides.set(a+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer({teams:1})));
-  descendants(stepsOf(other.panel())[0]).find(n=>n.tagName==='BUTTON').click();await flush();
-  assert.equal(stateCalls(other.h).length,1);assert.ok(other.panel(),'today\'s guide keeps its panel through its own launch');
-  assert.equal(partsOf(other.host)?.hidden??true,true);
+// A bridged page that sends one Launch from its own panel; launch: the computer's answer to it.
+async function bridgedLaunch(t,launch) {
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  const a=landingRefs[0].endpoint_origin,setup=a+'/api/owner/connected/setup/';
+  const binding={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+  l.h.overrides.set(a+'/api/owner/connected/issue',setupOnlyIssue);
+  l.h.overrides.set(setup+'context',()=>reply(200,{...landingContext,provider_signin:false}));
+  l.h.overrides.set(setup+'preview',()=>reply(200,{...binding,version:2,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},
+    dispatch:'prepared',phase:'quiesce',expires_at:1800000600}));
+  l.h.overrides.set(setup+'launch',()=>reply(200,{...binding,version:2,...launch}));
+  // After the Launch the computer's session comes back ready, as the hand-off's status check finds it; its parts read
+  // would say started with the saved configuration's team.
+  l.h.overrides.set(a+'/api/owner/connected/status',()=>reply(200,{version:1,state:'ready',expires_in:900,
+    read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+  l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({teams:1})));
+  const panel=l.panel(),button=text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+  descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  const area=descendants(panel).find(n=>n.tagName==='TEXTAREA');area.value='Improve checkout tests';area.handlers.input();
+  button('Preview team').click();await flush();button('Launch team').click();await flush();
+  assert.equal(l.h.calls.filter(c=>c.url===setup+'launch').length,1,'one Launch');
+  await l.workspace.act(0,'check');await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  return {l,panel,note:()=>descendants(panel).find(n=>n.className==='setup-note').textContent};
+}
+test('on a bridged page the five-step panel stays to its "Team launched" ending through a Launch this page sent, with no parts read',async t=>{
+  const {l,panel,note}=await bridgedLaunch(t,{state:'done',launch_reserved:true,config_committed:true,health_errors:{}});
+  assert.equal(stateCalls(l.h).length,0,'nothing reads the parts while the page follows its own Launch');
+  assert.equal(l.panel(),panel);assert.equal(partsOf(l.host),undefined);
+  assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the guide keeps its ending');
+  assert.equal(note(),'Team launched. Your team is running on this computer.');
+  // A later page has the same request in this browser's storage and follows nothing: it shows the parts.
+  const later=landing(t);await later.workspace.checkAccount();await flush();
+  later.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer({teams:1})));
+  descendants(stepsOf(later.panel())[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  assert.equal(stateCalls(later.h).length,1);
+  assert.equal(partsOf(later.host)?.hidden,false,'a request kept from an earlier page does not hold the panel');assert.equal(later.panel(),undefined);
 });
+for(const [name,launch,said] of [['received',{state:'quiesce',launch_reserved:true,config_committed:true,health_errors:{}},/^Launch received\./],
+  ['needing attention',{state:'unknown',launch_reserved:true,config_committed:true,health_errors:{}},/^The launch needs attention/]])
+  test(`on a bridged page with a Launch ${name} the panel keeps its own words and no parts read is sent, even when the window regains focus`,async t=>{
+    const {l,panel,note}=await bridgedLaunch(t,launch);
+    assert.match(note(),said);
+    l.frame.view.listeners.get('focus')();await flush();
+    assert.equal(stateCalls(l.h).length,0);assert.equal(l.panel(),panel);assert.equal(partsOf(l.host),undefined);
+    assert.ok(!l.shownText().some(text=>/running/i.test(text)),'nothing says a team is running');
+  });
 for(const [name,answer] of [['a refusal',()=>reply(403,{state:'denied'})],['no such operation (an older computer)',()=>reply(404,{state:'denied'})],
   ['a lost answer',()=>{throw new Error('lost');}],['an answer this view cannot use',()=>reply(200,partsAnswer({provider:{state:'unknown'}}))]])
   test(`on a bridged page ${name} to the parts read shows exactly what the page shows today`,async t=>{
@@ -3020,23 +3061,65 @@ for(const [name,answer] of [['a refusal',()=>reply(403,{state:'denied'})],['no s
     assert.equal(stateCalls(now.l.h).length,1,'one read, never retried');
   });
 test('the embedding page names parts only with a well-formed part_names; anything else is dropped whole',async t=>{
-  const named=await partsWorkspace(t,{document:{part_names:{computer:'Office Mac',helper:'Helper'}}});
+  const named=await partsWorkspace(t,{document:{part_names:{helper:'Claudfather',bots:'Team bots'}}});
   assert.equal(named.workspace.snapshot().phase,'ready');
-  assert.deepEqual(partRows(named.parts()),[['computer','linked','Office Mac','Linked'],['provider','not_linked','Claude','Not linked'],
-    ['bots','none','Bots','None yet'],['helper','asleep','Helper','Asleep until Claude is linked']]);
+  assert.deepEqual(partRows(named.parts()),[['computer','linked','a.example.test','Linked'],['provider','not_linked','Claude','Not linked'],
+    ['bots','none','Team bots','None yet'],['helper','asleep','Claudfather','Asleep until Claude is linked']]);
   const linked=await partsWorkspace(t,{document:{part_names:{helper:'Helper'}},answer:partsAnswer({provider:{state:'linked'},helper:{state:'later'}})});
   assert.deepEqual(partRows(linked.parts()).at(-1),['helper','later','Helper','Coming soon']);
-  for(const bad of [{helper:''},{helper:'x'.repeat(41)},{helper:' Helper'},{helper:'Hélper'},{helper:'Help\ner'},{assistant:'Helper'},
-    {helper:'Helper',computer:7},['Helper'],'Helper',null]) {
+  // A computer keeps its own saved name, so a computer key drops the field; and a name that could read as a status is refused.
+  for(const bad of [{computer:'Office Mac'},{computer:'Office Mac',helper:'Helper'},{helper:'Claude - Linked'},{helper:'Claude: Linked'},
+    {provider:'Claude · Linked'},{bots:'Bots (None yet)'},{helper:'Helper.'},{helper:'Set--up'},{helper:'Set up '},{helper:'Set  up'},
+    {helper:''},{helper:'x'.repeat(41)},{helper:' Helper'},{helper:'Hélper'},{helper:'Help\ner'},{assistant:'Helper'},
+    {helper:'Helper',bots:7},['Helper'],'Helper',null]) {
     assert.equal(partNames(bad),null,JSON.stringify(bad));
     const w=await partsWorkspace(t,{document:{part_names:bad}});
     assert.equal(w.workspace.snapshot().phase,'ready','the document is still admitted');
     assert.deepEqual(partRows(w.parts()).map(row=>row[2]),['a.example.test','Claude','Bots'],'no name from a malformed field, and no helper row');
   }
-  assert.deepEqual(partNames({helper:'x'.repeat(40),bots:'My bots'}),{helper:'x'.repeat(40),bots:'My bots'});
+  assert.deepEqual(partNames({helper:'x'.repeat(40),bots:'My bots',provider:'Claude 2'}),{helper:'x'.repeat(40),bots:'My bots',provider:'Claude 2'});
+  assert.deepEqual(partNames({helper:'Set-up helper'}),{helper:'Set-up helper'},'a hyphen joins two words');
+  // With two computers, each shows its own saved name.
+  const h=harness();h.api.dispose();
+  const two=createConnectedWorkspace({...h.dependencies,documentContext:{...h.doc,part_names:{helper:'Claudfather'}}});t.after(()=>two.dispose());
+  for(const ref of refs)h.overrides.set(ref.endpoint_origin+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer()));
+  two.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});
+  await two.checkAccount();await two.act(0,'connect');await two.act(1,'connect');await flush();
+  const host=h.ui.get('rail-channel').children[0],roots=host.children.filter(n=>n.className==='workspace-parts');
+  assert.deepEqual(roots.map(root=>partRows(root)[0][2]).sort(),['a.example.test','b.example.test']);
   const other=harness({count:1});other.api.dispose();
   const refused=createConnectedWorkspace({...other.dependencies,documentContext:{...other.doc,names:{helper:'Helper'}}});t.after(()=>refused.dispose());
   assert.equal(refused.snapshot().phase,'denied','any other extra key still refuses the document');
+});
+test('renewing the session keeps the parts shown and keyboard focus in them, and sends no parts read',async t=>{
+  const w=await partsWorkspace(t,{answer:partsAnswer({teams:1})}),parts=w.parts(),a=refs[0].endpoint_origin,renew=a+'/api/owner/connected/renew';
+  const gate=deferred();
+  w.h.overrides.set(renew,init=>gate.promise.then(()=>{w.h.overrides.delete(renew);return w.h.dependencies.fetch(renew,init);}));
+  parts.focus();const layout=w.rail.dataset.setupFocus;
+  const renewing=w.workspace.act(0,'renew');await flush();
+  assert.equal(w.workspace.snapshot().computers[0].state,'renewing');
+  assert.equal(parts.hidden,false,'the parts stay while the session renews');assert.equal(w.rail.dataset.setupFocus,layout);
+  gate.resolve();assert.equal(await renewing,true);await flush();
+  assert.equal(w.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(w.parts(),parts);assert.equal(parts.hidden,false);assert.equal(w.rail.dataset.setupFocus,layout,'the layout never moved');
+  assert.equal(w.h.ui.document.activeElement,parts,'keyboard focus stays in the parts');
+  assert.equal(stateCalls(w.h).length,1,'a renewal sends no parts read');
+  assert.equal(w.h.calls.filter(c=>c.url===renew).length,2,'one renewal (the gate re-enters the harness once)');
+});
+test('a connection change while a parts read is in flight is followed by one read for the new connection',async t=>{
+  for(const change of ['renew','reconnect']){
+    const gate=deferred();let answered=0;
+    const w=await partsWorkspace(t,{answer:()=>++answered===1?gate.promise.then(()=>reply(200,partsAnswer())):reply(200,partsAnswer())});
+    assert.equal(stateCalls(w.h).length,1);assert.equal(w.parts(),undefined,'the first read has not answered');
+    if(change==='renew')assert.equal(await w.workspace.act(0,'renew'),true,change);
+    else{await w.workspace.act(0,'logout');assert.equal(await w.workspace.act(0,'connect'),true,change);}
+    await flush();
+    assert.equal(stateCalls(w.h).length,1,`${change}: the new connection waits for the read in flight`);
+    gate.resolve();await flush();
+    assert.equal(stateCalls(w.h).length,2,`${change}: one more read, for the new connection`);
+    assert.equal(w.parts()?.hidden,false,`${change}: its answer is shown`);
+    w.workspace.dispose();
+  }
 });
 test('the browser carrier carries the parts read and keeps part_names out of what it tells the parent',async t=>{
   const h=await bridgeHarness(t,{document:{...browserDocument(),part_names:{helper:'Helper'}}});

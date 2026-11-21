@@ -685,21 +685,21 @@ class SetupEngine:
         configuration lists a team; ``teams`` counts the committed configuration's teams. ``provider`` is
         ``linked`` exactly when a Claude sign-in line is saved on this computer, by the check every sign-in
         attempt already makes (the line's value is never read out); no approval and no attempt's record
-        decides it. Later versions add keys inside a part; ``version`` stays 1 while nothing is removed.
+        decides it, and an empty value or an unreadable file is not linked (``environment_linked``). ``teams`` is a
+        count, not a running state: it is also true mid-Launch, after a failed Launch and after a stop. Later
+        versions add keys inside a part; ``version`` stays 1 while nothing is removed.
         """
         from ..active_config import read_current_config
         from ..config_plan import PlanError
         from .owner_source import start_state
-        from .provider_signin import SigninRefused, environment_ready
+        from .provider_signin import SigninRefused, environment_linked
         self.store.session(reader)
         installation=managed_setup(self.root).installation
         try: teams=len(read_current_config(self.root,installation=installation)["fleets"])
         except (PlanError,OSError,ValueError,KeyError,TypeError): teams=0
         started=start_state(self.root,installation)=="started" or teams>0
-        try:
-            environment_ready(self.root); linked=False
-        except SigninRefused as exc: linked=exc.code=="credential_already_present"
-        except OSError: linked=False  # no environment file: nothing saved
+        try: linked=environment_linked(self.root)
+        except (SigninRefused,OSError): linked=False  # no environment file, or one the sign-in check refuses
         return {"version":1,"computer":"started" if started else "not_started",
             "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
             "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}

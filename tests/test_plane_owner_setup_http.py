@@ -291,13 +291,14 @@ def test_state_answers_a_session_with_no_approval_and_changes_nothing(setup_http
         assert not (access.root/'local').exists() and not (access.root/'state/setup-preview.lock').exists()
 
 
-@pytest.mark.parametrize('computer',['fresh','started','linked','launched'])
+@pytest.mark.parametrize('computer',['fresh','starting','started','linked','launched'])
 def test_state_answers_for_each_kind_of_computer(setup_http,monkeypatch,computer):
     from claudlobby import active_config
     from claudlobby.plane import owner_source
     app,access,_,_,_,_=setup_http
     token='sk-ant-oat01-'+'x'*80
     if computer in ('started','linked'):monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    if computer=='starting':monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'starting')  # an unfinished start
     if computer=='launched':
         monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'other')
         monkeypatch.setattr(active_config,'read_current_config',lambda root,*,installation,revision=None:{"fleets":["shop"]})
@@ -309,9 +310,71 @@ def test_state_answers_for_each_kind_of_computer(setup_http,monkeypatch,computer
     assert answer.status_code==200,answer.text
     assert token not in answer.text and 'ROUTE' not in answer.text
     linked=computer=='linked'
-    assert answer.json()=={"version":1,"computer":"not_started" if computer=='fresh' else "started",
+    assert answer.json()=={"version":1,"computer":"not_started" if computer in ('fresh','starting') else "started",
         "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
         "teams":1 if computer=='launched' else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
+
+
+TOKEN_LINE="export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-"+"x"*80+"'\n"
+@pytest.mark.parametrize('case,text,mode,linked',[
+    ('saved',TOKEN_LINE,0o600,True),
+    ('empty bare',"CLAUDE_CODE_OAUTH_TOKEN=\n",0o600,False),
+    ('empty single quotes',"export CLAUDE_CODE_OAUTH_TOKEN=''\n",0o600,False),
+    ('empty double quotes','CLAUDE_CODE_OAUTH_TOKEN=""\n',0o600,False),
+    ('a malformed earlier line',"export ROUTE=two words\n"+TOKEN_LINE,0o600,False),
+    ('a mode other than 0600',TOKEN_LINE,0o640,False),
+    ('a file over 64 KiB',"# "+"x"*65536+"\n"+TOKEN_LINE,0o600,False),
+    ('an API key',"export ANTHROPIC_API_KEY='sk-ant-api03-"+"y"*80+"'\n",0o600,False),
+    ('no environment file',None,None,False)])
+def test_state_linked_only_for_a_saved_sign_in_line_with_a_value(setup_http,monkeypatch,case,text,mode,linked):
+    from claudlobby.plane import owner_source, provider_signin
+    app,access,_,_,_,_=setup_http
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    env=access.root/'.env'
+    if text is None: env.unlink(missing_ok=True)
+    else: env.write_text(text); env.chmod(mode)
+    # Claude's own login files are not the sign-in line: a computer with only those reads as not linked.
+    (access.root/'.claude').mkdir(exist_ok=True); (access.root/'.claude'/'.credentials.json').write_text('{"claudeAiOauth":{}}')
+    before=None if text is None else env.read_bytes()
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,(case,answer.text)
+    assert answer.json()['provider']=={"state":"linked" if linked else "not_linked"},case
+    assert answer.json()['helper']=={"state":"later" if linked else "asleep"},case
+    assert 'sk-ant' not in answer.text and (text is None or env.read_bytes()==before)
+    # The sign-in check itself is unchanged: any saved line, even an empty one, still refuses a new attempt.
+    if case in ('saved','empty bare','empty single quotes','empty double quotes','a malformed earlier line'):
+        with pytest.raises(provider_signin.SigninRefused) as refused: provider_signin.environment_ready(access.root)
+        assert refused.value.code==("environment_format" if case=='a malformed earlier line' else "credential_already_present")
+    if case=='an API key': provider_signin.environment_ready(access.root)
+
+
+@pytest.mark.parametrize('wrong',['origin','binding','computer'])
+def test_state_refuses_a_wrong_origin_binding_or_computer(setup_http,monkeypatch,wrong):
+    from claudlobby.plane import owner_setup
+    app,access,_,_,_,_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        if wrong=='binding':
+            real=app.connected_setup.workspace.active_binding
+            monkeypatch.setattr(app.connected_setup.workspace,'active_binding',
+                lambda principal:SimpleNamespace(issuer=real(principal).issuer,operational_origin='https://other.example.test'))
+        if wrong=='computer': monkeypatch.setattr(owner_setup,'source_host_uid',lambda root:'host_'+'f'*32)
+        answer=post(client,'state',token,extra={'Origin':HOST} if wrong=='origin' else None)
+    assert answer.status_code==403,answer.text
+    assert 'linked' not in answer.text and 'teams' not in answer.text
+
+
+def test_state_refuses_a_computer_with_no_installation(setup_http,monkeypatch):
+    from claudlobby import resources
+    app,*_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        package=resources.get_resources()
+        monkeypatch.setattr(resources,'get_resources',lambda:SimpleNamespace(installation=None,source_revision=package.source_revision))
+        answer=post(client,'state',token)
+    assert answer.status_code==403,answer.text
+    assert 'linked' not in answer.text and 'teams' not in answer.text
 
 
 def test_state_needs_a_live_session_and_takes_no_input(setup_http):

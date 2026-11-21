@@ -308,16 +308,27 @@ answers
 `{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
 
 `computer` is `started` for a computer started with no team (`start_state`) or
-one whose committed configuration lists a team; `teams` counts those teams.
-`provider` is `linked` exactly when a Claude sign-in line is saved on this
-computer, by the check every sign-in attempt already makes; the line's value is
-never read out, and no approval and no attempt's record decides it. `helper` is
+one whose committed configuration lists a team; `teams` counts those teams. It
+is a count, not a running state: it is also true mid-Launch, after a failed
+Launch and after a stop, so the pane shows no status sentence beside it.
+`provider` is `linked` exactly when a Claude sign-in line with a value is saved
+in this computer's `.env` (`environment_linked`), under the same file checks every
+sign-in attempt already makes (`environment_ready`, unchanged); the line's value
+is never read out, and no approval and no attempt's record decides it. These read
+as `not_linked`: no `.env`; a `.env` that is not a single-link regular file of
+this user with mode 0600 and at most 64 KiB, or that changes while read; a line
+before the sign-in line that the check cannot read; an empty value
+(`CLAUDE_CODE_OAUTH_TOKEN=`, `''` or `""`); and an API key or Claude's own
+`claude login` files, which are not this line. `helper` is
 `asleep` until Claude is linked, then `later`. Later versions add keys and states
 inside a part and entries in `bots`; `version` stays 1 while nothing is removed
 or renamed.
 
 The pane (`workspace-parts.js`) sends the parts read once for each new `ready`
 connection to a shown computer, and again whenever the window regains focus.
+A renewal of the same session (`ready`, `renewing`, `ready`) keeps the answer
+shown and sends no read; a connection change while a read is in flight is
+followed by one read for the new connection when it ends.
 Nothing else repeats it, nothing retries it, and the pane still connects only
 when the person chooses Connect. A `setup_only` session is never sent it. When the
 answer says `started`, the computer's parts show in the setup host: this
@@ -327,13 +338,17 @@ sentence and at most one control; the only control is a "Create a bot" that is
 visibly not available. With no team the parts are the whole view; with a team
 they stay as a strip above its teams. Over the browser carrier the five-step
 panel is the view only while the parts read has no answer or says `not_started`,
-and while that panel follows a launch this browser asked for (today's guide).
+and while that panel follows a launch in this page's lifetime: once this page
+sent a Launch or a launch status check, or followed a managed hand-off, the
+panel stays to its ending and no parts read is sent. A request kept in the
+browser's storage from an earlier page does not hold the panel.
 A refusal, a lost answer, an answer the pane cannot use, or a computer whose core
 has no parts read leaves the view exactly as it was.
 
 The connected document may carry `part_names`: an object whose keys are from
-`computer`, `provider`, `bots` and `helper`, and whose values are 1 to 40
-printable ASCII characters with no space at either end. The pane uses
+`provider`, `bots` and `helper` (never a computer, which keeps its own saved
+name), and whose values are 1 to 40 ASCII letters and digits in words joined by
+one space or one hyphen, so a name cannot read like a status. The pane uses
 `part_names[<part>]` as that part's name when the whole field passes; anything
 else drops the whole field, never one name, and the document is still admitted.
 Without it the computer's saved name, "Claude" and "Bots" are used, and the

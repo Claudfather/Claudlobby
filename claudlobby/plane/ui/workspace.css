@@ -936,12 +936,12 @@ textarea.setup-input { min-height:96px; resize:vertical; }
 .part { display:grid; grid-template-columns:14px minmax(0,1fr) auto; column-gap:12px; row-gap:4px; align-items:baseline; padding:12px 0; }
 .part + .part { border-top:1px solid var(--edge); }
 .part-mark { width:10px; height:10px; border:1.5px solid var(--edge); border-radius:50%; background:var(--panel); align-self:center; }
-.part[data-state="linked"] .part-mark, .part[data-state="teams"] .part-mark { border-color:var(--status-ok-edge); background:var(--status-ok-ink); }
-.part[data-state="not_linked"] .part-mark, .part[data-state="none"] .part-mark, .part[data-state="asleep"] .part-mark,
+.part[data-state="linked"] .part-mark { border-color:var(--status-ok-edge); background:var(--status-ok-ink); }
+.part[data-state="not_linked"] .part-mark, .part[data-state="none"] .part-mark, .part[data-state="teams"] .part-mark, .part[data-state="asleep"] .part-mark,
 .part[data-state="later"] .part-mark { border-color:var(--status-idle-edge); background:var(--status-idle-bg); }
 .part-name { min-width:0; font-size:15px; font-weight:600; overflow-wrap:anywhere; }
 .part-status { color:var(--dim); font-size:13px; text-align:right; }
-.part[data-state="linked"] .part-status, .part[data-state="teams"] .part-status { color:var(--status-ok-ink); font-weight:600; }
+.part[data-state="linked"] .part-status { color:var(--status-ok-ink); font-weight:600; }
 .plane-workspace .workspace-parts .part-control { grid-column:2 / -1; justify-self:start; min-height:32px; padding:6px 14px; border:1px dashed var(--edge);
   border-radius:8px; background:var(--chip); color:var(--dim); font-size:13px; cursor:not-allowed; }
 .part-reason { grid-column:2 / -1; margin:0; color:var(--dim); font-size:12px; line-height:1.5; }

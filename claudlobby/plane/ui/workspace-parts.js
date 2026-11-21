@@ -12,15 +12,19 @@ export const PART_TEXT = Object.freeze({
   bots:'Bots', none:'None yet', create:'Create a bot', // A16
   createReason:'Creating bots here is coming. There is nothing to do yet.', // A16
   asleep:'Asleep until Claude is linked', // A17
-  later:'Coming soon',              // B17
-  teams:n => `${n} ${n === 1 ? 'team' : 'teams'} running`}); // C7
-// The embedding page may name parts (part_names in the connected document): keys from PARTS, values 1 to 40
-// printable ASCII characters with no space at either end. Anything else drops the whole field, never one name.
-const NAME = /^[\x21-\x7e](?:[\x20-\x7e]{0,38}[\x21-\x7e])?$/;
+  later:'Coming soon'});            // B17
+// With a team the bots part says nothing: the count is the saved configuration's, which is also true mid-Launch, after
+// a failed Launch and after a stop, so no sheet sentence fits it ("running" would not be true). A sentence awaits the owner.
+// The embedding page may name the provider, bots and helper parts (part_names in the connected document), never a
+// computer: each computer keeps its own saved name. A name is 1 to 40 ASCII letters and digits in words joined by
+// one space or one hyphen, so it cannot read like a status ("Claude - Linked", "Claude: Linked"). Anything else
+// drops the whole field, never one name.
+const NAMED = Object.freeze(['provider','bots','helper']);
+const NAME = /^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*$/;
 export function partNames(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
   const entries = Object.entries(value);
-  if (entries.some(([key, name]) => !PARTS.includes(key) || typeof name !== 'string' || !NAME.test(name))) return null;
+  if (entries.some(([key, name]) => !NAMED.includes(key) || typeof name !== 'string' || name.length > 40 || !NAME.test(name))) return null;
   return Object.freeze(Object.fromEntries(entries));
 }
 // The parts read's answer (owner_setup.py SetupEngine.state). Later versions add keys inside a part, so only the
@@ -34,29 +38,44 @@ function answer(value) {
   return Object.freeze({computer:value.computer, provider:value.provider.state, teams:value.teams, helper:value.helper.state});
 }
 
-// One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null.
+// One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
+// hold(): true while the entry keeps today's panel for a launch this page sent or follows, when nothing is read.
 // The parts read is sent once for each new ready connection and on refresh() (the window regained focus), never
 // on a timer and never to retry. A refusal, a lost answer or a computer whose core has no parts read leaves
 // started() false, so the view shows exactly what it showed before this read existed.
-export function createWorkspaceParts({client, name, names = null, key, onChange = () => {}}) {
-  let current = null, readFor = null, reading = null, disposed = false, mount = null;
+export function createWorkspaceParts({client, name, names = null, key, hold = () => false, onChange = () => {}}) {
+  let current = null, readFor = null, reading = null, again = false, disposed = false, mount = null, last = client.snapshot();
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
-    if (current && current.epoch !== state.epoch || state.state !== 'ready') current = null;
+    const before = last; last = state;
+    // Renewing the same session (ready, renewing, ready again) moves the epoch once and keeps the answer: the view
+    // stays as it was through the renewal and no read is sent for it. Any other change drops the answer.
+    const renewal = before.state === 'ready' && state.state === 'renewing' || before.state === 'renewing' && state.state === 'ready';
+    if (current && renewal && current.epoch === before.epoch) { current = {...current, epoch:state.epoch}; readFor = state.epoch; }
+    else if (current && (current.epoch !== state.epoch || state.state !== 'ready')) current = null;
     if (state.state === 'ready' && readFor !== state.epoch) void read();
   }
   async function read() {
-    if (disposed || !ready() || reading || typeof client.setupState !== 'function') return false;
-    const epoch = client.snapshot().epoch; readFor = epoch;
+    if (disposed || !ready() || hold() || typeof client.setupState !== 'function') return false;
+    const epoch = client.snapshot().epoch;
+    // A read already sent for this connection answers this one too; one sent for an earlier connection is
+    // followed by one more for this connection when it ends, so a change that lands mid-read is never lost.
+    if (reading) { if (readFor !== epoch) again = true; return reading; }
+    readFor = epoch;
     reading = (async () => {
       let value = null;
       try { value = answer(await client.setupState()); } catch { value = null; }
       if (disposed || !ready() || client.snapshot().epoch !== epoch) return false;
       current = value ? {...value, epoch} : null; return !!value;
     })();
-    try { return await reading; } finally { reading = null; if (!disposed) onChange(); }
+    try { return await reading; }
+    finally {
+      reading = null;
+      if (!disposed) { if (again) { again = false; void read(); } onChange(); }
+    }
   }
-  const live = () => !!current && ready() && client.snapshot().epoch === current.epoch;
+  // An answer kept through a renewal stays shown while the session renews.
+  const live = () => !!current && ['ready','renewing'].includes(client.snapshot().state) && client.snapshot().epoch === current.epoch;
   const started = () => live() && current.computer === 'started';
   function mountView(document) {
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; };
@@ -87,11 +106,11 @@ export function createWorkspaceParts({client, name, names = null, key, onChange 
       if (status.textContent !== text) status.textContent = text; // no repeated announcement
       row.dataset.state = state;
     };
-    const computer = names?.computer ?? name();
+    const computer = name();
     root.setAttribute('aria-label', computer);
     set('computer', computer, 'linked', PART_TEXT.linked);
     set('provider', names?.provider ?? PART_TEXT.provider, current.provider, current.provider === 'linked' ? PART_TEXT.linked : PART_TEXT.notLinked);
-    set('bots', names?.bots ?? PART_TEXT.bots, current.teams ? 'teams' : 'none', current.teams ? PART_TEXT.teams(current.teams) : PART_TEXT.none);
+    set('bots', names?.bots ?? PART_TEXT.bots, current.teams ? 'teams' : 'none', current.teams ? '' : PART_TEXT.none);
     control.hidden = reason.hidden = current.teams > 0;
     root.dataset.teams = String(current.teams);
     // The helper has no name in core: drawn only when the embedding page names it.
