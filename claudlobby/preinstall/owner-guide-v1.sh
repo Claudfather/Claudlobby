@@ -1076,9 +1076,10 @@ def validate(value, deadline, action="setup"):
                 or not recorded_python(state, python)
                 or hashlib.sha256(json.dumps({key: state[key] for key in BINDING_FIELDS}, sort_keys=True).encode()).hexdigest() != value["binding_sha256"]
                 or value["finish_setup"] is None and action not in {"api", "computer"} and state["ref"] != value["source_revision"]):
-            # Only the fixed api mode carries no finish tuple: it is admitted at the
+            # The api and computer modes carry no finish tuple: each is admitted at the
             # exact current installed source (source_check below) while the original
-            # preparation binding, ref and receipt above stay verified unchanged.
+            # preparation binding, ref and receipt above stay verified unchanged; a
+            # computer run at a later revision is admitted by its record in Python.
             raise Refusal()
         identity = read_json(install / "installation.json", 4096)
         if identity != {"schema": 1, "data_root": str(data)} or type(identity.get("schema")) is not int:
