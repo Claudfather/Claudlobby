@@ -172,6 +172,36 @@ resolves none. One that names nothing is `not_found` only after that search; a
 shorter prefix is `invalid_argument`. Every mutation, and a reply's parent,
 still takes the full ID: copy it from the read's result before acting on it.
 
+`message list` uses the same visibility as `message show`. A bot sees messages
+it sent or received, including across fleets. An operator selects a fleet and
+sees messages recorded for it or involving one of its bots.
+
+```bash
+# See who received task requests from the manager over the last 72 hours.
+claudlobby --fleet example --json message list --since 72h --from manager --kind task_request
+
+# From the manager's bot context, check its inbound messages since the box was last empty.
+claudlobby --json message list --since 30m --to manager
+```
+
+Use an ISO timestamp with an offset for exact bounds. `--since` is inclusive,
+`--until` is exclusive and defaults to the first page's query time. The window
+is at most seven days. A bare bot name resolves in the selected fleet, and
+`FLEET/BOT` or `bot:FLEET/BOT` names a bot in a specific fleet. Rows in
+`data.items` carry metadata only. They sort newest first, breaking timestamp
+ties by message ID. Continue with `data.next_cursor` and the same window and
+filters until the cursor is null.
+
+`receipt_observation` distinguishes a committed receipt (`received`), staged
+proof (`pending`), unavailable evidence (`unavailable`), an observable
+recipient with no matching receipt (`missing`), and a recipient with no
+receipt history (`no_history`). A human destination has `not_applicable`.
+`received_at` is the recorded receiver timestamp when present. Check
+`integrity_verdict` for byte-level delivery confirmation. Delivery-state
+filtering would need a way to evaluate receipt
+and queue evidence across all matching rows before taking a page. This read
+observes delivery for the returned page.
+
 Read reports with `claudlobby --json fleet reports list`, optionally filtering
 with `--bot`, `--status`, or `--since RFC3339_CUTOFF`. The cutoff must be a
 real RFC3339 instant with an offset, derived for the intended window. Inspect

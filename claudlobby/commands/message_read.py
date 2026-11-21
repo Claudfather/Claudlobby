@@ -22,8 +22,8 @@ def _read(args) -> CommandOutput:
     from ..active_config import runtime_read_stamp
     from ..config_plan import PlanError
     from ..context import BotNotFoundError
-    from ..message_queries import (MessageQueryError, receipt, resolve_message_reference, show_message,
-                                   wait_for_reply)
+    from ..message_queries import (MessageQueryError, list_messages, receipt, resolve_message_reference,
+                                   show_message, wait_for_reply)
     from ..operation_context import (
         OperationContextError, OperationContextUnavailableError, _MissingHumanIdentity,
         _local_operator_alias, bind_task_context, resolve_operation_scope,
@@ -47,8 +47,14 @@ def _read(args) -> CommandOutput:
         caller_alias = None if origin is not None else _local_operator_alias()
         ctx = bind_task_context(destination, origin=origin, operator_alias=caller_alias)
         failure = None
-        # A read door also takes a prefix of a readable message's ID (#2380).
-        message_id = resolve_message_reference(ctx, args.message_id)
+        if args.public_command == "message.list":
+            data = list_messages(ctx, since=args.since, until=args.until, sender=args.sender,
+                                 recipient=args.recipient, kind=args.kind, limit=args.limit,
+                                 cursor=args.cursor, selection=selected.cursor_scope)
+            lines = ()
+        else:
+            # A point read also takes a prefix of a readable message's ID (#2380).
+            message_id = resolve_message_reference(ctx, args.message_id)
 
         if args.public_command == "message.show":
             message = show_message(ctx, message_id)
@@ -70,7 +76,7 @@ def _read(args) -> CommandOutput:
             lines = note_prefix(data, (f"{observation.message_id}\t{observation.receipt_observation}\t"
                                        f"{observation.integrity_verdict}",),
                                 args.message_id, observation.message_id)
-        else:
+        elif args.public_command == "message.wait":
             observation = wait_for_reply(ctx, message_id, timeout=args.timeout)
             data = {"message_id": observation.message_id,
                     "reply": asdict(observation.reply) if observation.reply else None}
