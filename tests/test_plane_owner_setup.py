@@ -2435,3 +2435,214 @@ def test_provider_signin_reads_the_token_after_the_keyboard_mode_switch_claude_s
         assert row['code_delivered']==1 and row['detail'] is None
         assert env.read_text()=="export ROUTE=private\nexport CLAUDE_CODE_OAUTH_TOKEN='"+token+"'\n"
     finally:engine.signin.shutdown()
+
+
+# Today's guide on the wire. Written before the computer run was added and
+# kept at the head of every later core phase: the ordered frames, each frame's
+# keys, and each proposal's keys and action, of a typed Linux guide driven
+# through the real channel from a fresh computer to its Launch hand-off.
+_PROPOSAL = ["digest", "proposal", "proposal_id", "seq", "session_id", "type", "version"]
+TODAYS_GUIDE_FRAMES = [
+    ("hello", None, ["profile", "seq", "session_id", "type", "version"]),
+    ("proposal", "prepare_directories", _PROPOSAL),
+    ("proposal", "install_provider", _PROPOSAL),
+    ("state", "provider_installing", ["platform", "provider_version", "seq", "session_id", "state", "type", "version"]),
+    ("proposal", "initialize_owner", _PROPOSAL),
+    ("state", "pairing_ready", ["origin", "seq", "session_id", "state", "type", "version"]),
+    ("state", "awaiting_pairing", ["seq", "session_id", "state", "type", "version"]),
+    ("proposal", "pair_owner", _PROPOSAL),
+    ("proposal", "initialize_workspace", _PROPOSAL),
+    ("proposal", "initialize_connected", _PROPOSAL),
+    ("state", "workspace_ready", ["origin", "seq", "session_id", "state", "type", "version"]),
+    ("state", "awaiting_workspace", ["seq", "session_id", "state", "type", "version"]),
+    ("proposal", "bind_workspace", _PROPOSAL),
+    ("proposal", "allow_setup", _PROPOSAL),
+    ("state", "preview_launch_ready", ["generation", "origin", "seq", "session_id", "state", "type", "version"]),
+    ("result", "launch_handoff", ["config_fingerprint", "generation", "request_id", "seq", "session_id",
+                                  "source_revision", "state", "type", "version"]),
+]
+TODAYS_PROPOSAL_KEYS = ["action", "expires_at", "scope"]
+TODAYS_START_KEYS = ["binding_sha256", "expected_uid", "finish_setup", "profile", "seq", "session_id",
+                     "source_revision", "type", "version"]
+
+
+def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    import os, subprocess, sys, threading
+    from claudlobby import git_update, provider_install, resources, supervision_inventory
+    from claudlobby.commands import host_owner_setup as guide, operator_context, owner_setup_consent
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile, StdioGuideConsent
+    from claudlobby.commands.owner_stdio import OwnerStdio
+    from claudlobby.config_plan import ConfigPlanBuilder
+    from claudlobby.context import resolve_paths
+    from tests.test_plane_owner_workspace import ISSUER, ORIGIN
+    args, root, _effects = team_setup
+    original = git_update._prepare_update_locked
+    def prepare(store, **kwargs):  # As setup_authority freezes the one team's inputs.
+        record = original(store, **kwargs)
+        manifest = root / "local/shop/fleet.yaml"
+        builder = ConfigPlanBuilder(root, fleets=("shop",), effects={})
+        from claudlobby.config import host_override_path
+        builder.input(host_override_path())
+        _, fleet_digest = builder.input_snapshot(manifest)
+        _, projects_digest = builder.input_snapshot(manifest.parent / "projects.yaml")
+        builder.effects.update(fleet_sources={"shop": {
+            "fleet": {"path": str(manifest), "sha256": fleet_digest},
+            "projects": {"path": str(manifest.parent / "projects.yaml"), "sha256": projects_digest}}},
+            fleet_manifests={"shop": str(manifest)})
+        args.retained["record"].update(config_fingerprint=builder.freeze(record["target"]).fingerprint,
+                                       initialization_scope=kwargs["initialization"])
+        return dict(args.retained["record"])
+    monkeypatch.setattr(git_update, "_prepare_update_locked", prepare)
+    package = resources.get_resources()
+    package.installation.bin.mkdir(parents=True)
+    package.installation.cli.write_text("#!/bin/sh\nexit 0\n")
+    package.installation.cli.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    units = home / ".config/systemd/user"
+    monkeypatch.setattr(guide, "_native_directories", lambda _paths: (units,))
+    monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: SimpleNamespace(
+        read=lambda _function: f"manager\tLinux\ndirectory\t{units}\n"))
+    monkeypatch.setattr(operator_context, "require_operator_context", lambda root=None: None)
+    # The fixed profile's own two cards, run on this fixture's directories.
+    family = home / ".local/share/claudlobby-browser"
+    family.mkdir(parents=True, mode=0o700)
+    profile = SimpleNamespace(project=home / "claudfather-projects/first-team", account=family / "provider-profile",
+        policy=family / "host-policy/system.yaml", provider=family / "provider-bin/claude", units=units,
+        data=root, account_name="example-account", uid=os.getuid(),
+        request={"source_revision": "a" * 40, "binding_sha256": "b" * 64},
+        origin=lambda: "https://host.example.test")
+    profile.prepare_directories = lambda consent, paths, **kw: FixedOwnerProfile.prepare_directories(profile, consent, paths, **kw)
+    profile.prepare_provider = lambda consent, paths: FixedOwnerProfile.prepare_provider(profile, consent, paths)
+    observed = SimpleNamespace(state="missing", version="2.1.0", platform="linux-x64", sha256="c" * 64)
+    monkeypatch.setattr(provider_install, "status", lambda *_: observed)
+    monkeypatch.setattr(provider_install, "prepare", lambda *_a, **_k: SimpleNamespace(state="ready"))
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", lambda *_: None)
+    access = OwnerAccess(root)
+    config = {"origin": "https://host.example.test", "socket": str(root / "state/owner/owner.sock"),
+        "tailscale": sys.executable, "tailscale_socket": None, "workspace_issuer": ISSUER, "workspace_origin": ORIGIN}
+    approval = SimpleNamespace(template="revenue-web-app", target_fleet="shop", repository="example-org/shop",
+        project_directory=None, account_directory=None, managed_owner=None, provider_signin=None,
+        install_directory=units)
+    monkeypatch.setattr(guide, "_configuration", lambda *_: (config, approval))
+    codes, servers = {}, []
+    @contextmanager
+    def serving(command, *_args, **_kwargs):
+        servers.append(command)
+        owner = access.current_grant()
+        if owner is None:
+            codes["pairing"] = access.begin_pairing(OWNER).token
+            yield SimpleNamespace()
+            return
+        codes["workspace"] = proposed((access, access.workspace(), owner, [access._now()])).nonce
+        class Child:
+            def wait(self, timeout):
+                connected = access.connected()
+                session = connected.issue(evidence(connected, [access._now()]), OWNER)
+                reader = VerifiedReader(OWNER, session.token)
+                engine, grant = SetupEngine(access), OwnerSetup(access).local()
+                engine.launch(reader, **binding(engine.preview(reader, grant.generation, "Review checkout")))
+                raise subprocess.TimeoutExpired("owner", timeout)
+        yield Child()
+    monkeypatch.setattr(guide, "_serving", serving)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+    channel = OwnerStdio(incoming, outgoing)
+    frames, starts = [], []
+    def drive():
+        seq = 0
+        def send(kind, **body):
+            nonlocal seq
+            seq += 1
+            os.write(client, (json.dumps({**body, "version": 1, "type": kind, "seq": seq, "session_id": channel.session_id},
+                sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii"))
+        with os.fdopen(observer, "rb", buffering=0) as stream:
+            while True:
+                line = b""
+                while not line.endswith(b"\n"):
+                    part = stream.read(1)
+                    if not part:
+                        return
+                    line += part
+                frame = json.loads(line)
+                frames.append(frame)
+                if frame["type"] == "hello":
+                    start = {"profile": "owner-setup-v1", "expected_uid": 501, "source_revision": "a" * 40,
+                             "binding_sha256": "b" * 64, "finish_setup": None}
+                    starts.append(start)
+                    send("start", **start)
+                elif frame["type"] == "proposal":
+                    send("decide", proposal_id=frame["proposal_id"], digest=frame["digest"], approve=True)
+                elif frame.get("state") == "awaiting_pairing":
+                    send("submit_pairing", challenge=codes["pairing"])
+                elif frame.get("state") == "awaiting_workspace":
+                    send("submit_workspace", nonce=codes["workspace"])
+                elif frame["type"] in {"result", "error"}:
+                    return
+    thread = threading.Thread(target=drive)
+    thread.start()
+    try:
+        channel.hello()
+        request = channel.start()
+        assert sorted(["seq", "session_id", "type", "version", *starts[0]]) == TODAYS_START_KEYS
+        assert request["finish_setup"] is None
+        result = guide.run(SimpleNamespace(), resolve_paths(root=root), access, None,
+                           consent=StdioGuideConsent(channel), profile=profile)
+        channel.emit("result", **result.data)  # As owner_stdio.dispatch sends it.
+    finally:
+        thread.join(30)
+        for fd in (incoming, outgoing, client):
+            os.close(fd)
+    assert not thread.is_alive()
+    seen = [(frame["type"], frame["proposal"]["action"] if frame["type"] == "proposal"
+             else frame.get("state"), sorted(frame)) for frame in frames]
+    assert seen == TODAYS_GUIDE_FRAMES
+    assert all(sorted(frame["proposal"]) == TODAYS_PROPOSAL_KEYS for frame in frames if frame["type"] == "proposal")
+    assert [frame["seq"] for frame in frames] == list(range(1, len(frames) + 1))
+    assert result.data["state"] == "launch_handoff" and len(args.dispatches) == 1 and len(servers) == 2
+
+
+from tests.test_owner_guide_preinstall import installed  # noqa: E402,F401
+from tests.test_owner_stdio import fixed_profile, pipes  # noqa: E402,F401
+
+
+def test_todays_guide_is_unchanged_on_the_wire_at_the_script(installed, tmp_path):
+    """A request at a revision other than the receipt's, with no finish tuple, is refused as today."""
+    from tests.test_owner_guide_preinstall import advance_source, run_prelude
+    module, home, install, value, python = installed
+    current = advance_source(module, install, python, home)
+    operations = {"setup": "owner-guide-v1", "status": "owner-guide-status-v1", "api": "owner-api-v1"}
+    for action in ("setup", "status"):
+        refused = run_prelude(module, tmp_path, home, python, action, dict(value, source_revision=current))
+        assert refused.stdout == module.wire({"schema_version": 1, "operation": operations[action],
+            "state": "refused", "code": "installation_changed", "retry": False})
+    # Their request's keys are fixed: one more key is refused before anything is read.
+    record = ["22222222-2222-4222-8222-222222222222", current]
+    for action, operation in operations.items():
+        refused = run_prelude(module, tmp_path, home, python, action, dict(value, update_record=record))
+        assert refused.returncode == 2 and refused.stdout == module.wire({"schema_version": 1,
+            "operation": operation, "state": "refused", "code": "invalid_request", "retry": False})
+
+
+def test_todays_guide_is_unchanged_on_the_wire_at_the_profile(fixed_profile, pipes):
+    """The typed start keeps its keys, and the profile refuses a receipt at another revision."""
+    import hashlib, os
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import OwnerStdio, StdioRefused
+    from tests.test_owner_stdio import read_frame, start, wire
+    paths, request, _home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["ref"] = receipt["revision"] = "e" * 40
+    path.write_bytes(json.dumps(receipt, sort_keys=True).encode())
+    fields = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256")
+    request["binding_sha256"] = hashlib.sha256(json.dumps({key: receipt[key] for key in fields},
+                                                          sort_keys=True).encode()).hexdigest()
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    os.write(pipes[2], wire(start(hello["session_id"], update_record=None)))
+    with pytest.raises(StdioRefused):
+        console.start()
