@@ -334,7 +334,9 @@ class Case:
         if stage == "retire-render":
             update_entry._retire_completed_render(store)
         elif stage == "render":
-            update_entry._render_candidate(store, record, self.package(record["target"]))
+            update_entry._render_candidate(
+                store, record, self.package(record["target"])
+            )
         elif stage == "prepare":
             update_operation.prepare_operation(
                 store,
@@ -430,6 +432,34 @@ class Case:
         )
         assert dispatched["job"] == {"dispatch": "started"}
         return self.run_job()
+
+    def admit(self):
+        """Run later commands in this process as the started computer's own runtime."""
+        from claudlobby.paths import Paths
+        from claudlobby.runtime_admission import RuntimeIdentity
+
+        identity = RuntimeIdentity(
+            self.installation.cli,
+            self.installation.native,
+            "",
+            self.installation,
+            self.target,
+        )
+        self.monkeypatch.setattr(
+            RuntimeIdentity, "current", classmethod(lambda cls: identity)
+        )
+        self.monkeypatch.setenv(
+            "CLAUDLOBBY_INSTALLATION", str(self.installation.directory)
+        )
+        self.monkeypatch.setenv("CLAUDLOBBY_ROOT", str(self.root))
+        for key in (
+            "CLAUDLOBBY_RELEASE_ID",
+            "CLAUDLOBBY_ARTIFACT_ID",
+            "CLAUDLOBBY_FLEET",
+            "CLAUDLOBBY_UPDATE_SCHEDULED",
+        ):
+            self.monkeypatch.delenv(key, raising=False)
+        return identity, Paths(self.root, package=self.package(self.target))
 
     def update(self, target):
         """Dispatch an ordinary update to `target` and run its job to its end."""
