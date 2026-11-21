@@ -343,15 +343,30 @@ class TestPerBotIsolation:
         assert "branden" in b["BOT_DIR"]
         assert a["BOT_DIR"] != b["BOT_DIR"]
 
-    def test_no_cross_contamination(self, tmp_path):
-        """No alex-specific value appears in branden's env and vice versa."""
+    def test_no_cross_contamination(self, tmp_path, monkeypatch):
+        """No alex-specific value appears in branden's env and vice versa, even
+        when the suite runs from alex's directory."""
+        # Each env also holds where the suite runs (its checkout, interpreter,
+        # working directory, PATH), and that can name a bot. A value a third
+        # bot's env shares is no one bot's own, so the scan skips it. The third
+        # bot is composed first, so nothing one composition leaks into a later
+        # one can reach it.
+        third_dir, _ = _compose_bot(tmp_path)
         env_a, env_b = self._make_two_bots(tmp_path)
-        a = _source_env_and_dump(env_a)
-        b = _source_env_and_dump(env_b)
+        monkeypatch.chdir(env_a.parent)
+        shared = _source_env_and_dump(_build_tmux_env(third_dir))
+
+        def own(tmux_env):
+            env = _source_env_and_dump(tmux_env)
+            return {key: val for key, val in env.items() if shared.get(key) != val}
+
+        a, b = own(env_a), own(env_b)
 
         # alex's identity strings must not appear in branden's env values
-        alex_markers = {"alex", "alex_bot", "TG_TOKEN_ALEX", "-100111"}
-        branden_markers = {"branden", "branden_bot", "TG_TOKEN_BRANDEN", "-100222"}
+        # (BOT_LABEL is the id in capitals)
+        alex_markers = {"alex", "ALEX", "alex_bot", "TG_TOKEN_ALEX", "-100111"}
+        branden_markers = {"branden", "BRANDEN", "branden_bot", "TG_TOKEN_BRANDEN",
+                           "-100222"}
 
         for key, val in b.items():
             for marker in alex_markers:
