@@ -2849,3 +2849,50 @@ test('browser carrier: one saved computer opens its panel; an account listing on
   assert.equal(partial.status().textContent,'Your account or saved computers changed. Reopen setup from your workspace.');
   assert.equal(partial.h.ui.get('main').children.length,1,'only the closing line remains in the main area');
 });
+
+// A synthetic first-team plan of the measured real shape (about 63 KB): 76 changes, 70 units without their
+// working data, and the bot and fleet lists. The Context answer that repeats it carries it under `preview`.
+const SETUP_LIMIT=131072;
+const realisticPlan=pending=>{const sha='c'.repeat(64);
+  return {...pending,version:2,expires_at:1800000600,fleets:['shop'],
+    changes:Array.from({length:76},(_,i)=>({target:`/home/synthetic/fleets/shop/units/unit-${i}/config.toml`,before:{kind:'file',mode:'0644',sha256:sha},
+      after:{kind:'directory',mode:'0755',files:Object.fromEntries(Array.from({length:4},(_,f)=>[`file-${f}.toml`,sha]))}})),
+    effects:{units:Array.from({length:70},(_,i)=>({bot:`shop/bot-${i}`,enroll:false,fleet:'shop',phase:'start',platform:'linux',scope:'user',
+        service:`claudlobby-bot-${i}.service`,sha256:sha,source:`/home/synthetic/fleets/shop/units/unit-${i}`})),
+      restart_bots:['shop/a','shop/b','shop/c'],reload_supervision:true,fleet_sources:{shop:'/home/synthetic/fleets/shop'},
+      bot_paths:{a:'/home/synthetic/a',b:'/home/synthetic/b'},coverage:{bots:70,units:70},fleet_manifests:{shop:sha},restart_reason:'units changed'},
+    dispatch:'prepared',phase:'quiesce'};};
+const bytesOf=value=>Buffer.byteLength(JSON.stringify(value));
+const padded=(value,size)=>({...value,pad:'x'.repeat(size-bytesOf({...value,pad:''}))});
+test('the setup panel offers Launch for a realistic 63 KB plan in a ready Context answer',async()=>{
+  const h=setupHarness(),plan=realisticPlan(h.pending),context={...h.context,...said.ready({...h,preview:plan})};
+  assert.ok(bytesOf(plan)>55000&&bytesOf(plan)<75000,String(bytesOf(plan)));assert.ok(bytesOf(context)>55000&&bytesOf(context)<75000);
+  const p=previewHarness({answers:[()=>context]}),{panel}=p;
+  await p.start();
+  assert.equal(p.h.api.snapshot().note,'Preview ready. Review it below, then choose Launch team.');
+  assert.equal(p.h.api.snapshot().plan.changes.length,76);
+  assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
+  p.h.api.dispose();h.api.dispose();
+});
+for(const operation of ['setup-preview','setup-context']) test(`browser transport carries a realistic ${operation} answer, accepts exactly the ceiling and retires on one byte over`,async t=>{
+  const plan=realisticPlan({generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)}),
+    answer=operation==='setup-preview'?plan:{version:2,preview_state:'ready',preview:plan,request:{generation:id(9)}},
+    path=operation==='setup-preview'?'preview':'context',input=operation==='setup-preview'?{generation:id(9),goal:'One useful team'}:{};
+  assert.ok(bytesOf(answer)>55000&&bytesOf(answer)<75000,String(bytesOf(answer)));
+  const pass=async body=>{
+    const h=await bridgeHarness(t);h.admit();await h.bridge.ready;
+    const pending=h.host('/api/owner/connected/setup/'+path,input);await flush();const request=h.frames.find(f=>f.type==='request');
+    assert.equal(request.request.operation,operation);
+    h.send('headers',{id:request.id,status:200,headers:{'content-type':'application/json'}});
+    const raw=Buffer.from(JSON.stringify(body)),response=await pending,reading=response.json().then(v=>({v}),error=>({error}));
+    for(let at=0;at<raw.length;at+=16384){h.send('chunk',{id:request.id,data:raw.subarray(at,at+16384).toString('base64')});await flush();}
+    return {h,request,reading,raw};
+  };
+  const intended=await pass(answer);intended.h.send('end',{id:intended.request.id});
+  assert.deepEqual((await intended.reading).v,answer);
+  const exact=await pass(padded(answer,SETUP_LIMIT));assert.equal(exact.raw.length,SETUP_LIMIT);exact.h.send('end',{id:exact.request.id});
+  assert.equal(bytesOf((await exact.reading).v),SETUP_LIMIT);
+  const over=await pass(padded(answer,SETUP_LIMIT+1));assert.equal(over.raw.length,SETUP_LIMIT+1);over.h.send('end',{id:over.request.id});
+  assert.ok((await over.reading).error,'the answer is refused, not delivered');
+  await assert.rejects(over.h.host('/api/owner/connected/setup/'+path,input),'the over-limit answer retires the transport');
+});
