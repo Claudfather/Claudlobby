@@ -36,8 +36,11 @@ if [ -n "${INPUT_BOX_START_DELAY:-}" ]; then
     echo "seam: each manager's stand-in starts $INPUT_BOX_START_DELAY s late (#2136)"
 fi
 
-ROOT="$(mktemp -d)"
-ROOT="$(cd "$ROOT" && pwd -P)"
+# A root that cannot be made ends the run here, with nothing removed.
+# scratch-dir.sh says what the two lines this replaces cost (2026-11-21).
+# shellcheck source=harness/scratch-dir.sh
+. "$REPO/harness/scratch-dir.sh" || exit 3
+scratch_dir ROOT
 FLEET="rdr$$"
 MGR_SOCK="rdrm$$"
 MGR="mgr$$"
@@ -54,8 +57,7 @@ check () { # <label> <expected> <actual>
 }
 cleanup () {
     tmux -L "$MGR_SOCK" kill-server 2>/dev/null || true
-    rm -rf "$ROOT"
-    rm -rf "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
+    scratch_remove "$ROOT" "$(dirname "$ROOT")/.harness-installation-${ROOT##*/}"
 }
 trap cleanup EXIT
 
