@@ -334,6 +334,118 @@ def test_context_offers_no_preview_past_its_window(setup_authority):
     setup_authority[4][0]=preview["expires_at"]  # the window is [created, expires)
     context=engine.context(reader)
     assert "preview" not in context and context["request"] is not None
+    # Expired, not "did not finish": only the computer can go on with it, and the context says how.
+    assert context["preview_state"]=="expired" and context["continuation"].endswith("host update continue")
+
+
+# What became of this approval's Preview, as the context read reports it (preview_state).
+def _scope(engine,grant):
+    return {"directory":grant.install_directory,"manifests":[str(engine.root/"local"/grant.fleet/"fleet.yaml")]}
+
+
+def _preparing(engine,grant,**changes):
+    """This approval's own first-team record while Preview's prepare stages run: no fingerprint bound yet."""
+    record={"target":grant.source_revision,"config_fingerprint":None,"finalized":False,"phase":"prepare",
+            "request_id":str(uuid4()),"initialization_scope":_scope(engine,grant)}
+    record.update(changes)
+    return {key:value for key,value in record.items() if value is not ...}
+
+
+def _begun(fixture,record):
+    engine,grant,reader=allow(fixture)
+    engine.store.begin_preview(reader,grant,"Improve checkout tests")
+    fixture[-1].retained["record"]=record(engine,grant) if callable(record) else record
+    return engine,grant,reader
+
+
+def test_context_says_none_before_any_preview(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    context=engine.context(reader)
+    assert context["preview_state"]=="none" and context["request"] is None
+    assert "preview" not in context and "continuation" not in context
+
+
+@pytest.mark.parametrize("record",[
+    pytest.param(None,id="before-any-update-record"),
+    pytest.param(_preparing,id="no-config-fingerprint-yet"),
+    pytest.param(lambda engine,grant:_preparing(engine,grant,finalized=True,config_fingerprint="b"*64),
+                 id="fingerprint-bound-prepare-stage-still-running"),
+])
+def test_context_answers_preparing_while_this_approvals_own_preview_runs(setup_authority,record):
+    engine,grant,reader=_begun(setup_authority,record)
+    assert engine._effects_lock.acquire(blocking=False)  # Preview holds it for as long as it runs
+    try:
+        context=engine.context(reader)
+        assert context["preview_state"]=="preparing" and context["request"] is None
+        assert not context["launch_reserved"] and "preview" not in context and "continuation" not in context
+        # Only the read answers: Launch's own checks still refuse an unfinished preparation.
+        with pytest.raises((AccessDenied,AccessUnavailable)):engine.store.retained_request(reader)
+        with pytest.raises(AccessDenied):engine.store.begin_preview(reader,grant,"Another goal")
+    finally:engine._effects_lock.release()
+    assert not setup_authority[-1].dispatches
+
+
+def test_context_says_failed_on_a_stage_error_and_names_the_local_command(setup_authority):
+    engine,grant,reader=_begun(setup_authority,lambda engine,grant:_preparing(engine,grant,
+        stage_error={"stage":"render","detail":"refused"}))
+    assert engine._effects_lock.acquire(blocking=False)
+    try:context=engine.context(reader)
+    finally:engine._effects_lock.release()
+    assert context["preview_state"]=="failed" and context["request"] is None and "preview" not in context
+    assert context["continuation"].endswith("host update continue")
+
+
+def test_context_says_failed_once_no_preview_runs_here_and_offers_a_command_only_for_a_recorded_operation(setup_authority):
+    engine,grant,reader=_begun(setup_authority,_preparing)
+    context=engine.context(reader)  # Nothing holds the effects lock: this listener's Preview has ended.
+    assert context["preview_state"]=="failed" and context["continuation"].endswith("host update continue")
+    setup_authority[-1].retained["record"]=None  # it ended before any update record was written
+    context=engine.context(reader)
+    assert context["preview_state"]=="failed" and "continuation" not in context and context["request"] is None
+
+
+def test_preparing_is_bounded_by_the_preview_stages_own_timeouts(setup_authority,monkeypatch):
+    from claudlobby import git_update
+    from claudlobby.plane import owner_setup
+    assert owner_setup.preparing_seconds()==3*git_update._STAGE_TIMEOUT+300  # authorize, render, prepare, plus Git and file steps
+    # The connected session lasts less than that bound, so the clock walks a shortened one.
+    monkeypatch.setattr(owner_setup,"preparing_seconds",lambda:120)
+    engine,grant,reader=_begun(setup_authority,_preparing)
+    started=setup_authority[4][0]
+    assert engine._effects_lock.acquire(blocking=False)
+    try:
+        setup_authority[4][0]=started+119
+        assert engine.context(reader)["preview_state"]=="preparing"
+        setup_authority[4][0]=started+120
+        assert engine.context(reader)["preview_state"]=="failed"
+    finally:engine._effects_lock.release()
+
+
+def test_context_says_ready_with_the_plan_and_nothing_once_launch_is_reserved(setup_authority):
+    engine,grant,reader=allow(setup_authority)
+    preview=engine.preview(reader,grant.generation,"Improve checkout tests")
+    context=engine.context(reader)
+    assert context["preview_state"]=="ready" and context["preview"]=={**preview,"goal":"Improve checkout tests"}
+    engine.store.reserve(reader,grant,context["request"])
+    context=engine.context(reader)
+    assert context["launch_reserved"] and "preview_state" not in context and "preview" not in context
+
+
+@pytest.mark.parametrize("changes",[{"target":"c"*40},{"initialization_scope":{"directory":"/different","manifests":[]}},
+    {"request_id":"not-a-request"},{"initialize":False},{"phase":"quiesce"},
+    {"finalized":True},{"finalized":False,"config_fingerprint":"b"*64}],ids=str)
+def test_a_foreign_or_changed_record_mid_preparation_is_still_refused(setup_authority,changes):
+    engine,grant,reader=_begun(setup_authority,lambda engine,grant:_preparing(engine,grant,**changes))
+    assert engine._effects_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(AccessDenied):engine.context(reader)
+    finally:engine._effects_lock.release()
+
+
+def test_another_approval_never_sees_this_approvals_preview_state(setup_authority):
+    engine,grant,reader=_begun(setup_authority,_preparing)
+    engine.store.revoke(grant)
+    with pytest.raises(AccessDenied):engine.context(reader)
 
 
 @pytest.mark.parametrize("field,value",[("target","c"*40),("config_fingerprint","d"*64),

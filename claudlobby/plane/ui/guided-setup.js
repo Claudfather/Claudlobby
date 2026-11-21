@@ -22,11 +22,33 @@ const badPlan = (value, selected) => !value || value.version !== selected.versio
   || !Array.isArray(value.changes) || !value.effects || typeof value.effects !== 'object' || Array.isArray(value.effects)
   || !Number.isFinite(value.expires_at);
 const phases = ['unknown','prepare','quiesce','git','environment','publish','migrate','commit','restore','done'];
+// What the computer says became of this approval's Preview (owner_setup.py SetupEngine.context); absent beside a reserved
+// launch or a kept request it cannot show as a plan.
+const PREVIEW_STATES = ['none','preparing','ready','expired','failed'];
+// A preparing Preview is read again every 5 s for at most 10 minutes (its plan's own window), then the page stops and says so.
+const PREVIEW_POLL_MS = 5000, PREVIEW_POLL_SECONDS = 600;
+const onComputer = value => value.continuation ?? 'this installation’s stable CLI with host update continue';
+const PREVIEW_NOTES = {
+  checking:'Checking what happened to the preview…',
+  preparing:'Your computer is still preparing your team. This page checks again by itself.',
+  stopped:'Automatic checks stopped after 10 minutes. Your computer was still preparing your team then. Choose Check preview to look again.',
+  ready:'Preview ready. Review it below, then choose Launch team.',
+  expired:value => `The preview ran out before you chose Launch team, so this page can no longer launch it. To launch it from your computer, run there: ${onComputer(value)}`,
+  failed:value => 'Preparing your team stopped on your computer before it finished. ' + (value.continuation
+    ? `To retry it there, and launch your team if that works, run: ${value.continuation}` : 'This setup cannot go on from this page.'),
+  refused:'Your computer refused to start the preview, so nothing was prepared.',
+  notStarted:'The preview did not start on your computer, so nothing was prepared.',
+  readRefused:'Your computer refused to show this setup. Choose Check preview to look again.',
+  readLost:'Could not get an answer from your computer about the preview. Choose Check preview to look again.',
+  lost:'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.',
+  kept:'Choose Check launch status to see where setup stands on your computer.'};
+const refusal = error => [400,401,403,409].includes(error?.status);
 // Presentation only: the step that shows each operation's progress, and its text.
 const PROGRESS = {context:['approve','Checking setup approval…'],'signin-begin':['signin','Starting Claude sign-in…'],
   'signin-retry':['signin','Starting a new Claude sign-in…'],
   'signin-status':['signin','Checking sign-in…'],'signin-code':['signin','Sending your code…'],'signin-cancel':['signin','Cancelling sign-in…'],
-  preview:['goal','Preparing your team preview…'],launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
+  preview:['goal','Preparing your team preview…'],'preview-check':['goal','Checking on the preview…'],
+  launch:['launch','Launching your team…'],receipt:['launch','Checking launch status…']};
 // The one progress line that is a note, not a wait: every other shown progress line turns a ring.
 const POLL_NOTE = 'This page checks for progress automatically.';
 // Skips unchanged writes, so a status region is not re-announced on every two-second check.
@@ -149,6 +171,30 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
+  // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
+  // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
+  // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
+  // previewProblem: the last read about it was refused ('refused') or got no answer ('lost'). previewChecking: the
+  // read that follows a failed Preview is queued. previewUntil/previewStopped: the bound on automatic checks.
+  let previewState = null, previewWatch = false, previewTried = null, previewProblem = null, previewChecking = false;
+  let previewTimer = null, previewUntil = 0, previewStopped = false;
+  // Preview team can be sent only while the computer holds no preview for this approval (it refuses a second one).
+  const previewOpen = () => (previewState === null || previewState === 'none') && !previewProblem && !previewChecking;
+  const previewPolling = () => previewState === 'preparing' && !previewStopped && !previewProblem;
+  function stopPreviewPoll() { clearTimeout(previewTimer); previewTimer = null; }
+  function schedulePreviewPoll() {
+    if (previewTimer !== null || disposed || !context || pending || !previewPolling()) return;
+    if (!previewUntil) previewUntil = now() + PREVIEW_POLL_SECONDS;
+    if (now() >= previewUntil) { previewStopped = true; note = PREVIEW_NOTES.stopped; changed(); return; }
+    if (!visible() || !active()) return; // Resumes with resumeHandoff when this view/connection returns.
+    const ticket = epoch;
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      if (disposed || ticket !== epoch || !previewPolling()) return;
+      if (busy) { schedulePreviewPoll(); return; } // never overlaps another call
+      void run('preview-check',{quiet:true}); // its completion schedules the next check
+    },PREVIEW_POLL_MS);
+  }
   function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
   function scheduleHandoff() {
     if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
@@ -242,6 +288,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       state = next; changed(); return;
     }
     if (next.epoch !== state.epoch || next.state !== state.state) {
+      // A check on the preview that was queued, running or scheduled stops here; say so instead of leaving it on screen.
+      if (previewChecking || previewTimer !== null || busyOperation === 'preview-check' || busy && previewPolling()) note = PREVIEW_NOTES.lost;
+      stopPreviewPoll(); previewState = previewTried = previewProblem = null; previewWatch = previewChecking = previewStopped = false; previewUntil = 0;
       epoch++; context = null; plan = null; launchable = false; stopSigninPoll();
       clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); // only a live link can be lost
     }
@@ -253,14 +302,20 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     changed(); scheduleHandoff();
   }
   // quiet: the automatic poll shows steady text, not a progress flash.
-  // afterPreview: the read that follows a Preview that did not answer; it keeps the approval and the steps already
-  // done on screen, and asks the computer what became of the Preview.
-  async function run(operation, {quiet = false, afterPreview = false} = {}) {
+  // preview-check: the same read as context, asking the computer what became of a Preview. Once a Preview was sent or
+  // the computer reported one (previewWatch), a read keeps the approval and the steps already done on screen.
+  async function run(operation, {quiet = false} = {}) {
     if (disposed || busy || !active()) return false;
-    if (operation === 'context' && !afterPreview) { context = null; launchable = false; }
+    const reading = operation === 'context' || operation === 'preview-check';
+    if (operation === 'preview-check' && (!context || pending)) return false;
+    // Beside a fresh launchable plan a failed read still retires Launch, as before.
+    const keep = reading && !launchable && (previewWatch || operation === 'preview-check');
+    if (reading && !keep) { context = null; launchable = false; }
+    if (reading) { stopPreviewPoll(); previewChecking = false; }
+    if (operation === 'preview-check' && !quiet) { previewStopped = false; previewUntil = 0; } // a click looks again for 10 minutes
     const ticket = epoch; busy = true; busyOperation = quiet || !Object.hasOwn(PROGRESS,operation) ? null : operation; changed();
     try {
-      if (operation === 'context') {
+      if (reading) {
         const value = await client.setupContext();
         if (disposed || ticket !== epoch || !active()) return false;
         if (!value || !(value.version === 2 && value.template === 'revenue-web-app' && typeof value.repository === 'string' && !('project_directory' in value)
@@ -272,11 +327,20 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
               || value.request.source_revision !== value.source_revision)) throw new Error();
+        // The computer's word on this approval's Preview: none and preparing and failed keep no request; ready and expired
+        // keep one; nothing is said beside a reserved launch; a plan comes only with ready.
+        const said = value.preview_state;
+        if (said !== undefined && (!PREVIEW_STATES.includes(said) || value.launch_reserved
+            || ['none','preparing','failed'].includes(said) === (value.request !== null))
+            || (value.preview !== undefined) !== (said === 'ready')) throw new Error();
         // A Preview the computer finished and kept: offered while its window is open, never beside a reserved launch.
         const kept = value.preview && !value.launch_reserved && value.request && value.preview.expires_at > now() ? value.preview : null;
         if (value.preview !== undefined && (!value.request || value.launch_reserved
             || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000))) throw new Error();
-        context = Object.freeze({...value}); plan = null;
+        context = Object.freeze({...value}); plan = null; launchable = false; previewProblem = null;
+        previewState = said ?? null;
+        if (said !== undefined && said !== 'none') previewWatch = true;
+        if (said !== 'preparing') { previewUntil = 0; previewStopped = false; }
         if (value.provider_signin === true && value.signin_attempt) signinReceipt(value.signin_attempt);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
@@ -284,14 +348,18 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
-          plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true;
+          plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
         }
+        // A ready plan whose window this browser's clock has already passed reads as expired.
+        const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
         // A null request or new grant is never proof that an original request vanished.
-        note = !pending ? (afterPreview ? 'The preview did not finish. Your goal is still here. Choose Preview team to try again.' : '')
-          : kept ? 'Preview ready. Review it below, then choose Launch team.'
-          : value.preview ? 'This preview expired. Inspect the update on the computer.'
-          : value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
-          : `Your computer began preparing your team but did not finish, and only the computer can restart that. ${localContinue(value)}`;
+        note = value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
+          : shown === 'ready' ? PREVIEW_NOTES.ready
+          : shown === 'expired' ? PREVIEW_NOTES.expired(value)
+          : shown === 'preparing' ? previewStopped ? PREVIEW_NOTES.stopped : PREVIEW_NOTES.preparing
+          : shown === 'failed' ? PREVIEW_NOTES.failed(value)
+          : pending ? value.request ? PREVIEW_NOTES.kept : `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
+          : previewTried ? previewTried === 'refused' ? PREVIEW_NOTES.refused : PREVIEW_NOTES.notStarted : '';
         if (value.managed_owner && value.launch_reserved) { managedHandoff = true; handoffUntil = now()+600; handoffReads=0; }
       } else if (operation.startsWith('signin-')) {
         if (!context?.provider_signin || pending || signinBlocked) return false;
@@ -330,8 +398,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         signinReceipt(result);
         if (action==='code') { signinRefusal=null; if (signinState==='waiting') signinCodeSent=signinAttempt.attempt_id; }
       } else if (operation === 'preview') {
-        if (!context || context.launch_reserved || pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= now()) return false;
-        const selected = context, authored = goal;
+        if (!context || context.launch_reserved || pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= now()
+            || !previewOpen()) return false;
+        const selected = context, authored = goal; previewWatch = true; previewTried = null;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
         if (badPlan(value,selected) || value.expires_at <= now()) throw new Error();
@@ -358,9 +427,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (!disposed && ticket === epoch) {
         // A failed read leaves no approval shown beside its "could not confirm" note.
         // A Preview that failed leaves the approval and the finished steps as they were; one read then asks the computer
-        // what became of it. Only a read of the approval itself, made from a click, drops it.
+        // what became of it. A failed read drops them only where nothing was previewed yet, or beside a launchable plan.
         if (operation === 'preview') launchable = false;
-        if (operation === 'context' && !afterPreview) { context = null; launchable = false; }
+        if (reading && !keep) { context = null; launchable = false; }
+        if (reading && keep) {
+          // The approval and the steps already done stay; the computer's next answer decides what is true.
+          previewProblem = refusal(error) ? 'refused' : 'lost';
+          note = error?.code === 'setup_storage_unavailable' ? error.message
+            : previewProblem === 'refused' ? PREVIEW_NOTES.readRefused : PREVIEW_NOTES.readLost;
+          return false;
+        }
         if (operation === 'receipt') launchable = false;
         if (operation.startsWith('signin-')) {
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
@@ -382,18 +458,21 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           return false;
         }
         if (operation === 'preview' && !pending && error?.code !== 'setup_storage_unavailable') {
-          note = 'Checking what happened to the preview…';
-          queueMicrotask(() => { if (!disposed && ticket === epoch) void run('context',{afterPreview:true}); });
+          // One read asks the computer what became of it. A refusal and a lost answer are remembered apart.
+          previewTried = refusal(error) ? 'refused' : 'lost'; previewChecking = true; note = PREVIEW_NOTES.checking;
+          queueMicrotask(() => {
+            if (disposed || ticket !== epoch || !previewChecking) return;
+            if (!active()) { previewChecking = false; note = PREVIEW_NOTES.lost; changed(); return; }
+            void run('preview-check',{quiet:true});
+          });
           return false;
         }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
-          : operation === 'context' && afterPreview
-          ? 'Could not confirm the preview. It may still be finishing on your computer. Choose Check setup approval again to look for it.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;
-    } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); scheduleSigninPoll(); } }
+    } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); scheduleSigninPoll(); schedulePreviewPoll(); } }
   }
   // A refused Try again rolled the host back and an unsent one reached nothing: the ended attempt is still
   // the current one, so this browser follows it again (memory and storage). Returns the notice, or '' if neither.
@@ -515,6 +594,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (busy && busyOperation && !lineSaysIt) { const [step,text] = PROGRESS[busyOperation]; progress[step] = text; }
     if (!progress.signin && signinKnown && !pending && signinPolling()) progress.signin = POLL_NOTE;
     if (!progress.launch && managedHandoff) progress.launch = 'Checking automatically while your team connects…';
+    // While the computer prepares the preview the goal step keeps Preview team's own line, so nothing changes between checks.
+    if (!progress.goal && !pending && previewPolling()) progress.goal = PROGRESS.preview[1];
     for (const [name,step] of Object.entries(m.steps)) {
       const state = states[name]; step.root.hidden = state === null;
       if (state === null) continue;
@@ -534,6 +615,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
+    // Check preview: once the computer said a preview exists that this page cannot move on, and it is not checking by itself.
+    const checkShown = approved && !pending && previewWatch && !previewOpen() && !previewPolling() && !previewChecking;
     // While this page checks by itself a manual check only repeats it, so it is offered once automatic checks stop.
     // Nor beside Try again: the computer already said the ended attempt may be replaced, so there is nothing to check,
     // unless an earlier Try again's ID was set aside and a check may find the computer took it after all.
@@ -543,6 +626,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // so is Sign in to Claude, except while it is held as sign-in starts.
     const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
       : !approved ? 'context'
+      : checkShown ? 'check'
       : states.signin !== 'current' ? null
       : typed ? 'code' : waitingLink ? 'link' : signinRetryOffered() ? 'retry'
       : manualCheck && !ended && signinRefusal !== 'attempt' ? 'status' : null;
@@ -564,6 +648,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     submit.className = filled('code','pill ghost');
     check.className = filled('status','pill ghost');
     controls.receipt.className = filled('receipt','pill ghost');
+    controls.previewCheck.className = filled('check','pill ghost'); controls.previewCheck.hidden = !checkShown;
+    controls.preview.hidden = !previewOpen();
     m.signinLink.hidden = !waitingLink; if (signinUrl) m.signinLink.setAttribute('href',signinUrl); else m.signinLink.removeAttribute?.('href');
     m.signinCopyButton.hidden = !waitingLink;
     const copy = waitingLink && signinCopy?.url === signinUrl ? signinCopy : null;
@@ -580,11 +666,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const retry = m.steps.signin.retry, retryShown = signinRetryOffered();
     retry.hidden = !retryShown; retry.className = filled('retry','pill ghost');
     retry.disabled = !live || busy || !retryShown;
-    m.lead = {context:controls.context,receipt:controls.receipt,code:submit,link:m.signinLink,retry,status:check}[lead] ?? null;
+    m.lead = {context:controls.context,receipt:controls.receipt,check:controls.previewCheck,code:submit,link:m.signinLink,retry,status:check}[lead] ?? null;
     setText(m.goalDone,pending ? planGoal ? `Goal: ${planGoal}` : 'Team preview prepared' : '');
     setText(m.goalText,context ? `Your team works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
-    m.area.disabled = !live || busy || !!pending || legacyBlocked();
+    m.area.disabled = !live || busy || !!pending || legacyBlocked() || !previewOpen();
     controls.launch.hidden = !launchShown;
     setText(m.summary,launchShown ? `Your team is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
       : 'Check launch status to see where setup stands. This page never sends a launch twice.');
@@ -603,7 +689,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     m.disclosure.hidden = !context && !m.details.textContent;
     for (const [operation,button] of Object.entries(controls)) button.disabled = !live || busy
-      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= time)
+      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signinReady() || !goal.trim() || context.expires_at <= time || !previewOpen())
+      || operation === 'previewCheck' && !checkShown
       || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || !signinReady() || goal !== planGoal || plan.expires_at <= time || context.expires_at <= time)
       || operation === 'receipt' && !pending;
     m.recheck.disabled = controls.context.disabled;
@@ -696,8 +783,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     area.setAttribute('placeholder','For example: Add a contact form to the homepage, with tests that check each message arrives.');
     area.addEventListener('input',() => { goal = area.value; changed(); });
     const goalField = make('label','setup-field'), preview = action('Preview team','pill setup-primary','preview'), goalHint = make('p','setup-hint');
+    const previewCheck = action('Check preview','pill ghost','preview-check');
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
-    goalStep.body.append(goalText,goalField,row(preview),goalHint);
+    goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHint);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
     launchStep.body.append(summary,row(launch,receiptButton),launchHint);
@@ -706,12 +794,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
-      controls:{context:contextButton,preview,launch,receipt:receiptButton}};
+      controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
   }
-  return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal}),
+  return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal,previewState}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
-    resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); },
+    resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); schedulePreviewPoll(); },
     // Presentation only: how the entry's Connect looks now. It never connects or sends anything itself.
     showConnect(value) {
       const next = value && typeof value === 'object' ? {operation:value.operation === 'check' ? 'check' : 'connect',
@@ -720,5 +808,5 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (JSON.stringify(next) === JSON.stringify(connectView)) return;
       connectView = next; if (!disposed) render();
     },
-    dispose() { disposed = true; stopHandoff(); stopSigninPoll(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
+    dispose() { disposed = true; stopHandoff(); stopSigninPoll(); stopPreviewPoll(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
 }

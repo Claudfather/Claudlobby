@@ -1011,39 +1011,128 @@ test('changed connection fences held preview, preserves goal and never launches'
 });
 const signedIn=h=>{h.context.provider_signin=true;h.context.signin_attempt={attempt_id:id(11),generation:id(9),state:'connected',reason:null};};
 const refused=()=>Object.assign(new Error('refused'),{status:403});
-test('a failed preview keeps the finished steps, the goal and the sign-in, and says what is true',async()=>{
-  const ui=dom(),panel=new ui.Element();
-  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);throw refused();}}});signedIn(h);
-  h.api.mountPanel({document:ui.document,element:panel});
-  await h.api.run('context');h.api.setGoal('Improve tests');
-  const before=stepShape(panel);
-  assert.equal(await h.api.run('preview'),false);await flush();
-  assert.notEqual(h.api.snapshot().context,null,'a failed preview never clears the approval');
-  assert.deepEqual(stepShape(panel).map(r=>r[1]).slice(0,2),before.map(r=>r[1]).slice(0,2));
-  const shape=Object.fromEntries(stepShape(panel));
-  assert.equal(shape.approve,'done');assert.equal(shape.signin,'done','Sign in to Claude stays ticked');assert.equal(shape.goal,'current');
-  assert.equal(h.api.snapshot().goal,'Improve tests');
-  assert.equal(h.api.snapshot().note,'The preview did not finish. Your goal is still here. Choose Preview team to try again.');
-  assert.doesNotMatch(h.api.snapshot().note,/nothing was saved|setup approval/i);
-  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1,'the page never previews again by itself');
+const timedOut=()=>new Error('timed out');
+const CMD="'/example/cli' --root '/example/data' host update continue";
+const buttonOf=(panel,text)=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
+const offered=(panel,text)=>{const b=buttonOf(panel,text);return !!b&&visible(b)&&!b.disabled;};
+const doneSteps=panel=>{const s=Object.fromEntries(stepShape(panel));return [s.approve,s.signin];};
+// What the computer says about this approval's Preview, read by read (the last answer repeats).
+const said={none:()=>({preview_state:'none'}),preparing:()=>({preview_state:'preparing'}),
+  ready:h=>({preview_state:'ready',request:{...h.pending},preview:{...h.preview,goal:'Improve tests'},continuation:CMD}),
+  expired:h=>({preview_state:'expired',request:{...h.pending},continuation:CMD}),
+  failed:()=>({preview_state:'failed',continuation:CMD}),failedUnrecorded:()=>({preview_state:'failed'})};
+function previewHarness({answers,preview=timedOut,previewSent}={}) {
+  const timers=[],ui=dom(),panel=new ui.Element(),clock={t:1800000000};let reads=0;
+  const h=setupHarness({setupOptions:{now:()=>clock.t,setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
+    client:{async setupContext(){h.calls.push(['context']);
+      const answer=reads++===0?said.none:answers[Math.min(reads-2,answers.length-1)];
+      return {...h.context,...answer(h)};},
+      async setupPreview(input){h.calls.push(['preview',input]);previewSent?.(h);throw preview();}}});
+  signedIn(h);h.api.mountPanel({document:ui.document,element:panel});
+  const live=()=>timers.filter(t=>t.live);
+  return {h,panel,timers,clock,live,
+    async start(){await h.api.run('context');h.api.setGoal('Improve tests');assert.equal(await h.api.run('preview'),false);await flush();},
+    async tick(){const t=live()[0];assert.ok(t,'a check is scheduled');t.live=false;await t.fn();await flush();}};
+}
+const fail=error=>()=>{throw error;};
+test('a timed-out Preview the computer is still preparing is checked again by itself until it is ready, with the steps kept',async()=>{
+  const p=previewHarness({answers:[said.preparing,said.preparing,said.ready]}),{h,panel}=p;
+  await p.start();
+  assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
+  assert.deepEqual(doneSteps(panel),['done','done'],'Approve setup and Sign in to Claude stay ticked');
+  assert.equal(Object.fromEntries(stepShape(panel)).goal,'current');
+  assert.equal(stepPart(panel,'goal','setup-progress').textContent,'Preparing your team preview…');
+  assert.equal(offered(panel,'Preview team'),false,'the computer would refuse a second Preview');
+  assert.equal(p.live().length,1);assert.equal(p.live()[0].ms,5000);
+  await p.tick();
+  assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
+  assert.deepEqual(doneSteps(panel),['done','done']);
+  await p.tick();
+  assert.equal(h.api.snapshot().note,'Preview ready. Review it below, then choose Launch team.');
+  assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
+  assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(p.live().length,0,'checks stop once the preview is ready');
+  await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);h.api.dispose();
+});
+test('automatic checks on a preparing preview stop after ten minutes and say so; Check preview looks again',async()=>{
+  const p=previewHarness({answers:[said.preparing]}),{h,panel}=p;
+  await p.start();
+  p.clock.t+=600;await p.tick();
+  assert.equal(p.live().length,0);
+  assert.equal(h.api.snapshot().note,'Automatic checks stopped after 10 minutes. Your computer was still preparing your team then. Choose Check preview to look again.');
+  assert.equal(offered(panel,'Check preview'),true);assert.deepEqual(filledIn(panel),['Check preview']);
+  assert.deepEqual(doneSteps(panel),['done','done']);
+  const before=h.calls.filter(c=>c[0]==='context').length;
+  buttonOf(panel,'Check preview').click();await flush();
+  assert.equal(h.calls.filter(c=>c[0]==='context').length,before+1);
+  assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
+  assert.equal(p.live().length,1,'looking again restarts the bounded checks');
+  assert.deepEqual(doneSteps(panel),['done','done']);h.api.dispose();
+});
+test('a preview that ran out before Launch says this page cannot launch it and shows the local command',async()=>{
+  const p=previewHarness({answers:[said.expired]}),{h,panel}=p;
+  await p.start();
+  assert.equal(h.api.snapshot().note,`The preview ran out before you chose Launch team, so this page can no longer launch it. To launch it from your computer, run there: ${CMD}`);
+  assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(offered(panel,'Launch team'),false);
+  assert.equal(await h.api.run('launch'),false);assert.equal(p.live().length,0);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
-test('a failed preview the computer cannot undo says only the computer can restart it, and keeps the finished steps',async()=>{
-  const ui=dom(),panel=new ui.Element();
-  const h=setupHarness({client:{async setupPreview(){
-    h.context.request={...h.pending};h.context.continuation="'/example/cli' --root '/example/data' host update continue";throw refused();}}});signedIn(h);
-  h.api.mountPanel({document:ui.document,element:panel});
-  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
-  const note=h.api.snapshot().note;
-  assert.match(note,/^Your computer began preparing your team but did not finish, and only the computer can restart that\./);
-  assert.ok(note.includes(h.context.continuation));assert.doesNotMatch(note,/Check setup approval/);
-  const shape=Object.fromEntries(stepShape(panel));assert.equal(shape.approve,'done');assert.equal(shape.signin,'done');
-  assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
+test('a preview that failed on the computer says so and shows the local command only when the computer has one',async()=>{
+  for (const [answer,note] of [[said.failed,`Preparing your team stopped on your computer before it finished. To retry it there, and launch your team if that works, run: ${CMD}`],
+      [said.failedUnrecorded,'Preparing your team stopped on your computer before it finished. This setup cannot go on from this page.']]) {
+    const p=previewHarness({answers:[answer]}),{h,panel}=p;
+    await p.start();
+    assert.equal(h.api.snapshot().note,note);
+    assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(offered(panel,'Preview team'),false);
+    assert.equal(offered(panel,'Check preview'),true);assert.equal(p.live().length,0);
+    assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
+  }
+});
+test('a refused Preview and one that never arrived read differently when the computer has no preview, and Preview opens again',async()=>{
+  for (const [preview,note] of [[refused,'Your computer refused to start the preview, so nothing was prepared.'],
+      [timedOut,'The preview did not start on your computer, so nothing was prepared.']]) {
+    const p=previewHarness({answers:[said.none],preview}),{h,panel}=p;
+    await p.start();
+    assert.equal(h.api.snapshot().note,note);assert.doesNotMatch(note,/try again/i,'no promise that trying again works');
+    assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(offered(panel,'Preview team'),true);
+    assert.equal(offered(panel,'Check preview'),false);assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
+  }
+});
+test('a check the computer refuses and one that gets no answer read differently, keep the steps and offer Check preview',async()=>{
+  for (const [answer,note] of [[fail(refused()),'Your computer refused to show this setup. Choose Check preview to look again.'],
+      [fail(timedOut()),'Could not get an answer from your computer about the preview. Choose Check preview to look again.']]) {
+    const p=previewHarness({answers:[answer,said.preparing]}),{h,panel}=p;
+    await p.start();
+    assert.equal(h.api.snapshot().note,note);assert.notEqual(h.api.snapshot().context,null);
+    assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(offered(panel,'Preview team'),false);
+    assert.deepEqual(filledIn(panel),['Check preview']);
+    // The approval's own re-check from Details keeps the steps too.
+    buttonOf(panel,'Check setup approval again').click();await flush();
+    assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
+    assert.deepEqual(doneSteps(panel),['done','done']);h.api.dispose();
+  }
+});
+test('a reload during preparation shows it, and a connection change says the checks stopped instead of a stuck check line',async()=>{
+  const p=previewHarness({answers:[said.preparing]}),{h,panel}=p;
+  await p.start();
+  h.change({state:'expired',epoch:2});
+  assert.equal(h.api.snapshot().note,'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.');
+  assert.equal(p.live().length,0);h.api.dispose();
+  // The connection goes inactive after the failed Preview, before its queued read runs.
+  const q=previewHarness({answers:[said.preparing],preview:()=>{q.h.client.snapshot=()=>({state:'expired',epoch:1});return timedOut();}});
+  await q.start();
+  assert.notEqual(q.h.api.snapshot().note,'Checking what happened to the preview…');
+  assert.equal(q.h.api.snapshot().note,'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.');
+  q.h.api.dispose();
+  // A fresh page whose first read finds the preparation shows it the same way.
+  const r=setupHarness();signedIn(r);r.context.preview_state='preparing';await r.api.run('context');
+  assert.equal(r.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
+  assert.equal(await r.api.run('preview'),false);r.api.dispose();
 });
 test('a preview that finished on the computer after this page gave up is picked up and can be launched',async()=>{
   const ui=dom(),panel=new ui.Element();
   const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);
-    h.context.request={...h.pending};h.context.preview={...h.preview,goal:'Improve tests'};throw new Error('timed out');}}});signedIn(h);
+    h.context.request={...h.pending};h.context.preview_state='ready';h.context.preview={...h.preview,goal:'Improve tests'};throw new Error('timed out');}}});signedIn(h);
   h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
   const snap=h.api.snapshot();
@@ -1056,21 +1145,23 @@ test('a preview that finished on the computer after this page gave up is picked 
   await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);h.api.dispose();
 });
 test('reloading the approval shows a retained preview and offers Launch, never a second preview',async()=>{
-  const h=setupHarness();signedIn(h);h.context.request={...h.pending};h.context.preview={...h.preview,goal:'Improve tests'};
+  const h=setupHarness();signedIn(h);h.context.request={...h.pending};h.context.preview_state='ready';h.context.preview={...h.preview,goal:'Improve tests'};
   await h.api.run('context');
   assert.equal(h.api.snapshot().plan.request_id,h.pending.request_id);assert.equal(h.api.snapshot().goal,'Improve tests');
   assert.equal(await h.api.run('preview'),false);await h.api.run('launch');
   assert.equal(h.calls.filter(c=>c[0]==='preview').length,0);assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
-test('a preview that cannot be confirmed leaves the steps in place and names the one thing to press',async()=>{
-  const ui=dom(),panel=new ui.Element();let reads=0;
-  const h=setupHarness({client:{async setupContext(){reads++;if(reads>1)throw new Error('unreachable');return h.context;},
-    async setupPreview(){throw new Error('timed out');}}});signedIn(h);
-  h.api.mountPanel({document:ui.document,element:panel});
-  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
-  assert.notEqual(h.api.snapshot().context,null);assert.equal(Object.fromEntries(stepShape(panel)).signin,'done');
-  assert.equal(h.api.snapshot().note,'Could not confirm the preview. It may still be finishing on your computer. Choose Check setup approval again to look for it.');
-  assert.equal(h.api.snapshot().goal,'Improve tests');h.api.dispose();
+test('a context read whose preview state contradicts its request is refused',async()=>{
+  for (const bad of [{preview_state:'preparing',request:'pending'},{preview_state:'ready'},{preview_state:'expired'},
+      {preview_state:'later'},{preview_state:'none',preview:'plan'},{preview_state:'ready',request:'pending',launch_reserved:true,preview:'plan'}]) {
+    const h=setupHarness();
+    Object.assign(h.context,bad,bad.request?{request:{...h.pending}}:{},bad.preview?{preview:{...h.preview,goal:'g'}}:{});
+    assert.equal(await h.api.run('context'),false,JSON.stringify(bad));assert.equal(h.api.snapshot().context,null);h.api.dispose();
+  }
+});
+test('a kept request the computer shows without a preview state points at Check launch status',async()=>{
+  const h=setupHarness();h.context.request={...h.pending};h.context.continuation=CMD;await h.api.run('context');
+  assert.equal(h.api.snapshot().note,'Choose Check launch status to see where setup stands on your computer.');h.api.dispose();
 });
 test('setup panel retains disclosure/focus and refuses launch without durable original identifiers',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});

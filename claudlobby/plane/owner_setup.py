@@ -22,6 +22,16 @@ from .owner_source import source_host_uid, fresh_owner_setup
 
 PLAN_SECONDS = 600
 GRANT_SECONDS = 86400
+
+
+def preparing_seconds():
+    """How long a Preview may honestly still be preparing: its three stage processes (authorize,
+    render, prepare) each get git_update's whole stage timeout, plus 300 s for the Git and file
+    steps between them. Past this the context read says it failed instead."""
+    from ..git_update import _STAGE_TIMEOUT
+    return 3 * _STAGE_TIMEOUT + 300
+
+
 _SCHEMA = (
     "CREATE TABLE setup_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
     "INSERT INTO setup_metadata VALUES(1,2)",
@@ -331,13 +341,31 @@ class OwnerSetup:
         with self.access._connection() as conn:
             return self._admit(conn,reader,expected=expected,effects=effects)[0]
 
+    def _scope(self, grant):
+        return {"directory":grant.install_directory,
+                "manifests":[str(self.access.root/"local"/grant.fleet/"fleet.yaml")]}
+
+    def _preparing(self, grant, record):
+        """This approval's own first-team operation, still in Preview's prepare phase.
+
+        The same scope, target and request identity operation() requires; only the fields the prepare
+        stages have not written yet may be missing: the configuration fingerprint (bound when
+        preparation finalizes) and initialize (written just after it). Never an authority to launch.
+        """
+        finalized=record.get("finalized",True)
+        fingerprint=record.get("config_fingerprint")
+        return (record.get("initialization_scope")==self._scope(grant) and record.get("target")==grant.source_revision
+                and _uuid(record.get("request_id")) and record.get("phase")=="prepare"
+                and record.get("initialize",True) is True
+                and (finalized is False and fingerprint is None
+                     or finalized is True and isinstance(fingerprint,str) and re.fullmatch(r"[0-9a-f]{64}",fingerprint) is not None))
+
     def operation(self, grant):
         from ..git_update import read_update
         package=managed_setup(self.access.root,grant,current=False)
         record=read_update(package.installation)
         if record is None: return None
-        scope={"directory":grant.install_directory,
-               "manifests":[str(self.access.root/"local"/grant.fleet/"fleet.yaml")]}
+        scope=self._scope(grant)
         if (record.get("initialization_scope")!=scope or record.get("target")!=grant.source_revision
                 or not record.get("initialize") or not _uuid(record.get("request_id"))
                 or not isinstance(record.get("config_fingerprint"),str)
@@ -389,12 +417,27 @@ class OwnerSetup:
                 raise AccessDenied("setup_original_operation_changed")
         return actual
 
-    def retained_preview(self, reader):
-        """The goal and window of the retained preview row, or None when there is none."""
+    def preview_status(self, reader):
+        """What became of this approval's Preview, for the context read only: (state, request, reserved, kept).
+
+        state is "none" (no preview row), "preparing" (a row without a kept request whose update record
+        is absent or is this approval's own operation still in its prepare phase; "failed" instead when
+        that record carries a stage error), or None, when the original request rules (_request) decide
+        exactly as before, refusals included. kept is the row's goal and window, with the record read.
+        """
         with self.access._connection() as conn:
-            grant,_=self._admit(conn,reader)
-            row=conn.execute("SELECT payload,expires_at FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
-            return None if row is None else (json.loads(row["payload"])["goal"],row["expires_at"])
+            grant,row=self._admit(conn,reader)
+            reserved=row["launch_id"] is not None
+            preview=conn.execute("SELECT created_at,expires_at,payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
+            if preview is None: return "none",None,reserved,None
+            payload=json.loads(preview["payload"])
+            kept={"goal":payload["goal"],"created_at":preview["created_at"],"expires_at":preview["expires_at"],"record":None}
+            if payload.get("request") is None and not reserved:
+                from ..git_update import read_update
+                record=read_update(managed_setup(self.access.root,grant,current=False).installation)
+                if record is None or self._preparing(grant,record):
+                    return ("failed" if record is not None and record.get("stage_error") else "preparing"),None,reserved,{**kept,"record":record}
+            return None,self._request(conn,grant),reserved,kept
 
     def retained_request(self, reader):
         with self.access._connection() as conn:
@@ -475,30 +518,41 @@ class SetupEngine:
             "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
             "effects":rendered.effects,"dispatch":"prepared","phase":phase}
 
-    def _retained_plan(self,reader,grant,request):
+    def _retained_plan(self,grant,request,kept):
         """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
         try:
             record=self.store.operation(grant)
-            kept=self.store.retained_preview(reader)
-            if record is None or record["phase"]!="quiesce" or kept is None: return None
-            goal,expires_at=kept
-            if not self.store.access._now()<expires_at: return None
-            return {**self._plan(grant,request,expires_at,record["phase"]),"goal":goal}
+            if record is None or record["phase"]!="quiesce": return None
+            return {**self._plan(grant,request,kept["expires_at"],record["phase"]),"goal":kept["goal"]}
         except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): return None
+
+    def _preview_state(self,grant,request,reserved,state,kept):
+        """preview_state for the context read (none, preparing, ready, expired, failed), or None beside a
+        reserved launch or a kept request the computer cannot show as a plan; and the plan when ready."""
+        now=self.store.access._now()
+        if state=="preparing" and (not self._effects_lock.locked() or now>=kept["created_at"]+preparing_seconds()):
+            # Preview holds the effects lock for as long as it runs: unheld, no Preview of this listener is running.
+            return "failed",None
+        if state is not None or reserved: return state,None
+        if not now<kept["expires_at"]: return "expired",None
+        preview=self._retained_plan(grant,request,kept)
+        return ("ready",preview) if preview is not None else (None,None)
 
     def context(self,reader):
         grant=self.store.authorize(reader)
         managed_setup(self.root,grant,current=False)
-        request,reserved=self.store.retained_request(reader)
-        preview=self._retained_plan(reader,grant,request) if request is not None and not reserved else None
+        state,request,reserved,kept=self.store.preview_status(reader)
+        state,preview=self._preview_state(grant,request,reserved,state,kept)
+        recorded=state=="failed" and kept["record"] is not None  # a failed preparation the computer can continue
         return {"version":3 if grant.template == "local-project" else 2,"template":grant.template,"fleet":grant.fleet,
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
             **({"managed_owner":True} if grant.managed_owner is not None else {}),
             **({"provider_signin":True,"signin_attempt":self.signin.summary(reader,grant) if request is None else None} if grant.provider_signin is not None else {}),
             "request":request,"launch_reserved":reserved,
+            **({"preview_state":state} if state is not None else {}),
             **({"preview":preview} if preview is not None else {}),
-            **({"continuation":_continuation(self.root,grant)} if request and not reserved else {})}
+            **({"continuation":_continuation(self.root,grant)} if request and not reserved or recorded else {})}
 
     def _signin_grant(self,reader,generation,attempt_id):
         grant=self.store.authorize(reader,effects=True)
