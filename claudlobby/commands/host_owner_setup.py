@@ -429,7 +429,11 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
     installation = package.installation
     record = read_update(installation)
     selected = os.path.lexists(paths.root / "state/config.json")
-    if record is not None:
+    # The one record a typed guide may start again over: this approval's own prepared Preview with
+    # nothing launched (its page closed before Launch). It goes on as a returning run does.
+    reopened = (record is not None and consent is not None and getattr(args, "finish_setup", None) is None
+                and OwnerSetup(store).kept_preview(retained, record))
+    if record is not None and not reopened:
         if (not retained or retained.grant is None or record.get("request_id") != retained.launch_id
                 or record.get("config_fingerprint") != retained.launch_plan or record.get("phase") != "done"):
             raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
