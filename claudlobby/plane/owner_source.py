@@ -323,8 +323,13 @@ def started_without_team(root: Path, installation) -> bool:
 def start_state(root: Path, installation) -> str:
     """`fresh`, `starting`, `started` or `other`: where a no-team start stands. Reads only.
 
-    A start is unfinished by the update record's own rule: not `done`, or `done`
-    with health errors.
+    `starting` is an unfinished start record, by the update record's own rule:
+    not `done`, or `done` with health errors. It also covers a start that was
+    prepared and never dispatched (a run killed between the two); its record
+    names its request, and `host update continue` continues it by that id. Any
+    other unfinished record is an ordinary update: a started computer with no
+    team stays `started` while one is in flight or after it ends with health
+    errors, and any other computer reads `other`.
     """
     from ..git_update import UpdateError, read_update
 
@@ -337,7 +342,8 @@ def start_state(root: Path, installation) -> str:
         return "other"
     if record is not None and (record["phase"] != "done" or record.get("health_errors")):
         scope = record.get("initialization_scope")
-        return "starting" if isinstance(scope, dict) and scope.get("manifests") == [] else "other"
+        if isinstance(scope, dict) and scope.get("manifests") == []:
+            return "starting"
     if started_without_team(root, installation):
         return "started"
     if record is None:

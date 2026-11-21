@@ -680,3 +680,41 @@ def test_a_start_done_with_health_errors_is_starting_not_started(tmp_path, monke
         record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
         store.save(record)
     assert start_state(case.root, case.installation) == "starting"
+
+
+def test_a_started_computer_with_an_ordinary_update_pending_is_still_started(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import UpdateStore, read_update
+    from claudlobby.plane.owner_source import start_state
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    later = case.add_target()
+    dispatched = updater.apply_or_continue(case.installation, target=later)
+    assert dispatched["job"] == {"dispatch": "started"}
+    record = read_update(case.installation)
+    assert record["phase"] != "done" and "initialization_scope" not in record
+    # In flight.
+    assert start_state(case.root, case.installation) == "started"
+    case.run_job()
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        assert record["phase"] == "done" and not record["health_errors"]
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    # Done with health errors.
+    assert start_state(case.root, case.installation) == "started"
+
+
+def test_a_computer_with_a_team_and_an_ordinary_update_pending_is_other(current_runtime):
+    from claudlobby.git_update import UpdateStore
+    from claudlobby.plane.owner_source import start_state
+
+    root, installation, _, host = current_runtime
+    with UpdateStore(installation) as store:
+        record = store.load()
+        assert record is not None and "initialization_scope" not in record
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    assert start_state(root, installation) == "other"
