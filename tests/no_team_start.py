@@ -403,7 +403,11 @@ class Case:
         return self._jobs(store)
 
     def run_job(self, at=None):
-        """The dispatched job: run the frozen operation to its end. `at[n]` runs at the n-th lock poll."""
+        """The dispatched job: run the frozen operation to its end. `at[n]` runs at the n-th lock poll.
+
+        `self.polls` counts the runtime-lock polls the job made, every one at a gate
+        that found the lock held.
+        """
         at = dict(at or {})
         real = time.sleep
         count = [0]
@@ -422,6 +426,7 @@ class Case:
             patch.setattr(time, "sleep", sleep)
             with UpdateStore(self.installation) as store:
                 result = updater.run_prepared_update(store)
+        self.polls = count[0]
         assert not at, f"the updater never waited for polls {sorted(at)}"
         return result
 

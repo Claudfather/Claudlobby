@@ -896,11 +896,15 @@ def test_a_computer_starts_with_no_team(tmp_path, monkeypatch, owner):
                      operation.db_file(case.root).exists(), (case.root / "state/config.json").exists()))
         os.close(lease)
     result = case.run_job(at={3: guide_exits})
-    # While the run that dispatched it lived, the updater waited at its drain and changed nothing.
+    # While the run that dispatched it lived, the updater polled at its drain and changed
+    # nothing: at the third poll no gate had been taken and nothing was quiesced or written.
     assert seen == [("quiesce", [], False, False, False)]
     assert result["phase"] == "done" and result["health_errors"] == {}
+    # It took the drain only after the lease closed at that poll, and the cutover found
+    # the lock free. Counted in polls, not seconds: a fast runner records a 0.0 s wait.
     drain, cutover = result["runtime_waits"]
-    assert drain["gate"] == "drain" and drain["seconds"] > 0 and cutover["gate"] == "cutover"
+    assert drain["gate"] == "drain" and drain["outcome"] == "taken" and case.polls == 3
+    assert cutover["gate"] == "cutover" and cutover["outcome"] == "taken"
     assert case.installation.preflight() == case.target
     # A bound plane.db that holds no team.
     assert inspect_source(case.root) == case.host_uid and not case.access.first_fleet_pending()
@@ -956,7 +960,12 @@ def test_an_ordinary_update_of_a_computer_started_with_no_team_reaches_done(tmp_
 
 
 def test_a_computer_started_with_no_team_is_admitted_and_checked_like_any_other(tmp_path, monkeypatch):
-    """Runtime admission, the operator check and update authorization each read the empty configuration."""
+    """Runtime admission and the operator check each read the empty configuration.
+
+    Update authorization (`update_entry.main`'s authorize stage) is not run here: it
+    checks its own process's source and interpreter. This checks what it reads after
+    the operator check: the committed configuration's native placement.
+    """
     from claudlobby import context, supervision_inventory
     from claudlobby.commands.operator_context import require_operator_context
     from claudlobby.command_result import CommandFailure
@@ -984,8 +993,7 @@ def test_a_computer_started_with_no_team_is_admitted_and_checked_like_any_other(
     with pytest.raises(CommandFailure, match="operator shell"):
         require_operator_context(case.root)
     monkeypatch.delenv("BOT_ID")
-    # Update authorization (update_entry.main) is that operator check, then the
-    # committed configuration's native placement.
+    # The native placement update authorization reads after that operator check.
     from claudlobby.active_config import read_current_config
     snapshot = read_current_config(case.root, installation=case.installation, revision=package.source_revision)
     assert snapshot["supervision"] == {"manager": "Linux", "domain": "", "directory": str(case.directory)}
