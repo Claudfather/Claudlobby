@@ -25,6 +25,7 @@ import pytest
 
 from claudlobby.composer import compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig, ScopeConfig
+from tests.conftest import load_test_fleet, make_paths
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
 
@@ -71,12 +72,24 @@ def _session_start(settings: dict) -> list:
 
 
 class TestKnobDefaultOff:
-    def test_no_stanza_composes_no_brief_hook(self, paths):
-        bot = _bot()
-        settings = compose_settings_local(bot, _fleet(bot), paths)
-        for group in _session_start(settings):
-            for hook in group.get("hooks", []):
-                assert "brief" not in hook.get("command", "")
+    def test_no_stanza_composes_no_brief_hook(self, fleet_dir, monkeypatch):
+        # Parsed from fleet.yaml text with no brief: stanza, so the default
+        # under test is _parse_brief's, not BotConfig's field default. The
+        # probe answers as a CLI that can serve the hook, so a default that
+        # armed would compose the hook here instead of refusing to.
+        import claudlobby.composer as composer_mod
+
+        monkeypatch.setattr(
+            composer_mod,
+            "_brief_cli_probe",
+            lambda: ("/fake/bin/claudlobby", ""),
+        )
+        fleet = load_test_fleet(fleet_dir)
+        for bot in fleet.bots.values():
+            settings = compose_settings_local(bot, fleet, make_paths(fleet_dir))
+            for group in _session_start(settings):
+                for hook in group.get("hooks", []):
+                    assert "brief" not in hook.get("command", "")
 
     def test_probe_never_runs_when_off(self, paths, monkeypatch):
         import claudlobby.composer as composer_mod
