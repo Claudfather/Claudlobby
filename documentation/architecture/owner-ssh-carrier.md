@@ -289,23 +289,28 @@ in this order and each only if an earlier run has not: `prepare_directories`,
 storages a workspace link needs) and `bind_workspace`. Then it drains its own
 listener and asks `start_workspace`, which dispatches the start with no team.
 It never asks a Claude card or a team card. Its state frames are the existing
-`pairing_ready` and `workspace_ready`, then one result:
+`pairing_ready` and `workspace_ready`, then one `type: "result"` frame:
 
 | Result | Fields beyond the common four | Meaning |
 |---|---|---|
 | `computer_starting` | `state`, `request_id`, `config_fingerprint`, `target` | The start is dispatched or under way; the run exits so the updater can proceed |
 | `computer_ready` | `state`, `origin`, and `transport` over SSH | The computer is started; on Linux its lasting service answered `/owner` |
 
-Run again, it is the way back in and asks no card: on a started computer it
-answers `computer_ready`, and while the start is under way `computer_starting`
-with the same identifiers. It never waits for the updater, never continues a
-record and never answers `computer_ready` in the process that dispatched a
-start. Its refusals are an `error` frame: `use_full_guide` when today's guide
-retains a first-team approval or Launch, or the computer is in any other state;
-`start_failed`, with core's `line` and the record's `request_id`, when the
-start stopped or a started computer's lasting service did not answer within 15
-seconds; `revision_differs`, from the prelude itself, when the installed
-revision is not the requested one. A stopped start is continued by its request
+After a declined card the next run asks the cards that remain, from the
+declined one on. After the hand-off it is the way back in and asks no card: on
+a started computer it answers `computer_ready`, and while the start is under
+way `computer_starting` with the same identifiers, read without a card or a
+dispatch. It never waits for the updater, never continues a record and never
+answers `computer_ready` in the process that dispatched a start. Its refusals
+are `type: "error"` frames, as today's guide sends them (`code`, `state:
+"stopped"`, `retry: false`): `use_full_guide` when today's guide retains a
+first-team approval or Launch, or the computer is in any other state;
+`start_failed` when the start stopped or a started computer's lasting service
+did not answer within 15 seconds, with `line` (display text only; it can name a
+path under the account's home) and the record's `request_id`;
+`revision_differs`, from the prelude itself, when the installed revision is
+not the requested one. A computer part-way through today's cards, with no
+approval or Launch retained, is taken over by this run. A stopped start is continued by its request
 id over the account channel, never by a run: while its record is in maintenance
 no run can begin.
 
@@ -314,8 +319,10 @@ Its admission line and its `start` frame carry one more key than today's guide,
 the client read. A computer's receipt keeps the revision it was prepared at for
 good and is never rewritten. The computer run is admitted at that revision as
 today's guide is, or at a later installed revision only when `update_record`
-names the record on disk, that record is `done` with no health errors, it ends
-at the installed revision, and the receipt's revision is an ancestor of it. The
+names the record on disk, that record is `done` as strictly as today's finish
+reads one (an empty health table, out of maintenance, configuration committed,
+no stage error), it ends at the installed revision, and the receipt's revision
+is an ancestor of it. The
 prelude only skips the receipt's revision for this mode; the record and
 ancestry checks are the profile's and the run's. Everything else is checked as
 today: the receipt's shape, the binding, the system Python and the installed
