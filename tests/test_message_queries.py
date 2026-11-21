@@ -236,6 +236,48 @@ def staged_receipt(root, number=1, name="1-ev_staged.batch"):
     return staged / name
 
 
+def test_message_list_operator_scope_and_pending_receipt(estate, monkeypatch):
+    ctx, conn = estate
+    operator = replace(ctx, caller=ACTORS["human:operator"], caller_fleet_uid=None)
+    pending = communication(conn)
+    inbound = communication(conn, 2, sender="bot:b/worker", recipient="bot:a/manager", fleet_uid=FLEETS["b"])
+    foreign = communication(conn, 3, sender="bot:c/worker", recipient="bot:b/worker", fleet_uid=FLEETS["c"])
+    other_host = communication(conn, 4, host_uid="host_" + "1" * 32)
+    addressed_to_human = communication(conn, 5, recipient="human:operator")
+    listed_by_envelope = communication(conn, 6, sender="bot:c/worker", recipient="bot:b/worker")
+    transmission(conn, "pane_submitted", fleet="a")
+
+    def listed():
+        return {item["message_id"]: item for item in q.list_messages(
+            operator, since="1d", until="2026-09-28T01:00:00Z", sender=None,
+            recipient=None, kind=None, limit=50, cursor=None, selection={},
+        )["items"]}
+
+    rows = listed()
+    assert set(rows) == {pending, inbound, addressed_to_human, listed_by_envelope}
+    for message_id in rows:
+        assert q.show_message(operator, message_id).message_id == message_id
+    for message_id in (foreign, other_host):
+        with pytest.raises(q.MessageNotFoundError):
+            q.show_message(operator, message_id)
+    assert (rows[pending]["receipt_observation"], rows[pending]["integrity_verdict"]) == ("no_history", "unconfirmed")
+    assert (rows[inbound]["receipt_observation"], rows[inbound]["integrity_verdict"]) == ("no_history", "unknown")
+    assert rows[addressed_to_human]["receipt_observation"] == "not_applicable"
+
+    batch = staged_receipt(ctx.root)
+    staged_bytes = batch.read_bytes()
+    with ingest_daemon(monkeypatch):
+        rows = listed()
+    assert rows[pending]["receipt_observation"] == "pending"
+    assert rows[pending]["integrity_verdict"] == "unconfirmed" and rows[pending]["received_at"] is None
+    assert batch.read_bytes() == staged_bytes
+
+    batch.write_text("{")
+    row = listed()[pending]
+    assert row["receipt_observation"] == "unavailable" and row["integrity_verdict"] == "unconfirmed"
+    assert row["received_at"] is None
+
+
 @contextmanager
 def ingest_daemon(monkeypatch, *, answer=DAEMON_ANSWER):
     """Where the receipt check probes the ingest daemon, a real listener on a
