@@ -864,3 +864,56 @@ def test_conversion_last_check_allows_scheduled_finish_but_preserves_enrollment(
         operation.check_conversion_before_retirement(store, SimpleNamespace(package=object()))
     assert store.history == []
     assert store.load()["consumers"]["job.service"]["intent"] == original
+
+
+@pytest.mark.parametrize("owner", [None, "on", "off"])
+def test_a_computer_starts_with_no_team(tmp_path, monkeypatch, owner):
+    """Phase 1's proof: the first activation, without a team, dispatched by a run that holds a lease.
+
+    The run that asks for the start holds the runtime reader lease, as every guide
+    run does. The updater drains it before its cutover: nothing is committed
+    while that run lives, and the start finishes once it has exited.
+    """
+    import sqlite3
+    from claudlobby import git_update as updater
+    from claudlobby.active_config import read_current_config
+    from claudlobby.git_update import read_update
+    from claudlobby.installation import _runtime_lock
+    from claudlobby.plane.owner_source import inspect_source
+    from tests.no_team_start import Case, default_on_jobs, job_name
+    case = Case(tmp_path, monkeypatch, owner=owner)
+    lease = _runtime_lock(case.installation)  # the guide's reader lease
+    dispatched = updater.apply_or_continue(case.installation, target=case.target, initialization=case.scope)
+    assert dispatched["job"] == {"dispatch": "started"}
+    assert case.dispatches == [dispatched["update"]["request_id"]]
+    assert dispatched["update"]["phase"] == "quiesce" and dispatched["update"]["initialization_scope"] == case.scope
+    assert not operation.db_file(case.root).exists() and not (case.root / "state/config.json").exists()
+    seen = []
+
+    def guide_exits():
+        record = read_update(case.installation)
+        seen.append((record["phase"], record["runtime_wait"]["gate"], "quiesce" in case.trace,
+                     operation.db_file(case.root).exists(), (case.root / "state/config.json").exists()))
+        os.close(lease)
+    result = case.run_job(at={3: guide_exits})
+    # While the run that dispatched it lived, the updater waited at its drain and changed nothing.
+    assert seen == [("quiesce", "drain", False, False, False)]
+    assert result["phase"] == "done" and result["health_errors"] == {}
+    drain, cutover = result["runtime_waits"]
+    assert drain["gate"] == "drain" and drain["seconds"] > 0 and cutover["gate"] == "cutover"
+    assert case.installation.preflight() == case.target
+    # A bound plane.db that holds no team.
+    assert inspect_source(case.root) == case.host_uid and not case.access.first_fleet_pending()
+    connection = sqlite3.connect(operation.db_file(case.root))
+    try:
+        assert connection.execute("SELECT count(*) FROM identity_registry WHERE kind != 'host'").fetchone() == (0,)
+    finally:
+        connection.close()
+    # A committed configuration that lists no team, and no identities.
+    config = read_current_config(case.root, installation=case.installation, revision=case.target)
+    assert config["fleets"] == {} and config["identities"] is None
+    # Exactly the default-on jobs, and the lasting service only where the settings switch it on.
+    expected = default_on_jobs() | ({"plane-owner"} if owner == "on" else set())
+    assert {job_name(key) for key in result["consumers"]} == expected
+    assert all(item["restore"] == "done" for item in result["consumers"].values())
+    assert {path.name for path in case.directory.iterdir() if path.is_file()} == set(result["consumers"])
