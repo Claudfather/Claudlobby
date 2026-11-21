@@ -927,8 +927,10 @@ def independent_python():
         if python != profile.python or sys.prefix != sys.base_prefix:
             raise Refusal("prerequisite_unusable", 6)
         return python
+    folder = Path("/usr/bin").lstat()
     if (sys.implementation.name != "cpython" or sys.version_info < (3, 10)
-            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")):
+            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")
+            or not stat.S_ISDIR(folder.st_mode) or folder.st_uid != 0 or folder.st_mode & 0o022):
         raise Refusal("prerequisite_unusable", 6)
     trusted_executable(python)
     return python

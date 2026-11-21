@@ -262,9 +262,9 @@ def fixed_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(Installation, "preflight", lambda self, **kwargs: "a" * 40)
     # The running Linux interpreter, trusted from this directory and owner as
     # /usr/bin and root are on a real computer.
-    from claudlobby.commands import owner_setup_consent
-    monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_DIRECTORY", tmp_path, raising=False)
-    monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_OWNER", os.getuid(), raising=False)
+    from claudlobby import bootstrap
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path)
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid())
     monkeypatch.setattr(sys, "executable", str(interpreter))
     return SimpleNamespace(root=family / "data", package=package), request, home, path
 
@@ -977,15 +977,15 @@ def test_linux_system_python_update_keeps_the_recorded_binding(fixed_profile):
 
 
 @pytest.mark.parametrize("defect", ["owner", "group-writable", "other-writable", "not-executable",
-                                    "outside", "running-python"])
+                                    "outside", "running-python", "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
 def test_linux_system_python_must_stay_trusted(fixed_profile, monkeypatch, tmp_path, defect):
-    from claudlobby.commands import owner_setup_consent
+    from claudlobby import bootstrap  # holds the shared trust check
     from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
     from claudlobby.commands.owner_stdio import StdioRefused
     paths, request, home, path = fixed_profile
     interpreter = Path(json.loads(path.read_bytes())["interpreter"])
     if defect == "owner":
-        monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_OWNER", os.getuid() + 1)
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid() + 1)
     elif defect == "group-writable":
         interpreter.chmod(0o775)
     elif defect == "other-writable":
@@ -993,10 +993,12 @@ def test_linux_system_python_must_stay_trusted(fixed_profile, monkeypatch, tmp_p
     elif defect == "not-executable":
         interpreter.chmod(0o644)
     elif defect == "outside":
-        monkeypatch.setattr(owner_setup_consent, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
-    else:
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
+    elif defect == "running-python":
         other = tmp_path / "other-python"; other.write_bytes(b"other"); other.chmod(0o755)
         monkeypatch.setattr(sys, "executable", str(other))
+    else:
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", _fake_folder(tmp_path, defect))
     receipt, before = path.read_bytes(), sorted(str(p) for p in home.rglob("*"))
     with pytest.raises(StdioRefused, match="installation_changed"):
         FixedOwnerProfile(paths, request)
@@ -1014,3 +1016,30 @@ def test_darwin_managed_python_bytes_stay_pinned(darwin_fixed_profile):
     with pytest.raises(StdioRefused, match="installation_changed"):
         FixedOwnerProfile(paths, request)
     assert receipt_path.read_bytes() == receipt
+
+
+def _fake_folder(path, defect):
+    """The trusted folder as lstat reports it, with at most one property faked."""
+    if not (defect or "").startswith("folder-"):
+        return path
+    import stat as stat_module
+    class Folder(type(Path("/"))):
+        def lstat(self):
+            info = super().lstat()
+            mode = stat_module.S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return SimpleNamespace(st_mode=mode, st_uid=info.st_uid + (defect == "folder-owner"))
+    return Folder(path)
+
+
+def test_linux_recorded_python_digest_is_never_compared(fixed_profile):
+    """Only the recorded digest changes, and the binding the website holds agrees."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, _home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["interpreter_sha256"] = "e" * 64
+    path.write_text(json.dumps(receipt, sort_keys=True))
+    binding = {key: value for key, value in receipt.items()
+               if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
+    request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    FixedOwnerProfile(paths, request)

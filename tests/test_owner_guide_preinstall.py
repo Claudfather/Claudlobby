@@ -438,7 +438,8 @@ def test_replaced_python_bytes_admit_only_the_linux_system_python(installed, mon
     assert path.read_bytes() == receipt and snapshot(home) == before
 
 
-@pytest.mark.parametrize("defect", [None, "owner", "group-writable", "other-writable", "outside"])
+@pytest.mark.parametrize("defect", [None, "owner", "group-writable", "other-writable", "outside",
+                                    "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
 def test_linux_system_python_is_admitted_only_while_trusted(monkeypatch, tmp_path, defect):
     module = payload()
     monkeypatch.setattr(module.platform, "system", lambda: "Linux")
@@ -453,6 +454,13 @@ def test_linux_system_python_is_admitted_only_while_trusted(monkeypatch, tmp_pat
             mode, uid = info.st_mode, (1001 if defect == "owner" else info.st_uid)
             mode |= {"group-writable": 0o020, "other-writable": 0o002}.get(defect, 0)
             return types.SimpleNamespace(st_mode=mode, st_uid=uid)
+        def lstat(self):
+            info = super().lstat()
+            if str(self) != "/usr/bin":
+                return info
+            mode = __import__("stat").S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return types.SimpleNamespace(st_mode=mode, st_uid=1001 if defect == "folder-owner" else info.st_uid)
     monkeypatch.setattr(module, "Path", Observed)
     if defect is None:
         assert module.independent_python() == executable.resolve()
@@ -460,3 +468,15 @@ def test_linux_system_python_is_admitted_only_while_trusted(monkeypatch, tmp_pat
     with pytest.raises(module.Refusal) as error:
         module.independent_python()
     assert (error.value.code, error.value.exit_code) == ("prerequisite_unusable", 6)
+
+
+def test_linux_recorded_python_digest_is_never_compared(installed):
+    """Only the recorded digest changes, and the binding the website holds agrees."""
+    module, home, install, value, python = installed
+    path = install / "preparation.json"
+    state = json.loads(path.read_text()); state["interpreter_sha256"] = "e" * 64
+    path.write_text(json.dumps(state)); path.chmod(0o600)
+    value["binding_sha256"] = hashlib.sha256(json.dumps(
+        {key: state[key] for key in module.BINDING_FIELDS}, sort_keys=True).encode()).hexdigest()
+    assert module.platform.system() == "Linux"  # the fixture's platform
+    assert module.validate(value, time.monotonic() + 10)[0] == python

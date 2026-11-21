@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 
+from ..bootstrap import trusted_system_python
 from ..plane.owner_consent import TrustedWorkspacePresenter
 from .owner_stdio import StdioRefused, _unique
 
@@ -25,25 +26,6 @@ def _digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             value.update(chunk)
     return value.hexdigest()
-
-
-# Where a Linux preparation's system Python is trusted from, and its owner.
-_SYSTEM_PYTHON_DIRECTORY, _SYSTEM_PYTHON_OWNER = Path("/usr/bin"), 0
-
-
-def _system_python(interpreter):
-    """Linux: the resolved running interpreter, a regular executable in /usr/bin
-    owned by root and writable by nobody else (the preinstall admission).
-
-    Its bytes are not compared: Ubuntu security updates replace this file, and
-    whoever can replace a root-owned file there already controls the computer.
-    The digest recorded at preparation stays in the receipt and its binding.
-    """
-    info = interpreter.stat()
-    if (interpreter != Path(sys.executable).resolve() or interpreter.parent != _SYSTEM_PYTHON_DIRECTORY
-            or not stat.S_ISREG(info.st_mode) or info.st_uid != _SYSTEM_PYTHON_OWNER
-            or info.st_mode & 0o022 or not os.access(interpreter, os.X_OK)):
-        raise StdioRefused("installation_changed")
 
 
 def _directory(path, *, private=True):
@@ -125,8 +107,9 @@ class FixedOwnerProfile:
                     or re.fullmatch(r"[0-9a-f]{64}", receipt["interpreter_sha256"]) is None
                     or self.runtime is not None and _digest(interpreter) != receipt["interpreter_sha256"]):
                 raise StdioRefused("installation_changed")
-            if self.runtime is None:
-                _system_python(interpreter)
+            # Linux: trusted by place and ownership; the recorded digest stays bound.
+            if self.runtime is None and not trusted_system_python(interpreter):
+                raise StdioRefused("installation_changed")
             if (request["finish_setup"] is None and not updated_source
                     and receipt["ref"] != request["source_revision"]):
                 raise StdioRefused("installation_changed")
