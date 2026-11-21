@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The event's three defaults, and ready_for_review: marking a draft ready
+    # starts the run that includes the macOS lane (below).
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # A push to a pull request cancels the run for the commit it replaced. A push
 # to main has no pull request number, so it falls back to its own run id: each
@@ -19,13 +22,18 @@ env:
   # limit on its plan), and harness-macos is the fifth.
   TEST_SPLITS: "4"
 
-# Every pull request runs the suite outside quarantine on each supported
-# platform, Linux with Python 3.10 (the floor version) and macOS with Python
-# 3.11, in TEST_SPLITS shards. Each platform's gate job carries the platform's
-# check name and passes only when every shard did and, between them, the shards
-# ran the suite they collected, each test once (tests/ci_shards.py). The harness
-# runs in a job of its own on each platform. Linux with Python 3.11 runs on push
-# to main only. Every lane excludes quarantine; tests/test_ci_lanes.py pins them.
+# Every pull request runs the suite outside quarantine on Linux with Python 3.10
+# (the floor version), in TEST_SPLITS shards. A pull request that is ready for
+# review also runs it on macOS with Python 3.11, and so does every push to main.
+# A draft runs no macOS job: its macOS checks read skipped until it is marked
+# ready, which starts a new run. The account runs five macOS jobs at once and
+# one run needs all five, so with macOS on every push of every draft the jobs
+# waited a median of 19 minutes for a runner (2026-11-21). Each platform's gate
+# job carries the platform's check name and passes only when every shard did
+# and, between them, the shards ran the suite they collected, each test once
+# (tests/ci_shards.py). The harness runs in a job of its own on each platform.
+# Linux with Python 3.11 runs on push to main only. Every lane excludes
+# quarantine; tests/test_ci_lanes.py pins them.
 # Ubuntu qualification stays on 24.04 until newer images pass the native process
 # fixtures. Keep check names and artifact identifiers stable for existing gates.
 jobs:
@@ -239,9 +247,12 @@ jobs:
           python3 tests/ci_shards.py check --lane 'supported (ubuntu-latest, py3.10)' \
             --splits "$TEST_SPLITS" shards
 
-  # The macOS 3.11 suite, sharded as the Linux one is above.
+  # The macOS 3.11 suite, sharded as the Linux one is above. Not on a draft
+  # pull request. The condition holds on a push to main, which has no pull
+  # request, and on a pull request opened ready.
   supported-macos-shard:
     name: supported (macos-latest, py3.11) shard ${{ matrix.group }}
+    if: github.event.pull_request.draft != true
     runs-on: macos-latest
     # A shard runs about a quarter of the suite (around thirteen minutes).
     timeout-minutes: 40
@@ -340,11 +351,14 @@ jobs:
 
   # The check name the merge gate reads for macOS, as supported-ubuntu is for
   # Linux. It also requires the native macOS evidence: each case ran in exactly
-  # one shard and passed.
+  # one shard and passed. On a draft it is skipped with its shards, and a
+  # skipped check is not a pass: nothing merges a draft, and a merger reads the
+  # run that marking it ready starts. A required check would read a skipped job
+  # as met, for the seconds before that run appears.
   supported-macos:
     name: supported (macos-latest, py3.11)
     needs: [supported-macos-shard]
-    if: always()
+    if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -433,9 +447,11 @@ jobs:
           if-no-files-found: error
 
   # The harness on macOS, out of the macOS shards: it took about 3.5 minutes
-  # inside the one macOS job the suite ran in before the shards (#1945).
+  # inside the one macOS job the suite ran in before the shards (#1945). Not on
+  # a draft pull request, as the shards.
   harness-macos:
     name: harness (macos-latest, py3.11)
+    if: github.event.pull_request.draft != true
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
