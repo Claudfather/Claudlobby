@@ -1422,6 +1422,104 @@ def test_provider_signin_real_pty_original_attempt_code_and_host_only_store(synt
     finally:engine.signin.shutdown()
 
 
+def _prepared_record(engine,args,**changes):
+    """The update record a prepared first-team Preview leaves on disk: at quiesce, so native startup is fenced.
+
+    The fixture's update store keeps the record in memory only; the real one writes it here."""
+    record={**args.retained['record'],'schema':1,'maintenance':False,'finalized':True,**changes}
+    (engine.root/'state/update.json').write_text(json.dumps(record))
+
+
+def _signed_in_preview(engine,grant,reader,args):
+    """Signed in through the real PTY and the synthetic provider, then a prepared Preview with its record on disk."""
+    from claudlobby import resources
+    from claudlobby.installation import _check_maintenance,FencedError
+    attempt=str(uuid4())
+    engine.signin_begin(reader,grant.generation,attempt)
+    _signin_until(engine,grant,reader,attempt,'waiting')
+    engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+    _signin_until(engine,grant,reader,attempt,'connected')
+    preview=engine.preview(reader,grant.generation,'Requested local work')
+    assert preview['dispatch']=='prepared' and preview['phase']=='quiesce'
+    _prepared_record(engine,args)
+    installation=resources.get_resources().installation
+    _check_maintenance(installation)  # A read passes ...
+    with pytest.raises(FencedError):_check_maintenance(installation,native=True)  # ... a native start does not.
+    return attempt,binding(preview)
+
+
+def _nothing_launched(engine,args):
+    assert not args.dispatches
+    with engine.store.access._connection() as conn:
+        assert conn.execute('SELECT launch_id FROM setup_grant').fetchone()[0] is None
+
+
+def test_signed_in_first_team_launches_its_own_prepared_preview(synthetic_signin,setup_authority):
+    """Found live: Launch asked the native-start fence, which this approval's own Preview had raised."""
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        _,request=_signed_in_preview(engine,grant,reader,args)
+        result=engine.launch(reader,**request)
+        assert result['state']=='quiesce' and result['launch_reserved']
+        assert [record['request_id'] for record in args.dispatches]==[request['request_id']]
+        assert engine.launch(reader,**request)==result and engine.receipt(reader,**request)==result
+        assert engine.context(reader)['launch_reserved'] and len(args.dispatches)==1
+    finally:engine.signin.shutdown()
+
+
+def test_signed_in_first_team_launch_still_refuses_a_signin_that_is_not_connected(synthetic_signin,setup_authority):
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        attempt,request=_signed_in_preview(engine,grant,reader,args)
+        for ending in ('needs_attention','cancelled','unknown','missing'):  # missing last: it deletes the row
+            with engine.store.access._connection(write=True) as conn:
+                conn.execute("UPDATE setup_provider SET state='connected' WHERE attempt_id=?",(attempt,))
+            engine.signin.ready(reader,grant)  # each ending starts from a connected sign-in
+            with engine.store.access._connection(write=True) as conn:
+                if ending=='missing':conn.execute('DELETE FROM setup_provider')
+                else:conn.execute('UPDATE setup_provider SET state=? WHERE attempt_id=?',(ending,attempt))
+            with pytest.raises(AccessDenied,match='signin_not_complete'):engine.launch(reader,**request)
+            assert not engine.context(reader)['launch_reserved']
+            _nothing_launched(engine,args)
+    finally:engine.signin.shutdown()
+
+
+def test_signed_in_first_team_launch_still_refuses_during_maintenance(synthetic_signin,setup_authority):
+    """ready() skips only the native-start fence: active maintenance still refuses before anything is reserved."""
+    from claudlobby.installation import InstallationError
+    engine,grant,reader,*_=synthetic_signin
+    args=setup_authority[-1]
+    try:
+        _,request=_signed_in_preview(engine,grant,reader,args)
+        _prepared_record(engine,args,maintenance=True)
+        with pytest.raises(InstallationError,match='maintenance is active'):engine.launch(reader,**request)
+        _nothing_launched(engine,args)
+    finally:engine.signin.shutdown()
+
+
+def test_signin_calls_stay_fenced_while_the_prepared_preview_quiesces(synthetic_signin,setup_authority):
+    """Only ready() reads past the native-start fence; every call the browser or worker makes still asks it."""
+    from claudlobby.installation import FencedError
+    engine,grant,reader,*_=synthetic_signin
+    try:
+        attempt,_=_signed_in_preview(engine,grant,reader,setup_authority[-1])
+        engine.signin.ready(reader,grant)
+        signin=engine.signin
+        # The browser's own calls end earlier, at the retained Preview; under them the fence still holds.
+        with pytest.raises(AccessDenied,match='signin_preview_retained'):engine.signin_status(reader,grant.generation,attempt)
+        for call in (lambda:signin.status(reader,grant,attempt),lambda:signin.begin(reader,grant,attempt),
+                     lambda:signin.begin(reader,grant,str(uuid4())),lambda:signin.code(reader,grant,attempt,'accepted#'+'b'*32),
+                     lambda:signin.cancel(reader,grant,attempt),lambda:signin.summary(reader,grant),
+                     lambda:signin._admit(reader,grant)):
+            with pytest.raises(FencedError):call()
+        with pytest.raises(FencedError):
+            with engine.signin._runtime(reader,grant):pytest.fail('a fenced runtime was entered')
+        assert engine.signin._thread is not None and not engine.signin._thread.is_alive()
+    finally:engine.signin.shutdown()
+
+
 def test_provider_signin_reported_deadline_never_outlasts_the_setup_approval(synthetic_signin,monkeypatch):
     from claudlobby.plane import provider_signin
     engine,grant,reader,_program,_token,_env=synthetic_signin
