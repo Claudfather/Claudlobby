@@ -892,12 +892,12 @@ def test_a_computer_starts_with_no_team(tmp_path, monkeypatch, owner):
 
     def guide_exits():
         record = read_update(case.installation)
-        seen.append((record["phase"], record["runtime_wait"]["gate"], "quiesce" in case.trace,
+        seen.append((record["phase"], record.get("runtime_waits", []), "quiesce" in case.trace,
                      operation.db_file(case.root).exists(), (case.root / "state/config.json").exists()))
         os.close(lease)
     result = case.run_job(at={3: guide_exits})
     # While the run that dispatched it lived, the updater waited at its drain and changed nothing.
-    assert seen == [("quiesce", "drain", False, False, False)]
+    assert seen == [("quiesce", [], False, False, False)]
     assert result["phase"] == "done" and result["health_errors"] == {}
     drain, cutover = result["runtime_waits"]
     assert drain["gate"] == "drain" and drain["seconds"] > 0 and cutover["gate"] == "cutover"

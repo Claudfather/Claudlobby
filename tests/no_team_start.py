@@ -86,7 +86,8 @@ class Native:
         elif function == "svc_activation_start":
             self.states[args[1]] = "enabled loaded active"
         elif function == "svc_inventory_state":
-            output = self.states.get(args[1], "enabled loaded inactive")
+            installed = Path(args[0]).exists()
+            output = self.states.get(args[1], "enabled loaded inactive") if installed else "not-found not-found inactive"
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
 
