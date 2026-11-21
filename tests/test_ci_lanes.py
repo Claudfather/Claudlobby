@@ -383,8 +383,9 @@ MACOS_LANE = {
     HARNESS_MACOS[1]: MACOS_RUNS,
     GATES[MACOS_SHARDS][0]: f"always() && ({MACOS_RUNS})",
 }
-# The name the macOS gate job takes where the lane does not run.
-MACOS_GATE_SKIPPED_NAME = "macos lane not run (draft pull request)"
+# The matrix key that gives the macOS gate job its name. GitHub shows a job its
+# `if` skips under its unexpanded name, so this is what a skipped gate is called.
+MACOS_GATE_NAME_KEY = "macos-not-run-on-a-draft-pull-request"
 
 
 def test_the_linux_311_lane_runs_on_push_to_main_only():
@@ -426,17 +427,17 @@ def test_a_skipped_macos_gate_does_not_carry_the_gates_check_name():
     """A run creates its gate job only once the shards have finished. After a
     draft is marked ready, the draft run's skipped gate is therefore the only
     result on the commit for as long as the new run's macOS shards take, and a
-    required check reads a skipped job as met. So where the lane does not run,
-    the gate job is skipped under another name, on the lane's own condition:
+    required check reads a skipped job as met. So the gate's name is not
+    written on the job: it is the one value of a matrix, which GitHub expands
+    only for a job that runs. A skipped gate shows as the matrix key, and
     nothing called by the gate's check name exists on a commit until a run that
     ran the lane has judged it."""
     gate_id, check_name = GATES[MACOS_SHARDS]
-    name = _workflow("test.yml")["jobs"][gate_id]["name"]
-    assert name == (
-        f"${{{{ ({MACOS_RUNS}) && '{check_name}' || '{MACOS_GATE_SKIPPED_NAME}' }}}}"
-    )
-    assert MACOS_GATE_SKIPPED_NAME != check_name
-    assert MACOS_GATE_SKIPPED_NAME not in ci_shards.SKIP_CEILINGS
+    gate = _workflow("test.yml")["jobs"][gate_id]
+    assert gate["name"] == f"${{{{ matrix.{MACOS_GATE_NAME_KEY} }}}}"
+    assert gate["strategy"] == {"matrix": {MACOS_GATE_NAME_KEY: [check_name]}}
+    # The check name is nowhere else on the job that a skipped run could show.
+    assert check_name not in gate["name"]
     # The Linux gate never skips, so its name is the check name outright.
     linux_id, linux_name = GATES[UBUNTU_SHARDS]
     assert _workflow("test.yml")["jobs"][linux_id]["name"] == linux_name
@@ -595,10 +596,10 @@ def test_a_shard_step_lists_and_runs_its_suite_in_one_environment(
 def test_each_gate_carries_its_check_name_and_waits_for_every_shard(lane):
     gate_id, check_name = GATES[lane]
     gate = _workflow(lane[0])["jobs"][gate_id]
-    # The macOS gate's name is an expression that gives its check name wherever
-    # the lane runs (test_a_skipped_macos_gate_does_not_carry_the_gates_check_name).
+    # The macOS gate takes its check name from a matrix of one value
+    # (test_a_skipped_macos_gate_does_not_carry_the_gates_check_name).
     if gate_id in MACOS_LANE:
-        assert f"'{check_name}'" in gate["name"]
+        assert gate["strategy"]["matrix"][MACOS_GATE_NAME_KEY] == [check_name]
     else:
         assert gate["name"] == check_name
     assert gate["needs"] == [lane[1]]

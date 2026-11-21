@@ -58,7 +58,7 @@ operator approval. On a pull request `pytest` is skipped (it runs on push to
 main), and each `supported` name is a gate job over its platform's shards: a
 rule that requires a check names the gate, never a shard. Where the macOS
 lane does not run, on a draft without the label, its gate job is skipped under
-another name, `macos lane not run (draft pull request)`. A required check
+another name, `matrix.macos-not-run-on-a-draft-pull-request`. A required check
 reads a skipped job as met, and a run creates its gate job only once its
 shards have finished: a skipped result under the gate's own name would stand
 on the commit for the whole macOS run after a draft is marked ready. Under

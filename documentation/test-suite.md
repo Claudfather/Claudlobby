@@ -109,7 +109,7 @@ attributing it.
 **macOS runs once a pull request is ready for review.** Open a pull request as a draft while
 you iterate, and mark it ready when its Linux lanes are green. A draft runs the Linux lanes
 only: its macOS shards and its macOS harness read skipped, and its gate job is skipped under
-another name, `macos lane not run (draft pull request)`. So a commit carries no
+another name, `matrix.macos-not-run-on-a-draft-pull-request`. So a commit carries no
 `supported (macos-latest, py3.11)` result at all until a run that ran macOS has judged it: a run
 creates its gate job only once the shards have finished, and a skipped result under the gate's
 own name would otherwise stand on the commit for the whole macOS run after a draft is marked
