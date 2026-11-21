@@ -41,6 +41,60 @@ def test_spawn_scheduled_projection_is_binding_only_for_explicit_restore(tmp_pat
     assert inventory._darwin_print(observed, "gui/501/fixture", restore_pending=True)["ActiveState"] == "activating"
 
 
+@pytest.mark.parametrize("fault", [None, "missing-service", "foreign-service", "wrong-trigger"])
+def test_added_timer_restore_observes_its_real_service_binding(tmp_path, monkeypatch, fault):
+    import base64
+    import hashlib
+    from types import SimpleNamespace
+    from claudlobby import update_services as services
+
+    obs = Observations(tmp_path)
+    service = obs.add("alpha.watch.service", "fleet")
+    timer = obs.add("alpha.watch.timer", "fleet", service=service.name)
+    declaration = obs.declarations[-1]
+    timer.chmod(declaration.source.stat().st_mode & 0o777)
+    content = declaration.source.read_bytes()
+    row = {"target": timer.name, "manager": "Linux", "scheduled": True,
+           "bot_binding": None, "enroll": True, "enabled": True,
+           "destination": str(timer), "declaration": {
+               "source": str(declaration.source), "working_directory": str(declaration.working_directory),
+               "environment": list(declaration.environment)},
+           "candidate": {"sha256": hashlib.sha256(content).hexdigest(),
+                         "mode": declaration.source.stat().st_mode & 0o777,
+                         "content": {"base64": base64.b64encode(content).decode()}}}
+    # Resume the native failure point: files published, service restored,
+    # timer not yet started. Inventory and ownership are the real implementation.
+    progress = {"restore": "files"}
+    record = {"consumers": {service.name: {"restore": "done", "intent": {
+        "manager": "Linux", "scheduled": True}}, timer.name: progress}}
+    saved = []
+    store = SimpleNamespace(save=lambda value: saved.append(value))
+    monkeypatch.setattr(services, "current_git_declarations", lambda *_: tuple(obs.declarations))
+    if fault == "missing-service":
+        service.unlink()
+    elif fault == "foreign-service":
+        service.write_bytes(service.read_bytes().replace(str(obs.root).encode(), b"/foreign"))
+    elif fault == "wrong-trigger":
+        obs.properties[timer.name]["Triggers"] = "foreign.service"
+
+    def runner(command, **kwargs):
+        if command[5] in {"svc_activation_reload", "svc_activation_start", "svc_inventory_state"}:
+            obs.calls.append((command[5], command[6:]))
+            return subprocess.CompletedProcess(command, 0, "enabled loaded active", "")
+        return obs.runner(command, **kwargs)
+
+    adapter = Adapter(obs.package, runner=runner)
+    if fault:
+        with pytest.raises(InventoryError):
+            services._restore_added(store, record, progress, row, adapter, {"data_root": str(obs.root)})
+        assert not any(name == "svc_activation_start" for name, _ in obs.calls)
+    else:
+        services._restore_added(store, record, progress, row, adapter, {"data_root": str(obs.root)})
+        assert progress["restore"] == "done" and saved
+        assert {args[0] for name, args in obs.calls if name == "svc_inventory_properties"} == {
+            service.name, timer.name}
+
+
 def test_nonstandard_apple_xml_remains_raw_and_classifies_foreign(tmp_path, monkeypatch):
     raw = _apple_xml()
     obs = Observations(tmp_path)
@@ -890,10 +944,11 @@ def test_selected_adapter_catalog_uses_recording_native_functions(tmp_path):
     package = source_package()
     prologue = f'''
 uname() {{ printf 'Linux\\n'; }}
-systemd-analyze() {{ printf '%s\\n' {shlex.quote(str(tmp_path))}; }}
+systemd-analyze() {{ return 98; }}
 systemctl() {{
     printf '%s\\n' "$*" >> {shlex.quote(str(trace))}
     case "$2" in
+        show) printf '%s\\n' {shlex.quote(str(tmp_path))} ;;
         list-unit-files) printf 'worker.service enabled enabled\\n' ;;
         list-units) printf 'worker.service loaded active running Fixture\\n' ;;
         *) return 99 ;;
@@ -909,10 +964,52 @@ systemctl() {{
     assert adapter.read("svc_inventory_catalog") == (
         f"manager\tLinux\ndirectory\t{tmp_path}\ninstalled\tworker.service\nloaded\tworker.service\n")
     assert trace.read_text().splitlines() == [
+        "--user show --property=UnitPath --value",
         "--user list-unit-files --no-legend --no-pager --plain",
         "--user list-units --all --no-legend --no-pager --plain"]
     with pytest.raises(InventoryError, match="unsupported"):
         adapter.call("arbitrary_shell")
+
+
+@pytest.mark.parametrize("xdg", [None, "/usr/share:/var/lib/snapd/desktop"])
+def test_linux_catalog_uses_running_manager_paths_not_caller_xdg(tmp_path, monkeypatch, xdg):
+    if xdg is None:
+        monkeypatch.delenv("XDG_DATA_DIRS", raising=False)
+    else:
+        monkeypatch.setenv("XDG_DATA_DIRS", xdg)
+    prologue = r'''
+uname() { printf 'Linux\n'; }
+systemd-analyze() { printf '/caller/%s\n' "${XDG_DATA_DIRS:-scrubbed}"; }
+systemctl() {
+    case "$2" in
+        show) printf '/manager/config /manager/data\n' ;;
+        list-unit-files|list-units) : ;;
+        *) return 99 ;;
+    esac
+}
+'''
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+    assert Adapter(source_package(), runner=recording).read("svc_inventory_catalog") == (
+        "manager\tLinux\ndirectory\t/manager/config\ndirectory\t/manager/data\n")
+
+
+@pytest.mark.parametrize("value,rc", [
+    ("", 0), ("relative", 0), ("/valid relative", 0),
+    ("/valid\n/other", 0), ("/valid\t/other", 0),
+    (r"/escaped\x20path", 0), ("/valid", 1),
+])
+def test_linux_catalog_refuses_unavailable_or_malformed_manager_paths(tmp_path, value, rc):
+    prologue = f'''
+uname() {{ printf 'Linux\\n'; }}
+systemctl() {{ [ "$2" = show ] || return 99; printf '%s' {shlex.quote(value)}; return {rc}; }}
+'''
+    def recording(command, **kwargs):
+        command[2] = prologue + command[2]
+        return subprocess.run(command, **kwargs)
+    with pytest.raises(InventoryError, match="svc_inventory_catalog failed"):
+        Adapter(source_package(), runner=recording).read("svc_inventory_catalog")
 
 
 def test_linux_catalog_keeps_escaped_services_but_skips_non_consumers(tmp_path):
