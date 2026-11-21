@@ -325,8 +325,9 @@ def start_state(root: Path, installation) -> str:
 
     `starting` is an unfinished start record, by the update record's own rule:
     not `done`, or `done` with health errors. It also covers a start that was
-    prepared and never dispatched (a run killed between the two); its record
-    names its request, and `host update continue` continues it by that id. Any
+    prepared and never dispatched (a run killed between the two). `start()`,
+    which holds the update lock to tell the two apart, reports that one
+    `failed` with its request id, and it is continued by that id. Any
     other unfinished record is an ordinary update: a started computer with no
     team stays `started` while one is in flight or after it ends with health
     errors, and any other computer reads `other`.

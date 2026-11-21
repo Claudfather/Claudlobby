@@ -192,9 +192,10 @@ def test_a_second_call_while_the_start_holds_its_lock_is_starting(tmp_path, monk
         assert (state, ids["request_id"]) == ("starting", record["request_id"])
         assert again.calls == [] and case.dispatches == []
     # With the lock free and no dispatch, that start died before dispatching.
-    state, failure = _start(case, paths, Consent())
+    again = Consent()
+    state, failure = _start(case, paths, again)
     assert (state, failure["request_id"]) == ("failed", record["request_id"])
-    assert case.dispatches == []
+    assert again.calls == [] and case.dispatches == []
 
 
 def test_a_refused_dispatch_is_reported_with_its_request_and_then_reads_failed(tmp_path, monkeypatch):
@@ -247,6 +248,27 @@ def test_a_started_computer_returns_started_and_changes_nothing(tmp_path, monkey
     again = Consent()
     assert _start(case, paths, again) == ("started", None)
     assert again.calls == [] and _files(case.root) == before
+
+
+def test_a_started_computer_with_an_ordinary_update_pending_returns_started(tmp_path, monkeypatch):
+    case, paths = _computer(tmp_path, monkeypatch)
+    _start(case, paths, Consent())
+    case.run_job()
+    later = case.add_target()
+    assert updater.apply_or_continue(case.installation, target=later)["job"] == {"dispatch": "started"}
+    record = read_update(case.installation)
+    assert record["phase"] != "done" and "initialization_scope" not in record
+    for when in ("in flight", "done with health errors"):
+        if when != "in flight":
+            case.run_job()
+            with UpdateStore(case.installation) as store:
+                record = store.load()
+                assert record["phase"] == "done"
+                record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+                store.save(record)
+        before, dispatched, again = _files(case.root), len(case.dispatches), Consent()
+        assert _start(case, paths, again) == ("started", None), when
+        assert again.calls == [] and _files(case.root) == before and len(case.dispatches) == dispatched
 
 
 def test_a_stopped_start_returns_failed_with_its_request(tmp_path, monkeypatch):
