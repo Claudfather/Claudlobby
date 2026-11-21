@@ -349,7 +349,7 @@ class TestPerBotIsolation:
         # Each env also holds where the suite runs (its checkout, interpreter,
         # working directory, PATH), and that can name a bot. A value a third
         # bot's env shares is no one bot's own, so the scan skips it. The third
-        # bot is composed first, so nothing one composition leaks into a later
+        # bot is composed first, so nothing one composition carries into a later
         # one can reach it.
         third_dir, _ = _compose_bot(tmp_path)
         env_a, env_b = self._make_two_bots(tmp_path)
