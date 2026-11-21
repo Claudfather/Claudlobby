@@ -480,3 +480,160 @@ def test_linux_recorded_python_digest_is_never_compared(installed):
         {key: state[key] for key in module.BINDING_FIELDS}, sort_keys=True).encode()).hexdigest()
     assert module.platform.system() == "Linux"  # the fixture's platform
     assert module.validate(value, time.monotonic() + 10)[0] == python
+
+
+RECORD = ["33333333-3333-4333-8333-333333333333", "f" * 40]
+
+
+@pytest.mark.parametrize("known", [None, RECORD])
+def test_prelude_computer_request_takes_the_one_extra_key(known):
+    module = payload()
+    value = json.loads(frame(update_record=known))
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, frame(update_record=known))
+        assert module.request(reader, time.monotonic() + .2, "computer") == value
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+@pytest.mark.parametrize("raw", [
+    frame(), frame(update_record=RECORD[:1]), frame(update_record=[*RECORD, RECORD[1]]),
+    frame(update_record="33333333-3333-4333-8333-333333333333"), frame(update_record=[RECORD[0], "F" * 40]),
+    frame(update_record=["not-an-id", RECORD[1]]), frame(update_record=[RECORD[0], 7]),
+    frame(update_record={"request_id": RECORD[0], "target": RECORD[1]}),
+    frame(update_record=None, extra="never a command"),
+])
+def test_prelude_computer_request_refuses_anything_else(raw):
+    module = payload()
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, raw)
+        with pytest.raises(module.Refusal) as error:
+            module.request(reader, time.monotonic() + .2, "computer")
+    finally:
+        os.close(reader)
+        os.close(writer)
+    assert error.value.code == "invalid_request" and error.value.exit_code == 2
+
+
+@pytest.mark.parametrize("action", ["setup", "status", "api"])
+def test_prelude_todays_requests_refuse_the_computer_key(action):
+    module = payload()
+    for known in (None, RECORD):
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, frame(update_record=known))
+            with pytest.raises(module.Refusal) as error:
+                module.request(reader, time.monotonic() + .2, action)
+        finally:
+            os.close(reader)
+            os.close(writer)
+        assert error.value.code == "invalid_request"
+
+
+def run_mode(module, tmp_path, home, python, action, value, mode):
+    driver = tmp_path / "mode-driver.py"
+    driver.write_text("import pathlib,sys,types,platform\n"
+        "platform.system=lambda: 'Linux'\n"
+        "script,home,python,action=sys.argv[1:]\n"
+        "body=pathlib.Path(script).read_text().split('# BEGIN EMBEDDED PYTHON\\n',1)[1].split('# END EMBEDDED PYTHON\\n',1)[0]\n"
+        "m=types.ModuleType('fixture');exec(compile(body,script,'exec'),m.__dict__)\n"
+        "m.account_profile=lambda uid:pathlib.Path(home)\n"
+        "m.independent_python=lambda:pathlib.Path(python)\n"
+        "raise SystemExit(m.main(action))\n")
+    return subprocess.run([str(python), "-I", "-S", "-B", str(driver), str(SCRIPT), str(home), str(python), action],
+        input=module.wire(value) + b'{"retained":"following"}\n',
+        env=constructed_env(BOT_UNKNOWN_FIXTURE="preserved", EXPECTED_MODE=mode),
+        capture_output=True, timeout=15)
+
+
+def refusal(module, code, operation="owner-guide-computer-v1"):
+    return module.wire({"schema_version": 1, "operation": operation, "state": "refused", "code": code, "retry": False})
+
+
+def test_computer_maps_to_its_route_at_the_receipts_revision(installed, tmp_path):
+    module, home, _install, value, python = installed
+    before = snapshot(home)
+    result = run_mode(module, tmp_path, home, python, "computer", dict(value, update_record=None),
+                      "setup --stdio-computer")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout == b'{"type":"hello","fixture":true}\n{"retained":"following"}\n'
+    assert snapshot(home) == before
+
+
+def test_computer_is_admitted_by_the_script_at_a_later_installed_revision_and_setup_is_not(installed, tmp_path):
+    """The script skips only the receipt's ref for the computer run; Python checks the record it names."""
+    module, home, install, value, python = installed
+    current = advance_source(module, install, python, home)
+    named = dict(value, source_revision=current, update_record=["33333333-3333-4333-8333-333333333333", current])
+    before = snapshot(home)
+    result = run_mode(module, tmp_path, home, python, "computer", named, "setup --stdio-computer")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout == b'{"type":"hello","fixture":true}\n{"retained":"following"}\n'
+    setup = dict(named)
+    del setup["update_record"]
+    assert run_mode(module, tmp_path, home, python, "setup", setup, "setup --stdio").stdout == refusal(
+        module, "installation_changed", "owner-guide-v1")
+    # Binding and the receipt's shape are still checked for the computer run.
+    forged = dict(named, binding_sha256="0" * 64)
+    assert run_mode(module, tmp_path, home, python, "computer", forged, "-").stdout == refusal(
+        module, "installation_changed")
+    assert snapshot(home) == before
+
+
+@pytest.mark.parametrize("receipt", ["installed", "requested"])
+def test_computer_names_a_revision_that_is_not_installed_as_revision_differs(installed, tmp_path, receipt):
+    """Installed X, request Y: the script answers revision_differs, whatever the receipt's ref says."""
+    module, home, install, value, python = installed
+    requested = "e" * 40
+    if receipt == "requested":
+        path = install / "preparation.json"
+        state = json.loads(path.read_text())
+        state["ref"] = state["revision"] = requested
+        path.write_text(json.dumps(state))
+        value["binding_sha256"] = hashlib.sha256(json.dumps(
+            {key: state[key] for key in module.BINDING_FIELDS}, sort_keys=True).encode()).hexdigest()
+    before = snapshot(home)
+    request = dict(value, source_revision=requested)
+    for known in (None, ["33333333-3333-4333-8333-333333333333", requested]):
+        result = run_mode(module, tmp_path, home, python, "computer", dict(request, update_record=known), "-")
+        assert (result.returncode, result.stdout) == (4, refusal(module, "revision_differs"))
+    # Today's guide keeps its own refusal names for the same computer.
+    today = run_mode(module, tmp_path, home, python, "setup", request, "-")
+    assert today.stdout == refusal(module, "installation_changed" if receipt == "installed" else "source_mismatch",
+                                   "owner-guide-v1")
+    assert snapshot(home) == before
+
+
+def test_computer_refusal_names_its_own_operation():
+    module = payload()
+    reader, writer = os.pipe()
+    observer, output = os.pipe()
+    saved = os.dup(1)
+    try:
+        os.write(writer, frame())  # no update_record
+        os.close(writer)
+        writer = None
+        os.dup2(output, 1)
+        code = module.main("computer", reader)
+    finally:
+        os.dup2(saved, 1)
+        for fd in (saved, reader, output, writer):
+            if fd is not None:
+                os.close(fd)
+    try:
+        assert os.read(observer, 4096) == refusal(module, "invalid_request")
+    finally:
+        os.close(observer)
+    assert code == 2
+
+
+@pytest.mark.parametrize("arguments", [["computer", "extra"], ["COMPUTER"], ["computer --stdio-computer"]])
+def test_shell_computer_mode_is_one_exact_word(arguments):
+    result = subprocess.run(["/bin/sh", str(SCRIPT), *arguments], input=frame(update_record=None),
+                            env=constructed_env(), capture_output=True, timeout=5)
+    assert result.returncode == 2 and result.stderr == b""
+    assert json.loads(result.stdout) == {"schema_version": 1, "operation": "owner-guide-v1", "state": "refused",
+                                         "code": "invalid_request", "retry": False}
