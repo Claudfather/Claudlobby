@@ -686,11 +686,15 @@ class SetupEngine:
         ``linked`` exactly when a Claude sign-in line is saved on this computer, by the check every sign-in
         attempt already makes (the line's value is never read out); no approval and no attempt's record
         decides it, and an empty value or an unreadable file is not linked (``environment_linked``). ``teams`` is a
-        count, not a running state: it is also true mid-Launch, after a failed Launch and after a stop. Later
-        versions add keys inside a part; ``version`` stays 1 while nothing is removed.
+        count, not a running state: it is also true mid-Launch, after a failed Launch and after a stop.
+        ``team.state`` is ``launch_unfinished`` while a team preparation that a Launch dispatched has not
+        finished cleanly (its update record is not ``done``, or is ``done`` with health errors), or when the
+        update record cannot be read; otherwise ``none``. A Preview nothing launched is never dispatched, so it
+        reads ``none``. Later versions add keys and states inside a part; ``version`` stays 1 while nothing is removed.
         """
         from ..active_config import read_current_config
         from ..config_plan import PlanError
+        from ..git_update import UpdateError, read_update, team_preparation
         from .owner_source import start_state
         from .provider_signin import SigninRefused, environment_linked
         self.store.session(reader)
@@ -700,8 +704,14 @@ class SetupEngine:
         started=start_state(self.root,installation)=="started" or teams>0
         try: linked=environment_linked(self.root)
         except (SigninRefused,OSError): linked=False  # no environment file, or one the sign-in check refuses
+        try:
+            record=read_update(installation)
+            unfinished=(record is not None and team_preparation(record) and record.get("job_dispatch") is not None
+                and (record["phase"]!="done" or bool(record.get("health_errors"))))
+        except FileNotFoundError: unfinished=False
+        except (UpdateError,OSError,ValueError,KeyError,TypeError): unfinished=True  # the guide's own view stays
         return {"version":1,"computer":"started" if started else "not_started",
-            "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
+            "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"launch_unfinished" if unfinished else "none"},
             "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
 
     def _signin_grant(self,reader,generation,attempt_id):

@@ -3037,6 +3037,41 @@ test('on a bridged page the five-step panel stays to its "Team launched" ending 
   assert.equal(stateCalls(later.h).length,1);
   assert.equal(partsOf(later.host)?.hidden,false,'a request kept from an earlier page does not hold the panel');assert.equal(later.panel(),undefined);
 });
+// A page opened again after this browser sent a Launch (or only a Preview): storage holds the request, the computer is
+// ready, and its parts read says what became of the Launch.
+async function reopened(t,{team,receipt,teams=1}) {
+  landing(t); // stubs this test's localStorage
+  globalThis.localStorage.setItem(`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`,
+    JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]}));
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  const setup=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
+  l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({teams,team:{state:team}})));
+  if(receipt)l.h.overrides.set(setup+'receipt',()=>reply(200,{...settingUp,version:2,launch_reserved:true,config_committed:true,health_errors:{},...receipt}));
+  const panel=l.panel();
+  descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');assert.equal(stateCalls(l.h).length,1);
+  return {l,panel,note:()=>descendants(panel).find(n=>n.className==='setup-note').textContent,
+    button:text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text&&visible(n))};
+}
+for(const [name,receipt,said] of [['in progress',{state:'quiesce'},/^Launch received\./],['needing attention',{state:'unknown'},/^The launch needs attention/]])
+  test(`a page opened again while the computer's Launch is ${name} keeps the five-step panel and Check launch status`,async t=>{
+    const {l,panel,note,button}=await reopened(t,{team:'launch_unfinished',receipt});
+    assert.equal(l.panel(),panel,'the panel stays');assert.equal(partsOf(l.host)?.hidden??true,true,'the parts do not replace it');
+    button('Check launch status').click();await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/receipt')).length,1);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,0,'never a second Launch');
+    assert.match(note(),said);assert.equal(l.panel(),panel);
+    l.frame.view.listeners.get('focus')();await flush();
+    assert.equal(stateCalls(l.h).length,1,'once this page follows the Launch, nothing reads the parts');
+  });
+test('a page opened again after the computer finished the Launch shows the parts',async t=>{
+  const {l}=await reopened(t,{team:'none'});
+  assert.equal(partsOf(l.host)?.hidden,false);assert.equal(l.panel(),undefined);
+});
+test('a Preview kept in storage with nothing launched does not hold the panel once the computer is started',async t=>{
+  const {l}=await reopened(t,{team:'none',teams:0});
+  assert.equal(partsOf(l.host)?.hidden,false,'the stale Preview never holds the panel');assert.equal(l.panel(),undefined);
+  assert.deepEqual(partRows(partsOf(l.host))[2],['bots','none','Bots','None yet']);
+});
 for(const [name,launch,said] of [['received',{state:'quiesce',launch_reserved:true,config_committed:true,health_errors:{}},/^Launch received\./],
   ['needing attention',{state:'unknown',launch_reserved:true,config_committed:true,health_errors:{}},/^The launch needs attention/]])
   test(`on a bridged page with a Launch ${name} the panel keeps its own words and no parts read is sent, even when the window regains focus`,async t=>{
@@ -3069,7 +3104,8 @@ test('the embedding page names parts only with a well-formed part_names; anythin
   assert.deepEqual(partRows(linked.parts()).at(-1),['helper','later','Helper','Coming soon']);
   // A computer keeps its own saved name, so a computer key drops the field; and a name that could read as a status is refused.
   for(const bad of [{computer:'Office Mac'},{computer:'Office Mac',helper:'Helper'},{helper:'Claude - Linked'},{helper:'Claude: Linked'},
-    {provider:'Claude · Linked'},{bots:'Bots (None yet)'},{helper:'Helper.'},{helper:'Set--up'},{helper:'Set up '},{helper:'Set  up'},
+    {provider:'Claude · Linked'},{bots:'Bots (None yet)'},{provider:'Linked'},{provider:'Not linked'},{provider:'Claude Linked'},
+    {provider:'claude-linked'},{bots:'None yet'},{bots:'My bots none yet'},{helper:'Coming soon'},{helper:'Asleep until Claude is linked'},{helper:'Helper.'},{helper:'Set--up'},{helper:'Set up '},{helper:'Set  up'},
     {helper:''},{helper:'x'.repeat(41)},{helper:' Helper'},{helper:'Hélper'},{helper:'Help\ner'},{assistant:'Helper'},
     {helper:'Helper',bots:7},['Helper'],'Helper',null]) {
     assert.equal(partNames(bad),null,JSON.stringify(bad));
@@ -3079,6 +3115,8 @@ test('the embedding page names parts only with a well-formed part_names; anythin
   }
   assert.deepEqual(partNames({helper:'x'.repeat(40),bots:'My bots',provider:'Claude 2'}),{helper:'x'.repeat(40),bots:'My bots',provider:'Claude 2'});
   assert.deepEqual(partNames({helper:'Set-up helper'}),{helper:'Set-up helper'},'a hyphen joins two words');
+  assert.deepEqual(partNames({helper:'Claudfather',bots:'None',provider:'Unlinked Claude'}),{helper:'Claudfather',bots:'None',provider:'Unlinked Claude'},
+    'only a whole status the view says is refused');
   // With two computers, each shows its own saved name.
   const h=harness();h.api.dispose();
   const two=createConnectedWorkspace({...h.dependencies,documentContext:{...h.doc,part_names:{helper:'Claudfather'}}});t.after(()=>two.dispose());

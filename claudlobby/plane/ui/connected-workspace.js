@@ -483,10 +483,12 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // A started computer shows its parts: the whole view with no team, a strip above its teams with one. Only a ready
       // session reads them, so a computer in first-team setup keeps today's panel. In the browser carrier the bridged
       // computer's panel is the view whenever the parts read has no answer or says not started, so Connect is its
-      // first step; and it stays while it follows a launch this page sent or followed (today's guide and its ending).
+      // first step; it stays while it follows a launch this page sent or followed (today's guide and its ending), and
+      // while the computer says a Launch it dispatched has not finished cleanly, so a reloaded page keeps Check launch
+      // status. A Preview nothing launched is not dispatched, so it never holds the panel.
       const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
       const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
-        && !(browserTransport && setup.following());
+        && !(browserTransport && (setup.following() || parts.launchUnfinished()));
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead

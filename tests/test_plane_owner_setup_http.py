@@ -315,6 +315,31 @@ def test_state_answers_for_each_kind_of_computer(setup_http,monkeypatch,computer
         "teams":1 if computer=='launched' else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
 
 
+SCOPE={"directory":"/home/example/app","manifests":["/home/example/app/local/shop/fleet.yaml"]}
+@pytest.mark.parametrize('record,team',[
+    (None,'none'),
+    ({"phase":"quiesce","initialization_scope":SCOPE,"job_dispatch":None},'none'),  # a Preview nothing launched
+    ({"phase":"git","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"}},'launch_unfinished'),  # in progress
+    ({"phase":"done","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"},"health_errors":{"shop/lead":"down"}},'launch_unfinished'),
+    ({"phase":"done","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"},"health_errors":{}},'none'),
+    ({"phase":"git","initialization_scope":None,"job_dispatch":{"unit":"x"}},'none'),  # an ordinary update
+    ('unreadable','launch_unfinished')])
+def test_state_says_when_a_dispatched_launch_has_not_finished(setup_http,monkeypatch,record,team):
+    from claudlobby import git_update
+    from claudlobby.plane import owner_source
+    app,*_=setup_http
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    def read(installation):
+        if record=='unreadable': raise git_update.UpdateError('current update record cannot be read')
+        return record
+    monkeypatch.setattr(git_update,'read_update',read)
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,answer.text
+    assert answer.json()['team']=={"state":team} and answer.json()['computer']=='started'
+    assert 'home' not in answer.text and 'shop' not in answer.text
+
+
 TOKEN_LINE="export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-"+"x"*80+"'\n"
 @pytest.mark.parametrize('case,text,mode,linked',[
     ('saved',TOKEN_LINE,0o600,True),

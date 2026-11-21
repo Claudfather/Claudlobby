@@ -18,13 +18,18 @@ export const PART_TEXT = Object.freeze({
 // The embedding page may name the provider, bots and helper parts (part_names in the connected document), never a
 // computer: each computer keeps its own saved name. A name is 1 to 40 ASCII letters and digits in words joined by
 // one space or one hyphen, so it cannot read like a status ("Claude - Linked", "Claude: Linked"). Anything else
-// drops the whole field, never one name.
+// drops the whole field, never one name. Nor may a name hold a status the view says ("Linked", "Not linked",
+// "Claude Linked", "None yet", "Coming soon"), which would be drawn beside the real one and contradict it.
 const NAMED = Object.freeze(['provider','bots','helper']);
 const NAME = /^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*$/;
+const words = text => text.toLowerCase().split(/[ -]/);
+const STATUSES = Object.freeze(['linked','notLinked','none','asleep','later'].map(key => words(PART_TEXT[key])));
+const saysStatus = name => { const w = words(name);
+  return STATUSES.some(status => w.some((_, i) => status.every((word, j) => w[i+j] === word))); };
 export function partNames(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
   const entries = Object.entries(value);
-  if (entries.some(([key, name]) => !NAMED.includes(key) || typeof name !== 'string' || name.length > 40 || !NAME.test(name))) return null;
+  if (entries.some(([key, name]) => !NAMED.includes(key) || typeof name !== 'string' || name.length > 40 || !NAME.test(name) || saysStatus(name))) return null;
   return Object.freeze(Object.fromEntries(entries));
 }
 // The parts read's answer (owner_setup.py SetupEngine.state). Later versions add keys inside a part, so only the
@@ -35,7 +40,8 @@ function answer(value) {
     || !has(value.provider, ['state']) || !['not_linked','linked'].includes(value.provider.state)
     || !has(value.team, ['state']) || typeof value.team.state !== 'string'
     || !Array.isArray(value.bots) || !has(value.helper, ['state']) || !['asleep','later'].includes(value.helper.state)) return null;
-  return Object.freeze({computer:value.computer, provider:value.provider.state, teams:value.teams, helper:value.helper.state});
+  return Object.freeze({computer:value.computer, provider:value.provider.state, teams:value.teams, helper:value.helper.state,
+    team:value.team.state});
 }
 
 // One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
@@ -118,6 +124,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     if (names?.helper) set('helper', names.helper, current.helper, current.helper === 'later' ? PART_TEXT.later : PART_TEXT.asleep);
   }
   return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
-    teams:() => started() ? current.teams : null, get root() { return mount?.root ?? null; },
+    teams:() => started() ? current.teams : null,
+    // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention).
+    launchUnfinished:() => started() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
     dispose() { disposed = true; current = null; mount = null; }});
 }

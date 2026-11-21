@@ -319,7 +319,11 @@ as `not_linked`: no `.env`; a `.env` that is not a single-link regular file of
 this user with mode 0600 and at most 64 KiB, or that changes while read; a line
 before the sign-in line that the check cannot read; an empty value
 (`CLAUDE_CODE_OAUTH_TOKEN=`, `''` or `""`); and an API key or Claude's own
-`claude login` files, which are not this line. `helper` is
+`claude login` files, which are not this line. `team.state` is
+`launch_unfinished` while a team preparation that a Launch dispatched has not
+finished cleanly (its update record is not `done`, or is `done` with health
+errors), and when the update record cannot be read; otherwise `none`. A Preview
+nothing launched is never dispatched, so it reads `none`. `helper` is
 `asleep` until Claude is linked, then `later`. Later versions add keys and states
 inside a part and entries in `bots`; `version` stays 1 while nothing is removed
 or renamed.
@@ -340,15 +344,20 @@ they stay as a strip above its teams. Over the browser carrier the five-step
 panel is the view only while the parts read has no answer or says `not_started`,
 and while that panel follows a launch in this page's lifetime: once this page
 sent a Launch or a launch status check, or followed a managed hand-off, the
-panel stays to its ending and no parts read is sent. A request kept in the
-browser's storage from an earlier page does not hold the panel.
+panel stays to its ending and no parts read is sent. A page opened again keeps
+the panel, with its Check launch status, while the parts read says
+`launch_unfinished`; once the Launch is done the parts show. A request kept in
+the browser's storage does not hold the panel by itself, so a Preview nothing
+launched never does.
 A refusal, a lost answer, an answer the pane cannot use, or a computer whose core
 has no parts read leaves the view exactly as it was.
 
 The connected document may carry `part_names`: an object whose keys are from
 `provider`, `bots` and `helper` (never a computer, which keeps its own saved
 name), and whose values are 1 to 40 ASCII letters and digits in words joined by
-one space or one hyphen, so a name cannot read like a status. The pane uses
+one space or one hyphen, and that holds none of the view's own status sentences
+as whole words ("Linked", "Not linked", "None yet", "Coming soon", "Asleep until
+Claude is linked"), so a name cannot read like a status. The pane uses
 `part_names[<part>]` as that part's name when the whole field passes; anything
 else drops the whole field, never one name, and the document is still admitted.
 Without it the computer's saved name, "Claude" and "Bots" are used, and the
