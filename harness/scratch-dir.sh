@@ -29,7 +29,8 @@
 #       Print why PATH must not be removed, or nothing. It removes nothing.
 #       Refused: an empty path, a relative one, the filesystem root, and a
 #       directory that is or holds the current directory, the directory this
-#       script was started in, or the home directory.
+#       script was started in, the checkout this file is in, or the home
+#       directory.
 #
 # Sourcing sets no shell option and no trap, so it is safe under a caller with
 # or without -e. bash 3.2 (the macOS /bin/bash) runs it.
@@ -52,6 +53,14 @@ _scratch_physical () {
 
 # Read once, when sourced: a later cd must not hide where the script started.
 _SCRATCH_STARTED_IN="$(_scratch_physical .)" || _SCRATCH_STARTED_IN=""
+
+# The checkout this file is in: the parent of harness/. An instrument is run
+# from a checkout it must leave whole, wherever it was started.
+_SCRATCH_CHECKOUT=""
+case "${BASH_SOURCE[0]:-}" in
+    */*) _SCRATCH_CHECKOUT="$(_scratch_physical "${BASH_SOURCE[0]%/*}/..")" || _SCRATCH_CHECKOUT="" ;;
+    ?*)  _SCRATCH_CHECKOUT="$(_scratch_physical ..)" || _SCRATCH_CHECKOUT="" ;;
+esac
 
 # <directory> <kept>: whether kept is that directory or lies inside it.
 _scratch_holds () {
@@ -89,6 +98,8 @@ scratch_refusal () {
         echo "it is or holds the current directory ($here)"
     elif _scratch_holds "$physical" "$_SCRATCH_STARTED_IN"; then
         echo "it is or holds the directory this script was started in ($_SCRATCH_STARTED_IN)"
+    elif _scratch_holds "$physical" "$_SCRATCH_CHECKOUT"; then
+        echo "it is or holds the checkout this helper is in ($_SCRATCH_CHECKOUT)"
     elif _scratch_holds "$physical" "$home"; then
         echo "it is or holds the home directory ($home)"
     fi

@@ -20,7 +20,9 @@ no() { printf 'FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 # SIGPIPE can flip a check whose match was found.
 
 unset GITGUARDIAN_API_KEY GITGUARDIAN_API_URL
-T="$(mktemp -d)"
+# Stop when the directory cannot be made: with T empty, "$T/..." names paths
+# under the filesystem root.
+T="$(mktemp -d)" && [ -d "$T" ] || { echo "FATAL: mktemp -d made no directory. Nothing was removed." >&2; exit 3; }
 trap 'rm -rf "$T"' EXIT
 rnd() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 TOKEN="t$(rnd 16)"

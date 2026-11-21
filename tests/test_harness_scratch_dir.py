@@ -18,11 +18,14 @@ a directory now. What is pinned here:
 2. scratch_dir stops the script unless mktemp really made a directory that is
    not the current one.
 3. scratch_remove refuses a path that is empty, relative, the filesystem root,
-   or that is or holds the home directory, the current directory or the
-   directory the script was started in. Those refusals run against a stand-in
-   `rm` that only records its arguments, so a broken guard cannot remove
-   anything from this test either. The root is asked of scratch_refusal, which
-   only prints.
+   or that is or holds the home directory, the current directory, the
+   directory the script was started in or the checkout the helper is in. Those
+   refusals run against a stand-in `rm` that only records its arguments, so a
+   broken guard cannot remove anything from this test either. The root and the
+   real checkout are asked of scratch_refusal, which only prints.
+4. The other scripts whose unchecked `mktemp -d` fed a removal, a `pkill -f` or
+   an export root stop there too. An empty value pointed them at the filesystem
+   root: `rm -rf /log`, `pkill -f "/bin/claude"`, an export into `/root`.
 """
 
 from __future__ import annotations
@@ -40,6 +43,20 @@ from tests.conftest import constructed_env
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / "harness" / "scratch-dir.sh"
 INSTRUMENTS = ("rehearse-held-push.sh", "rehearse-debounce-recipient.sh")
+# (script, arguments, a uname that says Linux, which mktemp calls fail). The last is
+# None for every call, with nothing else on PATH but dirname: the code before the
+# fix went on with an empty variable, and without rm, pkill, mkdir or tar it can do
+# nothing with one. ab-comms-eval.sh keeps the whole PATH and loses only its own two
+# directories: it sources lib-common.sh first, which makes one of its own, and it ran
+# under set -e, so the code before the fix stopped as well, without saying why.
+ALSO_STOP = [
+    ("harness/rehearse-env-cascade.sh", (), False, None),
+    ("harness/rehearse-plane-durability.sh", (), True, None),
+    ("harness/ab-comms-eval.sh", ("--dry-run",), False, "ab-comms-eval"),
+    ("tests/test_alert_recipient.sh", (), False, None),
+    ("tests/test_err_trap_errtrace.sh", (), False, None),
+    ("library/skills/gitguardian/test.sh", (), False, None),
+]
 FULL_DISK = "mktemp: mkdtemp failed on /full/tmp.XXXXXXXXXX: No space left on device"
 
 
@@ -57,9 +74,18 @@ def _path(*stub_dirs: Path) -> str:
 
 @pytest.fixture
 def failing_mktemp(tmp_path: Path) -> Path:
-    """mktemp as a full disk leaves it: the reason on stderr, nothing on stdout, rc 1."""
+    """mktemp as a full disk leaves it: the reason on stderr, nothing on stdout, rc 1.
+    With MKTEMP_FAILS_FOR set, only a call naming that text fails; the rest are real."""
     return _stub(
-        tmp_path / "mktemp-fails", "mktemp", f"echo '{FULL_DISK}' >&2\nexit 1\n"
+        tmp_path / "mktemp-fails",
+        "mktemp",
+        'if [ -n "${MKTEMP_FAILS_FOR:-}" ]; then\n'
+        '    case "$*" in\n'
+        '        *"$MKTEMP_FAILS_FOR"*) ;;\n'
+        f'        *) exec {shutil.which("mktemp")} "$@" ;;\n'
+        "    esac\n"
+        "fi\n"
+        f"echo '{FULL_DISK}' >&2\nexit 1\n",
     )
 
 
@@ -70,11 +96,11 @@ def recording_rm(tmp_path: Path) -> Path:
 
 
 def _probe(
-    tmp_path: Path, body: str, *, cwd: Path, **env
+    tmp_path: Path, body: str, *, cwd: Path, helper: Path = HELPER, **env
 ) -> subprocess.CompletedProcess:
-    """Source the real helper as the instruments do (set -u, no -e) and run `body`."""
+    """Source the helper as the instruments do (set -u, no -e) and run `body`."""
     probe = tmp_path / "probe.sh"
-    probe.write_text(f'set -uo pipefail\n. "{HELPER}"\n{body}\n')
+    probe.write_text(f'set -uo pipefail\n. "{helper}"\n{body}\n')
     return subprocess.run(
         ["bash", str(probe)],
         cwd=cwd,
@@ -113,6 +139,40 @@ def test_an_instrument_that_cannot_make_its_root_removes_nothing(
     assert sorted(p.name for p in started_in.iterdir()) == ["kept.txt"], (
         "the instrument went on to work in the directory it was started in"
     )
+
+
+@pytest.mark.parametrize(
+    "script, arguments, says_linux, fails_for", ALSO_STOP, ids=[c[0] for c in ALSO_STOP]
+)
+def test_a_script_that_cannot_make_its_temporary_directory_stops_there(
+    script, arguments, says_linux, fails_for, tmp_path, failing_mktemp
+):
+    stand_ins = failing_mktemp
+    (stand_ins / "dirname").symlink_to(shutil.which("dirname"))
+    if says_linux:
+        _stub(stand_ins, "uname", "echo Linux\n")
+    started_in, under_test = tmp_path / "started-in", tmp_path / "checkout-under-test"
+    started_in.mkdir()
+    under_test.mkdir()
+    (started_in / "kept.txt").write_text("kept\n")
+    env = (
+        constructed_env(PATH=_path(stand_ins), MKTEMP_FAILS_FOR=fails_for)
+        if fails_for
+        else constructed_env(PATH=stand_ins, CLAUDLOBBY_ROOT=under_test)
+    )
+    result = subprocess.run(
+        [shutil.which("bash"), str(REPO / script), *arguments],
+        cwd=started_in,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "No space left on device" in result.stderr
+    assert "Nothing was removed" in result.stderr
+    assert sorted(p.name for p in started_in.iterdir()) == ["kept.txt"]
+    assert not any(under_test.iterdir())
 
 
 class TestScratchDir:
@@ -302,3 +362,52 @@ class TestScratchRemove:
             result.stdout + result.stderr
         )
         assert here.is_dir() and home.is_dir()
+
+    def test_it_refuses_the_checkout_its_own_file_is_in(self, tmp_path, recording_rm):
+        """Against a copy of the helper in a stand-in checkout: this test never
+        hands the real checkout to scratch_remove."""
+        checkout = tmp_path / "holder" / "checkout"
+        (checkout / "harness").mkdir(parents=True)
+        copy = checkout / "harness" / "scratch-dir.sh"
+        shutil.copy(HELPER, copy)
+        elsewhere, log = tmp_path / "elsewhere", tmp_path / "rm.log"
+        elsewhere.mkdir()
+        for target in (checkout, tmp_path / "holder", checkout / "harness" / ".."):
+            result = _probe(
+                tmp_path,
+                f'scratch_remove "{target}"\necho "rc=$?"',
+                cwd=elsewhere,
+                helper=copy,
+                PATH=_path(recording_rm),
+                HOME=tmp_path / "absent",
+                RM_LOG=log,
+            )
+            assert "rc=1" in result.stdout, result.stdout + result.stderr
+            assert "the checkout this helper is in" in result.stderr
+            assert not log.exists(), f"rm was run: {log.read_text()}"
+        result = _probe(
+            tmp_path,
+            f'scratch_remove "{checkout}/harness"\necho "rc=$?"',
+            cwd=elsewhere,
+            helper=copy,
+            PATH=_path(recording_rm),
+            HOME=tmp_path / "absent",
+            RM_LOG=log,
+        )
+        assert "rc=0" in result.stdout and log.exists(), (
+            "a directory inside the checkout is not the checkout"
+        )
+
+    def test_the_real_checkout_is_refused(self, tmp_path):
+        """Asked of scratch_refusal, which only prints. The reason is pinned by
+        the test above; here a test directory inside the checkout may come first."""
+        result = _probe(
+            tmp_path,
+            f'scratch_refusal "{REPO}"\nscratch_refusal "{REPO.parent}"',
+            cwd=tmp_path,
+            HOME=tmp_path / "absent",
+        )
+        lines = result.stdout.splitlines()
+        assert len(lines) == 2 and all(
+            line.startswith("it is or holds") for line in lines
+        ), result.stdout + result.stderr
