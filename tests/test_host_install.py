@@ -1257,10 +1257,162 @@ def test_update_status_reports_the_record_and_its_kind(tmp_path, local_install_s
     result, answer, _children = invoke_update(tmp_path, home, "update-status", update_frame())
     assert result.returncode == 0, answer
     update = answer["update"]
-    assert set(update) == {"request_id", "kind", "phase", "target", "maintenance", "dispatched", "failed",
-                           "health_errors"}
+    assert set(update) == UPDATE_KEYS
     assert update["request_id"] == record["request_id"] and update["target"] == revision
     assert {key: update[key] for key in expected} == expected
+
+
+# The whole of `update` in a status answer: #3079's fields, then where the update
+# is, each read from the record alone.
+UPDATE_KEYS = {"request_id", "kind", "phase", "target", "maintenance", "dispatched", "failed", "health_errors",
+               "stage", "units", "runner", "pending_seconds", "entered_seconds", "outcome", "waiting",
+               "runtime_busy", "unhealthy_units"}
+NOW = 1_800_000_000
+SUMMARY_BASE = {"request_id": REQUEST_ID, "phase": "quiesce", "target": "a" * 40, "maintenance": False}
+UNITS = {"a.service": {"stop": "done"}, "b.service": {"stop": "done", "restore_error": "x"}, "c.service": {}}
+PROGRESS = {
+    "prepared": ({}, {"stage": None, "units": None, "runner": "none", "pending_seconds": None,
+                      "entered_seconds": None, "outcome": None, "waiting": False, "runtime_busy": False,
+                      "unhealthy_units": 0, "failed": False}),
+    "pending": ({"job_dispatch": {"state": "pending", "attempt": 1}, "job_clock": {"pending_at": NOW - 130}},
+                {"runner": "pending", "pending_seconds": 130, "entered_seconds": None, "failed": False}),
+    # A job that entered and has said nothing since is running, however long ago.
+    "entered": ({"job_dispatch": {"state": "entered", "attempt": 2},
+                 "job_clock": {"pending_at": NOW - 9000, "entered_at": NOW - 8000}},
+                {"runner": "entered", "pending_seconds": 9000, "entered_seconds": 8000, "outcome": None,
+                 "failed": False}),
+    "clock_ahead": ({"job_dispatch": {"state": "entered", "attempt": 1}, "job_clock": {"entered_at": NOW + 5}},
+                    {"entered_seconds": 0, "pending_seconds": None}),
+    "quiesce_units": ({"consumers": UNITS}, {"units": {"done": 1, "total": 3}}),
+    "restore_units": ({"phase": "restore", "consumers": {"a.service": {"stop": "done", "restore": "done"},
+                                                         "b.service": {"stop": "done"}}},
+                      {"units": {"done": 1, "total": 2}}),
+    "no_units": ({"phase": "restore", "consumers": {}}, {"units": None}),
+    "units_elsewhere": ({"phase": "git", "maintenance": True, "consumers": UNITS}, {"units": None}),
+    "stage": ({"phase": "restore", "stage_error": {"stage": "restore", "detail": "unit failed: secret text"}},
+              {"stage": "restore", "failed": True}),
+    "other_stage": ({"stage_error": {"stage": "something new", "detail": "x"}}, {"stage": "other", "failed": True}),
+    "finished": ({"phase": "done", "job_dispatch": {"state": "finished", "attempt": 1},
+                  "job_outcome": {"attempt": 1, "at": NOW, "result": "finished"}},
+                 {"runner": "finished", "outcome": "finished", "failed": False}),
+    "unfinished": ({"phase": "environment", "maintenance": True, "job_dispatch": {"state": "finished", "attempt": 1},
+                    "job_outcome": {"attempt": 1, "at": NOW, "result": "unfinished"}},
+                   {"runner": "finished", "outcome": "unfinished", "failed": True}),
+    # Refused before it entered: the dispatch still says pending, and the update has stopped.
+    "refused": ({"job_dispatch": {"state": "pending", "attempt": 1},
+                 "job_outcome": {"attempt": 1, "at": NOW, "result": "refused"}},
+                {"runner": "pending", "outcome": "refused", "failed": True}),
+    # An earlier attempt's outcome does not speak for the dispatch after it.
+    "earlier_attempt": ({"job_dispatch": {"state": "pending", "attempt": 2},
+                         "job_outcome": {"attempt": 1, "at": NOW, "result": "refused"}},
+                        {"outcome": None, "failed": False}),
+    "waiting": ({"job_dispatch": {"state": "entered", "attempt": 1},
+                 "runtime_wait": {"gate": "cutover", "at": "x", "seconds": 301.0, "holders": [{"unit": "a"}]},
+                 "runtime_waits": [{"gate": "drain", "outcome": "taken"}]},
+                {"waiting": True, "runtime_busy": False, "failed": False}),
+    "runtime_busy": ({"phase": "restore", "job_dispatch": {"state": "finished", "attempt": 1},
+                      "runtime_waits": [{"gate": "drain", "outcome": "taken"}, {"gate": "cutover", "outcome": "refused"}]},
+                     {"waiting": False, "runtime_busy": True, "failed": True}),
+    "busy_before": ({"runtime_waits": [{"outcome": "refused"}, {"outcome": "taken"}]}, {"runtime_busy": False}),
+    # An outcome with no dispatch to speak for (the updater writes none) says nothing.
+    "no_dispatch_outcome": ({"job_outcome": {"attempt": None, "at": NOW, "result": "refused"}},
+                            {"runner": "none", "outcome": None, "failed": False}),
+    # Unhashable values where a code belongs read as `other` or nothing, and refuse nothing.
+    "unhashable": ({"stage_error": {"stage": ["restore"]}, "job_dispatch": {"state": ["entered"], "attempt": 1},
+                    "job_outcome": {"attempt": 1, "at": NOW, "result": ["refused"]}},
+                   {"stage": "other", "runner": "none", "outcome": None}),
+    "unhealthy": ({"phase": "done", "health_errors": {"b.service": "x", "a.timer": "y"}},
+                  {"unhealthy_units": 2, "failed": True}),
+    # Keys in a shape this script does not know read as nothing, and refuse nothing.
+    "malformed": ({"job_clock": {"pending_at": "soon", "entered_at": True}, "job_outcome": "finished",
+                   "runtime_waits": {"outcome": "refused"}, "runtime_wait": "yes",
+                   "consumers": ["a.service"], "stage_error": "x"},
+                  {"pending_seconds": None, "entered_seconds": None, "outcome": None, "runtime_busy": False,
+                   "waiting": False, "units": None, "stage": "other"}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROGRESS))
+def test_update_status_reports_where_the_update_is_from_the_record_alone(name):
+    """Each progress field, from the record and the computer's clock only.
+
+    Nothing here can look at a native job: a job that entered and has not
+    finished reads as running, however old, and only the record says stopped.
+    """
+    module = payload()
+    changes, expected = PROGRESS[name]
+    update = module.summary({**SUMMARY_BASE, **changes}, now=NOW)
+    assert set(update) == UPDATE_KEYS
+    assert {key: update[key] for key in expected} == expected
+    # A closed set of codes, counts and seconds: no record text, and no unit names beyond #3079's own.
+    assert update["stage"] in module.STAGES | {"other", None}
+    assert update["runner"] in {"none", "pending", "entered", "finished"}
+    assert update["outcome"] in {"finished", "unfinished", "refused", None}
+    assert "secret text" not in json.dumps(update)
+
+
+def test_the_carrier_document_names_exactly_the_update_fields():
+    import re
+    carrier = (ROOT / "documentation/architecture/owner-ssh-carrier.md").read_text()
+    section = carrier.split("## Updating a started computer\n", 1)[1].split("\n## ", 1)[0]
+    listed = re.sub(r"\([^)]*\)", "", section.split("in the names a\nclient reads: ", 1)[1].split(", then where", 1)[0])
+    table = [line.split("|")[1] for line in section.splitlines() if line.startswith("| `")
+             and "`" in line.split("|")[1] and line.split("|")[2].strip() != ""]
+    progress = [line for line in table if not line.strip().startswith(("`update-status`", "`update`",
+                                                                       "`update-continue`"))]
+    named = set(re.findall(r"`([a-z_]+)`", listed)) | {key for line in progress
+                                                        for key in re.findall(r"`([a-z_]+)`", line)}
+    assert named == UPDATE_KEYS
+    for key in payload().STAGES | payload().OUTCOMES:
+        assert f"`{key}`" in section, key
+    # A record of each shape still yields only those fields, and update/continue's own reads work on it.
+    module = payload()
+    for changes, _expected in PROGRESS.values():
+        update = module.summary({**SUMMARY_BASE, **changes}, now=NOW)
+        assert set(update) == UPDATE_KEYS
+        module.unfinished(update), module.undispatched_team(update)
+
+
+def test_the_stage_codes_are_the_updaters_own_stages():
+    import re
+    entry = (ROOT / "claudlobby/update_entry.py").read_text()
+    choices = re.search(r'add_argument\("stage", choices=\[([^\]]*)\]', entry).group(1)
+    assert payload().STAGES == set(re.findall(r'"([a-z-]+)"', choices))
+    from claudlobby import git_update
+    assert payload().OUTCOMES == set(git_update.JOB_RESULTS)
+
+
+@pytest.mark.parametrize("phase", ["prepare", "quiesce", "git", "environment", "publish", "migrate", "commit",
+                                   "restore", "done"])
+def test_update_status_reads_progress_while_the_updater_holds_its_lock(tmp_path, local_install_source, phase):
+    """While the updater holds update.lock, at any phase, update-status still answers.
+
+    It takes no update lock: a read that waited would run past its budget and
+    answer unavailable.
+    """
+    import fcntl
+    _remote, _wheels, revision = local_install_source
+    home, family = _prepared(tmp_path, local_install_source, setup="started")
+    record = _record(home, revision, "first_team", phase="commit" if phase == "migrate" else phase,
+                     job_dispatch={"state": "entered", "attempt": 1}, job_clock={"pending_at": 1, "entered_at": 2},
+                     consumers={"a.service": {"stop": "done", "restore": "done"}, "b.service": {"stop": "done"}})
+    if phase == "migrate":  # the fixture's maintenance rule leaves migrate out
+        record = _rewrite(home, record, phase="migrate", maintenance=True)
+    descriptor = os.open(family / "data/state/update.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    before = snapshot(home)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, answer, _children = invoke_update(tmp_path, home, "update-status", update_frame())
+    finally:
+        os.close(descriptor)
+    assert result.returncode == 0 and answer["state"] == "recorded", answer
+    update = answer["update"]
+    assert set(update) == UPDATE_KEYS and update["request_id"] == record["request_id"]
+    assert (update["phase"], update["runner"], update["outcome"], update["failed"]) == (phase, "entered", None, False)
+    assert type(update["pending_seconds"]) is int and type(update["entered_seconds"]) is int
+    assert update["units"] == ({"done": 2, "total": 2} if phase == "quiesce" else {"done": 1, "total": 2}
+                               if phase == "restore" else None)
+    assert snapshot(home) == before
 
 
 def test_update_status_after_a_system_python_update_reports_it_and_every_action_goes_on(tmp_path, local_install_source):

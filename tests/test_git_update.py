@@ -1575,6 +1575,10 @@ def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_
     record = read_update(installation)
     assert record["phase"] == "restore"
     assert record.get("job_dispatch") == (None if refusal == "dispatch_intent" else {"state": "pending", "attempt": 1})
+    # Only a process that has shown it is the job records an outcome, and only for
+    # a dispatch: a refusal before membership may be a hand-run `_run`.
+    assert record.get("job_outcome") == ({"attempt": 1, "at": record["job_outcome"]["at"], "result": "refused"}
+                                         if refusal == "bound_job" else None)
     posted, stderr = _posted(installation), capsys.readouterr().err
     if refusal in {"membership", "binding"}:
         assert posted == [] and "did not finish" not in stderr
@@ -1583,6 +1587,172 @@ def test_a_job_run_refused_before_the_update_tells_the_alert_chat_unless_it_may_
     assert posted[0][3].startswith(f"FLEET ALERT: host update {record['request_id']} did not finish "
                                    f"(root {installation.data_root}, phase restore): {message}. ")
     assert "posted that this update did not finish (scan:bot:worker)" in stderr
+
+
+def _saves(monkeypatch):
+    """Every record this process saves, in order."""
+    saved, original = [], UpdateStore.save
+    def save(store, record):
+        original(store, record)
+        saved.append(deepcopy(record))
+    monkeypatch.setattr(UpdateStore, "save", save)
+    return saved
+
+
+@pytest.mark.parametrize("ending", ["done", "health_error", "stage_refused", "refused_before_entering", "not_the_job"])
+def test_an_update_job_records_how_its_run_ended_in_one_write(update, monkeypatch, ending):
+    """The job's outcome and its finished dispatch are one save, the last it makes.
+
+    A run refused before it entered the update records `refused` against the
+    dispatch it was given, which stays pending; a process that has not shown it
+    is the job records nothing.
+    """
+    from claudlobby import git_update as updater
+    restore = {"done": 'record.update(phase="done")', "health_error": FINISHED_UNHEALTHY,
+               "stage_refused": 'print("restore refused", file=sys.stderr); raise SystemExit(6)'}.get(
+                   ending, 'record.update(phase="done")')
+    installation, _ = _notice_job(update, monkeypatch, restore)
+    monkeypatch.setattr(updater, "_epoch", lambda: 1_800_000_000)
+    if ending == "refused_before_entering":
+        monkeypatch.setattr(updater, "_check_bound_job", lambda *_a: (_ for _ in ()).throw(UpdateError("bound job")))
+    elif ending == "not_the_job":
+        updater._retained_job(None)[0].verify_update_job_runner = (
+            lambda *_a, **_k: (_ for _ in ()).throw(UpdateError("external")))
+    saved = _saves(monkeypatch)
+    if ending in {"done", "health_error"}:
+        updater._run_native_update(installation)
+    else:
+        with pytest.raises(UpdateError):
+            updater._run_native_update(installation)
+    record = read_update(installation)
+    if ending == "not_the_job":
+        assert saved == [] and "job_outcome" not in record and record["job_dispatch"]["state"] == "pending"
+        return
+    result = {"done": "finished", "health_error": "finished", "stage_refused": "unfinished",
+              "refused_before_entering": "refused"}[ending]
+    assert record["job_outcome"] == {"attempt": 1, "at": 1_800_000_000, "result": result}
+    assert saved[-1] == record and [save for save in saved if "job_outcome" in save] == [record]
+    if ending == "refused_before_entering":
+        assert record["job_dispatch"] == {"state": "pending", "attempt": 1} and "job_clock" not in record
+        return
+    assert record["job_dispatch"]["state"] == "finished"
+    assert [save["job_dispatch"]["state"] for save in saved].count("finished") == 1
+    assert record["job_clock"] == {"entered_at": 1_800_000_000}
+
+
+def test_a_run_again_on_the_same_dispatch_drops_the_outcome_before_it(update, monkeypatch, tmp_path):
+    """A job started again on a dispatch that already finished is a new run: the
+    earlier `unfinished` no longer speaks once it enters, and its own end does."""
+    from claudlobby import git_update as updater
+    seen = tmp_path / "outcome-seen-by-stage"
+    installation, _ = _notice_job(update, monkeypatch, _lines(
+        f'pathlib.Path({str(seen)!r}).write_text(str("job_outcome" in record))', 'record.update(phase="done")'))
+    with UpdateStore(installation) as store:
+        record = store.load()
+        record.update(job_dispatch={"state": "finished", "attempt": 1},
+                      job_outcome={"attempt": 1, "at": 5, "result": "unfinished"})
+        store.save(record)
+    monkeypatch.setattr(updater, "_epoch", lambda: 1_800_000_000)
+    updater._run_native_update(installation)
+    assert seen.read_text() == "False"
+    assert read_update(installation)["job_outcome"] == {"attempt": 1, "at": 1_800_000_000, "result": "finished"}
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_a_run_cut_short_records_unfinished(update, monkeypatch, capsys, interruption):
+    """A run that did not return is never `finished`, whatever stopped it, and the interruption goes on unchanged."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'record.update(phase="done")')
+    def cut(_store):
+        raise interruption()
+    monkeypatch.setattr(updater, "run_prepared_update", cut)
+    with pytest.raises(interruption):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert record["job_dispatch"]["state"] == "finished" and record["job_outcome"]["result"] == "unfinished"
+    assert len(_posted(installation)) == 1
+
+
+def test_a_run_that_returns_but_cannot_save_its_outcome_still_tells_and_raises(update, monkeypatch, capsys):
+    """The notice sits inside the inner finally: a returned run whose save fails still posts, then raises."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, FINISHED_UNHEALTHY)
+    original = UpdateStore.save
+    def save(store, record):
+        if "job_outcome" in record:
+            raise OSError("the disk is full")
+        original(store, record)
+    monkeypatch.setattr(UpdateStore, "save", save)
+    with pytest.raises(OSError, match="the disk is full"):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert "job_outcome" not in record and record["job_dispatch"]["state"] == "entered"
+    (posted,) = _posted(installation)
+    assert "1 unit(s) reported a health error" in posted[3]
+    assert "this run's outcome was not recorded: OSError" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("ending", ["stage_refused", "refused_before_entering"])
+def test_the_notice_is_sent_when_the_outcome_cannot_be_saved(update, monkeypatch, capsys, ending):
+    """A save of the outcome that fails never stops the notice, nor replaces the run's own error."""
+    from claudlobby import git_update as updater
+    installation, _ = _notice_job(update, monkeypatch, 'print("restore refused", file=sys.stderr); raise SystemExit(6)')
+    message = "application stage restore refused; continue the retained operation"
+    if ending == "refused_before_entering":
+        message = "bound job refused"
+        monkeypatch.setattr(updater, "_check_bound_job", lambda *_a: (_ for _ in ()).throw(UpdateError(message)))
+    original = UpdateStore.save
+    def save(store, record):
+        if "job_outcome" in record or record["job_dispatch"]["state"] == "finished":
+            raise OSError("the disk is full")
+        original(store, record)
+    monkeypatch.setattr(UpdateStore, "save", save)
+    with pytest.raises(UpdateError, match=f"^{re.escape(message)}$"):
+        updater._run_native_update(installation)
+    record = read_update(installation)
+    assert "job_outcome" not in record
+    assert record["job_dispatch"]["state"] == ("pending" if ending == "refused_before_entering" else "entered")
+    (posted,) = _posted(installation)
+    assert posted[3].startswith(f"FLEET ALERT: host update {record['request_id']} did not finish ")
+    stderr = capsys.readouterr().err
+    assert "this run's outcome was not recorded: OSError" in stderr
+    assert "posted that this update did not finish" in stderr
+
+
+def test_each_dispatch_starts_its_own_clock_and_drops_an_earlier_outcome(update, monkeypatch):
+    from claudlobby import git_update as updater
+    installation, _, target, _ = update
+    monkeypatch.setattr(updater, "_epoch", lambda: 1_800_000_000)
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        record.update(phase="quiesce", job_dispatch={"state": "finished", "attempt": 1},
+                      job_clock={"pending_at": 5, "entered_at": 6},
+                      job_outcome={"attempt": 1, "at": 7, "result": "refused"})
+        store.save(record)
+        jobs, _ = _bound_native_job(store, "inactive")
+        monkeypatch.setattr(updater, "_retained_job", lambda _: (jobs, installation, object()))
+        _observed, dispatch = updater._dispatch_update_job(store)
+        assert dispatch is not None
+        record = store.load()
+        assert record["job_dispatch"] == {"state": "pending", "attempt": 2}
+        assert record["job_clock"] == {"pending_at": 1_800_000_000} and "job_outcome" not in record
+
+
+@pytest.mark.parametrize("key, value", [
+    ("job_clock", {"pending_at": "soon"}), ("job_clock", {"pending_at": -1}), ("job_clock", {"pending_at": True}),
+    ("job_clock", {"started_at": 1}), ("job_clock", [1]),
+    ("job_outcome", {"attempt": 1, "at": 1, "result": "stopped"}), ("job_outcome", {"attempt": 0, "at": 1, "result": "finished"}),
+    ("job_outcome", {"attempt": 1, "at": 1, "result": "finished", "detail": "x"}), ("job_outcome", "finished"),
+    ("job_outcome", {"attempt": None, "at": 1, "result": "refused"}),
+])
+def test_the_record_refuses_an_outcome_or_clock_of_another_shape(update, key, value):
+    installation, _, target, _ = update
+    with UpdateStore(installation) as store:
+        record = prepare(store, target)
+        with pytest.raises(UpdateError, match="invalid or unsupported"):
+            store.save({**record, key: value})
+        store.save({**record, "job_clock": {"pending_at": 1, "entered_at": 2},
+                    "job_outcome": {"attempt": 1, "at": 3, "result": "refused"}})
 
 
 @pytest.mark.parametrize("carrier", ["stalls", "stalls_ignoring_sigterm"])

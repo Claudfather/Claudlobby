@@ -1607,6 +1607,13 @@ def execute(action, value, deadline):
 BINDING_KEYS = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter",
                 "interpreter_sha256")
 PHASES = {"prepare", "quiesce", "git", "environment", "publish", "migrate", "commit", "restore", "done"}
+# The updater's own stages, a stage error names one of them; the stages that work
+# through units and the field a finished unit sets; how a job run ended.
+STAGES = {"authorize", "retire-render", "render", "prepare", "conversion-check", "quiesce", "quiet", "publish",
+          "restore"}
+UNIT_FIELDS = {"quiesce": "stop", "restore": "restore"}
+RUNNERS = {"pending", "entered", "finished"}
+OUTCOMES = {"finished", "unfinished", "refused"}
 
 
 def installed(home, python, runner, env):
@@ -1660,7 +1667,40 @@ def installed(home, python, runner, env):
         os.close(lock)
 
 
-def summary(record):
+def progress(record, dispatch, now):
+    # Where the update is, from the record alone and this computer's clock; nothing
+    # looks at the native job. A key the updater did not write, or wrote in another
+    # shape, reads as null or false and refuses nothing.
+    error = record.get("stage_error")
+    named = error.get("stage") if isinstance(error, dict) else None
+    stage = None if not error else named if isinstance(named, str) and named in STAGES else "other"
+    units, field, consumers = None, UNIT_FIELDS.get(record["phase"]), record.get("consumers")
+    if field and isinstance(consumers, dict) and consumers:
+        # A unit with a restore error has not finished: the updater's own count.
+        units = {"done": sum(isinstance(row, dict) and row.get(field) == "done" and "restore_error" not in row
+                             for row in consumers.values()), "total": len(consumers)}
+    state = dispatch.get("state") if isinstance(dispatch, dict) else None
+    attempt = dispatch.get("attempt") if isinstance(dispatch, dict) else None
+    clock = record.get("job_clock") if isinstance(record.get("job_clock"), dict) else {}
+    def age(key):
+        at = clock.get(key)
+        return max(0, int(now) - at) if type(at) is int else None
+    outcome = record.get("job_outcome")
+    # Only the outcome of the current dispatch speaks for it; with no dispatch, none does.
+    outcome = (outcome["result"] if isinstance(outcome, dict) and isinstance(outcome.get("result"), str)
+               and outcome["result"] in OUTCOMES and type(attempt) is int and outcome.get("attempt") == attempt
+               else None)
+    waits = record.get("runtime_waits")
+    latest = waits[-1] if isinstance(waits, list) and waits else None
+    errors = record.get("health_errors") or {}
+    return {"stage": stage, "units": units, "runner": state if isinstance(state, str) and state in RUNNERS else "none",
+            "pending_seconds": age("pending_at"), "entered_seconds": age("entered_at"), "outcome": outcome,
+            "waiting": isinstance(record.get("runtime_wait"), dict),
+            "runtime_busy": isinstance(latest, dict) and latest.get("outcome") == "refused",
+            "unhealthy_units": len(errors)}
+
+
+def summary(record, now=None):
     # The update record as `host update status --json` prints it, in the names a client reads.
     if record is None:
         return None
@@ -1673,11 +1713,15 @@ def summary(record):
     kind = ("addition" if record.get("addition_scope") is not None else "update" if not isinstance(scope, dict)
             else "first_team" if scope.get("manifests") else "start")
     errors = record.get("health_errors") or {}
+    found = progress(record, dispatch, time.time() if now is None else now)
+    # Stopped, by the record alone: a job that ended or was refused before the
+    # update was done, a stage error, or done with health errors.
     failed = bool(record.get("stage_error") or record["phase"] == "done" and errors
-                  or isinstance(dispatch, dict) and dispatch.get("state") == "finished" and record["phase"] != "done")
+                  or isinstance(dispatch, dict) and dispatch.get("state") == "finished" and record["phase"] != "done"
+                  or found["outcome"] in {"unfinished", "refused"} and record["phase"] != "done")
     return {"request_id": record["request_id"], "kind": kind, "phase": record["phase"], "target": record["target"],
             "maintenance": record["maintenance"], "dispatched": dispatch is not None, "failed": failed,
-            "health_errors": sorted(errors)}
+            "health_errors": sorted(errors), **found}
 
 
 def unfinished(update):
