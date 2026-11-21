@@ -31,6 +31,19 @@ refuses a fragment under any other name, a heading not in that form, and a new
 entry written straight into `CHANGELOG.md`. It runs the default branch's copy
 of `bin/changelog.py`, so a PR that edits the script is still judged by the old one.
 
+It reads what the PR's **Files changed** shows: the changes from where the PR's
+head meets the live tip of its base branch, not the base the PR was opened against,
+so a stacked PR is not charged with a PR its base has merged since. A PR whose head
+collects other PRs, merged with GitHub's merge commit (`Merge pull request #N from
+<owner>/<branch>`), may carry each one's fragment, named after that PR's own head
+branch, when that merge commit added it. Such a PR still needs an entry in its own
+fragment, or a `Changelog: none — <why>` line, even when its other fragments came
+from sub-PRs. The exemption trusts GitHub's default merge-commit subject: a squash
+merge, a subject renamed at merge, or a repository setting that changes the default
+merge message leaves no subject it can read, so the fragment counts as misnamed and
+the check fails closed. Merge sub-PRs with GitHub's default merge commit, or move
+the entry into the branch's own fragment.
+
 ## The weekly roll-up
 
 On a branch off fresh `main`, run:

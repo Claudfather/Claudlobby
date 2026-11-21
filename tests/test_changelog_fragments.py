@@ -293,6 +293,122 @@ def test_a_reused_branch_name_adds_its_entry_to_the_waiting_fragment(cl, repo):
     assert problems[0].startswith("This PR adds no changelog entry."), problems
 
 
+# --- stacked PRs ------------------------------------------------------------------
+
+def _not_its_fragment(path: str, branch: str) -> str:
+    return (f"`{path}` is not this PR's fragment. Name it `changelog.d/{branch.replace('/', '-')}.md`: "
+            f"the head branch, `{branch}`, with each `/` as `-`.")
+
+
+def _github_merge(repo: Repo, number: int, branch: str) -> None:
+    """Merge the branch into the current one with the commit GitHub's merge button makes."""
+    repo.git("merge", "-q", "--no-ff", "-m", f"Merge pull request #{number} from Claudfather/{branch}",
+             "-m", f"The title of #{number}", branch)
+
+
+def _sub_pr(repo: Repo, branch: str, base: str, files: dict[str, str | None]) -> None:
+    repo.git("checkout", "-q", "-b", branch, base)
+    repo.commit(f"work on {branch}", files)
+
+
+def _event(repo: Repo, branch: str, base_ref: str, base_sha: str) -> dict:
+    """A pull_request event as GitHub sends it, with the base branch as the checkout
+    fetched it published at origin/<base ref>."""
+    repo.git("update-ref", f"refs/remotes/origin/{base_ref}", base_ref)
+    return {"pull_request": {"head": {"ref": branch, "sha": repo.git("rev-parse", branch)},
+                             "base": {"ref": base_ref, "sha": base_sha}, "body": ""}}
+
+
+def _integration(repo: Repo) -> str:
+    """codex/int off main, holding its own fragment; returns its tip."""
+    repo.git("checkout", "-q", "-b", "codex/int", "main")
+    return repo.commit("integration work", {"changelog.d/codex-int.md": GOOD})
+
+
+def test_a_stacked_pr_is_judged_against_the_live_tip_of_its_base(cl, repo):
+    """GitHub does not update an open PR's base.sha when its base branch moves (#3022). Once
+    the base merges the PR this one stacks on, the event's base.sha predates that merge,
+    and a merge base taken from it counts the other PR's fragment as this one's. The check
+    diffs against origin/<base ref>, as the PR's Files changed does."""
+    stale = _integration(repo)
+    _sub_pr(repo, "claude/a", "codex/int", {"changelog.d/claude-a.md": GOOD})
+    _sub_pr(repo, "claude/a-followup", "claude/a",
+            {"changelog.d/claude-a-followup.md": GOOD, "src.txt": "two\n"})
+    repo.git("checkout", "-q", "codex/int")
+    _github_merge(repo, 2, "claude/a")
+    event = _event(repo, "claude/a-followup", "codex/int", stale)
+    problems, passed = cl.check(repo.path, event)
+    assert problems == []
+    assert passed == "`changelog.d/claude-a-followup.md` adds 1 entry"
+
+    # Only where the checkout has no origin/<base ref> is the event's sha the base.
+    repo.git("update-ref", "-d", "refs/remotes/origin/codex/int")
+    problems, _ = cl.check(repo.path, event)
+    assert problems == [_not_its_fragment("changelog.d/claude-a.md", "claude/a-followup")]
+
+
+def test_an_integration_pr_carries_the_fragments_of_the_prs_merged_into_it(cl, repo):
+    """An integration branch collects reviewed sub-PRs with GitHub's merge commits (#2950).
+    Each sub-PR's fragment is named after its own head branch, and its merge commit added it."""
+    _integration(repo)
+    for number, branch in ((2, "claude/a"), (3, "claude/b-c")):
+        _sub_pr(repo, branch, "codex/int", {cl.fragment_path(branch): GOOD})
+        repo.git("checkout", "-q", "codex/int")
+        _github_merge(repo, number, branch)
+    # A PR merged into a sub-PR before that sub-PR merged is in the history too.
+    _sub_pr(repo, "claude/d", "codex/int", {"src.txt": "two\n"})
+    _sub_pr(repo, "claude/e", "claude/d", {"changelog.d/claude-e.md": GOOD})
+    repo.git("checkout", "-q", "claude/d")
+    _github_merge(repo, 5, "claude/e")
+    repo.git("checkout", "-q", "codex/int")
+    _github_merge(repo, 4, "claude/d")
+    event = _event(repo, "codex/int", "main", repo.git("rev-parse", "main"))
+    problems, passed = cl.check(repo.path, event)
+    assert problems == []
+    assert passed == "`changelog.d/codex-int.md` adds 1 entry"
+
+    # The format still binds a merged PR's fragment.
+    repo.commit("a later edit", {"changelog.d/claude-a.md": "### Fix — typo\n"})
+    event = _event(repo, "codex/int", "main", repo.git("rev-parse", "main"))
+    problems, _ = cl.check(repo.path, event)
+    assert problems == ["`changelog.d/claude-a.md`: line 1, `### Fix — typo`, must read "
+                        "`### <Category> — <what changed>`, with one of these categories: "
+                        "Added, Changed, Deprecated, Removed, Fixed, Security, Docs."]
+
+
+@pytest.mark.parametrize("case", ["plain-merge", "named-for-another-branch", "added-outside-the-merge"])
+def test_a_fragment_no_pr_merge_added_under_its_branchs_name_is_refused(cl, repo, case):
+    _integration(repo)
+    if case == "plain-merge":
+        _sub_pr(repo, "claude/a", "codex/int", {"changelog.d/claude-a.md": GOOD})
+        repo.git("checkout", "-q", "codex/int")
+        repo.git("merge", "-q", "--no-ff", "-m", "Merge branch 'claude/a' into codex/int", "claude/a")
+    elif case == "named-for-another-branch":
+        _sub_pr(repo, "claude/b", "codex/int", {"changelog.d/claude-a.md": GOOD})
+        repo.git("checkout", "-q", "codex/int")
+        _github_merge(repo, 2, "claude/b")
+    else:
+        repo.commit("an entry for claude/a, outside its PR", {"changelog.d/claude-a.md": GOOD})
+        _sub_pr(repo, "claude/a", "codex/int", {"src.txt": "two\n"})
+        repo.git("checkout", "-q", "codex/int")
+        _github_merge(repo, 2, "claude/a")
+    event = _event(repo, "codex/int", "main", repo.git("rev-parse", "main"))
+    problems, _ = cl.check(repo.path, event)
+    assert problems == [_not_its_fragment("changelog.d/claude-a.md", "codex/int")]
+
+
+def test_a_squash_merged_sub_prs_fragment_is_refused(cl, repo):
+    """Expected, and documented in changelog.d/README.md: a squash merge leaves no merge
+    commit naming the sub-PR's branch, so git alone cannot tell its fragment from a
+    misnamed one. Merge sub-PRs with a merge commit, or move the entry into the
+    integration branch's own fragment."""
+    _integration(repo)
+    repo.commit("fix: the sub-PR's change (#2)", {"changelog.d/claude-a.md": GOOD})
+    event = _event(repo, "codex/int", "main", repo.git("rev-parse", "main"))
+    problems, _ = cl.check(repo.path, event)
+    assert problems == [_not_its_fragment("changelog.d/claude-a.md", "codex/int")]
+
+
 DELETED = ("This PR deletes {n} fragment(s), but CHANGELOG.md is not exactly what "
            "`python3 bin/changelog.py assemble` makes of them. A roll-up commits that result "
            "unchanged, from a branch off fresh main. Any other PR that deletes a fragment, such "
