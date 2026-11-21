@@ -46,8 +46,9 @@ NEVER = {"install_provider", "provider_signin", "allow_setup", "initialize_works
 class Channel:
     """The typed channel's side the guide calls: every card recorded, approved unless declined."""
 
-    def __init__(self, codes, *, decline=()):
+    def __init__(self, codes, *, decline=(), cancel=False):
         self.codes, self.decline, self.cards, self.states, self.events = codes, set(decline), [], [], []
+        self.cancel, self.cancel_checks = cancel, 0
 
     def approve(self, action, scope, **kwargs):
         self.cards.append(action)
@@ -63,7 +64,9 @@ class Channel:
         self.states.append(body.get("state"))
 
     def check_cancel(self):
-        pass
+        self.cancel_checks += 1
+        if self.cancel:
+            raise StdioRefused("disconnected")
 
 
 class Computer:
@@ -115,8 +118,8 @@ class Computer:
     def paths(self):
         return Paths(self.case.root, package=self.case.package(self.revision))
 
-    def run(self, *, decline=(), update_record=None, consent=None):
-        self.channel = Channel(self.codes, decline=decline)
+    def run(self, *, decline=(), update_record=None, consent=None, cancel=False):
+        self.channel = Channel(self.codes, decline=decline, cancel=cancel)
         return guide.run_computer(SimpleNamespace(update_record=update_record), self.paths(), self.access,
                                   consent=consent or StdioGuideConsent(self.channel), profile=self.profile)
 
@@ -169,10 +172,14 @@ def lasting_service(computer):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def test_a_fresh_computer_asks_the_computer_cards_starts_and_exits_before_the_cutover(tmp_path, monkeypatch):
+def test_a_fresh_computer_asks_the_computer_cards_and_returns_at_quiesce_before_the_cutover(tmp_path, monkeypatch):
+    """In this process: the run returns at ``quiesce`` with nothing published, the
+    guide's listeners close before the start card, and the updater waits on a
+    reader lease. The lease here is the test's own; the run's own process and
+    its lease are the next test's."""
     computer = Computer(tmp_path, monkeypatch)
     case = computer.case
-    lease = _runtime_lock(case.installation)  # The run's own reader lease, as the launcher holds it.
+    lease = _runtime_lock(case.installation)  # A reader lease, as the launcher holds one for the run.
     result = computer.run()
     channel = computer.channel
     assert channel.cards == CARDS and not NEVER & set(channel.cards)
@@ -192,8 +199,8 @@ def test_a_fresh_computer_asks_the_computer_cards_starts_and_exits_before_the_cu
         seen.append((read_update(case.installation)["phase"], "quiesce" in case.trace))
         os.close(lease)
     finished = case.run_job(at={3: run_exits})
-    # The updater waited at its drain while the run's process lived, and cut over
-    # only after it had exited. Counted in polls, never in seconds.
+    # The updater waited at its drain while a reader lease was held, and cut over
+    # only after it was released. Counted in polls, never in seconds.
     assert seen == [("quiesce", False)] and case.polls == 3
     drain, cutover = finished["runtime_waits"]
     assert (drain["gate"], drain["outcome"], cutover["gate"], cutover["outcome"]) == (
@@ -417,3 +424,225 @@ def test_a_checkout_moved_by_hand_is_not_admitted(tmp_path, monkeypatch):
     with pytest.raises(StdioRefused, match="installation_changed"):
         admitted_update(case.installation, case.before, case.target,
                         ["00000000-0000-4000-8000-000000000001", case.target])
+
+
+def test_the_runs_own_process_exits_and_frees_its_lease_before_the_updater_runs(tmp_path, monkeypatch):
+    """A separate process holds the reader lease as the launcher holds it (released
+    only by the kernel when the process ends), runs the computer run, and exits.
+    The updater then finds the lease free and never waits. The launcher itself is
+    not run here: its lease is the same ``_runtime_lock``."""
+    import traceback
+    computer = Computer(tmp_path, monkeypatch)
+    case = computer.case
+    reader, writer = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # The run's own process.
+        code = 1
+        try:
+            os.close(reader)
+            _runtime_lock(case.installation)  # Never released by hand.
+            os.write(writer, json.dumps(computer.run().data).encode())
+            code = 0
+        except BaseException:
+            os.write(writer, traceback.format_exc().encode())
+        finally:
+            os._exit(code)
+    os.close(writer)
+    with os.fdopen(reader, "rb") as stream:
+        said = stream.read().decode()
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, said
+    record = read_update(case.installation)
+    assert json.loads(said) == {"state": "computer_starting", "request_id": record["request_id"],
+                                "config_fingerprint": record["config_fingerprint"], "target": record["target"]}
+    assert record["phase"] == "quiesce" and "publish" not in case.trace
+    # The process is gone, and so is its lease: the cutover's exclusive lock is free now.
+    os.close(_runtime_lock(case.installation, exclusive=True))
+    finished = case.run_job()
+    assert case.polls == 0 and finished["phase"] == "done" and finished["health_errors"] == {}
+
+
+class _Once:
+    """`start_state` says ``value`` the first time, then what core reads."""
+
+    def __init__(self, monkeypatch, value):
+        from claudlobby.plane import owner_source
+        self.real, self.value, self.calls = owner_source.start_state, value, 0
+        monkeypatch.setattr(owner_source, "start_state", self)
+
+    def __call__(self, *args):
+        self.calls += 1
+        return self.value if self.calls == 1 else self.real(*args)
+
+
+def test_a_start_whose_record_is_gone_when_read_asks_nothing_and_dispatches_nothing(tmp_path, monkeypatch):
+    computer = Computer(tmp_path, monkeypatch)
+    with pytest.raises(StdioRefused, match="declined"):
+        computer.run(decline={"start_workspace"})  # Paired and linked; nothing started.
+    before = _files(computer.case.root)
+    once = _Once(monkeypatch, "starting")
+    with pytest.raises(StdioRefused) as refused:
+        computer.run()
+    assert refused.value.code == "unavailable" and once.calls == 2
+    assert computer.channel.cards == [] and computer.channel.states == []
+    assert computer.case.dispatches == [] and read_update(computer.case.installation) is None
+    # Core's reader takes the update lock to read; its lock file is all that is new.
+    assert [item for item in _files(computer.case.root) if item[0].name != "update.lock"] == before
+
+
+def test_a_start_read_as_under_way_that_has_finished_is_computer_ready(tmp_path, monkeypatch):
+    computer = Computer(tmp_path, monkeypatch)
+    first = computer.run()
+    computer.case.run_job()
+    _Once(monkeypatch, "starting")
+    with lasting_service(computer):
+        assert computer.run().data == {"state": "computer_ready", "origin": HOST}
+    assert computer.channel.cards == [] and computer.case.dispatches == [first.data["request_id"]]
+
+
+def test_a_fresh_run_whose_computer_was_started_meanwhile_is_unavailable(tmp_path, monkeypatch):
+    computer = Computer(tmp_path, monkeypatch)
+    first = computer.run()
+    computer.case.run_job()
+    _Once(monkeypatch, "fresh")
+    with pytest.raises(StdioRefused) as refused:
+        computer.run()
+    assert refused.value.code == "unavailable"
+    assert "start_workspace" not in computer.channel.cards
+    assert computer.case.dispatches == [first.data["request_id"]]
+
+
+def test_a_start_that_fails_after_approval_is_asked_again_with_a_new_settings_plan(tmp_path, monkeypatch):
+    computer = Computer(tmp_path, monkeypatch)
+    original = updater._prepare_update_locked
+    failures = []
+
+    def prepare(*args, **kwargs):
+        if not failures:
+            failures.append(True)
+            raise RuntimeError("stopped after the settings were saved")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(updater, "_prepare_update_locked", prepare)
+    with pytest.raises(CommandFailure, match="settings were saved and nothing was started"):
+        computer.run()
+    assert computer.channel.cards == CARDS and read_update(computer.case.installation) is None
+    result = computer.run()  # Its settings plan is built again from the saved file.
+    assert computer.channel.cards == ["start_workspace"] and computer.channel.states == []
+    record = read_update(computer.case.installation)
+    assert result.data["state"] == "computer_starting" and result.data["request_id"] == record["request_id"]
+    assert computer.case.dispatches == [record["request_id"]]
+
+
+@pytest.mark.parametrize("declined", CARDS[:-1])
+def test_a_declined_card_is_asked_again_with_exactly_the_rest(tmp_path, monkeypatch, declined):
+    computer = Computer(tmp_path, monkeypatch)
+    with pytest.raises(StdioRefused, match="declined"):
+        computer.run(decline={declined})
+    rest = CARDS[CARDS.index(declined):]
+    assert computer.channel.cards == CARDS[:CARDS.index(declined) + 1]
+    result = computer.run()
+    assert computer.channel.cards == rest and result.data["state"] == "computer_starting"
+
+
+def test_a_retained_launch_whose_approval_is_withdrawn_is_use_full_guide(tmp_path, monkeypatch):
+    import sqlite3
+    computer = Computer(tmp_path, monkeypatch, store=True)
+    case = computer.case
+    owner = _paired(case)
+    case.access.connected().initialize(expected_owner=owner)
+    from claudlobby.plane.owner_setup import OwnerSetup
+    setup = OwnerSetup(case.access)
+    setup.allow(setup.candidate(owner.principal, template="revenue-web-app", fleet="shop",
+                                repository="example-org/shop", install_directory=str(case.directory)))
+    with sqlite3.connect(case.access.path) as db:
+        db.execute("UPDATE setup_grant SET active=0, launch_id=?, launch_plan=? WHERE singleton=1",
+                   ("00000000-0000-4000-8000-0000000000aa", "d" * 64))
+    retained = setup.retained_state()
+    assert retained.state == "revoked" and retained.launch_id is not None
+    before = _files(case.root)
+    with pytest.raises(StdioRefused, match="use_full_guide"):
+        computer.run()
+    assert computer.channel.cards == [] and _files(case.root) == before
+
+
+def test_waiting_for_the_started_service_stops_when_the_client_leaves(tmp_path, monkeypatch):
+    computer = Computer(tmp_path, monkeypatch)
+    computer.run()
+    computer.case.run_job()
+    with pytest.raises(StdioRefused) as refused:
+        computer.run(cancel=True)  # Nothing answers; the full wait would end in start_failed.
+    assert refused.value.code == "disconnected" and computer.channel.cancel_checks == 1
+
+
+def test_admission_refuses_a_receipt_on_a_sibling_branch(tmp_path, monkeypatch):
+    import subprocess
+    computer = Computer(tmp_path, monkeypatch)
+    case = computer.case
+    request_id, later = _moved(computer)
+    source = str(case.installation.source)
+    tree = subprocess.run(["git", "-C", source, "rev-parse", f"{case.before}^{{tree}}"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    sibling = subprocess.run(["git", "-C", source, "commit-tree", tree, "-p", case.before, "-m", "Sibling"],
+                             capture_output=True, text=True, check=True,
+                             env={**os.environ, "GIT_AUTHOR_NAME": "Example", "GIT_AUTHOR_EMAIL": "example@example.test",
+                                  "GIT_COMMITTER_NAME": "Example", "GIT_COMMITTER_EMAIL": "example@example.test"}
+                             ).stdout.strip()
+    # A real commit that git knows, and not an ancestor: git answers 1, not 128.
+    assert subprocess.run(["git", "-C", source, "merge-base", "--is-ancestor", sibling, later]).returncode == 1
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        admitted_update(case.installation, sibling, later, [request_id, later])
+
+
+@pytest.mark.parametrize("named", ["x", 7, [], {}, [None, None], [1, 2]])
+def test_admission_refuses_a_malformed_update_record(tmp_path, monkeypatch, named):
+    computer = Computer(tmp_path, monkeypatch)
+    _request_id, later = _moved(computer)
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        admitted_update(computer.case.installation, computer.case.target, later, named)
+
+
+@pytest.mark.parametrize("damage", ["symlink", "unreadable", "malformed", "not an object"])
+def test_admission_refuses_a_record_it_cannot_read(tmp_path, monkeypatch, damage):
+    computer = Computer(tmp_path, monkeypatch)
+    request_id, later = _moved(computer)
+    path = computer.case.root / "state/update.json"
+    if damage == "symlink":
+        elsewhere = tmp_path / "update.json"
+        path.rename(elsewhere)
+        path.symlink_to(elsewhere)
+    elif damage == "unreadable":
+        path.chmod(0)
+    elif damage == "malformed":
+        path.write_text("{")
+    else:
+        path.write_text("[]")
+    try:
+        with pytest.raises(StdioRefused, match="installation_changed"):
+            admitted_update(computer.case.installation, computer.case.target, later, [request_id, later])
+    finally:
+        if path.exists() and not path.is_symlink():
+            path.chmod(0o600)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("health_errors", None), ("health_errors", []), ("maintenance", True), ("maintenance", None),
+    ("config_committed", False), ("config_committed", None), ("stage_error", "render failed"),
+])
+def test_admission_reads_a_finished_record_as_strictly_as_todays_finish(tmp_path, monkeypatch, field, value):
+    computer = Computer(tmp_path, monkeypatch)
+    request_id, later = _moved(computer)
+    record = read_update(computer.case.installation)
+    # A real finished start and a real finished update both meet every condition.
+    assert (record["maintenance"], record["config_committed"], record.get("stage_error"), record["health_errors"]) == (
+        False, True, None, {})
+    path = computer.case.root / "state/update.json"
+    document = json.loads(path.read_text())
+    document[field] = value
+    path.write_text(json.dumps(document))
+    if field == "maintenance":  # Core's own read already refuses a done record in maintenance.
+        with pytest.raises(updater.UpdateError):
+            read_update(computer.case.installation)
+    else:  # Core reads it; the admission's own condition is what refuses.
+        assert read_update(computer.case.installation)[field] == value
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        admitted_update(computer.case.installation, computer.case.target, later, [request_id, later])

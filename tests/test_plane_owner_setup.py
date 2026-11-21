@@ -2456,6 +2456,7 @@ TODAYS_GUIDE_FRAMES = [
     ("state", "workspace_ready", ["origin", "seq", "session_id", "state", "type", "version"]),
     ("state", "awaiting_workspace", ["seq", "session_id", "state", "type", "version"]),
     ("proposal", "bind_workspace", _PROPOSAL),
+    ("proposal", "provider_signin", _PROPOSAL),
     ("proposal", "allow_setup", _PROPOSAL),
     ("state", "preview_launch_ready", ["generation", "origin", "seq", "session_id", "state", "type", "version"]),
     ("result", "launch_handoff", ["config_fingerprint", "generation", "request_id", "seq", "session_id",
@@ -2467,29 +2468,36 @@ TODAYS_START_KEYS = ["binding_sha256", "expected_uid", "finish_setup", "profile"
 
 
 def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path):
+    """Today's typed Linux run with its own configuration: the local project, the
+    Claude sign-in scope and the managed owner's settings plan are built by
+    `_configuration` itself. Stand-ins only for what this fixture has no real one
+    of: the native service manager and its directory, the Tailscale executable,
+    the Claude download and its reviewed digest, the operator gate, and the
+    browser on the other side of the guide's listener."""
     from contextlib import contextmanager
-    import os, subprocess, sys, threading
-    from claudlobby import git_update, provider_install, resources, supervision_inventory
+    import hashlib, os, subprocess, sys, threading
+    from claudlobby import config as host_config, git_update, provider_install, resources, supervision_inventory
     from claudlobby.commands import host_owner_setup as guide, operator_context, owner_setup_consent
     from claudlobby.commands.owner_setup_consent import FixedOwnerProfile, StdioGuideConsent
     from claudlobby.commands.owner_stdio import OwnerStdio
     from claudlobby.config_plan import ConfigPlanBuilder
     from claudlobby.context import resolve_paths
+    from claudlobby.plane import provider_signin
     from tests.test_plane_owner_workspace import ISSUER, ORIGIN
     args, root, _effects = team_setup
     original = git_update._prepare_update_locked
     def prepare(store, **kwargs):  # As setup_authority freezes the one team's inputs.
         record = original(store, **kwargs)
-        manifest = root / "local/shop/fleet.yaml"
-        builder = ConfigPlanBuilder(root, fleets=("shop",), effects={})
+        manifest = root / "local/web-app/fleet.yaml"
+        builder = ConfigPlanBuilder(root, fleets=("web-app",), effects={})
         from claudlobby.config import host_override_path
         builder.input(host_override_path())
         _, fleet_digest = builder.input_snapshot(manifest)
         _, projects_digest = builder.input_snapshot(manifest.parent / "projects.yaml")
-        builder.effects.update(fleet_sources={"shop": {
+        builder.effects.update(fleet_sources={"web-app": {
             "fleet": {"path": str(manifest), "sha256": fleet_digest},
             "projects": {"path": str(manifest.parent / "projects.yaml"), "sha256": projects_digest}}},
-            fleet_manifests={"shop": str(manifest)})
+            fleet_manifests={"web-app": str(manifest)})
         args.retained["record"].update(config_fingerprint=builder.freeze(record["target"]).fingerprint,
                                        initialization_scope=kwargs["initialization"])
         return dict(args.retained["record"])
@@ -2498,13 +2506,20 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
     package.installation.bin.mkdir(parents=True)
     package.installation.cli.write_text("#!/bin/sh\nexit 0\n")
     package.installation.cli.chmod(0o755)
+    root.chmod(0o700)  # A data root is private, as an installation makes it,
+    (root / "state").mkdir(mode=0o700, exist_ok=True)
+    (root / "state/runtime-use.lock").touch(mode=0o600)  # with the launcher's reader-lease file.
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     units = home / ".config/systemd/user"
     monkeypatch.setattr(guide, "_native_directories", lambda _paths: (units,))
     monkeypatch.setattr(supervision_inventory, "Adapter", lambda _package: SimpleNamespace(
         read=lambda _function: f"manager\tLinux\ndirectory\t{units}\n"))
     monkeypatch.setattr(operator_context, "require_operator_context", lambda root=None: None)
+    monkeypatch.setattr(guide, "LINUX_TAILSCALE", Path(sys.executable))
+    monkeypatch.setattr(guide, "_WORKSPACE_ORIGINS", (ISSUER, ORIGIN))
     # The fixed profile's own two cards, run on this fixture's directories.
     family = home / ".local/share/claudlobby-browser"
     family.mkdir(parents=True, mode=0o700)
@@ -2513,19 +2528,33 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
         data=root, account_name="example-account", uid=os.getuid(),
         request={"source_revision": "a" * 40, "binding_sha256": "b" * 64},
         origin=lambda: "https://host.example.test")
+    monkeypatch.setenv(host_config.HOST_OVERRIDE_ENV, str(profile.policy))
     profile.prepare_directories = lambda consent, paths, **kw: FixedOwnerProfile.prepare_directories(profile, consent, paths, **kw)
     profile.prepare_provider = lambda consent, paths: FixedOwnerProfile.prepare_provider(profile, consent, paths)
     observed = SimpleNamespace(state="missing", version="2.1.0", platform="linux-x64", sha256="c" * 64)
     monkeypatch.setattr(provider_install, "status", lambda *_: observed)
-    monkeypatch.setattr(provider_install, "prepare", lambda *_a, **_k: SimpleNamespace(state="ready"))
+    def install(*_args, **_kwargs):  # The download's one effect: Claude's executable at its fixed path.
+        # Claude's sign-in as the browser sees it: a link, then the pasted code, then a token.
+        link = ("https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code"
+                "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference"
+                "&code_challenge=" + "a" * 43 + "&code_challenge_method=S256&state=" + "b" * 32)
+        screen = ("\x1b[2K\r\u2713 Long-lived authentication token created successfully!\r\n"
+                  "Your OAuth token (valid for 1 year):\r\nsk-ant-oat01-" + "s" * 80 + "\r\n"
+                  "Store this token securely. You won't be able to see it again.\r\n"
+                  "Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\r\n")
+        profile.provider.write_text("\n".join([
+            "#!" + sys.executable, "import os, sys, tty", "tty.setraw(0)",
+            "sys.stdout.write(" + repr("\x1b]8;;" + link + "\x07Open Claude\x1b]8;;\x07\r\n") + ")",
+            "sys.stdout.flush()", "typed = b''",
+            "while not typed.endswith(b'\\r'):", "    typed += os.read(0, 1)",
+            "sys.stdout.write(" + repr(screen) + ")", "sys.stdout.flush()", ""]))
+        profile.provider.chmod(0o755)
+        monkeypatch.setattr(provider_signin, "SUPPORTED",
+                            {hashlib.sha256(profile.provider.read_bytes()).hexdigest(): "2.1.325"})
+        return SimpleNamespace(state="ready")
+    monkeypatch.setattr(provider_install, "prepare", install)
     monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", lambda *_: None)
     access = OwnerAccess(root)
-    config = {"origin": "https://host.example.test", "socket": str(root / "state/owner/owner.sock"),
-        "tailscale": sys.executable, "tailscale_socket": None, "workspace_issuer": ISSUER, "workspace_origin": ORIGIN}
-    approval = SimpleNamespace(template="revenue-web-app", target_fleet="shop", repository="example-org/shop",
-        project_directory=None, account_directory=None, managed_owner=None, provider_signin=None,
-        install_directory=units)
-    monkeypatch.setattr(guide, "_configuration", lambda *_: (config, approval))
     codes, servers = {}, []
     @contextmanager
     def serving(command, *_args, **_kwargs):
@@ -2542,6 +2571,11 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
                 session = connected.issue(evidence(connected, [access._now()]), OWNER)
                 reader = VerifiedReader(OWNER, session.token)
                 engine, grant = SetupEngine(access), OwnerSetup(access).local()
+                attempt = str(uuid4())
+                engine.signin_begin(reader, grant.generation, attempt)
+                _signin_until(engine, grant, reader, attempt, "waiting")
+                engine.signin_code(reader, grant.generation, attempt, "accepted#" + "b" * 32)
+                _signin_until(engine, grant, reader, attempt, "connected")
                 engine.launch(reader, **binding(engine.preview(reader, grant.generation, "Review checkout")))
                 raise subprocess.TimeoutExpired("owner", timeout)
         yield Child()
@@ -2601,6 +2635,10 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
     assert all(sorted(frame["proposal"]) == TODAYS_PROPOSAL_KEYS for frame in frames if frame["type"] == "proposal")
     assert [frame["seq"] for frame in frames] == list(range(1, len(frames) + 1))
     assert result.data["state"] == "launch_handoff" and len(args.dispatches) == 1 and len(servers) == 2
+    # The approval is the real configuration's: the local project, Claude's sign-in, the managed owner.
+    grant = OwnerSetup(access).local()
+    assert (grant.template, grant.fleet, grant.project_directory) == ("local-project", "web-app", str(profile.project))
+    assert grant.provider_signin["binary"] == str(profile.provider) and grant.managed_owner is not None
 
 
 from tests.test_owner_guide_preinstall import installed  # noqa: E402,F401
