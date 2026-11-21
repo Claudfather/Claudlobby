@@ -1797,7 +1797,7 @@ def test_provider_signin_single_attempt_table_is_read_then_upgraded_without_a_re
 # --- Which rule refused Claude's reply: named from a closed vocabulary, stored, never sent ---
 
 # Every detail the product makes must fit this. Written here on its own, not imported.
-_DETAIL=(r'(?:utf8|control 0x[01][0-9a-f]|escape (?:[!-~]|other)|csi malformed(?: [A-Za-z~])?'
+_DETAIL=(r'(?:utf8|control 0x[01][0-9a-f]|escape (?:[!-~]|other)|csi malformed(?: [A-Za-z~](?: [!-?_]{1,16})?)?'
          r'|csi private [?>][0-9;]{0,15} [A-Za-z]|csi range|csi [KJ] [0-9]{1,4}'
          r'|csi final [A-Za-z](?: [0-9;]{1,16})?|token shape|token changed|url changed'
          r'|bytes|escape length|exit 0 without token)')
@@ -1840,9 +1840,11 @@ def _refusal(*chunks):
     pytest.param([b'\x1b '],'unsupported_output','escape other',id='escape-other-space'),
     pytest.param(['\x1bé'.encode()],'unsupported_output','escape other',id='escape-other-not-ascii'),
     pytest.param(['\x1b[5é'.encode()],'unsupported_output','csi malformed',id='csi-malformed'),
-    pytest.param([b'\x1b[1>2A'],'unsupported_output','csi malformed A',id='csi-malformed-letter'),
-    pytest.param([b'\x1b[<u'],'unsupported_output','csi malformed u',id='csi-malformed-other-prefix'),
-    pytest.param([b'\x1b[200~'],'unsupported_output','csi malformed ~',id='csi-malformed-tilde'),
+    pytest.param([b'\x1b[1>2A'],'unsupported_output','csi malformed A 1>2',id='csi-malformed-letter'),
+    pytest.param([b'\x1b[<u'],'unsupported_output','csi malformed u <',id='csi-malformed-other-prefix'),
+    pytest.param([b'\x1b[0 q'],'unsupported_output','csi malformed q 0_',id='csi-malformed-intermediate'),
+    pytest.param([b'\x1b['+b'9'*17+b'!p'],'unsupported_output','csi malformed p',id='csi-malformed-long-body'),
+    pytest.param([b'\x1b[200~'],'unsupported_output','csi malformed ~ 200',id='csi-malformed-tilde'),
     pytest.param([b'\x1b[?2031;x'],'unsupported_output','csi private ?2031; x',id='csi-private'),
     pytest.param([b'\x1b[>1q'],'unsupported_output','csi private >1 q',id='csi-private-greater-than'),
     pytest.param([b'\x1b[?3h'],'unsupported_output','csi private ?3 h',id='csi-private-mode-not-allowed'),
@@ -1874,7 +1876,7 @@ def test_provider_signin_refusal_detail_never_carries_reply_text_a_code_or_a_tok
         return not any(text[at:at+2] in detail for text in (secret,code) for at in range(len(text)-1))
     hostile=[  # the reply, and the whole of the detail it may leave
         ([b'\x1b'+secret.encode()],'escape S'),  # the one character after ESC, never the rest
-        ([b'\x1b[ !"$%&'+secret.encode()],'csi malformed S'),  # a sequence stuffed with letters ends at its first
+        ([b'\x1b[ !"$%&'+secret.encode()],'csi malformed S _!"$%&'),  # a sequence stuffed with letters ends at its first
         ([b'\x1b['+secret.encode()],'csi final S'),
         ([b'\x1b[12;'+secret.encode()],'csi final S 12;'),
         ([b'\x1b[?'+code.encode()+b'h'],'csi private ? P'),

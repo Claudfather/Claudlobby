@@ -95,6 +95,8 @@ _TERMINAL = {"connected", "needs_attention", "cancelled", "unknown"}
 #   0xNN  an unhandled control character below 32, as two hex digits
 #   X     the one character after ESC, only when it is printable ASCII (else "other")
 #   F     a CSI's final ASCII letter ("csi malformed" may also name "~", which ends a CSI too)
+#   B     what stood between "ESC [" and F in a CSI of an unexpected form: digits and ASCII
+#         punctuation only (space written as _), at most 16 characters, never a letter
 #   P     a CSI's parameter string: digits ; ? > only, at most 16 characters
 #   N     an erase mode, a number within the CSI bound
 # refusal_detail() below is the only place a detail string is built, and it returns
@@ -104,7 +106,7 @@ _DETAIL_FORMS = (
     r"utf8",                                   # unsupported_output: undecodable bytes
     r"control 0x[01][0-9a-f]",                 # a control character that is not handled
     r"escape (?:[!-~]|other)",                 # an escape that is not CSI, OSC or a handled one
-    r"csi malformed(?: [A-Za-z~])?",           # not the expected CSI form
+    r"csi malformed(?: [A-Za-z~](?: [!-?_]{1,16})?)?",  # not the expected CSI form: F, then B
     r"csi private [?>][0-9;]{0,15} [A-Za-z]",  # a ? or > CSI outside the allowed sets: P, then F
     r"csi range",                              # a number above the bound
     r"csi [KJ] [0-9]{1,4}",                    # an erase mode that is not handled
@@ -262,7 +264,8 @@ class TokenScreen:
     def _csi(self, value):
         match = re.fullmatch(r"\x1b\[([?>]?[0-9;]*)([A-Za-z])", value)
         if not match:
-            raise SigninRefused("unsupported_output", refusal_detail("csi malformed", value[-1]))
+            body = value[2:-1].replace(" ", "_")  # digits and punctuation only, or it is left out
+            raise SigninRefused("unsupported_output", refusal_detail("csi malformed", value[-1], body))
         raw, final = match.groups()
         if (raw, final) in _IGNORED_CSI:
             return
