@@ -82,6 +82,18 @@ def test_fixed_definition_uses_only_independent_updater_and_no_autostart(fixture
     assert definition["RunAtLoad"] is False and definition["KeepAlive"] is False
 
 
+def test_update_job_definition_carries_no_environment_from_its_dispatcher(fixture, monkeypatch):
+    # Launch dispatches this job from the owner listener. Its stages, the activation
+    # registry scan among them, run in the native manager's environment, never in a
+    # silenced one handed down by whoever dispatched it.
+    installation, directory, _native = fixture
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    linux = jobs.update_job_definition(installation, manager="Linux", domain="", install_directory=directory)
+    assert b"Environment" not in linux.content and b"PLANE_EMIT" not in linux.content
+    darwin = jobs.update_job_definition(installation, manager="Darwin", domain=f"gui/{os.getuid()}", install_directory=directory)
+    assert "EnvironmentVariables" not in plistlib.loads(darwin.content)
+
+
 def test_prepare_is_exact_and_never_bounces_running_job(fixture):
     installation, directory, native = fixture
     first = jobs.prepare_update_job(installation, native, directory)

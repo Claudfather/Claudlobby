@@ -72,6 +72,19 @@ LOG="$LOG_DIR/claude-update.log"
 # Stamped at write time: how long an install ran is evidence when one goes wrong.
 log() { printf '%s %s\n' "$(ts_iso)" "$*" >> "$LOG"; }
 
+# --- A browser installation's pinned binary is not this job's to update -------
+# Website setup installs one hash-checked Claude at provider-bin/claude and the
+# fleet launches exactly that file (fleet_provider_claude). npm cannot update it
+# (that account has no node or npm, and an npm install would not be the pinned
+# bytes); its version changes only through website setup. So the job stops
+# here, before any measurement or alert, and says why in its log: no daily
+# binary_update_failed for a binary that is working as pinned.
+_pinned_claude="$(fleet_provider_claude || true)"
+if [ -n "$_pinned_claude" ] && [ "$(fleet_claude_bin)" = "$_pinned_claude" ]; then
+    log "UPDATE skipped — this fleet launches the pinned Claude that website setup installed ($_pinned_claude); setup owns its version, so nothing was measured or installed"
+    exit 0
+fi
+
 # Loud failure: raise it through the shared emit_failure_alert primitive (fleet
 # event + manager tmux nudge + Telegram escalation) — the same alert path
 # Mechanism 1's reload-fleet.sh uses, so neither mechanism forks it — then exit

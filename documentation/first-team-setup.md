@@ -24,6 +24,31 @@ Review the original request ID, target revision, configuration fingerprint, team
 
 If a response is lost, inspect and continue the original operation. Do not rerun fleet setup, invent replacement identifiers, or resend an unknown action. Separately observe `host doctor`, `host status` and a bounded reviewed task; a committed configuration or launch receipt is not proof of useful work or restart durability.
 
+## Starting a computer with no team
+
+A paired computer whose workspace is linked can also be started with no team. The start is one first install that names no team files. It lays down the computer's own database, recorder, view and scheduled host jobs, and the owner service when this host's settings turn it on. The committed configuration holds an empty team table. No agent starts and no Claude program is installed: the daily `claude-update` job does nothing until a team exists. The start's approval lists, before anything is written, the database, the native directory and whether the start creates it, each service and job it installs, the updater's own job unit, the programs it installs, and the path and hash of this computer's settings file. A declined start leaves the computer as it was. A native directory that does not exist yet, as on a new account, is created only after approval. A start is refused before its approval when the native directory is not one of this computer's or is not a real directory, when an update is already recorded, or when today's guided setup has state on this computer. It is refused after approval, with nothing started, when another update is running, the pairing or workspace changed, or the settings file changed while the approval waited. There is no terminal command for it yet. A start that stops is read with `host update status` and continued with `host update continue`, like any other update. This follows the workspace-first setup flow approved on 2026-11-21. Today's guided first-team setup still refuses a computer it did not start.
+
+## The computer run
+
+The hidden typed run `host owner setup --stdio-computer` (prelude mode `computer`) is the way a client adds a computer and starts it with no team. It asks the folders card, the access list and pairing, one storage card (`initialize_link_storage`) and the workspace link, each only when an earlier run has not, then the start card, dispatches the start, answers `computer_starting` and exits; its exit is what lets the updater proceed. After a declined card the next run asks the cards that remain. After the hand-off a run asks nothing: `computer_ready` once the computer is started and, on Linux, its lasting service answers; `computer_starting` while the start is under way; `start_failed` with core's line when it stopped. It never continues a start: a stopped start is continued by its request id with `host update continue`. A computer where today's guide retains a first-team approval or a Launch, or one in any other state, answers `use_full_guide`; a computer part-way through today's cards with nothing retained is taken over by this run. Today's guide is unchanged. A computer updated after its start is admitted at the later revision only when the run names the finished update record that moved it there; the preparation receipt keeps its first revision and is never rewritten.
+
+## Updating a started computer
+
+The preparation script reads and moves a computer it prepared with three
+actions. `update-status` reports the receipt's revision, the installed revision,
+whether the computer is started and the update record, if any. `update` moves a
+started computer forward to a named revision from the receipt's remote and
+exits; the updater carries on alone. `update-continue` continues the unfinished
+record it names: a start, an ordinary update, any dispatched record, or a
+finished one with health errors. It never dispatches a Preview, a prepared first
+team or a prepared addition; only its Launch does. A computer that is prepared
+but not started, untouched or partway through its cards, is not moved: it
+answers `needs_reset`. None of the three waits for the updater, rewrites the
+receipt or asks a card. `update` installs whatever fast-forward commit the
+client names: the client's pinned revision decides what is installed, as it
+does for preparation. The [owner SSH carrier](architecture/owner-ssh-carrier.md)
+lists their requests, answers and refusals.
+
 ## Browser connection remains a separate gate
 
 The existing workspace/owner boundary requires native identity and private ingress, explicit pairing, workspace binding and exact local launch/action grants. Managed Git preparation grants none of those. Browser reading does not grant messages, task feedback or permission decisions, and those grants do not authorize repository merges or deployments.
@@ -193,10 +218,15 @@ Existing privately configured tokens remain supported; omit this option to keep
 that route. For a new subscription sign-in, the local operator can instead add
 `--provider-signin /absolute/path/to/claude` to `host owner setup`. This optional
 route currently accepts only the independently inspected Claude Code 2.1.325
-Darwin arm64 and Linux arm64 glibc artifacts, verified by their exact file hash.
-Each attempt retains one verified public executable copy (roughly 350 MiB) in
+Darwin arm64, Linux arm64 glibc and Linux x86_64 glibc artifacts, verified by
+their exact file hash.
+Each attempt stages one verified public executable copy (roughly 350 MiB) in
 its private owner state, so an ordinary provider auto-update cannot replace the
-approved executable between verification and launch. A matching version string
+approved executable between verification and launch. The copy is removed when
+its attempt ends (signed in, timed out, cancelled or refused), unless its
+sign-in process could not be proven stopped; **Try again** (below) also removes
+a replaced attempt's copy if one is left. One setup
+approval allows at most ten attempts, so about 3.5 GiB even if every removal failed. A matching version string
 alone is insufficient. An unsupported binary is
 refused before invocation; use your existing private provider setup instead.
 
@@ -204,14 +234,20 @@ Keep the explicitly selected `--account-directory`; create/choose that private
 profile directory before invoking the guide. This filesystem choice does not
 authenticate the provider. The data root must be private
 0700 and its routing `.env` an owned, single-link regular file, mode 0600. The
-operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider authorization
-attempt and storage of its subscription token on this host. This does not grant
+operator separately confirms `ALLOW-CLAUDE-SIGNIN`: one provider sign-in (at most
+one attempt ever receives an authorization code) and storage of its subscription
+token on this host. This does not grant
 ordinary messages, native activation, or a model turn. Website sign-in is not
 provider consent or local authority.
 
 In the connected setup page choose **Sign in to Claude**, open its Claude link,
 and approve at the provider. If Claude gives a code, paste it into the private
-Claude code field on the connected setup page. It is sent directly to the
+Claude code field on the connected setup page, by the time the page shows beside
+the link (**Paste the code by …**, in your local time: the host's last moment for a
+code, 20 seconds before the attempt's own deadline, so a code is never cut off
+while it is exchanged; a later code is refused, and with no code sent the sign-in
+ends then and offers **Try again**). A sign-in is not started when the setup
+approval has less than 50 seconds left. The code is sent directly to the
 selected host, never through the website server. Choose **Check sign-in
 progress** for the original attempt. **Claude connected** means the token was
 stored in this host's private routing file; it does not mean bots started or
@@ -220,7 +256,7 @@ passed native readiness. Preview and Launch keep their separate approvals.
 The official `claude setup-token` process owns OAuth and its browser/code flow.
 The host captures its output privately; token/code/terminal output are never
 shown by Plane, placed in request receipts or sent through Vercel. Only the
-validated provider link and finite progress states are exposed. The credential
+validated provider link, its deadline and finite progress states are exposed. The credential
 update appends one literal token while preserving unrelated routing bytes and
 refuses existing tokens, unsafe files or unsupported environment syntax. In
 those cases choose local private setup/recovery rather than overwriting another
@@ -235,3 +271,39 @@ token, and does not revoke one. Interrupted attempts need local attention; setup
 never automatically remints or retries. Provider acceptance and native background
 readiness still require an authorized real trial; synthetic tests are not those
 observations.
+
+Two endings can be retried from the browser, only before the code reached the
+Claude CLI and while the setup approval has at least 50 seconds left: an attempt
+that timed out (no code by its paste-by time), and one that was
+cancelled (**Cancel sign-in**, or a lost connection that closed the sign-in). The
+host records that a code was delivered before it types the code, so a restart
+cannot make a later ending look retryable. The panel then says **The sign-in took
+too long.** or **The sign-in stopped before a code was sent.**, followed by **Choose
+Try again for a new sign-in link.** **Try again** starts a new attempt, with a new
+attempt ID and a new sign-in link, under the same approval, and only when you
+choose it. The old link and its code stop working. A new attempt still refuses a
+saved credential, and one approval allows at most ten attempts. If the computer
+refuses Try again or it could not be sent, the page keeps following the ended
+attempt, also after a reload. If its answer was lost, the computer may still start
+it, so the page follows whichever of the two attempts the computer names next, also
+after a reload. With less approval left the page says **Setup approval expired.** or
+**Setup approval ends too soon for a new sign-in.** instead of offering Try again. Every
+other ending, including a timeout or cancel after the code was sent
+and an interrupted attempt, keeps the single attempt: recover setup on the computer.
+While the Claude tab is in front, the setup page keeps checking every 25 seconds so
+the sign-in is not closed while you approve.
+
+When the computer cannot read Claude's reply (`unsupported_output`,
+`ambiguous_output` or `output_limit`), its sign-in record also names which of its
+rules refused the reply, in a `detail` column: a short fixed phrase such as
+`csi final z 5` or `exit 0 without token`. Claude's reply itself is not kept: the
+most a phrase can hold of it is one letter and 16 digits or punctuation marks of
+what followed an escape character. The setup page is not sent it. Read it on the computer, for example with
+`sqlite3 -readonly` on `state/plane/owner-access.db` under the data root:
+`SELECT state, reason, detail, code_delivered FROM setup_provider;`
+
+Before downgrading Claudlobby, finish or recover setup first. This version adds
+columns to the host's sign-in record (`setup_provider`) when it approves setup or
+starts a sign-in (two for Try again, then `detail`), and older versions refuse that
+table: their sign-in steps answer unavailable until the record is recovered on the
+computer.

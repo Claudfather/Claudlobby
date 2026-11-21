@@ -8,8 +8,12 @@ from ..command_result import execute
 
 
 def _dispatch(args):
-    if args.owner_action == "setup" and (getattr(args, "stdio", False) or getattr(args, "stdio_status", False)):
+    if args.owner_action == "setup" and (getattr(args, "stdio", False) or getattr(args, "stdio_status", False)
+                                         or getattr(args, "stdio_computer", False)):
         return import_module(".owner_stdio", __package__).dispatch(args)
+    if args.owner_action == "api":
+        # Owns stdout completely, like the typed guide: no result wrapper.
+        return import_module(".owner_api_stdio", __package__).dispatch(args)
     return execute(args.public_command,
                    lambda: import_module(".host_owner", __package__).dispatch(args),
                    json_output=args.json)
@@ -85,6 +89,7 @@ def register_host_owner(hosts):
     mode = guided.add_mutually_exclusive_group()
     mode.add_argument("--stdio", action="store_true", help=SUPPRESS)
     mode.add_argument("--stdio-status", action="store_true", help=SUPPRESS)
+    mode.add_argument("--stdio-computer", action="store_true", help=SUPPRESS)
     guided.add_argument("--provider-signin", type=Path, help="Separately approve browser-mediated setup-token using this reviewed Claude executable")
     guided.add_argument("--managed-owner", action="store_true", help="Locally approve a managed connection service in this team's original Launch")
     for flag in ("origin", "workspace-issuer", "workspace-origin", "target-fleet", "repository"):
@@ -93,6 +98,9 @@ def register_host_owner(hosts):
         guided.add_argument("--" + flag, type=Path)
     guided.add_argument("--json", action="store_true", help="Not supported for interactive setup")
     guided.set_defaults(func=_dispatch, public_command="host.owner.setup")
+    api = actions.add_parser("api", help=SUPPRESS)
+    api.add_argument("--stdio", action="store_true", required=True, help=SUPPRESS)
+    api.set_defaults(func=_dispatch, public_command="host.owner.api", json=False)
     serve = actions.add_parser("serve", help="Serve owner Plane on a private Unix socket (foreground)")
     serve.add_argument("--json", action="store_true", help="Not supported for the foreground server")
     serve.add_argument("--origin", required=True, help="Exact external HTTPS origin configured in Tailscale Serve")

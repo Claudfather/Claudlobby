@@ -25,7 +25,8 @@ IDLE_SECONDS = 300
 ADMISSION_SECONDS = 1800
 _ACTIONS = frozenset(("prepare_directories", "initialize_owner", "pair_owner",
     "initialize_workspace", "initialize_connected", "bind_workspace", "provider_signin",
-    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider"))
+    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider",
+    "start_workspace", "initialize_link_storage"))
 _BASE = {"version", "type", "seq", "session_id"}
 _FIELDS = {
     "start": {"profile", "expected_uid", "source_revision", "binding_sha256", "finish_setup"},
@@ -35,9 +36,13 @@ _FIELDS = {
 
 
 class StdioRefused(Exception):
-    """Finite redacted refusal, never raw input, configuration or child output."""
-    def __init__(self, code="invalid_request"):
+    """Finite redacted refusal, never raw input, configuration or child output.
+
+    ``data`` is the computer run's ``start_failed`` only: core's line and the
+    record's request id, sent in the error frame beside the code."""
+    def __init__(self, code="invalid_request", *, data=None):
         self.code = code
+        self.data = dict(data or {})
         super().__init__(code)
 
 
@@ -84,6 +89,7 @@ class OwnerStdio:
         self._closed = False
         self._pending = None
         self._partial_since = None
+        self._extra = {}
 
     def emit(self, kind, **body):
         if kind not in {"hello", "proposal", "state", "result", "error"}:
@@ -141,7 +147,7 @@ class OwnerStdio:
             value = json.loads(raw, object_pairs_hook=_unique,
                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             kind = value.get("type") if isinstance(value, dict) else None
-            fields = _BASE | _FIELDS.get(kind, set())
+            fields = _BASE | _FIELDS.get(kind, set()) | self._extra.get(kind, set())
             if kind == "decide" and self._pending == "actor_alias":
                 fields |= {"actor_alias"}
             if (kind not in _FIELDS or set(value) != fields or _wire(value) != raw + b"\n"
@@ -166,7 +172,11 @@ class OwnerStdio:
             self._closed = True
             raise
 
-    def start(self):
+    def start(self, *, computer=False):
+        """``computer``: the computer run's start, which also carries ``update_record``:
+        null, or the request id and target of the update record the client read."""
+        if computer:
+            self._extra = {"start": {"update_record"}}
         value = self._read({"start"})
         if (value["profile"] != "owner-setup-v1" or type(value["expected_uid"]) is not int
                 or not 0 < value["expected_uid"] < 2**32 - 1
@@ -183,6 +193,14 @@ class OwnerStdio:
                 _setup_binding(value["finish_setup"])
             except (InstallationError, TypeError):
                 raise StdioRefused() from None
+        if computer:
+            known = value["update_record"]
+            if value["finish_setup"] is not None or known is not None and (
+                    type(known) is not list or len(known) != 2 or not all(isinstance(v, str) for v in known)
+                    or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                                    known[0]) is None
+                    or re.fullmatch(r"[0-9a-f]{40}", known[1]) is None):
+                raise StdioRefused()
         return value
 
     def approve(self, action, scope, *, original=True, expires_at=None):
@@ -343,14 +361,27 @@ def dispatch(args):
     from ..command_result import CommandFailure
     from ..plane.owner_access import OwnerAccess, AccessDenied, AccessUnavailable
     from .owner_setup_consent import FixedOwnerProfile, StdioGuideConsent
-    from .host_owner_setup import run, interrupted
+    from .host_owner_setup import run, run_computer, interrupted
     channel = OwnerStdio(0, 1)
+    computer = getattr(args, "stdio_computer", False) is True
+    data = {}
     try:
         channel.hello()
         _selectors(args)
-        request = channel.start()
+        request = channel.start(computer=True) if computer else channel.start()
         paths = _admit(args, request)
-        profile = FixedOwnerProfile(paths, request)
+        profile = FixedOwnerProfile(paths, request, computer=True) if computer else FixedOwnerProfile(paths, request)
+        # The managed Mac runtime has no admitted HTTPS ingress: its guide is
+        # the explicit SSH-controlled lifecycle. Capture the server tuple here,
+        # before the fixed profile replaces the environment; a missing or
+        # ambiguous one refuses rather than falling back to another transport.
+        ssh = None
+        if profile.runtime is not None and not args.stdio_status:
+            from ..plane.owner_ssh import SSHSessionSource
+            try:
+                ssh = SSHSessionSource.capture()
+            except AccessDenied:
+                raise StdioRefused("owner_ssh_source_refused") from None
         with profile.environment(), interrupted():
             store = OwnerAccess(paths.root)
             if args.stdio_status:
@@ -359,11 +390,17 @@ def dispatch(args):
             configured = SimpleNamespace(**vars(args))
             configured.finish_setup = request["finish_setup"]
             consent = StdioGuideConsent(channel)
-            result = run(configured, paths, store, None, consent=consent, profile=profile)
+            if computer:
+                configured.update_record = request["update_record"]
+                result = run_computer(configured, paths, store, consent=consent, profile=profile,
+                                      **({"ssh": ssh} if ssh is not None else {}))
+            else:
+                result = run(configured, paths, store, None, consent=consent, profile=profile,
+                             **({"ssh": ssh} if ssh is not None else {}))
             channel.emit("result", **result.data)
         return 0
     except StdioRefused as exc:
-        code = exc.code
+        code, data = exc.code, exc.data
     except CommandFailure as exc:
         code = exc.error.code
     except (AccessDenied, AccessUnavailable, OSError, ValueError, ImportError, TimeoutError):
@@ -373,7 +410,7 @@ def dispatch(args):
     except Exception:
         code = "internal_error"
     try:
-        channel.emit("error", code=code, state="stopped", retry=False,
+        channel.emit("error", code=code, state="stopped", retry=False, **data,
             **({"next": "inspect_status"} if code.startswith("provider_install_") or code == "interrupted_unknown" else {}))
     except (StdioRefused, OSError):
         pass

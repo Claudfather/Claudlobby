@@ -38,5 +38,8 @@ def dispatch(args) -> CommandOutput:
     if result.source_revision is None:
         data.pop("source_revision")
         data.pop("config_fingerprint")
+    if result.outcome == "no_fleet":
+        return CommandOutput(data, result.release_id,
+                             (f"{action} update: no fleet on this computer — nothing to update.",))
     return CommandOutput(data, result.release_id,
                          (f"{action} update tick completed; inspect its log for per-target outcomes.",))

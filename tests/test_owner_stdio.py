@@ -260,6 +260,12 @@ def fixed_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(Installation, "preflight", lambda self, **kwargs: "a" * 40)
+    # The running Linux interpreter, trusted from this directory and owner as
+    # /usr/bin and root are on a real computer.
+    from claudlobby import bootstrap
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path)
+    monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid())
+    monkeypatch.setattr(sys, "executable", str(interpreter))
     return SimpleNamespace(root=family / "data", package=package), request, home, path
 
 
@@ -276,6 +282,33 @@ def test_fixed_profile_ignores_caller_home_and_uses_same_private_policy(fixed_pr
         assert os.environ["CLAUDE_CONFIG_DIR"] == str(home / ".local/share/claudlobby-browser/provider-profile")
         assert profile.provider == home / ".local/share/claudlobby-browser/provider-bin/claude"
     assert os.environ["HOME"] == "/untrusted-home"
+
+
+def test_linux_fixed_owner_environment_lets_first_team_setup_record(fixed_profile, monkeypatch):
+    # A browser Preview refused at prepare on a real computer: the guide's own
+    # fixed environment carried the harness silencer, the listener it starts
+    # inherited it, and first-fleet setup refuses under it by design (#2611).
+    import subprocess
+    import sys
+    from claudlobby import env_tiers as tiers
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.plane import registry_emit as registry
+    paths, request, _home, _ = fixed_profile
+    fleet = SimpleNamespace(name="first-team")
+    monkeypatch.setattr(tiers, "resolve", lambda *a, **k: {})
+    silenced = "PLANE_EMIT_DISABLED=1 in this command's environment silences"
+    # An operator who exports the switch is still refused, here and after the guide.
+    monkeypatch.setenv("PLANE_EMIT_DISABLED", "1")
+    assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
+    # A shell child, not sys.executable: this fixture stands a file in for the interpreter.
+    child = ["/bin/sh", "-c", 'printf %s "${PLANE_EMIT_DISABLED-None}"']
+    profile = FixedOwnerProfile(paths, request)
+    with profile.environment():
+        assert registry.activation_scan_refusal(paths, fleet) is None
+        assert "PLANE_EMIT_DISABLED" not in os.environ
+        # The listener and the update's stages are children that inherit this.
+        assert subprocess.run(child, capture_output=True, text=True, check=True).stdout.strip() == "None"
+    assert registry.activation_scan_refusal(paths, fleet).startswith(silenced)
 
 
 @pytest.mark.parametrize("change", ["uid", "binding", "source", "incomplete", "receipt_link"])
@@ -800,13 +833,19 @@ def test_typed_real_child_drain_records_repeated_signals_before_success(tmp_path
     import sys
     from claudlobby.commands import host_owner_setup as guide
     from claudlobby.commands.owner_stdio import StdioRefused
-    ready, draining, drained = (tmp_path / name for name in ('ready', 'draining', 'drained'))
+    ready, draining, sent, drained = (tmp_path / name for name in ('ready', 'draining', 'sent', 'drained'))
+    # The child drains until the sender says both signals are out (ten seconds at
+    # most), so both arrive during the owned cleanup however late a busy runner
+    # schedules the sender. With a fixed drain time, a stalled sender's signal
+    # arrived after the handlers were restored and ended the whole pytest process.
     child = '''import signal,time,sys
 from pathlib import Path
-ready,draining,drained=map(Path,sys.argv[1:4])
+ready,draining,sent,drained=map(Path,sys.argv[1:5])
 def stop(*_):
     draining.touch()
-    time.sleep(.15)
+    until=time.monotonic()+10
+    while not sent.exists() and time.monotonic()<until: time.sleep(.005)
+    time.sleep(.05)
     drained.touch()
     raise SystemExit(0)
 signal.signal(signal.SIGTERM,stop)
@@ -814,28 +853,49 @@ ready.touch()
 while True: time.sleep(.01)
 '''
     monkeypatch.setattr(guide, '_ready', lambda *_: ready.exists())
-    failures = []
+    failures, late, under_test = [], [], [True]
     def send_stops():
         try:
-            until = time.monotonic() + 3
+            until = time.monotonic() + 10
             while not draining.exists() and time.monotonic() < until: time.sleep(.005)
             assert draining.exists()
             os.kill(os.getpid(), getattr(signal, stop))
             time.sleep(.02)
             os.kill(os.getpid(), getattr(signal, stop))
         except BaseException as exc: failures.append(exc)
+        finally: sent.touch()
     sender = threading.Thread(target=send_stops)
-    sender.start()
+    # A signal that still arrives after the code under test has returned is
+    # recorded here and fails this test. Left to pytest's own handlers it would
+    # end the session. Inside the code under test SIGINT keeps Python's meaning.
+    def stray(number, frame):
+        if number == signal.SIGINT and under_test[0]: signal.default_int_handler(number, frame)
+        late.append(number)
+    outer = {sig: signal.signal(sig, stray) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        with guide.interrupted(), pytest.raises(StdioRefused, match='interrupted_unknown'):
-            with guide._serving([sys.executable, '-I', '-B', '-c', child, str(ready), str(draining), str(drained)],
-                    tmp_path / 'owner.sock', 'https://host.example.test',
-                    consent=SimpleNamespace(check_cancel=lambda: None)):
-                pass  # Interrupt during owned cleanup, after a possible Launch return.
+        sender.start()
+        try:
+            try:
+                with guide.interrupted(), pytest.raises(StdioRefused, match='interrupted_unknown'):
+                    with guide._serving([sys.executable, '-I', '-B', '-c', child, str(ready), str(draining), str(sent), str(drained)],
+                            tmp_path / 'owner.sock', 'https://host.example.test',
+                            consent=SimpleNamespace(check_cancel=lambda: None)):
+                        pass  # Interrupt during owned cleanup, after a possible Launch return.
+            finally:
+                under_test[0] = False
+        except KeyboardInterrupt:
+            under_test[0] = False
+            late.append('KeyboardInterrupt left the owned cleanup')
         assert drained.exists()
     finally:
-        sender.join(4)
-    assert not sender.is_alive() and not failures
+        under_test[0] = False
+        sender.join(15)
+        # Only once the sender has finished. A sender still running has a signal
+        # left to send, which must find these handlers and not pytest's own; the
+        # test then fails below and the handlers stay for the rest of the session.
+        if not sender.is_alive():
+            for sig, handler in outer.items(): signal.signal(sig, handler)
+    assert not sender.is_alive() and not failures and not late, (sender.is_alive(), failures, late)
 
 
 @pytest.fixture
@@ -954,3 +1014,336 @@ def test_darwin_owner_ingress_remains_explicit_native_gate(darwin_fixed_profile,
     profile = FixedOwnerProfile(paths, request)
     monkeypatch.setattr(owner_ingress, "ServePrincipalVerifier", lambda **_kw: pytest.fail("executed Linux native path"))
     with pytest.raises(StdioRefused, match="native_ingress_prerequisite_missing"): profile.origin()
+
+
+def test_linux_system_python_update_keeps_the_recorded_binding(fixed_profile):
+    """Ubuntu replaces /usr/bin/python3.x on a security update; setup goes on."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, home, path = fixed_profile
+    receipt, binding = path.read_bytes(), request["binding_sha256"]
+    interpreter = Path(json.loads(receipt)["interpreter"])
+    interpreter.write_bytes(b"synthetic interpreter after a security update; never executed")
+    assert hashlib.sha256(interpreter.read_bytes()).hexdigest() != json.loads(receipt)["interpreter_sha256"]
+    before = sorted(str(p) for p in home.rglob("*"))
+    FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and request["binding_sha256"] == binding
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("defect", ["owner", "group-writable", "other-writable", "not-executable",
+                                    "outside", "running-python", "folder-owner", "folder-group-writable", "folder-other-writable", "folder-symlink"])
+def test_linux_system_python_must_stay_trusted(fixed_profile, monkeypatch, tmp_path, defect):
+    from claudlobby import bootstrap  # holds the shared trust check
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, path = fixed_profile
+    interpreter = Path(json.loads(path.read_bytes())["interpreter"])
+    if defect == "owner":
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_OWNER", os.getuid() + 1)
+    elif defect == "group-writable":
+        interpreter.chmod(0o775)
+    elif defect == "other-writable":
+        interpreter.chmod(0o757)
+    elif defect == "not-executable":
+        interpreter.chmod(0o644)
+    elif defect == "outside":
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", tmp_path / "elsewhere")
+    elif defect == "running-python":
+        other = tmp_path / "other-python"; other.write_bytes(b"other"); other.chmod(0o755)
+        monkeypatch.setattr(sys, "executable", str(other))
+    else:
+        monkeypatch.setattr(bootstrap, "_SYSTEM_PYTHON_DIRECTORY", _fake_folder(tmp_path, defect))
+    receipt, before = path.read_bytes(), sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert path.read_bytes() == receipt and sorted(str(p) for p in home.rglob("*")) == before
+
+
+def test_darwin_managed_python_bytes_stay_pinned(darwin_fixed_profile):
+    """Claudlobby's own Mac runtime is its own file: a changed byte still refuses."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, receipt_path, runtime, _env = darwin_fixed_profile
+    FixedOwnerProfile(paths, request)
+    runtime.python.write_bytes(b"changed managed interpreter; never executed")
+    receipt = receipt_path.read_bytes()
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert receipt_path.read_bytes() == receipt
+
+
+def _fake_folder(path, defect):
+    """The trusted folder as lstat reports it, with at most one property faked."""
+    if not (defect or "").startswith("folder-"):
+        return path
+    import stat as stat_module
+    class Folder(type(Path("/"))):
+        def lstat(self):
+            info = super().lstat()
+            mode = stat_module.S_IFLNK | 0o777 if defect == "folder-symlink" else info.st_mode
+            mode |= {"folder-group-writable": 0o020, "folder-other-writable": 0o002}.get(defect, 0)
+            return SimpleNamespace(st_mode=mode, st_uid=info.st_uid + (defect == "folder-owner"))
+    return Folder(path)
+
+
+def test_linux_recorded_python_digest_is_never_compared(fixed_profile):
+    """Only the recorded digest changes, and the binding the website holds agrees."""
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, _home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["interpreter_sha256"] = "e" * 64
+    path.write_text(json.dumps(receipt, sort_keys=True))
+    binding = {key: value for key, value in receipt.items()
+               if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
+    request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    FixedOwnerProfile(paths, request)
+
+
+@pytest.mark.parametrize("action", ["start_workspace", "initialize_link_storage"])
+def test_stdio_proposes_the_computer_runs_cards(pipes, action):
+    """The computer run's two new card actions pass the channel's closed list."""
+    console, session = admitted(pipes)
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(console.approve(
+        action, {"effects": ["displayed core effect"]}, original="approved")), daemon=True)
+    thread.start()
+    import select
+    assert select.select([pipes[3]], [], [], 5)[0], "the channel refused the action"
+    proposal = read_frame(pipes[3])
+    assert proposal["type"] == "proposal" and proposal["proposal"]["action"] == action
+    os.write(pipes[2], wire({"version": 1, "type": "decide", "seq": 2,
+        "session_id": session, "proposal_id": proposal["proposal_id"],
+        "digest": proposal["digest"], "approve": True}))
+    thread.join(2)
+    assert not thread.is_alive() and outcome == ["approved"]
+
+
+DONE = {"request_id": "33333333-3333-4333-8333-333333333333", "target": "a" * 40, "phase": "done",
+        "health_errors": {}, "maintenance": False, "config_committed": True}
+
+
+@pytest.fixture
+def moved_profile(fixed_profile, monkeypatch):
+    """Receipt at X ("e"), installed and requested at Y ("a"); the record on disk and Git are stand-ins.
+
+    tests/test_owner_computer_run.py checks admitted_update against the updater's own records.
+    """
+    from claudlobby import git_update
+    paths, request, home, path = fixed_profile
+    receipt = json.loads(path.read_bytes())
+    receipt["ref"] = receipt["revision"] = "e" * 40
+    path.write_bytes(json.dumps(receipt, sort_keys=True).encode())
+    fields = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter", "interpreter_sha256")
+    request["binding_sha256"] = hashlib.sha256(json.dumps({key: receipt[key] for key in fields},
+                                                          sort_keys=True).encode()).hexdigest()
+    world = SimpleNamespace(record=dict(DONE), git=[], ancestor=True)
+    monkeypatch.setattr(git_update, "read_update", lambda installation: world.record and dict(world.record))
+    def git(installation, *args, check=True):
+        world.git.append(args)
+        return SimpleNamespace(returncode=0 if world.ancestor and args == (
+            "merge-base", "--is-ancestor", "e" * 40, "a" * 40) else 1)
+    monkeypatch.setattr(git_update, "_git", git)
+    return paths, request, home, world
+
+
+def test_the_computer_run_is_admitted_at_a_later_revision_naming_its_finished_update(moved_profile):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, world = moved_profile
+    before = sorted(str(p) for p in home.rglob("*"))
+    computer = dict(request, update_record=[DONE["request_id"], "a" * 40])
+    profile = FixedOwnerProfile(paths, computer, computer=True)
+    assert profile.receipt_revision == "e" * 40
+    assert world.git == [("merge-base", "--is-ancestor", "e" * 40, "a" * 40)]
+    # Today's guide keeps its rule: the same computer, without a finish tuple, is refused.
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, request)
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+@pytest.mark.parametrize("change", ["health_errors", "another_id", "nothing_named", "no_record", "not_done",
+                                    "another_target", "not_an_ancestor", "binding", "finish_tuple"])
+def test_the_computer_run_at_a_later_revision_refuses_anything_else(moved_profile, change):
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby.commands.owner_stdio import StdioRefused
+    paths, request, home, world = moved_profile
+    computer = dict(request, update_record=[DONE["request_id"], "a" * 40])
+    if change == "health_errors":
+        world.record["health_errors"] = {"claudlobby-plane-owner.service": "unit failed to start"}
+    elif change == "another_id":
+        computer["update_record"] = ["44444444-4444-4444-8444-444444444444", "a" * 40]
+    elif change == "nothing_named":
+        computer["update_record"] = None
+    elif change == "no_record":  # a checkout moved by hand
+        world.record = None
+    elif change == "not_done":
+        world.record["phase"] = "restore"
+    elif change == "another_target":
+        world.record["target"] = computer["update_record"][1] = "b" * 40
+    elif change == "not_an_ancestor":
+        world.ancestor = False
+    elif change == "binding":
+        computer["binding_sha256"] = "f" * 64
+    else:
+        computer["finish_setup"] = ["11111111-1111-4111-8111-111111111111", DONE["request_id"], "b" * 64, "a" * 40]
+    before = sorted(str(p) for p in home.rglob("*"))
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        FixedOwnerProfile(paths, computer, computer=True)
+    assert sorted(str(p) for p in home.rglob("*")) == before
+
+
+def test_the_computer_run_at_the_receipts_revision_needs_no_record(fixed_profile, monkeypatch):
+    from claudlobby import git_update
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    paths, request, _home, _ = fixed_profile
+    monkeypatch.setattr(git_update, "read_update", lambda *_: pytest.fail("read a record at the receipt's revision"))
+    assert FixedOwnerProfile(paths, dict(request, update_record=None), computer=True).receipt_revision == "a" * 40
+
+
+@pytest.mark.parametrize("mutation", [
+    {}, {"update_record": ["33333333-3333-4333-8333-333333333333"]},
+    {"update_record": ["not-an-id", "a" * 40]}, {"update_record": ["33333333-3333-4333-8333-333333333333", "A" * 40]},
+    {"update_record": "33333333-3333-4333-8333-333333333333"},
+    {"update_record": "x"}, {"update_record": 7}, {"update_record": []}, {"update_record": {}},
+    {"update_record": [None, None]}, {"update_record": [1, 2]},
+    {"update_record": None, "finish_setup": ["11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222", "b" * 64, "c" * 40]},
+])
+def test_stdio_computer_start_takes_one_more_key_and_nothing_else(pipes, mutation):
+    from claudlobby.commands.owner_stdio import OwnerStdio, StdioRefused
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    value = start(hello["session_id"], **mutation)
+    os.write(pipes[2], wire(value))
+    with pytest.raises(StdioRefused) as refused:
+        console.start(computer=True)
+    assert refused.value.code == "invalid_request" and refused.value.data == {}
+
+
+@pytest.mark.parametrize("known", [None, ["33333333-3333-4333-8333-333333333333", "a" * 40]])
+def test_stdio_computer_start_returns_the_named_record(pipes, known):
+    from claudlobby.commands.owner_stdio import OwnerStdio
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    os.write(pipes[2], wire(start(hello["session_id"], update_record=known)))
+    assert console.start(computer=True)["update_record"] == known
+
+
+@pytest.mark.parametrize("outcome", ["ready", "start_failed"])
+def test_dispatch_runs_the_computer_run_for_its_flag(fixed_profile, monkeypatch, outcome):
+    """`--stdio-computer` reaches run_computer with the computer admission, never today's run."""
+    from claudlobby.command_result import CommandOutput
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    from claudlobby.commands import owner_setup_consent
+    paths, request, *_ = fixed_profile
+    seen = []
+    real = owner_setup_consent.FixedOwnerProfile
+
+    def profile(admitted, value, **kwargs):
+        seen.append(("profile", kwargs))
+        return real(admitted, value, **kwargs)
+
+    def run_computer(args, admitted, store, *, consent, profile):
+        seen.append(("run", args.update_record))
+        if outcome == "start_failed":
+            raise owner_stdio.StdioRefused("start_failed", data={"line": "core's line", "request_id": "id"})
+        return CommandOutput({"state": "computer_ready", "origin": "https://host.example.test"})
+
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", profile)
+    monkeypatch.setattr(host_owner_setup, "run", lambda *a, **k: pytest.fail("ran today's guide"))
+    monkeypatch.setattr(host_owner_setup, "run_computer", run_computer)
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            assert computer is True
+            return dict(request, update_record=None)
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=True, root=str(paths.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    assert seen == [("profile", {"computer": True}), ("run", None)]
+    if outcome == "ready":
+        assert code == 0 and frames[-1]["type"] == "result" and frames[-1]["state"] == "computer_ready"
+    else:
+        assert code == 4 and {key: frames[-1][key] for key in ("type", "code", "line", "request_id")} == {
+            "type": "error", "code": "start_failed", "line": "core's line", "request_id": "id"}
+
+
+@pytest.mark.parametrize("refusal, extra", [
+    ("declined", []), ("source_mismatch", []), ("provider_install_failed", ["next"]),
+    ("interrupted_unknown", ["next"]), ("conflict", []),
+])
+def test_todays_error_frame_keeps_its_keys(fixed_profile, monkeypatch, refusal, extra):
+    """Today's `--stdio` refusal on the wire: the error frame's keys, exactly, for each kind of refusal."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    paths, request, *_ = fixed_profile
+
+    def run(*_args, **_kwargs):
+        if refusal == "conflict":
+            raise CommandFailure("conflict", "the original setup is not current healthy DONE",
+                                 data={"request_id": "id"}, hint="host update status")
+        raise owner_stdio.StdioRefused(refusal)
+
+    monkeypatch.setattr(host_owner_setup, "run", run)
+    monkeypatch.setattr(host_owner_setup, "run_computer", lambda *a, **k: pytest.fail("ran the computer run"))
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            assert computer is False
+            return dict(request)
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=False, root=str(paths.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    assert code == 4 and frames[-1]["type"] == "error" and frames[-1]["code"] == refusal
+    assert sorted(frames[-1]) == sorted(["code", "retry", "seq", "session_id", "state", "type", "version", *extra])
+
+
+def test_stdio_computer_is_one_more_hidden_mode_of_the_same_exclusive_group(monkeypatch):
+    import argparse
+    from claudlobby.commands import _host_owner_parsers as parsers
+    parser = argparse.ArgumentParser(exit_on_error=False)
+    parsers.register_host_owner(parser.add_subparsers(dest="host_command"))
+    args = parser.parse_args(["owner", "setup", "--stdio-computer"])
+    assert args.stdio_computer is True and args.stdio is False and args.stdio_status is False
+    setup = parser._subparsers._group_actions[0].choices["owner"]._subparsers._group_actions[0].choices["setup"]
+    (group,) = [group for group in setup._mutually_exclusive_groups
+                if "--stdio" in [flag for action in group._group_actions for flag in action.option_strings]]
+    modes = {action.option_strings[0]: action.help for action in group._group_actions}
+    assert modes == {"--stdio": argparse.SUPPRESS, "--stdio-status": argparse.SUPPRESS,
+                     "--stdio-computer": argparse.SUPPRESS}
+    routed = []
+    monkeypatch.setattr(parsers, "import_module", lambda name, package: SimpleNamespace(
+        dispatch=lambda value: routed.append(name) or 0))
+    assert parsers._dispatch(args) == 0 and routed == [".owner_stdio"]

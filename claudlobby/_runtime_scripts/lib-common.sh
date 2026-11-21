@@ -214,16 +214,38 @@ claudlobby_cli() {
 _FLEET_CLAUDE_LINK_REL="state/bin/claude"
 _FLEET_CLAUDE_VERSIONS_REL="state/claude/versions"
 
+# fleet_provider_claude
+# The one Claude a browser installation's fleet may launch: website setup
+# installs a single reviewed, hash-checked executable at
+# ~/.local/share/claudlobby-browser/provider-bin/claude (provider_install.py)
+# and puts no claude on that account's PATH. The family is recognised by the
+# exact context its units carry, the pair _managed_browser_python also reads:
+# CLAUDLOBBY_ROOT is the family's data/ and CLAUDLOBBY_INSTALLATION its
+# install/. Prints the path and returns 0 for that family whether or not the
+# file is there yet, so a missing pin fails loudly at exec and is never
+# replaced by some other claude found on PATH. Returns 1, printing nothing, for
+# every other installation. It checks no bytes: provider_install verified them
+# when it published the file, create-only and read-only.
+fleet_provider_claude() {
+    [ -n "${HOME:-}" ] || return 1
+    local family="$HOME/.local/share/claudlobby-browser"
+    [ "${CLAUDLOBBY_ROOT:-}" = "$family/data" ] \
+        && [ "${CLAUDLOBBY_INSTALLATION:-}" = "$family/install" ] || return 1
+    printf '%s' "$family/provider-bin/claude"
+}
+
 # fleet_claude_bin
 # THE resolution of the claude binary the fleet launches (#1768; the single
 # resolver #1772 asks for). Prints what to exec, in order:
 #   1. CLAUDE_BIN, when set: the explicit pin (the validation harness's seam, or
 #      a host that names its binary);
-#   2. the fleet link $CLAUDLOBBY_ROOT/state/bin/claude, when it resolves to an
+#   2. a browser installation's pinned provider (fleet_provider_claude), always
+#      for that family, so neither a staged link nor PATH can stand in for it;
+#   3. the fleet link $CLAUDLOBBY_ROOT/state/bin/claude, when it resolves to an
 #      executable. Only the staged update creates it, and only after the
 #      version it names RAN and passed the size check, so with the switch off
 #      it does not exist and nothing below changes;
-#   3. otherwise the bare name `claude`, left to the caller's PATH exactly as
+#   4. otherwise the bare name `claude`, left to the caller's PATH exactly as
 #      before.
 # Returns the LINK, never its target: the kernel resolves it at exec, so a
 # session's executable is the real versioned path, and the next swap cannot
@@ -235,6 +257,7 @@ fleet_claude_bin() {
         printf '%s' "$CLAUDE_BIN"
         return 0
     fi
+    fleet_provider_claude && return 0
     local link="${CLAUDLOBBY_ROOT:-}/$_FLEET_CLAUDE_LINK_REL"
     if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -L "$link" ] && [ -x "$link" ]; then
         printf '%s' "$link"
@@ -7092,6 +7115,57 @@ seed_workspace_trust() {
         fi
     }
     with_lock "${json}.lock" _do_trust_seed || return 0
+}
+
+# seed_account_onboarding [config_json]
+# Mark Claude's first-run onboarding done in a profile kept for the bots, by
+# merging two keys and nothing else. A profile that only a sign-in has touched
+# (website setup's provider-profile, measured: firstStartTime, machineID,
+# userID and migration flags, no hasCompletedOnboarding) opens claude on its
+# first-run screens, a colour theme and then a notice about mistakes and
+# prompt injection, and headless nobody presses the key they wait for. Neither
+# is a consent: the theme is a display preference and the notice is
+# information; the account owner consented when they signed in.
+#
+# Only a browser installation (fleet_provider_claude) is touched, and only its
+# explicit CLAUDE_CONFIG_DIR: website setup signed that profile in before any
+# bot starts. A terminal installation is left alone even with an explicit
+# CLAUDE_CONFIG_DIR (bot.conf sets one for every named or non-default
+# account): a named account nobody has signed in to yet needs the wizard and
+# its login step. start-bot.sh calls this with no argument; the argument is
+# the config JSON file, for a test. A zero-byte file counts as no file. lastOnboardingVersion is the version of the
+# claude the fleet launches (measure_claude_version, #1772); one that cannot
+# report a version seeds nothing. A profile already onboarded is not read
+# further and its claude is not run. An unreadable file is not ours to repair.
+# Locked with seed_workspace_trust (same lock file), never fatal.
+seed_account_onboarding() {
+    local json="${1:-}"
+    fleet_provider_claude >/dev/null || return 0
+    if [ -z "$json" ]; then
+        [ -n "${CLAUDE_CONFIG_DIR:-}" ] || return 0
+        json="$CLAUDE_CONFIG_DIR/.claude.json"
+    fi
+    command -v jq >/dev/null 2>&1 || return 0
+    [ -d "$(dirname "$json")" ] || return 0
+    if [ -s "$json" ]; then
+        jq -e '.' "$json" >/dev/null 2>&1 || return 0
+        jq -e '.hasCompletedOnboarding == true' "$json" >/dev/null 2>&1 && return 0
+    fi
+    measure_claude_version || return 0
+    local version="$CLAUDE_VERSION"
+    _do_onboarding_seed() {
+        local tmp
+        tmp=$(safe_mktemp) || return 1
+        if [ -s "$json" ]; then
+            jq -e '.' "$json" >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
+            jq --arg v "$version" '.hasCompletedOnboarding = true
+                | .lastOnboardingVersion = $v' "$json" > "$tmp" && mv "$tmp" "$json"
+        else
+            jq -n --arg v "$version" '{hasCompletedOnboarding: true,
+                lastOnboardingVersion: $v}' > "$tmp" && mv "$tmp" "$json"
+        fi
+    }
+    with_lock "${json}.lock" _do_onboarding_seed || return 0
 }
 
 # seed_claude_auth_and_trust <config_dir> <project_cwd> <claude_bin> <host_creds>

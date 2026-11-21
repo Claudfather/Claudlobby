@@ -681,6 +681,22 @@ test('late rejected status cannot relabel a disconnected newer epoch as access d
  assert.equal(await h.api.readHandle.jget('/api/tasks'),null);h.api.dispose();
 });
 
+test('setup requests wait 15 s, except Preview 95 s (past the listener\'s 90 s) and Launch 45 s', async () => {
+  const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
+    setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
+  h.overrides.set('issue',()=>reply(200,setup(TOKEN)));
+  for (const operation of ['context','preview','launch','receipt']) h.overrides.set('setup/'+operation,()=>reply(200,{version:2}));
+  assert.equal(await h.api.connect(),true);
+  const waits={};
+  for (const [operation,call] of [['context',()=>h.api.setupContext()],['preview',()=>h.api.setupPreview({})],
+      ['launch',()=>h.api.setupLaunch({})],['receipt',()=>h.api.setupReceipt({})]]) {
+    const before=h.timers.length; await call();
+    waits[operation]=h.timers.slice(before).find(t=>[15000,45000,95000].includes(t.ms))?.ms;
+  }
+  assert.deepEqual(waits,{context:15000,preview:95000,launch:45000,receipt:15000});
+  h.api.dispose();
+});
+
 test('setup-only identity never admits reads, supports original setup requests, and upgrades only after an actual read profile', async () => {
   const h=harness(); const setup=token=>({version:1,state:'setup_only',expires_in:900,
     setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:HOST},session_context:{...sessionContext},...(token?{token}:{})});
@@ -756,4 +772,196 @@ test('current account metadata accepts eight exact references and retires a nint
   const before=h.calls.length;await h.api.check();
   assert.notEqual(h.api.snapshot().state,'ready');assert.equal(h.calls.length,before);
   h.api.dispose();
+});
+
+// A live provider sign-in is authorized by the bearer admitted at begin: no renewal path may rotate it.
+const attemptInput = { generation: uuid(9), attempt_id: uuid(12) };
+const signinBody = (state, extra = {}) => ({ ...attemptInput, state, reason: null, ...extra });
+const renewals = h => h.calls.filter(c => c.url.endsWith('/renew')).length;
+const signinCalls = (h, name) => h.calls.filter(c => c.url.endsWith('/setup/signin-' + name));
+function signinHarness(state = 'waiting') {
+  const h = harness();
+  h.overrides.set('setup/signin-begin', () => reply(200, signinBody(state)));
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('waiting')));
+  return h;
+}
+
+test('a live sign-in defers explicit and automatic renewal until a terminal result, then renewal works', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.api.activity({ visible: true, userInput: true });
+  assert.equal((await h.api.setupSignin('begin', attemptInput)).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + TOKEN, 'begin used the issued bearer');
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'explicit renewal is deferred');
+  h.time = 780000; h.api.activity({ visible: true, userInput: true });
+  await flush();
+  assert.equal(renewals(h), 0, 'no automatic renewal while live and the one automatic attempt is not consumed');
+  assert.equal((await h.api.setupSignin('status', attemptInput)).state, 'waiting');
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'a nonterminal status releases nothing');
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('connected')));
+  assert.equal((await h.api.setupSignin('status', attemptInput)).state, 'connected');
+  await h.api.renew(); assert.equal(renewals(h), 1, 'the terminal result releases the hold');
+  h.api.dispose();
+});
+
+test('setup-only sessions hold lifecycle renewal the same way', async () => {
+  const h = signinHarness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  h.overrides.set('issue', () => reply(200, setup(TOKEN))); h.overrides.set('status', () => reply(200, setup()));
+  h.overrides.set('renew', () => reply(200, setup(ROTATED)));
+  assert.equal(await h.api.connect(), true); assert.equal(h.api.snapshot().state, 'setup_only');
+  await h.api.setupSignin('begin', attemptInput);
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0);
+  h.overrides.set('setup/signin-status', () => reply(200, signinBody('cancelled')));
+  await h.api.setupSignin('status', attemptInput);
+  assert.equal(await h.api.renew(), true); assert.equal(renewals(h), 1);
+  h.api.dispose();
+});
+
+test('an unknown begin result keeps the hold; only a completed refusal, disconnect or disposal ends it', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
+  await assert.rejects(h.api.setupSignin('begin', attemptInput), error => error.code !== 'signin_not_started',
+    'a sent begin is never reported as not started');
+  assert.equal(signinCalls(h, 'begin').length, 1);
+  assert.equal(await h.api.renew(), false); assert.equal(renewals(h), 0, 'a lost answer proves no cleanup');
+  assert.equal(signinCalls(h, 'begin').length, 1, 'nothing replays or begins again');
+  await h.api.logout();
+  assert.equal(await h.api.connect(), true); await h.api.renew(); assert.equal(renewals(h), 1, 'disconnect ended the hold');
+  h.api.dispose();
+  const refused = signinHarness(); await refused.api.connect();
+  refused.overrides.set('setup/signin-begin', () => reply(403, { state: 'denied' }));
+  await assert.rejects(refused.api.setupSignin('begin', attemptInput));
+  await refused.api.renew(); assert.equal(renewals(refused), 1, 'a completed refusal admitted no attempt');
+  refused.api.dispose();
+});
+
+test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
+  const h = signinHarness(); await h.api.connect();
+  h.time = 600000; // 300 seconds left: not enough for a 630-second conversation
+  await h.api.setupSignin('begin', attemptInput);
+  const order = h.calls.map(c => new URL(c.url).pathname.split('/').pop()).filter(x => ['renew', 'signin-begin'].includes(x));
+  assert.deepEqual(order, ['renew', 'signin-begin']);
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(h.api.continuity().remainingSeconds, 900, 'the host lifetime was not extended locally');
+  await h.api.renew(); assert.equal(renewals(h), 1, 'no further rotation while live');
+  h.api.dispose();
+  // The session must also cover a ten-minute attempt's 630-second conversation, with a margin.
+  for (const [left, renewed] of [[600, 1], [660, 0]]) { // seconds left of the 900-second session
+    const s = signinHarness(); await s.api.connect(); s.time = (900 - left) * 1000;
+    await s.api.setupSignin('begin', attemptInput);
+    assert.equal(renewals(s), renewed, `${left} seconds left`);
+    s.api.dispose();
+  }
+  const failed = signinHarness(); await failed.api.connect();
+  failed.overrides.set('renew', () => { throw new Error('lost renewal'); });
+  failed.time = 600000;
+  await assert.rejects(failed.api.setupSignin('begin', attemptInput),
+    error => /not started/.test(error.message) && error.code === 'signin_not_started');
+  assert.equal(signinCalls(failed, 'begin').length, 0, 'no begin without a confirmed renewal');
+  failed.api.dispose();
+});
+
+test('a redundant renewal neither erases nor replaces the admitted one; begin still waits for it', async () => {
+  const h = signinHarness(); await h.api.connect();
+  const held = deferred(); h.overrides.set('renew', () => held.promise);
+  const first = h.api.renew(); await flush();
+  assert.equal(await h.api.renew(), false, 'a redundant renewal is refused without touching the tracked one');
+  const beginning = h.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(h, 'begin').length, 0, 'begin does not run on the old token');
+  held.resolve(reply(200, ready(ROTATED))); await first;
+  assert.equal((await beginning).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(renewals(h), 1, 'one renewal only'); h.api.dispose();
+  const s = signinHarness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  s.overrides.set('issue', () => reply(200, setup(TOKEN))); s.overrides.set('status', () => reply(200, setup()));
+  assert.equal(await s.api.connect(), true);
+  const gate = deferred(); s.overrides.set('renew', () => gate.promise);
+  const r1 = s.api.renew(); await flush(); assert.equal(await s.api.renew(), false);
+  const b = s.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(s, 'begin').length, 0, 'setup-only begin waits for the admitted renewal');
+  gate.resolve(reply(200, setup(ROTATED))); await r1; await b;
+  assert.equal(signinCalls(s, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  s.api.dispose();
+});
+
+test('sign-in admission waits for a renewal already in flight and then uses the rotated bearer', async () => {
+  const h = signinHarness(); await h.api.connect();
+  const held = deferred(); h.overrides.set('renew', () => held.promise);
+  const renewing = h.api.renew(); await flush();
+  const beginning = h.api.setupSignin('begin', attemptInput); await flush();
+  assert.equal(signinCalls(h, 'begin').length, 0, 'begin waits behind the renewal');
+  assert.equal(await h.api.renew(), false, 'a second renewal cannot slip in while begin is admitting');
+  held.resolve(reply(200, ready(ROTATED))); await renewing;
+  assert.equal((await beginning).state, 'waiting');
+  assert.equal(signinCalls(h, 'begin')[0].init.headers.Authorization, 'Bearer ' + ROTATED);
+  assert.equal(renewals(h), 1); h.api.dispose();
+});
+
+// A synthetic first-team plan of the measured real shape (about 63 KB): 76 changes, 70 units without their
+// working data, and the bot and fleet lists. The Context answer that repeats it carries it under `preview`.
+const SETUP_LIMIT = 131072;
+const setupRequest = { generation: uuid(9), request_id: uuid(10), config_fingerprint: 'a'.repeat(64), source_revision: 'b'.repeat(40) };
+function realisticPlan() {
+  const sha = 'c'.repeat(64);
+  return { ...setupRequest, version: 2, expires_at: 1800000600, fleets: ['shop'],
+    changes: Array.from({ length: 76 }, (_, i) => ({ target: `/home/example/fleets/shop/units/unit-${i}/config.toml`,
+      before: { kind: 'file', mode: '0644', sha256: sha },
+      after: { kind: 'directory', mode: '0755', files: Object.fromEntries(Array.from({ length: 4 }, (_, f) => [`file-${f}.toml`, sha])) } })),
+    effects: { units: Array.from({ length: 70 }, (_, i) => ({ bot: `shop/bot-${i}`, enroll: false, fleet: 'shop', phase: 'start',
+        platform: 'linux', scope: 'user', service: `claudlobby-bot-${i}.service`, sha256: sha, source: `/home/example/fleets/shop/units/unit-${i}` })),
+      restart_bots: ['shop/a', 'shop/b', 'shop/c'], reload_supervision: true, fleet_sources: { shop: '/home/example/fleets/shop' },
+      bot_paths: { a: '/home/example/a', b: '/home/example/b' }, coverage: { bots: 70, units: 70 },
+      fleet_manifests: { shop: sha }, restart_reason: 'units changed' },
+    dispatch: 'prepared', phase: 'quiesce' };
+}
+const readyContext = plan => ({ version: 2, template: 'revenue-web-app', fleet: 'shop', repository: 'example-org/shop',
+  source_revision: setupRequest.source_revision, generation: setupRequest.generation, expires_at: 1800003600, request: { ...setupRequest },
+  launch_reserved: false, provider_signin: true, signin_attempt: { attempt_id: uuid(11), generation: setupRequest.generation, state: 'connected', reason: null }, continuation: "'/example/cli' host update continue",
+  preview_state: 'ready', preview: { ...plan, goal: 'Improve tests' } });
+const bytesOf = value => new TextEncoder().encode(JSON.stringify(value)).length;
+// The same answer padded (inside one string field) to exactly `size` bytes.
+const padded = (value, size) => ({ ...value, pad: 'x'.repeat(size - bytesOf({ ...value, pad: '' })) });
+async function setupOnlyHarness() {
+  const h = harness(); const setup = token => ({ version: 1, state: 'setup_only', expires_in: 900,
+    setup_profile: { version: 2, profile: 'first-team-setup-v2', host_uid: HOST }, session_context: { ...sessionContext }, ...(token ? { token } : {}) });
+  h.overrides.set('issue', () => reply(200, setup(TOKEN))); h.overrides.set('status', () => reply(200, setup()));
+  assert.equal(await h.api.connect(), true); return h;
+}
+
+test('a realistic first-team Preview answer and the Context answer that repeats it pass the setup ceiling; one byte over is refused', async () => {
+  const plan = realisticPlan(), context = readyContext(plan);
+  assert.ok(bytesOf(plan) > 55000 && bytesOf(plan) < 75000, String(bytesOf(plan)));
+  assert.ok(bytesOf(context) > 55000 && bytesOf(context) < 75000, String(bytesOf(context)));
+  for (const [operation, call, answer] of [['preview', h => h.api.setupPreview({ generation: setupRequest.generation, goal: 'Improve tests' }), plan],
+      ['context', h => h.api.setupContext(), context]]) {
+    const h = await setupOnlyHarness();
+    h.overrides.set('setup/' + operation, () => reply(200, answer));
+    assert.deepEqual(await call(h), answer, operation + ' at the intended size');
+    h.overrides.set('setup/' + operation, () => reply(200, padded(answer, SETUP_LIMIT)));
+    assert.equal(bytesOf(await call(h)), SETUP_LIMIT, operation + ' exactly at the limit');
+    h.overrides.set('setup/' + operation, () => reply(200, padded(answer, SETUP_LIMIT + 1)));
+    await assert.rejects(call(h), operation + ' one byte over the limit');
+    h.api.dispose();
+  }
+});
+
+test('the setup panel reaches the ready state from a realistic Context answer; one over the limit says it could not get an answer and offers Check preview', async () => {
+  const { createGuidedSetup } = await import(new URL('../claudlobby/plane/ui/guided-setup.js', import.meta.url));
+  const none = { ...readyContext(realisticPlan()), request: null, preview_state: 'none', preview: undefined };
+  const panelFor = async (previewAnswer, laterContext) => {
+    const h = await setupOnlyHarness(), saved = new Map(); let reads = 0;
+    h.overrides.set('setup/context', () => reply(200, reads++ === 0 ? none : laterContext));
+    h.overrides.set('setup/preview', () => reply(200, previewAnswer));
+    const setup = createGuidedSetup({ client: h.api, storage: { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) },
+      storageKey: 'size', now: () => 1800000000 });
+    await setup.run('context'); setup.setGoal('Improve tests'); await setup.run('preview'); await flush(); return { h, setup };
+  };
+  const plan = realisticPlan(), ready = await panelFor(plan, readyContext(plan));
+  assert.equal(ready.setup.snapshot().plan.changes.length, 76); assert.deepEqual(ready.setup.snapshot().pending, setupRequest);
+  ready.setup.dispose(); ready.h.api.dispose();
+  const over = await panelFor(padded(plan, SETUP_LIMIT + 1), padded(readyContext(plan), SETUP_LIMIT + 1));
+  assert.equal(over.setup.snapshot().plan, null);
+  assert.equal(over.setup.snapshot().note, 'Could not get an answer from your computer about the preview. Choose Check preview to look again.');
+  over.setup.dispose(); over.h.api.dispose();
 });

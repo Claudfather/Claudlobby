@@ -29,13 +29,17 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module", params=["", "3"], ids=["prompt-start", "slow-start"])
-def run(request):
+def run(request, tmp_path_factory):
     """Every test runs on both arms. The slow arm starts each manager's stand-in
     3 s late (its INPUT_BOX_START_DELAY seam), so a pulse sent at once would reach
     its pane before the box (#2136)."""
+    # Started in a private directory, never the checkout: the instrument removes
+    # directories, and one that took its start directory for its own root
+    # removed a checkout (2026-11-21, tests/test_harness_scratch_dir.py).
     r = subprocess.run(
         ["bash", str(HARNESS)], capture_output=True, text=True, timeout=300,
         env={**os.environ, "INPUT_BOX_START_DELAY": request.param},
+        cwd=tmp_path_factory.mktemp("debounce-recipient"),
     )
     r.delay = request.param
     return r

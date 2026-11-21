@@ -364,7 +364,7 @@ test('only core admitted read handles; distinct hosts; no action or mutation cap
   const a = await source('a','a'), b = await source('b','a');
   assert.throws(() => createTwoSourceReadTransport({ sources: [a,b] }), /independently/);
   const { api, a: x } = await pair();
-  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','presentationChanged','retryOverview','roomLabel','routeRoom']);
   for (const path of ['/api/owner/actions/send','/api/tasks?fleet=unregistered','/api/channel?limit=999','/api/tasks?fleet=a%20%2F%20team&fleet=b','https://wrong/api/tasks','/api/inventory']) assert.notEqual((await api.jget(path)).state, 'ok');
   assert.ok(x.calls.every(c => !c.opts.method || c.opts.method === 'GET'));
 });
@@ -1040,7 +1040,7 @@ test('workspace transport accepts one to eight distinct core-issued handles; old
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
   const api=createWorkspaceReadTransport({sources:[a]});
-  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','presentationChanged','retryOverview','roomLabel','routeRoom']);
   assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
   assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
   assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
@@ -1437,4 +1437,34 @@ test('generic workspace admits eight independent sources, refuses nine, and scop
     assert.ok(result.data.threads.every(t=>!t.work_item_id.startsWith('h7::')));
     assert.equal(api.routeRoom('h0 / team').key,'h0');
   } finally { api.dispose();rows.forEach(row=>row.reader.dispose()); }
+});
+
+test('a source the entry does not show is left out of aggregate facts, coverage and blocker text; admission is unchanged',async()=>{
+  const rows=await Promise.all(['a','b','c'].map(n=>source(n,n)));let only=null;
+  assert.throws(()=>createWorkspaceReadTransport({sources:[{...rows[0],shown:true}]}),/core read handle/);
+  const api=createWorkspaceReadTransport({sources:rows.map(row=>({...row,shown:()=>only===null||only===row.key}))});
+  const stream=api.createEventSource('/api/stream'),events=[];stream.onmessage=e=>events.push(JSON.parse(e.data));
+  try {
+    assert.deepEqual((await api.jget('/api/overview')).data.coverage,{total:3,reachable:3,partial:false},'every source is shown by default');
+    only='a';
+    for(const path of ['/api/overview','/api/fleets','/api/tasks','/api/channel?limit=120']) {
+      const value=await api.jget(path);
+      assert.deepEqual(value.data.sources.map(s=>s.key),['a'],path);
+      assert.deepEqual(value.data.windows.map(w=>w.source),['a'],path);
+      assert.deepEqual(value.data.coverage,{total:1,reachable:1,partial:false},path);
+    }
+    assert.deepEqual((await api.jget('/api/fleets')).data.fleets.map(f=>f.alias),['a / team']);
+    assert.equal(api.routeRoom('b / team').key,'b','routing and admission of a hidden source are unchanged');
+    for(const row of rows){row.setStatus('sign_in_required');await row.reader.start();}
+    const blocked=await api.jget('/api/tasks');
+    assert.equal(blocked.state,'unavailable');assert.match(blocked.remediation,/^a: /);
+    assert.doesNotMatch(blocked.remediation,/(?:^| )[bc]: /,'blocker text names only the shown computer');
+    assert.deepEqual((await api.jget('/api/overview')).data.sources.map(s=>s.key),['a']);
+    const pushed=events.length;api.presentationChanged();
+    assert.equal(events.length,pushed+1);assert.equal(events.at(-1).coverage_changed,true);
+    assert.deepEqual(events.at(-1).overview.data.sources.map(s=>s.key),['a'],'the pushed summary uses the same presentation');
+    only='nobody';
+    assert.equal((await api.jget('/api/tasks')).data.coverage.total,3,'with nothing shown every source is presented');
+  } finally { api.dispose();rows.forEach(row=>row.reader.dispose()); }
+  const after=events.length;api.presentationChanged();assert.equal(events.length,after,'a disposed transport pushes nothing');
 });

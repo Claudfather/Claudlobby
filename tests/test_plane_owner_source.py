@@ -12,6 +12,7 @@ from claudlobby.plane.view import _envelope
 from tests.plane_setup import initialize_plane
 from tests.plane_fixtures import ro
 from tests.test_plane_two_fleets import _seed
+from tests.fixtures.current_runtime import current_runtime  # noqa: F401
 
 TABLES = HOST_TABLES
 
@@ -596,3 +597,124 @@ def test_sidecar_stat_permission_failure_is_not_transient_disappearance(fresh_ow
         assert reached
     finally:
         writer.close()
+
+
+def test_a_fresh_computer_is_not_started(tmp_path, monkeypatch):
+    from claudlobby.plane.owner_source import start_state, started_without_team
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    assert start_state(case.root, case.installation) == "fresh"
+    assert not started_without_team(case.root, case.installation)
+
+
+def test_a_computer_started_with_no_team_is_started_and_not_fresh(tmp_path, monkeypatch):
+    from claudlobby.plane.owner_source import fresh_owner_setup, start_state, started_without_team
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    def files():
+        # A SQLite reader may leave its shared-memory sidecars; nothing else may change.
+        return sorted((path, path.stat().st_mtime_ns) for path in case.root.rglob("*")
+                      if path.is_file() and not path.name.endswith(("-shm", "-wal")))
+
+    before = files()
+    assert started_without_team(case.root, case.installation)
+    assert start_state(case.root, case.installation) == "started"
+    with pytest.raises(SourceUnavailable):
+        fresh_owner_setup(case.root)
+    # Reads change nothing.
+    assert files() == before
+    # A team's runtime folder holding anything is not a computer with no team.
+    bot = case.root / "runtime/bots/example"
+    bot.mkdir(parents=True)
+    assert not started_without_team(case.root, case.installation)
+    assert start_state(case.root, case.installation) == "other"
+    bot.rmdir()
+    (case.root / "runtime/bots").rmdir()
+    overlay = case.root / "local/example/runtime"
+    overlay.mkdir(parents=True)
+    (case.root / "local/example/fleet.yaml").write_text("fleet: example\n")
+    (overlay / "bots").mkdir()
+    assert not started_without_team(case.root, case.installation)
+
+
+def test_a_computer_with_a_team_is_other(current_runtime):
+    from claudlobby.plane.owner_source import start_state, started_without_team
+
+    root, installation, _, host = current_runtime
+    assert host.snapshot["fleets"]
+    assert not started_without_team(root, installation)
+    assert start_state(root, installation) == "other"
+
+
+def test_an_unfinished_start_is_starting(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import UpdateStore
+    from claudlobby.plane.owner_source import start_state
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    # Prepared and not yet dispatched, as a start leaves it before its job runs.
+    with UpdateStore(case.installation) as store:
+        updater._prepare_update_locked(store, target=case.target, initialization=case.scope, prepare_only=True)
+    assert start_state(case.root, case.installation) == "starting"
+    # Dispatched, its job not yet run.
+    updater.apply_or_continue(case.installation, target=case.target, initialization=case.scope)
+    assert start_state(case.root, case.installation) == "starting"
+    case.run_job()
+    assert start_state(case.root, case.installation) == "started"
+
+
+def test_a_start_done_with_health_errors_is_starting_not_started(tmp_path, monkeypatch):
+    from claudlobby.git_update import UpdateStore
+    from claudlobby.plane.owner_source import start_state
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        assert record["phase"] == "done" and not record["health_errors"]
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    assert start_state(case.root, case.installation) == "starting"
+
+
+def test_a_started_computer_with_an_ordinary_update_pending_is_still_started(tmp_path, monkeypatch):
+    from claudlobby import git_update as updater
+    from claudlobby.git_update import UpdateStore, read_update
+    from claudlobby.plane.owner_source import start_state
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    later = case.add_target()
+    dispatched = updater.apply_or_continue(case.installation, target=later)
+    assert dispatched["job"] == {"dispatch": "started"}
+    record = read_update(case.installation)
+    assert record["phase"] != "done" and "initialization_scope" not in record
+    # In flight.
+    assert start_state(case.root, case.installation) == "started"
+    case.run_job()
+    with UpdateStore(case.installation) as store:
+        record = store.load()
+        assert record["phase"] == "done" and not record["health_errors"]
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    # Done with health errors.
+    assert start_state(case.root, case.installation) == "started"
+
+
+def test_a_computer_with_a_team_and_an_ordinary_update_pending_is_other(current_runtime):
+    from claudlobby.git_update import UpdateStore
+    from claudlobby.plane.owner_source import start_state
+
+    root, installation, _, host = current_runtime
+    with UpdateStore(installation) as store:
+        record = store.load()
+        assert record is not None and "initialization_scope" not in record
+        record["health_errors"] = {"claudlobby-plane-daemon.service": "unit failed to start"}
+        store.save(record)
+    assert start_state(root, installation) == "other"

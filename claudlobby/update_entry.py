@@ -182,6 +182,19 @@ def _render_paths(store, record, package):
     return paths
 
 
+def _render_candidate(store, record, package):
+    """Render the candidate for this record with the computer's own root and package.
+
+    The list of teams may be empty: a start record, and any later update of a
+    computer whose committed configuration lists no team.
+    """
+    from .config_staging import render_git_configuration
+    paths = _render_paths(store, record, package)
+    rendered = render_git_configuration(paths, revision=record["target"], root=store.root, package=package)
+    record["candidate_render"] = rendered.fingerprint
+    store.save(record)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private updater application stage")
     parser.add_argument("installation")
@@ -258,12 +271,7 @@ def main(argv=None):
         from .supervision_inventory import Adapter
         from . import update_operation
         if args.stage == "render":
-            from .config_staging import render_git_configuration
-            package = get_resources(installation=installation, checkout=source)
-            paths = _render_paths(store, record, package)
-            rendered = render_git_configuration(paths, revision=record["target"])
-            record["candidate_render"] = rendered.fingerprint
-            store.save(record)
+            _render_candidate(store, record, get_resources(installation=installation, checkout=source))
         elif args.stage == "prepare":
             from .config_plan import read_rendered
             rendered = read_rendered(store.root, record["candidate_render"])

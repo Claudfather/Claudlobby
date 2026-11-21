@@ -247,3 +247,31 @@ def test_provider_signin_real_http_and_shutdown_drain(synthetic_signin,profile,f
     assert not worker.is_alive()
     if finish=='shutdown':assert env.read_text()=='export ROUTE=private\n'
     else:assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=')==1
+
+
+def test_preview_gets_time_for_its_stage_processes_and_launch_keeps_its_own(setup_http):
+    app,*_=setup_http
+    seconds=lambda operation:app.connected_setup.response_seconds({"setup_operation":operation})
+    assert seconds("preview")==90 and seconds("launch")==45
+    assert {seconds(op) for op in ("context","receipt","signin-begin","signin-status","signin-code","signin-cancel")}=={15}
+
+
+def test_context_answers_during_preparation_and_still_refuses_a_foreign_record(setup_http,setup_authority):
+    from uuid import uuid4
+    app,access,_,_,_,grant=setup_http
+    engine=app.connected_setup.engine
+    engine.store.allow(grant)
+    scope={"directory":grant.install_directory,"manifests":[str(access.root/"local"/grant.fleet/"fleet.yaml")]}
+    record={"target":grant.source_revision,"config_fingerprint":None,"finalized":False,"phase":"prepare",
+            "request_id":str(uuid4()),"initialization_scope":scope}
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http);token=s['token']
+        from claudlobby.plane.owner_access import VerifiedReader
+        engine.store.begin_preview(VerifiedReader(OWNER,token),grant,"Improve checkout tests")
+        setup_authority[-1].retained["record"]=record
+        with engine.store.preview_lease():
+            context=post(client,'context',token)
+            assert context.status_code==200,context.text
+            assert context.json()['preview_state']=='preparing' and context.json()['request'] is None
+            setup_authority[-1].retained["record"]={**record,"target":"c"*40}
+            assert post(client,'context',token).status_code==403

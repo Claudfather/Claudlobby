@@ -126,24 +126,31 @@ def _bot(builder, context, bot, delay, cascade, log) -> None:
         str(path) for path in (directory, access) if path is not None]
 
 
-def render_git_configuration(fleet_paths: list[Paths], *, revision: str,
-                             log=lambda message: None, validation_warning=None) -> RenderedConfiguration:
-    """Render candidate resources once with final installation paths, without a release seal."""
-    if not fleet_paths:
+def render_git_configuration(fleet_paths: list[Paths], *, revision: str, root: Path | None = None,
+                             package=None, log=lambda message: None,
+                             validation_warning=None) -> RenderedConfiguration:
+    """Render candidate resources once with final installation paths, without a release seal.
+
+    `root` and `package` name the computer itself. The list of teams may be
+    empty, for a computer started with no team; then they are required and the
+    plan holds the computer's own host resources only.
+    """
+    if fleet_paths:
+        root = fleet_paths[0].root if root is None else root
+        package = fleet_paths[0].package if package is None else package
+    elif root is None or package is None:
         raise PlanError("select the declared host fleets before rendering configuration")
-    package = fleet_paths[0].package
     installation = package.installation
-    if (installation is None or installation.data_root != fleet_paths[0].root
+    if (installation is None or installation.data_root != root
             or package.source_revision != revision or package.artifact_id):
         raise PlanError("Git rendering requires the exact candidate installation/revision binding")
     builder = ConfigPlanBuilder(installation.data_root, effects={})
-    return _render_configuration(fleet_paths, builder, log=log,
+    return _render_configuration(fleet_paths, builder, root=root, package=package, log=log,
                                  validation_warning=validation_warning).freeze(revision)
 
 
-def _render_configuration(fleet_paths, builder, *, log, validation_warning):
+def _render_configuration(fleet_paths, builder, *, root, package, log, validation_warning):
     """Render the managed Git candidate using final runtime paths."""
-    root, package = fleet_paths[0].root, fleet_paths[0].package
     if any(paths.root != root or paths.package != package or paths.seed for paths in fleet_paths):
         raise PlanError("configuration fleets must share one data root and candidate package")
     manifests = {paths.fleet_yaml.resolve() for paths in fleet_paths}
@@ -246,7 +253,8 @@ def _render_configuration(fleet_paths, builder, *, log, validation_warning):
             builder.file(paths.runtime / "composed.json",
                          (json.dumps(provenance, sort_keys=True, indent=2) + "\n").encode())
         host = scratch / "host"
-        paths = contexts[0].paths
+        # Host resources take no team; a computer with no team renders them alone.
+        paths = contexts[0].paths if contexts else Paths(root, package=package)
         timers = compose.compose_host_timers(paths, output_dir=host)
         paths.assert_writable(root / "runtime/_host/timers")
         files = _snapshot(timers)

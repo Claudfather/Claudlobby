@@ -14,7 +14,8 @@
 #
 # Usage: claude-version.sh [<binary>]
 #   With no argument: the binary the fleet launches (fleet_claude_path: CLAUDE_BIN,
-#   else the staged fleet link, else `claude` on the launch PATH). CLAUDLOBBY_ROOT,
+#   else a browser installation's pinned provider, else the staged fleet link,
+#   else `claude` on the launch PATH). CLAUDLOBBY_ROOT, CLAUDLOBBY_INSTALLATION,
 #   HOME and CLAUDE_BIN are read from the environment exactly as start-bot.sh
 #   reads them.
 # Exit: 0 measured · 3 could not measure (the reason on stderr) · 2 usage.

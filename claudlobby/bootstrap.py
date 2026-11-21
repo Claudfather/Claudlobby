@@ -31,6 +31,28 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Where a Linux system Python is trusted from, and the owner of it and its folder.
+_SYSTEM_PYTHON_DIRECTORY, _SYSTEM_PYTHON_OWNER = Path("/usr/bin"), 0
+
+
+def trusted_system_python(interpreter: Path) -> bool:
+    """Linux: the resolved running interpreter, a regular executable in a real
+    /usr/bin; it and /usr/bin are owned by root and writable by nobody else.
+
+    Its bytes are not compared: Ubuntu security updates replace this file, and
+    whoever can replace a root-owned file there already controls the computer.
+    """
+    try:
+        folder, info = _SYSTEM_PYTHON_DIRECTORY.lstat(), interpreter.stat()
+    except OSError:
+        return False
+    return (interpreter == Path(sys.executable).resolve() and interpreter.parent == _SYSTEM_PYTHON_DIRECTORY
+            and stat.S_ISDIR(folder.st_mode) and folder.st_uid == _SYSTEM_PYTHON_OWNER
+            and not folder.st_mode & 0o022 and stat.S_ISREG(info.st_mode)
+            and info.st_uid == _SYSTEM_PYTHON_OWNER and not info.st_mode & 0o022
+            and os.access(interpreter, os.X_OK))
+
+
 _BROWSER_REMOTE = "https://github.com/Claudfather/Claudlobby.git"
 _PREPARATION_FIELDS = {"schema", "purpose", "installation", "data_root", "remote", "ref",
                        "interpreter", "interpreter_sha256", "revision", "lock_sha256",
@@ -237,7 +259,18 @@ def prepare_git_installation(directory: Path, data_root: Path, *, remote: str, r
             raise BundleError("Git preparation receipt is redirected")
         if receipt.exists():
             state = _browser_receipt(receipt) if isolated else json.loads(receipt.read_bytes())
-            if not isinstance(state, dict) or any(state.get(key) != value for key, value in binding.items()):
+            # A Linux browser preparation resumes across a security update of the
+            # system Python: changed bytes are admitted only for the trusted
+            # /usr/bin file, and the receipt keeps the digest it recorded. A
+            # managed Mac Python and every other preparation stay byte-pinned.
+            relaxed = isolated and profile is None
+            pinned = {key: value for key, value in binding.items()
+                      if key != 'interpreter_sha256' or not relaxed}
+            if (not isinstance(state, dict) or any(state.get(key) != value for key, value in pinned.items())
+                    or not isinstance(state.get('interpreter_sha256'), str)
+                    or re.fullmatch(r'[0-9a-f]{64}', state['interpreter_sha256']) is None
+                    or (relaxed and state['interpreter_sha256'] != binding['interpreter_sha256']
+                        and not trusted_system_python(interpreter))):
                 raise BundleError("existing preparation belongs to different explicit inputs")
         else:
             state = {**binding, 'revision': None, 'lock_sha256': None, 'environment_owned': False,

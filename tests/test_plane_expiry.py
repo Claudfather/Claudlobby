@@ -486,3 +486,23 @@ def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):
     finally:
         conn.close()
     assert n == 1
+
+
+def test_a_computer_with_no_team_has_nothing_to_sweep(tmp_path, monkeypatch):
+    """The default-on expiry timer exits zero on a computer started with no team."""
+    from claudlobby.commands import plane_expire
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    case.admit()
+    with closing(connect(db_path(case.root))) as conn:
+        before = conn.execute("SELECT count(*) FROM events").fetchone()[0]
+    for dry_run in (True, False):
+        result = plane_expire.dispatch(SimpleNamespace(
+            root=case.root, fleet=None, seed=False, after_days=None, dry_run=dry_run))
+        assert result.data["fleets"] == [] and result.data["expired"] == 0
+        assert result.data["source_revision"] == case.target
+        assert result.lines == ("attention: no fleet — nothing to sweep",)
+    with closing(connect(db_path(case.root))) as conn:
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == before

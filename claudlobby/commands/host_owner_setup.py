@@ -25,6 +25,15 @@ from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import AccessDenied, AccessUnavailable
 from ..plane.owner_setup import OwnerSetup
 
+#: The fixed workspace issuer and operational origin of both typed guides.
+_WORKSPACE_ORIGINS = ("https://claudfather.ai", "https://plane.claudfather.ai")
+#: The native Tailscale the typed Linux guides admit.
+LINUX_TAILSCALE = Path("/usr/bin/tailscale")
+#: How long a started computer's lasting service has to answer; it is already running.
+READY_SECONDS = 15
+#: Core's existing line for an owner listener that did not answer.
+_NOT_READY = "local owner server did not become ready; inspect serving configuration and private socket"
+
 
 def _say(terminal, text):
     if terminal is not None:
@@ -198,9 +207,9 @@ def _commit_owner_override(plan):
         temporary.unlink(missing_ok=True)
 
 
-def _configuration(args, paths, terminal, cli):
+def _serving_configuration(args, paths, terminal, cli):
+    """The owner listener's exact settings, validated by the service's own builder."""
     from ..plane.owner_service import service_command
-    from .setup import _template_config, _local_project, _account_directory
     config = {
         "origin": _input(terminal, args.origin, "This computer's exact private HTTPS origin"),
         "tailscale": _input(terminal, args.tailscale, "Absolute native Tailscale executable"),
@@ -215,6 +224,12 @@ def _configuration(args, paths, terminal, cli):
         service_command(paths.root, cli, config)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "local serving configuration is invalid; review exact HTTPS origins and absolute native paths") from exc
+    return config
+
+
+def _configuration(args, paths, terminal, cli):
+    from .setup import _template_config, _local_project, _account_directory
+    config = _serving_configuration(args, paths, terminal, cli)
     fleet = _input(terminal, args.target_fleet, "First team name", "web-app")
     template = getattr(args, "template", "revenue-web-app")
     project = getattr(args, "project_directory", None)
@@ -342,6 +357,39 @@ def _serving(command, path, origin, *, consent=None):
                         continue
 
 
+@contextmanager
+def _ssh_waiting():
+    """No listener: typed operations arrive on their own admitted SSH channels."""
+    class Waiting:
+        @staticmethod
+        def wait(timeout):
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired("owner-ssh-guide", timeout)
+    yield Waiting()
+
+
+def _ssh_origin(source):
+    """The server's own logical authority key, bound to the captured destination."""
+    import asyncio
+    from ..plane.owner_ssh import MAC_TAILSCALE, SSHSessionVerifier
+    from ..plane.owner_ingress import NativePrincipalResolver
+    from .owner_stdio import StdioRefused
+    try:
+        verifier = SSHSessionVerifier(source, NativePrincipalResolver(tailscale_binary=MAC_TAILSCALE))
+        async def inspect():
+            return await asyncio.wait_for(verifier.origin(), 15)
+        return asyncio.run(inspect())
+    except (AccessDenied, AccessUnavailable, ValueError, OSError, asyncio.TimeoutError):
+        raise StdioRefused("ssh_identity_prerequisite_missing") from None
+
+
+def _operation_retained(root, retained, record):
+    from ..plane.owner_setup import _continuation
+    return CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
+        data={"request_id":record["request_id"]},
+        hint=_continuation(root,retained.grant) if retained and retained.grant else "host update status")
+
+
 def _original_launch(state):
     raise CommandFailure("conflict", "a first-team launch is already retained; inspect its original receipt before continuing",
                          data={"launch_id": state.launch_id, "launch_plan": state.launch_plan,
@@ -383,7 +431,10 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         lines=("Original setup finished; no Launch or message was sent again.",))
 
 
-def run(args, paths, store, terminal, *, consent=None, profile=None):
+def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
+    """``ssh`` is the captured server SSH source of an explicit SSH-controlled
+    guide: no listener, no owner service, and typed operations on sibling
+    channels. It is never inferred from a frame or from the platform alone."""
     from . import host_owner as console
     from ..active_config import read_current_config
     from ..git_update import read_update
@@ -400,12 +451,16 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     installation = package.installation
     record = read_update(installation)
     selected = os.path.lexists(paths.root / "state/config.json")
-    if record is not None:
+    # The one record a typed guide over the browser carrier may start again over: this approval's own
+    # prepared Preview with nothing launched (its page closed before Launch). It goes on as a returning
+    # run does. The SSH guide never needed a run alive between Preview and Launch.
+    reopened = (record is not None and consent is not None and ssh is None
+                and getattr(args, "finish_setup", None) is None
+                and OwnerSetup(store).kept_preview(retained, record))
+    if record is not None and not reopened:
         if (not retained or retained.grant is None or record.get("request_id") != retained.launch_id
                 or record.get("config_fingerprint") != retained.launch_plan or record.get("phase") != "done"):
-            raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
-                data={"request_id":record["request_id"]},
-                hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
+            raise _operation_retained(paths.root, retained, record)
         snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
         if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
@@ -419,18 +474,31 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
     typed = {"consent": consent} if consent is not None else {}
+    if ssh is not None and consent is None:
+        raise CommandFailure("invalid_argument", "SSH-controlled setup is the typed guide only")
+    carrier = {}
+    if ssh is not None:
+        from ..plane.owner_ssh import TRANSPORT
+        carrier = {"transport": TRANSPORT}
     if consent is not None:
         if profile is None:
             raise CommandFailure("invalid_argument", "typed guide requires its fixed local profile")
-        profile.prepare_directories(consent, paths)
+        if ssh is not None and profile.runtime is None:
+            raise CommandFailure("invalid_argument", "SSH-controlled setup requires the managed Mac runtime profile")
+        profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))
         profile.prepare_provider(consent, paths)
-        args.origin = profile.origin()
-        args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
-        args.workspace_issuer, args.workspace_origin = "https://claudfather.ai", "https://plane.claudfather.ai"
+        if ssh is not None:
+            from ..plane.owner_ssh import MAC_TAILSCALE
+            args.origin = _ssh_origin(ssh)  # logical key; never a claim of reachable HTTPS
+            args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
+        else:
+            args.origin = profile.origin()
+            args.tailscale, args.tailscale_socket = LINUX_TAILSCALE, ""
+        args.workspace_issuer, args.workspace_origin = _WORKSPACE_ORIGINS
         args.socket = paths.root / "state/owner/owner.sock"
         args.template, args.target_fleet, args.repository = "local-project", "web-app", None
         args.project_directory, args.account_directory = str(profile.project), str(profile.account)
-        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, True
+        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, ssh is None
     config, approval = _configuration(args, paths, terminal, cli)
     if load_host_jobs()["plane-owner"].get("enroll", True) and approval.managed_owner is None:
         raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
@@ -438,7 +506,12 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     if not os.path.lexists(store.path):
         console._initialize_first_owner(paths, terminal, **typed)
     owner = store.current_grant()
-    if owner is None or not owner.active:
+    if (owner is None or not owner.active) and ssh is not None:
+        # The browser begins pairing through its own typed SSH operation; the
+        # same local confirmation as every other transport follows here.
+        consent.state("pairing_ready", origin=config["origin"], **carrier)
+        console._confirm_owner(paths, store, terminal, **typed)
+    elif owner is None or not owner.active:
         direct = {**config, "workspace_issuer": None, "workspace_origin": None}
         _say(terminal, "Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
         command = service_command(paths.root, cli, direct)
@@ -452,20 +525,24 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     console._describe(terminal, owner)
     if not selected and store.connected().preparation_state() != "ready":
         console._initialize_connected(store, terminal, prepare_workspace=True, **typed)
-    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed) as child:
+    with (_ssh_waiting() if ssh is not None else
+          _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)) as child:
         if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
                 _say(terminal, "In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
                 if consent is not None:
-                    consent.state("workspace_ready", origin=config["origin"])
+                    consent.state("workspace_ready", origin=config["origin"], **carrier)
                 console._confirm_workspace(store, terminal, owner, recover=True, **typed)
                 workspace_state, binding = store.workspace().status()
             if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
                     or binding.operational_origin != config["workspace_origin"]):
                 raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
             _say(terminal, "Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
-            retained = OwnerSetup(store).retained_state()
+            entry, retained = retained, OwnerSetup(store).retained_state()
+            if reopened and retained.state != "allowed":
+                # The kept Preview's approval lapsed after the entry check: never ask to allow again.
+                raise _operation_retained(paths.root, retained if retained.grant else entry, record)
             # A browser may retain this invocation's approved Launch as soon as
             # serving is ready. Entry checks already refused pre-existing work;
             # compare the same grant below, then use the normal handoff loop.
@@ -485,7 +562,7 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         setup = OwnerSetup(store)
         approved = setup.local() if not selected else None
         if consent is not None:
-            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation)
+            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation, **carrier)
         try:
             while True:
                 if consent is not None:
@@ -503,11 +580,13 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
                         # the child and this guide must exit to release reader
                         # leases; never let imported owner code survive cutover.
                         status = shlex.join([str(cli), "--root", str(paths.root), "host", "update", "status", "--json"])
-                        reconnect = ("The approved managed connection will return at the same address; keep the original browser view open."
+                        reconnect = ("No owner service is enrolled. After DONE, open a fresh authenticated SSH connection to this computer; do not launch again."
+                                     if ssh is not None else
+                                     "The approved managed connection will return at the same address; keep the original browser view open."
                                      if approved.managed_owner else "After DONE, reconnect without another setup: " + shlex.join(service_command(paths.root, cli, config)))
                         return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
                             "config_fingerprint": retained.launch_plan, "generation": approved.generation,
-                            "source_revision": approved.source_revision}, lines=(
+                            "source_revision": approved.source_revision, **carrier}, lines=(
                                 "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",
@@ -525,3 +604,149 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
                 raise StdioRefused("interrupted_unknown") from None
             return CommandOutput({"state": "serving_stopped"}, lines=("Local foreground serving stopped; shutdown did not change approvals or stop the fleet.",))
         raise CommandFailure("unavailable", "local foreground owner stopped unexpectedly; no server or launch was retried")
+
+
+def _computer_handoff(outcome, ids):
+    """``computer_starting`` for a start under way; ``start_failed`` with core's line for one that stopped."""
+    from .owner_stdio import StdioRefused
+    if ids is None:  # A record gone since it was read: nothing to name.
+        raise StdioRefused("unavailable")
+    if outcome == "starting":
+        return CommandOutput({"state": "computer_starting", "request_id": ids["request_id"],
+                              "config_fingerprint": ids["config_fingerprint"], "target": ids["target"]})
+    if outcome == "failed":
+        raise StdioRefused("start_failed", data={"line": ids["line"], "request_id": ids["request_id"]})
+    raise StdioRefused("unavailable")
+
+
+def _computer_ready(paths, installation, profile, ssh, carrier, consent):
+    """``computer_ready`` once the started computer answers, never from a guide's own child.
+
+    Over SSH nothing listens: the address is the server's own logical key. On
+    Linux the lasting service must answer ``/owner`` on the socket its settings
+    name, for the origin native Tailscale reads for this computer now, within
+    ``READY_SECONDS``; otherwise ``start_failed``.
+    """
+    from ..config import load_host_jobs
+    from ..git_update import read_update
+    from .owner_stdio import StdioRefused
+    if ssh is not None:
+        return CommandOutput({"state": "computer_ready", "origin": _ssh_origin(ssh), **carrier})
+    origin = profile.origin()
+    owner = load_host_jobs()["plane-owner"]
+    socket = owner.get("socket")
+    if owner.get("enroll") is True and owner.get("origin") == origin and isinstance(socket, str):
+        deadline = time.monotonic() + READY_SECONDS
+        while True:
+            consent.check_cancel()
+            if _ready(Path(socket), origin):
+                return CommandOutput({"state": "computer_ready", "origin": origin})
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    record = read_update(installation)
+    raise StdioRefused("start_failed", data={"line": _NOT_READY,
+                                             "request_id": record["request_id"] if record else None})
+
+
+def run_computer(args, paths, store, *, consent, profile, ssh=None):
+    """The computer run: the cards that add a computer, then its start; and the way back into it.
+
+    By phase 1's ``start_state``: ``other``, or a first-team approval or Launch
+    retained by today's guide, refuses ``use_full_guide`` and writes nothing.
+    ``started`` asks nothing and answers ``computer_ready``. ``starting`` asks
+    nothing and dispatches nothing: it reads the start and answers
+    ``computer_starting`` or ``start_failed``. ``fresh`` asks the folders card,
+    pairing, one storage card and the workspace link, each only if an earlier
+    run has not, drains its own listener, then asks the start card and
+    dispatches. It never waits for the updater and never continues a record:
+    its exit is what lets the updater proceed, so it never answers
+    ``computer_ready`` in the process that dispatched a start. No Claude and no
+    team card is asked. ``ssh`` is as for ``run``.
+    """
+    from . import host_owner as console
+    from .owner_setup_consent import admitted_update
+    from .owner_stdio import StdioRefused
+    from ..config import load_host_jobs
+    from ..plane import owner_start
+    from ..plane.owner_service import service_command
+    from ..plane.owner_setup import managed_setup
+    from ..plane.owner_source import start_state
+    if consent is None or profile is None:
+        raise CommandFailure("invalid_argument", "the computer run is the typed guide only")
+    if ssh is not None and profile.runtime is None:
+        raise CommandFailure("invalid_argument", "SSH-controlled setup requires the managed Mac runtime profile")
+    package = managed_setup(paths.root)
+    installation = package.installation
+    # Admission at the installed revision: the profile checked it; the run checks it again.
+    if profile.receipt_revision != package.source_revision:
+        admitted_update(installation, profile.receipt_revision, package.source_revision,
+                        getattr(args, "update_record", None))
+    retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
+    if retained is not None and (retained.state != "absent" or retained.launch_id is not None):
+        raise StdioRefused("use_full_guide")
+    state = start_state(paths.root, installation)
+    if state == "other":
+        raise StdioRefused("use_full_guide")
+    carrier = {}
+    if ssh is not None:
+        from ..plane.owner_ssh import TRANSPORT
+        carrier = {"transport": TRANSPORT}
+    if state == "started":
+        return _computer_ready(paths, installation, profile, ssh, carrier, consent)
+    if state == "starting":
+        # Core's read-only reader: it asks no card and dispatches nothing, even
+        # when the record is gone by the time it reads.
+        outcome, ids = owner_start._progress(paths.root, installation)
+        if outcome == "started":  # Finished since it was read; this run dispatched nothing.
+            return _computer_ready(paths, installation, profile, ssh, carrier, consent)
+        return _computer_handoff(outcome, ids)
+    typed = {"consent": consent}
+    profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))
+    if ssh is not None:
+        from ..plane.owner_ssh import MAC_TAILSCALE
+        args.origin = _ssh_origin(ssh)  # logical key; never a claim of reachable HTTPS
+        args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
+    else:
+        args.origin = profile.origin()
+        args.tailscale, args.tailscale_socket = LINUX_TAILSCALE, ""
+    args.workspace_issuer, args.workspace_origin = _WORKSPACE_ORIGINS
+    args.socket = paths.root / "state/owner/owner.sock"
+    cli = installation.cli
+    config = _serving_configuration(args, paths, None, cli)
+    # On Linux the lasting service's settings; built fresh by every run, so a
+    # run after a failed start never reuses an old plan.
+    plan = _owner_override_plan(paths.root, config) if ssh is None else None
+    if load_host_jobs()["plane-owner"].get("enroll", True) and plan is None:
+        raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
+    if not os.path.lexists(store.path):
+        console._initialize_first_owner(paths, None, **typed)
+    owner = store.current_grant()
+    if (owner is None or not owner.active) and ssh is not None:
+        consent.state("pairing_ready", origin=config["origin"], **carrier)
+        console._confirm_owner(paths, store, None, **typed)
+    elif owner is None or not owner.active:
+        direct = {**config, "workspace_issuer": None, "workspace_origin": None}
+        command = service_command(paths.root, cli, direct) + ["--bootstrap-pairing-origin", config["workspace_origin"]]
+        with _serving(command, Path(config["socket"]), config["origin"], **typed):
+            consent.state("pairing_ready", origin=config["origin"])
+            console._confirm_owner(paths, store, None, **typed)
+    owner = console._active_owner(store)
+    if store.connected().preparation_state() != "ready":
+        console._initialize_link_storage(store, None, **typed)
+    workspace_state, binding = store.workspace().status()
+    if workspace_state == "absent":
+        with (_ssh_waiting() if ssh is not None else
+              _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)):
+            consent.state("workspace_ready", origin=config["origin"], **carrier)
+            console._confirm_workspace(store, None, owner, recover=True, **typed)
+        workspace_state, binding = store.workspace().status()
+    if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
+            or binding.operational_origin != config["workspace_origin"]):
+        raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
+    # The guide's own listener is drained above; the lasting service may now take the socket.
+    outcome, ids = owner_start.start(paths, store, None, consent=consent, owner_plan=plan,
+                                     directory=profile.units)
+    if outcome == "started":  # Started by another run meanwhile; this one dispatched nothing.
+        raise StdioRefused("unavailable")
+    return _computer_handoff(outcome, ids)

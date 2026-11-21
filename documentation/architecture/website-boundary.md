@@ -47,6 +47,9 @@ host; another independently admitted host can remain usable.
 Detailed contracts live in [owner access and actions](observable-plane.md),
 [local workspace approval](owner-workspace.md) and
 [connected sessions and the canonical browser entry](owner-connected-read.md).
+A managed Mac is reached over the person's SSH connection instead of HTTPS; its
+source contract, including the saved-reference `transport` field, is in
+[owner operations over a Mac SSH connection](owner-ssh-carrier.md).
 The reciprocal [website and host contract](https://github.com/Claudfather/claudfather.ai/blob/main/documentation/architecture/host-contract.md)
 describes the account and document handoff side.
 

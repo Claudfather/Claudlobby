@@ -814,3 +814,39 @@ def test_managed_tools_do_not_select_runtime_emission_policy(tmp_path, monkeypat
     env = native_environment(Paths(tmp_path, package=git_package(tmp_path)))
     assert env["TMUX_BIN"] == "/fixed/tmux"
     assert "PLANE_EMIT_DISABLED" not in env
+
+
+def test_the_python_door_measures_a_browser_installations_pinned_provider(
+    tmp_path, monkeypatch
+):
+    """start-bot's `_native-session launch` (require_provider) measures through
+    this door in a BUILT env under the composed launch PATH, before any pane
+    exists. The browser installation's pin is found from the installation the
+    paths carry, and a claude on that launch PATH is never measured instead."""
+    from claudlobby import claude_version
+    from claudlobby.installation import Installation
+    from claudlobby.paths import Paths
+    from tests.package_fixtures import source_package
+
+    home = tmp_path / "home"
+    family = home / ".local/share/claudlobby-browser"
+    root = family / "data"
+    root.mkdir(parents=True)
+    (family / "install").mkdir()
+    (family / "provider-bin").mkdir()
+    _write_exec(family / "provider-bin" / "claude", healthy("2.1.325"))
+    launch = tmp_path / "launch-bin"
+    launch.mkdir()
+    _write_exec(launch / "claude", healthy("9.9.9"))
+    tools = _version_tool_path(tmp_path)
+    package = replace(
+        source_package(),
+        native=LIB,
+        installation=Installation(family / "install", root),
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_BIN", raising=False)
+    result = claude_version.measure(
+        Paths(root=root, package=package), launch_path=f"{launch}:{tools}"
+    )
+    assert (result.version, result.why) == ("2.1.325", None)
