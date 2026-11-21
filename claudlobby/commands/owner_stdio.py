@@ -25,7 +25,8 @@ IDLE_SECONDS = 300
 ADMISSION_SECONDS = 1800
 _ACTIONS = frozenset(("prepare_directories", "initialize_owner", "pair_owner",
     "initialize_workspace", "initialize_connected", "bind_workspace", "provider_signin",
-    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider"))
+    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider",
+    "start_workspace", "initialize_link_storage"))
 _BASE = {"version", "type", "seq", "session_id"}
 _FIELDS = {
     "start": {"profile", "expected_uid", "source_revision", "binding_sha256", "finish_setup"},

@@ -1070,3 +1070,22 @@ def test_linux_recorded_python_digest_is_never_compared(fixed_profile):
                if key not in {"revision", "lock_sha256", "environment_owned", "complete"}}
     request["binding_sha256"] = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     FixedOwnerProfile(paths, request)
+
+
+@pytest.mark.parametrize("action", ["start_workspace", "initialize_link_storage"])
+def test_stdio_proposes_the_computer_runs_cards(pipes, action):
+    """The computer run's two new card actions pass the channel's closed list."""
+    console, session = admitted(pipes)
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(console.approve(
+        action, {"effects": ["displayed core effect"]}, original="approved")), daemon=True)
+    thread.start()
+    import select
+    assert select.select([pipes[3]], [], [], 5)[0], "the channel refused the action"
+    proposal = read_frame(pipes[3])
+    assert proposal["type"] == "proposal" and proposal["proposal"]["action"] == action
+    os.write(pipes[2], wire({"version": 1, "type": "decide", "seq": 2,
+        "session_id": session, "proposal_id": proposal["proposal_id"],
+        "digest": proposal["digest"], "approve": True}))
+    thread.join(2)
+    assert not thread.is_alive() and outcome == ["approved"]
