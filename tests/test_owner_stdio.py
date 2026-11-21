@@ -1092,7 +1092,7 @@ def test_stdio_proposes_the_computer_runs_cards(pipes, action):
 
 
 DONE = {"request_id": "33333333-3333-4333-8333-333333333333", "target": "a" * 40, "phase": "done",
-        "health_errors": {}}
+        "health_errors": {}, "maintenance": False, "config_committed": True}
 
 
 @pytest.fixture
@@ -1177,6 +1177,8 @@ def test_the_computer_run_at_the_receipts_revision_needs_no_record(fixed_profile
     {}, {"update_record": ["33333333-3333-4333-8333-333333333333"]},
     {"update_record": ["not-an-id", "a" * 40]}, {"update_record": ["33333333-3333-4333-8333-333333333333", "A" * 40]},
     {"update_record": "33333333-3333-4333-8333-333333333333"},
+    {"update_record": "x"}, {"update_record": 7}, {"update_record": []}, {"update_record": {}},
+    {"update_record": [None, None]}, {"update_record": [1, 2]},
     {"update_record": None, "finish_setup": ["11111111-1111-4111-8111-111111111111",
         "22222222-2222-4222-8222-222222222222", "b" * 64, "c" * 40]},
 ])
@@ -1187,8 +1189,9 @@ def test_stdio_computer_start_takes_one_more_key_and_nothing_else(pipes, mutatio
     hello = read_frame(pipes[3])
     value = start(hello["session_id"], **mutation)
     os.write(pipes[2], wire(value))
-    with pytest.raises(StdioRefused):
+    with pytest.raises(StdioRefused) as refused:
         console.start(computer=True)
+    assert refused.value.code == "invalid_request" and refused.value.data == {}
 
 
 @pytest.mark.parametrize("known", [None, ["33333333-3333-4333-8333-333333333333", "a" * 40]])

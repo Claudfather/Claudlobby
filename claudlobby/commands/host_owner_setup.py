@@ -595,6 +595,8 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
 def _computer_handoff(outcome, ids):
     """``computer_starting`` for a start under way; ``start_failed`` with core's line for one that stopped."""
     from .owner_stdio import StdioRefused
+    if ids is None:  # A record gone since it was read: nothing to name.
+        raise StdioRefused("unavailable")
     if outcome == "starting":
         return CommandOutput({"state": "computer_starting", "request_id": ids["request_id"],
                               "config_fingerprint": ids["config_fingerprint"], "target": ids["target"]})
@@ -603,7 +605,7 @@ def _computer_handoff(outcome, ids):
     raise StdioRefused("unavailable")
 
 
-def _computer_ready(paths, installation, profile, ssh, carrier):
+def _computer_ready(paths, installation, profile, ssh, carrier, consent):
     """``computer_ready`` once the started computer answers, never from a guide's own child.
 
     Over SSH nothing listens: the address is the server's own logical key. On
@@ -622,6 +624,7 @@ def _computer_ready(paths, installation, profile, ssh, carrier):
     if owner.get("enroll") is True and owner.get("origin") == origin and isinstance(socket, str):
         deadline = time.monotonic() + READY_SECONDS
         while True:
+            consent.check_cancel()
             if _ready(Path(socket), origin):
                 return CommandOutput({"state": "computer_ready", "origin": origin})
             if time.monotonic() >= deadline:
@@ -676,11 +679,13 @@ def run_computer(args, paths, store, *, consent, profile, ssh=None):
         from ..plane.owner_ssh import TRANSPORT
         carrier = {"transport": TRANSPORT}
     if state == "started":
-        return _computer_ready(paths, installation, profile, ssh, carrier)
+        return _computer_ready(paths, installation, profile, ssh, carrier, consent)
     if state == "starting":
-        outcome, ids = owner_start.start(paths, store, None, consent=consent)
+        # Core's read-only reader: it asks no card and dispatches nothing, even
+        # when the record is gone by the time it reads.
+        outcome, ids = owner_start._progress(paths.root, installation)
         if outcome == "started":  # Finished since it was read; this run dispatched nothing.
-            return _computer_ready(paths, installation, profile, ssh, carrier)
+            return _computer_ready(paths, installation, profile, ssh, carrier, consent)
         return _computer_handoff(outcome, ids)
     typed = {"consent": consent}
     profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))

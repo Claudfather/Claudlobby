@@ -55,21 +55,25 @@ def admitted_update(installation, receipt_revision, revision, named):
 
     ``named`` is the computer run's ``update_record``: the request id and target
     the client read. Admitted only when that is the record on disk, the record
-    is ``done`` with no health errors (core's own rule for finished), it ends at
-    ``revision``, and the receipt's revision is an ancestor of ``revision``.
-    Anything else refuses. Reads only.
+    is ``done`` as strictly as today's finish tuple reads one (health errors an
+    empty table, out of maintenance, configuration committed, no stage error),
+    it ends at ``revision``, and the receipt's revision is an ancestor of
+    ``revision``. Anything else refuses. Reads only.
     """
     from ..git_update import UpdateError, _git, read_update
     try:
         record = read_update(installation)
         if (type(named) is not list or record is None
                 or [record.get("request_id"), record.get("target")] != named
-                or record.get("phase") != "done" or record.get("health_errors")
+                or record.get("phase") != "done"
+                or type(record.get("health_errors")) is not dict or record["health_errors"]
+                or record.get("maintenance") is not False or record.get("config_committed") is not True
+                or record.get("stage_error") is not None
                 or record["target"] != revision):
             raise ValueError()
         if _git(installation, "merge-base", "--is-ancestor", receipt_revision, revision, check=False).returncode:
             raise ValueError()
-    except (UpdateError, OSError, ValueError, TypeError, KeyError):
+    except (UpdateError, OSError, ValueError, TypeError, KeyError, AttributeError):
         raise StdioRefused("installation_changed") from None
     return record
 
