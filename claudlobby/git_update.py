@@ -257,7 +257,7 @@ def _initialization_scope(value):
     """One explicit first-install scope, readable without the mutable application."""
     if (type(value) is not dict or set(value) != {"directory", "manifests"}
             or not isinstance(value["directory"], str) or type(value["manifests"]) is not list
-            or not value["manifests"] or any(not isinstance(path, str) for path in value["manifests"])):
+            or any(not isinstance(path, str) for path in value["manifests"])):
         raise UpdateError("initialization requires one native directory and exact authored manifests")
     paths = [value["directory"], *value["manifests"]]
     if any(not Path(path).is_absolute() or ".." in Path(path).parts or str(Path(path)) != path
