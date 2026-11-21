@@ -448,6 +448,34 @@ class OwnerSetup:
             raise AccessDenied("setup_original_operation_changed")
         return record
 
+    def kept_preview(self, retained, record):
+        """True only when ``record`` is this approval's own prepared Preview and nothing was launched.
+
+        The guide may start again over it (the page that embedded the last run closed it before
+        Launch). The approval is active and holds no launch; the record is the one operation()
+        accepts for it, finalized at quiesce with no stage error, its configuration not committed and
+        never dispatched (nothing a continue saves first: quiet or notice support, job support or dispatch); and the Preview row kept for this approval names exactly that record, as
+        retain() binds it, whether or not its window has passed. Anything else is not a Preview.
+        """
+        if (retained is None or retained.state != "allowed" or not retained.effective_active
+                or retained.grant is None or retained.launch_id is not None or retained.launch_plan is not None):
+            return False
+        grant = retained.grant
+        try:
+            if self.operation(grant) != record:
+                return False
+            with self.access._connection() as conn:
+                if self._retained_state(conn) != retained:
+                    return False
+                row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+                kept = json.loads(row["payload"]).get("request") if row is not None else None
+        except (AccessDenied, AccessUnavailable, OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        return (kept is not None and kept == _binding(grant, record)
+                and record.get("phase") == "quiesce" and record.get("finalized", True) is True
+                and not record.get("stage_error") and not record.get("config_committed")
+                and all(record.get(key) is None for key in ("quiet_support", "notice_support", "job_dispatch", "updater_job", "job_support")))
+
     def _request(self, conn, grant):
         row=conn.execute("SELECT payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
         if row is None: return None
