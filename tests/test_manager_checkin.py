@@ -13,7 +13,11 @@ min-gap window -- recording `checkin_triggered` on a real send and
 ones (not a manager, not equipped) and the three a row would only repeat or
 could not reach (rate limited, a trigger still queued for ingest,
 unreachable). A beat held because the staged and spool queues could not be
-read in full is recorded (`queue_deep`, `queue_unreadable`, #2445). The scan
+read in full is recorded (`queue_deep`, `queue_unreadable`, #2445). Inside the
+gap, a report its manager has not acknowledged whose one notice found no
+receipt brings the beat early, once (#2842): the stub steers that read
+(`--checkin-early`) apart, and the end-to-end tests run the shipped reader
+over a real Plane. The scan
 reads a stage the socket client did not finish (a dot name, which bash's `*`
 passes over) and never the spool's own temps (#2448). It fails CLOSED: an
 unreachable plane (rc 3) skips without firing and without a row.
@@ -35,7 +39,7 @@ import re
 import shlex
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -140,11 +144,21 @@ exit "${STUB_DISPATCH_RC:-0}"
 # Stub plane-lookup.py: record the argv the trigger called it with (the
 # rate-limit read's own assertions), print a hit when the test wants the
 # min-gap window to suppress the beat, and exit with the steered code (3 =
-# unreachable, per plane-lookup.py's real contract).
+# unreachable, per plane-lookup.py's real contract). The early read inside
+# the gap (`--checkin-early`, #2842) is steered apart: its argv goes to its
+# own capture, and it prints STUB_PLANE_EARLY and exits STUB_PLANE_EARLY_RC.
 STUB_PLANE_LOOKUP = """\
 #!/usr/bin/env python3
 import os
 import sys
+
+if "--checkin-early" in sys.argv[1:]:
+    capture = os.environ.get("STUB_PLANE_EARLY_ARGV_CAPTURE")
+    if capture:
+        with open(capture, "w") as f:
+            f.write("\\t".join(sys.argv[1:]))
+    sys.stdout.write(os.environ.get("STUB_PLANE_EARLY", ""))
+    sys.exit(int(os.environ.get("STUB_PLANE_EARLY_RC", "0")))
 
 argv_capture = os.environ.get("STUB_PLANE_ARGV_CAPTURE")
 if argv_capture:
@@ -173,6 +187,7 @@ def _run(
     extra_args: list[str] | None = None,
     env_extra: dict | None = None,
     roster_bad: list[str] | None = None,
+    real_lookup: bool = False,
 scratch_plane_env) -> tuple[int, str, str]:
     libdir = tmp_path / "lib"
     libdir.mkdir(exist_ok=True)
@@ -181,8 +196,15 @@ scratch_plane_env) -> tuple[int, str, str]:
     dispatch.write_text(STUB_DISPATCH)
     dispatch.chmod(0o755)
     plane_lookup = libdir / "plane-lookup.py"
-    plane_lookup.write_text(STUB_PLANE_LOOKUP)
-    plane_lookup.chmod(0o755)
+    if plane_lookup.is_symlink() or plane_lookup.exists():
+        plane_lookup.unlink()      # never write a stub through a link to the shipped reader
+    if real_lookup:
+        # The shipped reader, through a link: it loads plane-readers.py and the
+        # report codec from beside its real path, as an install does.
+        plane_lookup.symlink_to(REPO / "claudlobby/_runtime_scripts" / "plane-lookup.py")
+    else:
+        plane_lookup.write_text(STUB_PLANE_LOOKUP)
+        plane_lookup.chmod(0o755)
     (libdir / "manager-checkin.sh").write_text(TRIGGER.read_text())
 
     bots_dir = tmp_path / "bots"
@@ -235,6 +257,7 @@ scratch_plane_env) -> tuple[int, str, str]:
         "STUB_ROSTER_FILE": str(roster_file),
         "STUB_ROSTER_BAD_FILE": str(roster_bad_file),
         "STUB_PLANE_ARGV_CAPTURE": str(tmp_path / "plane_argv_capture"),
+        "STUB_PLANE_EARLY_ARGV_CAPTURE": str(tmp_path / "plane_early_argv_capture"),
         "STUB_BUSY_CALLS": str(tmp_path / "busy_calls"),
     }
     env.pop("CLAUDLOBBY_FLEET", None)
@@ -780,6 +803,205 @@ def test_neither_nonzero_expecting_call_runs_in_a_command_substitution():
     assert "$(python3" not in text
     assert re.search(r"(?m)^\s*if declared_bots_strict\b", text)
     assert re.search(r"(?m)^\s*if python3 .*plane-lookup\.py", text)
+
+
+# ---------------------------------------------------------------------------
+# #2842: inside the minimum gap the beat comes early, once, for a report its
+# manager has not acknowledged whose one notice found no receipt. HIT is a
+# trigger inside the gap (the rate-limit read's stub answer); the early read
+# (`--checkin-early`) is steered apart by STUB_PLANE_EARLY. The end-to-end
+# tests run the shipped reader over a real Plane.
+# ---------------------------------------------------------------------------
+
+HIT = '{"ts":"2026-09-18T00:00:00Z"}\n'
+LOST = "msg_" + "a" * 32
+
+
+def _early_argv(tmp_path: Path) -> list[str]:
+    f = tmp_path / "plane_early_argv_capture"
+    return f.read_text().split("\t") if f.exists() else []
+
+
+def _beat_log_tail(tmp_path: Path) -> str:
+    lines = _log(tmp_path).rstrip("\n").splitlines()
+    return lines[-1] if lines else ""
+
+
+def test_an_unreceipted_report_brings_the_beat_early_with_the_same_keys(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgrdir", "fleet": "f", "bot_id": "lead"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgrdir\t/checkin"
+    events = _events(tmp_path)
+    assert [e["type"] for e in events] == ["checkin_triggered"]
+    assert events[0]["data"] == {"bot": "lead", "min_gap_s": DEFAULT_MIN_GAP_S}
+    argv = _early_argv(tmp_path)
+    assert "--checkin-early" in argv
+    assert (_flag(argv, "--fleet"), _flag(argv, "--bot")) == ("f", "lead")
+    assert _beat_log_tail(tmp_path).endswith(
+        f"DISPATCH f/lead -- /checkin sent early, inside the {DEFAULT_MIN_GAP_S}s gap: the notice"
+        f" of report {LOST} has no receipt (1 unacknowledged report(s) since the last check-in)")
+
+
+def test_with_every_notice_received_the_gap_holds(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": ""},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert "--checkin-early" in _early_argv(tmp_path)
+    assert _beat_log_tail(tmp_path).endswith(f"SKIP f/mgr -- checked in within {DEFAULT_MIN_GAP_S}s")
+
+
+def test_outside_the_gap_the_beat_fires_as_before_and_never_asks(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_EARLY": LOST + "\n"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert _early_argv(tmp_path) == []
+    assert _beat_log_tail(tmp_path).endswith("DISPATCH f/mgr -- /checkin sent")
+
+
+@pytest.mark.parametrize("busy", [{"STUB_BUSY_RC": "0"}, {"STUB_BUSY_RC": "1", "STUB_BUSY_RC_2": "0"}],
+                         ids=["at-the-gate", "at-the-send"])
+def test_a_busy_manager_still_refuses_the_early_beat(tmp_path, busy, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n", **busy},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert [(e["type"], e["data"]["reason"]) for e in _events(tmp_path)] == [("checkin_skipped", "busy")]
+
+
+def test_a_held_box_or_an_open_menu_still_refuses_the_early_beat(tmp_path, *, scratch_plane_env):
+    # dispatch.sh exits 1 when its send does not submit: the pane guard refuses
+    # a box that holds text, or an open menu, before it types anything
+    # (tests/test_pane_send_verified.sh). The early beat sends through that
+    # same door, so the refusal records the miss and no trigger.
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n",
+                                    "STUB_DISPATCH_RC": "1"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert [(e["type"], e["data"]["reason"]) for e in _events(tmp_path)] == [
+        ("checkin_skipped", "send_failed")]
+
+
+def _pending_receipt(tmp_path: Path, queue: str, name: str, dest: str) -> None:
+    """A `received` batch for *dest* that the receipt hook left queued while
+    the daemon could not take it, in the shape plane-dispatch-in.sh builds."""
+    d = tmp_path / "state" / "plane" / queue
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps({"events": [{
+        "event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "f",
+        "payload": {"msg_id": LOST, "attempt_no": 1, "carrier": "tmux", "destination": dest,
+                    "state": "received", "received_bytes": 1,
+                    "received_sha256": "sha256:" + "0" * 64}}]}))
+
+
+def test_a_receipt_still_queued_for_ingest_is_pending_so_the_gap_holds(tmp_path, *, scratch_plane_env):
+    _pending_receipt(tmp_path, "staged", f"1792621600000000000-ev_{'1' * 32}.m{'a' * 32}.batch", "mgr")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _early_argv(tmp_path) == []
+    assert _beat_log_tail(tmp_path).endswith(
+        f"checked in within {DEFAULT_MIN_GAP_S}s; a receipt for this manager may be pending"
+        " Plane ingest, so the gap holds")
+
+
+def test_a_receipt_queued_for_another_bot_does_not_hold_the_early_beat(tmp_path, *, scratch_plane_env):
+    _pending_receipt(tmp_path, "spool", f"ev_{'2' * 32}.m{'a' * 32}.json", "someone-else")
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == "mgr\t/checkin"
+    assert "sent early" in _beat_log_tail(tmp_path)
+
+
+def test_an_early_read_that_cannot_answer_holds_the_gap(tmp_path, *, scratch_plane_env):
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}],
+                         env_extra={"STUB_PLANE_HITS": HIT, "STUB_PLANE_EARLY": LOST + "\n",
+                                    "STUB_PLANE_EARLY_RC": "3"},
+                         scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    assert _dispatched(tmp_path) == ""
+    assert _events(tmp_path) == []
+    assert _beat_log_tail(tmp_path).endswith(
+        f"checked in within {DEFAULT_MIN_GAP_S}s; the read for unseen reports could not answer"
+        " (rc 3), so the gap holds")
+
+
+def _real_plane(tmp_path: Path) -> None:
+    """A real Plane under the beat's root, written through the shipped emit door."""
+    from tests.plane_setup import initialize_plane
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    initialize_plane(tmp_path)
+
+
+def _stamp(at: datetime) -> str:
+    return at.strftime("%Y-%m-%dT%H:%M:%SZ")      # emit_fleet_event's own form
+
+
+def _lost_notice_scene(tmp_path: Path) -> str:
+    """The manager received a message once, checked in ten minutes ago, and a
+    report reached the Plane five minutes ago with no receipt for its notice."""
+    from tests.plane_fixtures import _checkin_triggered, _receipt_history, _report_to
+    _real_plane(tmp_path)
+    now = datetime.now(timezone.utc)
+    _receipt_history(tmp_path)
+    _checkin_triggered(tmp_path, _stamp(now - timedelta(minutes=10)))
+    return _report_to(tmp_path, 1, (now - timedelta(minutes=5)).isoformat())
+
+
+def _tick(tmp_path: Path, scratch_plane_env, **env) -> tuple[str, list[str], str]:
+    """One beat with the shipped reader: what it sent, the rows it recorded, its last log line."""
+    for name in ("dispatch_capture", "events_capture"):
+        (tmp_path / name).unlink(missing_ok=True)
+    rc, _out, err = _run(tmp_path, bots=[{"dir": "mgr", "fleet": "f"}], real_lookup=True,
+                         env_extra=env or None, scratch_plane_env=scratch_plane_env)
+    assert rc == 0, err
+    return _dispatched(tmp_path), [e["type"] for e in _events(tmp_path)], _beat_log_tail(tmp_path)
+
+
+def test_end_to_end_a_lost_notice_brings_one_early_beat_and_the_next_tick_waits(tmp_path, *, scratch_plane_env):
+    from tests.plane_fixtures import _checkin_triggered
+    lost = _lost_notice_scene(tmp_path)
+    sent, rows, last = _tick(tmp_path, scratch_plane_env)
+    assert (sent, rows) == ("mgr\t/checkin", ["checkin_triggered"])
+    assert f"sent early, inside the {DEFAULT_MIN_GAP_S}s gap: the notice of report {lost} has no receipt" in last
+    _checkin_triggered(tmp_path, _stamp(datetime.now(timezone.utc)))     # what that beat records
+    sent, rows, last = _tick(tmp_path, scratch_plane_env)
+    assert (sent, rows) == ("", [])
+    assert last.endswith(f"SKIP f/mgr -- checked in within {DEFAULT_MIN_GAP_S}s")
+
+
+def test_end_to_end_a_received_notice_leaves_the_gap_in_force(tmp_path, *, scratch_plane_env):
+    from tests.plane_fixtures import _receipt
+    _receipt(tmp_path, _lost_notice_scene(tmp_path))
+    sent, rows, last = _tick(tmp_path, scratch_plane_env)
+    assert (sent, rows) == ("", [])
+    assert last.endswith(f"SKIP f/mgr -- checked in within {DEFAULT_MIN_GAP_S}s")
+
+
+def test_end_to_end_a_refused_early_send_records_nothing_so_the_next_tick_tries_again(
+        tmp_path, *, scratch_plane_env):
+    _lost_notice_scene(tmp_path)
+    sent, rows, _last = _tick(tmp_path, scratch_plane_env, STUB_DISPATCH_RC="1")
+    assert (sent, rows) == ("mgr\t/checkin", ["checkin_skipped"])
+    sent, rows, last = _tick(tmp_path, scratch_plane_env)
+    assert (sent, rows) == ("mgr\t/checkin", ["checkin_triggered"])
+    assert "sent early" in last
 
 
 # ---------------------------------------------------------------------------
