@@ -77,7 +77,7 @@ def test_selected_reload_only_marks_running_selected_bot(tmp_path, with_plugin):
     assert result.stdout.splitlines() == ["marked\tlead"] + (
         ["refreshed\tclaudna@Claudfather"] if with_plugin else [])
     assert (calls.read_text().splitlines() if calls.exists() else []) == (
-        ["plugin update claudna@Claudfather"] if with_plugin else [])
+        ["plugin update --scope user claudna@Claudfather"] if with_plugin else [])
     assert (bots / "lead/data/.reload-pending").exists()
     assert not (bots / "worker/data/.reload-pending").exists()
     assert not (bots / "residue/data/.reload-pending").exists()
