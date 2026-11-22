@@ -4880,7 +4880,7 @@ class TestPerOrgGitCredentialRouting:
     Spec: documentation/plans/2026-07-27-per-org-git-credential-routing.md
     """
 
-    def _render(self, tmp_path, monkeypatch, creds=None):
+    def _render(self, tmp_path, monkeypatch, creds=None, bot=None):
         """Both host seams stubbed so the assertions are host-independent — and
         so a test can never invoke the real gh helper (which would answer with
         the operator's actual token and print it into pytest output)."""
@@ -4890,7 +4890,9 @@ class TestPerOrgGitCredentialRouting:
         monkeypatch.setattr(
             comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig"
         )
-        return comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path))
+        if bot is None:
+            bot = _git_cred_bot(creds)
+        return comp.compose_bot_gitconfig(bot, _make_paths(tmp_path))
 
     # --- the three load-bearing ordering properties -----------------------
 
@@ -4946,22 +4948,42 @@ class TestPerOrgGitCredentialRouting:
         assert '[credential "https://github.com/OrgB"]' in out
         assert "password=$A_PAT" in out and "password=$B_PAT" in out
 
-    def test_no_credentials_declared_composes_nothing(self, tmp_path, monkeypatch):
-        """Fleets declaring none must compose byte-identically to before."""
-        assert self._render(tmp_path, monkeypatch, {}) is None
-
-    def test_bot_conf_exports_git_config_global_only_when_declared(self, tmp_path):
+    @pytest.fixture
+    def parsed_fleet(self, tmp_path):
+        """`lead` declares one org's credentials in fleet.yaml text and `worker`
+        declares none; `load_fleet` parses both."""
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
-        (root / "lib").mkdir()
-        paths = _make_paths(root)
-        bot = _git_cred_bot()
-        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl", service_prefix="com.crog.tl")
+        root.mkdir()
+        (root / "fleet.yaml").write_text(dedent("""\
+            fleet:
+              name: test-fleet
+              manager: lead
+              service_prefix: com.test
+              bots:
+                lead:
+                  expertise: [eng]
+                  git_credentials:
+                    OrgA: ORG_A_PAT
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        return fleet, _make_paths(root)
+
+    def test_no_credentials_declared_composes_nothing(
+        self, tmp_path, monkeypatch, parsed_fleet
+    ):
+        """Fleets declaring none must compose byte-identically to before."""
+        fleet, _paths = parsed_fleet
+        assert self._render(tmp_path, monkeypatch, bot=fleet.bots["worker"]) is None
+
+    def test_bot_conf_exports_git_config_global_only_when_declared(self, parsed_fleet):
+        fleet, paths = parsed_fleet
         assert 'export GIT_CONFIG_GLOBAL="$BOT_DIR/.gitconfig"' in compose_bot_conf(
-            bot, fleet, paths
+            fleet.bots["lead"], fleet, paths
         )
         assert "GIT_CONFIG_GLOBAL" not in compose_bot_conf(
-            _git_cred_bot({}), fleet, paths
+            fleet.bots["worker"], fleet, paths
         )
 
 
