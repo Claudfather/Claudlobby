@@ -175,6 +175,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
+  // launchHeld: the request the computer last said holds a Launch (launch_reserved, from a launch status or context read).
+  // In the whole view the steps already done stay done while it holds: the hand-over's own connection check moves the
+  // connection on, which clears the approval context (connectionChanged). handoffChecking: that check is in flight.
+  // An answer that contradicts the launch, or a lost connection, lets go of it, so approval is checked again; a pause of
+  // the automatic checks does not. launchSeen: the request the computer ever said was reserved; never let go, so the
+  // line that nothing runs yet stays hidden for that request.
+  let launchHeld = null, handoffChecking = false, launchSeen = null;
+  const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
+  const releaseLaunch = () => { if (!launched()) launchHeld = null; };
+  const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) launchSeen = pending; };
   // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
   // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
   // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
@@ -200,12 +210,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       void run('preview-check',{quiet:true}); // its completion schedules the next check
     },PREVIEW_POLL_MS);
   }
-  function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
+  function stopHandoff(paused = false) { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; if (!paused) releaseLaunch(); }
   function scheduleHandoff() {
     if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
     if (!handoffUntil) handoffUntil = now() + 600;
     if (now() >= handoffUntil || handoffReads >= 80) {
-      stopHandoff(); note = standalone ? 'Automatic checks paused. Choose Check launch status to look again. Do not launch again.'
+      stopHandoff(true); note = standalone ? 'Automatic checks paused. Choose Check launch status to look again. Do not launch again.'
         : 'Automatic checks paused. Choose Check connection on the computer card, then Check launch status. Do not launch again.'; changed(); return;
     }
     if (!visible() || !active()) return; // Resume the same reads when this view/connection returns.
@@ -230,7 +240,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         if (!value.launch_reserved) { stopHandoff(); return; }
         if (!connectionChecked && typeof client.check === 'function') {
-          await client.check(); connectionChecked = true;
+          handoffChecking = true;
+          try { await client.check(); } finally { handoffChecking = false; }
+          connectionChecked = true;
         }
         if (value.state === 'done' || value.state === 'unknown' || Object.keys(value.health_errors).length) stopHandoff();
       } catch (error) {
@@ -300,6 +312,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); // only a live link can be lost
     }
     state = next;
+    if (['denied','signed_out','expired','disposed'].includes(next.state)) releaseLaunch();
     if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
       stopHandoff(); note = standalone ? 'Connection needs attention. Choose Connect above; the launch is not repeated.'
         : 'Connection needs attention. Reconnect from the computer card; the launch is not repeated.';
@@ -352,6 +365,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
         }
+        holdLaunch(value.launch_reserved);
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
@@ -446,6 +460,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           return false;
         }
         if (operation === 'receipt') launchable = false;
+        if (operation === 'receipt' && refusal(error)) releaseLaunch(); // a refusal contradicts the hold; a lost answer does not
         if (operation.startsWith('signin-')) {
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
           const refused=[400,401,403,409].includes(error?.status);
@@ -533,6 +548,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
+    holdLaunch(value.launch_reserved);
     const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
     launchedFor = done ? pending : null;
     note = done ? standalone ? 'Team launched. Your team is running on this computer.'
@@ -580,8 +596,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
     if (!mount) return;
     const m = mount, live = active(), time = now();
-    const approved = !!context && context.expires_at > time;
-    const signinKnown = context?.provider_signin === true;
+    // A launch the computer holds for this request was approved, even once the approval context is gone.
+    const holding = launchHolding(), approved = holding || !!context && context.expires_at > time;
+    // It keeps a sign-in this page saw connected for the same approval.
+    const signinKnown = context?.provider_signin === true || holding && !context && signinState === 'connected'
+      && signinAttempt?.generation === pending.generation;
     // Sign-in is a step when this approval asks for it; until approval is known it is shown as upcoming.
     const signinShown = pending ? signinKnown && signinState === 'connected' : signinKnown || !context;
     const signinDone = signinKnown && signinReady();
@@ -590,8 +609,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       goal:pending ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
       launch:pending ? 'current' : 'upcoming'};
     // With a Connect step, nothing after it is current until this computer is connected.
-    const connecting = !!m.steps.connect && !live;
-    if (m.steps.connect) states.connect = live ? 'done' : 'current';
+    const settling = holding && handoffChecking && ['checking','renewing'].includes(state.state);
+    const connecting = !!m.steps.connect && !live && !settling;
+    if (m.steps.connect) states.connect = live || settling ? 'done' : 'current';
     if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
     // The whole view ends on finished steps, even after the handoff's status check moved the connection
     // on and cleared the approval context: nothing is left to approve or check again.
@@ -618,7 +638,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    setText(m.approveDone,context || finished ? 'Setup approved' : '');
+    setText(m.approveDone,states.approve === 'done' ? 'Setup approved' : '');
+    // Once a launch is held or finished, nothing waits on Launch team any more.
+    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched();
     // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
     setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
@@ -744,7 +766,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     element.className = [element.className,'setup-panel'].filter(Boolean).join(' ');
     const status = make('p','setup-note'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite');
     const list = make('ol','setup-steps'); list.setAttribute('role','list');
-    element.append(make('p','setup-lede','Nothing runs on this computer until you choose Launch team.'),status,list);
+    const lede = make('p','setup-lede','Nothing runs on this computer until you choose Launch team.');
+    element.append(lede,status,list);
     const steps = {};
     const step = (name,title,{done = true, before = []} = {}) => {
       const root = make('li','setup-step'), mark = make('span','setup-step-mark'), progress = make('p','setup-progress');
@@ -804,7 +827,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
     disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
-    mount = {root:element,document,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
+    mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
