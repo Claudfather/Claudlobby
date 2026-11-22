@@ -2821,6 +2821,200 @@ test('a rebound setup request is not shown as launched, so its launch status can
   assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
+// A panel that sends one managed Launch. launch: the computer's answer to it (an Error is thrown); receipts: the
+// answers to the launch status reads in order (an Error is thrown); check: what the hand-over's connection check does.
+function managedLaunch({launch,receipts=[],check,standalone=true}={}) {
+  const timers=[],answer=value=>{if(value instanceof Error)throw value;return value;};let h=null;
+  h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+    client:{...(launch?{async setupLaunch(input){h.calls.push(['launch',input]);return answer(launch(input));}}:{}),
+      async setupReceipt(input){h.calls.push(['receipt',input]);
+        return {...input,version:2,state:'quiesce',managed_owner:true,launch_reserved:true,config_committed:false,health_errors:{},...answer(receipts.shift())};},
+      async check(){await check?.(h);}}});
+  h.context.managed_owner=true;
+  const ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel,...(standalone?{standalone:true,connect:()=>{}}:{})});
+  return {h,panel,timers,lede:()=>descendants(panel).find(n=>n.className==='setup-lede'),
+    async start(){await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');},
+    async next(){await timers.shift()();await flush();}};
+}
+const reserved=input=>({...input,version:2,state:'quiesce',managed_owner:true,launch_reserved:true,config_committed:false,health_errors:{}});
+// As the connected read client when the session turns readable: setup_only, checking, then ready (a new epoch).
+const promote=(h,seen=()=>{})=>{h.change({state:'checking'});seen();h.change({state:'ready',epoch:2});};
+const stepButtons=panel=>stepsOf(panel).flatMap(descendants).filter(n=>n.tagName==='BUTTON'&&visible(n)&&!n.disabled).map(n=>n.textContent);
+test('while a managed launch hands over, no finished step loses its tick or disappears and nothing offers approval again',async()=>{
+  let whileChecking=null;
+  const l=managedLaunch({receipts:[{},{state:'publish'},{state:'publish'},{state:'done',config_committed:true}],
+    check:h=>promote(h,()=>{whileChecking=stepShape(l.panel);})});
+  signedIn(l.h);await l.start();
+  const during=[['connect','done'],['approve','done'],['signin','done'],['goal','done'],['launch','current']];
+  assert.deepEqual(stepShape(l.panel),during);
+  for(let read=1;read<=3;read++){
+    await l.next();
+    assert.equal(l.h.api.snapshot().context,null,'the hand-over moved the connection on and cleared the approval context');
+    assert.deepEqual(stepShape(l.panel),during,'read '+read);
+    assert.ok(descendants(stepsOf(l.panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)),'read '+read);
+    assert.deepEqual(stepButtons(l.panel),['Check launch status'],'no step offers approving again, read '+read);
+    assert.equal(stepPart(l.panel,'launch','setup-progress').textContent,'Checking automatically while your team connects…');
+  }
+  assert.deepEqual(whileChecking,during,'the hand-over\'s own connection check keeps Connect done');
+  assert.equal(l.h.api.snapshot().note,'Still in progress. Checking status never repeats or resumes setup.');
+  await l.next();
+  assert.deepEqual(stepShape(l.panel),during.map(([name])=>[name,'done']));
+  assert.equal(l.h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+test('a person\'s own connection check beside a held launch shows Connect not done, with its checking line',async()=>{
+  for(const lost of ['unavailable','denied']){
+    const l=managedLaunch({launch:reserved});await l.start();
+    l.h.change({state:lost,epoch:3});l.h.api.showConnect({operation:'check',busy:'check'});l.h.change({state:'checking'});
+    assert.deepEqual(stepShape(l.panel)[0],['connect','current'],lost);
+    assert.equal(stepPart(l.panel,'connect','setup-progress').textContent,'Checking connection…',lost);
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+  }
+});
+test('a hand-over that stops short of a finished launch lets go of the held steps, so approval can be checked again',async()=>{
+  // Health errors after the connection check cleared the approval context; then a refused status check and a denial.
+  const l=managedLaunch({receipts:[{state:'publish',health_errors:{'example.service':'failed'}}],check:h=>promote(h)});
+  await l.start();await l.next();
+  assert.equal(l.h.api.snapshot().context,null);
+  assert.deepEqual(stepShape(l.panel)[1],['approve','current']);
+  assert.ok(stepButtons(l.panel).includes('Check setup approval'));
+  l.h.client.setupReceipt=async()=>{throw Object.assign(new Error('refused'),{status:403});};
+  await l.h.api.run('receipt');l.h.change({state:'denied',epoch:3});l.h.change({state:'setup_only',epoch:4});
+  assert.deepEqual(stepShape(l.panel)[1],['approve','current']);
+  assert.equal(descendants(stepsOf(l.panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)),false);
+  assert.ok(stepButtons(l.panel).includes('Check setup approval'),'the approval can be checked again');
+  l.h.api.dispose();
+  // A refused hand-over read leaves the approval context: Check setup approval again is offered under Details.
+  const refused=managedLaunch({receipts:[Object.assign(new Error('refused'),{status:403})]});
+  await refused.start();await refused.next();
+  assert.equal(offered(refused.panel,'Check setup approval again'),true);
+  refused.h.api.dispose();
+});
+test('a denied or signed-out connection lets go of a held launch, so approval is checked again after reconnecting',async()=>{
+  for(const [lost,held] of [['unavailable',true],['denied',false],['signed_out',false]]){
+    const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});
+    l.h.context.managed_owner=undefined;await l.start();
+    l.h.change({state:lost,epoch:3});l.h.change({state:'setup_only',epoch:4});
+    assert.deepEqual(stepShape(l.panel)[1],['approve',held?'done':'current'],lost);
+    assert.equal(stepButtons(l.panel).includes('Check setup approval'),!held,lost);
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+  }
+});
+test('a launch status that says the launch is no longer reserved lets go of the held steps',async()=>{
+  const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});
+  l.h.context.managed_owner=undefined;await l.start();
+  l.h.change({state:'unavailable',epoch:3});l.h.change({state:'setup_only',epoch:4});
+  assert.deepEqual(stepShape(l.panel)[1],['approve','done'],'held while the computer holds the launch');
+  assert.equal(visible(l.lede()),false);
+  l.h.client.setupReceipt=async input=>({...input,version:2,state:'quiesce',launch_reserved:false,config_committed:false,health_errors:{}});
+  await l.h.api.run('receipt');
+  assert.match(l.h.api.snapshot().note,/^Prepared but not launched\./);
+  assert.deepEqual(stepShape(l.panel)[1],['approve','current']);assert.ok(stepButtons(l.panel).includes('Check setup approval'));
+  assert.equal(visible(l.lede()),false,'this request was reserved once, so the line that nothing runs yet stays gone');
+  assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+test('the Launch team line stays gone for a request the computer reserved, whatever stops the hand-over, and returns for a new request',async()=>{
+  const refused=()=>Object.assign(new Error('refused'),{status:403});
+  for(const [name,options,after] of [
+    ['health errors',{receipts:[{state:'publish',health_errors:{'example.service':'failed'}}],check:h=>promote(h)},async()=>{}],
+    ['a refused status read',{receipts:[{},refused()]},async l=>{await l.next();}],
+    ['denied',{receipts:[{}]},async l=>{l.h.change({state:'denied',epoch:3});}],
+    ['the pause',{},async l=>{while(l.timers.length)await l.next();assert.match(l.h.api.snapshot().note,/^Automatic checks paused\./);}]]){
+    const l=managedLaunch(options);await l.start();await l.next();await after(l);
+    assert.equal(visible(l.lede()),false,name);
+    if(name==='health errors'){
+      Object.assign(l.h.context,{request:{...l.h.pending,request_id:id(30)},launch_reserved:false});
+      assert.equal(await l.h.api.run('context'),true);
+      assert.equal(visible(l.lede()),true,'a different request has launched nothing');
+    }
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1,name);l.h.api.dispose();
+  }
+});
+test('a slow but healthy hand-over that reaches its pause keeps every finished step, and the approval and launch status can still be checked',async()=>{
+  const l=managedLaunch({check:h=>promote(h)});signedIn(l.h);await l.start();
+  const during=[['connect','done'],['approve','done'],['signin','done'],['goal','done'],['launch','current']];
+  while(l.timers.length)await l.next();
+  assert.equal(l.h.calls.filter(c=>c[0]==='receipt').length,80,'every read said the launch is still reserved');
+  assert.equal(l.h.api.snapshot().note,'Automatic checks paused. Choose Check launch status to look again. Do not launch again.');
+  assert.deepEqual(stepShape(l.panel),during);
+  assert.equal(offered(l.panel,'Check setup approval again'),true);
+  l.h.client.setupReceipt=async input=>({...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}});
+  buttonOf(l.panel,'Check launch status').click();await flush();
+  assert.equal(l.h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.deepEqual(stepShape(l.panel),during.map(([name])=>[name,'done']));
+  assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+test('after the pause, a refused Check launch status lets go of the held steps and a lost answer keeps them',async()=>{
+  for(const [name,error,held] of [['refused',Object.assign(new Error('refused'),{status:409}),false],['lost',new Error('lost'),true]]){
+    const l=managedLaunch({check:h=>promote(h)});signedIn(l.h);await l.start();
+    while(l.timers.length)await l.next();
+    assert.match(l.h.api.snapshot().note,/^Automatic checks paused\./,name);
+    l.h.client.setupReceipt=async()=>{throw error;};
+    buttonOf(l.panel,'Check launch status').click();await flush();
+    assert.deepEqual(stepShape(l.panel)[1],['approve',held?'done':'current'],name);
+    assert.equal(stepShape(l.panel).some(([step])=>step==='signin'),held,name);
+    assert.equal(stepButtons(l.panel).includes('Check setup approval'),!held,name);
+    assert.equal(visible(l.lede()),false,'the line that nothing runs yet stays gone, '+name);
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+  }
+});
+test('a managed Launch the computer refused holds nothing, even while its status reads get no answer',async()=>{
+  const l=managedLaunch({launch:()=>Object.assign(new Error('refused'),{status:409}),receipts:[new Error('lost'),new Error('lost')]});
+  await l.start();
+  assert.equal(visible(l.lede()),true,'nothing was reserved');
+  await l.next();
+  assert.equal(l.h.api.snapshot().note,'Starting your team’s connection. The launch is not repeated.');
+  l.h.change({state:'setup_only',epoch:3});
+  assert.equal(visible(l.lede()),true);
+  assert.deepEqual(stepShape(l.panel)[1],['approve','current']);assert.ok(stepButtons(l.panel).includes('Check setup approval'));
+  assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+test('a reopened page whose approval read says a launch is held hides the Launch team line',async()=>{
+  const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})]],
+    context:{request:settingUp,launch_reserved:true}});
+  const lede=descendants(p.panel).find(n=>n.className==='setup-lede');
+  assert.equal(visible(lede),true);
+  await p.finish();assert.equal(p.reads(),1);
+  assert.equal(visible(lede),false);
+  assert.equal(p.h.calls.filter(c=>['launch','receipt'].includes(c[0])).length,0,'only the approval read');p.h.api.dispose();
+});
+test('a held launch keeps no Claude sign-in from another approval',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();signedIn(h);
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>{}});
+  await h.api.run('context');
+  // A new approval holds a launch, and its read names no sign-in: the connected one belongs to the old approval.
+  const next={generation:id(20),request_id:id(21),config_fingerprint:'c'.repeat(64),source_revision:h.pending.source_revision};
+  Object.assign(h.context,{generation:id(20),request:next,launch_reserved:true});delete h.context.signin_attempt;
+  assert.equal(await h.api.run('context'),true);
+  h.change({state:'setup_only',epoch:3});
+  assert.equal(h.api.snapshot().context,null);
+  assert.deepEqual(stepShape(panel).map(row=>row[0]),['connect','approve','goal','launch'],'no Sign in to Claude step is shown done');
+  assert.deepEqual(stepShape(panel)[1],['approve','done']);
+  h.api.dispose();
+});
+test('the Launch team reassurance goes once the launch is held and stays gone after it finished',async()=>{
+  const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});l.h.context.managed_owner=undefined;
+  await l.h.api.run('context');l.h.api.setGoal('Improve checkout tests');await l.h.api.run('preview');
+  assert.equal(l.lede().textContent,'Nothing runs on this computer until you choose Launch team.');assert.equal(visible(l.lede()),true);
+  await l.h.api.run('launch');assert.equal(visible(l.lede()),false,'a held launch');
+  l.h.client.setupReceipt=async input=>({...input,version:2,state:'done',launch_reserved:true,config_committed:true,health_errors:{}});
+  await l.h.api.run('receipt');
+  assert.equal(l.h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.equal(visible(l.lede()),false,'a finished launch');
+  l.h.api.dispose();
+});
+test('the shared panel keeps the Launch team line through a held launch and drops it once the launch finished',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element(),lede=()=>descendants(panel).find(n=>n.className==='setup-lede');
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(visible(lede()),true,'its steps and line are as before while the launch is unconfirmed');
+  await h.api.run('receipt');
+  assert.match(h.api.snapshot().note,/^Team launched\./);
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['approve','done'],['goal','done'],['launch','current']]);
+  assert.equal(visible(lede()),false);
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
 test('Connect moves keyboard focus on only while this frame has focus and nothing else took it',async t=>{
   for(const away of ['element','frame']){
     const l=landing(t);await l.workspace.checkAccount();await flush();
