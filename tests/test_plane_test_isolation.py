@@ -151,6 +151,7 @@ def incidental_session(_isolate_plane_session):
     assert os.environ["PLANE_EMIT_DISABLED"] == "1"
     assert "CLAUDLOBBY_ROOT" not in os.environ
     assert "PLANE_SOCKET" not in os.environ and "PLANE_EMIT_CLI" not in os.environ
+    assert "FLEET_NAME" not in os.environ and "CLAUDLOBBY_FLEET" not in os.environ
 ''')
         (probe / "test_probe.py").write_text('''import os, subprocess
 
@@ -170,10 +171,12 @@ def test_function(tmp_path, tmp_path_factory):
     assert os.environ["PLANE_EMIT_DISABLED"] == "1"
     assert "CLAUDLOBBY_ROOT" not in os.environ
     assert "PLANE_SOCKET" not in os.environ and "PLANE_EMIT_CLI" not in os.environ
+    assert "FLEET_NAME" not in os.environ and "CLAUDLOBBY_FLEET" not in os.environ
 ''')
         env = constructed_env(HOME=tmp_path / "home", PYTHONPATH=REPO, ISOLATION_SHIM=SHIM,
                               ISOLATION_BATCH=BATCH, CLAUDLOBBY_ROOT=sentinel["root"],
-                              PLANE_SOCKET=sentinel["socket"], PLANE_EMIT_CLI=sentinel["cli"])
+                              PLANE_SOCKET=sentinel["socket"], PLANE_EMIT_CLI=sentinel["cli"],
+                              FLEET_NAME="ambient", CLAUDLOBBY_FLEET="ambient")
         if initial_guard is None:
             env.pop("PLANE_EMIT_DISABLED")
         else:
