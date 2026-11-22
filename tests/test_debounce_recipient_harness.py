@@ -67,5 +67,17 @@ def test_alert_survives_a_manager_restart(run):
 
 def test_debounce_still_debounces(run):
     """The fix must not turn a debounced alert into a per-tick alarm."""
-    _skip_if_stopped_before(run, "3 ticks, still one session_missing")
+    _skip_if_stopped_before(run, "3 ticks inside the re-notify window: one session_missing")
     assert "FAIL: 3 ticks" not in run.stdout, run.stdout
+
+
+def test_debounce_renotifies_past_its_window(run):
+    """Debounced is not silenced: once the re-notify window has passed, the same
+    manager is pushed each alert again. Three ticks inside the window show one
+    push each and say nothing about the far side of it."""
+    _skip_if_stopped_before(run, "past the re-notify window, a second session_missing")
+    for label in ("session_missing's marker is dated past the window",
+                  "unit_missing's marker is dated past the window",
+                  "past the re-notify window, a second session_missing to the SAME instance",
+                  "past the re-notify window, a second unit_missing to the SAME instance"):
+        assert f"PASS: {label}" in run.stdout, run.stdout

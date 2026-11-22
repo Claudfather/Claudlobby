@@ -8,8 +8,12 @@
 # unresolved, restarts the real manager session, and counts what that session
 # was submitted.
 #
-# Red on the pre-fix code: step 3 finds nothing submitted, because the marker says
+# Red on the pre-fix code: step 4 finds nothing submitted, because the marker says
 # "already told someone" and cannot say the someone is gone.
+#
+# Debounced is not silenced: inside the re-notify window an alert is pushed once
+# (step 2), and once the window has passed it is pushed again (step 3). The run
+# cannot wait out the shipped six hours, so step 3 dates the markers back past it.
 #
 # Isolation (#846): private tmux sockets under a throwaway TMUX_TMPDIR, a
 # throwaway CLAUDLOBBY_ROOT, and a fake escalation chat id — the escalation leg
@@ -108,9 +112,19 @@ stop_manager () { (. "$LIB_DIR/lib-common.sh" && harness_box_down "$MGR_SOCK" "$
 # Counted PER ALERT TYPE: one tick legitimately pushes two here (one from each
 # worker), so a bare total would conflate them.
 push_count ()    { grep -c "\\[FLEET-PULSE\\].*$1" "$MGR_LOG" || true; }
+# Dates one alert's debounce marker (state/pulse/<bot>.<suffix>) six hours and a
+# minute back, past the shipped re-notify window, and prints "aged", or "missing"
+# when there is no such marker to date.
+age_marker ()    {
+    if python3 -c 'import os, sys, time; t = time.time() - 21660; os.utime(sys.argv[1], (t, t))' \
+        "$ROOT/state/pulse/$1" 2>/dev/null; then echo aged; else echo missing; fi
+}
 
+# Every sweep runs with the shipped re-notify window, whatever the caller's
+# environment sets.
 run_pulse () {
-    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET CLAUDLOBBY_ROOT="$ROOT" HOME="$ROOT/home" TMUX_TMPDIR="$TMUX_TMPDIR" \
+    env -u PLANE_EMIT_DISABLED -u PLANE_SOCKET -u FLEET_PULSE_RENOTIFY_AFTER_S \
+        CLAUDLOBBY_ROOT="$ROOT" HOME="$ROOT/home" TMUX_TMPDIR="$TMUX_TMPDIR" \
         FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
         TELEGRAM_GROUP_CHAT_ID="" FLEET_PULSE_ESCALATION_STATE_DIR="$ROOT/tg" \
         python3 "$REPO/harness/compose.py" --root "$ROOT" --fleet "$FLEET" --record-plane --pulse \
@@ -125,20 +139,27 @@ run_pulse
 check "  session_missing pushed once" 1 "$(push_count session_missing)"
 check "  unit_missing pushed once"    1 "$(push_count unit_missing)"
 
-echo "--- 2. control: same manager, same episode -> debounce still debounces ---"
+echo "--- 2. control: same manager, same episode, inside the window -> debounce still debounces ---"
 run_pulse
 run_pulse
-check "3 ticks, still one session_missing to the SAME instance" 1 "$(push_count session_missing)"
-check "3 ticks, still one unit_missing to the SAME instance"    1 "$(push_count unit_missing)"
+check "3 ticks inside the re-notify window: one session_missing to the SAME instance" 1 "$(push_count session_missing)"
+check "3 ticks inside the re-notify window: one unit_missing to the SAME instance"    1 "$(push_count unit_missing)"
 
-echo "--- 3. the bug: manager restarts, condition STILL unresolved ---"
+echo "--- 3. past the re-notify window: the same manager is pushed again ---"
+check "session_missing's marker is dated past the window" aged "$(age_marker w1.session_alerted)"
+check "unit_missing's marker is dated past the window"    aged "$(age_marker w2.unit_alerted)"
+run_pulse
+check "past the re-notify window, a second session_missing to the SAME instance" 2 "$(push_count session_missing)"
+check "past the re-notify window, a second unit_missing to the SAME instance"    2 "$(push_count unit_missing)"
+
+echo "--- 4. the bug: manager restarts, condition STILL unresolved ---"
 stop_manager
 start_manager
 run_pulse
 check "restarted manager receives session_missing (THE PROPERTY)" 1 "$(push_count session_missing)"
 check "restarted manager receives unit_missing too"              1 "$(push_count unit_missing)"
 
-echo "--- 4. resolution still re-arms: close the condition, then reopen it ---"
+echo "--- 5. resolution still re-arms: close the condition, then reopen it ---"
 tmux -L "rdrw$$" new-session -d -s "w1" "sleep 600" 2>/dev/null || true
 run_pulse                                   # condition resolved -> debounce_clear
 tmux -L "rdrw$$" kill-server 2>/dev/null || true
