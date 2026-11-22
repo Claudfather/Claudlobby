@@ -549,6 +549,7 @@ here — tracked as #1732.
 The `reload-fleet` timer calls the installation's `claudlobby fleet reload` at `03:30`. The public command uses the committed configuration’s fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
+   Each update names the user scope (`--scope user`), so the directory the command runs from does not choose the installation: with no scope, Claude Code updates the local entry of a directory that has one in `installed_plugins.json`, and the user entry stays as it was (#3088).
 2. Drops `data/.reload-pending` on each **running bot in the committed configuration**. It does not send any keystroke itself.
 
 The timer never composes or enrolls native units. Changes to authored configuration, composed skills, or native enrollment go through the same managed Git updater.

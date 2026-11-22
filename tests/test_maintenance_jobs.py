@@ -287,8 +287,8 @@ class TestReloadFleetNpxPreflight:
                                             plugins=("alpha@Src", "beta@Src"))
         self._run_reload(root, env, plugins)
         calls = self._calls(tmp_path)
-        assert "claude plugin update alpha@Src" in calls
-        assert "claude plugin update beta@Src" in calls
+        assert "claude plugin update --scope user alpha@Src" in calls
+        assert "claude plugin update --scope user beta@Src" in calls
 
 
 def _source_lib_common(tmp_path, snippet, path, **extra_env):

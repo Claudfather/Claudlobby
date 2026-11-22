@@ -3,7 +3,8 @@
 #
 # Steps (under one fleet-wide lock):
 #   1. claude plugin update <each FLEET_PLUGINS_REQUIRED> — refresh the shared
-#      host plugin cache (~/.claude/plugins/cache, shared fleet-wide).
+#      host plugin cache (~/.claude/plugins/cache, shared fleet-wide). Each
+#      update names the user scope (#3088).
 #   2. drop data/.reload-pending on every selected RUNNING bot. keepalive.sh performs the
 #      actual /reload-plugins + /reload-skills at each bot's next idle tick — a
 #      single, idle-gated activation path (fork F2(b) in the update-lifecycle plan).
@@ -232,9 +233,13 @@ _reload_critical() {
         printf '%s not found on PATH=%s — install Claude Code or set CLAUDE_BIN' "$_claude" "$PATH" > "$_reason_file"
         return 1
     fi
+    # --scope user (#3088): with no scope, Claude Code picks the installation
+    # to update from the working directory, which a hand run inherits from its
+    # caller. From a directory with a local entry in installed_plugins.json,
+    # the update landed on that entry and the user entry stayed as it was.
     local _p
     for _p in ${PLUGINS[@]+"${PLUGINS[@]}"}; do
-        _run_step "claude plugin update $_p" "$_claude" plugin update "$_p" || return 1
+        _run_step "claude plugin update $_p" "$_claude" plugin update --scope user "$_p" || return 1
     done
 }
 

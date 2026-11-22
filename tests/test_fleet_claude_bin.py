@@ -264,5 +264,5 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     )
     assert r.returncode == 0, r.stderr + r.stdout
     calls = (tmp_path / "calls.log").read_text().splitlines()
-    assert "staged plugin update somepkg@Somewhere" in calls, calls
+    assert "staged plugin update --scope user somepkg@Somewhere" in calls, calls
     assert not [c for c in calls if c.startswith("claude plugin")], calls
