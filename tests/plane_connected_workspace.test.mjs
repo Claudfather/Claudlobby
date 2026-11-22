@@ -2906,7 +2906,38 @@ test('a launch status that says the launch is no longer reserved lets go of the 
   await l.h.api.run('receipt');
   assert.match(l.h.api.snapshot().note,/^Prepared but not launched\./);
   assert.deepEqual(stepShape(l.panel)[1],['approve','current']);assert.ok(stepButtons(l.panel).includes('Check setup approval'));
-  assert.equal(visible(l.lede()),true);
+  assert.equal(visible(l.lede()),false,'this request was reserved once, so the line that nothing runs yet stays gone');
+  assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+test('the Launch team line stays gone for a request the computer reserved, whatever stops the hand-over, and returns for a new request',async()=>{
+  const refused=()=>Object.assign(new Error('refused'),{status:403});
+  for(const [name,options,after] of [
+    ['health errors',{receipts:[{state:'publish',health_errors:{'example.service':'failed'}}],check:h=>promote(h)},async()=>{}],
+    ['a refused status read',{receipts:[{},refused()]},async l=>{await l.next();}],
+    ['denied',{receipts:[{}]},async l=>{l.h.change({state:'denied',epoch:3});}],
+    ['the pause',{},async l=>{while(l.timers.length)await l.next();assert.match(l.h.api.snapshot().note,/^Automatic checks paused\./);}]]){
+    const l=managedLaunch(options);await l.start();await l.next();await after(l);
+    assert.equal(visible(l.lede()),false,name);
+    if(name==='health errors'){
+      Object.assign(l.h.context,{request:{...l.h.pending,request_id:id(30)},launch_reserved:false});
+      assert.equal(await l.h.api.run('context'),true);
+      assert.equal(visible(l.lede()),true,'a different request has launched nothing');
+    }
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1,name);l.h.api.dispose();
+  }
+});
+test('a slow but healthy hand-over that reaches its pause keeps every finished step, and the approval and launch status can still be checked',async()=>{
+  const l=managedLaunch({check:h=>promote(h)});signedIn(l.h);await l.start();
+  const during=[['connect','done'],['approve','done'],['signin','done'],['goal','done'],['launch','current']];
+  while(l.timers.length)await l.next();
+  assert.equal(l.h.calls.filter(c=>c[0]==='receipt').length,80,'every read said the launch is still reserved');
+  assert.equal(l.h.api.snapshot().note,'Automatic checks paused. Choose Check launch status to look again. Do not launch again.');
+  assert.deepEqual(stepShape(l.panel),during);
+  assert.equal(offered(l.panel,'Check setup approval again'),true);
+  l.h.client.setupReceipt=async input=>({...input,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}});
+  buttonOf(l.panel,'Check launch status').click();await flush();
+  assert.equal(l.h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.deepEqual(stepShape(l.panel),during.map(([name])=>[name,'done']));
   assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
 });
 test('a managed Launch the computer refused holds nothing, even while its status reads get no answer',async()=>{

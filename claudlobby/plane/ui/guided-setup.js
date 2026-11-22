@@ -178,10 +178,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // launchHeld: the request the computer last said holds a Launch (launch_reserved, from a launch status or context read).
   // In the whole view the steps already done stay done while it holds: the hand-over's own connection check moves the
   // connection on, which clears the approval context (connectionChanged). handoffChecking: that check is in flight.
-  // A hand-over that stops short of a finished launch, or a lost connection, lets go of it, so approval is checked again.
-  let launchHeld = null, handoffChecking = false;
+  // An answer that contradicts the launch, or a lost connection, lets go of it, so approval is checked again; a pause of
+  // the automatic checks does not. launchSeen: the request the computer ever said was reserved; never let go, so the
+  // line that nothing runs yet stays hidden for that request.
+  let launchHeld = null, handoffChecking = false, launchSeen = null;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
+  const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) launchSeen = pending; };
   // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
   // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
   // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
@@ -207,12 +210,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       void run('preview-check',{quiet:true}); // its completion schedules the next check
     },PREVIEW_POLL_MS);
   }
-  function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; releaseLaunch(); }
+  function stopHandoff(paused = false) { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; if (!paused) releaseLaunch(); }
   function scheduleHandoff() {
     if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
     if (!handoffUntil) handoffUntil = now() + 600;
     if (now() >= handoffUntil || handoffReads >= 80) {
-      stopHandoff(); note = standalone ? 'Automatic checks paused. Choose Check launch status to look again. Do not launch again.'
+      stopHandoff(true); note = standalone ? 'Automatic checks paused. Choose Check launch status to look again. Do not launch again.'
         : 'Automatic checks paused. Choose Check connection on the computer card, then Check launch status. Do not launch again.'; changed(); return;
     }
     if (!visible() || !active()) return; // Resume the same reads when this view/connection returns.
@@ -362,7 +365,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
         }
-        launchHeld = value.launch_reserved ? pending : null;
+        holdLaunch(value.launch_reserved);
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
@@ -544,7 +547,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
-    launchHeld = value.launch_reserved ? pending : null;
+    holdLaunch(value.launch_reserved);
     const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
     launchedFor = done ? pending : null;
     note = done ? standalone ? 'Team launched. Your team is running on this computer.'
@@ -636,7 +639,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,states.approve === 'done' ? 'Setup approved' : '');
     // Once a launch is held or finished, nothing waits on Launch team any more.
-    m.lede.hidden = holding || launched();
+    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched();
     // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
     setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
