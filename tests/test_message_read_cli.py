@@ -30,17 +30,21 @@ def _generated(monkeypatch, root, bot):
     monkeypatch.setenv("BOT_ID", bot)
 
 
-def _communication(root, number, *, sender, recipient, reply_to=None, privacy="metadata"):
+def _communication(root, number, *, sender, recipient, reply_to=None, privacy="metadata",
+                   occurred_at=None, kind="chat"):
     message_id = f"msg_{number:032x}"
     # Capture is selected by host policy, never by a sender's payload field.
     (root / "state/plane/capture.json").write_text(json.dumps({"*": privacy}))
     payload = {"msg_id": message_id, "sender": sender, "recipient": recipient,
-               "recipient_raw": recipient, "message_class": "chat", "body": "private message body",
+               "recipient_raw": recipient, "message_class": kind, "body": "private message body",
                "privacy": "full"}
     if reply_to is not None:
         payload["reply_to_msg_id"] = reply_to
-    emit_batch(root, [{"event_type": "communication", "fleet": sender.split(":", 1)[1].split("/", 1)[0],
-                       "emitter": "message-read-fixture", "payload": payload}], require_commit=True)
+    event = {"event_type": "communication", "fleet": sender.split(":", 1)[1].split("/", 1)[0],
+             "emitter": "message-read-fixture", "payload": payload}
+    if occurred_at is not None:
+        event["occurred_at"] = occurred_at
+    emit_batch(root, [event], require_commit=True)
     return message_id
 
 
@@ -236,6 +240,58 @@ def test_cross_fleet_participant_capture_and_receipt_proof(active, monkeypatch, 
                               recipient="bot:example/worker", privacy="full")
     assert main(["--root", str(root), "message", "show", captured]) == 0
     assert "private message body" in capsys.readouterr().out
+
+
+def test_message_list_pages_visible_ties_and_filters_without_bodies(active, monkeypatch, capsys):
+    root, host = active
+    at = "2026-09-28T12:00:00Z"
+    parties = {"sender": "bot:other/worker", "recipient": "bot:example/worker", "privacy": "full"}
+    first = _communication(root, 3, occurred_at=at, **parties)
+    second = _communication(root, 2, occurred_at="2026-09-28T08:00:00-04:00", reply_to=first, **parties)
+    _communication(root, 4, occurred_at=at, kind="notice", **parties)
+    after = _communication(root, 5, occurred_at="2026-09-28T12:00:01Z", **parties)
+    _communication(root, 6, occurred_at="2026-09-28T11:00:00.999999Z", **parties)
+    foreign = _communication(root, 7, occurred_at=at, sender="bot:other/worker",
+                             recipient="bot:other/manager")
+    _transmission(root, first, fleet="other", state="pane_submitted")
+    _transmission(root, first, fleet="example", state="received")
+    before = _counts(root)
+    _generated(monkeypatch, root, "worker")
+    window = ("--since", "1h", "--until", "2026-09-28T12:00:01Z")
+    filters = ("--from", "other/worker", "--to", "worker", "--kind", "chat")
+    page = _call(capsys, root, "list", *window, *filters, "--limit", "1")["data"]
+    assert page["source_revision"] == host.snapshot["revision"]
+    item, = page["items"]
+    assert item["message_id"] == first and page["next_cursor"]
+    assert item["receipt_observation"] == "received" and item["integrity_verdict"] == "delivered"
+    assert item["received_at"]
+    shown = _call(capsys, root, "show", first)["data"]["message"]
+    for field in ("message_id", "occurred_at", "sender", "destination", "message_class", "reply_to_message_id"):
+        assert item[field] == shown[field]
+    assert "private message body" in shown["body"]
+    assert "body" not in item and "private message body" not in json.dumps(page)
+    cursor = ("--cursor", page["next_cursor"])
+    page_two = _call(capsys, root, "list", *window, *filters, *cursor, "--limit", "1")["data"]
+    item, = page_two["items"]
+    assert item["message_id"] == second and item["reply_to_message_id"] == first
+    assert item["receipt_observation"] == "missing" and item["integrity_verdict"] == "unknown"
+    assert item["received_at"] is None and page_two["next_cursor"] is None
+    assert _call(capsys, root, "list", *window, *cursor, expected=2)["error"]["code"] == "invalid_argument"
+    assert _call(capsys, root, "list", *window, "--cursor", "broken!", expected=2)["error"]["code"] == "invalid_argument"
+    assert _call(capsys, root, "show", after)["ok"]  # readable, but past the window
+
+    _generated(monkeypatch, root, "manager")
+    assert _call(capsys, root, "list", *window, *filters)["data"]["items"] == []
+    assert _call(capsys, root, "list", *window, *filters, *cursor, expected=2)["error"]["code"] == "invalid_argument"
+    for denied in (first, foreign):
+        assert _call(capsys, root, "show", denied, expected=3)["error"]["code"] == "not_found"
+
+    _generated(monkeypatch, root, "worker")
+    assert main(["--root", str(root), "message", "list", *window, "--to", "other/manager"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["items"] == []
+    for flags in (("--since", "8d"), ("--since", "bad"), ("--limit", "101"), ("--kind", "bad")):
+        assert _call(capsys, root, "list", *window, *flags, expected=2)["error"]["code"] == "invalid_argument"
+    assert _counts(root) == before
 
 
 def test_reply_wait_facade_and_read_only_context_refusal(active, monkeypatch, capsys):  # noqa: F811

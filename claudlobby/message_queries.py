@@ -7,9 +7,10 @@ become visible. Transmission integrity comes only from DELIVERY_STATUS_SQL.
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
@@ -23,7 +24,7 @@ from typing import Literal, TYPE_CHECKING
 from .plane.db import connect_ro, db_file
 from .plane.ids import ID_PATTERNS
 from .plane.migrations import DowngradeError
-from .plane.queries import DELIVERY_STATUS_SQL, RECEIPT_HISTORY_SQL
+from .plane.queries import DELIVERY_STATUS_SQL, EVENT_OCCURRED_AT_SQL, RECEIPT_HISTORY_SQL
 from .plane.queue_names import may_hold_transmission
 from .plane.queue_paths import scan_queue_dir, scan_spool, staged_dir, staged_payload
 from .plane.schema_state import PendingMigrationError, require_current_schema
@@ -45,6 +46,7 @@ DIRECT_REPLY_SQL = (
 # followed by 'g' closes the range.
 MESSAGE_PREFIX_SQL = ("SELECT msg_id FROM communications WHERE msg_id >= ? AND msg_id < ?"
                       " ORDER BY msg_id LIMIT ?")
+_LIST_WINDOW = timedelta(days=7)
 
 
 class MessageQueryError(ValueError):
@@ -330,8 +332,8 @@ def _identity(conn, uid, alias):
     return MessageIdentity(uid, alias, fleet_uid)
 
 
-def _show(conn, ctx, message_id):
-    row = conn.execute("SELECT * FROM communications WHERE msg_id=?", (message_id,)).fetchone()
+def _visible_parties(conn, ctx, row, message_id):
+    """The scope and identity checks shared by point and list reads."""
     missing = MessageNotFoundError(f"message not found: {message_id}")
     if row is None or row["host_uid"] != ctx.host_uid:
         raise missing
@@ -348,6 +350,12 @@ def _show(conn, ctx, message_id):
     if operator and ctx.fleet_uid not in (row["fleet_uid"], sender.fleet_uid,
                                           destination.fleet_uid if destination else None):
         raise missing
+    return sender, destination
+
+
+def _show(conn, ctx, message_id):
+    row = conn.execute("SELECT * FROM communications WHERE msg_id=?", (message_id,)).fetchone()
+    sender, destination = _visible_parties(conn, ctx, row, message_id)
     body = row["body"] if row["privacy"] != "metadata" else None
     content = ("withheld" if body is None else "partial"
                if row["privacy"] == "preview" or row["truncated"] else "captured")
@@ -410,6 +418,185 @@ def show_message(ctx: TaskOperationContext, message_id: str) -> Message:
     _message_id(message_id)
     with _snapshot(ctx) as conn:
         return _show(conn, ctx, message_id)
+
+
+def _utc_key(value: str) -> str | None:
+    """Sort Plane timestamps by instant, including historical offsets and fractions."""
+    try:
+        # Python 3.10 only parses 3- or 6-digit fractional seconds.
+        value = re.sub(r"(\d{2}:\d{2}:\d{2})[.,](\d+)",
+                       lambda m: m[1] + "." + m[2][:6].ljust(6, "0"), value)
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if instant.tzinfo is not None:
+            return instant.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _list_cursor(token, scope):
+    if token is None:
+        return None, None
+    try:
+        if not 1 <= len(token) <= 4096:
+            raise ValueError
+        raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+        version, held_scope, end, instant, message_id = json.loads(raw)
+        if type(version) is not int or version != 1 or held_scope != scope:
+            raise ValueError
+        if not isinstance(end, str) or not isinstance(instant, str) or _utc_key(end) != end or _utc_key(instant) != instant:
+            raise ValueError
+        _message_id(message_id)
+        return end, (instant, message_id)
+    except (ValueError, TypeError, AttributeError, RecursionError) as exc:
+        raise MessageQueryError("invalid message cursor or changed caller, fleet, window, or filters") from exc
+
+
+def _list_window(since, until, cursor_end):
+    end = _utc_key(until) if until is not None else cursor_end
+    if until is not None and end is None:
+        raise MessageQueryError("--until requires an ISO timestamp with an offset")
+    end = end or datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    upper = datetime.fromisoformat(end)
+    duration = re.fullmatch(r"([0-9]{1,4})([mhd])", since)
+    try:
+        if duration:
+            units = {"m": "minutes", "h": "hours", "d": "days"}
+            lower = upper - timedelta(**{units[duration[2]]: int(duration[1])})
+        else:
+            start = _utc_key(since)
+            if start is None:
+                raise MessageQueryError("--since requires an ISO timestamp with an offset or a duration such as 72h")
+            lower = datetime.fromisoformat(start)
+    except OverflowError as exc:
+        raise MessageQueryError("message time window is out of range") from exc
+    if not timedelta(0) < upper - lower <= _LIST_WINDOW:
+        raise MessageQueryError("message time window must be positive and at most 7 days")
+    return lower.isoformat(timespec="microseconds"), end
+
+
+def _list_party(conn, ctx, value):
+    if value is None or re.fullmatch(r"(?:bot:[^\s:/]+/[^\s:/]+|(?:human|system):[^\s:/]+)", value):
+        return value
+    if re.fullmatch(r"[^\s:/]+/[^\s:/]+", value):
+        return "bot:" + value
+    if re.fullmatch(r"[^\s:/]+", value):
+        fleet = conn.execute("SELECT alias FROM identity_registry WHERE kind='fleet' AND uid=?",
+                             (ctx.fleet_uid,)).fetchone()
+        if fleet is None:
+            raise MessageUnavailableError("selected fleet identity is unavailable")
+        return f"bot:{fleet[0]}/{value}"
+    raise MessageQueryError("--from and --to require a bot name or canonical actor alias")
+
+
+def _list_rows(conn, ctx, start, end, after, sender, recipient, kind, limit):
+    conn.create_function("message_utc_key", 1, _utc_key, deterministic=True)
+    clauses = ["host_uid=?", "sort_at>=?", "sort_at<?"]
+    params = [ctx.host_uid, start, end]
+    if ctx.caller.alias.startswith("bot:"):
+        clauses.append("(sender_uid=? OR recipient_uid=?)")
+        params.extend((ctx.caller.uid, ctx.caller.uid))
+    for column, value in (("sender_alias", sender), ("recipient_alias", recipient), ("message_class", kind)):
+        if value is not None:
+            clauses.append(f"{column}=?")
+            params.append(value)
+    if after is not None:
+        clauses.append("(sort_at, msg_id) < (?, ?)")
+        params.extend(after)
+    rows = conn.execute(
+        "SELECT msg_id, occurred_at, host_uid, fleet_uid, sender_uid, sender_alias,"
+        " recipient_uid, recipient_alias, message_class, reply_to_msg_id,"
+        " message_utc_key(occurred_at) AS sort_at FROM communications WHERE "
+        + " AND ".join(clauses) + " ORDER BY sort_at DESC, msg_id DESC", params,
+    )
+    items = []
+    for row in rows:
+        try:
+            parties = _visible_parties(conn, ctx, row, row["msg_id"])
+        except MessageNotFoundError:
+            continue
+        items.append((row, *parties))
+        if len(items) > limit:
+            break
+    return items
+
+
+def _delivery_proofs(conn, message_ids):
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" for _ in message_ids)
+    return {row["msg_id"]: row for row in
+            conn.execute(DELIVERY_STATUS_SQL.format(ph=placeholders), message_ids)}
+
+
+def _proof_state(proof, *, history, queued):
+    received = proof["received_ingest_seq"] is not None
+    observation = ("received" if received else queued if queued != "absent" else
+                   "missing" if history else "no_history")
+    verdict = proof["delivery"] or ("unconfirmed" if received else "unknown")
+    return observation, verdict
+
+
+def list_messages(ctx: TaskOperationContext, *, since: str, until: str | None, sender: str | None,
+                  recipient: str | None, kind: str | None, limit: int, cursor: str | None,
+                  selection: dict) -> dict:
+    """List visible metadata, then observe delivery evidence for this page only."""
+    from .plane.contracts import MESSAGE_CLASSES
+
+    if not 1 <= limit <= 100:
+        raise MessageQueryError("--limit must be from 1 to 100")
+    if kind is not None and kind not in MESSAGE_CLASSES:
+        raise MessageQueryError("--kind must name a recorded message class")
+    scope = [str(ctx.root), ctx.host_uid, ctx.fleet_uid, ctx.caller.uid, selection,
+             since, until, sender, recipient, kind]
+    cursor_end, after = _list_cursor(cursor, scope)
+    start, end = _list_window(since, until, cursor_end)
+    if after is not None and (cursor_end != end or not start <= after[0] < end):
+        raise MessageQueryError("message cursor falls outside the requested time window")
+    with _snapshot(ctx) as conn:
+        page = _list_rows(conn, ctx, start, end, after, _list_party(conn, ctx, sender),
+                          _list_party(conn, ctx, recipient), kind, limit)
+        proofs = _delivery_proofs(conn, [row["msg_id"] for row, _, target in page[:limit]
+                                         if target is not None and target.fleet_uid is not None])
+    queued = {}
+    for row, _, _ in page[:limit]:
+        message_id = row["msg_id"]
+        if message_id in proofs and proofs[message_id]["received_ingest_seq"] is None:
+            instant = datetime.fromisoformat(row["sort_at"]).timestamp()
+            queued[message_id] = queued_transmission_proof(ctx.root, message_id, written_after=instant).state
+
+    items = []
+    with _snapshot(ctx) as conn:
+        # Proof can move from queue to SQLite during the scan. Check committed
+        # proof again before reporting a pending, unavailable, or missing receipt.
+        proofs.update(_delivery_proofs(conn, list(queued)))
+        histories = {}
+        for row, author, target in page[:limit]:
+            message_id = row["msg_id"]
+            observation, verdict, received_at = "unavailable", "unknown", None
+            if target is not None and target.alias.startswith("human:"):
+                observation = verdict = "not_applicable"
+            if message_id in proofs:
+                proof = proofs[message_id]
+                received_seq = proof["received_ingest_seq"]
+                queue_state = queued.get(message_id, "absent")
+                if received_seq is not None:
+                    received_at = conn.execute(EVENT_OCCURRED_AT_SQL, (received_seq,)).fetchone()[0]
+                elif queue_state == "absent" and target.uid not in histories:
+                    histories[target.uid] = bool(conn.execute(RECEIPT_HISTORY_SQL, (message_id,)).fetchone()[0])
+                observation, verdict = _proof_state(proof, history=histories.get(target.uid), queued=queue_state)
+            items.append({"message_id": message_id, "occurred_at": row["occurred_at"],
+                          "sender": asdict(author), "destination": asdict(target) if target else None,
+                          "message_class": row["message_class"], "reply_to_message_id": row["reply_to_msg_id"],
+                          "receipt_observation": observation, "integrity_verdict": verdict,
+                          "received_at": received_at})
+
+    next_cursor = None
+    if len(page) > limit:
+        last = page[limit - 1][0]
+        raw = json.dumps([1, scope, end, last["sort_at"], last["msg_id"]], separators=(",", ":")).encode()
+        next_cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return {"items": items, "next_cursor": next_cursor}
 
 
 def _destination(conn, ctx, message, supplied):
@@ -488,9 +675,9 @@ def receipt(ctx: TaskOperationContext, message_id: str, *, destination: str | No
             return ReceiptObservation(message_id, str(ctx.root), message.sender if message else None,
                 message.destination if message else None, "unavailable", "unknown", 6, "unavailable", str(exc))
         # Uncommitted or unobservable proof is neither missing nor absent history.
-        observation = ("received" if received else "unavailable" if queued.state != "absent" else
-                       "missing" if history else "no_history")
-        verdict = proof["delivery"] or ("unconfirmed" if received else "unknown")
+        observation, verdict = _proof_state(proof, history=history, queued=queued.state)
+        if observation == "pending":
+            observation = "unavailable"
         if verdict in ("delivered", "truncated", "altered"):
             code = None if verdict == "delivered" else "receipt_mismatch"
             reason = None if code is None else f"receipt {message_id} is {verdict}; delivery not verified"
