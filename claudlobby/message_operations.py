@@ -61,6 +61,7 @@ class MessageSendResult:
     retryable: bool = False
     alert: object | None = None
     native_returncode: int | None = None  # the transport's, when it observed one
+    transport_reason: str | None = None  # the transport's words for a failed or unknown send
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,24 @@ def _record(root: Path, route: MessageRoute, raw: dict | tuple[dict, ...], fact,
 
 def _observation(result: TransportOutcome) -> TransportObservation:
     return TransportObservation(result.status, result.wire_sha256, result.wire_bytes,
-                                result.native_returncode)
+                                result.native_returncode, result.reason)
+
+
+_NOT_IDLE = {"busy": "recipient pane was busy; nothing was sent",
+             "unknown": "recipient pane could not be read; nothing was sent"}
+
+
+def _idle_only(transport: Callable) -> Callable:
+    """``transport``, sent only into an idle pane: just before its one native send,
+    read_box asks whether a turn is running there. A busy or unreadable pane is a
+    failed attempt that typed nothing. The native send keeps its own refusals of a
+    box holding text or a menu. A report's uncertain retry sends through this."""
+    def send(package, destination, **options):
+        box = _native_transport.read_box(package, destination, busy=True)
+        if box in _NOT_IDLE:
+            return TransportOutcome("failed", reason=_NOT_IDLE[box])
+        return transport(package, destination, **options)
+    return send
 
 
 def _retry_has_no_submission_proof(root: Path, route: MessageRoute,
@@ -330,13 +348,15 @@ def transmit_native_attempt(route: MessageRoute, package: PackageResources,
 def send_committed_native_attempt(route: MessageRoute, package: PackageResources,
                                   store: RequestStore, receipt: RequestReceipt,
                                   envelope: RenderedNativeEnvelope, *, request_id: str,
-                                  retry_uncertain: bool = False,
+                                  retry_uncertain: bool = False, idle_only: bool = False,
                                   transport: Callable = native_send) -> NativeAttemptResult:
     """Notify after a proved task/report batch, using the caller's held request store.
 
     The caller commits the recording batch under its task lock, then releases
     that lock before entering here. A failed notification never replays that
     batch. No request lock is acquired here, and no O1 best-effort path applies.
+    With ``idle_only`` (a report's uncertain retry) the send types only into an
+    idle pane (_idle_only).
     """
     if (not isinstance(store, RequestStore) or not isinstance(receipt, RequestReceipt)
             or receipt.request_id != request_id or receipt.intent.operation not in {
@@ -373,6 +393,8 @@ def send_committed_native_attempt(route: MessageRoute, package: PackageResources
                                          persistence=persistence, strict=True)
     at = datetime.now(timezone.utc)
     parties = {route.caller.alias: route.caller.uid, route.peer.alias: route.peer.uid}
+    if idle_only:
+        transport = _idle_only(transport)
     if intent.operation == "task.feedback":
         # JSON quoting can expand the accepted 16 KiB comment to about 96 KiB.
         # Allow the native lock/chunk/display budgets without changing pacing,
@@ -600,7 +622,9 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                                  code, 11 if degraded else (0 if delivery == "submitted" else 5),
                                  alert=alert,
                                  native_returncode=(native_result.observation.native_returncode
-                                                    if native_result.observation else None))
+                                                    if native_result.observation else None),
+                                 transport_reason=(native_result.observation.reason
+                                                   if native_result.observation else None))
 
     # Distinguish unavailable request persistence from an existing receipt.
     # A failed read after lock acquisition never becomes a fresh send.
@@ -637,12 +661,15 @@ def send_unlinked_report(route: MessageRoute, package: PackageResources, report:
                          transport: Callable = native_send,
                          notify: Callable = notify_recording_degraded,
                          clear: Callable = clear_recording_degraded) -> MessageSendResult:
-    """Report to this fleet's manager without consulting or changing task state."""
+    """Report to this fleet's manager without consulting or changing task state.
+
+    Its uncertain retry types only into an idle pane (_idle_only)."""
     if not isinstance(report, ReportPayload):
         raise MessageConflict("typed report payload required")
     return send_message(route, package, MessageBody(report.to_body()), request_id=request_id,
                         retry_uncertain=retry_uncertain, trusted_tiers=trusted_tiers,
-                        transport=transport, notify=notify, clear=clear, _report=report)
+                        transport=_idle_only(transport) if retry_uncertain else transport,
+                        notify=notify, clear=clear, _report=report)
 
 
 def record_reply_to_human(route: HumanReplyRoute, package: PackageResources, body: MessageBody, *,

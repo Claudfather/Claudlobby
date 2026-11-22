@@ -346,8 +346,13 @@ to inspect or reconcile the *same* intended operation; use `claudlobby --json
 request show UUID` to inspect its recorded outcome. If a report commits the
 task transition but manager notification fails, that transition still stands:
 inspect the returned recording and notification outcomes, and do not submit a
-second report under a new UUID. The `--by` field records provenance; it does
-not grant another actor's authority.
+second report under a new UUID. A report rerun with its UUID and
+`--retry-uncertain`, linked or unlinked, makes one new notification attempt
+under the same message ID: refused once a submission is recorded, and typing
+nothing while the manager's pane is busy or unreadable. A plain rerun sends
+nothing; `transport_reason` and `request show` carry the transport's reason.
+The `--by` field records provenance; it does not grant another actor's
+authority.
 
 When there is no assignment to report against, submit an explicitly unlinked
 report to your own fleet manager. It sends a report message and does not

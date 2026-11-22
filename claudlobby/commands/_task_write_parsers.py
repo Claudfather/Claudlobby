@@ -156,4 +156,5 @@ def register_task_write_subparsers(task_children, assignment_children):
         reporting.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
         reporting.add_argument("--summary" if verb in ("progress", "complete") else "--reason",
                                required=True, metavar="TEXT")
+        reporting.add_argument("--retry-uncertain", action="store_true")
         add_report_flags(reporting)

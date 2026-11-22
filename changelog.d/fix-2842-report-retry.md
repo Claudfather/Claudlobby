@@ -1,0 +1,3 @@
+### Added — report verbs take `--retry-uncertain`, and a failed send says why (#2842)
+
+`assignment progress`, `block`, `return`, `complete` and `fail` now take `--retry-uncertain`, as `fleet reports submit` already did: the same command and request ID make one new attempt at the manager notification, under the same message ID, and it is refused once a submission is recorded. A plain rerun still sends nothing. A report's retry, linked or unlinked, types only into an idle pane: while the manager's pane is busy or cannot be read, the attempt fails and nothing is typed. The transport's reason for a failed or unknown send now reaches the command's `transport_reason` and `request show`, where the request used to record only the status.

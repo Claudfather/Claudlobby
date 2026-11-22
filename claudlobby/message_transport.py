@@ -439,12 +439,15 @@ def press_held_enter(package: PackageResources, destination: TransportDestinatio
 
 # One read of the recipient's box just before a send (#2105, chip identity): does
 # it already hold text, a person's or an earlier delivery's? The same exact pane
-# and the shared pane_is_held as the repair's look. Nothing is sent.
+# and the shared pane_is_held as the repair's look. Nothing is sent. Asked with
+# busy ($4), it answers busy first while the shared pane_is_busy sees a running
+# turn; asked without, its answer is the same whether a turn runs or not.
 _BOX_SCRIPT = r'''
 set -uo pipefail
 . "$1" >/dev/null 2>&1 || { printf 'box-v1\tunknown\n'; exit 3; }
 pane=$(bot_tmux "$2" capture-pane -p -t "=$3:" 2>/dev/null) || { printf 'box-v1\tunknown\n'; _lc_cleanup >/dev/null 2>&1; exit 3; }
-if pane_is_held "$pane"; then printf 'box-v1\theld\n'; else printf 'box-v1\tempty\n'; fi
+if [ "${4:-}" = busy ] && pane_is_busy "$pane"; then printf 'box-v1\tbusy\n'
+elif pane_is_held "$pane"; then printf 'box-v1\theld\n'; else printf 'box-v1\tempty\n'; fi
 _lc_cleanup >/dev/null 2>&1
 exit 0
 '''
@@ -453,11 +456,13 @@ _BOX_STATES = frozenset({"empty", "held", "unknown"})
 
 
 def read_box(package: PackageResources, destination: TransportDestination, *,
-             timeout: float = 5, runner=None) -> str:
+             timeout: float = 5, runner=None, busy: bool = False) -> str:
     """``empty`` when the recipient's box holds no text before a send, ``held`` when
     it does, ``unknown`` when it could not be read. The owner reads it just before
     its send and hands it to press_held_enter: a lone paste chip afterwards can then
-    only be this send's, or a sender's racing between the read and the keystrokes."""
+    only be this send's, or a sender's racing between the read and the keystrokes.
+    With ``busy`` it answers ``busy`` first while a turn runs, for a sender that types
+    only into an idle pane; without it, a running turn changes nothing."""
     if not isinstance(destination, TransportDestination):
         raise ValueError("a frozen TransportDestination is required")
     if isinstance(timeout, bool) or not 0 < timeout <= 30:
@@ -470,13 +475,14 @@ def read_box(package: PackageResources, destination: TransportDestination, *,
            "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
            "TMPDIR": str(destination.tmux_tmpdir), "PLANE_EMIT_DISABLED": "1"}
     command = ["/bin/bash", "--noprofile", "--norc", "-c", _BOX_SCRIPT, "message-box-read",
-               str(native), destination.socket, destination.session]
+               str(native), destination.socket, destination.session, *(["busy"] if busy else [])]
     try:
         result = (runner or _run)(command, input=b"", env=env, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError, _StartedFailure):
         return "unknown"
-    found = re.fullmatch(rb"box-v1\t(empty|held|unknown)\n", result.stdout or b"")
-    return found.group(1).decode() if found else "unknown"
+    found = re.fullmatch(rb"box-v1\t([a-z]+)\n", result.stdout or b"")
+    answer = found.group(1).decode() if found else "unknown"
+    return answer if answer in _BOX_STATES or (busy and answer == "busy") else "unknown"
 
 
 def _repair_line(output: bytes | None) -> tuple[str, bool, str | None] | None:

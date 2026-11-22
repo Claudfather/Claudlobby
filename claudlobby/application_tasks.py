@@ -36,14 +36,14 @@ def _nudge_envelope(result, route, by, reason):
 
 
 def _committed_notification(ctx, route, package, result, envelope, *, send_on_replay=True,
-                            allow_enter_repair=True):
+                            allow_enter_repair=True, retry_uncertain=False):
     from .message_operations import (RenderedNativeEnvelope, read_recipient_box,
                                       repair_held_delivery, send_committed_native_attempt)
     from .message_queries import receipt as observe_receipt
-    from .request_receipts import locked_request
+    from .request_receipts import ReceiptConflict, locked_request
 
     data = {"message_id": result.message_id, "recipient_uid": result.recipient_uid,
-            "notification": "unknown", "transport": "unknown",
+            "notification": "unknown", "transport": "unknown", "transport_reason": None,
             "transmission_recording": "unknown", "request_persisted": None,
             "receipt_observation": None, "integrity_verdict": None}
     native_returncode = None
@@ -70,6 +70,7 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                 observation = prior.observation
                 data.update(transport=observation.status if observation else "unknown",
                             notification=observation.status if observation else "unknown",
+                            transport_reason=observation.reason if observation else None,
                             transmission_recording=prior.recording_status,
                             request_persisted=True)
             else:
@@ -79,9 +80,11 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
                 attempt = send_committed_native_attempt(
                     route, package, store, frozen,
                     RenderedNativeEnvelope(result.message_id, envelope),
-                    request_id=result.request_id)
+                    request_id=result.request_id, retry_uncertain=retry_uncertain,
+                    idle_only=retry_uncertain)
                 data.update(transport=attempt.delivery,
                             notification=attempt.delivery,
+                            transport_reason=attempt.observation.reason if attempt.observation else None,
                             transmission_recording=attempt.transmission_recording,
                             request_persisted=attempt.request_persisted)
                 native_returncode = (attempt.observation.native_returncode
@@ -112,7 +115,12 @@ def _committed_notification(ctx, route, package, result, envelope, *, send_on_re
             data["notification"] = "received"
         elif observed.integrity_verdict in ("truncated", "altered"):
             data["notification"] = "failed"
-    except Exception:
+    except Exception as exc:
+        if retry_uncertain and result.replayed and isinstance(exc, ReceiptConflict):
+            # The retry of a recorded report was refused before any native effect (a
+            # recorded submission, or a request that changed): the caller answers
+            # conflict, as message send does.
+            raise
         # An error after the atomic task commit cannot erase its result. A
         # reservation or native send may already have happened; never retry it.
         data["notification"] = "unknown"
