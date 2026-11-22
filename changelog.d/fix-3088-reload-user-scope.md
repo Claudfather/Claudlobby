@@ -1,0 +1,3 @@
+### Fixed — plugin updates name the user scope, wherever a reload or a bot start runs them (#3088)
+
+`reload-fleet.sh` and `plugin_ensure` now run `claude plugin update --scope user`. With no scope, Claude Code chose the installation to update from the working directory. A hand `fleet reload` run from a directory with a local entry in `installed_plugins.json` updated that entry, reported success and marked the bots for reload, while the user entry kept the old version. A bot start runs the update from the bot's directory, so a bot whose directory has a local entry did the same. A required plugin with no user-scope installation now fails its update (`is not installed at scope user`), which a reload reports as `reload_failed`.

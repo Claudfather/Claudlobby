@@ -5502,6 +5502,13 @@ PY
 # fails the locked section BEFORE the update runs, so without the second
 # guard such a host would update nothing and log nothing.
 #
+# Every update names the user scope (#3088). start-bot.sh changes into the
+# bot's directory before its Step 2 loop, and with no --scope Claude Code
+# picks the installation to update from the working directory: where that
+# directory has a local entry in installed_plugins.json, the update lands on
+# it and the user entry stays as it was. The install needs no flag:
+# `claude plugin install` installs for the user scope by default.
+#
 # Called once per plugin from the Step 2 loop of start-bot.sh. Never
 # propagates a failure -- a plugin-manager hiccup (network blip, cold
 # marketplace cache) must not abort the boot it is called from -- and is
@@ -5525,7 +5532,7 @@ plugin_ensure() {
 
     if [ "$once_flag" != "1" ]; then
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
         return 0
     fi
 
@@ -5536,7 +5543,7 @@ plugin_ensure() {
     epoch="$(resolve_boot_epoch 2>/dev/null || true)"
     if [ -z "$epoch" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (boot epoch unresolvable) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
         return 0
     fi
 
@@ -5549,7 +5556,7 @@ plugin_ensure() {
     lockfile="$boot_dir/plugins.lock"
     if ! mkdir -p "$boot_dir" 2>/dev/null || [ ! -w "$boot_dir" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (state dir unwritable: $boot_dir) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1 || true
+        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
         return 0
     fi
 
@@ -5563,7 +5570,7 @@ plugin_ensure() {
             return 0
         fi
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        if with_timeout 30 "$claude_bin" plugin update "$plugin" >> "$log" 2>&1; then
+        if with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1; then
             touch "$stamp" 2>/dev/null || true
             return 0
         fi
