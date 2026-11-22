@@ -3233,9 +3233,9 @@ test('on a bridged page the five-step panel stays to its "Team launched" ending 
 });
 // A page opened again after this browser sent a Launch (or only a Preview): storage holds the request, the computer is
 // ready, and its parts read says what became of the Launch.
-async function reopened(t,{team,receipt,teams=1}) {
+async function reopened(t,{team,receipt,teams=1,stored=true}) {
   landing(t); // stubs this test's localStorage
-  globalThis.localStorage.setItem(`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`,
+  if(stored)globalThis.localStorage.setItem(`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`,
     JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]}));
   const l=landing(t);await l.workspace.checkAccount();await flush();
   const setup=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
@@ -3245,18 +3245,41 @@ async function reopened(t,{team,receipt,teams=1}) {
   descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
   assert.equal(l.workspace.snapshot().computers[0].state,'ready');assert.equal(stateCalls(l.h).length,1);
   return {l,panel,note:()=>descendants(panel).find(n=>n.className==='setup-note').textContent,
-    button:text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text&&visible(n))};
+    button:text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text&&visible(n)),
+    lede:()=>visible(descendants(panel).find(n=>n.textContent==='Nothing runs on this computer until you choose Launch team.'))};
 }
 for(const [name,receipt,said] of [['in progress',{state:'quiesce'},/^Launch received\./],['needing attention',{state:'unknown'},/^The launch needs attention/]])
   test(`a page opened again while the computer's Launch is ${name} keeps the five-step panel and Check launch status`,async t=>{
-    const {l,panel,note,button}=await reopened(t,{team:'launch_unfinished',receipt});
+    const {l,panel,note,button,lede}=await reopened(t,{team:'launch_unfinished',receipt});
     assert.equal(l.panel(),panel,'the panel stays');assert.equal(partsOf(l.host)?.hidden??true,true,'the parts do not replace it');
+    // Before any read, the steps say only what the computer said: a Launch is under way, so nothing waits on Launch team
+    // and the approval it ran under is shown done. Nothing was read or sent for it.
+    assert.equal(lede(),false,'no "Nothing runs on this computer" line while a Launch is under way');
+    assert.deepEqual(stepShape(panel),[['connect','done'],['approve','done'],['goal','done'],['launch','current']]);
+    assert.ok(descendants(panel).some(n=>n.textContent==='Setup approved'&&visible(n)));
+    assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state'],'only the parts read');
     button('Check launch status').click();await flush();
     assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/receipt')).length,1);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,0,'never a second Launch');
     assert.match(note(),said);assert.equal(l.panel(),panel);
     l.frame.view.listeners.get('focus')();await flush();
     assert.equal(stateCalls(l.h).length,1,'once this page follows the Launch, nothing reads the parts');
   });
+test('another browser opening the computer mid-Launch is not stuck: Check setup approval, then Check launch status',async t=>{
+  const {l,panel,note,button,lede}=await reopened(t,{team:'launch_unfinished',stored:false,receipt:{state:'quiesce'}});
+  const setup=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
+  l.h.overrides.set(setup+'context',()=>reply(200,{...landingContext,provider_signin:false,request:settingUp,launch_reserved:true}));
+  assert.equal(l.panel(),panel,'the panel stays');assert.equal(lede(),false,'no "Nothing runs" line while a Launch is under way');
+  // With no request of its own, this browser shows approval as a step to check: Check setup approval leads.
+  assert.deepEqual(stepShape(panel).slice(0,2),[['connect','done'],['approve','current']]);
+  assert.equal(button('Check launch status'),undefined,'nothing to check a launch by yet');
+  button('Check setup approval').click();await flush();
+  assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state','context'],'one read; nothing sent');
+  assert.deepEqual(stepShape(panel),[['connect','done'],['approve','done'],['goal','done'],['launch','current']]);
+  assert.match(note(),/^Setup was already submitted from this browser\./,'the context answer names the request');
+  button('Check launch status').click();await flush();
+  assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state','context','receipt']);
+  assert.match(note(),/^Launch received\./);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,0,'never a Launch');
+});
 test('a page opened again after the computer finished the Launch shows the parts',async t=>{
   const {l}=await reopened(t,{team:'none'});
   assert.equal(partsOf(l.host)?.hidden,false);assert.equal(l.panel(),undefined);

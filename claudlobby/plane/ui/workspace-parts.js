@@ -126,6 +126,6 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
     teams:() => started() ? current.teams : null,
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention).
-    launchUnfinished:() => started() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
+    launchUnfinished:() => live() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
     dispose() { disposed = true; current = null; mount = null; }});
 }

@@ -489,6 +489,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
       const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
         && !(browserTransport && (setup.following() || parts.launchUnfinished()));
+      // What the computer says of a Launch is shown in the panel's steps; it sends nothing and resumes nothing.
+      if (browserTransport) setup.showLaunchUnderway?.(parts.launchUnfinished());
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead

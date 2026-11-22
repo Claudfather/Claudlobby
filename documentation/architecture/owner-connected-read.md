@@ -346,7 +346,12 @@ and while that panel follows a launch in this page's lifetime: once this page
 sent a Launch or a launch status check, or followed a managed hand-off, the
 panel stays to its ending and no parts read is sent. A page opened again keeps
 the panel, with its Check launch status, while the parts read says
-`launch_unfinished`; once the Launch is done the parts show. A request kept in
+`launch_unfinished`; once the Launch is done the parts show. Before that page
+reads anything, the panel shows what the computer said, for display only: the
+line that nothing runs yet is hidden, and with this browser's own request kept
+the approval step shows done. It sends, resumes and follows nothing. A browser
+with no request of its own shows approval as the step to check; Check setup
+approval reads the request, and Check launch status then follows it. A request kept in
 the browser's storage does not hold the panel by itself, so a Preview nothing
 launched never does.
 A refusal, a lost answer, an answer the pane cannot use, or a computer whose core

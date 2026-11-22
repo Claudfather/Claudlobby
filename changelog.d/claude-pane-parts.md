@@ -16,7 +16,8 @@ shown. On a bridged page the five-step panel stays the view whenever the read
 has no answer or says not started, and, with no parts read sent, while it
 follows a Launch this page sent or a hand-off it followed, or the read says a
 dispatched Launch has not finished cleanly (so a reloaded page keeps Check
-launch status); a computer in
+launch status, and shows no "nothing runs yet" line or unapproved step for it
+before reading anything); a computer in
 first-team setup is never sent the read, and one whose core predates it shows
 what it does today. The connected document may carry `part_names` for the
 provider, bots and helper (never a computer), checked strictly and dropped whole

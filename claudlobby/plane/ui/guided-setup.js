@@ -185,6 +185,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // the automatic checks does not. launchSeen: the request the computer ever said was reserved; never let go, so the
   // line that nothing runs yet stays hidden for that request.
   let launchHeld = null, handoffChecking = false, launchSeen = null;
+  // launchUnderway: the computer's parts read says a Launch it dispatched has not finished (the entry passes it on).
+  // Presentation only, for a page opened again before it read anything: the line that nothing runs yet is hidden,
+  // and with this browser's own request kept, the approval is shown done. It sends, resumes and follows nothing.
+  let launchUnderway = false;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
   const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) launchSeen = pending; };
@@ -601,7 +605,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (!mount) return;
     const m = mount, live = active(), time = now();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
-    const holding = launchHolding(), approved = holding || !!context && context.expires_at > time;
+    const holding = launchHolding(), underway = standalone && launchUnderway;
+    const approved = holding || underway && !!pending || !!context && context.expires_at > time;
     // It keeps a sign-in this page saw connected for the same approval.
     const signinKnown = context?.provider_signin === true || holding && !context && signinState === 'connected'
       && signinAttempt?.generation === pending.generation;
@@ -644,7 +649,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,states.approve === 'done' ? 'Setup approved' : '');
     // Once a launch is held or finished, nothing waits on Launch team any more.
-    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched();
+    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched() || underway;
     // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
     setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
@@ -849,5 +854,6 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (JSON.stringify(next) === JSON.stringify(connectView)) return;
       connectView = next; if (!disposed) render();
     },
+    showLaunchUnderway(value) { if (!!value === launchUnderway) return; launchUnderway = !!value; if (!disposed) render(); },
     dispose() { disposed = true; stopHandoff(); stopSigninPoll(); stopPreviewPoll(); epoch++; if (mount) mount.code.value=''; signinUrl=null; mount = null; }});
 }
