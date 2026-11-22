@@ -349,8 +349,8 @@ inspect the returned recording and notification outcomes, and do not submit a
 second report under a new UUID. A report rerun with its UUID and
 `--retry-uncertain`, linked or unlinked, makes one new notification attempt
 under the same message ID: refused once a submission is recorded, and typing
-nothing while the manager's pane is busy or unreadable. A plain rerun sends
-nothing; `transport_reason` and `request show` carry the transport's reason.
+nothing while the manager's pane is busy or unreadable. A plain rerun repeats
+no attempt; `transport_reason` and `request show` carry the transport's reason.
 The `--by` field records provenance; it does not grant another actor's
 authority.
 
