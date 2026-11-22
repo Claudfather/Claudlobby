@@ -2816,6 +2816,48 @@ test('a rebound setup request is not shown as launched, so its launch status can
   assert.equal(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),false);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
 });
+test('while a managed launch hands over, no finished step loses its tick or disappears and nothing offers approval again',async()=>{
+  const timers=[];let h=null;
+  const answers=['quiesce','publish','publish','done'];
+  h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+    client:{async setupReceipt(input){h.calls.push(['receipt',input]);const state=answers.shift();
+      return {...input,version:2,state,managed_owner:true,launch_reserved:true,config_committed:state==='done',health_errors:{}};},
+      // As the connected read client when the session turns readable: setup_only, checking, then ready (a new epoch).
+      async check(){h.change({state:'checking'});h.change({state:'ready',epoch:2});}}});
+  h.context.managed_owner=true;signedIn(h);
+  const ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>{}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');await h.api.run('launch');
+  const during=[['connect','done'],['approve','done'],['signin','done'],['goal','done'],['launch','current']];
+  const offeredNow=()=>descendants(panel).filter(n=>n.tagName==='BUTTON'&&visible(n)&&!n.disabled).map(n=>n.textContent);
+  assert.deepEqual(stepShape(panel),during);
+  for(let read=1;answers.length>1;read++){
+    await timers.shift()();await flush();
+    assert.equal(h.api.snapshot().context,null,'the hand-over moved the connection on and cleared the approval context');
+    assert.deepEqual(stepShape(panel),during,'read '+read);
+    assert.ok(descendants(stepsOf(panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)),'read '+read);
+    assert.deepEqual(offeredNow(),['Check launch status'],'nothing suggests approving again, read '+read);
+    assert.equal(stepPart(panel,'launch','setup-progress').textContent,'Checking automatically while your team connects…');
+  }
+  assert.equal(h.api.snapshot().note,'Still in progress. Checking status never repeats or resumes setup.');
+  await timers.shift()();await flush();
+  assert.deepEqual(stepShape(panel),during.map(([name])=>[name,'done']));
+  assert.equal(h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+test('the Launch team reassurance goes once the launch is held and stays gone after it finished',async()=>{
+  const h=setupHarness({client:{async setupLaunch(input){h.calls.push(['launch',input]);
+    return {...input,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}};}}});
+  const ui=dom(),panel=new ui.Element(),lede=()=>descendants(panel).find(n=>n.className==='setup-lede');
+  h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>{}});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  assert.equal(lede().textContent,'Nothing runs on this computer until you choose Launch team.');assert.equal(visible(lede()),true);
+  await h.api.run('launch');assert.equal(visible(lede()),false,'a held launch');
+  await h.api.run('receipt');
+  assert.equal(h.api.snapshot().note,'Team launched. Your team is running on this computer.');
+  assert.equal(visible(lede()),false,'a finished launch');
+  h.api.dispose();
+});
 test('Connect moves keyboard focus on only while this frame has focus and nothing else took it',async t=>{
   for(const away of ['element','frame']){
     const l=landing(t);await l.workspace.checkAccount();await flush();
