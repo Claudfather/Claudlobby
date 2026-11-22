@@ -3233,13 +3233,13 @@ test('on a bridged page the five-step panel stays to its "Team launched" ending 
 });
 // A page opened again after this browser sent a Launch (or only a Preview): storage holds the request, the computer is
 // ready, and its parts read says what became of the Launch.
-async function reopened(t,{team,receipt,teams=1,stored=true}) {
+async function reopened(t,{team,receipt,teams=1,stored=true,computer='started'}) {
   landing(t); // stubs this test's localStorage
   if(stored)globalThis.localStorage.setItem(`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`,
     JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]}));
   const l=landing(t);await l.workspace.checkAccount();await flush();
   const setup=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
-  l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({teams,team:{state:team}})));
+  l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({computer,teams,team:{state:team}})));
   if(receipt)l.h.overrides.set(setup+'receipt',()=>reply(200,{...settingUp,version:2,launch_reserved:true,config_committed:true,health_errors:{},...receipt}));
   const panel=l.panel();
   descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
@@ -3279,6 +3279,36 @@ test('another browser opening the computer mid-Launch is not stuck: Check setup 
   button('Check launch status').click();await flush();
   assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state','context','receipt']);
   assert.match(note(),/^Launch received\./);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,0,'never a Launch');
+});
+test('a computer not started yet whose first Launch is unfinished keeps the panel and ticks only what is known',async t=>{
+  for(const stored of [false,true]){
+    const {l,panel,lede,button}=await reopened(t,{team:'launch_unfinished',teams:0,computer:'not_started',stored});
+    assert.equal(l.panel(),panel);assert.equal(partsOf(l.host),undefined,'a computer that is not started shows no parts');
+    assert.equal(lede(),false,'no "Nothing runs" line while its first Launch is under way');
+    assert.deepEqual(stepShape(panel),stored?[['connect','done'],['approve','done'],['goal','done'],['launch','current']]
+      :[['connect','done'],['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','upcoming']],
+      stored?'with this browser\'s request: approval and goal, as the request shows':'with no request: nothing past Connect is ticked');
+    assert.equal(!!button('Check launch status'),stored);
+    l.workspace.dispose();
+  }
+});
+test('the panel lets go of the Launch it showed under way when the next parts read no longer says so',async t=>{
+  for(const [name,next] of [['finished',{computer:'started',teams:1,team:{state:'none'}}],['failed and cleared',{computer:'not_started',teams:0,team:{state:'none'}}]]){
+    const {l,panel,lede,button}=await reopened(t,{team:'launch_unfinished'});
+    assert.equal(lede(),false);assert.deepEqual(stepShape(panel).slice(0,2),[['connect','done'],['approve','done']]);
+    l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer(next)));
+    l.frame.view.listeners.get('focus')();await flush();
+    assert.equal(stateCalls(l.h).length,2,name);
+    if(name==='finished'){assert.equal(partsOf(l.host)?.hidden,false,name);assert.equal(l.panel(),undefined,'the parts replace the panel');}
+    else{
+      assert.equal(l.panel(),panel,name);
+      assert.deepEqual(stepShape(panel),[['connect','done'],['approve','current'],['goal','done'],['launch','current']]);
+      assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'Check launch status leads');
+      assert.equal(lede(),true,'the "Nothing runs" line is back');
+    }
+    assert.equal(l.h.calls.filter(c=>/\/setup\/(?:launch|preview|context|receipt)$/.test(c.url)).length,0,'nothing was sent');
+    l.workspace.dispose();
+  }
 });
 test('a page opened again after the computer finished the Launch shows the parts',async t=>{
   const {l}=await reopened(t,{team:'none'});

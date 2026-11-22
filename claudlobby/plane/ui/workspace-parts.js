@@ -125,7 +125,9 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
     teams:() => started() ? current.teams : null,
-    // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention).
+    // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
+    // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
+    // and the panel must not say "nothing runs yet" there either. It only hides that line and holds the panel.
     launchUnfinished:() => live() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
     dispose() { disposed = true; current = null; mount = null; }});
 }
