@@ -175,11 +175,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   }
   const lostNotice='The sign-in link was cleared because this connection or approval changed. Check setup approval, then check sign-in progress.';
   let managedHandoff = false, handoffTimer = null, handoffReads = 0, connectionChecked = false, handoffUntil = 0;
-  // launchHeld: the request a launch status answer said the computer holds a Launch for (launch_reserved).
-  // In the whole view, while this page follows that Launch (or its managed hand-over), the steps already done stay done:
-  // the hand-over's own connection check moves the connection on, which clears the approval context (connectionChanged).
-  let launchHeld = null;
-  const launchHolding = () => standalone && !!pending && (managedHandoff || !!launchHeld && same(launchHeld,pending));
+  // launchHeld: the request the computer last said holds a Launch (launch_reserved, from a launch status or context read).
+  // In the whole view the steps already done stay done while it holds: the hand-over's own connection check moves the
+  // connection on, which clears the approval context (connectionChanged). handoffChecking: that check is in flight.
+  // A hand-over that stops short of a finished launch, or a lost connection, lets go of it, so approval is checked again.
+  let launchHeld = null, handoffChecking = false;
+  const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
+  const releaseLaunch = () => { if (!launched()) launchHeld = null; };
   // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
   // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
   // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
@@ -205,7 +207,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       void run('preview-check',{quiet:true}); // its completion schedules the next check
     },PREVIEW_POLL_MS);
   }
-  function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; }
+  function stopHandoff() { managedHandoff = false; clearTimeout(handoffTimer); handoffTimer = null; releaseLaunch(); }
   function scheduleHandoff() {
     if (!managedHandoff || handoffTimer !== null || disposed || !pending) return;
     if (!handoffUntil) handoffUntil = now() + 600;
@@ -235,7 +237,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         if (!value.launch_reserved) { stopHandoff(); return; }
         if (!connectionChecked && typeof client.check === 'function') {
-          await client.check(); connectionChecked = true;
+          handoffChecking = true;
+          try { await client.check(); } finally { handoffChecking = false; }
+          connectionChecked = true;
         }
         if (value.state === 'done' || value.state === 'unknown' || Object.keys(value.health_errors).length) stopHandoff();
       } catch (error) {
@@ -305,6 +309,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); // only a live link can be lost
     }
     state = next;
+    if (['denied','signed_out','expired','disposed'].includes(next.state)) releaseLaunch();
     if (managedHandoff && ['denied','signed_out','expired','disposed'].includes(next.state)) {
       stopHandoff(); note = standalone ? 'Connection needs attention. Choose Connect above; the launch is not repeated.'
         : 'Connection needs attention. Reconnect from the computer card; the launch is not repeated.';
@@ -357,6 +362,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
         }
+        launchHeld = value.launch_reserved ? pending : null;
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
@@ -538,7 +544,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
-    if (value.launch_reserved) launchHeld = pending;
+    launchHeld = value.launch_reserved ? pending : null;
     const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
     launchedFor = done ? pending : null;
     note = done ? standalone ? 'Team launched. Your team is running on this computer.'
@@ -586,19 +592,20 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
     if (!mount) return;
     const m = mount, live = active(), time = now();
-    const approved = !!context && context.expires_at > time, holding = launchHolding();
-    // A held launch keeps a sign-in this page saw connected, once the approval context is gone.
-    const signinKnown = context?.provider_signin === true || holding && !context && signinState === 'connected';
+    // A launch the computer holds for this request was approved, even once the approval context is gone.
+    const holding = launchHolding(), approved = holding || !!context && context.expires_at > time;
+    // It keeps a sign-in this page saw connected for the same approval.
+    const signinKnown = context?.provider_signin === true || holding && !context && signinState === 'connected'
+      && signinAttempt?.generation === pending.generation;
     // Sign-in is a step when this approval asks for it; until approval is known it is shown as upcoming.
     const signinShown = pending ? signinKnown && signinState === 'connected' : signinKnown || !context;
     const signinDone = signinKnown && signinReady();
-    const states = {approve:approved || holding ? 'done' : 'current',
+    const states = {approve:approved ? 'done' : 'current',
       signin:!signinShown ? null : signinDone ? 'done' : approved ? 'current' : 'upcoming',
       goal:pending ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
       launch:pending ? 'current' : 'upcoming'};
     // With a Connect step, nothing after it is current until this computer is connected.
-    // The hand-over's own connection check passes through checking on its way to a readable session; that is not a loss.
-    const settling = holding && ['checking','renewing'].includes(client.snapshot().state);
+    const settling = holding && handoffChecking && ['checking','renewing'].includes(state.state);
     const connecting = !!m.steps.connect && !live && !settling;
     if (m.steps.connect) states.connect = live || settling ? 'done' : 'current';
     if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
@@ -627,13 +634,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // An automatic check briefly holds every action; workspace.css dims them only once it takes a moment.
     if (busy && !busyOperation) m.root.dataset.polling = 'true'; else delete m.root.dataset.polling;
     const {controls} = m;
-    setText(m.approveDone,context || finished || holding ? 'Setup approved' : '');
+    setText(m.approveDone,states.approve === 'done' ? 'Setup approved' : '');
     // Once a launch is held or finished, nothing waits on Launch team any more.
     m.lede.hidden = holding || launched();
     // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
     setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
-    m.recheck.hidden = states.approve !== 'done' || launchable || finished || holding;
+    m.recheck.hidden = states.approve !== 'done' || launchable || finished;
     const ended = SIGNIN_ENDED.includes(signinState), sent = signinSent(), waitingLink = signinLinkLive();
     m.codeHad = !!m.code.value; const typed = m.codeHad && !sent;
     const launchShown = !!plan && launchable;
