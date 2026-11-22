@@ -2940,6 +2940,20 @@ test('a slow but healthy hand-over that reaches its pause keeps every finished s
   assert.deepEqual(stepShape(l.panel),during.map(([name])=>[name,'done']));
   assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
 });
+test('after the pause, a refused Check launch status lets go of the held steps and a lost answer keeps them',async()=>{
+  for(const [name,error,held] of [['refused',Object.assign(new Error('refused'),{status:409}),false],['lost',new Error('lost'),true]]){
+    const l=managedLaunch({check:h=>promote(h)});signedIn(l.h);await l.start();
+    while(l.timers.length)await l.next();
+    assert.match(l.h.api.snapshot().note,/^Automatic checks paused\./,name);
+    l.h.client.setupReceipt=async()=>{throw error;};
+    buttonOf(l.panel,'Check launch status').click();await flush();
+    assert.deepEqual(stepShape(l.panel)[1],['approve',held?'done':'current'],name);
+    assert.equal(stepShape(l.panel).some(([step])=>step==='signin'),held,name);
+    assert.equal(stepButtons(l.panel).includes('Check setup approval'),!held,name);
+    assert.equal(visible(l.lede()),false,'the line that nothing runs yet stays gone, '+name);
+    assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+  }
+});
 test('a managed Launch the computer refused holds nothing, even while its status reads get no answer',async()=>{
   const l=managedLaunch({launch:()=>Object.assign(new Error('refused'),{status:409}),receipts:[new Error('lost'),new Error('lost')]});
   await l.start();

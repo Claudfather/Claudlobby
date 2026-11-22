@@ -460,6 +460,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           return false;
         }
         if (operation === 'receipt') launchable = false;
+        if (operation === 'receipt' && refusal(error)) releaseLaunch(); // a refusal contradicts the hold; a lost answer does not
         if (operation.startsWith('signin-')) {
           // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
           const refused=[400,401,403,409].includes(error?.status);
