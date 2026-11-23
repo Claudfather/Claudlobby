@@ -12,7 +12,7 @@ import stat
 from pathlib import Path
 from textwrap import dedent
 
-from claudlobby.config import FleetConfig, BotConfig, TelegramConfig, load_fleet
+from claudlobby.config import load_fleet
 from claudlobby.composer import scaffold_env_files
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
@@ -137,70 +137,3 @@ class TestScaffoldEnvFilePermissions:
         mode = stat.S_IMODE(env_path.stat().st_mode)
         assert mode == 0o600, f"expected 0o600 after re-scaffold, got {oct(mode)}"
 
-
-class TestEnvMigratePermissions:
-    """_apply_env_migration writes .env files with mode 0o600."""
-
-    def test_fleet_env_migrate_has_0o600(self, tmp_path):
-        """Fleet .env written by _apply_env_migration has mode 0o600."""
-        from claudlobby.commands.env_migrate import _apply_env_migration
-
-        root = tmp_path / "claudlobby"
-        root.mkdir()
-        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
-        paths = _make_paths(root)
-
-        fleet = FleetConfig(manager="worker",
-            name="test-fleet",
-            service_prefix="com.test",
-            bots={
-                "worker": BotConfig(
-                    bot_id="worker",
-                    name="worker",
-                    expertise=["eng"],
-                    telegram=TelegramConfig(handle="w_bot", token_env="TG_TOKEN_W"),
-                )
-            },
-        )
-
-        fleet_vars = {"GITHUB_PAT": "ghp_xxxxxxxxxxxxxxxxxxxx"}
-        bot_vars = {"worker": {"TG_TOKEN_W": "123456:AAAA"}}
-
-        _apply_env_migration(fleet, paths, Path("/fake/source"), fleet_vars, bot_vars)
-
-        fleet_env = root / ".env"
-        assert fleet_env.is_file()
-        mode = stat.S_IMODE(fleet_env.stat().st_mode)
-        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
-
-    def test_bot_env_migrate_has_0o600(self, tmp_path):
-        """Bot .env written by _apply_env_migration has mode 0o600."""
-        from claudlobby.commands.env_migrate import _apply_env_migration
-
-        root = tmp_path / "claudlobby"
-        root.mkdir()
-        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
-        paths = _make_paths(root)
-
-        fleet = FleetConfig(manager="worker",
-            name="test-fleet",
-            service_prefix="com.test",
-            bots={
-                "worker": BotConfig(
-                    bot_id="worker",
-                    name="worker",
-                    expertise=["eng"],
-                    telegram=TelegramConfig(handle="w_bot", token_env="TG_TOKEN_W"),
-                )
-            },
-        )
-
-        fleet_vars = {}
-        bot_vars = {"worker": {"TG_TOKEN_W": "123456:AAAA"}}
-
-        _apply_env_migration(fleet, paths, Path("/fake/source"), fleet_vars, bot_vars)
-
-        bot_env = root / "runtime" / "bots" / "worker" / ".env"
-        assert bot_env.is_file()
-        mode = stat.S_IMODE(bot_env.stat().st_mode)
-        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"

@@ -228,7 +228,7 @@ def register_release_subparsers(sub):
                       help="Pending Git render fingerprint; omit for committed output drift")
     diff.add_argument("--bot", metavar="BOT", help="Limit current drift to one declared bot")
 
-    migration = sub.add_parser("migration", help="Inspect historical migration evidence or run explicit data converters")
+    migration = sub.add_parser("migration", help="Inspect historical migration evidence, or import and backfill workstreams")
     migrations = migration.add_subparsers(dest="migration_command", required=True)
     status = _route(migrations, "status", "migration.status", "Actual SQL version and recorded activation evidence")
     status.add_argument("--activation", metavar="ID", help="Inspect one named host activation")

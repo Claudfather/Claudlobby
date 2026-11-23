@@ -10,11 +10,6 @@ import pytest
 from claudlobby.__main__ import main
 from claudlobby.commands.core import cmd_generate
 from claudlobby.commands._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
-from claudlobby.commands.data_migrate import (
-    _contains_git_checkouts,
-    _dir_size_mb,
-    _human_size,
-)
 from tests.package_fixtures import git_package, source_package
 from claudlobby.paths import Paths
 
@@ -104,84 +99,6 @@ class TestLoadFleetOrExit:
         assert config.name == "test-fleet"
         assert "lead" in config.bots
         assert isinstance(merged_defaults, dict)
-
-
-# ── _contains_git_checkouts ──────────────────────────────────────────
-
-
-class TestContainsGitCheckouts:
-    def test_all_git_dirs(self, tmp_path):
-        for name in ("repo-a", "repo-b"):
-            (tmp_path / name / ".git").mkdir(parents=True)
-        assert _contains_git_checkouts(tmp_path) is True
-
-    def test_no_git_dirs(self, tmp_path):
-        for name in ("data", "logs"):
-            (tmp_path / name).mkdir()
-        assert _contains_git_checkouts(tmp_path) is False
-
-    def test_mixed_below_threshold(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
-        for name in ("data", "logs", "cache"):
-            (tmp_path / name).mkdir()
-        # 1/4 = 0.25 < 0.5 threshold
-        assert _contains_git_checkouts(tmp_path) is False
-
-    def test_empty_dir(self, tmp_path):
-        assert _contains_git_checkouts(tmp_path) is False
-
-    def test_nonexistent_dir(self, tmp_path):
-        assert _contains_git_checkouts(tmp_path / "nope") is False
-
-    def test_custom_threshold(self, tmp_path):
-        (tmp_path / "repo" / ".git").mkdir(parents=True)
-        (tmp_path / "other").mkdir()
-        # 1/2 = 0.5, threshold 0.3 → True
-        assert _contains_git_checkouts(tmp_path, threshold=0.3) is True
-
-
-# ── _dir_size_mb ─────────────────────────────────────────────────────
-
-
-class TestDirSizeMb:
-    def test_empty_dir(self, tmp_path):
-        assert _dir_size_mb(tmp_path) == 0.0
-
-    def test_single_file(self, tmp_path):
-        f = tmp_path / "data.bin"
-        f.write_bytes(b"x" * 1024)  # 1 KB
-        size = _dir_size_mb(tmp_path)
-        assert 0 < size < 0.01  # way less than 1 MB
-
-    def test_nested_dirs(self, tmp_path):
-        sub = tmp_path / "sub"
-        sub.mkdir()
-        (sub / "file.txt").write_bytes(b"y" * 2048)
-        size = _dir_size_mb(tmp_path)
-        assert size > 0
-
-    def test_symlinks_skipped(self, tmp_path):
-        real = tmp_path / "real.txt"
-        real.write_bytes(b"z" * 4096)
-        link = tmp_path / "link.txt"
-        link.symlink_to(real)
-        size_with_link = _dir_size_mb(tmp_path)
-        # The symlink itself shouldn't count the target's size again
-        assert size_with_link < 0.01
-
-
-# ── _human_size ──────────────────────────────────────────────────────
-
-
-class TestHumanSize:
-    def test_sub_mb(self):
-        assert _human_size(0.5) == "<1M"
-
-    def test_mb_range(self):
-        assert _human_size(42) == "42M"
-
-    def test_gb_range(self):
-        assert _human_size(2048) == "2.0G"
 
 
 # ── config validate ─────────────────────────────────────────────────
