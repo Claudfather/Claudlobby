@@ -18,7 +18,8 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
-from tests.plane_fixtures import open_assignment_ids, plane_root
+from tests.plane_fixtures import (_checkin_triggered, _receipt, _receipt_history, _report,
+                                  _report_to, _reports_acked, open_assignment_ids, plane_root)
 
 REPO = Path(__file__).resolve().parent.parent
 LOOKUP = REPO / "claudlobby/_runtime_scripts" / "plane-lookup.py"
@@ -151,3 +152,80 @@ def test_the_cutover_modes_are_gone(tmp_path):
     assert r.returncode == 2 and "unrecognized arguments" in r.stderr, (r.returncode, r.stderr)
     r = _run(tmp_path, "--retired", "--fleet", "f")
     assert r.returncode == 2, (r.returncode, r.stderr)
+
+
+# --- `--checkin-early` (#2842): the reports that bring a manager's check-in
+# beat before its minimum gap. Run as manager-checkin.sh runs it, under
+# `python3 -S -E`, so the report codec is loaded from the selected package.
+
+MGR = "mgr"
+
+
+def _early(root, *args, bot=MGR, fleet=F):
+    flags = ["--fleet", fleet] + (["--bot", bot] if bot else [])
+    return subprocess.run([sys.executable, "-S", "-E", str(LOOKUP), "--root", str(root),
+                           "--checkin-early", *flags, *args],
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_checkin_early_names_each_unacked_report_whose_notice_has_no_receipt(tmp_path):
+    root = _root(tmp_path)
+    _receipt_history(root)
+    _checkin_triggered(root, "2026-11-22T12:00:00Z")
+    wi, asg, _ = _dispatch(root, "a", "t-1-aaaa")
+    linked = _report(root, wi, asg, "2026-11-22T12:15:35+00:00")      # assignment complete
+    unlinked = _report_to(root, 1, "2026-11-22T12:16:00+00:00")        # fleet reports submit
+    seen = _report_to(root, 2, "2026-11-22T12:20:00+00:00")
+    _receipt(root, seen)
+    r = _early(root)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == [linked, unlinked]
+
+
+def test_a_checkin_after_the_report_clears_it_and_a_later_report_counts_on_its_own(tmp_path):
+    root = _root(tmp_path)
+    _receipt_history(root)
+    _checkin_triggered(root, "2026-11-22T12:00:00Z")
+    first = _report_to(root, 1, "2026-11-22T12:15:35+00:00")
+    assert _early(root).stdout.split() == [first]
+    _checkin_triggered(root, "2026-11-22T12:30:00Z")              # the trigger the early beat records
+    r = _early(root)
+    assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
+    second = _report_to(root, 2, "2026-11-22T12:40:00+00:00")
+    assert _early(root).stdout.split() == [second]
+
+
+def test_an_acked_report_a_progress_note_or_a_report_to_another_bot_never_counts(tmp_path):
+    root = _root(tmp_path)
+    _receipt_history(root)
+    _checkin_triggered(root, "2026-11-22T12:00:00Z")
+    acked = _report_to(root, 1, "2026-11-22T12:05:00+00:00")
+    _reports_acked(root, acked)
+    _report_to(root, 2, "2026-11-22T12:10:00+00:00", status="progress")
+    # lead has a receipt history of its own, so only the recipient rule keeps its report out
+    _receipt_history(root, dest="lead", msg="msg_" + "e" * 32)
+    _report_to(root, 3, "2026-11-22T12:12:00+00:00", to="lead")
+    r = _early(root)
+    assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
+    later = _report_to(root, 4, "2026-11-22T12:14:00+00:00")
+    assert _early(root).stdout.split() == [later]      # the ack covers only what it reached
+
+
+def test_with_no_receipt_ever_recorded_for_the_manager_a_missing_one_proves_nothing(tmp_path):
+    root = _root(tmp_path)
+    _checkin_triggered(root, "2026-11-22T12:00:00Z")
+    _report_to(root, 1, "2026-11-22T12:15:35+00:00")
+    r = _early(root)
+    assert r.returncode == 0 and r.stdout == "", r.stdout
+    assert "no receipt has ever been recorded for 'mgr'" in r.stderr
+    assert "proves nothing" in r.stderr
+
+
+def test_checkin_early_needs_fleet_and_bot_and_a_fleet_the_plane_never_saw_is_unreachable(tmp_path):
+    root = _root(tmp_path)
+    _receipt_history(root)
+    usage = _early(root, bot=None)
+    assert usage.returncode == 2 and "--checkin-early needs --fleet and --bot" in usage.stderr
+    stranger = _early(root, fleet="nosuchfleet")
+    assert stranger.returncode == 3 and stranger.stdout == "", stranger.stderr
+    assert "unreachable" in stranger.stderr

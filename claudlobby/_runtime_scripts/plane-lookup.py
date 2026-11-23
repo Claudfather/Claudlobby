@@ -304,6 +304,67 @@ def _received(a) -> int:
     return _with_plane(a.root, fn)
 
 
+# The recipient a report was addressed to, as `_received` reads it.
+_RECIPIENT_SQL = "SELECT recipient_alias FROM communications WHERE msg_id = ?"
+
+
+def _checkin_early(a) -> int:
+    """`--checkin-early --fleet F --bot B`: the msg id, one per line and oldest
+    first, of each report that brings manager B's check-in beat before its
+    minimum gap (#2842). A worker's report reaches its manager by one send,
+    made right after the report is recorded, and nothing sends it again when
+    that send is refused. A check-in that ran before the report cannot have
+    shown it. So a report counts when all of these hold:
+
+    - B has not acknowledged it: it is past B's newest `reports_acked` and is
+      terminal or has no known status (`unacked_rows`, the rule the brief's
+      list and the overview card share; a progress note never counts).
+    - It was addressed to B.
+    - It occurred after B's newest `checkin_triggered`. The beat stamps that
+      row once it has sent `/checkin`, and the check-in then reads B's
+      unacknowledged reports, so it has shown every report from before the
+      stamp: a report brings the beat early at most once.
+    - Its notice has no receipt on the plane (`DELIVERY_SQL`, the stdlib twin
+      of the delivery read the message doors use), and B has recorded a
+      receipt before (`RECEIPT_HISTORY_SQL`). When B never has, a missing
+      receipt proves nothing: a note on stderr, and no report counts.
+
+    This reads committed rows only: a receipt still queued for ingest is the
+    caller's to rule out, before this read. Empty = none (rc 0); unreachable =
+    rc 3, and a fleet the plane never saw is unreachable, as for `--events`."""
+    def fn(pr, conn):
+        newest = pr.fleet_events(conn, a.fleet, bot=a.bot, event_type="checkin_triggered",
+                                 descending=True, limit=1)
+        entry = pr.bot_entry(conn, a.fleet, a.bot)
+        if entry is None:
+            return 0      # no identity for B, so nothing was addressed to it
+        ack = pr.newest_ack(conn, entry["uids"])
+        acked = ack["seq"] if ack else None
+        rows = pr.report_rows(conn, a.fleet, since=newest[0]["_occurred_at"] if newest else None,
+                              since_seq=acked)
+        want = f"bot:{a.fleet}/{a.bot}".lower()
+        mine = []
+        for row in pr.unacked_rows(rows, acked):
+            msg = row["plane_msg_id"]
+            to = conn.execute(_RECIPIENT_SQL, (msg,)).fetchone() if msg else None
+            if to and (to[0] or "").lower() == want:
+                mine.append(msg)
+        if not mine:
+            return 0
+        marks = ",".join("?" * len(mine))
+        received = {r[0]: r[4] for r in conn.execute(pr.DELIVERY_SQL.format(ph=marks), mine)}
+        missing = [m for m in mine if received.get(m) is None]
+        shown = [m for m in missing if conn.execute(pr.RECEIPT_HISTORY_SQL, (m,)).fetchone()[0]]
+        if len(shown) < len(missing):
+            print(f"plane-lookup: no receipt has ever been recorded for {a.bot!r}, so a missing"
+                  f" receipt proves nothing: {len(missing) - len(shown)} report(s) do not bring"
+                  " the check-in early", file=sys.stderr)
+        for m in shown:
+            print(m)
+        return 0
+    return _with_plane(a.root, fn)
+
+
 def _escalated(a) -> int:
     """`--escalated --fleet F`: `<event_id> <task_id> <by> <occurred_at>
     <question>` per OPEN escalation, oldest first, TAB-separated so a question
@@ -375,6 +436,11 @@ def main(argv=None) -> int:
     ap.add_argument("--verdict", action="store_true",
                     help="--received: also print `<verdict> <sender>` for a found receipt — the"
                     " check a receiver runs before trusting a paste-framed dispatch (#1876)")
+    ap.add_argument("--checkin-early", action="store_true",
+                    help="print the msg id of each report that brings --bot's check-in beat before"
+                    " its minimum gap: unacknowledged, addressed to it, after its newest"
+                    " checkin_triggered, and with no receipt for its notice (needs --fleet and"
+                    " --bot; #2842)")
     ap.add_argument("--wait", type=float, default=0)
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
@@ -391,6 +457,10 @@ def main(argv=None) -> int:
             ap.error(f"--received must be msg_ followed by 32 lowercase hex characters,"
                      f" got {a.received!r} (#1946)")
         return _received(a)   # no --destination matches no receipt: rc 4, no verdict
+    if a.checkin_early:
+        if not (a.fleet and a.bot):
+            ap.error("--checkin-early needs --fleet and --bot")
+        return _checkin_early(a)
     if a.escalated:
         if not a.fleet:
             ap.error("--escalated needs --fleet")
