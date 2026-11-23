@@ -180,6 +180,10 @@ class RequestReceipt:
     attempt: int = 0
     message_attempts: tuple[MessageAttempt, ...] = ()
     format_version: int = FORMAT_VERSION
+    # Where the request came from, kept outside the intent: it is never identity,
+    # so one request ID with and without it is the same request. Two shapes only
+    # (_provenance); left out of the written receipt when None.
+    provenance: dict | None = None
 
 
 _OPERATIONS = frozenset(
@@ -310,9 +314,29 @@ def _recorded_reply(intent):
         raise ReceiptError("a recorded reply plans one recording stage and no delivery")
 
 
+def _provenance(value):
+    """The connected session that sent a request, or the setup finish; nothing else.
+
+    It records the session that sent the request, not proof that a person typed it.
+    """
+    if value is None or type(value) is dict and value == {"carrier": "setup_finish"}:
+        return
+    if (type(value) is not dict or set(value) != {"carrier", "account", "binding_revision"}
+            or value["carrier"] != "connected" or type(value["binding_revision"]) is not int
+            or value["binding_revision"] <= 0 or not isinstance(value["account"], str)):
+        raise ReceiptError("invalid request provenance")
+    try:
+        canonical = str(UUID(value["account"])) == value["account"]
+    except ValueError:
+        canonical = False
+    if not canonical:
+        raise ReceiptError("invalid request provenance")
+
+
 def _validate(receipt):
     if type(receipt.format_version) is not int or receipt.format_version != FORMAT_VERSION:
         raise ReceiptError("unsupported request receipt format")
+    _provenance(receipt.provenance)
     if str(UUID(receipt.request_id)) != receipt.request_id:
         raise ReceiptError("request ID must be a canonical UUID")
     intent = receipt.intent
@@ -439,6 +463,8 @@ def _validate(receipt):
 def _receipt_payload(receipt):
     """Preserve historical sealed route fields; Git provenance is explicit."""
     payload = asdict(receipt)
+    if payload["provenance"] is None:
+        payload.pop("provenance")
     route = payload["intent"]["route"]
     if route is not None and route["revision"] is None and route["config_fingerprint"] is None:
         route.pop("revision")
@@ -448,6 +474,11 @@ def _receipt_payload(receipt):
 
 def _decode(raw):
     try:
+        if "provenance" not in raw:
+            # Receipts written without a sending session; None is never written.
+            raw = {**raw, "provenance": None}
+        elif raw["provenance"] is None:
+            raise ReceiptError("request provenance is written only when present")
         if "expected_by" not in raw["intent"]:
             # Receipts written before the frozen default kept routing open-ended.
             raw = {**raw, "intent": {**raw["intent"], "expected_by": None}}
@@ -571,8 +602,10 @@ class RequestStore:
             temporary.unlink(missing_ok=True)
         return receipt
 
-    def prepare(self, intent: RequestIntent) -> RequestReceipt:
-        candidate = RequestReceipt(self.path.stem, intent, tuple(StageOutcome() for _ in intent.stages))
+    def prepare(self, intent: RequestIntent, *, provenance: dict | None = None) -> RequestReceipt:
+        """A retained request keeps its own provenance; only the intent is compared."""
+        candidate = RequestReceipt(self.path.stem, intent, tuple(StageOutcome() for _ in intent.stages),
+                                   provenance=provenance)
         _validate(candidate)
         if intent.fleet_uid != self.fleet_uid:
             raise ReceiptConflict("request belongs to a different fleet")

@@ -144,3 +144,18 @@ def test_unsafe_receipt_node_and_oversize_refuse_without_repair(estate):  # noqa
     with pytest.raises(queries.RequestQueryError, match="read limit"):
         queries.read_request(ctx.root, ctx.fleet_uid, request_id)
     assert path.stat().st_size > len(saved)
+
+
+def test_request_show_prints_provenance_as_key_values_only_when_present():
+    from types import SimpleNamespace
+    from claudlobby.commands.request_read import _lines
+    base = dict(request_id="00000000-0000-4000-8000-000000000001", operation="message.send",
+                operation_version=1, observed_attempt=1, stages=(), transmissions=())
+    assert _lines(SimpleNamespace(**base, provenance=None)) == (
+        "00000000-0000-4000-8000-000000000001\tmessage.send/v1\tobserved_attempt=1",)
+    account = "00000000-0000-4000-8000-0000000000aa"
+    connected = {"carrier": "connected", "account": account, "binding_revision": 3}
+    assert _lines(SimpleNamespace(**base, provenance=connected))[-1] == (
+        f"provenance\tcarrier=connected\taccount={account}\tbinding_revision=3")
+    assert _lines(SimpleNamespace(**base, provenance={"carrier": "setup_finish"}))[-1] == (
+        "provenance\tcarrier=setup_finish")

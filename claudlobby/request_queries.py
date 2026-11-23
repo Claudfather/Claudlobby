@@ -103,6 +103,9 @@ class RequestView:
     observed_attempt: int  # Receipt snapshot, not a claim that no later attempt exists.
     stages: tuple[RecordedStage, ...]
     transmissions: tuple[RecordedTransmission, ...]
+    # The receipt's provenance: the connected session that sent it, the setup
+    # finish, or None (a direct session, the computer, or an older receipt).
+    provenance: dict | None = None
 
 
 def _scope(root: Path, fleet_uid: str, request_id: str, prefix: bool = False) -> Path:
@@ -242,4 +245,5 @@ def read_request(root: Path, fleet_uid: str, request_id: str, *, prefix: bool = 
     return RequestView(request_id, receipt.format_version, intent.operation, intent.operation_version,
                        intent.host_uid, intent.fleet_uid, intent.caller_uid, intent.recipient_uid,
                        intent.task_id, intent.assignment_id, intent.message_id,
-                       intent.semantic_sha256, intent.route, receipt.attempt, stages, transmissions)
+                       intent.semantic_sha256, intent.route, receipt.attempt, stages, transmissions,
+                       receipt.provenance)

@@ -442,6 +442,16 @@ label and raw team alias (for example Computer 1 / engineering). Recovery
 consumes its loss ticket only on an overview started after that loss; a stale
 healthy result cannot exhaust the later recovery refresh.
 
+A message sent through the connected carrier records where it came from on its
+request receipt, outside the request's intent: `provenance` is `{"carrier":
+"connected", "account": <the binding's subject>, "binding_revision": <its
+revision>}`, taken from the same binding snapshot the action's scope was checked
+against. It records the session that sent the message, not proof that a person
+typed it. A direct owner session and a message sent on the computer record none;
+the same request ID with and without it is the same request. The one other shape,
+`{"carrier": "setup_finish"}`, is accepted but not yet written. `request show`
+returns the field (and a `provenance` line when present); older receipts have none.
+
 
 ## First-team setup
 

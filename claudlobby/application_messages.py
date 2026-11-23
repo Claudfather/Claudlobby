@@ -61,7 +61,7 @@ def _alert_tiers(route):
 def deliver_bound_message(route, *, body=None, report=None, request_id,
                           kind="chat", parent_message_id=None,
                           retry_uncertain=False, caller_context=None,
-                          require_durable_request=False) -> ApplicationOutcome:
+                          require_durable_request=False, provenance=None) -> ApplicationOutcome:
     """Send and observe an authorized, frozen route under the caller's runtime admission.
 
     The caller must already hold runtime mutation admission and authorize the
@@ -71,6 +71,8 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
     generated callers are bound from the route's origin for receipt lookup.
     Owner sends require a durable request and native reservation before effects;
     ordinary CLI callers retain the default best-effort recording behavior.
+    ``provenance`` is the connected session's record for a new message receipt;
+    a report never carries one.
     """
     from .message_operations import (read_recipient_box, repair_held_delivery,
                                       send_message, send_unlinked_report)
@@ -105,7 +107,7 @@ def deliver_bound_message(route, *, body=None, report=None, request_id,
                                parent_message_id=parent_message_id,
                                retry_uncertain=retry_uncertain,
                                require_durable_request=require_durable_request,
-                               trusted_tiers=trusted_tiers)
+                               trusted_tiers=trusted_tiers, provenance=provenance)
     data = _data(route, outcome, parent_message_id=parent_message_id)
     if report is not None:
         data["report_status"] = report.status

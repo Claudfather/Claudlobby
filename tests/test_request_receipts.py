@@ -409,3 +409,107 @@ def test_git_route_rejects_mixed_or_incomplete_selection_before_recording(receip
         with pytest.raises(rr.ReceiptError):
             store.prepare(replace(_message_intent(root, base), route=replace(route, **change)))
         assert not store.path.exists()
+
+
+# Provenance: where a request came from, kept outside its intent. The account is
+# an obviously made-up UUID.
+_ACCOUNT = "00000000-0000-4000-8000-0000000000aa"
+_CONNECTED = {"carrier": "connected", "account": _ACCOUNT, "binding_revision": 3}
+_SETUP_FINISH = {"carrier": "setup_finish"}
+
+
+def _written(receipt):
+    return (json.dumps(rr._receipt_payload(receipt), sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def test_request_intent_carries_no_provenance():
+    from dataclasses import fields
+    assert "provenance" not in {field.name for field in fields(rr.RequestIntent)}
+    assert [field.name for field in fields(rr.RequestReceipt)][-1] == "provenance"
+
+
+def test_receipt_without_provenance_round_trips_byte_for_byte(receipt_case):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        saved = store.prepare(intent)
+        store.begin_native_attempt("ev_" + "a" * 32)
+        before = store.path.read_bytes()
+        raw = json.loads(before)
+        assert "provenance" not in raw and saved.provenance is None
+        decoded = rr.decode_receipt(raw, request_id=ident, fleet_uid=intent.fleet_uid)
+        assert decoded.provenance is None and _written(decoded) == before
+
+
+@pytest.mark.parametrize("provenance", [_CONNECTED, _SETUP_FINISH])
+def test_each_provenance_shape_round_trips_and_survives_later_writes(receipt_case, provenance):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        saved = store.prepare(intent, provenance=dict(provenance))
+        assert saved.provenance == provenance and saved.intent == intent
+        store.begin_native_attempt("ev_" + "a" * 32)
+        store.stage(0)
+        store.outcome(0, "committed")
+        before = store.path.read_bytes()
+    raw = json.loads(before)
+    assert raw["provenance"] == provenance and "provenance" not in raw["intent"]
+    decoded = rr.decode_receipt(raw, request_id=ident, fleet_uid=intent.fleet_uid)
+    assert decoded.provenance == provenance and _written(decoded) == before
+
+
+def test_same_request_with_and_without_provenance_is_the_same_request(receipt_case):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        first = store.prepare(intent, provenance=_CONNECTED)
+        before = store.path.read_bytes()
+        assert store.prepare(intent) == first
+        assert store.prepare(intent, provenance=_SETUP_FINISH) == first
+        assert store.path.read_bytes() == before
+    other = str(uuid4())
+    with rr.locked_request(root, intent.fleet_uid, other) as store:
+        first = store.prepare(intent)
+        before = store.path.read_bytes()
+        assert store.prepare(intent, provenance=_CONNECTED) == first
+        assert store.load().provenance is None and store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("provenance", [
+    {**_SETUP_FINISH, "account": _ACCOUNT},
+    {"carrier": "connected", "account": _ACCOUNT},
+    {"carrier": "connected", "binding_revision": 3},
+    {**_CONNECTED, "extra": 1},
+    {**_CONNECTED, "carrier": "direct"},
+    {**_CONNECTED, "binding_revision": True},
+    {**_CONNECTED, "binding_revision": 0},
+    {**_CONNECTED, "binding_revision": "3"},
+    {**_CONNECTED, "account": "not-a-uuid"},
+    {**_CONNECTED, "account": _ACCOUNT.upper()},
+    {**_CONNECTED, "account": None},
+    {"carrier": "setup_finish", "binding_revision": 3},
+    {},
+    ["connected"],
+    "connected",
+])
+def test_malformed_provenance_refuses_before_writing_and_on_read(receipt_case, provenance):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        with pytest.raises(rr.ReceiptError):
+            store.prepare(intent, provenance=provenance)
+        assert not store.path.exists()
+        store.prepare(intent)
+        raw = json.loads(store.path.read_bytes())
+    with pytest.raises(rr.ReceiptError):
+        rr.decode_receipt({**raw, "provenance": provenance}, request_id=ident, fleet_uid=intent.fleet_uid)
+
+
+def test_written_null_provenance_refuses(receipt_case):
+    root, ident, base = receipt_case
+    intent = _message_intent(root, base)
+    with rr.locked_request(root, intent.fleet_uid, ident) as store:
+        store.prepare(intent)
+        raw = json.loads(store.path.read_bytes())
+    with pytest.raises(rr.ReceiptError):
+        rr.decode_receipt({**raw, "provenance": None}, request_id=ident, fleet_uid=intent.fleet_uid)

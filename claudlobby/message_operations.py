@@ -380,7 +380,8 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
                  transport: Callable = native_send,
                  notify: Callable = notify_recording_degraded,
                  clear: Callable = clear_recording_degraded,
-                 _report: ReportPayload | None = None) -> MessageSendResult:
+                 _report: ReportPayload | None = None,
+                 provenance: dict | None = None) -> MessageSendResult:
     """Send once under caller-held runtime admission; inspect or explicitly retry later.
 
     ReceiptBusy/ReceiptError/MessageConflict and capture-policy failures are
@@ -389,6 +390,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
     ``require_durable_request`` refuses before transport unless preparation and
     the native reservation were durably retained. Later recording failures still
     leave an uncertain outcome to inspect, never permission to send again.
+    ``provenance`` goes on a newly prepared receipt only, outside its intent.
     """
     if not isinstance(route, MessageRoute) or not isinstance(body, MessageBody):
         raise MessageConflict("frozen route and validated body required")
@@ -509,7 +511,7 @@ def send_message(route: MessageRoute, package: PackageResources, body: MessageBo
             intent = existing.intent
         elif store is not None:
             try:
-                receipt = store.prepare(intent)
+                receipt = store.prepare(intent, provenance=provenance)
             except OSError as exc:
                 if require_durable_request:
                     raise ReceiptConflict("durable request preparation failed; inspect the request") from exc

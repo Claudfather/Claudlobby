@@ -444,3 +444,13 @@ def test_send_method_refusal_preserves_allow_without_effect_claim(browser_action
     response = client.request(method, "/api/owner/actions/send")
     assert response.status_code == 405 and response.headers["Allow"] == "POST"
     if method != "HEAD": assert "effect" not in response.json()
+
+
+def test_direct_session_action_send_records_no_provenance(browser_actions, monkeypatch):
+    _, client, adapter, _, _, ctx, _, _ = browser_actions
+    native_receiver(monkeypatch)
+    request = metadata(context(client), ctx.bots["worker"].uid)
+    sent = post(client, "send", {**request, "body": "Synthetic direct body"})
+    assert sent.status_code == 200 and sent.json()["status"] == "delivered"
+    stored = adapter.root / "state/requests" / ctx.fleet_uid / (request["request_id"] + ".json")
+    assert "provenance" not in json.loads(stored.read_bytes())
