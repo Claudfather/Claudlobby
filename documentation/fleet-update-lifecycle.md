@@ -568,6 +568,8 @@ Runnable **on-demand** as `claudlobby --root DATA --fleet FLEET fleet reload`; i
 
 **Loud-failure contract:** a failed `claude plugin update` aborts before any marker is dropped and raises `emit_failure_alert` (fleet event + manager tmux nudge + Telegram escalation on critical failure).
 
+A bot start updates its required plugins too (`plugin_ensure`, with the same `--scope user`). A failed update there does not stop the start: once the bot is up, the start raises `plugin_update_failed` through the same primitive, one alert per start naming each update that failed (#3090).
+
 ## Mechanism 2 — weekly lossless worker restart (binary)
 
 For one explicit operator run, use `claudlobby host update runtime`; the daily

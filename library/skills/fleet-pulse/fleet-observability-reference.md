@@ -71,7 +71,7 @@ The per-type loop: (That loop is over **type strings**, never bot paths — the 
 | `session_missing`, `service_down`, `unit_missing`, `bridge_down`, `crash_loop`, `activity_stuck`, `input_held`, `usage_limit_held`, `pane_unknown`, `overdue_dispatch` | fleet-pulse, per bot | the bot |
 | `rc_timeout` | `start-bot.sh`, once per (re)start | the bot |
 | `script_error` | a runtime script's ERR trap | its bot; the fleet or the host for a script with none |
-| `bridge_down`, `channel_refused`, `reload_failed`, `restart_failed`, `keepalive_failed`, `keepalive_silent`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up or keepalive, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
+| `bridge_down`, `channel_refused`, `reload_failed`, `plugin_update_failed`, `restart_failed`, `keepalive_failed`, `keepalive_silent`, `alert_target_refused`, `alert_pair_unreachable`, `fleet_alert` | a FLEET ALERT raised with a fleet in scope: a fleet job, a bot's bring-up or keepalive, `fleet notify --level alert` (`fleet_alert`) | the fleet, read as bot `fleet` |
 | `unit_failed` | fleet-pulse, once an episode, for an owned unit in the failed state (#2532) | the fleet for one of its own units (bot `fleet`); the host for a host unit |
 | `compaction_not_proven` | keepalive, once a request: no compaction proven within 10 minutes of the `/compact` it typed (#1053) | the bot |
 | `rolling_restart_stalled` | a FLEET ALERT from `rolling-restart.sh` when a roll halts | the fleet of the shell that ran it, else the host: not the fleet it was rolling (#2112) |

@@ -5494,6 +5494,26 @@ except (OSError, ValueError, TypeError, KeyError):
 PY
 }
 
+# _plugin_update <plugin> <claude_bin> <log>
+# One `claude plugin update --scope user <plugin>` for plugin_ensure, its
+# output appended to <log> as it runs. A failed one logs `PLUGIN ERROR
+# <reason>` and prints <reason> on stdout (see plugin_ensure). Returns the
+# status of the update.
+_plugin_update() {
+    local plugin="$1" claude_bin="$2" log="$3" rc=0 offset detail reason
+    offset=$(wc -c 2>/dev/null < "$log" || true)
+    offset="${offset//[!0-9]/}"
+    with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    # The last non-blank line this update wrote: the error in its own words.
+    detail=$(tail -c +"$(( ${offset:-0} + 1 ))" "$log" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+    reason="claude plugin update $plugin failed (exit $rc)${detail:+: $detail}"
+    echo "$(ts_iso) PLUGIN ERROR $reason" >> "$log"
+    printf '%s\n' "$reason"
+    return "$rc"
+}
+
 # plugin_ensure <plugin> <claude_bin> <log> <once_flag>
 #
 # Installs `plugin` via `claude plugin install` the moment
@@ -5530,6 +5550,14 @@ PY
 # it and the user entry stays as it was. The install needs no flag:
 # `claude plugin install` installs for the user scope by default.
 #
+# A failed update says why, on stdout (#3090): whichever path runs it, an
+# update that exits non-zero (the 30 s limit included) adds a `PLUGIN ERROR
+# <reason>` line to the log and prints <reason>, in the words reload-fleet.sh
+# gives a failed update: `claude plugin update <plugin> failed (exit N): <the
+# last line it printed>`. Nothing else is printed: a pass, a skip and an
+# install print nothing. start-bot.sh collects these, and once the bot is up
+# raises them as one plugin_update_failed alert for the start.
+#
 # Called once per plugin from the Step 2 loop of start-bot.sh. Never
 # propagates a failure -- a plugin-manager hiccup (network blip, cold
 # marketplace cache) must not abort the boot it is called from -- and is
@@ -5553,7 +5581,7 @@ plugin_ensure() {
 
     if [ "$once_flag" != "1" ]; then
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
@@ -5564,7 +5592,7 @@ plugin_ensure() {
     epoch="$(resolve_boot_epoch 2>/dev/null || true)"
     if [ -z "$epoch" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (boot epoch unresolvable) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
@@ -5577,21 +5605,22 @@ plugin_ensure() {
     lockfile="$boot_dir/plugins.lock"
     if ! mkdir -p "$boot_dir" 2>/dev/null || [ ! -w "$boot_dir" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (state dir unwritable: $boot_dir) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
     # Runs under with_lock: in-process behind the mkdir spinlock where flock
     # is absent (stock macOS), in a forked subshell where it is present
     # (Linux). It reads the locals above by dynamic scope and reports a
-    # failed update through its return code; both survive the fork.
+    # failed update through its return code and the reason _plugin_update
+    # prints; all of these survive the fork.
     _plugin_update_once_locked() {
         if [ -e "$stamp" ]; then
             echo "$(ts_iso) PLUGIN update skipped (already run this boot): $plugin" >> "$log"
             return 0
         fi
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        if with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1; then
+        if _plugin_update "$plugin" "$claude_bin" "$log"; then
             touch "$stamp" 2>/dev/null || true
             return 0
         fi
