@@ -26,11 +26,12 @@ State file:
   events: {"N": [{event, actor, created_at, label?, rename_from?, rename_to?}]}
   edits:  {"N": {lastEditedAt, editor, editor_bot}, or a list of them}; GraphQL
           answers with the newest one's time and editor, as GitHub does
-  references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt?, repo?} or {issue}]}, in
+  references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt, repo} or {issue}]}, in
           timeline order; a pull request's `mergedAt` is answered only when MERGED, and
           an issue's source is {}, as GitHub answers the PullRequest fragment for it
   fail:   {issue_list: bool, issue_view: bool, permission: [LOGIN], events: [N], graphql: [N],
-           references: [N]}
+           references: [N]}; a number in references answers as one GitHub cannot resolve:
+          partial data, an `errors` array, exit 1
   raw_issue_list: text printed verbatim for `issue list` (a malformed reply)
 """
 
@@ -235,7 +236,7 @@ def graphql(rest: list[str]) -> None:
 def source(ref: dict, slug: str) -> dict:
     if "issue" in ref:
         return {}
-    repo = ref.get("repo", slug)
+    repo = ref.get("repo") or slug
     merged = ref.get("mergedAt") if ref["state"] == "MERGED" else None
     return {"number": ref["pr"], "url": f"https://github.com/{repo}/pull/{ref['pr']}",
             "mergedAt": merged}
@@ -256,8 +257,10 @@ def timeline(query: str, fields: dict[str, str]) -> None:
         if f"i{k}:issue(number:$n{k})" not in query:
             refuse(f"variable n{k} without its aliased issue i{k}")
         if number in [str(n) for n in fail.get("references") or []]:
-            print(json.dumps({"data": None, "errors": [{"message": "Something went wrong"}]}))
-            print("gh: Something went wrong while executing your query.", file=sys.stderr)
+            missing = f"Could not resolve to an Issue with the number of {number}."
+            print(json.dumps({"data": {"repository": {f"i{k}": None}}, "errors": [
+                {"type": "NOT_FOUND", "path": ["repository", f"i{k}"], "message": missing}]}))
+            print(f"gh: {missing}", file=sys.stderr)
             sys.exit(1)
         cursor = re.fullmatch(r"cursor:(\d+)", fields.get(f"c{k}", "cursor:0"))
         if not cursor:

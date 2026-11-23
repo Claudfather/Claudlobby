@@ -94,14 +94,9 @@ REFS_ISSUE = (
     "first:100,after:$c%(k)d){pageInfo{hasNextPage endCursor}"
     "nodes{...on CrossReferencedEvent{source{...on PullRequest{number url mergedAt}}}}}}"
 )
-REF_KEYS = ("number", "mergedAt", "url")
 
 
 class Usage(Exception):
-    pass
-
-
-class Unreadable(Exception):
     pass
 
 
@@ -115,6 +110,13 @@ def gh(*args):
     except (OSError, subprocess.SubprocessError):
         return 127, ""
     return proc.returncode, proc.stdout
+
+
+def graphql(repo, query, *variables):
+    """gh api graphql for REPO: its owner and name go in as $owner and $name."""
+    owner, name = repo.split("/", 1)
+    return gh("api", "graphql", "-f", "query=" + query, "-F", "owner=" + owner,
+              "-F", "name=" + name, *variables)
 
 
 def canon(login):
@@ -237,19 +239,7 @@ def label_vouches(repo, number, label, roles):
         return False, "label time unreadable"
     if any(e.get("event") == "renamed" for e in events[applied[-1] + 1 :]):
         return False, "title changed after %s was applied" % label
-    owner, name = repo.split("/", 1)
-    rc, out = gh(
-        "api",
-        "graphql",
-        "-f",
-        "query=" + EDIT_QUERY,
-        "-F",
-        "owner=" + owner,
-        "-F",
-        "name=" + name,
-        "-F",
-        "number=%s" % number,
-    )
+    rc, out = graphql(repo, EDIT_QUERY, "-F", "number=%s" % number)
     if rc != 0:
         return False, "last edit unreadable"
     try:
@@ -268,10 +258,10 @@ def label_vouches(repo, number, label, roles):
 
 
 def merged_references(repo, numbers):
-    """{number: the merged pull requests that cross-reference that issue}, read in one
-    GraphQL query per REFS_PER_QUERY issues; an issue whose timeline has another page
-    goes back in the queue with its cursor."""
-    owner, name = repo.split("/", 1)
+    """({number: the merged pull requests that cross-reference that issue}, None), or
+    (None, why) for a read that failed or was not the expected shape. One GraphQL query
+    reads REFS_PER_QUERY issues; an issue whose timeline has another page goes back in
+    the queue with its cursor."""
     found = {number: {} for number in numbers}
     pending = [(number, None) for number in numbers]
     while pending:
@@ -280,17 +270,14 @@ def merged_references(repo, numbers):
             ",".join("$n%d:Int!,$c%d:String" % (k, k) for k in range(len(page))),
             " ".join(REFS_ISSUE % {"k": k} for k in range(len(page))),
         )
-        call = ["api", "graphql", "-f", "query=" + query, "-F", "owner=" + owner,
-                "-F", "name=" + name]
+        variables = []
         for k, (number, cursor) in enumerate(page):
-            call += ["-F", "n%d=%d" % (k, number)]
+            variables += ["-F", "n%d=%d" % (k, number)]
             if cursor:
-                call += ["-f", "c%d=%s" % (k, cursor)]
-        rc, out = gh(*call)
+                variables += ["-f", "c%d=%s" % (k, cursor)]
+        rc, out = graphql(repo, query, *variables)
         if rc != 0:
-            raise Unreadable(
-                "the merged-reference read for %s failed (gh exit %d)" % (repo, rc)
-            )
+            return None, "failed (gh exit %d)" % rc
         try:
             reply = json.loads(out)["data"]["repository"]
             for k, (number, cursor) in enumerate(page):
@@ -302,20 +289,20 @@ def merged_references(repo, numbers):
                     if not (isinstance(pull["number"], int) and isinstance(pull["url"], str)
                             and instant(pull["mergedAt"])):
                         raise ValueError
-                    found[number][pull["url"]] = {key: pull[key] for key in REF_KEYS}
+                    found[number][pull["url"]] = {
+                        key: pull[key] for key in ("number", "mergedAt", "url")
+                    }
                 if timeline["pageInfo"]["hasNextPage"]:
                     after = timeline["pageInfo"]["endCursor"]
                     if not isinstance(after, str) or after in ("", cursor):
                         raise ValueError
                     pending.append((number, after))
         except (ValueError, KeyError, TypeError, AttributeError):
-            raise Unreadable(
-                "the merged-reference read for %s was not the expected shape" % repo
-            )
+            return None, "was not the expected shape"
     return {
         number: sorted(refs.values(), key=lambda ref: (instant(ref["mergedAt"]), ref["url"]))
         for number, refs in found.items()
-    }
+    }, None
 
 
 def shown(row):
@@ -389,12 +376,15 @@ def run_list(args):
             reason += "; " + label_why
         skipped.append((number, reason))
     if MERGED in asked:
-        try:
-            refs = merged_references(args.repo, [row.get("number") for row in kept])
-        except Unreadable as exc:
-            print("issue-intake: refused: %s" % exc, file=sys.stderr)
+        refs, why = merged_references(args.repo, [row.get("number") for row in kept])
+        if refs is None:
+            print(
+                "issue-intake: refused: the merged-reference read for %s %s" % (args.repo, why),
+                file=sys.stderr,
+            )
             return 3
-        kept = [dict(row, **{MERGED: refs[row.get("number")]}) for row in kept]
+        for row in kept:
+            row[MERGED] = refs[row.get("number")]
     print(json.dumps([shown(row) for row in kept]))
     print(
         "issue-intake: kept %d of %d %s issue(s) in %s"

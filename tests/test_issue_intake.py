@@ -504,8 +504,7 @@ def test_a_malformed_call_is_a_usage_error(tmp_path, argv):
 
 
 def pull(number: int, state: str, merged_at=None, *, repo=None) -> dict:
-    return {"pr": number, "state": state,
-            **({"mergedAt": merged_at} if merged_at else {}), **({"repo": repo} if repo else {})}
+    return {"pr": number, "state": state, "mergedAt": merged_at, "repo": repo}
 
 
 def mention(number: int) -> dict:
@@ -607,7 +606,7 @@ def test_the_checkin_backlog_read_lists_the_merged_references(tmp_path):
     assert len(listing) == 1, listing
     proc, _ = run(
         tmp_path,
-        shell=listing[0].replace("<owner/name>", SLUG),
+        shell=" ".join(listing[0].replace("\\\n", " ").split()).replace("<owner/name>", SLUG),
         issues=[issue(30, "repo-owner"), issue(31, "repo-owner")],
         extra_state={"references": {"30": [pull(40, "MERGED", MERGED_AT)], "31": [pull(42, "OPEN")]}},
     )
