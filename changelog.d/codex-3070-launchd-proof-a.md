@@ -1,1 +1,1 @@
-Record the isolated macOS launchd session-lifetime observation for phase 0.
+Record isolated macOS launchd and Linux systemd session-lifetime observations for phase 0.
