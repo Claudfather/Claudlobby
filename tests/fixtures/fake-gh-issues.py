@@ -7,7 +7,9 @@ It answers the reads the intake makes from a JSON state file ($FAKE_GH_STATE):
 - `gh issue view N --repo R --json FIELDS`
 - `gh api repos/R/collaborators/LOGIN/permission`
 - `gh api --paginate repos/R/issues/N/events?per_page=100`
-- `gh api graphql -f query=... -F owner=O -F name=N -F number=K`
+- `gh api graphql -f query=... -F owner=O -F name=N -F number=K` (the body's last edit)
+- `gh api graphql -f query=... -F owner=O -F name=N -F n0=K [-f c0=CURSOR] ...`
+  (cross-references, one aliased issue `i<k>` per `n<k>`, paged by `first:` and `c<k>`)
 
 Each call's arguments are appended to $FAKE_GH_LOG, one call per line. Response
 shapes mirror live captures from api.github.com and gh 2.92 (identifiers
@@ -18,12 +20,17 @@ other call, or a flag this stand-in does not model, exits 2, so a reader that
 dropped a filter or read only the first page of events cannot pass here.
 
 State file:
-  issues: [{number, title, body, author, author_name, bot, labels, createdAt, state}]
+  issues: [{number, title, body, author, author_name, bot, labels, createdAt, updatedAt,
+            state}]
   roles:  {LOGIN: admin|maintain|write|triage|read|none}   (absent = HTTP 404)
   events: {"N": [{event, actor, created_at, label?, rename_from?, rename_to?}]}
   edits:  {"N": {lastEditedAt, editor, editor_bot}, or a list of them}; GraphQL
           answers with the newest one's time and editor, as GitHub does
-  fail:   {issue_list: bool, issue_view: bool, permission: [LOGIN], events: [N], graphql: [N]}
+  references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt?, repo?} or {issue}]}, in
+          timeline order; a pull request's `mergedAt` is answered only when MERGED, and
+          an issue's source is {}, as GitHub answers the PullRequest fragment for it
+  fail:   {issue_list: bool, issue_view: bool, permission: [LOGIN], events: [N], graphql: [N],
+           references: [N]}
   raw_issue_list: text printed verbatim for `issue list` (a malformed reply)
 """
 
@@ -138,6 +145,7 @@ def issue_list(rest: list[str]) -> None:
                 for n in i.get("labels", [])
             ],
             "createdAt": i["createdAt"],
+            "updatedAt": i.get("updatedAt", i["createdAt"]),
             "state": i.get("state", "OPEN"),
             "url": f"https://github.com/{opts['--repo']}/issues/{i['number']}",
         }
@@ -206,16 +214,72 @@ def graphql(rest: list[str]) -> None:
     query = ""
     i = 0
     while i < len(rest):
-        if rest[i] == "-f" and rest[i + 1].startswith("query="):
-            query = rest[i + 1][len("query=") :]
-        elif rest[i] == "-F" and "=" in rest[i + 1]:
-            key, _, value = rest[i + 1].partition("=")
-            fields[key] = value
-        else:
+        if rest[i] not in ("-f", "-F") or i + 1 >= len(rest) or "=" not in rest[i + 1]:
             refuse(f"unmodelled graphql argument {rest[i]!r}")
+        key, _, value = rest[i + 1].partition("=")
+        if rest[i] == "-f" and key == "query":
+            query = value
+        elif rest[i] == "-f" and re.fullmatch(r"n\d+", key):
+            refuse(f"issue number {key} passed as a string: GraphQL refuses it for Int!")
+        else:
+            fields[key] = value
         i += 2
-    if "lastEditedAt" not in query:
-        refuse("graphql query does not read the body's last edit")
+    if "timelineItems" in query:
+        timeline(query, fields)
+    elif "lastEditedAt" in query:
+        last_edit(fields)
+    else:
+        refuse("graphql query reads neither cross-references nor the body's last edit")
+
+
+def source(ref: dict, slug: str) -> dict:
+    if "issue" in ref:
+        return {}
+    repo = ref.get("repo", slug)
+    merged = ref.get("mergedAt") if ref["state"] == "MERGED" else None
+    return {"number": ref["pr"], "url": f"https://github.com/{repo}/pull/{ref['pr']}",
+            "mergedAt": merged}
+
+
+def timeline(query: str, fields: dict[str, str]) -> None:
+    if "itemTypes:[CROSS_REFERENCED_EVENT]" not in query:
+        refuse("cross-reference read without the CROSS_REFERENCED_EVENT filter")
+    sizes = set(re.findall(r"first:(\d+)", query))
+    if len(sizes) != 1:
+        refuse("cross-reference read without one page size")
+    size = int(sizes.pop())
+    slug = f"{fields['owner']}/{fields['name']}"
+    answer = {}
+    k = 0
+    while f"n{k}" in fields:
+        number = fields[f"n{k}"]
+        if f"i{k}:issue(number:$n{k})" not in query:
+            refuse(f"variable n{k} without its aliased issue i{k}")
+        if number in [str(n) for n in fail.get("references") or []]:
+            print(json.dumps({"data": None, "errors": [{"message": "Something went wrong"}]}))
+            print("gh: Something went wrong while executing your query.", file=sys.stderr)
+            sys.exit(1)
+        cursor = re.fullmatch(r"cursor:(\d+)", fields.get(f"c{k}", "cursor:0"))
+        if not cursor:
+            refuse(f"unknown cursor {fields[f'c{k}']!r}")
+        start = int(cursor.group(1))
+        refs = (state.get("references") or {}).get(number, [])
+        page = refs[start : start + size]
+        end = start + len(page)
+        answer[f"i{k}"] = {
+            "timelineItems": {
+                "pageInfo": {"hasNextPage": end < len(refs),
+                             "endCursor": f"cursor:{end}" if page else None},
+                "nodes": [{"source": source(ref, slug)} for ref in page],
+            }
+        }
+        k += 1
+    if not answer:
+        refuse("cross-reference read without an issue")
+    print(json.dumps({"data": {"repository": answer}}))
+
+
+def last_edit(fields: dict[str, str]) -> None:
     number = fields.get("number", "")
     if number in [str(n) for n in fail.get("graphql") or []]:
         print("gh: Something went wrong while executing your query.", file=sys.stderr)
