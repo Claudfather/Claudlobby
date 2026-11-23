@@ -116,6 +116,10 @@ def _silence_plane(patch):
         patch.delenv(key, raising=False)
 
 
+# The session directory a failed session kept, for pytest_terminal_summary to name.
+_KEPT_SESSION_DIRECTORY = pytest.StashKey[Path]()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_plane_session(tmp_path_factory, request):
     """Guard session fixtures too; undo only our changes when pytest exits.
@@ -139,9 +143,22 @@ def _isolate_plane_session(tmp_path_factory, request):
         tmp_path_factory.getbasetemp()
         yield base
     if request.session.testsfailed:
-        print(f"retained failed-test files: {base}", file=sys.stderr)
+        # Kept to be read. pytest usually runs this teardown inside the last
+        # test's, with output captured, so a line printed here showed only when
+        # that test failed (#3102); pytest_terminal_summary names it instead.
+        request.config.stash[_KEPT_SESSION_DIRECTORY] = base
     else:
         shutil.rmtree(base)
+
+
+def pytest_terminal_summary(terminalreporter, config):
+    """Name the directory a failed session kept, whichever test ran last.
+
+    The terminal reporter writes outside output capture, once every test and
+    every session fixture has finished."""
+    kept = config.stash.get(_KEPT_SESSION_DIRECTORY, None)
+    if kept is not None:
+        terminalreporter.write_line(f"retained failed-test files: {kept}")
 
 
 @pytest.fixture(autouse=True)
