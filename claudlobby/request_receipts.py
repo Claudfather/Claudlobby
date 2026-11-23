@@ -161,6 +161,7 @@ class TransportObservation:
     wire_sha256: str | None = None
     wire_bytes: int | None = None
     native_returncode: int | None = None
+    reason: str | None = None  # the transport's fixed words for a failed or unknown result
 
 
 @dataclass(frozen=True)
@@ -408,6 +409,8 @@ def _validate(receipt):
                     raise ReceiptError("invalid message wire proof")
                 if observation.native_returncode is not None and type(observation.native_returncode) is not int:
                     raise ReceiptError("invalid native return code")
+                if observation.reason is not None and not isinstance(observation.reason, str):
+                    raise ReceiptError("invalid native transport reason")
                 if (observation.status == "submitted" and observation.native_returncode != 0
                         or observation.status == "failed" and (
                             observation.native_returncode is not None or observation.wire_sha256 is not None)):
@@ -469,6 +472,11 @@ def _decode(raw):
             StagePlan(**{**s, "facts": tuple(ExpectedFact(**{**f, "fields": tuple(f["fields"])})
                                              for f in s["facts"])})
             for s in intent["stages"])})
+        # Receipts written before transport reasons were kept name none. The round-trip
+        # check below compares against this raw, so the key is filled in here.
+        raw = {**raw, "message_attempts": [
+            {**item, "observation": {"reason": None, **item["observation"]}}
+            if item["observation"] is not None else item for item in raw["message_attempts"]]}
         attempts = tuple(MessageAttempt(**{
             **item,
             "observation": (TransportObservation(**item["observation"])

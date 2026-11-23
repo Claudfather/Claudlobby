@@ -23,6 +23,7 @@ def _data(route, outcome, *, parent_message_id=None) -> dict:
             "destination": {"uid": route.peer.uid, "alias": route.peer.alias},
             "recording": outcome.recording, "request_persisted": outcome.request_persisted,
             "transport": outcome.delivery, "delivery": outcome.delivery,
+            "transport_reason": outcome.transport_reason,
             "receipt_observation": None, "integrity_verdict": None,
             "replayed": outcome.replayed, "alert": alert}
     if parent_message_id is not None:

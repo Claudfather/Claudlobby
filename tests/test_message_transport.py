@@ -34,7 +34,8 @@ def test_one_call_preserves_stdin_and_rejects_ambient_shell_and_trace_controls(d
                "PATH": "/tmp/evil", "PLANE_MSG_ID": "msg_" + "c" * 32,
                "PLANE_WIRE_OUT": "/tmp/leaked-proof", "PANE_VERIFY_TRACE": "/tmp/leaked-body",
                "PANE_SEND_VERIFY_TICKS": "99", "PANE_SEND_CHUNK_BYTES": "0",
-               "TMUX_TMPDIR": "/tmp/foreign-server", "PLANE_EMIT_DISABLED": "0"}
+               "TMUX_TMPDIR": "/tmp/foreign-server", "PLANE_EMIT_DISABLED": "0",
+               "PANE_SEND_IDLE_ONLY": "1"}
     for key, value in hostile.items():
         monkeypatch.setenv(key, value)
     body = 'quotes "\' $HOME $(touch forbidden) `false` ;\n\t\x1b[31m résumé\n'
@@ -257,6 +258,10 @@ def test_real_native_types_nothing_into_a_usage_limit_menu(credits_first):
     (b"pane_send: recipient-input-held; no payload or Enter was sent\n", 4, 1, "unknown"),
     (b"pane_send: recipient-menu-open; no payload or Enter was sent\n", 4, 4, "failed"),
     (b"pane_send: recipient-menu-open; no payload or Enter was sent\n", 4, 1, "unknown"),
+    (b"pane_send: recipient-busy; no payload or Enter was sent\n", 4, 4, "failed"),
+    (b"pane_send: recipient-busy; no payload or Enter was sent\n", 4, 1, "unknown"),
+    (b"pane_send: recipient-unreadable; no payload or Enter was sent\n", 4, 4, "failed"),
+    (b"pane_send: recipient-unreadable; no payload or Enter was sent\n", 4, 1, "unknown"),
 ])
 def test_held_refusal_requires_coherent_native_proof(destination, marker, reported, actual, expected):
     calls = []
@@ -268,6 +273,35 @@ def test_held_refusal_requires_coherent_native_proof(destination, marker, report
     assert result.status == expected and len(calls) == 1
     if expected == "failed":
         assert result.wire_sha256 is result.wire_bytes is None
+
+
+def test_only_an_idle_only_send_asks_the_native_helper_to_refuse_a_running_turn(destination):
+    seen = []
+    def runner(command, **kwargs):
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(command, 0,
+            f"transport-v1\tinvoked\ntransport-v1\tresult\t0\t{HASH}\t42\n".encode(), b"")
+    for idle_only in (False, True):
+        transport.send(source_package(), destination, message_id=MSG, body="new", runner=runner,
+                       idle_only=idle_only)
+    plain, idle = seen
+    assert "PANE_SEND_IDLE_ONLY" not in plain
+    assert idle == {**plain, "PANE_SEND_IDLE_ONLY": "1"}
+
+
+@pytest.mark.parametrize(("marker", "reason"), [
+    (b"pane_send: recipient-busy; no payload or Enter was sent\n", "recipient pane was busy; nothing was sent"),
+    (b"pane_send: recipient-unreadable; no payload or Enter was sent\n",
+     "recipient pane could not be read; nothing was sent"),
+])
+def test_an_idle_only_refusal_gives_the_reason_of_the_senders_own_look(destination, marker, reason):
+    def runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 4,
+            f"transport-v1\tinvoked\ntransport-v1\tresult\t4\t{HASH}\t42\n".encode(), marker)
+    result = transport.send(source_package(), destination, message_id=MSG, body="new", runner=runner,
+                            idle_only=True)
+    assert (result.status, result.reason) == ("failed", reason)
+    assert result.wire_sha256 is result.wire_bytes is None
 
 
 @pytest.mark.parametrize(("field", "value"), [("socket", "../foreign"), ("socket", ""),

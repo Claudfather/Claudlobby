@@ -256,7 +256,8 @@ def dispatch(args) -> CommandOutput:
                                                         values["report"], route=route.receipt_binding())
                 notification_data = _committed_notification(
                     ctx, route, selected.paths.package, result,
-                    _report_envelope(result, route, values["report"]))
+                    _report_envelope(result, route, values["report"]),
+                    retry_uncertain=args.retry_uncertain)
             elif args.public_command == "task.feedback":
                 return feedback_bound_task(ctx, route, selected.paths.package,
                                            request_id=args.request_id, **values)

@@ -18,8 +18,10 @@ def _lines(view) -> tuple[str, ...]:
     for attempt in view.transmissions:
         transport = attempt.transport.status if attempt.transport is not None else "unobserved"
         proof = attempt.proof.status if attempt.proof is not None else "not_available"
+        reason = attempt.transport.reason if attempt.transport is not None else None
         lines.append(f"transmission {attempt.attempt_no}\ttransport={transport}\t"
-                     f"recorded={attempt.recorded_status}\trecording_proof={proof}")
+                     f"recorded={attempt.recorded_status}\trecording_proof={proof}"
+                     + (f"\treason={reason}" if reason else ""))
     return tuple(lines)
 
 

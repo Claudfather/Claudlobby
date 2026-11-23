@@ -149,6 +149,12 @@ bot_tmux() {
             ;;
         capture-pane)
             local remaining fixture
+            # FAIL_LOCKED_CAPTURE=1: the capture under the send lock fails, as
+            # when the pane went away after its box was drawn.
+            if [ -n "${FAIL_LOCKED_CAPTURE:-}" ] &&
+                [ "${FUNCNAME[1]:-}" = _pane_send_verified_locked ]; then
+                return 1
+            fi
             # The pre-write look observes the last readiness frame. Future
             # frames describe the authored payload after send-keys, not input
             # that existed before it. Keep this snapshot across subshells.
@@ -1355,6 +1361,28 @@ r=$(boot_send_settled STARTUP 4 "$blog"; echo "rc=$?")
 assert_eq "rc 4 at boot: a menu does not abort the boot either" "rc=0" "$r"
 r=$(grep -c 'STARTUP — NOT SENT: the input box already held text, or a menu held the screen' "$blog" || true)
 assert_eq "the boot log names both reasons a send takes no input" "2" "$r"
+
+echo "=== an idle-only send refuses a running turn, or a capture it cannot read, under the lock ==="
+# PANE_SEND_IDLE_ONLY=1 is a sender that types only into an idle pane (a report's
+# uncertain retry). It looked before it waited for the pane's send lock, so the
+# capture taken under the lock, the last look before the first keystroke, refuses a
+# turn that started meanwhile. Without the flag the same pane is typed into.
+for busy in input-queued-turn.txt hooks-running-turn.txt; do
+    r=$(export PANE_SEND_IDLE_ONLY=1; run_send_rc 'NEW PAYLOAD' "$FIXTURES/$busy")
+    assert_eq "$busy: idle-only, no keystrokes and definite refusal" "0 4" "$r"
+    r=$(grep -cF 'pane_send: recipient-busy; no payload or Enter was sent' "$SEND_ERR" || true)
+    assert_eq "$busy: the busy refusal says that nothing was sent" "1" "$r"
+    r=$(run_send_rc 'NEW PAYLOAD' $(sent_frames 'NEW PAYLOAD' '' "$FIXTURES/$busy"))
+    assert_eq "$busy: without the flag, typed and submitted as before" "2 0" "$r"
+done
+r=$(export PANE_SEND_IDLE_ONLY=1; run_send_rc 'idle payload' $(sent_frames 'idle payload'))
+assert_eq "idle-only into an idle box: typed and submitted" "2 0" "$r"
+r=$(export PANE_SEND_IDLE_ONLY=1 FAIL_LOCKED_CAPTURE=1; run_send_rc 'NEW PAYLOAD' "$HINT")
+assert_eq "idle-only, the capture under the lock unreadable: definite refusal" "0 4" "$r"
+r=$(grep -cF 'pane_send: recipient-unreadable; no payload or Enter was sent' "$SEND_ERR" || true)
+assert_eq "the unreadable refusal says that nothing was sent" "1" "$r"
+r=$(export FAIL_LOCKED_CAPTURE=1; run_send_rc 'NEW PAYLOAD' $(sent_frames 'NEW PAYLOAD'))
+assert_eq "without the flag, an unreadable capture is typed past as before" "2 0" "$r"
 
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

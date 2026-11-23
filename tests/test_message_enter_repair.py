@@ -309,13 +309,15 @@ EMPTY = _frame("")
 
 
 @contextmanager
-def _stub_pane(frame, *, session="worker"):
-    """A real tmux pane drawing <frame> through the held-box stub, which logs every
-    key it receives. Yields a destination maker (a session name), the key log and
-    the package whose native helper is this checkout's."""
+def _stub_pane(frame, *, session="worker", stub="held-box-stub.py"):
+    """A real tmux pane drawing <frame> through the held-box stub, or another of the
+    fixtures' stubs that draws a frame file the same way, which logs every key it
+    receives. Yields a destination maker (a session name), the key log and the
+    package whose native helper is this checkout's. The frame is the destination
+    root's frame.txt."""
     tmux = shutil.which("tmux")
     assert tmux, "the native look requires tmux"
-    stub = Path(__file__).resolve().parent / "fixtures" / "held-box-stub.py"
+    stub = Path(__file__).resolve().parent / "fixtures" / stub
     with TemporaryDirectory(prefix="cl-rep-", dir="/tmp") as scratch:
         root = Path(scratch)
         sockets, home = root / "s", root / "h"
@@ -375,6 +377,20 @@ time.sleep(float(sys.argv[3]))
 """
 
 
+def _send_lock_file(package, destination) -> str:
+    """The pane's send lock file, as the shipped _pane_send_lock_file names it for the bare
+    session, with its directory made."""
+    lock = subprocess.run(
+        ["bash", "-c", '. "$1/lib-common.sh" >/dev/null 2>&1; _pane_send_lock_file "$2" "$3"; '
+         'printf %s "${_PANE_SEND_LOCK_FILE:-}"', "lock-file", str(package.native), destination.socket,
+         destination.session],
+        env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(destination.root), "LC_ALL": "C"},
+        capture_output=True, text=True, timeout=10).stdout
+    assert lock.startswith(str(destination.root)), f"no lock file named under the destination root: {lock!r}"
+    Path(lock).parent.mkdir(parents=True, exist_ok=True)
+    return lock
+
+
 def test_the_native_look_waits_for_the_recipients_send_lock():
     """#2036: the owner's repair Enter is a keystroke like any other. While another
     sender holds the pane's send lock, the look presses nothing; once the lock is
@@ -382,14 +398,7 @@ def test_the_native_look_waits_for_the_recipients_send_lock():
     sender's chunks. The lock file is the shipped helper's, for the bare session."""
     with _stub_pane(HELD) as (destination, log, package):
         dest = destination()
-        lock = subprocess.run(
-            ["bash", "-c", '. "$1/lib-common.sh" >/dev/null 2>&1; _pane_send_lock_file "$2" "$3"; '
-             'printf %s "${_PANE_SEND_LOCK_FILE:-}"', "lock-file", str(package.native), dest.socket,
-             dest.session],
-            env={"PATH": "/usr/bin:/bin", "CLAUDLOBBY_ROOT": str(dest.root), "LC_ALL": "C"},
-            capture_output=True, text=True, timeout=10).stdout
-        assert lock.startswith(str(dest.root)), f"no lock file named under the destination root: {lock!r}"
-        Path(lock).parent.mkdir(parents=True, exist_ok=True)
+        lock = _send_lock_file(package, dest)
         held = Path(lock).parent / "held"
         holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, lock, str(held), "30"])
         try:
