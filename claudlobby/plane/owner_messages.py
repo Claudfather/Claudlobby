@@ -105,7 +105,7 @@ class OwnerMessages:
     @admitted_action
     def send(self, reader: VerifiedReader, *, fleet: str, fleet_uid: str,
              recipient_uid: str, request_id: str, text: str,
-             expected_grant: OwnerMessageGrant) -> ApplicationOutcome:
+             expected_grant: OwnerMessageGrant, provenance: dict | None = None) -> ApplicationOutcome:
         """Authorize one ordinary send; reuse canonical idempotency and proof.
 
         Exceptions may follow a committed/native effect. Keep the original
@@ -113,6 +113,8 @@ class OwnerMessages:
         The shared workflow only returns success after receiver integrity proof.
         The caller supplies the grant bound to its action context. A later grant
         must not silently replace that expected principal/revision/actor binding.
+        ``provenance`` is set only by the connected action path, from its checked
+        session binding; a direct session or a computer send leaves it None.
         """
         self._authorize(reader, fleet_uid, expected_grant)
         if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
@@ -135,7 +137,8 @@ class OwnerMessages:
             self._authorize(reader, fleet_uid, grant)
             try:
                 result = deliver_bound_message(route, body=body, request_id=request_id,
-                                                caller_context=ctx, require_durable_request=True)
+                                                caller_context=ctx, require_durable_request=True,
+                                                provenance=provenance)
             except CommandFailure:
                 # An error can carry recorded outcome data after a native effect.
                 # Withhold it too when the session or exact grant changed.

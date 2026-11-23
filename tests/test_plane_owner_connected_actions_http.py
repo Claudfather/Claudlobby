@@ -280,3 +280,21 @@ def test_foreground_launcher_context_preserves_connected_send_and_original_recei
     else:
         assert sent.status_code == observed.status_code == 403
         assert checks == [] and calls == []
+
+
+def test_connected_send_records_the_bound_account_and_revision(connected_actions, monkeypatch):
+    from claudlobby.request_queries import read_request
+    f = connected_actions
+    allow(f, "message")
+    calls = receiver(monkeypatch)
+    r = row(f, "message")
+    sent = post(f, "send", {**r, "body": "Connected example"})
+    assert sent.status_code == 200 and sent.json()["status"] == "delivered", sent.text
+    adapter, ctx, binding = f[2], f[3], f[7]
+    expected = {"carrier": "connected", "account": binding.subject, "binding_revision": binding.revision}
+    stored = adapter.root / "state/requests" / ctx.fleet_uid / (r["request_id"] + ".json")
+    raw = json.loads(stored.read_bytes())
+    assert raw["provenance"] == expected and "provenance" not in raw["intent"]
+    assert read_request(adapter.root, ctx.fleet_uid, r["request_id"]).provenance == expected
+    assert post(f, "send", {**r, "body": "Connected example"}).json() == sent.json()
+    assert json.loads(stored.read_bytes())["provenance"] == expected and len(calls) == 1
