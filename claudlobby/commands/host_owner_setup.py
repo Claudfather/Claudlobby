@@ -515,7 +515,7 @@ class _CardEffects:
     def send(self, alias, request_id, text, check):
         from .message_write import send_to_lead
         send_to_lead(self.paths.root, package=self.paths.package, fleet=self.grant.fleet, alias=alias,
-                     request_id=request_id, text=text, check=check, provenance={"carrier": "setup_finish"})
+                     request_id=request_id, text=text, check=check)
 
 
 def _preview_payload(conn, grant):
@@ -535,9 +535,11 @@ def _keep(store, grant, value):
     return value
 
 
-def _stands(store, conn, grant, value):
-    """None while the approval stands, the owner is the one the finish bound, and (once granted) the
-    grant row holds the recorded actor and name; else the reason: ``revoked`` or ``stale``."""
+_REASONS = {"revoked": "setup_withdrawn", "stale": "stale_binding"}
+
+
+def _approval_stands(store, conn, grant):
+    """Read-only: None while this approval stands for an active owner; else ``revoked`` or ``stale``."""
     from ..plane.owner_setup import setup_still_stands
     row = conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
     if row is None or OwnerSetup._grant(row) != grant:
@@ -546,7 +548,16 @@ def _stands(store, conn, grant, value):
     if standing is not None:
         return "revoked" if standing == "revoked" else "stale"
     owner = store._grant(conn)
-    if owner is None or not owner.active or owner.revision != value["owner_revision"]:
+    return "stale" if owner is None or not owner.active else None
+
+
+def _stands(store, conn, grant, value):
+    """None while the approval stands, the owner is the one the finish bound, and (once granted) the
+    grant row holds the recorded actor and name; else the reason: ``revoked`` or ``stale``."""
+    reason = _approval_stands(store, conn, grant)
+    if reason is not None:
+        return reason
+    if store._grant(conn).revision != value["owner_revision"]:
         return "stale"
     if value.get("state") == "allowed" and not _grant_holds(store, conn, value):
         return "revoked"
@@ -580,8 +591,7 @@ def _admit(store, grant, ids, value):
                              (value["owner_revision"], value["fleet_uid"])).fetchone()
                 if reason is None and OwnerAccess._has_grants(conn, "message") else None)
         if reason is not None:
-            value.update(state=reason, reason="setup_withdrawn" if reason == "revoked" else "stale_binding",
-                         goal={"state": "not_sent", "reason": reason})
+            value.update(state=reason, reason=_REASONS[reason], goal={"state": "not_sent", "reason": reason})
         elif held is not None and (held["actor_uid"], held["actor_alias"]) != (value["actor_uid"], value["alias"]):
             # Approved at the terminal under another name: left as it is.
             value.update(state="kept", goal={"state": "not_sent", "reason": "other_grant"})
@@ -607,7 +617,7 @@ def _sent(view, value, text):
     return {"state": "unknown", "reason": "send_uncertain"}
 
 
-def _goal(store, grant, record, value, effects):
+def _goal(paths, store, grant, record, value, effects):
     """Send the launched goal once: look its id up first (never resend), then check and send."""
     goal = value["goal"]
     request_id = goal["request_id"]
@@ -623,7 +633,14 @@ def _goal(store, grant, record, value, effects):
 
     def check(ctx, route):
         """Immediately before the send, inside runtime admission."""
+        from ..git_update import healthy_done, read_update
+        from ..plane.owner_setup import managed_setup
         if (ctx.caller.uid, ctx.caller.alias, route.peer.uid) != (value["actor_uid"], value["alias"], value["lead_uid"]):
+            raise _Halt("stale")
+        # The Launch is still the computer's current healthy update: no later update finished since.
+        package = managed_setup(paths.root)
+        current = read_update(package.installation)
+        if current != record or not healthy_done(current) or package.source_revision != record["target"]:
             raise _Halt("stale")
         with store._connection() as conn:
             OwnerSetup._schema(conn)
@@ -699,6 +716,14 @@ def _card_messages(paths, store, grant, record, *, by, effects=None):
             OwnerSetup._schema(conn)
             value = _preview_payload(conn, grant).get("messages")
         if value is None or value.get("state") == "in_progress":
+            with store._connection() as conn:
+                OwnerSetup._schema(conn)
+                reason = _approval_stands(store, conn, grant)
+            if reason is not None:
+                # Before any name is read or registered: a withdrawn or re-paired approval registers nothing.
+                start = value or {"by": by, "alias": grant.messages["alias"], "renamed": False}
+                return card_answer(store, grant, _keep(store, grant, {**start, "state": reason,
+                    "reason": _REASONS[reason], "goal": {"state": "not_sent", "reason": reason}}))
             if value is None:
                 base = grant.messages["alias"].removeprefix("human:")
                 name = numbered_name(base, effects.taken())
@@ -712,7 +737,7 @@ def _card_messages(paths, store, grant, record, *, by, effects=None):
             ids = effects.register(value["alias"])
             value = _admit(store, grant, ids, value)
         if value["state"] == "allowed" and value["goal"]["state"] in ("pending", "unknown"):
-            value = _keep(store, grant, {**value, "goal": _goal(store, grant, record, value, effects)})
+            value = _keep(store, grant, {**value, "goal": _goal(paths, store, grant, record, value, effects)})
         return card_answer(store, grant, value)
 
 
@@ -732,7 +757,7 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
     if grant.messages is not None:
         # The team card carried the messages mark: its finish, never the three optional cards.
-        messages = _card_messages(paths, store, grant, record, by="page" if consent is not None else "computer")
+        messages = _card_messages(paths, store, grant, record, by="page" if consent is not None else "terminal")
         return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": messages},
                              lines=(card_line(messages),))
     _say(terminal, "Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")

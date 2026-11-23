@@ -9079,7 +9079,7 @@
     "tests/test_plane_owner_setup.py::test_provider_signin_unsafe_or_existing_environment_never_changes[source /other/root\\n]": 0.0011,
     "tests/test_plane_owner_setup.py::test_provider_signin_without_local_scope_never_starts": 0.0283,
     "tests/test_plane_owner_setup.py::test_repository_snapshot_stays_byte_compatible": 0.0186,
-    "tests/test_plane_owner_setup.py::test_todays_guide_is_unchanged_on_the_wire": 0.9412,
+    "tests/test_plane_owner_setup.py::test_the_guide_wire_keeps_todays_frames_and_the_marked_team_card_answer_names_the_sender": 0.9412,
     "tests/test_plane_owner_setup.py::test_todays_guide_is_unchanged_on_the_wire_at_the_profile": 0.0101,
     "tests/test_plane_owner_setup.py::test_todays_guide_is_unchanged_on_the_wire_at_the_script": 3.2308,
     "tests/test_plane_owner_setup.py::test_typed_completion_reopen_only_offers_optional_messages_for_original_done": 0.0629,

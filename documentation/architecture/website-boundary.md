@@ -52,9 +52,10 @@ The guide's cards travel over the computer's Tailscale connection, not in a
 website session, and carry no website-signed statement. Core cannot tell which
 website account a setup page is signed into: whoever can act as the computer's
 Tailscale user already reaches the guide's cards, so the team card's name is an
-accident boundary, like the operator terminal. The first guard is the page's
-own rule: it fills the card's name only for the account the computer is bound
-to. Core refuses the finish only when the binding the approval pinned has
+accident boundary, like the operator terminal. The website's name-card change
+adds the page-side rule: the page fills the card's name only for the account the
+computer is bound to. Today's page has no such rule and sends no name, so core
+refuses its answer to the marked team card (`invalid_request`). Core refuses the finish only when the binding the approval pinned has
 changed (a re-pair or re-bind); it cannot refuse a different account on the
 same binding.
 

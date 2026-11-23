@@ -1383,9 +1383,12 @@ def test_unmarked_team_card_refuses_a_name(pipes):
     assert isinstance(returned, StdioRefused) and returned.code == "invalid_request"
 
 
-def test_marked_team_card_without_a_name_is_refused(pipes):
+@pytest.mark.parametrize("approve", [True, False])
+def test_todays_website_frame_on_a_marked_team_card_is_refused(pipes, approve):
+    """Today's page answers the team card with no `actor_alias`, approving or declining: refused as an
+    invalid request. The website's core pin moves only together with its name-card change."""
     from claudlobby.commands.owner_stdio import StdioRefused
-    returned, _ = _team_card(pipes, marked=True, answer={})
+    returned, _ = _team_card(pipes, marked=True, answer={"approve": approve})
     assert isinstance(returned, StdioRefused) and returned.code == "invalid_request"
 
 

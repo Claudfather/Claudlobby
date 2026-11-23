@@ -2718,7 +2718,7 @@ TODAYS_START_KEYS = ["binding_sha256", "expected_uid", "finish_setup", "profile"
                      "source_revision", "type", "version"]
 
 
-def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path):
+def test_the_guide_wire_keeps_todays_frames_and_the_marked_team_card_answer_names_the_sender(team_setup, monkeypatch, tmp_path):
     """Today's typed Linux run with its own configuration: the local project, the
     Claude sign-in scope and the managed owner's settings plan are built by
     `_configuration` itself. Stand-ins only for what this fixture has no real one
@@ -3148,20 +3148,30 @@ def test_a_finish_that_died_after_choosing_its_label_resumes_with_it(setup_autho
     assert resumed.registered == [ALIAS] and message_grants(access) == [(ACTOR_UID, ALIAS)]
 
 
+@pytest.mark.parametrize("resumed", [False, True])
 @pytest.mark.parametrize("change", ["revoke_setup", "re_pair"])
-def test_a_withdrawn_or_re_paired_approval_grants_and_sends_nothing(setup_authority, monkeypatch, change):
+def test_a_withdrawn_or_re_paired_approval_registers_grants_and_sends_nothing(setup_authority, monkeypatch, change, resumed):
     from tests.test_plane_owner_workspace import OWNER as PRINCIPAL
     engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
     access = setup_authority[1]
+    if resumed:  # A finish died after choosing its label, before registering it.
+        dying = FakeCard(access)
+        dying.register = lambda alias: (_ for _ in ()).throw(KeyboardInterrupt())
+        with pytest.raises(KeyboardInterrupt):
+            finish(setup_authority, request, dying, monkeypatch)
     if change == "revoke_setup":
         OwnerSetup(access).revoke(grant)
     else:
         access.revoke_owner(expected_revision=access.current_grant().revision)
         access.confirm_pairing(access.begin_pairing(PRINCIPAL).token, expected_principal=PRINCIPAL)
     card = FakeCard(access)
+    card.taken = lambda: pytest.fail("names were read for a withdrawn or re-paired approval")
     answer = finish(setup_authority, request, card, monkeypatch)["messages"]
-    assert answer["state"] == ("revoked" if change == "revoke_setup" else "stale")
-    assert answer["goal"]["state"] == "not_sent" and not card.sent and message_grants(access) == []
+    expected = ("revoked", "setup_withdrawn") if change == "revoke_setup" else ("stale", "stale_binding")
+    assert (answer["state"], answer["reason"], answer["alias"]) == (*expected, ALIAS)
+    assert answer["goal"] == {"state": "not_sent", "reason": expected[0]}
+    assert not card.registered and not card.sent and message_grants(access) == []
+    assert finish(setup_authority, request, card, monkeypatch)["messages"] == answer and not card.registered
 
 
 @pytest.mark.parametrize("binding", ["as_approved", "rebound_before_finish"])
@@ -3170,8 +3180,8 @@ def test_finish_takes_no_website_account_and_stops_only_on_a_changed_binding(set
 
     The finish takes no account input: whoever drives the guide over the computer's Tailscale user (a
     bare consent object here) gets exactly the card's effect under the card's name, for the binding the
-    approval pinned. It refuses only when that binding changed (a re-pair or a re-bind). The page-side
-    rule (the page fills the name only for its own bound account) is the first guard."""
+    approval pinned. It refuses only when that binding changed (a re-pair or a re-bind). The website's
+    name-card change adds the page-side rule (the page fills the name only for its own bound account)."""
     import inspect
     from claudlobby.commands.host_owner_setup import _card_messages
     assert set(inspect.signature(_card_messages).parameters) == {"paths", "store", "grant", "record", "by", "effects"}
@@ -3274,6 +3284,84 @@ def test_an_update_after_done_refuses_the_marked_finish(setup_authority, monkeyp
     monkeypatch.setattr(guide, "_CardEffects", lambda *_: pytest.fail("a stale Launch reached the finish"))
     with pytest.raises((CommandFailure, ValueError, RuntimeError)):
         finish(setup_authority, request, None, monkeypatch)
+
+
+@pytest.mark.parametrize("change", ["second_update", "update_started"])
+def test_an_update_between_the_check_and_the_send_stops_the_send(setup_authority, monkeypatch, change):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    retained = setup_authority[-1].retained
+    card = FakeCard(access)
+    send = card.send
+
+    def later(alias, request_id, text, check):  # After the finish's first check, before its send.
+        if change == "second_update":  # Another update finished healthy at the same revision.
+            retained["record"] = {**retained["record"], "request_id": str(uuid4())}
+        else:
+            retained["record"] = {**retained["record"], "phase": "quiesce"}
+        send(alias, request_id, text, check)
+    card.send = later
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert answer["state"] == "allowed" and answer["goal"] == {"state": "not_sent", "reason": "stale"}
+    assert not card.sent and message_grants(access) == [(ACTOR_UID, ALIAS)]
+
+
+def test_an_uncertain_send_is_reported_from_its_receipt_and_never_resent(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    send = card.send
+
+    def uncertain(alias, request_id, text, check):  # The request is recorded, its transport unconfirmed.
+        send(alias, request_id, text, check)
+        card.receipts[request_id] = _receipt(ACTOR_UID, LEAD_UID, text, status="unknown")
+        raise OSError("synthetic error after the effect")
+    card.send = uncertain
+    first = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert first["goal"] == {"state": "unknown", "reason": "send_uncertain"} and len(card.sent) == 1
+    again = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert again["goal"] == {"state": "unknown", "reason": "send_uncertain"}
+    assert len(card.sent) == 1, "the receipt answers the rerun; nothing is resent"
+
+
+@pytest.mark.parametrize("when", ["before_the_send", "after_the_send"])
+def test_an_unavailable_receipt_is_reported_and_never_counted_sent(setup_authority, monkeypatch, when):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    lookups = []
+
+    def receipt(fleet_uid, request_id):
+        lookups.append(request_id)
+        if when == "before_the_send" or len(lookups) > 1:
+            raise OSError("synthetic receipt store failure")
+        return None
+    card.receipt = receipt
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    if when == "before_the_send":
+        assert answer["goal"] == {"state": "pending", "reason": "receipt_unavailable"} and not card.sent
+    else:
+        assert answer["goal"] == {"state": "unknown", "reason": "receipt_unavailable"} and len(card.sent) == 1
+
+
+def test_a_team_without_a_lead_gets_messages_but_no_goal(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    register = card.register
+    card.register = lambda alias: {**register(alias), "lead_uid": None}
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert (answer["state"], answer["goal"]) == ("allowed", {"state": "not_sent", "reason": "no_lead"})
+    assert not card.sent and message_grants(access) == [(ACTOR_UID, ALIAS)]
+
+
+def test_a_finish_typed_at_the_terminal_is_recorded_by_terminal(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    answer = finish(setup_authority, request, card, monkeypatch, consent=False)["messages"]
+    assert answer == {"state": "allowed", "by": "terminal", "alias": ALIAS, "renamed": False, "goal": {"state": "sent"}}
+    assert len(card.sent) == 1 and message_grants(access) == [(ACTOR_UID, ALIAS)]
 
 
 def test_the_card_carries_the_mark_only_while_its_finish_exists(monkeypatch):

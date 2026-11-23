@@ -573,18 +573,21 @@ exactly as before.
 
 After a healthy Launch, the guide's finish (`--_finish-setup`, run today by the
 setup page) does for a marked approval, instead of the three optional cards: it
-takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
+first checks, read-only, that the approval still stands for an active owner
+(otherwise it records `revoked` with reason `setup_withdrawn`, or `stale` with
+reason `stale_binding`, and reads or registers no name); it then takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
 to 38 characters) if a recorded person or bot already uses it; registers it;
 re-checks the approval, binding and owner and writes the message grant in one
-transaction; then, after the same checks plus the grant row and the goal against
-the launched configuration, sends the Preview's goal to the lead once under a
+transaction; then, after the same checks plus the grant row, the goal against
+the launched configuration, and the computer's update record re-read at send
+time (still this Launch's, healthy, at the running revision), sends the Preview's goal to the lead once under a
 request id derived from the Launch's. It counts the goal sent only from a
 receipt whose sender, recipient and body match. One finish runs at a time
 (`state/setup-finish-<launch request id>.lock`); its record lives in the
 approval's Preview row, so running it again answers from that record and never
 grants or sends twice. Its answer is `{"state": "setup_complete", "request_id":
 ..., "messages": {"state": "allowed"|"kept"|"name_taken"|"revoked"|"stale"|"in_progress",
-"reason": ..., "by": "page"|"computer", "alias": ..., "renamed": ...,
+"reason": ..., "by": "page"|"terminal", "alias": ..., "renamed": ...,
 "goal": {"state": "sent"|"unknown"|"pending"|"not_sent", "reason": ...}}}`.
 It reports `allowed` only while the grant row holds; otherwise `revoked` with
 reason `messages_revoked`. The status run and `host owner setup-status` carry

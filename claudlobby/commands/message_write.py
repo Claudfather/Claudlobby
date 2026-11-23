@@ -13,8 +13,9 @@ from ..request_ids import canonical_request_id
 from ..runtime_admission import bound_runtime_release as _bound_release
 
 
-def send_to_lead(root, *, package, fleet, alias, request_id, text, check, provenance):
-    """One registered local human's ordinary message to the fleet's lead, through the local send path.
+def send_to_lead(root, *, package, fleet, alias, request_id, text, check):
+    """The setup finish's one message: a registered local human's goal to the fleet's lead, through the
+    local send path, under the provenance ``{"carrier": "setup_finish"}``.
 
     ``check(ctx, route)`` runs inside runtime admission immediately before delivery and refuses by
     raising. The durable request is required; nothing here retries or registers.
@@ -40,7 +41,7 @@ def send_to_lead(root, *, package, fleet, alias, request_id, text, check, proven
                                  release_id=runtime_release_id(release))
         check(ctx, route)
         return deliver_bound_message(route, body=body, request_id=request_id, caller_context=ctx,
-                                     require_durable_request=True, provenance=provenance)
+                                     require_durable_request=True, provenance={"carrier": "setup_finish"})
 
 
 def _body(args):
