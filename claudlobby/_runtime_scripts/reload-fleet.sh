@@ -171,7 +171,7 @@ _warm_npx() {
 # file, and `|| _rc=$?` keeps the ERR trap exactly as quiet as it was.
 _run_step() {
     local label="$1"; shift
-    local cmd="$1" rc=0 detail
+    local cmd="$1" rc=0
     _rf_step "$label"
     : > "$_step_rc"
     { _rc=0; "$@" || _rc=$?; printf '%s' "$_rc" > "$_step_rc"; } 2>&1 \
@@ -179,12 +179,7 @@ _run_step() {
     rc=$(cat "$_step_rc" 2>/dev/null || true)
     case "$rc" in ''|*[!0-9]*) rc=1 ;; esac     # no status written: never a success
     [ "$rc" -eq 0 ] && return 0
-    # Last non-blank line of the command's own output — the real error text.
-    detail=$(grep -v '^[[:space:]]*$' "$_step_out" | tail -n 1)
-    # 127 is the unresolvable-tool signature: name the command and the PATH it
-    # was not found on, so the alert points at the install rather than the work.
-    [ "$rc" -eq 127 ] && detail="$cmd not found on PATH=$PATH"
-    printf '%s failed (exit %d)%s' "$label" "$rc" "${detail:+: $detail}" > "$_reason_file"
+    step_failure_reason "$label" "$rc" "$cmd" < "$_step_out" > "$_reason_file"
     return 1
 }
 

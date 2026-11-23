@@ -5494,6 +5494,39 @@ except (OSError, ValueError, TypeError, KeyError):
 PY
 }
 
+# step_failure_reason <label> <rc> <command> < output
+# How a failed step says what went wrong (#805): `<label> failed (exit <rc>)`
+# and the last non-blank line of its own output, read on stdin. Exit 127 is
+# the unresolvable-tool signature, so for it the reason names the command and
+# the PATH it was not found on, pointing at the install rather than the work.
+# A failed plugin update reads the same from the daily reload (_run_step in
+# reload-fleet.sh) and from a bot start (_plugin_update below).
+step_failure_reason() {
+    local label="$1" rc="$2" cmd="$3" detail
+    detail=$(grep -v '^[[:space:]]*$' | tail -n 1 || true)
+    [ "$rc" -ne 127 ] || detail="$cmd not found on PATH=$PATH"
+    printf '%s failed (exit %d)%s' "$label" "$rc" "${detail:+: $detail}"
+}
+
+# _plugin_update <plugin> <claude_bin> <log>
+# One `claude plugin update --scope user <plugin>` for plugin_ensure. Its
+# output goes into <log> as it runs, as the reload streams a step, so a start
+# killed mid-update still leaves it there; a failure reads it back from where
+# this update began. A failed update logs `PLUGIN ERROR <reason>` and prints
+# <reason> on stdout. Returns the status of the update.
+_plugin_update() {
+    local plugin="$1" claude_bin="$2" log="$3" rc=0 offset reason
+    offset=$(wc -c 2>/dev/null < "$log" || true)
+    offset="${offset//[!0-9]/}"    # BSD wc pads the count with spaces
+    with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    reason=$(tail -c +"$(( ${offset:-0} + 1 ))" "$log" 2>/dev/null \
+        | step_failure_reason "claude plugin update $plugin" "$rc" "$claude_bin" || true)
+    echo "$(ts_iso) PLUGIN ERROR $reason" >> "$log"
+    printf '%s\n' "$reason"
+    return "$rc"
+}
+
 # plugin_ensure <plugin> <claude_bin> <log> <once_flag>
 #
 # Installs `plugin` via `claude plugin install` the moment
@@ -5530,6 +5563,10 @@ PY
 # it and the user entry stays as it was. The install needs no flag:
 # `claude plugin install` installs for the user scope by default.
 #
+# A failed update (non-zero exit, the 30 s limit included) prints its reason
+# on stdout, whichever path ran it, and nothing else prints (#3090; see
+# _plugin_update). start-bot.sh raises these once the bot is up.
+#
 # Called once per plugin from the Step 2 loop of start-bot.sh. Never
 # propagates a failure -- a plugin-manager hiccup (network blip, cold
 # marketplace cache) must not abort the boot it is called from -- and is
@@ -5553,7 +5590,7 @@ plugin_ensure() {
 
     if [ "$once_flag" != "1" ]; then
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
@@ -5564,7 +5601,7 @@ plugin_ensure() {
     epoch="$(resolve_boot_epoch 2>/dev/null || true)"
     if [ -z "$epoch" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (boot epoch unresolvable) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
@@ -5577,21 +5614,22 @@ plugin_ensure() {
     lockfile="$boot_dir/plugins.lock"
     if ! mkdir -p "$boot_dir" 2>/dev/null || [ ! -w "$boot_dir" ]; then
         echo "$(ts_iso) PLUGIN update-once unavailable (state dir unwritable: $boot_dir) — updating $plugin" >> "$log"
-        with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || true
+        _plugin_update "$plugin" "$claude_bin" "$log" || true
         return 0
     fi
 
     # Runs under with_lock: in-process behind the mkdir spinlock where flock
     # is absent (stock macOS), in a forked subshell where it is present
     # (Linux). It reads the locals above by dynamic scope and reports a
-    # failed update through its return code; both survive the fork.
+    # failed update through its return code and the reason _plugin_update
+    # prints; all of these survive the fork.
     _plugin_update_once_locked() {
         if [ -e "$stamp" ]; then
             echo "$(ts_iso) PLUGIN update skipped (already run this boot): $plugin" >> "$log"
             return 0
         fi
         echo "$(ts_iso) PLUGIN updating $plugin" >> "$log"
-        if with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1; then
+        if _plugin_update "$plugin" "$claude_bin" "$log"; then
             touch "$stamp" 2>/dev/null || true
             return 0
         fi

@@ -352,7 +352,9 @@ CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FIL
 # means only the first bot to start actually fetches; others get a no-op.
 # Failures never block bot startup (a network blip must not down the
 # fleet) — but marketplace registration is verified against the registry
-# and surfaced as a fleet event when it did not land, never swallowed.
+# and surfaced as a fleet event when it did not land, never swallowed, and
+# a failed update is raised once the bot is up (at the end of this script).
+_plugin_failures=""
 if [ "$_sb_plugin_startup_policy" = manage ] && command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
     LOG="$BOT_DIR/logs/startup.log"
     setup_log_dir "$LOG"
@@ -393,9 +395,11 @@ if [ "$_sb_plugin_startup_policy" = manage ] && command -v "$CLAUDE" >/dev/null 
     # (lib-common.sh) owns the install-vs-update decision and the
     # once-per-host-boot update gate: BOOT_PLUGIN_UPDATE_ONCE comes from the
     # sourced bot.conf, and an un-regenerated one that predates the key reads
-    # as 0 -- todays every-start update behavior.
+    # as 0 -- todays every-start update behavior. It prints the reason for an
+    # update that failed, and nothing otherwise.
     for _plugin in $FLEET_PLUGINS_REQUIRED; do
-        plugin_ensure "$_plugin" "$CLAUDE" "$LOG" "${BOOT_PLUGIN_UPDATE_ONCE:-0}" || true
+        _plugin_failure="$(plugin_ensure "$_plugin" "$CLAUDE" "$LOG" "${BOOT_PLUGIN_UPDATE_ONCE:-0}" || true)"
+        [ -z "$_plugin_failure" ] || _plugin_failures="${_plugin_failures:+$_plugin_failures; }$_plugin_failure"
     done
 fi
 
@@ -651,5 +655,17 @@ case "$_bridge_verdict" in
     unknown)   echo "$(ts_iso) BRIDGE_UNKNOWN — ownership unprovable; not actionable" >> "$LOG" ;;
     no_handle) : ;; # not a channel bot — nothing to verify
 esac
+
+# A required-plugin update that failed in Step 2 reaches the manager the way
+# a failed update in the daily reload does: one FLEET ALERT for this start
+# (emit_failure_alert: a plane event, the manager pane and Telegram) naming
+# each update that failed, and a line in the log, as the reload writes its
+# own. Raised once the bot is dispatch-ready, as the bridge verify above is,
+# so its sends never delay the session.
+if [ -n "$_plugin_failures" ]; then
+    _plugin_reason="${BOT_DIR##*/} start: $_plugin_failures; the session started on the plugins as installed"
+    printf '%s plugin_update_failed: %s\n' "$(ts_iso)" "$_plugin_reason" >> "$LOG"
+    emit_failure_alert "$(dirname "$BOT_DIR")" "plugin_update_failed" "$_plugin_reason" || true
+fi
 
 echo "$BOT_LABEL started"

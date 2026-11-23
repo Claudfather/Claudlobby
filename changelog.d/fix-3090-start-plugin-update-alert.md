@@ -1,0 +1,3 @@
+### Fixed — a bot start whose required-plugin update fails now tells the manager (#3090)
+
+A bot start runs `claude plugin update` for each required plugin, and a failed update went to the bot's startup log and nowhere else. Now the start raises one `plugin_update_failed` FLEET ALERT once the bot is up: a critical plane event, the manager's pane and Telegram, as a failed update in the daily reload raises `reload_failed`. It names each update that failed, with its exit status and the last line it printed. A start whose updates pass raises nothing, and a failed update still never stops the start.

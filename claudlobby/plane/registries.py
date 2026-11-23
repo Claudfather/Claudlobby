@@ -141,6 +141,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "overdue_dispatch": "critical",
     "bridge_down": "critical",
     "reload_failed": "critical",
+    # #3090: a required-plugin update that failed at a bot start, raised
+    # through emit_failure_alert once for the start, after the bot is up. A
+    # failed update in the daily reload is reload_failed.
+    "plugin_update_failed": "critical",
     "restart_failed": "critical",
     "rc_timeout": "critical",
     # #2423: Claude Code skipped the bot's Telegram channel at connect (the
