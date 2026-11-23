@@ -291,10 +291,10 @@ def _receipt(root, msg, dest="mgr"):
                                    "received_sha256": "sha256:" + "0" * 64}}])
 
 
-def _receipt_history(root, dest="mgr"):
-    """A message to *dest* that it received, so a missing receipt means something."""
+def _receipt_history(root, dest="mgr", *, msg="msg_" + "d" * 32):
+    """A message *msg* to *dest* that it received, so a missing receipt means
+    something. A second bot's history needs a *msg* of its own."""
     initialize_plane(root)
-    msg = "msg_" + "d" * 32
     emit_batch(root, [{"event_type": "communication", "emitter": "t", "fleet": F,
                        "payload": {"msg_id": msg, "sender": f"bot:{F}/w1", "recipient": f"bot:{F}/{dest}",
                                    "recipient_raw": dest, "message_class": "chat", "body": "hello"}}])

@@ -202,6 +202,8 @@ def test_an_acked_report_a_progress_note_or_a_report_to_another_bot_never_counts
     acked = _report_to(root, 1, "2026-11-22T12:05:00+00:00")
     _reports_acked(root, acked)
     _report_to(root, 2, "2026-11-22T12:10:00+00:00", status="progress")
+    # lead has a receipt history of its own, so only the recipient rule keeps its report out
+    _receipt_history(root, dest="lead", msg="msg_" + "e" * 32)
     _report_to(root, 3, "2026-11-22T12:12:00+00:00", to="lead")
     r = _early(root)
     assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
