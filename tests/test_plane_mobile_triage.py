@@ -74,3 +74,38 @@ def test_workspace_desktop_resets_legacy_tablet_rail_order():
                   r"\.plane-workspace #rail-right\s*\{([^}]*)\}", desktop)
     assert m and re.search(r"order:\s*0\b", m.group(1)), \
         "workspace must own all three rail orders above its tablet breakpoint"
+
+
+def _workspace_media(query: str) -> str:
+    workspace = CSS.with_name("workspace.css").read_text()
+    blocks = re.findall(r"@media\(" + re.escape(query) + r"\) \{(.*?)\n\}", workspace, re.S)
+    assert blocks, f"workspace.css has no @media({query}) block"
+    return "\n".join(blocks)
+
+
+def test_workspace_phone_has_one_scroller():
+    # A phone scrolls the page only: no fixed-height team column, no capped teams list or composer,
+    # so a swipe never moves a box inside a box.
+    phone = _workspace_media("max-width:760px")
+    assert "calc(100dvh" not in phone, "the phone team column must not have a fixed height"
+    assert re.search(r"#rail-fleet \{[^}]*max-height:none;[^}]*overflow:visible", phone)
+    assert re.search(r"#rail-channel \{[^}]*height:auto", phone)
+    assert re.search(r"#trust \{[^}]*overflow:visible", phone), "the views inside the column flow in the page"
+    assert re.search(r"#work-loop, \.room-bot-inspector \{[^}]*max-height:none;[^}]*overflow:visible", phone)
+    assert not re.search(r"max-height:\s*(30|48)dvh", phone)
+
+
+def test_workspace_wide_conversation_keeps_its_share():
+    # Wide screens: main fills what the header leaves (no guessed header height), the conversation
+    # keeps a minimum share and the composer shrinks and scrolls inside itself first.
+    wide = _workspace_media("min-width:761px")
+    assert "calc(100dvh - 78px)" not in wide
+    assert re.search(r"main \{[^}]*flex:1 1 0;", wide)
+    assert re.search(r"#channel \{[^}]*min-height:max\(140px, 45%\)", wide)
+    assert re.search(r"#work-loop \{[^}]*flex:0 1 auto;[^}]*min-height:0", wide)
+
+
+def test_workspace_has_no_dead_wide_side_space_rule():
+    # The 5vw side space for 1450px and wider never applied: the later room-first rule set the padding.
+    workspace = CSS.with_name("workspace.css").read_text()
+    assert "5vw" not in workspace and "min-width:1450px" not in workspace
