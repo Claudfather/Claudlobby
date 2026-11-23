@@ -6,7 +6,7 @@ Two update classes, two mechanisms:
 
 | Update type | Stays current (download) | Applied to a *running* bot | Restart? | Cadence |
 |---|---|---|---|---|
-| Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `claudlobby/_runtime_scripts/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30`, + on-demand |
+| Selected plugin cache | `claudlobby fleet reload` refreshes plugins through `claudlobby/_runtime_scripts/reload-fleet.sh` | Keepalive sends `/reload-plugins` + `/reload-skills` when idle | **No** | Daily, `03:30` plus one minute for each fleet before this one on the host, + on-demand |
 | Claude Code binary | `npm install -g @anthropic-ai/claude-code@latest` (`claudlobby/_runtime_scripts/update-claude-code.sh`) | new `claude` process at next start | **Yes** (binary swap) | Downloaded daily at `04:00`; applied via natural restarts + a weekly worker-only restart, `Sun 05:00` |
 
 Binary updates take effect on the next session start. Framework and authored configuration updates use the common Git updater, which saves and stops affected consumers before publishing shared runtime files. Plugin refresh remains a separate idle-gated operation.
@@ -546,7 +546,7 @@ here — tracked as #1732.
 
 ## Mechanism 1 — daily selected-fleet plugin refresh
 
-The `reload-fleet` timer calls the installation's `claudlobby fleet reload` at `03:30`. The public command uses the committed configuration’s fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
+The `reload-fleet` timer calls the installation's `claudlobby fleet reload` at `03:30`, one minute later for each fleet before its own on the host (`slot: true` in `claudlobby/system.yaml`), so no two fleets' reloads start in the same second. The public command uses the committed configuration’s fleet roster and plugin list, then calls the packaged `claudlobby/_runtime_scripts/reload-fleet.sh` owner.
 
 1. Under a fleet-wide lock (`with_lock`), runs `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` — refreshes the shared host plugin cache (`~/.claude/plugins/cache/`).
    Each update names the user scope (`--scope user`), so the directory the command runs from does not choose the installation: with no scope, Claude Code updates the local entry of a directory that has one in `installed_plugins.json`, and the user entry stays as it was (#3088).

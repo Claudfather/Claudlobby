@@ -4356,6 +4356,34 @@ def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
     return index * (min(interval_s, _INTERVAL_SPREAD_S) // slots)
 
 
+# A plain time of day in an OnCalendar= expression: HH:MM or HH:MM:SS.
+_CALENDAR_TIME = re.compile(r"(\d{1,2}):(\d{2})(:\d{2})?")
+
+
+def _calendar_in_slot(expression: str, slot: tuple[int, int]) -> str:
+    """*expression* moved one minute later for each slot before *slot*'s own.
+
+    Every fleet composes the same calendar job, and identical timers start in
+    the same second. A job that declares ``slot: true`` takes its owner's slot,
+    as an anchored interval job does: slot 0 keeps the declared expression and
+    each later slot runs one minute after the one before it. Each copy is then
+    due in its own minute, and the default AccuracySec= of a minute starts it
+    within that minute unless the user manager stalls. launchd reads the moved
+    ``HH:MM`` too. Only an expression with exactly one plain time of day moves,
+    wrapping within its day; any other keeps its declared form.
+    """
+    tokens = expression.split()
+    times = [at for at, token in enumerate(tokens) if _CALENDAR_TIME.fullmatch(token)]
+    if not slot[0] or len(times) != 1:
+        return expression
+    hours, minutes, seconds = _CALENDAR_TIME.fullmatch(tokens[times[0]]).groups()
+    if int(hours) > 23 or int(minutes) > 59:
+        return expression
+    moved = (int(hours) * 60 + int(minutes) + slot[0]) % 1440
+    tokens[times[0]] = f"{moved // 60:02d}:{moved % 60:02d}{seconds or ''}"
+    return " ".join(tokens)
+
+
 def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
                             slot: tuple[int, int] | None = None, second: int | None = None) -> dict:
     """Resolve timer scheduling from config.
@@ -4376,10 +4404,15 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
     ``phase`` for its slot (``_interval_phase_s``). A past OnBootSec= or
     OnStartupSec= point fires a timer at once (systemd.timer(5)). An activation
     counts every OnActiveSec= from its last daemon-reload, and every
-    daemon-reload re-arms OnActiveSec= for a waiting timer.
+    daemon-reload re-arms OnActiveSec= for a waiting timer. A calendar job that
+    declares ``slot`` moves one minute later for each slot before its own
+    (``_calendar_in_slot``).
     """
     if "schedule" in timer_cfg:
-        return {"type": "calendar", "expression": timer_cfg["schedule"]}
+        expression = timer_cfg["schedule"]
+        if slot is not None and timer_cfg.get("slot"):
+            expression = _calendar_in_slot(expression, slot)
+        return {"type": "calendar", "expression": expression}
     seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]

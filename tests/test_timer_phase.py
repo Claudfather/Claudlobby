@@ -7,7 +7,8 @@ So an interval that divides an hour or a day is anchored to the clock (OnCalenda
 UTC). The minute is split into one band of seconds per slot, fleets in the sorted
 overlay order the boot ladder uses and the host's jobs last, and each anchored job
 takes its own second in its owner's band: no two units on the host are due in the same
-second. Any other interval keeps OnUnitActiveSec= with only a first-run offset.
+second. Any other interval keeps OnUnitActiveSec= with only a first-run offset. A calendar job
+that declares `slot: true`, the reload, runs one minute later for each slot before its own.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 from textwrap import dedent
@@ -91,6 +93,9 @@ EXPECTED = {
         ],
     ),
 }
+# reload-fleet declares `slot: true`: each fleet's copy of its calendar runs one minute after the
+# previous fleet's, at the declared second, with the default accuracy.
+RELOAD = ["*-*-* 03:30:00", "*-*-* 03:31:00", "*-*-* 03:32:00", "*-*-* 03:33:00"]
 HOST_PROBE = "claudlobby-plane-host-probe"
 ANCHORED = "# Anchored to the clock at this unit's own second on the host."
 
@@ -298,9 +303,9 @@ def test_an_anchored_unit_says_so(host):
     assert _timer(timers["host"], HOST_PROBE)[0] == ANCHORED
 
 
-def test_calendar_jobs_are_left_as_declared(host):
+def test_calendar_jobs_without_a_slot_are_left_as_declared(host):
     _, timers = host
-    for job in ("creds-check", "reload-fleet", "data-sweep", "weekly-worker-restart"):
+    for job in ("creds-check", "data-sweep", "weekly-worker-restart"):
         sections = {tuple(_timer(timers[name], f"com.{name}.{job}")) for name in FLEETS}
         assert len(sections) == 1, (job, sections)
         (section,) = sections
@@ -308,6 +313,72 @@ def test_calendar_jobs_are_left_as_declared(host):
         assert not any(line.startswith(("OnActiveSec=", "#")) for line in section), (
             section
         )
+
+
+def test_each_fleet_s_reload_runs_a_minute_after_the_previous_fleet_s(host):
+    """Each copy is due in its own minute, so the default 60 s accuracy keeps every start apart."""
+    _, timers = host
+    sections = [_timer(timers[name], f"com.{name}.reload-fleet") for name in FLEETS]
+    assert [_value(lines, "OnCalendar") for lines in sections] == RELOAD
+    for lines in sections:
+        assert _value(lines, "AccuracySec") == "60", lines
+        assert not any(
+            line.startswith(("RandomizedDelaySec=", "Persistent=", "OnActiveSec=", "#"))
+            for line in lines
+        ), lines
+
+
+def test_launchd_starts_each_fleet_s_reload_in_its_own_minute(host):
+    _, timers = host
+    starts = [
+        plistlib.loads((timers[name] / f"com.{name}.reload-fleet.plist").read_bytes())[
+            "StartCalendarInterval"
+        ]
+        for name in FLEETS
+    ]
+    assert starts == [{"Hour": 3, "Minute": minute} for minute in (30, 31, 32, 33)]
+
+
+@pytest.mark.parametrize(
+    ("override", "expression"),
+    [
+        ('schedule: "*-*-* 04:15"', "*-*-* 04:16"),
+        ("slot: false", "*-*-* 03:30:00"),
+    ],
+)
+def test_a_fleet_s_own_reload_settings_merge_with_its_slot(tmp_path, override, expression):
+    """Fields merge one by one, so a fleet's own schedule takes the slot and `slot: false` drops it."""
+    root = _host_root(tmp_path, names=("fleet-a",))
+    _write_fleet(
+        root / "local" / "home" / "fleet-b",
+        "fleet-b",
+        f"  defaults:\n    jobs:\n      reload-fleet:\n        {override}\n",
+    )
+    timers = _compose_fleet(root, root / "local" / "home" / "fleet-b", tmp_path / "out")
+    assert _value(_timer(timers, "com.fleet-b.reload-fleet"), "OnCalendar") == expression
+
+
+@pytest.mark.parametrize(
+    ("expression", "index", "moved"),
+    [
+        ("*-*-* 03:30:00", 3, "*-*-* 03:33:00"),
+        ("*-*-* 03:58:00", 3, "*-*-* 04:01:00"),
+        ("*-*-* 23:59:00", 2, "*-*-* 00:01:00"),
+        ("Sun *-*-* 05:00", 1, "Sun *-*-* 05:01"),
+        ("*-*-* 3:30 UTC", 2, "*-*-* 03:32 UTC"),
+        ("*-*-*  3:30", 0, "*-*-*  3:30"),
+        ("daily", 2, "daily"),
+        ("*-*-* *:30:00", 2, "*-*-* *:30:00"),
+        ("Mon..Fri 09:00,13:00", 2, "Mon..Fri 09:00,13:00"),
+        ("*-*-* 24:00:00", 1, "*-*-* 24:00:00"),
+    ],
+)
+def test_a_calendar_copy_moves_one_minute_for_each_slot_before_its_own(expression, index, moved):
+    """Slot 0 keeps the declared text; a plain time of day moves and wraps within its day; any
+    other expression, or a time systemd would refuse, is left for systemd as declared."""
+    from claudlobby.composer import _calendar_in_slot
+
+    assert _calendar_in_slot(expression, (index, 5)) == moved
 
 
 def test_launchd_keeps_its_interval_and_has_no_slot(host):
@@ -490,6 +561,27 @@ def test_systemd_reads_each_anchored_expression_as_one_run_per_interval(job):
             interval,
         ], out
         assert all(at.second in _seconds_of_minute(expression) for at in elapses), out
+
+
+@pytest.mark.skipif(
+    shutil.which("systemd-analyze") is None, reason="needs systemd-analyze"
+)
+def test_systemd_reads_the_reload_copies_as_one_run_a_day_a_minute_apart():
+    firsts = []
+    for expression in RELOAD:
+        out = subprocess.run(
+            ["systemd-analyze", "calendar", "--iterations=2", expression],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "TZ": "UTC"},
+        ).stdout
+        elapses = _elapses(out)
+        assert len(elapses) == 2, out
+        assert (elapses[1] - elapses[0]).total_seconds() == 86400, out
+        firsts.append(elapses[0])
+    # Times of day: a run between 03:30 and 03:33 puts some copies' next run tomorrow.
+    assert [(b - a).total_seconds() % 86400 for a, b in zip(firsts, firsts[1:])] == [60, 60, 60]
 
 
 @pytest.mark.parametrize(
