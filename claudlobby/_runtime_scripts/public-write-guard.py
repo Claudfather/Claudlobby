@@ -43,6 +43,12 @@ likely private than not.
 ok with its pattern count, and whether the off switch is set) and never prints
 a term; rollout runs it on each host.
 
+``--count [FILE ...]`` (standard input when no FILE is named) says, for each
+input, how many of its lines a hit on the host's list touches, never a term or
+a matched line, so a check that runs on the host before a write can ask the
+list's own reader instead of reading the list itself. It exits 0 when every
+count is 0, 1 when any is above 0, and 2 when the list is absent or broken.
+
 Failure directions, each chosen on purpose:
   - no list file: ALLOW, and record ``public_write_guard_unarmed``. There is
     nothing to match, and refusing every GitHub write on a host that was never
@@ -81,8 +87,10 @@ repositories; it is not a boundary against a caller trying to get past it.
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import importlib.util
+import io
 import json
 import os
 import re
@@ -1612,9 +1620,58 @@ def check() -> int:
     return 0 if rx is not None and (off is None or not off.exists()) else 1
 
 
+def _hit_lines(rx: re.Pattern, text: str) -> int:
+    """How many of ``text``'s lines a hit touches. The matches are found in the
+    whole text, as a write's content is read, so a match that runs across a
+    line break counts each line it spans and is never lost."""
+    starts = [0] + [m.end() for m in re.finditer("\n", text)]
+    lines: set[int] = set()
+    for m in rx.finditer(text):
+        first = bisect.bisect_right(starts, m.start()) - 1
+        last = bisect.bisect_right(starts, max(m.start(), m.end() - 1)) - 1
+        lines.update(range(first, last + 1))
+    return len(lines)
+
+
+def count(files: list[str]) -> int:
+    """``--count [FILE ...]``: for each input (standard input when no FILE is
+    named), how many of its lines a hit touches, without printing a term or a
+    matched line: an input whose own name has a hit is named by its place among
+    the inputs. A file is read as a body file is, and an input it cannot read
+    counts as a hit, as content does in a write. Exit 0 when every count is 0,
+    1 when any is above 0, 2 when the list is absent or broken (said on
+    standard error, as ``--check`` says it), so a caller fails closed. The off
+    switch does not change a count."""
+    rx, state = load_terms(terms_path())
+    if rx is None:
+        print(f"{_list_label()}: {state}", file=sys.stderr)
+        return 2
+    hit = False
+    for place, name in enumerate(files or [None], 1):
+        if name is None:
+            label = "standard input"
+        else:
+            label = f"input {place}" if rx.search(name) else name
+        try:
+            if name is None:
+                text = io.TextIOWrapper(sys.stdin.buffer, errors="replace").read()
+            else:
+                text = Path(name).read_text(errors="replace")
+        except OSError:
+            print(f"{label}: cannot be read, counted as a hit")
+            hit = True
+            continue
+        n = _hit_lines(rx, text)
+        hit = hit or n > 0
+        print(f"{label}: {n} line(s) with a hit")
+    return 1 if hit else 0
+
+
 def main() -> int:
     if sys.argv[1:] == ["--check"]:
         return check()
+    if sys.argv[1:2] == ["--count"]:
+        return count(sys.argv[2:])
     try:
         payload = json.loads(sys.stdin.read())
     except ValueError:
