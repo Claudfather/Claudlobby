@@ -412,6 +412,7 @@ def interrupted():
 
 def _completed(args, paths, store, terminal, retained, record, package, *, consent=None):
     from ..plane.owner_setup import OwnerSetup
+    from ..git_update import healthy_done
     from ..installation import _setup_binding
     from .host_owner import _setup_messages
     grant = retained.grant
@@ -419,8 +420,7 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
     expected = getattr(args, "finish_setup", None)
     if (consent is not None and expected is None
             or expected is not None and _setup_binding(expected) != actual
-            or record.get("maintenance") is not False or record.get("config_committed") is not True
-            or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
+            or not healthy_done(record)
             or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
             or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
