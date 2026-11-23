@@ -413,13 +413,13 @@ def interrupted():
 # Its effect is fixed by the stored card, whoever starts it: messages on for that one team under
 # the card's name (numbered if taken), and the launched goal sent to that team's lead once.
 # Fixed: the goal's request id is derived from the Launch's, so a second finish finds the first send.
-_GOAL_NAMESPACE = "6f1d2c3b-8a47-4e59-9b0c-5d2e7f8a9b10"
+_GOAL_REQUEST_LABEL = "claudlobby:setup-goal:"
 
 
 def goal_request_id(launch_request_id):
     """The setup goal's message request id, derived from the Launch's request id."""
-    from uuid import UUID, uuid5
-    return str(uuid5(UUID(_GOAL_NAMESPACE), launch_request_id))
+    from uuid import NAMESPACE_URL, uuid5
+    return str(uuid5(NAMESPACE_URL, _GOAL_REQUEST_LABEL + launch_request_id))
 
 
 def numbered_name(base, taken):
