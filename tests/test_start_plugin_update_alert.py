@@ -37,10 +37,12 @@ PLUGINS = ("alpha@Market", "beta@Market")
 
 # Stands in for Claude Code: records each call, and fails an update for a plugin
 # named in CLAUDE_FAILS the way the binary the bots launch fails one for a plugin
-# with no user-scope installation (#3089's scratch run printed this line).
+# with no user-scope installation (#3089's scratch run printed this line), or
+# with no output at all for one named in CLAUDE_FAILS_SILENTLY.
 CLAUDE_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$CLAUDE_CALLS"
 for ref; do :; done
+case " ${CLAUDE_FAILS_SILENTLY:-} " in *" $ref "*) exit 1 ;; esac
 case " ${CLAUDE_FAILS:-} " in
     *" $ref "*)
         printf 'Checking for updates for plugin "%s" at user scope...\n' "$ref"
@@ -87,13 +89,17 @@ def _registry(home: Path, directory: Path, refs) -> None:
 
 
 def _start_text() -> str:
-    """start-bot.sh from its plugin step through the session spawn, then from its
-    closing plugin alert through its last line."""
+    """start-bot.sh from the line after its launch command through the session
+    spawn (its plugin step), then from the end of its bridge verify through its
+    last line (its closing plugin alert). Sliced at code lines the plugin step
+    and its alert do not own, so neither rewording a comment nor changing those
+    lines moves the slices."""
     source = START_BOT.read_text()
-    step = source[source.index("# Update third-party plugins before launch."):]
+    step = source[source.index("\n", source.index("\nCLAUDE_CMD=") + 1) + 1:]
     spawn = 'bot_session_spawn "$TMUX_SOCKET"'
     step = step[:step.index("\n", step.index(spawn)) + 1]
-    tail = source[source.index("# A required-plugin update that failed in Step 2"):]
+    last = source.index('echo "$BOT_LABEL started"')
+    tail = source[source.rindex("esac\n", 0, last) + len("esac\n"):]
     return step + tail
 
 
@@ -185,16 +191,19 @@ OTHER_CASES = {
     "installed-at-a-cold-start": ('rm "$HOME/.claude/plugins/installed_plugins.json"', "0",
                                   "PLUGIN installing alpha@Market (cold start)"),
 }
-CASES = {**{(path, outcome): (setup, once, taken)
+# (case, the stub's outcome): the set-up, the once flag, the log line that shows
+# the case was taken, and whether plugin_ensure prints a reason: only an update
+# that ran and failed does.
+CASES = {**{(path, outcome): (setup, once, taken, outcome == "fails")
             for path, (setup, once, taken, _stamps) in UPDATE_PATHS.items()
             for outcome in ("fails", "passes")},
-         **{(case, "fails"): spec for case, spec in OTHER_CASES.items()}}
+         **{(case, "fails"): (*spec, False) for case, spec in OTHER_CASES.items()}}
 
 
 @pytest.mark.parametrize("case", sorted(CASES), ids=lambda c: "-".join(c))
 def test_plugin_ensure_prints_a_failed_updates_reason_and_nothing_else(tmp_path, case):
-    setup, once, taken = CASES[case]
-    path, outcome = case
+    setup, once, taken, prints = CASES[case]
+    _path, outcome = case
     home, root, bot = tmp_path / "home", tmp_path / "root", tmp_path / "bot"
     root.mkdir()
     bot.mkdir()
@@ -208,6 +217,26 @@ def test_plugin_ensure_prints_a_failed_updates_reason_and_nothing_else(tmp_path,
                             CLAUDE_FAILS=PLUGINS[0] if outcome == "fails" else ""))
     assert result.returncode == 0, result.stderr
     assert taken in log.read_text(), log.read_text()
-    printed = _failure(PLUGINS[0]) if (outcome == "fails" and path in UPDATE_PATHS) else ""
-    assert result.stdout == (printed and printed + "\n")
-    assert ("PLUGIN ERROR " in log.read_text()) is bool(printed)
+    assert result.stdout == (_failure(PLUGINS[0]) + "\n" if prints else "")
+    assert ("PLUGIN ERROR " in log.read_text()) is prints
+
+
+def test_an_update_that_fails_with_no_output_reports_its_status_alone(tmp_path):
+    """The reason is read from this update's own output, never from earlier lines
+    of the log: an update that printed nothing reports its exit status, not the
+    plugin step's last line."""
+    home, root, bot = tmp_path / "home", tmp_path / "root", tmp_path / "bot"
+    root.mkdir()
+    bot.mkdir()
+    _registry(home, bot, PLUGINS[:1])
+    log = tmp_path / "startup.log"
+    script = (f'. "{LIB}/lib-common.sh"\n'
+              f'plugin_ensure "{PLUGINS[0]}" "{_claude(tmp_path)}" "{log}" 0\n')
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=bot, capture_output=True, text=True, timeout=60,
+        env=constructed_env(HOME=home, CLAUDLOBBY_ROOT=root, CLAUDE_CALLS=tmp_path / "claude-calls",
+                            CLAUDE_FAILS_SILENTLY=PLUGINS[0]))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"claude plugin update {PLUGINS[0]} failed (exit 1)\n"
+    assert log.read_text().splitlines()[-1].endswith(
+        f" PLUGIN ERROR claude plugin update {PLUGINS[0]} failed (exit 1)")

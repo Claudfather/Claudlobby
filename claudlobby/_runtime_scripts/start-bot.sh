@@ -353,9 +353,7 @@ CLAUDE_CMD="unset DISPLAY; export WAYLAND_DISPLAY= BROWSER=true; . '$BOT_ENV_FIL
 # Failures never block bot startup (a network blip must not down the
 # fleet) — but marketplace registration is verified against the registry
 # and surfaced as a fleet event when it did not land, never swallowed, and
-# a failed update reaches the manager once the bot is up (below the bridge
-# verify), as one plugin_update_failed alert naming each update that failed
-# in this start (#3090).
+# a failed update is raised once the bot is up (at the end of this script).
 _plugin_failures=""
 if [ "$_sb_plugin_startup_policy" = manage ] && command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
     LOG="$BOT_DIR/logs/startup.log"

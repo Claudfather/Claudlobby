@@ -5494,21 +5494,34 @@ except (OSError, ValueError, TypeError, KeyError):
 PY
 }
 
+# step_failure_reason <label> <rc> <command> < output
+# How a failed step says what went wrong (#805): `<label> failed (exit <rc>)`
+# and the last non-blank line of its own output, read on stdin. Exit 127 is
+# the unresolvable-tool signature, so for it the reason names the command and
+# the PATH it was not found on, pointing at the install rather than the work.
+# A failed plugin update reads the same from the daily reload (_run_step in
+# reload-fleet.sh) and from a bot start (_plugin_update below).
+step_failure_reason() {
+    local label="$1" rc="$2" cmd="$3" detail
+    detail=$(grep -v '^[[:space:]]*$' | tail -n 1 || true)
+    [ "$rc" -ne 127 ] || detail="$cmd not found on PATH=$PATH"
+    printf '%s failed (exit %d)%s' "$label" "$rc" "${detail:+: $detail}"
+}
+
 # _plugin_update <plugin> <claude_bin> <log>
-# One `claude plugin update --scope user <plugin>` for plugin_ensure, its
-# output appended to <log> as it runs. A failed one logs `PLUGIN ERROR
-# <reason>` and prints <reason> on stdout (see plugin_ensure). Returns the
-# status of the update.
+# One `claude plugin update --scope user <plugin>` for plugin_ensure. Its
+# output goes into <log> as it runs, as the reload streams a step, so a start
+# killed mid-update still leaves it there; a failure reads it back from where
+# this update began. A failed update logs `PLUGIN ERROR <reason>` and prints
+# <reason> on stdout. Returns the status of the update.
 _plugin_update() {
-    local plugin="$1" claude_bin="$2" log="$3" rc=0 offset detail reason
+    local plugin="$1" claude_bin="$2" log="$3" rc=0 offset reason
     offset=$(wc -c 2>/dev/null < "$log" || true)
-    offset="${offset//[!0-9]/}"
+    offset="${offset//[!0-9]/}"    # BSD wc pads the count with spaces
     with_timeout 30 "$claude_bin" plugin update --scope user "$plugin" >> "$log" 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || return 0
-    # The last non-blank line this update wrote: the error in its own words.
-    detail=$(tail -c +"$(( ${offset:-0} + 1 ))" "$log" 2>/dev/null \
-        | grep -v '^[[:space:]]*$' | tail -n 1 || true)
-    reason="claude plugin update $plugin failed (exit $rc)${detail:+: $detail}"
+    reason=$(tail -c +"$(( ${offset:-0} + 1 ))" "$log" 2>/dev/null \
+        | step_failure_reason "claude plugin update $plugin" "$rc" "$claude_bin" || true)
     echo "$(ts_iso) PLUGIN ERROR $reason" >> "$log"
     printf '%s\n' "$reason"
     return "$rc"
@@ -5550,13 +5563,9 @@ _plugin_update() {
 # it and the user entry stays as it was. The install needs no flag:
 # `claude plugin install` installs for the user scope by default.
 #
-# A failed update says why, on stdout (#3090): whichever path runs it, an
-# update that exits non-zero (the 30 s limit included) adds a `PLUGIN ERROR
-# <reason>` line to the log and prints <reason>, in the words reload-fleet.sh
-# gives a failed update: `claude plugin update <plugin> failed (exit N): <the
-# last line it printed>`. Nothing else is printed: a pass, a skip and an
-# install print nothing. start-bot.sh collects these, and once the bot is up
-# raises them as one plugin_update_failed alert for the start.
+# A failed update (non-zero exit, the 30 s limit included) prints its reason
+# on stdout, whichever path ran it, and nothing else prints (#3090; see
+# _plugin_update). start-bot.sh raises these once the bot is up.
 #
 # Called once per plugin from the Step 2 loop of start-bot.sh. Never
 # propagates a failure -- a plugin-manager hiccup (network blip, cold
