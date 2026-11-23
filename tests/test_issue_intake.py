@@ -588,7 +588,8 @@ def test_without_the_field_nothing_more_is_read_or_printed(tmp_path):
 @pytest.mark.parametrize("state", [
     {"fail": {"references": [30]}},
     {"extra_state": {"references": {"30": [pull(40, "MERGED", "2026-03-01T00:00:00")]}}},
-], ids=["failed-read", "merge-time-without-a-zone"])
+    {"fail": {"cursor": [30]}},
+], ids=["failed-read", "merge-time-without-a-zone", "next-page-without-a-cursor"])
 def test_a_reference_read_it_cannot_vouch_for_refuses_rather_than_answering_without_it(
     tmp_path, state
 ):
