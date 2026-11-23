@@ -47,6 +47,7 @@ DIRECT_REPLY_SQL = (
 MESSAGE_PREFIX_SQL = ("SELECT msg_id FROM communications WHERE msg_id >= ? AND msg_id < ?"
                       " ORDER BY msg_id LIMIT ?")
 _LIST_WINDOW = timedelta(days=7)
+_LIST_RECEIPT_BUDGET_S = 0.5
 
 
 class MessageQueryError(ValueError):
@@ -157,6 +158,9 @@ class QueuedProof:
     reason: str | None = None
 
 
+_PAGE_DEADLINE_REACHED = QueuedProof("unavailable", "the page's receipt-check deadline was reached")
+
+
 def _queued_proof(value, message_id) -> bool:
     if isinstance(value, list):
         return any(_queued_proof(item, message_id) for item in value)
@@ -212,7 +216,7 @@ def pending_transmission_proof(root: Path, message_id: str, *,
 
 
 def queued_transmission_proof(root: Path, message_id: str, *, written_after: float | None = None,
-                              probe_timeout: float = 0.5) -> QueuedProof:
+                              probe_timeout: float = 0.5, deadline: float | None = None) -> QueuedProof:
     """Submission/receiver proof for one message still awaiting Plane ingest.
 
     Bounded and read-only over the existing staged and spool queues: it never
@@ -236,7 +240,12 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
     counted. Orphaned stages wait an hour for replay, so a burst of them held
     every later receipt past the bound (#2086). One written after the message
     may hold its proof and is read like any other.
+
+    A list page shares one monotonic deadline across its queue reads and
+    daemon probes. An unfinished check leaves the receipt unavailable.
     """
+    if deadline is not None and time.monotonic() >= deadline:
+        return _PAGE_DEADLINE_REACHED
     probe, entries = scan_queue_dir(staged_dir(root))
     spool = scan_spool(root)
     if probe.state == SOURCE_UNREADABLE or spool.spool_state == "unreadable":
@@ -249,12 +258,20 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
         if len(files) > _LISTED_FILES:
             return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                               f" {_LISTED_FILES} whose write times a receipt check reads")
-        files = [path for path in files if not _written_before(path, written_after)]
+        recent = []
+        for path in files:
+            if deadline is not None and time.monotonic() >= deadline:
+                return _PAGE_DEADLINE_REACHED
+            if not _written_before(path, written_after):
+                recent.append(path)
+        files = recent
     if len(files) > _PENDING_FILES:
         return QueuedProof("unavailable", f"{len(files)} {scope} are more than the"
                                           f" {_PENDING_FILES} a receipt check reads")
     budget, needle = _PENDING_BYTES, message_id.encode()
     for path in files:
+        if deadline is not None and time.monotonic() >= deadline:
+            return _PAGE_DEADLINE_REACHED
         data = _queued_bytes(path, budget)
         if data is None:
             return QueuedProof("unavailable", f"queued Plane entry {path.name} cannot be read")
@@ -277,6 +294,10 @@ def queued_transmission_proof(root: Path, message_id: str, *, written_after: flo
             return QueuedProof("pending")
     if probe.state != SOURCE_ABSENT:
         from .plane.daemon import probe_daemon_state, socket_path
+        if deadline is not None:
+            probe_timeout = min(probe_timeout, deadline - time.monotonic())
+            if probe_timeout <= 0:
+                return _PAGE_DEADLINE_REACHED
         daemon = probe_daemon_state(socket_path(root), timeout=probe_timeout)
         if daemon != "serving":
             return QueuedProof("unavailable", _DAEMON_DOUBT[daemon].format(timeout=probe_timeout))
@@ -559,11 +580,13 @@ def list_messages(ctx: TaskOperationContext, *, since: str, until: str | None, s
         proofs = _delivery_proofs(conn, [row["msg_id"] for row, _, target in page[:limit]
                                          if target is not None and target.fleet_uid is not None])
     queued = {}
+    deadline = time.monotonic() + _LIST_RECEIPT_BUDGET_S
     for row, _, _ in page[:limit]:
         message_id = row["msg_id"]
         if message_id in proofs and proofs[message_id]["received_ingest_seq"] is None:
             instant = datetime.fromisoformat(row["sort_at"]).timestamp()
-            queued[message_id] = queued_transmission_proof(ctx.root, message_id, written_after=instant).state
+            queued[message_id] = queued_transmission_proof(
+                ctx.root, message_id, written_after=instant, deadline=deadline).state
 
     items = []
     with _snapshot(ctx) as conn:
