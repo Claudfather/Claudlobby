@@ -38,13 +38,16 @@ BOTS
 MERGED REFERENCES (`list --json ...,mergedReferences`)
     Named among the --json fields, `mergedReferences` gives each kept issue the
     merged pull requests that cross-reference it, closing or not, as
-    {number, mergedAt, url}, oldest merge first. The intake computes it, since
-    `gh issue list` has no such field: one GraphQL query reads the timelines of
-    up to 50 kept issues at a time, and an issue with more than 100
-    cross-references reads the rest in later queries. An open pull request, or
-    one closed without merging, is not listed. A listed pull request is where to
-    look, not proof that the issue is done: it can name the issue without taking
-    its work.
+    {number, mergedAt, url}, oldest merge first. Only a pull request whose
+    repository GitHub reports under the --repo owner, in upper or lower case,
+    is listed: a merged pull request under another owner is not this
+    project's work. The intake computes the field, since `gh issue list` has no
+    such field: one GraphQL query reads the timelines of up to 50 kept issues
+    at a time, and an issue with more than 100 cross-references reads the rest
+    in later queries, up to 10 pages; past them the read refuses at exit 3. An
+    open pull request, or one closed without merging, is not listed. A listed
+    pull request is where to look, not proof that the issue is done: it can
+    name the issue without taking its work.
 
 `quote`
     Prints one issue's title and body between two lines that share a random id:
@@ -62,9 +65,9 @@ EXIT
        each naming its author by login only, and one stderr line per skipped
        issue; `quote` prints the block.
     2  usage error; nothing was read.
-    3  the issue read, or the merged-reference read asked for, failed or returned
-       something unreadable, or the intake hit an error: no answer, and stdout is
-       empty. Never read as "no issues".
+    3  the issue read, or the merged-reference read asked for, failed, returned
+       something unreadable or ran past an issue's 10 pages, or the intake hit an
+       error: no answer, and stdout is empty. Never read as "no issues".
 """
 
 import argparse
@@ -86,13 +89,15 @@ EDIT_QUERY = (
 )
 MERGED = "mergedReferences"
 REFS_PER_QUERY = 50
+REFS_PAGES_PER_ISSUE = 10
 REFS_QUERY = (
     "query($owner:String!,$name:String!,%s){repository(owner:$owner,name:$name){%s}}"
 )
 REFS_ISSUE = (
     "i%(k)d:issue(number:$n%(k)d){timelineItems(itemTypes:[CROSS_REFERENCED_EVENT],"
     "first:100,after:$c%(k)d){pageInfo{hasNextPage endCursor}"
-    "nodes{...on CrossReferencedEvent{source{...on PullRequest{number url mergedAt}}}}}}"
+    "nodes{...on CrossReferencedEvent{source{...on PullRequest{number url mergedAt "
+    "repository{owner{login}}}}}}}}"
 )
 
 
@@ -258,11 +263,14 @@ def label_vouches(repo, number, label, roles):
 
 
 def merged_references(repo, numbers):
-    """({number: the merged pull requests that cross-reference that issue}, None), or
-    (None, why) for a read that failed or was not the expected shape. One GraphQL query
+    """({number: the merged pull requests in repositories of REPO's owner that
+    cross-reference that issue}, None), or (None, why) for a read that failed, was not the
+    expected shape, or ran past an issue's REFS_PAGES_PER_ISSUE pages. One GraphQL query
     reads REFS_PER_QUERY issues; an issue whose timeline has another page goes back in
     the queue with its cursor."""
+    owner = repo.split("/", 1)[0].lower()
     found = {number: {} for number in numbers}
+    pages = dict.fromkeys(numbers, 0)
     pending = [(number, None) for number in numbers]
     while pending:
         page, pending = pending[:REFS_PER_QUERY], pending[REFS_PER_QUERY:]
@@ -282,17 +290,24 @@ def merged_references(repo, numbers):
             reply = json.loads(out)["data"]["repository"]
             for k, (number, cursor) in enumerate(page):
                 timeline = reply["i%d" % k]["timelineItems"]
+                pages[number] += 1
                 for node in timeline["nodes"]:
                     pull = node["source"]  # an issue's is {}: the fragment reads PRs only
                     if pull.get("mergedAt") is None:
                         continue
+                    login = pull["repository"]["owner"]["login"]
                     if not (isinstance(pull["number"], int) and isinstance(pull["url"], str)
                             and instant(pull["mergedAt"])):
                         raise ValueError
+                    if login.lower() != owner:  # not this project's work
+                        continue
                     found[number][pull["url"]] = {
                         key: pull[key] for key in ("number", "mergedAt", "url")
                     }
                 if timeline["pageInfo"]["hasNextPage"]:
+                    if pages[number] >= REFS_PAGES_PER_ISSUE:
+                        return None, "found more than %d pages of cross-references on #%d" % (
+                            REFS_PAGES_PER_ISSUE, number)
                     after = timeline["pageInfo"]["endCursor"]
                     if not isinstance(after, str) or after in ("", cursor):
                         raise ValueError

@@ -27,12 +27,15 @@ State file:
   edits:  {"N": {lastEditedAt, editor, editor_bot}, or a list of them}; GraphQL
           answers with the newest one's time and editor, as GitHub does
   references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt, repo} or {issue}]}, in
-          timeline order; a pull request's `mergedAt` is answered only when MERGED, and
-          an issue's source is {}, as GitHub answers the PullRequest fragment for it
+          timeline order; a pull request's `mergedAt` is answered only when MERGED, its
+          repository's owner (when the query reads it) is the owner in `repo`, or in the
+          read repository when `repo` is absent, and an issue's source is {}, as GitHub
+          answers the PullRequest fragment for it
   fail:   {issue_list: bool, issue_view: bool, permission: [LOGIN], events: [N], graphql: [N],
-           references: [N], cursor: [N]}; a number in references answers as one GitHub
-          cannot resolve (partial data, an `errors` array, exit 1), and one in cursor
-          answers a next page with no cursor to it
+           references: [N], cursor: [N], repeat: [N]}; a number in references answers as
+          one GitHub cannot resolve (partial data, an `errors` array, exit 1), one in cursor
+          answers a next page with no cursor to it, and one in repeat a next page whose
+          cursor is the one it was asked with
   raw_issue_list: text printed verbatim for `issue list` (a malformed reply)
 """
 
@@ -234,13 +237,16 @@ def graphql(rest: list[str]) -> None:
         refuse("graphql query reads neither cross-references nor the body's last edit")
 
 
-def source(ref: dict, slug: str) -> dict:
+def source(ref: dict, slug: str, query: str) -> dict:
     if "issue" in ref:
         return {}
     repo = ref.get("repo") or slug
     merged = ref.get("mergedAt") if ref["state"] == "MERGED" else None
-    return {"number": ref["pr"], "url": f"https://github.com/{repo}/pull/{ref['pr']}",
+    pull = {"number": ref["pr"], "url": f"https://github.com/{repo}/pull/{ref['pr']}",
             "mergedAt": merged}
+    if "repository{owner{login}}" in query:
+        pull["repository"] = {"owner": {"login": repo.split("/", 1)[0]}}
+    return pull
 
 
 def timeline(query: str, fields: dict[str, str]) -> None:
@@ -273,10 +279,12 @@ def timeline(query: str, fields: dict[str, str]) -> None:
         info = {"hasNextPage": end < len(refs), "endCursor": f"cursor:{end}" if page else None}
         if number in [str(n) for n in fail.get("cursor") or []]:
             info = {"hasNextPage": True, "endCursor": None}
+        if number in [str(n) for n in fail.get("repeat") or []]:
+            info = {"hasNextPage": True, "endCursor": fields.get(f"c{k}", "cursor:0")}
         answer[f"i{k}"] = {
             "timelineItems": {
                 "pageInfo": info,
-                "nodes": [{"source": source(ref, slug)} for ref in page],
+                "nodes": [{"source": source(ref, slug, query)} for ref in page],
             }
         }
         k += 1
