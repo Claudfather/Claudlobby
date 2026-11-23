@@ -109,7 +109,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 ## What we choose not to build
 
 - **A hosted version.** Claudlobby is software users run themselves. We are not becoming "Claude Code Bots as a Service."
-- **Web UI for fleet management.** Telegram + tmux + systemctl + fleet-state.json is the management surface. Adding a web UI would double the surface area for marginal benefit.
+- **Web UI for fleet management.** Telegram + tmux + systemctl + fleet-state.json is the management surface. Adding a web UI would double the surface area for marginal benefit. The one exception is the workspace view of a started computer's parts (this computer, Claude, bots and the helper), part of the setup flow the owner approved for planning on 2026-11-21.
 - **Cross-host fleet coordination.** A Claudlobby fleet runs on one host. Multi-host coordination is interesting and explicitly out of scope for v1 — the architecture would change too much.
 - **Skill or knowledge management.** That's clauDNA and Claudron. Claudlobby orchestrates bots that consume those; it does not become them.
 - **Per-bot LLM provider abstraction.** Claudlobby composes and supervises agent CLIs — Claude Code today, OpenAI Codex through its execution adapter (#2145 F18/F11, #2149) — and the model stays each CLI's concern. It does not abstract LLM providers beneath the CLI, and a bot that is not an agent CLI belongs in a different framework.

@@ -407,6 +407,30 @@ def environment_ready(root):
     finally: os.close(fd)
 
 
+def environment_linked(root):
+    """The parts read's Linked: a sign-in line with a value is saved in ``.env``. Reads only; never returns the value.
+
+    The same file checks as ``environment_ready``, which this leaves unchanged: a file that is not a single-link
+    regular file of this user with mode 0600 and at most 64 KiB, a line before the sign-in line it cannot read, or
+    a file that changed while read, is not linked. An empty value (``CLAUDE_CODE_OAUTH_TOKEN=``, ``''`` or ``""``)
+    is not a sign-in. An API key or Claude's own login files are not this line, so they are not linked either.
+    """
+    fd,before=_open_file(root/".env")
+    try:
+        raw=os.read(fd,65537)
+        if _node(before)!=_node(os.fstat(fd)) or _node(before)!=_node((root/".env").lstat()): return False
+    finally: os.close(fd)
+    try: _environment_format(raw.decode("utf-8"))
+    except UnicodeError: return False
+    except SigninRefused as exc:
+        if exc.code!="credential_already_present": return False
+        # The check stopped at the first sign-in line, which it read as well formed: that line decides.
+        for line in raw.decode("utf-8").splitlines():
+            match=re.fullmatch(r"(?:export )?CLAUDE_CODE_OAUTH_TOKEN=(.*)",line)
+            if match: return match[1] not in ("","''",'""')
+    return False
+
+
 def store_token(root, token, admit):
     """Append exactly one literal token, preserving private routing bytes/inode."""
     if not _TOKEN.fullmatch(token): raise SigninRefused("unsupported_output", refusal_detail("token shape"))

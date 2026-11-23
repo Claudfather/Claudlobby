@@ -1075,6 +1075,9 @@ def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path)
     assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
     assert 'from "./connected-read-client.js?v=' in workspace.text
     assert 'from "./two-source-read.js?v=' in workspace.text
+    assert 'from "./workspace-parts.js?v=' in workspace.text
+    parts = client.get("/workspace-parts.js")
+    assert parts.status_code == 200 and parts.headers["cache-control"] == "no-store"
     assert "import(" not in workspace.text
     assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
 
