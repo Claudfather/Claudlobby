@@ -1,6 +1,6 @@
 // The parts view: one row for each part of a started computer, from the parts read (setup-state).
 // It reads only, over a connection the person already made, and has no working control in this version.
-// Every sentence a person reads here is a draft awaiting the owner's approval (STRINGS_FOR_APPROVAL, slice A).
+// Every sentence a person reads here is the owner's approved wording (2026-11-23).
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...fields].sort().join();
 const has = (value, fields) => value && typeof value === 'object' && !Array.isArray(value) && fields.every(key => Object.hasOwn(value, key));
@@ -20,11 +20,11 @@ export const PART_TEXT = Object.freeze({
 // computer: each computer keeps its own saved name. A name is 1 to 40 ASCII letters and digits in words joined by
 // one space or one hyphen, so it cannot read like a status ("Claude - Linked", "Claude: Linked"). Anything else
 // drops the whole field, never one name. Nor may a name hold a status the view says ("Linked", "Not linked",
-// "Claude Linked", "None yet", "Coming soon"), which would be drawn beside the real one and contradict it.
+// "Claude Linked", "None yet", "Coming soon", "1 team set up"), which would be drawn beside the real one and contradict it.
 const NAMED = Object.freeze(['provider','bots','helper']);
 const NAME = /^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*$/;
 const words = text => text.toLowerCase().split(/[ -]/);
-const STATUSES = Object.freeze(['linked','notLinked','none','asleep','later'].map(key => words(PART_TEXT[key])));
+const STATUSES = Object.freeze(['linked','notLinked','none','asleep','later','oneTeam'].map(key => words(PART_TEXT[key])));
 const saysStatus = name => { const w = words(name);
   return STATUSES.some(status => w.some((_, i) => status.every((word, j) => w[i+j] === word))); };
 export function partNames(value) {

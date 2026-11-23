@@ -21,5 +21,5 @@ before reading anything); a computer in
 first-team setup is never sent the read, and one whose core predates it shows
 what it does today. The connected document may carry `part_names` for the
 provider, bots and helper (never a computer), checked strictly and dropped whole
-when malformed. Its sentences are drafts awaiting
-approval, and nothing is visible until the website's pin moves.
+when malformed. Its sentences are the owner's approved wording (2026-11-23),
+and nothing is visible until the website's pin moves.

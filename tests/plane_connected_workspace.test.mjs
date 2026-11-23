@@ -3400,7 +3400,7 @@ test('the embedding page names parts only with a well-formed part_names; anythin
   // A computer keeps its own saved name, so a computer key drops the field; and a name that could read as a status is refused.
   for(const bad of [{computer:'Office Mac'},{computer:'Office Mac',helper:'Helper'},{helper:'Claude - Linked'},{helper:'Claude: Linked'},
     {provider:'Claude · Linked'},{bots:'Bots (None yet)'},{provider:'Linked'},{provider:'Not linked'},{provider:'Claude Linked'},
-    {provider:'claude-linked'},{bots:'None yet'},{bots:'My bots none yet'},{helper:'Coming soon'},{helper:'Asleep until Claude is linked'},{helper:'Helper.'},{helper:'Set--up'},{helper:'Set up '},{helper:'Set  up'},
+    {provider:'claude-linked'},{bots:'None yet'},{bots:'My bots none yet'},{helper:'Coming soon'},{bots:'1 team set up'},{helper:'Asleep until Claude is linked'},{helper:'Helper.'},{helper:'Set--up'},{helper:'Set up '},{helper:'Set  up'},
     {helper:''},{helper:'x'.repeat(41)},{helper:' Helper'},{helper:'Hélper'},{helper:'Help\ner'},{assistant:'Helper'},
     {helper:'Helper',bots:7},['Helper'],'Helper',null]) {
     assert.equal(partNames(bad),null,JSON.stringify(bad));
