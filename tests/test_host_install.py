@@ -642,9 +642,10 @@ def test_any_later_state_under_the_private_roots_means_in_use(tmp_path, local_in
 
 
 def _update_job_name(family, suffix=".service"):
-    """The name update_job.update_job_label derives for this installation."""
-    return ("com.claudlobby.update." + hashlib.sha256(str(family / "install").encode()).hexdigest()[:16]
-            + suffix)
+    """The name the updater itself derives for this installation."""
+    from claudlobby.installation import Installation
+    from claudlobby.update_job import update_job_label
+    return update_job_label(Installation(family / "install", family / "data")) + suffix
 
 
 def add_update_job(family, name=None):
@@ -686,6 +687,48 @@ def test_the_updater_job_definition_alone_is_not_in_use(tmp_path, local_install_
         result = invoke_fixture(tmp_path, home, local_install_source, action)
         assert result.returncode == 4 and json.loads(result.stdout)["code"] == "existing_installation"
         assert snapshot(home) == before
+
+
+def test_a_job_definition_at_the_size_limit_is_admitted(tmp_path, local_install_source):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    add_update_job(family).write_bytes(b"#" * 8192)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert json.loads(status.stdout)["state"] == "recorded_in_use"
+
+
+def test_status_on_a_mac_admits_the_launchd_job_definition(tmp_path, local_install_source, monkeypatch):
+    # The status action with the platform set to Darwin. The runtime profile is
+    # the fixture's and Git runs as on Linux, so what differs is the job name.
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    (family / "runtime").mkdir(mode=0o700)
+    add_update_job(family, _update_job_name(family, ".plist"))
+    module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    env = module.fixed_environment(home)
+    profile, _policy, _environment = _darwin_policy_fixture(module, home, monkeypatch)
+    profile.git = Path("/usr/bin/git")
+    python = Path(sys.executable).resolve()
+    monkeypatch.setattr(module, "independent_python", lambda: python)
+    monkeypatch.setattr(module, "fixed_environment", lambda actual: env if actual == home else None)
+    monkeypatch.setenv("PATH", "/nonexistent")
+    value = {"schema_version": 1, "source_revision": local_install_source[2], "expected_uid": os.geteuid()}
+    before = snapshot(home)
+    assert module.execute("status", value, time.monotonic() + 15)[0] == "recorded_in_use"
+    assert snapshot(home) == before
+    # The Linux name beside it is foreign on a Mac.
+    add_update_job(family)
+    with pytest.raises(module.Refusal) as error:
+        module.execute("status", value, time.monotonic() + 15)
+    assert (error.value.code, error.value.next_step) == ("existing_installation", "inspect")
 
 
 def _linked_job(family):

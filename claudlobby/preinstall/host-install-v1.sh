@@ -1487,7 +1487,10 @@ def inspect(install, data, expected, python, runner, env, in_use=False):
         if later - ({job} if in_use else set()):
             raise Refusal("existing_installation", next_step="inspect")
         if later:
-            info = (entries / job).lstat()
+            try:
+                info = (entries / job).lstat()
+            except FileNotFoundError:
+                raise Refusal("identity_changed", next_step="inspect") from None
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
                     or stat.S_IMODE(info.st_mode) != 0o644 or info.st_size > 8192):
                 raise Refusal("existing_installation", next_step="inspect")
