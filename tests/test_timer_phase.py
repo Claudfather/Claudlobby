@@ -363,7 +363,8 @@ def test_a_fleet_s_own_reload_settings_merge_with_its_slot(tmp_path, override, e
     [
         ("*-*-* 03:30:00", 3, "*-*-* 03:33:00"),
         ("*-*-* 03:58:00", 3, "*-*-* 04:01:00"),
-        ("*-*-* 23:59:00", 2, "*-*-* 00:01:00"),
+        ("*-*-* 23:59:00", 2, "*-*-* 23:59:00"),
+        ("Sun *-*-* 23:59", 1, "Sun *-*-* 23:59"),
         ("Sun *-*-* 05:00", 1, "Sun *-*-* 05:01"),
         ("*-*-* 3:30 UTC", 2, "*-*-* 03:32 UTC"),
         ("*-*-*  3:30", 0, "*-*-*  3:30"),
@@ -371,14 +372,15 @@ def test_a_fleet_s_own_reload_settings_merge_with_its_slot(tmp_path, override, e
         ("*-*-* *:30:00", 2, "*-*-* *:30:00"),
         ("Mon..Fri 09:00,13:00", 2, "Mon..Fri 09:00,13:00"),
         ("*-*-* 24:00:00", 1, "*-*-* 24:00:00"),
+        ("*-*-* 03:75", 1, "*-*-* 03:75"),
     ],
 )
 def test_a_calendar_copy_moves_one_minute_for_each_slot_before_its_own(expression, index, moved):
-    """Slot 0 keeps the declared text; a plain time of day moves and wraps within its day; any
+    """Slot 0 keeps the declared text; one plain time of day moves, never past midnight; any
     other expression, or a time systemd would refuse, is left for systemd as declared."""
     from claudlobby.composer import _calendar_in_slot
 
-    assert _calendar_in_slot(expression, (index, 5)) == moved
+    assert _calendar_in_slot(expression, index) == moved
 
 
 def test_launchd_keeps_its_interval_and_has_no_slot(host):
@@ -580,7 +582,7 @@ def test_systemd_reads_the_reload_copies_as_one_run_a_day_a_minute_apart():
         assert len(elapses) == 2, out
         assert (elapses[1] - elapses[0]).total_seconds() == 86400, out
         firsts.append(elapses[0])
-    # Times of day: a run between 03:30 and 03:33 puts some copies' next run tomorrow.
+    # Compared as times of day: between 03:30 and 03:33 UTC the first copies' next run is tomorrow.
     assert [(b - a).total_seconds() % 86400 for a, b in zip(firsts, firsts[1:])] == [60, 60, 60]
 
 

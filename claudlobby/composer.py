@@ -4357,30 +4357,29 @@ def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
 
 
 # A plain time of day in an OnCalendar= expression: HH:MM or HH:MM:SS.
-_CALENDAR_TIME = re.compile(r"(\d{1,2}):(\d{2})(:\d{2})?")
+_CALENDAR_TIME = re.compile(r"(\d{1,2}):([0-5]\d)(:\d{2})?")
 
 
-def _calendar_in_slot(expression: str, slot: tuple[int, int]) -> str:
-    """*expression* moved one minute later for each slot before *slot*'s own.
+def _calendar_in_slot(expression: str, index: int) -> str:
+    """*expression* one minute later for each slot before *index*.
 
-    Every fleet composes the same calendar job, and identical timers start in
-    the same second. A job that declares ``slot: true`` takes its owner's slot,
-    as an anchored interval job does: slot 0 keeps the declared expression and
-    each later slot runs one minute after the one before it. Each copy is then
-    due in its own minute, and the default AccuracySec= of a minute starts it
-    within that minute unless the user manager stalls. launchd reads the moved
-    ``HH:MM`` too. Only an expression with exactly one plain time of day moves,
-    wrapping within its day; any other keeps its declared form.
+    A calendar job that declares ``slot: true`` takes its owner's slot
+    (``_host_timer_slot``) as an anchored interval job does, so the copies
+    every fleet composes are each due in their own minute. Slot 0 keeps the
+    declared expression. Only one plain time of day moves, and only within its
+    day: any other expression, or a copy that would pass midnight, keeps its
+    declared form.
     """
     tokens = expression.split()
-    times = [at for at, token in enumerate(tokens) if _CALENDAR_TIME.fullmatch(token)]
-    if not slot[0] or len(times) != 1:
+    found = [(at, match) for at, token in enumerate(tokens)
+             if (match := _CALENDAR_TIME.fullmatch(token))]
+    if not index or len(found) != 1:
         return expression
-    hours, minutes, seconds = _CALENDAR_TIME.fullmatch(tokens[times[0]]).groups()
-    if int(hours) > 23 or int(minutes) > 59:
+    ((at, match),) = found
+    moved = int(match[1]) * 60 + int(match[2]) + index
+    if moved >= 24 * 60:
         return expression
-    moved = (int(hours) * 60 + int(minutes) + slot[0]) % 1440
-    tokens[times[0]] = f"{moved // 60:02d}:{moved % 60:02d}{seconds or ''}"
+    tokens[at] = f"{moved // 60:02d}:{moved % 60:02d}{match[3] or ''}"
     return " ".join(tokens)
 
 
@@ -4411,7 +4410,7 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
     if "schedule" in timer_cfg:
         expression = timer_cfg["schedule"]
         if slot is not None and timer_cfg.get("slot"):
-            expression = _calendar_in_slot(expression, slot)
+            expression = _calendar_in_slot(expression, slot[0])
         return {"type": "calendar", "expression": expression}
     seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:

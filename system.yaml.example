@@ -58,10 +58,9 @@
 # counted from its last start (OnUnitActiveSec=); only that first run gets a
 # slot. Without a `startup_delay` a job uses its interval, at most 900 s.
 # launchd keeps StartInterval with no slot: its first run is one interval
-# after load. A calendar job that declares `slot: true` takes its slot too:
-# the declared time is the first fleet's, each later fleet's copy runs one
-# minute after the one before it, and launchd's copies move with it. Only a
-# single plain HH:MM or HH:MM:SS time moves, wrapping within its day.
+# after load. A calendar job that declares `slot: true` takes its slot as
+# well: the first fleet's copy keeps the declared time and each later fleet's
+# runs one minute after the one before it, on launchd too.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
