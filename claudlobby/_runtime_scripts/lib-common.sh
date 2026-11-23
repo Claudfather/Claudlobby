@@ -3646,7 +3646,10 @@ pane_send_key() {
 # proves the input box already holds text: no new payload or Enter is sent, and
 # the existing input is left untouched. Unreadable captures are not held proof.
 # It returns 4 too, typing nothing, when that capture shows a menu
-# (pane_is_menu), which would read the keystrokes as choices.
+# (pane_is_menu), which would read the keystrokes as choices. With
+# PANE_SEND_IDLE_ONLY=1, for a sender that types only into an idle pane, it
+# returns 4 as well when that capture shows a running turn (pane_is_busy) or
+# could not be read. Each refusal names itself on a pane_send: stderr line.
 #
 # The keystrokes go out as N chunks of at most PANE_SEND_CHUNK_BYTES, not as one
 # send-keys — see _pane_send_payload and the knobs above for the measurement
@@ -3701,9 +3704,27 @@ _pane_send_verified_locked() {
     # A previous send may have typed text but withheld its Enter. Appending a
     # new payload would submit both as one prompt. Inspect after readiness and
     # under the same recipient lock as the write; never clear or submit the hold.
-    local before
-    if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) &&
-        { pane_is_held "$before" || pane_box_end_held "$before"; }; then
+    local before captured=0
+    if before=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null); then
+        captured=1
+    fi
+    # PANE_SEND_IDLE_ONLY=1 (see above): this capture is the last look before
+    # the first keystroke. The sender looked before it waited for a compaction
+    # and for this lock, and a turn can start in those waits, as when the
+    # previous holder's Enter starts one. Busy is asked first, as that look
+    # asks it. Not a send_miss: the sender's request records why it sent
+    # nothing. A turn that starts while the payload is typed is not caught.
+    if [ "${PANE_SEND_IDLE_ONLY:-}" = 1 ]; then
+        if [ "$captured" = 0 ]; then
+            printf 'pane_send: recipient-unreadable; no payload or Enter was sent\n' >&2
+            return 4
+        fi
+        if pane_is_busy "$before"; then
+            printf 'pane_send: recipient-busy; no payload or Enter was sent\n' >&2
+            return 4
+        fi
+    fi
+    if [ "$captured" = 1 ] && { pane_is_held "$before" || pane_box_end_held "$before"; }; then
         emit_fleet_event send_miss dispatch \
             "$(printf '{"session":"%s","reason":"recipient-input-held"}' \
                 "$(json_escape "$session")")"

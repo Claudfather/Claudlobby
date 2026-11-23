@@ -177,20 +177,19 @@ def _observation(result: TransportOutcome) -> TransportObservation:
                                 result.native_returncode, result.reason)
 
 
-_NOT_IDLE = {"busy": "recipient pane was busy; nothing was sent",
-             "unknown": "recipient pane could not be read; nothing was sent"}
-
-
 def _idle_only(transport: Callable) -> Callable:
     """``transport``, sent only into an idle pane: just before its one native send,
-    read_box asks whether a turn is running there. A busy or unreadable pane is a
-    failed attempt that typed nothing. The native send keeps its own refusals of a
-    box holding text or a menu. A report's uncertain retry sends through this."""
+    read_box asks whether a turn is running there, and the native send asks again
+    (``idle_only``) on the capture it takes under the recipient's send lock, right
+    before it types, since a turn can start while it waits for that lock or for a
+    compaction. A busy or unreadable pane is a failed attempt that typed nothing.
+    The native send keeps its own refusals of a box holding text or a menu. A
+    report's uncertain retry sends through this."""
     def send(package, destination, **options):
         box = _native_transport.read_box(package, destination, busy=True)
-        if box in _NOT_IDLE:
-            return TransportOutcome("failed", reason=_NOT_IDLE[box])
-        return transport(package, destination, **options)
+        if box in _native_transport.NOT_IDLE:
+            return TransportOutcome("failed", reason=_native_transport.NOT_IDLE[box])
+        return transport(package, destination, idle_only=True, **options)
     return send
 
 

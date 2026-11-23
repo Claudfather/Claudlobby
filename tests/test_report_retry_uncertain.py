@@ -11,15 +11,22 @@ request say why the send failed: the transport's reason never reached the receip
 Each report verb now takes --retry-uncertain: the same command and request ID make one new
 attempt under the same message ID, refused once a submission is recorded. A report's retry
 types only into an idle pane: read_box, asked with busy, answers busy while a turn runs, and
-the retry then sends nothing. The first attempt's admission is unchanged, and no other caller
+the retry then sends nothing. The native send asks again on the capture it takes under the
+manager's send lock, right before it types, so a turn that starts while the retry waits for
+that lock gets nothing either. The first attempt's admission is unchanged, and no other caller
 asks for the busy answer. The transport's reason reaches the command's data
 (transport_reason) and request show.
 
 The manager's pane is faked where the decision under test is the owner's (which read, which
-send, which receipt); read_box's busy answer runs against real tmux.
+send, which receipt); read_box's busy answer and a retry that waits for the send lock run
+against real tmux.
 """
 
 import json
+import os
+import subprocess
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +44,8 @@ from tests.fixtures.current_runtime import current_runtime as cold, tmp_path  # 
 from tests.test_releases import installed  # noqa: F401 (cold dependency)
 from tests.test_task_read_cli import active  # noqa: F401 (active private Plane)
 from tests.test_message_write_cli import _assigned, _generated
-from tests.test_message_enter_repair import BUSY, EMPTY, HELD, LIVE_BUSY, _frame, _stub_pane
+from tests.test_message_enter_repair import (BUSY, EMPTY, HELD, LIVE_BUSY, _HOLD_LOCK, _frame,
+                                             _send_lock_file, _stub_pane)
 
 _MENU = "recipient pane showed a menu; nothing was sent"  # message_transport.send's own refusal
 _BUSY = "recipient pane was busy; nothing was sent"
@@ -55,11 +63,12 @@ class _Pane:
     """The recipient's pane. ``box`` is what a busy read answers (busy, empty, held or
     unknown); a plain read answers as read_box always has, so a running turn reads empty.
     Each native send takes the next outcome, and a submitted one earns its receipt unless
-    ``receives`` is off. Every read records whether it asked about a running turn."""
+    ``receives`` is off. Every read records whether it asked about a running turn, and every
+    send whether it asked the native helper to refuse one under the send lock (idle_only)."""
 
     def __init__(self, monkeypatch, *outcomes, box="empty", receives=True):
         self.outcomes, self.box, self.receives = list(outcomes), box, receives
-        self.reads, self.sends, self.submitted = [], [], set()
+        self.reads, self.sends, self.idle_only, self.submitted = [], [], [], set()
         monkeypatch.setattr(message_transport, "read_box", self.read_box)
         monkeypatch.setattr(message_transport, "press_held_enter", self.press)
         monkeypatch.setattr(message_queries, "receipt", self.receipt)
@@ -72,6 +81,7 @@ class _Pane:
 
     def transport(self, package, destination, *, message_id, body, **options):
         self.sends.append(message_id)
+        self.idle_only.append(options.get("idle_only", False))
         outcome = self.outcomes.pop(0)
         if outcome.status == "submitted":
             self.submitted.add(message_id)
@@ -137,6 +147,7 @@ def test_a_refused_report_notice_is_sent_again_under_its_request(active, monkeyp
     assert retried["data"]["transport_reason"] is None
     assert pane.sends == [first["data"]["message_id"]] * 2
     assert pane.reads == [False, False, False, True], "only the retry asks whether a turn runs"
+    assert pane.idle_only == [False, True], "only the retry's native send refuses a turn under the lock"
     assert _attempts(capsys, root, request_id) == [("failed", _MENU), ("submitted", None)]
     assert main(["--root", str(root), "request", "show", request_id]) == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("transmission ")]
@@ -219,6 +230,7 @@ def test_an_unlinked_report_retry_types_nothing_into_a_busy_pane(active, monkeyp
     sent = _run(capsys, root, *command, "--retry-uncertain", expected=0)
     assert sent["data"]["message_id"] == first["data"]["message_id"] and len(pane.sends) == 2
     assert _attempts(capsys, root, request_id) == [("failed", _MENU), ("failed", _BUSY), ("submitted", None)]
+    assert pane.idle_only == [False, True], "only the retry's native send refuses a turn under the lock"
 
 
 def test_no_other_send_asks_whether_a_turn_runs(active, monkeypatch, capsys, tmp_path):  # noqa: F811
@@ -239,7 +251,7 @@ def test_no_other_send_asks_whether_a_turn_runs(active, monkeypatch, capsys, tmp
                "--request-id", str(uuid4()))
     _run(capsys, root, *deliver, expected=5)
     assert _run(capsys, root, *deliver, "--retry-uncertain", expected=0)["data"]["delivery"] == "received"
-    assert len(pane.sends) == 4 and True not in pane.reads
+    assert len(pane.sends) == 4 and True not in pane.reads and True not in pane.idle_only
 
 
 def test_a_receipt_kept_before_reasons_were_still_loads_and_retries(active, monkeypatch, capsys):
@@ -289,3 +301,50 @@ def test_a_busy_answer_counts_only_when_asked(tmp_path):  # noqa: F811
     assert message_transport.read_box(package, destination, runner=runner) == "unknown"
     assert message_transport.read_box(package, destination, runner=runner, busy=True) == "busy"
     assert asked == ["worker", "busy"], "a plain read's command is unchanged"
+
+
+_MSG = "msg_" + "e" * 32
+
+
+@pytest.mark.parametrize("turn", [True, False], ids=["a-turn-starts-while-it-waits", "no-turn-starts"])
+def test_a_retry_refuses_a_turn_that_starts_while_it_waits_for_the_send_lock(turn, monkeypatch):
+    """Another sender holds the manager's send lock. The retry looks and sees an idle pane;
+    then the other sender's message starts a turn while the retry waits for the lock. The retry
+    refuses on the capture it takes under the lock and types nothing. With no turn it types once
+    the lock frees. A real tmux pane, the shipped native helper and message_transport.send,
+    wrapped as a report's retry is."""
+    with _stub_pane(EMPTY, stub="redraw-box-stub.py") as (destination, log, package):
+        dest = destination()
+        lock = _send_lock_file(package, dest)
+        held = Path(lock).parent / "held"
+        holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, lock, str(held), "1.5"])
+        try:
+            deadline = time.monotonic() + 10
+            while not held.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert held.exists(), "the other sender never took the lock"
+            real, looks = message_transport.read_box, []
+
+            def look(*args, **kwargs):
+                looks.append(real(*args, **kwargs))
+                if turn:  # the other sender's message is submitted, and a turn starts
+                    running = dest.root / "turn.txt"
+                    running.write_text(_BUSY_EMPTY, encoding="utf-8")
+                    os.replace(running, dest.root / "frame.txt")
+                return looks[-1]
+            monkeypatch.setattr(message_transport, "read_box", look)
+            outcome = message_operations._idle_only(message_transport.send)(
+                package, dest, message_id=_MSG, body="retried notice")
+            freed = holder.poll() is not None  # the holder frees the lock as it exits
+            time.sleep(0.5)  # a keystroke still in flight reaches the stub's log
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+        typed = log.read_bytes()
+        assert looks == ["empty"], "the retry's own look saw an idle pane"
+        assert freed, "the send went on before the other sender freed the lock"
+        if turn:
+            assert (outcome.status, outcome.reason) == ("failed", _BUSY), outcome
+            assert typed == b"", "the retry typed into a running turn"
+        else:
+            assert outcome.status == "submitted" and b"retried notice" in typed, (outcome, typed)

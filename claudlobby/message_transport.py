@@ -245,13 +245,36 @@ def _await_compaction(package: PackageResources, destination: TransportDestinati
     return waited
 
 
+# Why an idle-only send typed nothing, keyed by read_box's answer. The sender's
+# own look before the send (message_operations._idle_only) and the native
+# helper's look under the send lock (send's idle_only) give the same reasons.
+NOT_IDLE = {"busy": "recipient pane was busy; nothing was sent",
+            "unknown": "recipient pane could not be read; nothing was sent"}
+
+# The native helper's refusals before it types: its stderr line at rc 4, and the
+# failed attempt's reason. The helper computes the wire proof before admission,
+# so those prepared bytes never crossed the pane and are not sent proof.
+_REFUSALS = {
+    b"pane_send: recipient-input-held; no payload or Enter was sent\n":
+        "recipient input already held text; nothing was sent",
+    b"pane_send: recipient-menu-open; no payload or Enter was sent\n":
+        "recipient pane showed a menu; nothing was sent",
+    b"pane_send: recipient-busy; no payload or Enter was sent\n": NOT_IDLE["busy"],
+    b"pane_send: recipient-unreadable; no payload or Enter was sent\n": NOT_IDLE["unknown"],
+}
+
+
 def send(package: PackageResources, destination: TransportDestination, *, message_id: str,
-         body: str, timeout: float = 30, runner=None, lease=None) -> TransportOutcome:
+         body: str, timeout: float = 30, runner=None, lease=None,
+         idle_only: bool = False) -> TransportOutcome:
     """Attempt exactly one native submission; no automatic payload/Enter retry.
 
     The runner seam has subprocess byte-input semantics. Only pre-call validation
     inability to launch, native no-session preflight, and observed occupied input
     refused before writing are definite failures.
+    With ``idle_only`` the native helper also refuses, typing nothing, when the
+    capture it takes under the recipient's send lock, its last look before the
+    first keystroke, shows a running turn or cannot be read.
     A timeout, partial send, malformed response, or interrupted native call is unknown.
     Wire proof describes prepared native bytes, not delivery, and may be absent
     even after submission.
@@ -283,6 +306,8 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
            "FLEET_NAME": destination.fleet, "TMUX_TMPDIR": str(destination.tmux_tmpdir),
            "TMPDIR": str(destination.tmux_tmpdir), "PLANE_MSG_ID": message_id,
            "PLANE_EMIT_DISABLED": "1", "PANE_SEND_VERIFY_TICKS": "0"}
+    if idle_only:
+        env["PANE_SEND_IDLE_ONLY"] = "1"
     _await_compaction(package, destination, lease or compaction_lease)
     command = ["/bin/bash", "--noprofile", "--norc", "-c", _SCRIPT, "message-transport",
                str(native), destination.socket, destination.session]
@@ -305,17 +330,10 @@ def send(package: PackageResources, destination: TransportDestination, *, messag
             and b"send dropped (logged)" in stderr):
         return TransportOutcome("failed",
                                 reason="native session precheck dropped the send")
-    if (rc == result.returncode == 4
-            and b"pane_send: recipient-input-held; no payload or Enter was sent\n" in stderr):
-        # The helper computes the wire proof before admission. These prepared
-        # bytes never crossed the pane, and must not be reported as sent proof.
-        return TransportOutcome("failed",
-                                reason="recipient input already held text; nothing was sent")
-    if (rc == result.returncode == 4
-            and b"pane_send: recipient-menu-open; no payload or Enter was sent\n" in stderr):
-        # A menu would read typed keys as choices, so the helper typed nothing.
-        return TransportOutcome("failed",
-                                reason="recipient pane showed a menu; nothing was sent")
+    if rc == result.returncode == 4:
+        for line, reason in _REFUSALS.items():
+            if line in stderr:
+                return TransportOutcome("failed", reason=reason)
     return TransportOutcome("unknown", digest, length, result.returncode,
                             "native submission did not complete with a valid success result")
 

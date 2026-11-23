@@ -348,11 +348,12 @@ task transition but manager notification fails, that transition still stands:
 inspect the returned recording and notification outcomes, and do not submit a
 second report under a new UUID. A report rerun with its UUID and
 `--retry-uncertain`, linked or unlinked, makes one new notification attempt
-under the same message ID: refused once a submission is recorded, and typing
-nothing while the manager's pane is busy or unreadable. A plain rerun repeats
-no attempt; `transport_reason` and `request show` carry the transport's reason.
-The `--by` field records provenance; it does not grant another actor's
-authority.
+under the same message ID, refused once a submission is recorded. It types
+nothing while the manager's pane is busy or unreadable, checked again just
+before its first keystroke, so only a turn that starts while the text is being
+typed can still receive it. A plain rerun repeats no attempt; `transport_reason`
+and `request show` carry the transport's reason. The `--by` field records
+provenance; it does not grant another actor's authority.
 
 When there is no assignment to report against, submit an explicitly unlinked
 report to your own fleet manager. It sends a report message and does not
