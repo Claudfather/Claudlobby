@@ -41,10 +41,15 @@ MERGED REFERENCES (`list --json ...,mergedReferences`)
     {number, mergedAt, url}, oldest merge first. Only a pull request whose
     repository GitHub reports under the --repo owner, in upper or lower case,
     is listed: a merged pull request under another owner is not this
-    project's work. The intake computes the field, since `gh issue list` has no
-    such field: one GraphQL query reads the timelines of up to 50 kept issues
-    at a time, and an issue with more than 100 cross-references reads the rest
-    in later queries, up to 10 pages; past them the read refuses at exit 3. An
+    project's work, so a reference's owner is read before its other fields,
+    and another owner's reference is dropped there. The intake computes the
+    field, since `gh issue list` has no such field: one GraphQL query reads the
+    timelines of up to 50 kept issues at a time, and an issue with more than
+    100 cross-references reads the rest in later queries, up to 10 pages. An
+    issue with more pages than that, or with a reference that is not another
+    owner's and is not in the shape the query asks for, gets null in place of
+    the list, is read no further and is named on stderr: whether work merged
+    under it is unknown, not none. The other issues are listed as usual. An
     open pull request, or one closed without merging, is not listed. A listed
     pull request is where to look, not proof that the issue is done: it can
     name the issue without taking its work.
@@ -63,11 +68,14 @@ MERGED REFERENCES (`list --json ...,mergedReferences`)
 EXIT
     0  answered: `list` prints a JSON array of the kept issues (possibly empty),
        each naming its author by login only, and one stderr line per skipped
-       issue; `quote` prints the block.
+       issue and per issue whose `mergedReferences` is null; `quote` prints the
+       block.
     2  usage error; nothing was read.
-    3  the issue read, or the merged-reference read asked for, failed, returned
-       something unreadable or ran past an issue's 10 pages, or the intake hit an
-       error: no answer, and stdout is empty. Never read as "no issues".
+    3  the issue read failed or was not a list of issues; the merged-reference
+       read asked for failed, or its reply was not in the shape of its query (a
+       missing issue, or a next page without a cursor or with the one it was
+       asked with); or the intake hit an error: no answer, and stdout is empty.
+       Never read as "no issues".
 """
 
 import argparse
@@ -262,14 +270,39 @@ def label_vouches(repo, number, label, roles):
     return True, "%s applied by %s" % (label, actor)
 
 
+def merged_pull(source, owner):
+    """A timeline source as `mergedReferences` lists it when it is a merged pull request
+    in a repository of OWNER, else None: an issue ({}, since the fragment reads pull
+    requests only), another owner's pull request, or one not merged. The owner is read
+    first, so another owner's pull request is dropped before its other fields are read.
+    Raises ValueError, KeyError or TypeError for any other source not in the shape the
+    query asks for."""
+    if source == {}:
+        return None
+    login = source["repository"]["owner"]["login"]
+    if not isinstance(login, str):
+        raise ValueError
+    if login.lower() != owner:  # not this project's work
+        return None
+    if source["mergedAt"] is None:
+        return None
+    if not (isinstance(source["number"], int) and isinstance(source["url"], str)
+            and instant(source["mergedAt"])):
+        raise ValueError
+    return {key: source[key] for key in ("number", "mergedAt", "url")}
+
+
 def merged_references(repo, numbers):
-    """({number: the merged pull requests in repositories of REPO's owner that
-    cross-reference that issue}, None), or (None, why) for a read that failed, was not the
-    expected shape, or ran past an issue's REFS_PAGES_PER_ISSUE pages. One GraphQL query
-    reads REFS_PER_QUERY issues; an issue whose timeline has another page goes back in
-    the queue with its cursor."""
+    """(refs, unreadable, None), or (None, None, why) for a read that failed or a reply
+    not in the shape of its query. refs maps each number to the merged pull requests in
+    repositories of REPO's owner that cross-reference that issue, or to None when they
+    cannot be read: more than REFS_PAGES_PER_ISSUE pages of them, or one merged_pull
+    cannot read. unreadable says why for each None, and such an issue is read no
+    further. One GraphQL query reads REFS_PER_QUERY issues; an issue whose timeline has
+    another page goes back in the queue with its cursor."""
     owner = repo.split("/", 1)[0].lower()
     found = {number: {} for number in numbers}
+    unreadable = {}
     pending = [(number, None, 1) for number in numbers]  # (issue, cursor, which page it reads)
     while pending:
         page, pending = pending[:REFS_PER_QUERY], pending[REFS_PER_QUERY:]
@@ -284,38 +317,36 @@ def merged_references(repo, numbers):
                 variables += ["-f", "c%d=%s" % (k, cursor)]
         rc, out = graphql(repo, query, *variables)
         if rc != 0:
-            return None, "failed (gh exit %d)" % rc
+            return None, None, "failed (gh exit %d)" % rc
         try:
             reply = json.loads(out)["data"]["repository"]
             for k, (number, cursor, nth) in enumerate(page):
                 timeline = reply["i%d" % k]["timelineItems"]
                 for node in timeline["nodes"]:
-                    pull = node["source"]  # an issue's is {}: the fragment reads PRs only
-                    if pull.get("mergedAt") is None:
-                        continue
-                    login = pull["repository"]["owner"]["login"]
-                    if not (isinstance(pull["number"], int) and isinstance(pull["url"], str)
-                            and isinstance(login, str) and instant(pull["mergedAt"])):
-                        raise ValueError
-                    if login.lower() != owner:  # not this project's work
-                        continue
-                    found[number][pull["url"]] = {
-                        key: pull[key] for key in ("number", "mergedAt", "url")
-                    }
-                if timeline["pageInfo"]["hasNextPage"]:
-                    if nth >= REFS_PAGES_PER_ISSUE:
-                        return None, "found more than %d pages of cross-references on #%d" % (
-                            REFS_PAGES_PER_ISSUE, number)
-                    after = timeline["pageInfo"]["endCursor"]
-                    if not isinstance(after, str) or after in ("", cursor):
-                        raise ValueError
-                    pending.append((number, after, nth + 1))
+                    try:
+                        pull = merged_pull(node["source"], owner)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        unreadable[number] = "a cross-reference not in the expected shape"
+                        break
+                    if pull:
+                        found[number][pull["url"]] = pull
+                if number in unreadable or not timeline["pageInfo"]["hasNextPage"]:
+                    continue
+                if nth >= REFS_PAGES_PER_ISSUE:
+                    unreadable[number] = "more than %d pages of cross-references" % (
+                        REFS_PAGES_PER_ISSUE)
+                    continue
+                after = timeline["pageInfo"]["endCursor"]
+                if not isinstance(after, str) or after in ("", cursor):
+                    raise ValueError
+                pending.append((number, after, nth + 1))
         except (ValueError, KeyError, TypeError, AttributeError):
-            return None, "was not the expected shape"
+            return None, None, "was not the expected shape"
     return {
-        number: sorted(refs.values(), key=lambda ref: (instant(ref["mergedAt"]), ref["url"]))
+        number: None if number in unreadable else
+        sorted(refs.values(), key=lambda ref: (instant(ref["mergedAt"]), ref["url"]))
         for number, refs in found.items()
-    }, None
+    }, unreadable, None
 
 
 def shown(row):
@@ -388,8 +419,9 @@ def run_list(args):
                 continue
             reason += "; " + label_why
         skipped.append((number, reason))
+    unreadable = {}
     if MERGED in asked:
-        refs, why = merged_references(args.repo, [row.get("number") for row in kept])
+        refs, unreadable, why = merged_references(args.repo, [row.get("number") for row in kept])
         if refs is None:
             print(
                 "issue-intake: refused: the merged-reference read for %s %s" % (args.repo, why),
@@ -406,6 +438,9 @@ def run_list(args):
     )
     for number, reason in skipped:
         print("issue-intake: skipped #%s: %s" % (number, reason), file=sys.stderr)
+    for number, reason in unreadable.items():
+        print("issue-intake: %s of #%s unreadable: %s" % (MERGED, number, reason),
+              file=sys.stderr)
     return 0
 
 

@@ -568,6 +568,28 @@ def test_a_merged_reference_is_listed_only_from_a_repository_of_the_same_owner(
     assert merged_refs(proc) == {30: [merged(45, repo=pull_repo)] if listed else []}
 
 
+@pytest.mark.parametrize("reference", [
+    pull(44, "MERGED", "2026-03-01T00:00:00", repo="other-org/other-repo"),
+    pull("44", "MERGED", MERGED_AT, repo="other-org/other-repo"),
+], ids=["merge-time-without-a-zone", "number-not-an-integer"])
+def test_another_owners_reference_is_dropped_before_its_other_fields_are_read(
+    tmp_path, reference
+):
+    """Only the owner's references are listed, so another owner's is read no further
+    than its owner."""
+    proc, _ = run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(30, "repo-owner"), issue(31, "repo-owner")],
+        extra_state={"references": {
+            "30": [reference, pull(40, "MERGED", MERGED_AT)],
+            "31": [pull(41, "MERGED", MERGED_AT)],
+        }},
+    )
+    assert merged_refs(proc) == {30: [merged(40)], 31: [merged(41)]}
+    assert "unreadable" not in proc.stderr
+
+
 def test_the_kept_issues_share_one_reference_read_and_a_skipped_one_is_not_read(tmp_path):
     proc, calls = run(
         tmp_path,
@@ -595,28 +617,58 @@ def test_a_reference_past_the_first_page_of_the_timeline_is_still_listed(tmp_pat
 
 
 def read_a_timeline_of(tmp_path, count: int):
-    """Issue 35 with COUNT cross-references, the last of them a merged pull request."""
+    """Issue 35 with COUNT cross-references, the last of them a merged pull request,
+    beside issue 36 with one merged pull request."""
     return run(
         tmp_path,
         MERGED_LIST,
-        issues=[issue(35, "repo-owner")],
+        issues=[issue(35, "repo-owner"), issue(36, "repo-owner")],
         extra_state={"references": {
             "35": [mention(2000 + k) for k in range(count - 1)] + [pull(47, "MERGED", MERGED_AT)],
+            "36": [pull(48, "MERGED", MERGED_AT)],
         }},
     )
 
 
 def test_an_issue_timeline_of_ten_full_pages_is_read_to_its_end(tmp_path):
     proc, calls = read_a_timeline_of(tmp_path, 1000)
-    assert merged_refs(proc) == {35: [merged(47)]}
+    assert merged_refs(proc) == {35: [merged(47)], 36: [merged(48)]}
     assert len(reference_reads(calls)) == 10
 
 
-def test_an_issue_timeline_past_ten_pages_refuses_rather_than_reading_on(tmp_path):
+def test_an_issue_timeline_past_ten_pages_reads_null_and_the_others_are_listed(tmp_path):
     proc, calls = read_a_timeline_of(tmp_path, 1001)
-    assert (proc.returncode, proc.stdout) == (3, "")
-    assert "more than 10 pages of cross-references on #35" in proc.stderr
+    assert merged_refs(proc) == {35: None, 36: [merged(48)]}
+    assert proc.stderr.count("unreadable") == 1
+    assert "mergedReferences of #35 unreadable: more than 10 pages of cross-references" in (
+        proc.stderr)
     assert len(reference_reads(calls)) == 10
+
+
+@pytest.mark.parametrize("reference", [
+    pull(44, "MERGED", "2026-03-01T00:00:00"),
+    pull("44", "MERGED", MERGED_AT),
+    pull(44, "MERGED", MERGED_AT) | {"login": None},
+], ids=["merge-time-without-a-zone", "number-not-an-integer", "owner-unreadable"])
+def test_a_reference_in_another_shape_reads_null_for_its_issue_and_the_others_are_listed(
+    tmp_path, reference
+):
+    """Its issue's well-shaped references are not listed without the rest, and its later
+    pages are not read."""
+    proc, calls = run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(30, "repo-owner"), issue(31, "repo-owner")],
+        extra_state={"references": {
+            "30": [pull(40, "MERGED", MERGED_AT), reference] + [mention(100 + k) for k in range(100)],
+            "31": [pull(41, "MERGED", MERGED_AT)],
+        }},
+    )
+    assert merged_refs(proc) == {30: None, 31: [merged(41)]}
+    assert proc.stderr.count("unreadable") == 1
+    assert "mergedReferences of #30 unreadable: a cross-reference not in the expected shape" in (
+        proc.stderr)
+    assert len(reference_reads(calls)) == 1, "an issue whose references cannot be read is read no further"
 
 
 def test_without_the_field_nothing_more_is_read_or_printed(tmp_path):
@@ -632,11 +684,9 @@ def test_without_the_field_nothing_more_is_read_or_printed(tmp_path):
 
 @pytest.mark.parametrize("state, reads", [
     ({"fail": {"references": [30]}}, 1),
-    ({"extra_state": {"references": {"30": [pull(40, "MERGED", "2026-03-01T00:00:00")]}}}, 1),
     ({"fail": {"cursor": [30]}}, 1),
     ({"fail": {"repeat": [30]}}, 2),
-], ids=["failed-read", "merge-time-without-a-zone", "next-page-without-a-cursor",
-        "next-page-with-the-cursor-it-was-asked-with"])
+], ids=["failed-read", "next-page-without-a-cursor", "next-page-with-the-cursor-it-was-asked-with"])
 def test_a_reference_read_it_cannot_vouch_for_refuses_rather_than_answering_without_it(
     tmp_path, state, reads
 ):
@@ -649,20 +699,23 @@ def test_a_reference_read_it_cannot_vouch_for_refuses_rather_than_answering_with
 
 def test_the_checkin_backlog_read_lists_the_merged_references(tmp_path):
     """Step 4 of the check-in names the field, so a beat sees the work already merged
-    against an issue it reads as open."""
+    against an issue it reads as open, and one issue whose references cannot be read
+    leaves the others listed."""
     text = (REPO / "library" / "skills" / "checkin" / "SKILL.md").read_text(encoding="utf-8")
     listing = [c for c in INTAKE_CALL.findall(text) if " list " in c]
     assert len(listing) == 1, listing
     proc, _ = run(
         tmp_path,
         shell=" ".join(listing[0].replace("\\\n", " ").split()).replace("<owner/name>", SLUG),
-        issues=[issue(30, "repo-owner"), issue(31, "repo-owner")],
+        issues=[issue(30, "repo-owner"), issue(31, "repo-owner"), issue(32, "repo-owner")],
         extra_state={"references": {
-            "30": [pull(40, "MERGED", MERGED_AT), pull(44, "MERGED", MERGED_AT, repo="other-org/other-repo")],
+            "30": [pull(40, "MERGED", MERGED_AT),
+                   pull(44, "MERGED", "2026-03-01T00:00:00", repo="other-org/other-repo")],
             "31": [pull(42, "OPEN")],
+            "32": [pull(43, "MERGED", "2026-03-01T00:00:00")],
         }},
     )
-    assert merged_refs(proc) == {30: [merged(40)], 31: []}
+    assert merged_refs(proc) == {30: [merged(40)], 31: [], 32: None}
 
 
 # --- quoting issue text for another agent ----------------------------------------------
