@@ -1,0 +1,3 @@
+### Fixed — a refused approval check lets go of a held launch's steps, and a kept Preview brings back the line that nothing runs yet (#3091)
+
+In the whole-view setup panel, a Check setup approval that the computer refused while a launch was held left "Setup approved" beside the note that it could not be confirmed. A refusal now lets go of the held steps, as a refused launch status check already did; a lost answer keeps them. When the computer offers a request's ready Preview again, which it keeps only while nothing was dispatched, "Nothing runs on this computer until you choose Launch team." shows again. No sentence was added or changed, and nothing new is sent.

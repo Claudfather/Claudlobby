@@ -376,6 +376,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
+          launchSeen = null; // the computer keeps this Preview only while nothing was dispatched, so nothing runs yet
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
         const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
@@ -458,6 +459,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         // what became of it. A failed read drops them only where nothing was previewed yet, or beside a launchable plan.
         if (operation === 'preview') launchable = false;
         if (reading && !keep) { context = null; launchable = false; }
+        if (reading && refusal(error)) releaseLaunch(); // as for the launch status read below
         if (reading && keep) {
           // The approval and the steps already done stay; the computer's next answer decides what is true.
           previewProblem = refusal(error) ? 'refused' : error?.code === 'setup_approval_expired' ? 'expired'

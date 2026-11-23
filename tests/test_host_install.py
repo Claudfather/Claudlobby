@@ -641,6 +641,136 @@ def test_any_later_state_under_the_private_roots_means_in_use(tmp_path, local_in
     assert json.loads(status.stdout)["state"] == "recorded_in_use" and snapshot(home) == before
 
 
+def _update_job_name(family, suffix=".service"):
+    """The name the updater itself derives for this installation."""
+    from claudlobby.installation import Installation
+    from claudlobby.update_job import update_job_label
+    return update_job_label(Installation(family / "install", family / "data")) + suffix
+
+
+def add_update_job(family, name=None):
+    """The job definition a Launch leaves beside the updater's entry."""
+    job = family / "install/bin" / (name or _update_job_name(family))
+    job.write_text("[Unit]\nDescription=FIXTURE-JOB\n"); job.chmod(0o644)
+    return job
+
+
+def test_status_after_a_launch_reads_the_updater_job_definition_as_in_use(tmp_path, local_install_source):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    add_update_job(family)
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert (result["state"], result["code"], result["next"]) == ("recorded_in_use", "none", "continue_onboarding")
+    assert status.stderr == b"" and snapshot(home) == before
+    # Prepare never adopts or replaces it.
+    again = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    result = json.loads(again.stdout)
+    assert again.returncode == 4 and result["code"] == "existing_installation" and not result["prepared"]
+    assert snapshot(home) == before
+
+
+def test_the_updater_job_definition_alone_is_not_in_use(tmp_path, local_install_source):
+    # Only an update writes it, and an update needs setup. Beside an untouched
+    # preparation it is unknown to both actions.
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    add_update_job(home / ".local/share/claudlobby-browser")
+    before = snapshot(home)
+    for action in ("status", "prepare"):
+        result = invoke_fixture(tmp_path, home, local_install_source, action)
+        assert result.returncode == 4 and json.loads(result.stdout)["code"] == "existing_installation"
+        assert snapshot(home) == before
+
+
+def test_a_job_definition_at_the_size_limit_is_admitted(tmp_path, local_install_source):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    add_update_job(family).write_bytes(b"#" * 8192)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert json.loads(status.stdout)["state"] == "recorded_in_use"
+
+
+def test_status_on_a_mac_admits_the_launchd_job_definition(tmp_path, local_install_source, monkeypatch):
+    # The status action with the platform set to Darwin. The runtime profile is
+    # the fixture's and Git runs as on Linux, so what differs is the job name.
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    (family / "runtime").mkdir(mode=0o700)
+    add_update_job(family, _update_job_name(family, ".plist"))
+    module = payload()
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    env = module.fixed_environment(home)
+    profile, _policy, _environment = _darwin_policy_fixture(module, home, monkeypatch)
+    profile.git = Path("/usr/bin/git")
+    python = Path(sys.executable).resolve()
+    monkeypatch.setattr(module, "independent_python", lambda: python)
+    monkeypatch.setattr(module, "fixed_environment", lambda actual: env if actual == home else None)
+    monkeypatch.setenv("PATH", "/nonexistent")
+    value = {"schema_version": 1, "source_revision": local_install_source[2], "expected_uid": os.geteuid()}
+    before = snapshot(home)
+    assert module.execute("status", value, time.monotonic() + 15)[0] == "recorded_in_use"
+    assert snapshot(home) == before
+    # The Linux name beside it is foreign on a Mac.
+    add_update_job(family)
+    with pytest.raises(module.Refusal) as error:
+        module.execute("status", value, time.monotonic() + 15)
+    assert (error.value.code, error.value.next_step) == ("existing_installation", "inspect")
+
+
+def _linked_job(family):
+    os.link(add_update_job(family), family.parent / "second-name")
+
+
+def _job_symlink(family):
+    target = family.parent / "job-target"
+    target.write_text("[Unit]\n"); target.chmod(0o644)
+    (family / "install/bin" / _update_job_name(family)).symlink_to(target)
+
+
+UNKNOWN_UPDATE_JOB = {
+    "second-name": lambda f: (add_update_job(f), add_update_job(f, "other")),
+    "interrupted-publish": lambda f: (add_update_job(f), add_update_job(f, ".update-job-abc123")),
+    "other-hash": lambda f: add_update_job(f, "com.claudlobby.update." + "0" * 16 + ".service"),
+    "other-manager": lambda f: add_update_job(f, _update_job_name(f, ".plist")),
+    "symlink": _job_symlink,
+    "linked": _linked_job,
+    "executable": lambda f: add_update_job(f).chmod(0o755),
+    "private": lambda f: add_update_job(f).chmod(0o600),
+    "oversized": lambda f: add_update_job(f).write_bytes(b"#" * 8193),
+    "folder": lambda f: (f / "install/bin" / _update_job_name(f)).mkdir(mode=0o700),
+}
+
+
+@pytest.mark.parametrize("unknown", sorted(UNKNOWN_UPDATE_JOB))
+def test_status_refuses_anything_but_the_exact_updater_job_definition(tmp_path, local_install_source, unknown):
+    home = tmp_path / "account"; home.mkdir(mode=0o700)
+    prepared = invoke_fixture(tmp_path, home, local_install_source, "prepare")
+    assert prepared.returncode == 0, (prepared.stdout, prepared.stderr)
+    family = home / ".local/share/claudlobby-browser"
+    add_setup_state(family)
+    UNKNOWN_UPDATE_JOB[unknown](family)
+    before = snapshot(home)
+    status = invoke_fixture(tmp_path, home, local_install_source, "status")
+    result = json.loads(status.stdout)
+    assert status.returncode == 4, (status.stdout, status.stderr)
+    assert (result["code"], result["next"]) == ("existing_installation", "inspect") and not result["prepared"]
+    assert status.stderr == b"" and snapshot(home) == before
+
+
 def test_untouched_completed_preparation_keeps_its_strict_status(tmp_path, local_install_source):
     import fcntl
     home = tmp_path / "account"; home.mkdir(mode=0o700)
