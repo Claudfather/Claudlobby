@@ -2033,6 +2033,16 @@ test('composer starts folded to its announced summary and comes back from Tasks 
   assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
 });
 
+test('an opened composer stays open through a room change, an action refresh and an invalidation',async()=>{
+  const h=harness();h.loop.setRoom('north / web');await settle();h.update();
+  const composer=h.get('work-composer');composer.open=true;
+  h.get('work-body').value='Keep this draft';h.get('work-body').emit('input');
+  h.loop.setRoom('north / docs');await settle();h.update();assert.equal(composer.open,true,'room change');
+  h.loop.refreshActions('north');await settle();assert.equal(composer.open,true,'action refresh');
+  h.loop.invalidate();await settle();assert.equal(composer.open,true,'invalidation');
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
 test('Tasks view keeps one collapsed composer, its draft and receipt IDs across refresh and manual reopening',async()=>{
   const storage=store();saved(storage);const h=harness({storage});h.loop.setRoom('web');await settle();h.update();
   h.get('work-recipient').value='worker';h.get('work-recipient').onchange();

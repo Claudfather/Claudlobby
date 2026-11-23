@@ -94,6 +94,17 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   // On a phone the folded row waits at the bottom of the screen; opened, the composer returns to the end
   // of the page, so bring it into view. Elsewhere it is already in view and nothing moves.
   $("work-composer").addEventListener("toggle", () => { if ($("work-composer").open) root.scrollIntoView?.({ block: "nearest" }); });
+  // The folded row's real height, for the phone page's scroll padding (workspace.css), so focus never lands under it.
+  if (typeof globalThis.ResizeObserver === "function") new globalThis.ResizeObserver(() =>
+    document.documentElement?.style?.setProperty("--work-loop-height", `${root.offsetHeight}px`)).observe(root);
+  // Where the composer scrolls inside its own box (wide screens), keep a send's result line in sight in that box.
+  // Only the composer's own scroll position moves; the page never does.
+  function revealNotice() {
+    const line = $("work-notice"), box = root.getBoundingClientRect?.(), at = line.getBoundingClientRect?.();
+    if (!box || !at || !line.textContent || root.scrollHeight <= root.clientHeight) return;
+    if (at.bottom > box.bottom) root.scrollTop += at.bottom - box.bottom;
+    else if (at.top < box.top) root.scrollTop -= box.top - at.top;
+  }
   const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
   const requestContext = request => {
     const value = contextsByKind.get(request.kind);
@@ -846,7 +857,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         : originContext.version === 2 ? originContext.actions[0] === "feedback" ? "Task feedback was not sent. Your comment is kept; refresh the task and select feedback again." : "Task nudge was not sent. Your reason is kept; refresh the task and select its nudge again." : error.message;
     } finally {
       sending = false; inFlightRequest = null;
-      paint({ restoreDraft });
+      paint({ restoreDraft }); revealNotice();
     }
   };
   $("work-clear-saved").onclick = () => {
