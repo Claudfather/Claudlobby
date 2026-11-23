@@ -119,6 +119,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let onConnect=null, connectView=null, connectFocus=null, standalone=false, launchedFor=null;
   // followed: in this page's lifetime the panel sent a Launch, sent a launch status check or followed a hand-off.
   // Never saved: a request kept in storage from an earlier page is not followed until this page acts on it.
+  // The follow ends at a clean done receipt for the current request (launched()); see following().
   let followed=false;
   const launched = () => !!launchedFor && !!pending && same(launchedFor,pending);
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
@@ -873,8 +874,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal,previewState}),
     setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
     resumeHandoff:() => { scheduleHandoff(); scheduleSigninPoll(); schedulePreviewPoll(); },
-    // Whether this page sent a Launch or follows one (see followed); the entry keeps the panel while it does.
-    following:() => followed,
+    // Whether this page follows a Launch it sent or followed (see followed) that has not ended in a clean done
+    // receipt; the entry keeps the panel while it does. Once launched, the page is treated like one opened again.
+    following:() => followed && !launched(),
     // Presentation only: how the entry's Connect looks now. It never connects or sends anything itself.
     showConnect(value) {
       const next = value && typeof value === 'object' ? {operation:value.operation === 'check' ? 'check' : 'connect',

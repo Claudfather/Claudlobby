@@ -2104,3 +2104,44 @@ test(`unconfirmed action context offers neutral recovery without diagnosing a mi
   assert.equal(h.get('work-send').disabled,true);
   assert.equal(h.sends.length,0);
 });
+
+// Document 03: once a team is ready the website's frame shows this message box. Without a message grant it keeps the
+// words it has today and sends nothing.
+test('without message access the message box says Messages: not authorized. and sends nothing',async()=>{
+  const h=harness({interactionContext:()=>{throw actionDenied();},protected:true});
+  h.loop.setRoom('web');await settle();h.update();
+  assert.match(h.get('work-access-status').textContent,/Messages: not authorized\./);
+  assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
+  assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-send').disabled,true);
+  await h.submit();
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+// Merge gate (document 03): the task detail, recipients and saved requests draw bot-written text as plain text. The
+// rooms, check-ins and lists are covered in plane_activity_renderer.test.mjs.
+const HOSTILE='<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+const plainText=html=>html.replace(/<[^>]*>/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+const tagsOf=html=>[...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m=>m[0].toLowerCase());
+async function renderTaskAndComposer(value){
+  const storage=store(),at='2026-01-01T00:00:00Z';
+  const owner={...context,simulation:false,recipients:[{id:'lead',label:value('recipient'),lead:true},{id:'worker',label:value('worker')}]};
+  new ActionState(storage).begin(owner,'message',{recipient:'lead',task_id:null},'Private old message','saved-request');
+  const detail={state:'ok',data:{task:{task_id:nudgeTaskId,fleet:'web',title:value('task title'),state:value('task state'),body:value('task body'),
+    resolved:false,attention_question:value('question'),delivery:{integrity:value('integrity')},
+    current_assignment:{assignee_short:value('assignee'),assignee_uid:'actor_x',state:'active',expected_by:null},
+    last_event:{event:value('last event'),occurred_at:at,detail:JSON.stringify({summary:value('summary')})},
+    assignments:[{assignee_short:value('assignment bot'),assignee_uid:'actor_y',state:value('assignment state'),assigned_by_alias:value('assigned by'),history:[]}],
+    history:[{event:value('history event'),occurred_at:at,actor_short:value('actor'),actor_uid:'actor_z',detail:JSON.stringify({reason:value('event reason')})}],
+    issues:[{code:value('issue code'),blocking:true}]}}};
+  const h=harness({storage,interactionContext:()=>owner,protected:true,jget:()=>detail});
+  h.loop.setRoom('web');await settle();h.update();h.open(nudgeTaskId);await settle();
+  return ['task-detail-content','work-recipient','work-pending'].map(id=>h.get(id).innerHTML).join('\n');
+}
+test('bot-written text in the task detail, recipients and saved requests is drawn as plain text',async()=>{
+  const fields=new Set(),hostile=await renderTaskAndComposer(name=>{fields.add(name);return `${HOSTILE}·${name}`;});
+  const plain=await renderTaskAndComposer(name=>`plain words·${name}`);
+  assert.deepEqual(tagsOf(hostile),tagsOf(plain),'the same elements, whatever the text');
+  assert.doesNotMatch(hostile,/<(?:img|form|input)\b|<a href="https:\/\/example\.invalid"/i);
+  const text=plainText(hostile);
+  assert.equal(fields.size,17);
+  for(const name of fields)assert.ok(text.includes(`${HOSTILE}·${name}`),`${name} is visible as its literal text`);
+});
