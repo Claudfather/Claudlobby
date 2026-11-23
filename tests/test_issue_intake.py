@@ -500,6 +500,171 @@ def test_a_malformed_call_is_a_usage_error(tmp_path, argv):
     assert calls == []
 
 
+# --- merged pull requests that cross-reference a kept issue ---------------------------
+
+
+def pull(number: int, state: str, merged_at=None, *, repo=None) -> dict:
+    return {"pr": number, "state": state, "mergedAt": merged_at, "repo": repo}
+
+
+def mention(number: int) -> dict:
+    return {"issue": number}
+
+
+def merged_refs(proc) -> dict:
+    assert proc.returncode == 0, proc.stderr
+    return {row["number"]: row["mergedReferences"] for row in json.loads(proc.stdout)}
+
+
+def reference_reads(calls) -> list:
+    return [c for c in calls if c[:2] == ["api", "graphql"] and "timelineItems" in " ".join(c)]
+
+
+MERGED_LIST = ["list", "--repo", SLUG, "--json", "number,mergedReferences"]
+MERGED_AT = "2026-03-01T00:00:00Z"
+
+
+def merged(number: int, at: str = MERGED_AT, repo: str = SLUG) -> dict:
+    return {"number": number, "mergedAt": at, "url": f"https://github.com/{repo}/pull/{number}"}
+
+
+def test_a_merged_reference_is_listed_and_an_open_or_unmerged_one_is_not(tmp_path):
+    proc, _ = run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(n, "repo-owner") for n in (30, 31, 32, 33)],
+        extra_state={"references": {
+            "30": [mention(41), pull(45, "MERGED", "2026-03-02T00:00:00Z", repo="example-org/other-repo"),
+                   pull(40, "MERGED", MERGED_AT)],
+            "31": [pull(42, "OPEN")],
+            "32": [pull(43, "CLOSED")],
+        }},
+    )
+    assert merged_refs(proc) == {
+        30: [merged(40), merged(45, "2026-03-02T00:00:00Z", "example-org/other-repo")],
+        31: [],
+        32: [],
+        33: [],
+    }
+
+
+@pytest.mark.parametrize("read_repo, pull_repo, listed", [
+    (SLUG, "other-org/example-repo", False),
+    (SLUG, "example-org/other-repo", True),
+    (SLUG, "Example-Org/other-repo", True),
+    ("Example-Org/example-repo", "example-org/other-repo", True),
+], ids=["another-owner", "same-owner-other-repository", "owner-in-another-case-on-github",
+        "owner-in-another-case-in-repo"])
+def test_a_merged_reference_is_listed_only_from_a_repository_of_the_same_owner(
+    tmp_path, read_repo, pull_repo, listed
+):
+    """A merged pull request under another owner is not this project's work."""
+    proc, _ = run(
+        tmp_path,
+        ["list", "--repo", read_repo, "--json", "number,mergedReferences"],
+        issues=[issue(30, "repo-owner")],
+        extra_state={"references": {"30": [pull(45, "MERGED", MERGED_AT, repo=pull_repo)]}},
+    )
+    assert merged_refs(proc) == {30: [merged(45, repo=pull_repo)] if listed else []}
+
+
+def test_the_kept_issues_share_one_reference_read_and_a_skipped_one_is_not_read(tmp_path):
+    proc, calls = run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(30, "repo-owner"), issue(31, "committer"), issue(34, "outside-user")],
+        extra_state={"references": {"34": [pull(46, "MERGED", MERGED_AT)]}},
+    )
+    assert merged_refs(proc) == {30: [], 31: []}
+    reads = reference_reads(calls)
+    assert len(reads) == 1, "one query for the page of kept issues, not one per issue"
+    assert {a.split("=")[1] for a in reads[0] if re.fullmatch(r"n\d+=\d+", a)} == {"30", "31"}
+
+
+def test_a_reference_past_the_first_page_of_the_timeline_is_still_listed(tmp_path):
+    proc, calls = run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(35, "repo-owner")],
+        extra_state={"references": {
+            "35": [mention(100 + k) for k in range(100)] + [pull(47, "MERGED", MERGED_AT)],
+        }},
+    )
+    assert merged_refs(proc) == {35: [merged(47)]}
+    assert len(reference_reads(calls)) == 2
+
+
+def read_a_timeline_of(tmp_path, count: int):
+    """Issue 35 with COUNT cross-references, the last of them a merged pull request."""
+    return run(
+        tmp_path,
+        MERGED_LIST,
+        issues=[issue(35, "repo-owner")],
+        extra_state={"references": {
+            "35": [mention(2000 + k) for k in range(count - 1)] + [pull(47, "MERGED", MERGED_AT)],
+        }},
+    )
+
+
+def test_an_issue_timeline_of_ten_full_pages_is_read_to_its_end(tmp_path):
+    proc, calls = read_a_timeline_of(tmp_path, 1000)
+    assert merged_refs(proc) == {35: [merged(47)]}
+    assert len(reference_reads(calls)) == 10
+
+
+def test_an_issue_timeline_past_ten_pages_refuses_rather_than_reading_on(tmp_path):
+    proc, calls = read_a_timeline_of(tmp_path, 1001)
+    assert (proc.returncode, proc.stdout) == (3, "")
+    assert "more than 10 pages of cross-references on #35" in proc.stderr
+    assert len(reference_reads(calls)) == 10
+
+
+def test_without_the_field_nothing_more_is_read_or_printed(tmp_path):
+    proc, calls = run(
+        tmp_path,
+        ["list", "--repo", SLUG, "--json", "number,title"],
+        issues=[issue(30, "repo-owner")],
+        extra_state={"references": {"30": [pull(40, "MERGED", MERGED_AT)]}},
+    )
+    assert [sorted(row) for row in json.loads(proc.stdout)] == [["author", "labels", "number", "title"]]
+    assert reference_reads(calls) == []
+
+
+@pytest.mark.parametrize("state, reads", [
+    ({"fail": {"references": [30]}}, 1),
+    ({"extra_state": {"references": {"30": [pull(40, "MERGED", "2026-03-01T00:00:00")]}}}, 1),
+    ({"fail": {"cursor": [30]}}, 1),
+    ({"fail": {"repeat": [30]}}, 2),
+], ids=["failed-read", "merge-time-without-a-zone", "next-page-without-a-cursor",
+        "next-page-with-the-cursor-it-was-asked-with"])
+def test_a_reference_read_it_cannot_vouch_for_refuses_rather_than_answering_without_it(
+    tmp_path, state, reads
+):
+    proc, calls = run(tmp_path, MERGED_LIST, issues=[issue(30, "repo-owner")], **state)
+    assert proc.returncode == 3, proc.stderr
+    assert proc.stdout == ""
+    assert "merged-reference read" in proc.stderr
+    assert len(reference_reads(calls)) == reads, "it refuses at the reply, not at the page limit"
+
+
+def test_the_checkin_backlog_read_lists_the_merged_references(tmp_path):
+    """Step 4 of the check-in names the field, so a beat sees the work already merged
+    against an issue it reads as open."""
+    text = (REPO / "library" / "skills" / "checkin" / "SKILL.md").read_text(encoding="utf-8")
+    listing = [c for c in INTAKE_CALL.findall(text) if " list " in c]
+    assert len(listing) == 1, listing
+    proc, _ = run(
+        tmp_path,
+        shell=" ".join(listing[0].replace("\\\n", " ").split()).replace("<owner/name>", SLUG),
+        issues=[issue(30, "repo-owner"), issue(31, "repo-owner")],
+        extra_state={"references": {
+            "30": [pull(40, "MERGED", MERGED_AT), pull(44, "MERGED", MERGED_AT, repo="other-org/other-repo")],
+            "31": [pull(42, "OPEN")],
+        }},
+    )
+    assert merged_refs(proc) == {30: [merged(40)], 31: []}
+
+
 # --- quoting issue text for another agent ----------------------------------------------
 
 OPEN_LINE = re.compile(r"^<<<GITHUB TEXT ([0-9a-f]{16}): (.+)>>>$")
