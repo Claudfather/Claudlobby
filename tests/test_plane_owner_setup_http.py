@@ -415,3 +415,29 @@ def test_state_needs_a_live_session_and_takes_no_input(setup_http):
         assert connected(client,'logout',token=s['token']).status_code==200
         assert post(client,'state',s['token']).status_code==403
     assert app.connected_setup.response_seconds({"setup_operation":"state"})==15
+
+
+def test_status_answers_ready_once_a_launch_binds_the_recorder(setup_http,monkeypatch):
+    # The browser's working form (document 03) follows this answer: after a healthy Launch the same session reads
+    # ready with a read profile, because the Launch's commit binds the new recorder (update_operation's first-fleet step).
+    from claudlobby import git_update
+    from tests.plane_setup import initialize_plane
+    from claudlobby.plane.owner_source import complete_first_fleet_source, inspect_source
+    app,access,_,_,_,grant=setup_http
+    app.connected_setup.engine.store.allow(grant)
+    def apply(installation,*,expected_request_id):
+        initialize_plane(access.root)
+        complete_first_fleet_source(access.root)
+        return {"update":git_update.read_update(installation),"dispatch":"submitted"}
+    monkeypatch.setattr(git_update,"apply_or_continue",apply)
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http); token=s['token']
+        assert client.get('/api/owner/connected/status',headers=headers(token)).json()['state']=='setup_only'
+        plan=post(client,'preview',token,{'generation':grant.generation,'goal':'Improve checkout tests'}).json()
+        assert post(client,'launch',token,binding(plan)).status_code==200
+        status=client.get('/api/owner/connected/status',headers=headers(token))
+        assert status.status_code==200,status.text
+        answer=status.json()
+        assert answer['state']=='ready' and 'setup_profile' not in answer
+        assert answer['read_profile']['profile']=='direct-owner-read-v1'
+        assert answer['read_profile']['host_uid']==inspect_source(access.root)==s['setup_profile']['host_uid']

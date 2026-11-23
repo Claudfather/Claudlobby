@@ -473,7 +473,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
@@ -504,7 +504,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead
       for (let node = document.activeElement; node; node = node.parentNode) if (node === setupPanel) { panelFocus = true; break; }
-      if (focused !== controls.focused) { (focused ? mount.setupHost : help).append(setupPanel); controls.focused = focused; }
+      // The working form's computer already has a team: its first-team panel is not offered anywhere, not even in the
+      // card's disclosure. It comes back, in the setup host or the disclosure, whenever the view returns to the setup form.
+      const place = controls.working ? null : focused ? mount.setupHost : help;
+      if (place !== controls.panelPlace) { if (place) place.append(setupPanel); else setupPanel.remove(); controls.panelPlace = place; }
+      controls.focused = focused;
       // The parts sit in the setup host ahead of any panel; a host that never showed them has none.
       if (partsShown && parts.root && parts.root.parentNode !== mount.setupHost) mount.setupHost.prepend(parts.root);
       parts.render(partsShown);
@@ -584,7 +588,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       invoke(() => { const page = document.documentElement, form = working ? null : 'setup';
         if (page && page.getAttribute('data-workspace-view') !== form)
           form ? page.setAttribute('data-workspace-view',form) : page.removeAttribute('data-workspace-view'); });
-      if (working !== framedWorking) { framedWorking = working; invoke(mount.onFormChange); }
+      if (working !== framedWorking) { framedWorking = working; invoke(mount.onFormChange); invoke(mount.onFormPost); }
     }
     if (mount.setupHost) {
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
@@ -690,9 +694,22 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     const view = document.defaultView;
     if (doc && !disposed && view && view.parent !== view) {
       invoke(() => view.parent.postMessage({type:'claudfather.workspace.ready',version:1}, doc.shell_origin));
-      if (browserTransport) reportSize(document, view);
+      if (browserTransport) { reportForm(view); reportSize(document, view); }
     }
     return {dispose};
+  }
+  // Browser carrier: the parent learns which form the view shows, 'setup' or 'working', so it can size the frame. Only
+  // that word crosses, to the exact shell origin: once at mount and again only when the form changes. A failed parts
+  // refresh or a session check that ends ready on the same computer keeps the form, so it posts nothing.
+  function reportForm(view) {
+    let posted = null;
+    mount.onFormPost = () => {
+      const form = framedWorking ? 'working' : 'setup';
+      if (disposed || form === posted) return;
+      posted = form;
+      invoke(() => view.parent.postMessage({type:'claudfather.workspace.form',version:1,form}, doc.shell_origin));
+    };
+    mount.onFormPost();
   }
   // Browser carrier: the parent sizes the frame. Only the height crosses, to the exact shell origin, and only when it
   // changed. In the setup form the view measures its content: a ResizeObserver on the root element reports at most

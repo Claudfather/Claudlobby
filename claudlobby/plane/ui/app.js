@@ -258,7 +258,7 @@ function bodyBlock(m, prose = null) {
                 + `${open ? "show less" : "show more"}</button>` : "") + reportEvidence(report);
   }
   return `<div class="body redacted">message captured as metadata only`
-       + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
+       + ` (${esc(m.body_bytes)} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
 
 function machineryBlock(m, prose = null) {
@@ -267,7 +267,7 @@ function machineryBlock(m, prose = null) {
     `msg ${esc(m.msg_id)}`,
     m.work_item_id ? `work item ${esc(m.work_item_id)}` : "",
     m.assignment_id ? `assignment ${esc(m.assignment_id)}` : "",
-    `seq ${m.ingest_seq}`,
+    `seq ${esc(m.ingest_seq)}`,
     t ? `tx ${esc(t.event)} via ${esc(t.carrier)}#${t.attempt_no}` : "",
     `class ${esc(m.message_class)}`,
     `sender ${esc(m.sender_alias)}`,
@@ -810,9 +810,9 @@ function renderTasks(env) {
       + `</div>`;
   };
   const limited = env.data.truncated
-    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${env.data.limit || 200} tasks`}. Older work may still need attention.</div></div>` : "";
+    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${esc(env.data.limit || 200)} tasks`}. Older work may still need attention.</div></div>` : "";
   const issues = issueCount
-    ? `<div class="card attn"><div class="why">⚠ ${issueCount} task-history issue(s)`
+    ? `<div class="card attn"><div class="why">⚠ ${esc(issueCount)} task-history issue(s)`
       + `${env.data.issues_truncated ? " (first 50 shown)" : ""}`
       + `${env.data.issue_scope === "displayed_tasks" ? " in displayed tasks" : ""};`
       + ` inspect Plane state before treating this board as clear.</div></div>`
@@ -966,20 +966,20 @@ function renderHeader(env) {
   const t = env.data.totals;
   const coverage = env.data.coverage;
   const coverageCopy = t.overview_retained ? ' · <small class="warn">Refreshing summaries; totals include the last read for pending computers</small>'
-    : coverage?.partial ? ` · <small class="warn">Team summaries: ${coverage.reachable}/${coverage.total} readable; totals cover readable sources</small>` : '';
+    : coverage?.partial ? ` · <small class="warn">Team summaries: ${esc(coverage.reachable)}/${esc(coverage.total)} readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
     el.innerHTML = `<span class="dim">${t.overview_retained ? "no fleet recorded in last summaries" : coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   const status = env.data.fleets?.length
     ? aggregateFleetStatusCopy(env.data.fleets, t.bots) : 'session counts unavailable';
-  el.innerHTML = `<b>${t.bots}</b> recorded bots · ${esc(status)}`
+  el.innerHTML = `<b>${esc(t.bots)}</b> recorded bots · ${esc(status)}`
     + (t.provisional ? ` <small title="actors no registry scan has confirmed`
-        + ` yet — a mistyped dispatch target mints one">(${t.provisional}`
+        + ` yet — a mistyped dispatch target mints one">(${esc(t.provisional)}`
         + ` unconfirmed identities)</small>` : "")
-    + ` · <b>${t.working}</b> working`
-    + ` · <b class="${t.attention ? "warn" : ""}">${t.attention}</b> need you`
-    + ` · <b class="${t.overdue ? "warn" : ""}">${t.overdue}</b> overdue`
+    + ` · <b>${esc(t.working)}</b> working`
+    + ` · <b class="${t.attention ? "warn" : ""}">${esc(t.attention)}</b> need you`
+    + ` · <b class="${t.overdue ? "warn" : ""}">${esc(t.overdue)}</b> overdue`
     + (t.live_poll !== "ok"
        ? ` <small class="warn" title="the pane sampler is not answering — the`
          + ` working count is the recorded half only">live poll`
@@ -1070,7 +1070,7 @@ function ovPresence(p) {
 }
 function ovNum(n, word, bad = true) {
   if (n === null || n === undefined) return `<span class="ov-warn">${esc(word)} unknown</span>`;
-  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${n} ${esc(word)}</span>`;
+  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${esc(n)} ${esc(word)}</span>`;
 }
 function overviewQueryDiagnosticHTML(source) {
   if (source.overview_failure_boundary !== 'server_query_budget') return '';
@@ -1193,8 +1193,8 @@ function renderOverview(env) {
       <details class="ov-team-details"${typeof f.uid === "string" && f.uid ? ` data-team-details="${esc(f.uid)}"${overviewDetails.has(f.uid) ? ' open' : ''}` : ''}>
         <summary>Team details</summary>
       <div class="ov-line">
-        <span>${f.bots} recorded bot${f.bots === 1 ? "" : "s"}${
-          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed identities)</small>` : ""}</span>
+        <span>${esc(f.bots)} recorded bot${f.bots === 1 ? "" : "s"}${
+          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${esc(f.provisional)} unconfirmed identities)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
       <div class="ov-line">
@@ -1203,7 +1203,7 @@ function renderOverview(env) {
       <div class="ov-line">
         <span>${f.newest_report_at
           ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
-          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}${
+          f.reports_24h ? ` · ${esc(f.reports_24h)} in 24h` : ""}${
           f.unacked === null || f.unacked === undefined
             ? ` · <span class="ov-warn" title="${esc(f.unacked_reason || "")}">no ack recorded</span>`
             : ` · ${ovNum(f.unacked, "unacked")} <small title="${esc(f.acked_at || "")}">acked by ${
@@ -1216,7 +1216,7 @@ function renderOverview(env) {
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
       <div class="ov-line">Team summary: ${s.overview_retained ? `refreshing; showing the last read ${esc(s.overview_read_at ? ago(s.overview_read_at) : 'at an unknown time')}` : s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
       <div class="ov-line">${(s.state === 'ok' || s.overview_retained) && s.host
-        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
+        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${esc(s.host.spool_files ?? 'unknown')} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
       <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
@@ -1310,7 +1310,7 @@ function pushDebugRow(row) {
 function renderDebugRail() {
   $("debug").innerHTML = [...debugRing].reverse().map((row) =>
     `<div class="evt"><span>${esc(ago(row.ingested_at))}</span>`
-    + `<b>${esc(row.family)}</b><span>seq ${row.ingest_seq}</span></div>`
+    + `<b>${esc(row.family)}</b><span>seq ${esc(row.ingest_seq)}</span></div>`
   ).join("");
 }
 

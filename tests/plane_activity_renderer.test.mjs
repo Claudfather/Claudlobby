@@ -776,7 +776,7 @@ async function renderWorkingView(value) {
   const tail = source.slice(source.indexOf('function activeRoom()'), source.indexOf('const ownerSession'))
     + source.slice(source.indexOf('function roomBotPanel('));
   const view = runInNewContext(`${source.slice(0, source.indexOf('let trustTimer =')).replace(/^import .*;\n/gm, '')}\n${tail}\n`
-    + '({renderFleet,renderChannel,renderTasks,renderHeader,renderSummary,renderOverview,renderFleetTabs,renderAgentDirectory,openRoomBot,'
+    + '({renderFleet,renderChannel,renderTasks,renderHeader,renderSummary,renderOverview,renderFleetTabs,renderAgentDirectory,openRoomBot,pushDebugRow,'
     + 'use(f,c){fleets=f;currentFleet=c;}})', {...panel, ...display, document, URL, Date, conversationTaskLink,
     jget: async () => presence, createEventSource() {}, interactionApi: {dispose() {}}, localStorage: {getItem: () => null, setItem() {}},
     workLoop: {canSelectMessageRecipient: () => false, selectMessageRecipient: () => false}, refreshEquipmentAction() {}, inspectBot() {},
@@ -791,26 +791,34 @@ async function renderWorkingView(value) {
   view.renderChannel({state: 'ok', data: {sources: [{key: 'north', state: 'ok'}], checkins_state: 'ok', threads: [
     {key: 't1', work_item_id: null, title: value('thread title'), latest_seq: 1, repo: null, task_events: [], messages: [message('4', {
       sender_short: value('sender'), recipient_short: value('recipient'), body: value('raw body'), body_words: value('message body'),
-      delivery_state: value('delivery')})]},
+      delivery_state: value('delivery'), ingest_seq: value('message seq')})]},
+    {key: 't4', work_item_id: null, title: null, latest_seq: 4, task_events: [], messages: [message('6', {sender_short: 'lead', recipient_short: 'owner',
+      body: null, body_words: null, body_bytes: value('body bytes')})]},
     {key: 't2', work_item_id: null, title: null, latest_seq: 2, task_events: [], messages: [message('5', {sender_short: 'lead', recipient_short: 'owner',
       body: value('first line'), body_words: null, report: {state: 'captured', status: 'progress', percent: null, pr_role: 'authored',
         pr_url: value('pr link'), artifacts: [value('artifact')], issues: [value('issue link')]}})]},
     thread(value('nudge reason'))],
     checkins: [{actor_uid: lead.uid, actor_alias: lead.alias, actor_short: value('checkin bot'), fleet: team, action: 'ask',
       reason: value('checkin reason'), rationale: value('rationale'), occurred_at: at}]}});
-  view.renderTasks({state: 'ok', data: {issue_count: 0, tasks: [{task_id: 'north::wi_' + '3'.repeat(32), fleet: team, title: value('task title'),
+  view.renderTasks({state: 'ok', data: {issue_count: value('issue count'), truncated: true, limit: value('task limit'), tasks: [{task_id: 'north::wi_' + '3'.repeat(32), fleet: team, title: value('task title'),
     state: 'active', attention: true, attention_reason: ['escalated', 'nudged'], attention_question: value('question'), attention_by: value('asked by'),
     attention_since: at, attention_act_reason: value('act reason'), nudged_at: at, nudged_by: value('nudged by'),
     current_assignment: {assignee_short: value('assignee'), assignee_uid: lead.uid, expected_by: null, dispatch_message_id: 'm'},
     delivery: {integrity: value('integrity')}, last_event: {event: value('last event'), occurred_at: at}, assignment_count: 1,
     resolved: false, issues: [{code: value('issue code'), blocking: true}]}]}});
-  view.renderHeader({state: 'ok', data: {totals: {fleets: 1, bots: 1, working: 0, attention: 0, overdue: 0, live_poll: value('header poll'),
-    recorder_gaps: [{label: value('recorder gap')}]}, fleets: []}});
+  view.renderHeader({state: 'ok', data: {totals: {fleets: 1, bots: value('header bots'), working: value('working'), attention: value('need you'),
+    overdue: value('overdue'), provisional: value('unconfirmed'), live_poll: value('header poll'), recorder_gaps: [{label: value('recorder gap')}]},
+    coverage: {partial: true, reachable: value('reachable'), total: value('total')}, fleets: []}});
   view.renderSummary({data: {coverage: {reachable: 1, total: 1}, sources: [{label: value('summary source'), state: 'ok', summary: {daemon_serving: true}, provenance: {}}]}});
-  view.renderOverview({state: 'ok', data: {fleets: [{alias: team, uid: teamUid, display_label: value('team name'), capture: value('capture'),
-    open: 0, attention: 0, overdue: 0, bots: 1, presence: {counts: {}, live_poll: value('overview poll')}, orphaned: 0, newest_report_at: null,
-    unacked: 0, acked_by: value('acked by'), acked_at: at, last_activity_at: at}],
-    sources: [{key: 'north', label: value('source label'), connection_state: 'ready', state: value('read state'), remediation: value('summary error')}]}});
+  const card = {alias: team, uid: teamUid, display_label: value('team name'), capture: value('capture'), open: value('open'),
+    attention: value('attention'), overdue: value('team overdue'), bots: value('team bots'), provisional: value('provisional'),
+    presence: {counts: {}, live_poll: value('overview poll')}, orphaned: value('orphaned'), orphaned_reason: value('orphaned reason', true),
+    newest_report_at: at, reports_24h: value('reports 24h'), last_activity_at: at};
+  view.renderOverview({state: 'ok', data: {fleets: [{...card, unacked: value('unacked'), acked_by: value('acked by'), acked_at: value('acked at', true)},
+    {...card, alias: 'north / other', uid: 'north::fleet_' + 'c'.repeat(32), unacked: null, unacked_reason: value('unacked reason', true)}],
+    sources: [{key: 'north', label: value('source label'), connection_state: 'ready', state: value('read state'), remediation: value('summary error')},
+      {key: 'east', label: 'East', connection_state: 'ready', state: 'ok', host: {spool_files: value('spool files'), daemon_serving: true}}]}});
+  view.pushDebugRow({ingested_at: at, family: value('debug family'), ingest_seq: value('debug seq')});
   view.renderAgentDirectory({state: 'ok', data: {identities: [lead], sources: [{key: 'north', label: value('source label'), state: 'ok'},
     {key: 'south', label: value('other source'), state: value('source state')}]}}, presence);
   await view.openRoomBot(lead);
@@ -821,11 +829,14 @@ async function renderWorkingView(value) {
   return markup.join('\n');
 }
 test('bot-written text in the connected view is drawn as plain text: rooms, check-ins, tasks, roster, teams, summaries and errors', async () => {
-  const fields = new Set(), hostile = await renderWorkingView(name => { fields.add(name); return `${HOSTILE}·${name}`; });
+  // Attribute-only fields (titles) are checked as escaped attribute values; the rest must also be visible text.
+  const fields = new Set(), attributes = new Set();
+  const hostile = await renderWorkingView((name, attribute) => { (attribute ? attributes : fields).add(name); return `${HOSTILE}·${name}`; });
   const plain = await renderWorkingView(name => `plain words·${name}`);
   assert.deepEqual(tagSequence(hostile), tagSequence(plain), 'the same elements, whatever the text');
   assert.doesNotMatch(hostile, /<(?:img|form|input)\b|<a href="https:\/\/example\.invalid"/i);
   const text = visibleText(hostile);
-  assert.equal(fields.size, 38);
+  assert.deepEqual([fields.size, attributes.size], [60, 3]);
   for (const name of fields) assert.ok(text.includes(`${HOSTILE}·${name}`), `${name} is visible as its literal text`);
+  for (const name of attributes) assert.ok(hostile.includes(`title="${panel.esc(`${HOSTILE}·${name}`)}"`), `${name} is an escaped title`);
 });

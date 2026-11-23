@@ -2740,7 +2740,8 @@ test('setup-only view shows only the bridged computer\'s panel and a plain line 
 });
 test('setup-only view posts its content height to the exact shell origin, once per observation and only when it changes',async t=>{
   const l=landing(t),{frame}=l,ready=[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin];
-  assert.deepEqual(frame.posts,[ready],'the ready message comes first; no size before a measurement');
+  const form=[{type:'claudfather.workspace.form',version:1,form:'setup'},documentContext.shell_origin];
+  assert.deepEqual(frame.posts,[ready,form],'the ready message comes first, then the form; no size before a measurement');
   assert.equal(frame.observers.length,1);assert.deepEqual(frame.observers[0].targets,[frame.page],'the observer watches the root element');
   await l.workspace.checkAccount();await flush();assert.equal(frame.sizes().length,0,'rendering alone posts nothing; the observer reports');
   frame.resize(900.4);
@@ -2760,7 +2761,8 @@ test('a framed setup-only view without ResizeObserver still announces ready and 
   h.api.dispose();delete frame.view.ResizeObserver;
   const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch});t.after(()=>{workspace.dispose();restore();});
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
-  assert.deepEqual(frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin]]);
+  assert.deepEqual(frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin],
+    [{type:'claudfather.workspace.form',version:1,form:'setup'},documentContext.shell_origin]]);
   assert.equal(frame.page.attributes['data-workspace-view'],'setup');
 });
 test('a standalone panel ends on a done Launch step with a plain running line; the shared panel keeps its lead guidance',async()=>{
@@ -3499,6 +3501,7 @@ for(const [name,answer] of [['a refusal',()=>reply(403,{state:'denied'})],['no s
 // The working form (document 03): on a bridged page the bound computer, started with a team and with a ready session,
 // is the connected view a direct connection gets for that one computer, its parts as a strip above its teams.
 const setupMarker=l=>l.frame.page.attributes['data-workspace-view'];
+const formsPosted=l=>l.frame.posts.filter(([message])=>message.type==='claudfather.workspace.form').map(([message])=>message.form);
 // Connect on a bridged page whose computer is already started; answer: its parts read.
 async function workingPage(t,{teams=1,answer}={}) {
   const l=landing(t);await l.workspace.checkAccount();await flush();
@@ -3556,6 +3559,7 @@ test('a session renewal on a bridged working page does not change the form',asyn
   assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');assert.equal(w.parts(),parts);
   assert.equal(stateCalls(l.h).length,1,'a renewal sends no parts read');
   assert.equal(l.frame.sizes().length,posts,'and posts no size');
+  assert.deepEqual(formsPosted(l),['setup','working'],'nor the form again');
 });
 test('the working form posts one fixed height and no measured height; going back to the setup form measures again',async t=>{
   const l=landing(t),{frame}=l;await l.workspace.checkAccount();await flush();
@@ -3721,4 +3725,84 @@ test('the parts view\'s styles use the existing colour names and no colour value
   assert.ok(rules.length>=4,'the parts list and its states have rules');
   for(const [,selectors,body] of rules)assert.doesNotMatch(body,/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i,selectors.trim());
   assert.ok(rules.some(([selectors])=>/data-state/.test(selectors)),'each state has its mark');
+});
+
+// Gate review of document 03, A: one failed refresh of the parts read never takes the working form away.
+test('on a bridged working page a refresh that is lost, refused or unusable keeps the working form and the room',async t=>{
+  const url=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state';
+  for(const [name,answer] of [['lost',()=>Promise.reject(new Error('lost'))],['refused',()=>reply(404,{})],
+    ['unusable',()=>reply(200,{version:1,computer:'somewhere'})]]){
+    const w=await workingPage(t),{l}=w,parts=w.parts(),posts=l.frame.sizes().length;
+    l.h.overrides.set(url,answer);
+    l.frame.view.listeners.get('focus')();await flush();
+    assert.equal(stateCalls(l.h).length,2,`${name}: the refresh was sent`);
+    assert.equal(setupMarker(l),undefined,name);assert.equal(l.rail.dataset.setupFocus,'shared',name);
+    assert.equal(parts.hidden,false,name);assert.equal(l.panel(),undefined,name);
+    assert.equal(l.frame.sizes().length,posts,`${name}: no new height`);
+    assert.deepEqual(formsPosted(l),['setup','working'],`${name}: no form change`);
+    l.workspace.dispose();
+  }
+});
+// B: a session check is like a renewal when it ends ready on the computer the answer came from.
+const readyStatus=(binding_generation=id(6),host='host_'+'a'.repeat(32))=>({version:1,state:'ready',expires_in:900,
+  read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:host},session_context:{issuer:documentContext.shell_origin,
+  subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,
+  binding_revision:1,binding_generation}});
+test('a session check that ends ready on the same computer keeps the working form and its height',async t=>{
+  const w=await workingPage(t),{l}=w,parts=w.parts(),posts=l.frame.sizes().length,url=landingRefs[0].endpoint_origin+'/api/owner/connected/status';
+  const gate=deferred(),forms=[];
+  l.h.overrides.set(url,init=>gate.promise.then(()=>{l.h.overrides.delete(url);return l.h.dependencies.fetch(url,init);}));
+  const checking=l.workspace.act(0,'check');await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'checking');
+  forms.push(setupMarker(l),l.rail.dataset.setupFocus,parts.hidden);
+  gate.resolve();await checking;await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  forms.push(setupMarker(l),l.rail.dataset.setupFocus,parts.hidden);
+  assert.deepEqual(forms,[undefined,'shared',false,undefined,'shared',false],'the marker never comes back during the check');
+  assert.equal(l.frame.sizes().length,posts,'no height posted');assert.equal(stateCalls(l.h).length,1,'no new parts read');
+  assert.deepEqual(formsPosted(l),['setup','working'],'no form change');
+  assert.equal(l.panel(),undefined);
+});
+test('a session check that ends anywhere but ready on the same computer brings back the setup form',async t=>{
+  const url=landingRefs[0].endpoint_origin+'/api/owner/connected/status';
+  const setupOnly={version:1,state:'setup_only',expires_in:900,setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:'host_'+'a'.repeat(32)},
+    session_context:readyStatus().session_context};
+  for(const [name,answer] of [['denied',()=>reply(403,{state:'denied'})],['setup_only',()=>reply(200,setupOnly)],
+    ['another binding',()=>reply(200,readyStatus(id(8)))],['another computer',()=>reply(200,readyStatus(id(6),'host_'+'d'.repeat(32)))]]){
+    const {l}=await workingPage(t);
+    l.h.overrides.set(url,answer);await l.workspace.act(0,'check');await flush();
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready',name);
+    assert.equal(setupMarker(l),'setup',name);assert.notEqual(l.rail.dataset.setupFocus,'shared',name);
+    assert.deepEqual(formsPosted(l),['setup','working','setup'],name);
+    l.workspace.dispose();
+  }
+});
+// C: the working form's computer already has a team, so its first-team panel is not offered anywhere.
+test('in the working form the first-team panel is not offered, not even in the card, and comes back with the setup form',async t=>{
+  const w=await workingPage(t),{l}=w,card=l.cards()[0],isPanel=n=>n.className==='setup-focus-panel';
+  assert.equal(setupMarker(l),undefined);
+  assert.equal(descendants(card).some(isPanel),false,'not in the card\'s disclosure');
+  assert.equal(descendants(l.host).some(isPanel),false,'not in the setup host');
+  assert.equal(descendants(card).some(n=>n.tagName==='BUTTON'&&['Check setup approval','Preview team','Launch team'].includes(n.textContent)),false);
+  await l.workspace.act(0,'logout');await flush();
+  assert.equal(setupMarker(l),'setup','a lost connection brings back the setup form');
+  assert.ok(l.panel(),'and its first-team panel');
+  assert.deepEqual(formsPosted(l),['setup','working','setup']);
+});
+
+// H: the frame tells the page which form it shows: once after ready, then only on a change; nothing else crosses.
+test('the framed view posts its form to the exact shell origin: setup at mount, working on entering, setup on leaving',async t=>{
+  const w=await workingPage(t),{l}=w,kinds=l.frame.posts.map(([message])=>message.type);
+  assert.deepEqual(kinds.slice(0,2),['claudfather.workspace.ready','claudfather.workspace.form'],'the form follows the ready message');
+  assert.deepEqual(formsPosted(l),['setup','working']);
+  for(const [message,origin] of l.frame.posts.filter(([message])=>message.type==='claudfather.workspace.form')){
+    assert.deepEqual(Object.keys(message),['type','version','form'],'exactly these keys');
+    assert.equal(message.version,1);assert.equal(origin,documentContext.shell_origin,'never a wildcard target');
+  }
+  l.frame.view.listeners.get('focus')();await flush();l.frame.resize(700);
+  assert.deepEqual(formsPosted(l),['setup','working'],'an unchanged form is not posted again');
+  await l.workspace.act(0,'logout');await flush();
+  assert.deepEqual(formsPosted(l),['setup','working','setup']);
+  l.workspace.dispose();await l.workspace.checkAccount();await flush();
+  assert.deepEqual(formsPosted(l),['setup','working','setup'],'nothing after the view closes');
 });
