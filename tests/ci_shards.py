@@ -53,9 +53,11 @@ SKIP_CEILINGS = {
     # 18: the zsh case in tests/test_telegram_token_env_name.py needs zsh,
     # which the Ubuntu runner image does not install; the macOS lane runs it.
     "supported (ubuntu-latest, py3.10)": 18,
-    # 145 from #2930: three tests in tests/test_stand_in_fixtures.py read a
-    # running stand-in's Linux /proc name, and macOS keeps copies.
-    "supported (macos-latest, py3.11)": 145,
+    # 146: 145 from #2930 (three tests in tests/test_stand_in_fixtures.py read a
+    # running stand-in's Linux /proc name, and macOS keeps copies), and one from
+    # #3038: tests/test_timer_phase.py reads the reload's copies with
+    # systemd-analyze, which macOS does not have.
+    "supported (macos-latest, py3.11)": 146,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests
