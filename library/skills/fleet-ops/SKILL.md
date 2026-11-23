@@ -334,8 +334,26 @@ it); one dispatched after it waits for a newer report. `block` is not progress.
 
 The table of what each `status` means and what changes it is in §Deadline watch.
 
-**Ending it.** `complete`, `fail` and `return` end the assignment, and it leaves
-your open work. `block` keeps it and changes nothing in the table. Only your
+**Ending it.** `assignment complete` closes the whole task, not just your part
+of it. `fail` also ends the task; `return` ends only your assignment and leaves
+the task available to route again. Do not complete an implementation while its
+review is still pending. Report implementation-ready work with `assignment
+progress`; the manager then reassigns that same open task to the reviewer.
+The reviewer accepts the new assignment and reports the verdict with
+`assignment progress`. After checking the verdict and evidence, the manager
+reassigns the same task to itself, accepts that final assignment, and records
+`assignment complete`. Only complete once the reviewed outcome is verified.
+
+For each handoff, the manager runs `task reassign TASK_ID --bot BOT --reason
+TEXT --request-id UUID`, retains the returned successor assignment ID, and
+uses `assignment deliver` for that exact assignment before the worker accepts
+it. Reassignment preserves the task and workstream; it does not itself deliver
+instructions. The manager's own final assignment needs no delivery to another
+bot. If review requests changes, reassign the still-open task to the engineer
+instead of admitting a duplicate. A completed task cannot be reassigned; when
+all tasks in a workstream have ended, it refuses new tasks joining it.
+
+`complete`, `fail` and `return` leave your open assignments. `block` keeps it and changes nothing in the table. Only your
 manager or an operator moves a deadline (`assignment reschedule`, above). If you
 are waiting on something outside you, put what and until when in the
 `block --reason`, which notifies the manager, and keep reporting progress while

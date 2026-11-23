@@ -1169,3 +1169,31 @@ def test_feedback_digest_validates_explicit_selection_and_exact_text():
     assert digest != tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='asg_' + 'b' * 32)
     with pytest.raises(tasks.TaskQueryError):
         tasks.feedback_semantic_digest(task_id, body=body, expected_assignment_id='')
+
+
+def test_one_task_implementation_review_and_manager_signoff_use_successor_assignments(estate):
+    """Progress and reassignment preserve one work item until reviewed signoff."""
+    ctx, conn = estate
+    admitted = tasks.admit(ctx, str(uuid4()), title="Implement and independently review")
+    implementation = tasks.assign(ctx, str(uuid4()), admitted.task_id, bot_id="worker")
+    worker = replace(ctx, caller=ctx.bots["worker"])
+    tasks.accept(worker, str(uuid4()), implementation.assignment_id)
+    ready = tasks.progress(worker, str(uuid4()), implementation.assignment_id,
+                           ReportPayload("progress", summary="Implementation ready; review pending"))
+    assert ready.task.open
+    assert tasks.workstream_closed(conn, fleet_uid=ctx.fleet_uid,
+                                   workstream_id=ready.task.workstream_id) is None
+    review = tasks.reassign(ctx, str(uuid4()), admitted.task_id, bot_id="other", reason="Independent review")
+    reviewer = replace(ctx, caller=ctx.bots["other"])
+    tasks.accept(reviewer, str(uuid4()), review.assignment_id)
+    verdict = tasks.progress(reviewer, str(uuid4()), review.assignment_id,
+                             ReportPayload("progress", summary="Approved after independent tests"))
+    assert verdict.task.open and verdict.task.workstream_id == ready.task.workstream_id
+    signoff = tasks.reassign(ctx, str(uuid4()), admitted.task_id, bot_id="manager", reason="Verify reviewed outcome")
+    tasks.accept(ctx, str(uuid4()), signoff.assignment_id)
+    final = tasks.complete(ctx, str(uuid4()), signoff.assignment_id,
+                           ReportPayload("completed", summary="Verified implementation, tests and review"))
+    assert final.task.state == "completed" and not final.task.open
+    assert _counts(conn)[:2] == (1, 3)
+    assert tasks.workstream_closed(conn, fleet_uid=ctx.fleet_uid,
+                                   workstream_id=ready.task.workstream_id).startswith("closed")
