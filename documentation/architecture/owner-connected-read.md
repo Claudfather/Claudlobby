@@ -244,18 +244,22 @@ sign in to Claude, describe the goal, launch. When the computer is still in
 first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
 setup approval read (`context`, which changes nothing on the computer), so
 approve setup is done without a second click. A computer that is already set up
-gets no automatic read. If the read fails, no approval is shown, Check setup
-approval stays the step's action and nothing retries it. The one other
-automatic read: when the computer has said (`launch_reserved`) that the request
-this browser keeps holds a Launch, the browser keeps that word beside the request
-(`<storage key>:launch`), and a page opened again then follows a panel Connect,
-after any approval read, with one launch status read (`receipt`, which also
-changes nothing on the computer), exactly as Check launch status would. It lands
-on Team launched or the launch's unfinished state, and a failed read is not
-retried. The same word hides "Nothing runs on this computer until you choose
-Launch team." from the first paint. A request kept from a Preview alone, or
-a computer with no such word, gets no launch status read. Sign-in, preview and
-launch still each wait for their own click. Focus then moves to the next shown,
+gets no automatic approval read. If the read fails, no approval is shown, Check
+setup approval stays the step's action and nothing retries it. When the computer
+has said (`launch_reserved`) that the request this browser keeps holds a Launch,
+the browser keeps that word beside the request (`<storage key>:launch`). After
+each Connect or Check connection chosen in the panel, and after any approval
+read, the page then reads that launch's status once (`receipt`, which also
+changes nothing on the computer), exactly as Check launch status would, but only
+when the computer's word for the kept request was stored before that Connect. It
+never reads when the launch is already shown finished, when a Preview can be
+launched, or while the launch hand-over is already reading. The read lands on
+Team launched or the launch's unfinished state. A failed or refused read leaves
+the view as it was and shows nothing, and nothing retries it. The same word
+hides "Nothing runs on this computer until you choose Launch team." from the
+first paint. A request kept from a Preview alone, a word stored for another
+request, or a word this browser cannot read gets no launch status read.
+Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
 enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is
 running on this computer." This holds even after the launch handoff's status

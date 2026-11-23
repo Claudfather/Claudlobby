@@ -45,7 +45,6 @@ const PREVIEW_NOTES = {
   lost:'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.',
   kept:'Choose Check launch status to see where setup stands on your computer.'};
 const refusal = error => [400,401,403,409].includes(error?.status);
-const LAUNCH_UNCONFIRMED = 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.';
 // An answer this page will not use; an approval past its end comes apart from a malformed one.
 const rejected = (code = 'setup_answer_rejected') => Object.assign(new Error('Setup answer not used.'), {code});
 // Presentation only: the step that shows each operation's progress, and its text.
@@ -502,7 +501,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           return false;
         }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
-          ? LAUNCH_UNCONFIRMED
+          ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;
@@ -555,6 +554,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // After a panel Connect, a page that kept the computer's word that this request's Launch was reserved (seen: launchSeen
   // before that Connect) reads that launch's status once, as Check launch status does (receipt changes nothing on the
   // computer). It never launches, renews or retries, and it is not this page following a launch (the click still is).
+  // A failed or refused read shows nothing: nobody asked, and an approval that ended days ago refuses it.
   async function readSeenLaunch(seen) {
     if (disposed || busy || !active() || !pending || !seen || !same(seen,pending) || launched() || launchable
         || managedHandoff) return;
@@ -566,7 +566,6 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } catch (error) {
       if (disposed || ticket !== epoch) return;
       if (refusal(error)) releaseLaunch();
-      note = LAUNCH_UNCONFIRMED;
     } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); } }
   }
   function receipt(value) {

@@ -912,7 +912,7 @@ function setupHarness(options={}) {
     async setupPreview(input){calls.push(['preview',input]);return preview;},
     async setupLaunch(input){assert.deepEqual(JSON.parse(saved.get('test')).pending,pending);calls.push(['launch',input]);throw new Error('lost');},
     async setupReceipt(input){calls.push(['receipt',input]);return {...input,version:2,state:'done',launch_reserved:true,config_committed:true,health_errors:{}};},...options.client};
-  const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)};
+  const storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value),...options.storage?.(saved)};
   const api=createGuidedSetup({client,storage,storageKey:'test',now:()=>1800000000,...options.setupOptions});
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
@@ -2575,9 +2575,10 @@ test('the approval read after Connect does not take focus the visitor moved else
   assert.equal(l.h.ui.document.activeElement,details,'focus stays where the visitor put it');
 });
 // A standalone panel whose own Connect was chosen; finish() makes that connection live as the entry does.
-function connectedPanel({saved=[],context={},client={}}={}) {
-  const h=setupHarness({saved,client,setupOptions:{setTimeout:()=>0,clearTimeout:()=>{}}});
-  Object.assign(h.context,context);h.change({state:'not_connected',epoch:2});
+function connectedPanel({saved=[],context={},client={},storage,timers}={}) {
+  const h=setupHarness({saved,client,storage,setupOptions:timers?{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}}
+    :{setTimeout:()=>0,clearTimeout:()=>{}}});
+  Object.assign(h.context,typeof context==='function'?context(h):context);h.change({state:'not_connected',epoch:2});
   const ui=dom(),panel=new ui.Element();
   h.api.mountPanel({document:ui.document,element:panel,standalone:true,connect:()=>h.api.showConnect({operation:'connect',busy:'connect'})});
   h.api.showConnect({operation:'connect'});
@@ -2818,9 +2819,9 @@ test('a rebound setup request is not shown as launched, so its launch status can
 });
 // A panel that sends one managed Launch. launch: the computer's answer to it (an Error is thrown); receipts: the
 // answers to the launch status reads in order (an Error is thrown); check: what the hand-over's connection check does.
-function managedLaunch({launch,receipts=[],check,standalone=true}={}) {
+function managedLaunch({launch,receipts=[],check,standalone=true,storage}={}) {
   const timers=[],answer=value=>{if(value instanceof Error)throw value;return value;};let h=null;
-  h=setupHarness({setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+  h=setupHarness({storage,setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
     client:{...(launch?{async setupLaunch(input){h.calls.push(['launch',input]);return answer(launch(input));}}:{}),
       async setupReceipt(input){h.calls.push(['receipt',input]);
         return {...input,version:2,state:'quiesce',managed_owner:true,launch_reserved:true,config_committed:false,health_errors:{},...answer(receipts.shift())};},
@@ -3027,7 +3028,7 @@ test('a page opened again after its Launch reads that launch\'s status once afte
     ['finished, readable session','ready',{},null,'Team launched. Your team is running on this computer.','done'],
     ['finished, setup session','setup_only',{request:settingUp,launch_reserved:true},null,'Team launched. Your team is running on this computer.','done'],
     ['still starting','ready',{},{state:'publish',launch_reserved:true,config_committed:false},'Still in progress. Checking status never repeats or resumes setup.','current'],
-    ['refused','ready',{},refused,'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.','current']]){
+    ['refused','ready',{},refused,'','current']]){
     const client=answer?{async setupReceipt(input){p.h.calls.push(['receipt',input]);if(answer instanceof Error)throw answer;
       return {...input,version:2,health_errors:{},...answer};}}:{};
     const p=connectedPanel({saved:keptLaunch(),context,client});
@@ -3040,9 +3041,60 @@ test('a page opened again after its Launch reads that launch\'s status once afte
     assert.equal(visible(reopenedLede(p)),false,name);
     p.h.api.dispose();
   }
+  // A refused read (an approval that ended days ago refuses it) shows nothing, offers the check, and is never retried.
+  const timers=[],refusedPage=connectedPanel({saved:keptLaunch(),timers,
+    client:{async setupReceipt(input){refusedPage.h.calls.push(['receipt',input]);throw refused;}}});
+  await refusedPage.finish('ready');await flush();
+  for(let round=0;round<5&&timers.length;round++){for(const fn of timers.splice(0))await fn();await flush();}
+  assert.equal(refusedPage.h.calls.filter(c=>c[0]==='receipt').length,1,'not retried');
+  assert.equal(refusedPage.h.api.snapshot().note,'');
+  assert.ok(stepButtons(refusedPage.panel).includes('Check launch status'));refusedPage.h.api.dispose();
   // Without the computer's word on a launch, Connect reads no launch status.
   const preview=connectedPanel({saved:[keptLaunch()[0]]});await preview.finish('ready');
   assert.equal(preview.h.calls.filter(c=>c[0]==='receipt').length,0);preview.h.api.dispose();
+});
+// The view after Connect of a page that kept the request and nothing about a launch.
+const viewOf=p=>({steps:stepShape(p.panel),note:p.h.api.snapshot().note,lede:visible(reopenedLede(p)),
+  receipts:p.h.calls.filter(c=>c[0]==='receipt').length});
+test('a stored word on a launch that this page cannot trust, or storage that fails, reads no launch status and changes nothing',async()=>{
+  const request=keptLaunch()[0],base=connectedPanel({saved:[request]});await base.finish('ready');await flush();
+  const before=viewOf(base);base.h.api.dispose();
+  assert.equal(before.receipts,0);assert.equal(before.lede,true);
+  for(const [name,options] of [
+    ['a word for another request',{saved:[request,['test:launch',JSON.stringify({...settingUp,request_id:id(11)})]]}],
+    ['an unreadable word',{saved:[request,['test:launch','not json']]}],
+    ['a forged word',{saved:[request,['test:launch',JSON.stringify({generation:'x'})]]}],
+    ['a browser that refuses to read it',{saved:[...keptLaunch()],
+      storage:saved=>({getItem:key=>{if(key==='test:launch')throw new Error('denied');return saved.get(key)??null;}})}]]){
+    const p=connectedPanel(options);
+    assert.equal(visible(reopenedLede(p)),true,name);
+    await p.finish('ready');await flush();
+    assert.deepEqual(viewOf(p),before,name);p.h.api.dispose();
+  }
+  // A browser that refuses to keep the word: the Launch is followed and shown as when it keeps it.
+  const shown=async storage=>{
+    const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined}),storage});l.h.context.managed_owner=undefined;
+    await l.start();
+    const view={steps:stepShape(l.panel),note:l.h.api.snapshot().note,lede:visible(l.lede()),kept:l.h.saved.has('test:launch'),
+      launches:l.h.calls.filter(c=>c[0]==='launch').length};
+    l.h.api.dispose();return view;
+  };
+  const keeps=await shown(),refuses=await shown(saved=>({setItem:(key,value)=>{if(key==='test:launch')throw new Error('full');saved.set(key,value);}}));
+  assert.deepEqual({...refuses,kept:true},keeps);assert.equal(refuses.kept,false);
+  assert.equal(keeps.lede,false);assert.equal(keeps.launches,1);
+});
+test('a page opened again reads no launch status while the hand-over is reading, or beside a Preview it can launch',async()=>{
+  const handoff=connectedPanel({saved:keptLaunch(),context:{request:settingUp,launch_reserved:true,managed_owner:true}});
+  await handoff.finish();await flush();
+  assert.equal(handoff.reads(),1);
+  assert.equal(handoff.h.calls.filter(c=>c[0]==='receipt').length,0,'the hand-over reads on its own schedule');
+  handoff.h.api.dispose();
+  const kept=connectedPanel({saved:keptLaunch(),context:h=>({...said.ready(h),launch_reserved:false})});
+  await kept.finish();await flush();
+  assert.equal(kept.reads(),1);
+  assert.equal(kept.h.calls.filter(c=>c[0]==='receipt').length,0,'a Preview the computer kept: nothing was dispatched');
+  assert.ok(stepButtons(kept.panel).includes('Launch team'));
+  assert.equal(kept.h.saved.get('test:launch'),'null');kept.h.api.dispose();
 });
 test('a reopened page whose approval read says a launch is held hides the Launch team line',async()=>{
   const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})]],
