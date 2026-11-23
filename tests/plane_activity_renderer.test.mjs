@@ -744,3 +744,88 @@ test(`task board refresh preserves exact keyboard position without stealing focu
     assert.equal(document.activeElement.dataset.taskFleet,row.fleet);
   }
 });
+
+// Merge gate (document 03): once a team is ready the frame shows this connected view, so every bot-written field it
+// draws must stay plain text. Each field carries markup; the rendered tag sequence must match a render of ordinary
+// words, no img, a, form or input is made from it, and its literal text is visible.
+const HOSTILE = '<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+const tagSequence = html => [...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m => m[0].toLowerCase());
+async function renderWorkingView(value) {
+  const made = [], byId = new Map();
+  class El {
+    constructor(tag = 'div', id = '') { this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.dataset = {}; this.attributes = {};
+      this.style = {setProperty(){}}; this.classList = {toggle(){}, add(){}, remove(){}, contains: () => false};
+      this.hidden = false; this.disabled = false; this.value = ''; this._html = ''; this._text = ''; this.isConnected = true; made.push(this); }
+    set innerHTML(v) { this._html = String(v); this._text = ''; this.children = []; } get innerHTML() { return this._html; }
+    set textContent(v) { this._text = String(v); this._html = ''; this.children = []; } get textContent() { return this._text; }
+    querySelectorAll() { return []; } querySelector() { return null; } addEventListener() {} removeEventListener() {}
+    append(...nodes) { for (const n of nodes) this.children.push(...(n.tagName === '#FRAGMENT' ? n.children : [n])); }
+    appendChild(n) { this.append(n); return n; } replaceChildren(...n) { this.children = []; this._html = ''; this.append(...n); }
+    remove() {} after() {} focus() {} scrollIntoView() {} contains() { return false; } closest() { return null; }
+    setAttribute(k, v) { this.attributes[k] = String(v); } getAttribute(k) { return this.attributes[k] ?? null; } removeAttribute(k) { delete this.attributes[k]; }
+  }
+  const document = {activeElement: null, documentElement: new El('html'), body: new El('body'), querySelectorAll: () => [], addEventListener() {},
+    getElementById: id => { if (!byId.has(id)) byId.set(id, new El('div', id)); return byId.get(id); },
+    createElement: tag => new El(tag), createDocumentFragment: () => new El('#fragment')};
+  const at = '2026-01-01T00:00:00Z', team = 'north / team', teamUid = 'north::fleet_' + 'b'.repeat(32);
+  const lead = {uid: 'north::actor_' + 'a'.repeat(32), alias: 'north::bot:team/lead', short: value('bot name'), fleet: team, kind: 'actor', last_seen: at, provisional: false};
+  const presence = {state: 'ok', data: {sources: [{key: 'north', state: 'ok', sampler_available: true, provenance: {checked_at: at}}], bots: [{alias: lead.alias, live: 'up', presence: 'working'}]}};
+  const display = await import(new URL('../claudlobby/plane/ui/workspace-display.js', import.meta.url));
+  const tail = source.slice(source.indexOf('function activeRoom()'), source.indexOf('const ownerSession'))
+    + source.slice(source.indexOf('function roomBotPanel('));
+  const view = runInNewContext(`${source.slice(0, source.indexOf('let trustTimer =')).replace(/^import .*;\n/gm, '')}\n${tail}\n`
+    + '({renderFleet,renderChannel,renderTasks,renderHeader,renderSummary,renderOverview,renderFleetTabs,renderAgentDirectory,openRoomBot,'
+    + 'use(f,c){fleets=f;currentFleet=c;}})', {...panel, ...display, document, URL, Date, conversationTaskLink,
+    jget: async () => presence, createEventSource() {}, interactionApi: {dispose() {}}, localStorage: {getItem: () => null, setItem() {}},
+    workLoop: {canSelectMessageRecipient: () => false, selectMessageRecipient: () => false}, refreshEquipmentAction() {}, inspectBot() {},
+    setTimeout, clearTimeout, setInterval() {}, clearInterval() {}});
+  view.use([{alias: team, uid: teamUid, display_label: value('team name'), bots: 1, source_state: 'ok', connection_state: 'ready'}], team);
+  const message = (id, fields) => ({msg_id: `north::msg_${id.repeat(32)}`, message_class: 'chat', emitter: 'claudlobby.v1', command_type: null,
+    sender_alias: lead.alias, recipient_alias: 'human:owner', work_item_id: null, assignment_id: null, ingest_seq: 1, truncated: 0,
+    occurred_at: at, delivery: 'unconfirmed', delivery_state: null, tx: [], ...fields});
+  const markup = [], snapshot = () => markup.push(made.map(el => el._html).join('\n'), made.map(el => panel.esc(el._text)).join('\n'));
+  view.renderFleet({state: 'ok', data: {identities: [lead]}});
+  view.renderFleetTabs();
+  view.renderChannel({state: 'ok', data: {sources: [{key: 'north', state: 'ok'}], checkins_state: 'ok', threads: [
+    {key: 't1', work_item_id: null, title: value('thread title'), latest_seq: 1, repo: null, task_events: [], messages: [message('4', {
+      sender_short: value('sender'), recipient_short: value('recipient'), body: value('raw body'), body_words: value('message body'),
+      delivery_state: value('delivery')})]},
+    {key: 't2', work_item_id: null, title: null, latest_seq: 2, task_events: [], messages: [message('5', {sender_short: 'lead', recipient_short: 'owner',
+      body: value('first line'), body_words: null, report: {state: 'captured', status: 'progress', percent: null, pr_role: 'authored',
+        pr_url: value('pr link'), artifacts: [value('artifact')], issues: [value('issue link')]}})]},
+    thread(value('nudge reason'))],
+    checkins: [{actor_uid: lead.uid, actor_alias: lead.alias, actor_short: value('checkin bot'), fleet: team, action: 'ask',
+      reason: value('checkin reason'), rationale: value('rationale'), occurred_at: at}]}});
+  view.renderTasks({state: 'ok', data: {issue_count: 0, tasks: [{task_id: 'north::wi_' + '3'.repeat(32), fleet: team, title: value('task title'),
+    state: 'active', attention: true, attention_reason: ['escalated', 'nudged'], attention_question: value('question'), attention_by: value('asked by'),
+    attention_since: at, attention_act_reason: value('act reason'), nudged_at: at, nudged_by: value('nudged by'),
+    current_assignment: {assignee_short: value('assignee'), assignee_uid: lead.uid, expected_by: null, dispatch_message_id: 'm'},
+    delivery: {integrity: value('integrity')}, last_event: {event: value('last event'), occurred_at: at}, assignment_count: 1,
+    resolved: false, issues: [{code: value('issue code'), blocking: true}]}]}});
+  view.renderHeader({state: 'ok', data: {totals: {fleets: 1, bots: 1, working: 0, attention: 0, overdue: 0, live_poll: value('header poll'),
+    recorder_gaps: [{label: value('recorder gap')}]}, fleets: []}});
+  view.renderSummary({data: {coverage: {reachable: 1, total: 1}, sources: [{label: value('summary source'), state: 'ok', summary: {daemon_serving: true}, provenance: {}}]}});
+  view.renderOverview({state: 'ok', data: {fleets: [{alias: team, uid: teamUid, display_label: value('team name'), capture: value('capture'),
+    open: 0, attention: 0, overdue: 0, bots: 1, presence: {counts: {}, live_poll: value('overview poll')}, orphaned: 0, newest_report_at: null,
+    unacked: 0, acked_by: value('acked by'), acked_at: at, last_activity_at: at}],
+    sources: [{key: 'north', label: value('source label'), connection_state: 'ready', state: value('read state'), remediation: value('summary error')}]}});
+  view.renderAgentDirectory({state: 'ok', data: {identities: [lead], sources: [{key: 'north', label: value('source label'), state: 'ok'},
+    {key: 'south', label: value('other source'), state: value('source state')}]}}, presence);
+  await view.openRoomBot(lead);
+  snapshot();
+  view.renderChannel({state: 'unavailable', remediation: value('channel error')});
+  view.renderTasks({state: 'unavailable', remediation: value('task error')});
+  snapshot();
+  return markup.join('\n');
+}
+test('bot-written text in the connected view is drawn as plain text: rooms, check-ins, tasks, roster, teams, summaries and errors', async () => {
+  const fields = new Set(), hostile = await renderWorkingView(name => { fields.add(name); return `${HOSTILE}·${name}`; });
+  const plain = await renderWorkingView(name => `plain words·${name}`);
+  assert.deepEqual(tagSequence(hostile), tagSequence(plain), 'the same elements, whatever the text');
+  assert.doesNotMatch(hostile, /<(?:img|form|input)\b|<a href="https:\/\/example\.invalid"/i);
+  const text = visibleText(hostile);
+  assert.equal(fields.size, 38);
+  for (const name of fields) assert.ok(text.includes(`${HOSTILE}·${name}`), `${name} is visible as its literal text`);
+});

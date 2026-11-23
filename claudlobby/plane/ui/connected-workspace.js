@@ -57,6 +57,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   let current = null, transport = null, clients = [], unsubscribes = [], mount = null;
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
+  let framedWorking = false; // the browser carrier's frame shows its working form (render)
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Map();
   // Presentation only: the browser carrier serves the one saved reference its parent bound, so only
   // that computer is shown. Before the offer, or for a carrier that never bound, every computer is shown.
@@ -76,8 +77,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     changed();
   }, () => {});
   // The browser carrier's frame is the body of the website's setup step: a setup-only view of the bound
-  // computer (workspace.css hides the rest). Its line says, in plain sentences, why no panel shows yet;
-  // [text, working]: a line that waits on a check turns a ring beside it.
+  // computer (workspace.css hides the rest) until that computer is ready with a team, when it becomes the
+  // connected view of that one computer (the working form, render below). Its line says, in plain sentences,
+  // why no panel shows yet; [text, working]: a line that waits on a check turns a ring beside it.
   function setupOnlyNote() {
     return phase === 'checking' ? ['Checking your workspace…',true]
       : phase === 'unavailable' ? ['Your account could not be checked yet. This page tries again shortly.']
@@ -212,7 +214,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         row.client.activity?.({visible:mount?.document.visibilityState === 'visible'});
         row.setup = createGuidedSetup({client:row.client,setTimeout,clearTimeout,
           visible:() => !mount || mount.document.visibilityState !== 'hidden',
-          storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`});
+          storageKey:`claudlobby:first-team:${doc.user_id}:${doc.workspace_id}:${doc.context_generation}:${reference.reference_id}:${reference.revision}`,
+          // A followed Launch ends at its clean done receipt: a parts read held back meanwhile is sent then, once.
+          onChange:() => { if (browserTransport && row.parts && !row.setup?.following()) void row.parts.release(); }});
         // On a bridged page the panel stays, and nothing is read for the parts, while it follows a launch this page sent.
         row.parts = createWorkspaceParts({client:row.client, key:row.key, names:partLabels, onChange:changed,
           hold:() => browserTransport && row.setup.following(), name:() => row.label || computerLabel(reference)});
@@ -469,7 +473,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
@@ -489,6 +493,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
       const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
         && !(browserTransport && (setup.following() || parts.launchUnfinished()));
+      // The working form: in the browser carrier the bound computer, started with a team and showing its parts, is
+      // the connected view a direct connection gets, with its parts as a strip above its teams. The same facts as the
+      // 'shared' layout below, so a renewal of its session (which keeps the parts shown) does not change the form.
+      // With no team the parts stay the whole view, in the setup form.
+      controls.working = browserTransport && bridged && partsShown && parts.teams() !== 0;
       // What the computer says of a Launch is shown in the panel's steps; it sends nothing and resumes nothing.
       if (browserTransport) setup.showLaunchUnderway?.(parts.launchUnfinished());
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
@@ -567,18 +576,34 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
       }
     });
+    // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished) is
+    // the connected view of that computer: no setup marker, and its parts sit above its teams (below). Otherwise the
+    // setup form: <html data-workspace-view="setup">, under which workspace.css shows only the setup host.
+    const working = controls.rows.some(row => row.working);
+    if (browserTransport) {
+      invoke(() => { const page = document.documentElement, form = working ? null : 'setup';
+        if (page && page.getAttribute('data-workspace-view') !== form)
+          form ? page.setAttribute('data-workspace-view',form) : page.removeAttribute('data-workspace-view'); });
+      if (working !== framedWorking) { framedWorking = working; invoke(mount.onFormChange); }
+    }
     if (mount.setupHost) {
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
       const showing = focusing || controls.rows.some(row => row.partsShown);
       if (mount.setupStatus) {
-        // Setup-only view: the host is the whole main area, with a plain line until the panel or the parts show.
-        // Retirement keeps the line in its host; a closed view writes nothing more.
-        if (phase !== 'disposed') {
-          const [text,working] = showing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = showing;
-          if (mount.setupStatus.textContent !== text) mount.setupStatus.textContent = text; // no repeated announcement
-          if (working) mount.setupStatus.dataset.tone = 'working'; else delete mount.setupStatus.dataset.tone;
+        // Browser carrier. In the working form the parts are a strip above the teams and the status line is hidden. In
+        // the setup form the host is the whole main area, with a plain line until the panel or the parts show.
+        // Retirement keeps the line in its host; a closed view writes nothing more to it.
+        if (working) {
+          mount.setupStatus.hidden = true;
+          mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'shared';
+        } else {
+          if (phase !== 'disposed') {
+            const [text,waiting] = showing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = showing;
+            if (mount.setupStatus.textContent !== text) mount.setupStatus.textContent = text; // no repeated announcement
+            if (waiting) mount.setupStatus.dataset.tone = 'working'; else delete mount.setupStatus.dataset.tone;
+          }
+          mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
         }
-        mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'only';
       } else {
         mount.setupHost.hidden = !showing;
         // Only setup to show: the panel replaces the main area; beside a readable computer it sits above its teams.
@@ -594,10 +619,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
     const rail = document.getElementById('rail-channel'), setupHost = rail ? document.createElement('section') : null;
     if (setupHost) { setupHost.id = 'setup-focus'; setupHost.className = 'setup-focus'; setupHost.hidden = true; rail.prepend(setupHost); }
-    // The browser carrier's frame is a setup-only view: workspace.css shows only #setup-focus under this marker.
+    // The browser carrier's frame: render sets <html data-workspace-view="setup"> in its setup form (workspace.css then
+    // shows only #setup-focus) and removes it in its working form.
     let setupStatus = null;
     if (browserTransport) {
-      invoke(() => document.documentElement?.setAttribute('data-workspace-view','setup'));
       if (setupHost) { setupStatus = document.createElement('p'); setupStatus.className = 'setup-only-status';
         setupStatus.setAttribute('role','status'); setupStatus.setAttribute('aria-live','polite'); setupHost.prepend(setupStatus); }
     }
@@ -669,22 +694,29 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     }
     return {dispose};
   }
-  // Setup-only view: the parent sizes the frame to this content. Only the height crosses, to the exact shell
-  // origin, and only when it changed. A ResizeObserver on the root element reports at most once per rendering frame.
+  // Browser carrier: the parent sizes the frame. Only the height crosses, to the exact shell origin, and only when it
+  // changed. In the setup form the view measures its content: a ResizeObserver on the root element reports at most
+  // once per rendering frame. The working form fills the window's height, so a measurement would only return the
+  // frame's own height; it posts one fixed height instead, once on entering it, and measures again on leaving it.
+  const WORKING_HEIGHT = 640; // the website's setup frame height, proposed for the owner's yes
   function reportSize(document, view) {
     const page = document.documentElement;
     if (!page || typeof view.ResizeObserver !== 'function') return;
     let posted = null, observer = null;
-    const measure = () => {
-      if (disposed) return;
-      let height; try { height = Math.ceil(page.getBoundingClientRect().height); } catch { return; }
-      if (!Number.isFinite(height)) return;
-      height = Math.min(20000, Math.max(1, height));
-      if (height === posted) return;
+    const post = height => {
+      if (disposed || height === posted) return;
       posted = height;
       invoke(() => view.parent.postMessage({type:'claudfather.workspace.size',version:1,height}, doc.shell_origin));
     };
+    const measure = () => {
+      if (disposed || framedWorking) return;
+      let height; try { height = Math.ceil(page.getBoundingClientRect().height); } catch { return; }
+      if (!Number.isFinite(height)) return;
+      post(Math.min(20000, Math.max(1, height)));
+    };
     try { observer = new view.ResizeObserver(measure); observer.observe(page); } catch { observer?.disconnect(); return; }
+    mount.onFormChange = () => { if (framedWorking) post(WORKING_HEIGHT); else measure(); };
+    if (framedWorking) post(WORKING_HEIGHT);
     const previous = mount.cleanup;
     mount.cleanup = () => { previous?.(); observer.disconnect(); };
   }

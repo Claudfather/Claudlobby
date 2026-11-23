@@ -2474,6 +2474,7 @@ function browserCarrier(h,bound=null) {
 // resize() delivers one ResizeObserver notification, as a browser does at most once per rendering frame.
 function framedPage(ui) {
   const page={attributes:{},height:640,setAttribute(k,v){this.attributes[k]=String(v);},getAttribute(k){return this.attributes[k]??null;},
+    removeAttribute(k){delete this.attributes[k];},
     getBoundingClientRect(){return {height:this.height};}};
   const posts=[],observers=[];
   class ResizeObserver {constructor(fn){this.fn=fn;this.targets=[];observers.push(this);}observe(target){this.targets.push(target);}disconnect(){this.closed=true;}}
@@ -3333,36 +3334,49 @@ test('on a bridged page a started computer shows its parts instead of the five-s
   await l.workspace.act(0,'logout');await flush();
   assert.equal(l.panel(),panel);assert.equal(parts.hidden,true);
 });
-// A bridged page that sends one Launch from its own panel; launch: the computer's answer to it.
-async function bridgedLaunch(t,launch) {
+// A bridged page that sends one Launch from its own panel; launch: the computer's answer to it. Optional answers: status,
+// the session status check after it (ready by default); fleets, the fleets read; receipt, the launch status read.
+// context, fields added to the approval read's answer; beforeCheck runs before the status check.
+const landingBinding={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+async function bridgedLaunch(t,launch,{status,fleets,receipt,context={},beforeCheck}={}) {
   const l=landing(t);await l.workspace.checkAccount();await flush();
   const a=landingRefs[0].endpoint_origin,setup=a+'/api/owner/connected/setup/';
-  const binding={generation:id(9),request_id:id(10),config_fingerprint:'a'.repeat(64),source_revision:'b'.repeat(40)};
+  const binding=landingBinding;
   l.h.overrides.set(a+'/api/owner/connected/issue',setupOnlyIssue);
-  l.h.overrides.set(setup+'context',()=>reply(200,{...landingContext,provider_signin:false}));
+  l.h.overrides.set(setup+'context',()=>reply(200,{...landingContext,provider_signin:false,...context}));
   l.h.overrides.set(setup+'preview',()=>reply(200,{...binding,version:2,fleets:['shop'],changes:[],effects:{restart_bots:['shop/lead'],reload_supervision:true},
     dispatch:'prepared',phase:'quiesce',expires_at:1800000600}));
   l.h.overrides.set(setup+'launch',()=>reply(200,{...binding,version:2,...launch}));
   // After the Launch the computer's session comes back ready, as the hand-off's status check finds it; its parts read
   // would say started with the saved configuration's team.
-  l.h.overrides.set(a+'/api/owner/connected/status',()=>reply(200,{version:1,state:'ready',expires_in:900,
+  l.h.overrides.set(a+'/api/owner/connected/status',status||(()=>reply(200,{version:1,state:'ready',expires_in:900,
     read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},session_context:{issuer:documentContext.shell_origin,
-      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}}));
+      subject:documentContext.user_id,workspace_id:documentContext.workspace_id,operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}})));
   l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({teams:1})));
+  if(fleets)l.h.overrides.set(a+'/api/owner/connected/read/fleets',fleets);
+  if(receipt)l.h.overrides.set(setup+'receipt',receipt);
   const panel=l.panel(),button=text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
   descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
   const area=descendants(panel).find(n=>n.tagName==='TEXTAREA');area.value='Improve checkout tests';area.handlers.input();
   button('Preview team').click();await flush();button('Launch team').click();await flush();
   assert.equal(l.h.calls.filter(c=>c.url===setup+'launch').length,1,'one Launch');
+  if(beforeCheck)await beforeCheck(l,panel);
   await l.workspace.act(0,'check');await flush();
-  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(l.workspace.snapshot().computers[0].state,status?(await (await status()).json()).state:'ready');
   return {l,panel,note:()=>descendants(panel).find(n=>n.className==='setup-note').textContent};
 }
-test('on a bridged page the five-step panel stays to its "Team launched" ending through a Launch this page sent, with no parts read',async t=>{
-  const {l,panel,note}=await bridgedLaunch(t,{state:'done',launch_reserved:true,config_committed:true,health_errors:{}});
-  assert.equal(stateCalls(l.h).length,0,'nothing reads the parts while the page follows its own Launch');
-  assert.equal(l.panel(),panel);assert.equal(partsOf(l.host),undefined);
-  assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the guide keeps its ending');
+// Document 03 replaced this test's ending: the page that followed the Launch no longer keeps the five steps after it.
+test('on a bridged page the five-step panel stays to its "Team launched" ending through a Launch this page sent, and the team\'s room follows once the session is ready',async t=>{
+  const {l,panel,note}=await bridgedLaunch(t,{state:'done',launch_reserved:true,config_committed:true,health_errors:{}},{beforeCheck:(l,panel)=>{
+    assert.equal(stateCalls(l.h).length,0,'nothing reads the parts while the session is in first-team setup');
+    assert.equal(l.panel(),panel);assert.equal(partsOf(l.host),undefined);assert.equal(l.frame.page.attributes['data-workspace-view'],'setup');
+    assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the guide keeps its ending');
+    assert.equal(descendants(panel).find(n=>n.className==='setup-note').textContent,'Team launched. Your team is running on this computer.');
+  }});
+  // The clean done receipt ended the follow: the ready session's parts read moves the page on to the team's room.
+  assert.equal(stateCalls(l.h).length,1,'one parts read, for the ready session');
+  assert.equal(l.panel(),undefined,'the panel left the view');assert.equal(partsOf(l.host)?.hidden,false);
+  assert.equal(l.frame.page.attributes['data-workspace-view'],undefined);assert.equal(l.rail.dataset.setupFocus,'shared');
   assert.equal(note(),'Team launched. Your team is running on this computer.');
   // A later page has the same request in this browser's storage and follows nothing: it shows the parts.
   const later=landing(t);await later.workspace.checkAccount();await flush();
@@ -3482,6 +3496,149 @@ for(const [name,answer] of [['a refusal',()=>reply(403,{state:'denied'})],['no s
     assert.equal(partsOf(now.l.host),undefined);assert.equal(now.l.rail.dataset.setupFocus,'only');
     assert.equal(stateCalls(now.l.h).length,1,'one read, never retried');
   });
+// The working form (document 03): on a bridged page the bound computer, started with a team and with a ready session,
+// is the connected view a direct connection gets for that one computer, its parts as a strip above its teams.
+const setupMarker=l=>l.frame.page.attributes['data-workspace-view'];
+// Connect on a bridged page whose computer is already started; answer: its parts read.
+async function workingPage(t,{teams=1,answer}={}) {
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state',answer||(()=>reply(200,partsAnswer({teams}))));
+  const panel=l.panel(),connect=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');
+  connect.focus();connect.click();await flush();
+  return {l,panel,parts:()=>partsOf(l.host)};
+}
+// Every rule that hides part of the page applies only under the setup marker or the 'only' setup focus.
+const hidingRules=async()=>{
+  const css=(await read('workspace.css')).replace(/\/\*[\s\S]*?\*\//g,'').replace(/\s+/g,' ');
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([,,body])=>/display:none/.test(body))
+    .flatMap(([,selectors])=>selectors.split(',').map(s=>s.trim()))
+    // The All agents view (.agent-directory-view) is a view the person chooses, the same in a direct connected view.
+    .filter(s=>/(?:^|[\s>])(?:header|#rail-fleet|#rail-channel|#channel|#work-loop|#tasks|#view-nav|main|:not\(#setup-focus\))$/.test(s)
+      &&!/\.agent-directory-view/.test(s));
+};
+test('on a bridged page a started computer with a team and a ready session shows its rooms, tasks and message box, with its parts above',async t=>{
+  const w=await workingPage(t),{l}=w,parts=w.parts();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(setupMarker(l),undefined,'no data-workspace-view: workspace.css shows the whole connected view');
+  assert.equal(l.rail.dataset.setupFocus,'shared','the parts sit above the teams');
+  assert.equal(l.host.hidden,false);assert.deepEqual(l.host.children.filter(visible),[parts],'the parts lead the setup host');
+  assert.equal(l.status().hidden,true);assert.equal(l.panel(),undefined,'the five-step panel left the view');
+  assert.deepEqual(partRows(parts)[2],['bots','teams','Bots','1 team set up']);
+  assert.equal(l.h.ui.document.activeElement,parts,'focus that was in the panel moves to the parts, never into the message box');
+  // Rooms, Tasks and All agents are on; Team details, Recorder, search and bot equipment stay off, as in a direct connected view.
+  assert.deepEqual(Object.fromEntries(l.h.ui.nav.map(b=>[b.dataset.view,b.disabled])),{channel:false,tasks:false,grid:false,fleet:true,trust:true});
+  assert.equal(l.h.ui.get('search').disabled,true);
+  // Under the page's connection nothing offers enrolment or the computer's own access page.
+  assert.equal(descendants(l.cards()[0]).some(n=>n.dataset.operation==='enroll'),false);
+  // The room, tasks and message box are drawn by the dashboard from the same reads, through this computer only.
+  const fleets=await l.workspace.jget('/api/fleets');assert.equal(fleets.state,'ok');assert.equal(fleets.data.fleets.length,1);
+  for(const path of ['/api/channel?limit=120','/api/tasks'])assert.equal((await l.workspace.jget(path)).state,'ok',path);
+  assert.equal(l.h.calls.filter(c=>/[bc]\.example\.test/.test(c.url)).length,0,'no request is sent toward a hidden computer');
+  // Without the marker no rule hides the header, the sidebar, the room or the message box; the shared focus hides nothing.
+  for(const selector of await hidingRules())
+    assert.match(selector,/:root\[data-workspace-view="setup"\]|\[data-setup-focus="only"\]/,selector);
+});
+test('on a bridged page a started computer with no team keeps the setup form and its parts',async t=>{
+  const w=await workingPage(t,{teams:0}),{l}=w,parts=w.parts();
+  assert.equal(setupMarker(l),'setup');assert.equal(l.rail.dataset.setupFocus,'only','the parts are the whole view');
+  assert.deepEqual(l.host.children.filter(visible),[parts]);assert.equal(l.panel(),undefined);
+  assert.deepEqual(partRows(parts)[2],['bots','none','Bots','None yet']);
+});
+test('a session renewal on a bridged working page does not change the form',async t=>{
+  const w=await workingPage(t),{l}=w,parts=w.parts(),a=landingRefs[0].endpoint_origin,renew=a+'/api/owner/connected/renew';
+  const gate=deferred(),posts=l.frame.sizes().length;
+  l.h.overrides.set(renew,init=>gate.promise.then(()=>{l.h.overrides.delete(renew);return l.h.dependencies.fetch(renew,init);}));
+  const renewing=l.workspace.act(0,'renew');await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'renewing');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');assert.equal(parts.hidden,false);
+  gate.resolve();assert.equal(await renewing,true);await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');assert.equal(w.parts(),parts);
+  assert.equal(stateCalls(l.h).length,1,'a renewal sends no parts read');
+  assert.equal(l.frame.sizes().length,posts,'and posts no size');
+});
+test('the working form posts one fixed height and no measured height; going back to the setup form measures again',async t=>{
+  const l=landing(t),{frame}=l;await l.workspace.checkAccount();await flush();
+  frame.resize(900);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer({teams:1})));
+  descendants(stepsOf(l.panel())[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  assert.equal(setupMarker(l),undefined);
+  frame.resize(1200);frame.resize(640.5);
+  await l.workspace.act(0,'logout');await flush();
+  assert.equal(setupMarker(l),'setup','a lost connection brings back the setup form');
+  frame.resize(700);
+  assert.deepEqual(frame.sizes().map(([message])=>message.height),[900,640,641,700],
+    'measured, then one fixed 640 on entering the working form and nothing measured in it, then measured again');
+  assert.ok(frame.sizes().every(([message,origin])=>Object.keys(message).join()==='type,version,height'&&origin===documentContext.shell_origin));
+});
+test('on a bridged working page without a message grant the message box says Messages: not authorized. and sends nothing',async t=>{
+  const w=await workingPage(t),{l}=w;await l.workspace.jget('/api/overview');
+  l.h.grants.delete('message');
+  await assert.rejects(l.workspace.interactionContext(sourceA+' / team'),{code:'action_not_authorized'},
+    'the computer\'s answer reaches the message box unchanged; its words are pinned in plane_work_loop.test.mjs');
+  assert.equal(l.h.calls.filter(c=>/\/actions\/(?:send|prepare|receipt)$/.test(c.url)).length,0,'nothing is sent');
+  assert.equal(setupMarker(l),undefined,'reading stays: the form does not change');assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+});
+// The page that sent a Launch and a page opened again end on the same view (document 03, run 39's first finding).
+test('the page that sent a Launch and a reopened page land on the same working view after a clean done receipt',async t=>{
+  const shape=l=>({marker:setupMarker(l),focus:l.rail.dataset.setupFocus,panel:l.panel()===undefined?'none':'shown',
+    status:l.status().hidden,parts:partRows(partsOf(l.host)),nav:l.h.ui.nav.map(b=>b.disabled)});
+  const {l:followed}=await bridgedLaunch(t,{state:'done',launch_reserved:true,config_committed:true,health_errors:{}});
+  const {l:again}=await reopened(t,{team:'none'});
+  assert.deepEqual(shape(followed),shape(again));
+  assert.equal(shape(again).marker,undefined);assert.equal(shape(again).focus,'shared');assert.equal(shape(again).panel,'none');
+});
+for(const [name,launch] of [['done with a health error',{state:'done',launch_reserved:true,config_committed:true,health_errors:{lead:'not running'}}],
+  ['done but not committed',{state:'done',launch_reserved:true,config_committed:false,health_errors:{}}]])
+  test(`a receipt that is not clean (${name}) keeps the panel and Check launch status on the page that followed the Launch`,async t=>{
+    const {l,panel,note}=await bridgedLaunch(t,launch);
+    assert.equal(l.panel(),panel,name);assert.equal(setupMarker(l),'setup',name);assert.equal(l.rail.dataset.setupFocus,'only');
+    assert.notEqual(note(),'Team launched. Your team is running on this computer.',name);
+    assert.ok(descendants(panel).some(n=>n.tagName==='BUTTON'&&n.textContent==='Check launch status'&&visible(n)),name);
+    l.frame.view.listeners.get('focus')();await flush();
+    assert.equal(stateCalls(l.h).length,0,`${name}: the page still follows its Launch, so nothing reads the parts`);
+    assert.equal(partsOf(l.host),undefined);
+  });
+// Proof A, the browser side: after a healthy Launch the session's status through the page's own connection answers
+// "ready" with a read profile, the fleets read lists the launched team, and only then does the room show.
+const launchedFleets=()=>reply(200,ok({fleets:[{alias:'shop',uid:fleetUID,bots:2,provisional:0}]}));
+const cleanDone={state:'done',launch_reserved:true,config_committed:true,health_errors:{}};
+test('after a clean done receipt the next session status through the page answering ready leads to the working form',async t=>{
+  const {l}=await bridgedLaunch(t,cleanDone,{fleets:launchedFleets});
+  const status=l.h.calls.filter(c=>c.url===landingRefs[0].endpoint_origin+'/api/owner/connected/status');
+  assert.equal(status.length,1,'one status check, through the page\'s transport');
+  const answer=await (await l.h.overrides.get(status[0].url)()).json();
+  assert.equal(answer.state,'ready');assert.equal(answer.read_profile.profile,'direct-owner-read-v1');
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  const fleets=await l.workspace.jget('/api/fleets');
+  assert.equal(fleets.state,'ok');assert.deepEqual(fleets.data.fleets.map(f=>f.alias.split(' / ').at(-1)),['shop'],'the fleets read lists the launched team');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');assert.equal(stateCalls(l.h).length,1);
+});
+test('after a clean done receipt a session status through the page answering setup_only keeps the setup form and never shows the room',async t=>{
+  const setupOnly={version:1,state:'setup_only',expires_in:900,setup_profile:{version:2,profile:'first-team-setup-v2',host_uid:'host_'+'a'.repeat(32)},
+    session_context:{issuer:documentContext.shell_origin,subject:documentContext.user_id,workspace_id:documentContext.workspace_id,
+      operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}};
+  const {l:held,panel}=await bridgedLaunch(t,cleanDone,{status:()=>reply(200,setupOnly)});
+  assert.equal(held.workspace.snapshot().computers[0].state,'setup_only');
+  held.frame.view.listeners.get('focus')();await flush();
+  assert.equal(stateCalls(held.h).length,0,'a setup_only session is never sent the parts read');
+  assert.equal(setupMarker(held),'setup');assert.equal(held.rail.dataset.setupFocus,'only');assert.equal(held.panel(),panel);
+  assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the panel keeps its ending');
+});
+test('a parts read held back while the page followed a managed hand-off is sent once its clean done receipt arrives',async t=>{
+  const {l,panel}=await bridgedLaunch(t,{state:'quiesce',managed_owner:true,launch_reserved:true,config_committed:false,health_errors:{}},
+    {context:{managed_owner:true},receipt:()=>reply(200,{...landingBinding,version:2,state:'done',managed_owner:true,launch_reserved:true,config_committed:true,health_errors:{}})});
+  // The session is ready while the hand-over still follows the Launch: the parts read is held back.
+  assert.equal(stateCalls(l.h).length,0);assert.equal(l.panel(),panel);assert.equal(setupMarker(l),'setup');
+  // The hand-over's own timer (1.5 s for its first reads) reads the launch status.
+  for(let round=0;round<4&&!l.h.calls.some(c=>c.url.endsWith('/setup/receipt'));round++){
+    for(const timer of l.h.timers.filter(t=>t.active&&t.ms===1500)){timer.active=false;await timer.fn();}await flush();
+  }
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/receipt')).length,1,'the hand-over read the launch status once');
+  assert.equal(stateCalls(l.h).length,1,'one parts read, once the follow ended');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');assert.equal(l.panel(),undefined);
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,1,'never a second Launch');
+});
 test('the embedding page names parts only with a well-formed part_names; anything else is dropped whole',async t=>{
   const named=await partsWorkspace(t,{document:{part_names:{helper:'Claudfather',bots:'Team bots'}}});
   assert.equal(named.workspace.snapshot().phase,'ready');

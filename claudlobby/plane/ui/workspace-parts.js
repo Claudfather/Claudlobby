@@ -48,10 +48,11 @@ function answer(value) {
 // One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
 // hold(): true while the entry keeps today's panel for a launch this page sent or follows, when nothing is read.
 // The parts read is sent once for each new ready connection and on refresh() (the window regained focus), never
-// on a timer and never to retry. A refusal, a lost answer or a computer whose core has no parts read leaves
+// on a timer and never to retry. A read the hold kept back is sent once by release() when the hold ends. A refusal, a lost answer or a computer whose core has no parts read leaves
 // started() false, so the view shows exactly what it showed before this read existed.
 export function createWorkspaceParts({client, name, names = null, key, hold = () => false, onChange = () => {}}) {
   let current = null, readFor = null, reading = null, again = false, disposed = false, mount = null, last = client.snapshot();
+  let held = false; // a read for a ready connection was kept back by hold()
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
     const before = last; last = state;
@@ -63,7 +64,9 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     if (state.state === 'ready' && readFor !== state.epoch) void read();
   }
   async function read() {
-    if (disposed || !ready() || hold() || typeof client.setupState !== 'function') return false;
+    if (disposed || !ready() || typeof client.setupState !== 'function') return false;
+    if (hold()) { held = true; return false; }
+    held = false;
     const epoch = client.snapshot().epoch;
     // A read already sent for this connection answers this one too; one sent for an earlier connection is
     // followed by one more for this connection when it ends, so a change that lands mid-read is never lost.
@@ -126,6 +129,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     if (names?.helper) set('helper', names.helper, current.helper, current.helper === 'later' ? PART_TEXT.later : PART_TEXT.asleep);
   }
   return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
+    // The entry's hold ended: a read it kept back is sent now, once; with none kept back nothing is sent.
+    release:() => held ? read() : Promise.resolve(false),
     teams:() => started() ? current.teams : null,
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
