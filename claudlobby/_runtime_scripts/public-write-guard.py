@@ -5,9 +5,10 @@ Refuses a GitHub-bound write that would put a term from the HOST'S list into a
 PUBLIC repository. Composed only for a bot with ``public_write_guard: true``.
 
 The list is host configuration, never repository content:
-``~/.config/claudlobby/public-write-terms`` holds one case-insensitive regular
-expression per line (``#`` starts a comment line). No term appears in this file,
-its tests or its messages; the tests use invented terms.
+``~/.config/claudlobby/public-write-terms`` is UTF-8 text holding one
+case-insensitive regular expression per line (``#`` starts a comment line). No
+term appears in this file, its tests or its messages; the tests use invented
+terms.
 
 WHAT A WRITE PUTS IN THE REPOSITORY is all this guard reads for terms:
   - an ``mcp__github__*`` tool that is not a read (``get_``, ``list_``,
@@ -53,10 +54,11 @@ Failure directions, each chosen on purpose:
   - no list file: ALLOW, and record ``public_write_guard_unarmed``. There is
     nothing to match, and refusing every GitHub write on a host that was never
     configured is an outage; the canary checks that the file exists.
-  - a broken list (a line that does not compile, or one that can match an
-    empty string, so every write would be a hit): REFUSE every guarded write,
-    naming the line and column, never the line's text. Someone meant to protect
-    this host, and a broken list must not read as none.
+  - a broken list (a file that is not UTF-8 text, a line that does not
+    compile, or one that can match an empty string, so every write would be a
+    hit): REFUSE every guarded write, naming a bad line by its number and
+    column, never by its text. Someone meant to protect this host, and a
+    broken list must not read as none.
   - a payload that is not JSON: ALLOW, loudly (exit 3: the hook leaves a
     breadcrumb). A hook that cannot read the harness's own payload must not
     wedge every call.
@@ -261,11 +263,13 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
     A broken list is named by line and column, never by the line's text: the
     reason reaches the bot, and the list is what must not travel."""
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return None, "absent"
     except OSError as exc:
         return None, f"broken: {exc.strerror or exc}"
+    except UnicodeDecodeError:
+        return None, "broken: it is not UTF-8 text"
     parts = [
         (n, ln.strip())
         for n, ln in enumerate(lines, 1)
@@ -1608,7 +1612,7 @@ def check() -> int:
     else:
         n = sum(
             1
-            for ln in terms_path().read_text().splitlines()
+            for ln in terms_path().read_text(encoding="utf-8").splitlines()
             if ln.strip() and not ln.strip().startswith("#")
         )
         print(f"{_list_label()}: ok, {n} pattern(s)")

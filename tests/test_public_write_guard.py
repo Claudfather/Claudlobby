@@ -832,6 +832,21 @@ def test_a_broken_line_is_named_by_position_never_by_its_text(env, tmp_path):
     assert rc == 1 and "quillon" not in out.lower()
 
 
+def test_a_list_that_is_not_utf8_text_is_broken(env, tmp_path):
+    """The list is read as UTF-8 text. A file that is not is a broken list: every
+    guarded write is refused, `--check` says broken and `--count` exits 2."""
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_bytes(b"zephyr[ ._-]?widgets\nquillon caf\xe9\n")
+    verdict, why = run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo", "plain"),
+                       tmp_path)
+    assert verdict == "deny" and "is broken (it is not UTF-8 text)" in why
+    rc, out = check_list(env)
+    assert rc == 1 and "broken: it is not UTF-8 text" in out
+    p = subprocess.run(["python3", str(SCRIPTS / "public-write-guard.py"), "--count"],
+                       input="plain\n", capture_output=True, text=True, env=env, timeout=30)
+    assert (p.returncode, p.stdout) == (2, "") and "broken: it is not UTF-8 text" in p.stderr
+    assert "quillon" not in (why + out + p.stderr).lower()
+
+
 def test_check_names_the_off_switch(env, tmp_path):
     off = Path(env["CLAUDLOBBY_ROOT"]) / "state" / "public-write-guard"
     off.mkdir(parents=True)
