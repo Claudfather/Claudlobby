@@ -11,9 +11,11 @@ and a failed update never stops the start.
 The start runs here from start-bot.sh's own text: its plugin step through the
 session spawn, then its closing alert through its last line, with lib-common
 sourced as the start sources it. Stubbed: `claude` (each update passes or fails
-as the case says), the spawn (it records that it ran) and the two tmux calls of
-the manager-pane send (they record the send). The alert's plane event lands on a
-served scratch plane and its Telegram send on the tg-post stub.
+as the case says), the spawn (it records that it ran), the manager's session
+check, and the two calls beneath the manager-pane send: its tmux call and the
+verified send, which records the text bot_tmux_send hands it, cleaned as the
+pane gets it. The alert's plane event lands on a served scratch plane and its
+Telegram send on the tg-post stub.
 """
 
 from __future__ import annotations
@@ -37,12 +39,18 @@ PLUGINS = ("alpha@Market", "beta@Market")
 
 # Stands in for Claude Code: records each call, and fails an update for a plugin
 # named in CLAUDE_FAILS the way the binary the bots launch fails one for a plugin
-# with no user-scope installation (#3089's scratch run printed this line), or
-# with no output at all for one named in CLAUDE_FAILS_SILENTLY.
+# with no user-scope installation (#3089's scratch run printed this line), with
+# no output at all for one named in CLAUDE_FAILS_SILENTLY, or with one long line
+# carrying control bytes for one named in CLAUDE_FAILS_LONG.
 CLAUDE_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$CLAUDE_CALLS"
 for ref; do :; done
 case " ${CLAUDE_FAILS_SILENTLY:-} " in *" $ref "*) exit 1 ;; esac
+case " ${CLAUDE_FAILS_LONG:-} " in
+    *" $ref "*)
+        printf 'Failed to update plugin "%s": \033[1m%05000d\033[0m\t\r\n' "$ref" 0
+        exit 1 ;;
+esac
 case " ${CLAUDE_FAILS:-} " in
     *" $ref "*)
         printf 'Checking for updates for plugin "%s" at user scope...\n' "$ref"
@@ -60,7 +68,8 @@ set -Eeuo pipefail
 trap 'printf "ERR %s\n" "$BASH_COMMAND" >> "$ERRORS"' ERR
 bot_session_spawn() { printf 'spawned\n' >> "$RECORD"; }
 check_tmux_session() { return 0; }
-bot_tmux_send() { printf 'pane %s %s: %s\n' "$1" "$2" "$3" >> "$RECORD"; }
+bot_tmux() { return 0; }
+pane_send_verified() { printf 'pane %s %s: %s\n' "$1" "$2" "$3" >> "$RECORD"; }
 """
 
 
@@ -68,6 +77,14 @@ def _failure(ref: str) -> str:
     """The reason plugin_ensure prints for the stub's failed update of *ref*."""
     return (f'claude plugin update {ref} failed (exit 1): Failed to update plugin "{ref}": '
             f'Plugin "{ref.split("@")[0]}" is not installed at scope user')
+
+
+def _long_failure(ref: str) -> str:
+    """The reason for the stub's long failed update of *ref*: the line cleaned
+    (the colour sequences dropped, the tab and the carriage return spaces), then
+    its first 300 bytes."""
+    line = f'Failed to update plugin "{ref}": ' + "0" * 5000
+    return f"claude plugin update {ref} failed (exit 1): " + line[:300]
 
 
 def _claude(tmp_path: Path) -> Path:
@@ -103,7 +120,7 @@ def _start_text() -> str:
     return step + tail
 
 
-def _start(tmp_path, scratch_plane_env, fails):
+def _start(tmp_path, scratch_plane_env, fails, long_fails=()):
     """Run the start's text for a bot `worker` whose fleet's manager `lead`
     declares its pane and the fleet's alert chat. Returns the run, the record of
     spawns and pane sends, the bot's startup log, the plane's fleet events, the
@@ -124,6 +141,7 @@ def _start(tmp_path, scratch_plane_env, fails):
             **scratch_plane_env(root, socket=socket), HOME=home, FLEET_NAME="tf",
             TG_CAPTURE=tmp_path / "tg-capture", NATIVE=native, RECORD=record, ERRORS=errors,
             CLAUDE_CALLS=tmp_path / "claude-calls", CLAUDE_FAILS=" ".join(fails),
+            CLAUDE_FAILS_LONG=" ".join(long_fails),
             BOT_DIR=worker, CLAUDE=_claude(tmp_path), FLEET_PLUGINS_REQUIRED=" ".join(PLUGINS),
             BOOT_PLUGIN_UPDATE_ONCE="0", _sb_plugin_startup_policy="manage",
             TMUX_SOCKET="worker-socket", TMUX_SESSION="worker", CLAUDE_CMD="claude",
@@ -180,6 +198,24 @@ def test_passing_updates_at_start_raise_nothing_and_the_start_goes_on(tmp_path, 
     # Both updates ran: nothing was raised because both passed.
     assert (tmp_path / "claude-calls").read_text().splitlines() == [
         f"plugin update --scope user {ref}" for ref in PLUGINS]
+
+
+def test_a_long_last_line_reaches_the_pane_and_the_chat_cut_and_cleaned(tmp_path, scratch_plane_env):
+    """#3107: each failed update's last line keeps its first 300 bytes, cleaned as
+    a pane send cleans text, so the alert fits one Telegram message and the
+    manager's pane shows the reason the chat does."""
+    result, record, log, events, severities, sent = _start(
+        tmp_path, scratch_plane_env, (), long_fails=PLUGINS)
+    reason = ("worker start: " + "; ".join(_long_failure(ref) for ref in PLUGINS)
+              + "; the session started on the plugins as installed")
+    assert result.stdout.splitlines()[-1] == "worker started"
+    assert record == ["spawned", f"pane lead-socket lead: [FLEET-ALERT] plugin_update_failed: {reason}"]
+    texts = [text for _chat, _state, text in (line.split("|", 2) for line in sent.splitlines())]
+    assert texts == [f"FLEET ALERT [plugin_update_failed]: {reason}"]
+    assert len(texts[0]) <= 4096
+    assert [e["data"] for e in events if e["type"] == "plugin_update_failed"] == [{"reason": reason}]
+    assert [line.split(" ", 1)[1] for line in log.splitlines() if " PLUGIN ERROR " in line] == [
+        f"PLUGIN ERROR {_long_failure(ref)}" for ref in PLUGINS]
 
 
 # plugin_ensure's cases besides the four update paths: one that skips the update

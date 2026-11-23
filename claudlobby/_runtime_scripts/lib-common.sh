@@ -5501,11 +5501,47 @@ PY
 # the PATH it was not found on, pointing at the install rather than the work.
 # A failed plugin update reads the same from the daily reload (_run_step in
 # reload-fleet.sh) and from a bot start (_plugin_update below).
+#
+# Either detail is cleaned as a pane send cleans its text, less the space that
+# can leave at either end, so the manager's pane shows the reason as the chat
+# does. It keeps its first _STEP_FAILURE_DETAIL_BYTES bytes, never part of a
+# character: Telegram refuses a message over 4,096 characters, and the alert
+# would reach the pane but not the chat. The line can be any length, so the
+# leading space goes by a case test and the cut comes before the trailing
+# one: under a UTF-8 locale bash took seconds to strip a space from a 100 KB
+# line with ${detail# } or ${detail% }.
+_STEP_FAILURE_DETAIL_BYTES=300
 step_failure_reason() {
     local label="$1" rc="$2" cmd="$3" detail
     detail=$(grep -v '^[[:space:]]*$' | tail -n 1 || true)
     [ "$rc" -ne 127 ] || detail="$cmd not found on PATH=$PATH"
+    detail=$(sanitize_tmux_input "$detail")
+    case "$detail" in " "*) detail=${detail:1} ;; esac
+    detail=$(_utf8_head "$detail" "$_STEP_FAILURE_DETAIL_BYTES")
+    detail="${detail% }"
     printf '%s failed (exit %d)%s' "$label" "$rc" "${detail:+: $detail}"
+}
+
+# _utf8_head <text> <max_bytes>
+# Print the head of <text> that fits in <max_bytes> bytes, never part of a
+# character: a cut that would land inside one backs off while the byte after
+# it is a continuation byte, at most 3 times, as _pane_split_bytes backs off
+# the end of a chunk. One cut, where the splitter walks every chunk of a long
+# text. Bytes under a local LC_ALL=C, whatever the caller's locale.
+_utf8_head() {
+    local LC_ALL=C
+    local text="$1" len="$2" back=0 c
+    if [ "${#text}" -le "$len" ]; then
+        printf '%s' "$text"
+        return 0
+    fi
+    while [ "$back" -lt 3 ] && [ "$len" -gt 1 ]; do
+        c=${text:$len:1}
+        case "$_PANE_UTF8_CONT" in *"$c"*) ;; *) break ;; esac
+        len=$((len - 1))
+        back=$((back + 1))
+    done
+    printf '%s' "${text:0:$len}"
 }
 
 # _plugin_update <plugin> <claude_bin> <log>
