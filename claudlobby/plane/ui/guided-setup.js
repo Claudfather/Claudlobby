@@ -95,8 +95,8 @@ const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 // Shown above Launch team when the team card carried the messages mark (string S24): which form
 // follows the Preview answer's finish, page when this page must stay open for the goal to be sent.
 const GOAL_SENT = {
-  page:"Launch sends this goal to your team's lead as your first message, under the name on your card. Keep this page open until the team is running, so the goal can be sent. A sent goal cannot be unsent.",
-  computer:"Launch sends this goal to your team's lead as your first message, under the name on your card. The team starts on it as soon as it is running, even if you close this page. A sent goal cannot be unsent."};
+  page:"Launch sends this goal to your team's lead as your first message, once the team is running. Keep this page open until then. A sent goal cannot be unsent.",
+  computer:"Launch sends this goal to your team's lead as your first message, once the team is running. You can close this page. A sent goal cannot be unsent."};
 // A Preview answer's goal fields: with the mark, the finish and the exact goal; without it, no finish.
 const badGoal = (value, selected) => (value.sends_goal === true) !== (selected.sends_goal === true)
   || value.sends_goal !== undefined && (!['page','computer'].includes(value.finish) || typeof value.goal !== 'string' || value.goal.length > 2000)

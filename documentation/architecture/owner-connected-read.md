@@ -297,9 +297,10 @@ Technical detail are reachable.
 
 The working form's computer already has a team, so its first-team panel is not
 offered anywhere in that form: it is detached from the page, not only hidden, and
-the card's "Connection options and first-time setup" disclosure no longer holds
-it. Whenever the view returns to the setup form the panel comes back, in the
-setup host or in that disclosure.
+the card's disclosure no longer holds it: in that form the disclosure is labelled
+"Connection options" and drops its guided-setup paragraph. Whenever the view
+returns to the setup form the panel comes back, in the setup host or in the
+disclosure, labelled "Connection options and first-time setup" again.
 
 Messaging in the working form is reach for an existing grant, not new authority.
 With a message grant the person has approved on that computer (today the guide's

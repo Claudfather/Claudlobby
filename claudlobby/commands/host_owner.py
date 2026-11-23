@@ -55,8 +55,8 @@ def _consent(terminal, word, consent, action, scope, *, expires_at=None):
 
 
 # The team card's second effect when it carries the messages mark (string S5).
-_CARD_MESSAGES_EFFECT = ("messages to this team from the website under the name on this card, after a healthy Launch; "
-                         "the launched setup goal sent once to the lead, which starts work on it unattended; "
+_CARD_MESSAGES_EFFECT = ("messages to this team from your workspace under the name on this card, numbered if taken, "
+                         "once the team is running; the launched goal sent once to the lead, which starts work on it without you; "
                          "no GitHub access")
 
 

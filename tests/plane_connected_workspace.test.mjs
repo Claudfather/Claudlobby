@@ -2371,7 +2371,7 @@ test('explicit browser transport shows canonical guide recovery without native t
   const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
   const nodes=descendants(h.ui.get('owner-session')),text=nodes.map(n=>n.textContent).join(' ');
-  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);
+  assert.match(text,/guided setup/);assert.doesNotMatch(text,/does not allow messages/,'with the marked team card, setup does allow messages');
   assert.match(text,/finish first-team setup in the setup panel\./);assert.doesNotMatch(text,/setup here/,'the panel may be in the main area');assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
   assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
   assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
@@ -3541,6 +3541,19 @@ test('on a bridged page a started computer with a team and a ready session shows
   for(const selector of await hidingRules())
     assert.match(selector,/:root\[data-workspace-view="setup"\]|\[data-setup-focus="only"\]/,selector);
 });
+// The card's disclosure: only connection options in the working form; first-time setup with its paragraph otherwise.
+const disclosure=l=>{const help=descendants(l.cards()[0]).find(n=>n.className==='connection-approval');
+  return {summary:help.children[0].textContent,steps:help.children[1]};};
+test('in the working form the card offers only connection options; in the setup form also first-time setup',async t=>{
+  const w=await workingPage(t),{l}=w;
+  assert.deepEqual(formsPosted(l),['setup','working']);
+  const working=disclosure(l);
+  assert.equal(working.summary,'Connection options');assert.equal(working.steps.hidden,true,'no guided-setup paragraph');
+  const s=await workingPage(t,{teams:0}),setupForm=disclosure(s.l);
+  assert.equal(setupMarker(s.l),'setup');
+  assert.equal(setupForm.summary,'Connection options and first-time setup');assert.equal(setupForm.steps.hidden,false);
+  assert.equal(setupForm.steps.textContent,'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup in the setup panel.');
+});
 test('on a bridged page a started computer with no team keeps the setup form and its parts',async t=>{
   const w=await workingPage(t,{teams:0}),{l}=w,parts=w.parts();
   assert.equal(setupMarker(l),'setup');assert.equal(l.rail.dataset.setupFocus,'only','the parts are the whole view');
@@ -3807,8 +3820,8 @@ test('the framed view posts its form to the exact shell origin: setup at mount, 
   assert.deepEqual(formsPosted(l),['setup','working','setup'],'nothing after the view closes');
 });
 // The team card carried the messages mark (04a with 04b1): Launch sends the computer's read-back goal once.
-const GOAL_PAGE="Launch sends this goal to your team's lead as your first message, under the name on your card. Keep this page open until the team is running, so the goal can be sent. A sent goal cannot be unsent.";
-const GOAL_COMPUTER="Launch sends this goal to your team's lead as your first message, under the name on your card. The team starts on it as soon as it is running, even if you close this page. A sent goal cannot be unsent.";
+const GOAL_PAGE="Launch sends this goal to your team's lead as your first message, once the team is running. Keep this page open until then. A sent goal cannot be unsent.";
+const GOAL_COMPUTER="Launch sends this goal to your team's lead as your first message, once the team is running. You can close this page. A sent goal cannot be unsent.";
 const SENT_AFTER="Team launched. Once its bots show as running, you can message the lead here.";
 function markedHarness(goal,{finish='page',marked=true}={}){
   const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);
