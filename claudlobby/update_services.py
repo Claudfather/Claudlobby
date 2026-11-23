@@ -946,8 +946,12 @@ def _restore_added(store, record, progress, row, adapter, snapshot):
     if row["manager"] == "Linux":
         _native(adapter, row, "svc_activation_reload")
     # The canonical inventory proves effective bindings after publication too.
+    # A timer's ownership and trigger proof also requires its restored service.
+    selected = {source.name}
+    if source.suffix == ".timer":
+        selected.add(declaration.service)
     collect_enrollment(Path(snapshot["data_root"]), candidates, adapter=adapter,
-                       only_names=frozenset({source.name})).require_complete()
+                       only_names=frozenset(selected)).require_complete()
     if is_unit_template(row["target"]):
         progress["restore"] = "done"
         store.save(record); return progress
