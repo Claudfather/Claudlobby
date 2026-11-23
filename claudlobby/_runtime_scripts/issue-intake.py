@@ -270,8 +270,7 @@ def merged_references(repo, numbers):
     the queue with its cursor."""
     owner = repo.split("/", 1)[0].lower()
     found = {number: {} for number in numbers}
-    pages = dict.fromkeys(numbers, 0)
-    pending = [(number, None) for number in numbers]
+    pending = [(number, None, 1) for number in numbers]  # (issue, cursor, which page it reads)
     while pending:
         page, pending = pending[:REFS_PER_QUERY], pending[REFS_PER_QUERY:]
         query = REFS_QUERY % (
@@ -279,7 +278,7 @@ def merged_references(repo, numbers):
             " ".join(REFS_ISSUE % {"k": k} for k in range(len(page))),
         )
         variables = []
-        for k, (number, cursor) in enumerate(page):
+        for k, (number, cursor, _) in enumerate(page):
             variables += ["-F", "n%d=%d" % (k, number)]
             if cursor:
                 variables += ["-f", "c%d=%s" % (k, cursor)]
@@ -288,16 +287,15 @@ def merged_references(repo, numbers):
             return None, "failed (gh exit %d)" % rc
         try:
             reply = json.loads(out)["data"]["repository"]
-            for k, (number, cursor) in enumerate(page):
+            for k, (number, cursor, nth) in enumerate(page):
                 timeline = reply["i%d" % k]["timelineItems"]
-                pages[number] += 1
                 for node in timeline["nodes"]:
                     pull = node["source"]  # an issue's is {}: the fragment reads PRs only
                     if pull.get("mergedAt") is None:
                         continue
                     login = pull["repository"]["owner"]["login"]
                     if not (isinstance(pull["number"], int) and isinstance(pull["url"], str)
-                            and instant(pull["mergedAt"])):
+                            and isinstance(login, str) and instant(pull["mergedAt"])):
                         raise ValueError
                     if login.lower() != owner:  # not this project's work
                         continue
@@ -305,13 +303,13 @@ def merged_references(repo, numbers):
                         key: pull[key] for key in ("number", "mergedAt", "url")
                     }
                 if timeline["pageInfo"]["hasNextPage"]:
-                    if pages[number] >= REFS_PAGES_PER_ISSUE:
+                    if nth >= REFS_PAGES_PER_ISSUE:
                         return None, "found more than %d pages of cross-references on #%d" % (
                             REFS_PAGES_PER_ISSUE, number)
                     after = timeline["pageInfo"]["endCursor"]
                     if not isinstance(after, str) or after in ("", cursor):
                         raise ValueError
-                    pending.append((number, after))
+                    pending.append((number, after, nth + 1))
         except (ValueError, KeyError, TypeError, AttributeError):
             return None, "was not the expected shape"
     return {

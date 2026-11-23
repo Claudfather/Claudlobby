@@ -594,9 +594,9 @@ def test_a_reference_past_the_first_page_of_the_timeline_is_still_listed(tmp_pat
     assert len(reference_reads(calls)) == 2
 
 
-@pytest.mark.parametrize("count", [1000, 1001], ids=["ten-full-pages", "past-ten-pages"])
-def test_an_issue_timeline_is_read_to_ten_pages_and_refuses_past_them(tmp_path, count):
-    proc, calls = run(
+def read_a_timeline_of(tmp_path, count: int):
+    """Issue 35 with COUNT cross-references, the last of them a merged pull request."""
+    return run(
         tmp_path,
         MERGED_LIST,
         issues=[issue(35, "repo-owner")],
@@ -604,12 +604,19 @@ def test_an_issue_timeline_is_read_to_ten_pages_and_refuses_past_them(tmp_path, 
             "35": [mention(2000 + k) for k in range(count - 1)] + [pull(47, "MERGED", MERGED_AT)],
         }},
     )
+
+
+def test_an_issue_timeline_of_ten_full_pages_is_read_to_its_end(tmp_path):
+    proc, calls = read_a_timeline_of(tmp_path, 1000)
+    assert merged_refs(proc) == {35: [merged(47)]}
     assert len(reference_reads(calls)) == 10
-    if count == 1000:
-        assert merged_refs(proc) == {35: [merged(47)]}
-    else:
-        assert (proc.returncode, proc.stdout) == (3, "")
-        assert "more than 10 pages of cross-references on #35" in proc.stderr
+
+
+def test_an_issue_timeline_past_ten_pages_refuses_rather_than_reading_on(tmp_path):
+    proc, calls = read_a_timeline_of(tmp_path, 1001)
+    assert (proc.returncode, proc.stdout) == (3, "")
+    assert "more than 10 pages of cross-references on #35" in proc.stderr
+    assert len(reference_reads(calls)) == 10
 
 
 def test_without_the_field_nothing_more_is_read_or_printed(tmp_path):
