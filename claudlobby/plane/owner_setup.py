@@ -174,6 +174,26 @@ def managed_setup(root, grant=None, *, current=True):
     return package
 
 
+def setup_still_stands(access, conn, active, grant):
+    """Whether a stored approval still stands, without its time window: ``None`` when it does.
+
+    ``"revoked"`` when it was withdrawn; ``"stale_binding"`` when the workspace binding is gone,
+    is no longer active for the current owner, or differs from the one the approval pinned.
+    ``retained_state`` and the setup finish both decide with this one function. Reads only,
+    inside the caller's transaction on the authority database.
+    """
+    workspace = access.workspace()
+    workspace._schema(conn)
+    binding = workspace._binding(conn)
+    owner = access._grant(conn)
+    if active == 0:
+        return "revoked"
+    if (binding is None or workspace._state(binding, owner) != "active"
+            or OwnerConnected._snapshot(binding) != grant.binding_snapshot):
+        return "stale_binding"
+    return None
+
+
 def _binding(grant, record):
     return {"generation": grant.generation, "request_id": record["request_id"],
             "config_fingerprint": record["config_fingerprint"], "source_revision": grant.source_revision}
@@ -282,13 +302,10 @@ class OwnerSetup:
             raise AccessUnavailable()
         grant = self._grant(row)
         now = self.access._now()
-        self.access.workspace()._schema(conn)
-        binding = self.access.workspace()._binding(conn)
-        owner = self.access._grant(conn)
-        state = ("revoked" if row["active"] == 0 else "expired" if now >= grant.expires_at
+        standing = setup_still_stands(self.access, conn, row["active"], grant)
+        state = ("revoked" if standing == "revoked" else "expired" if now >= grant.expires_at
                  else "not_yet_valid" if now < grant.created_at
-                 else "stale_binding" if binding is None or self.access.workspace()._state(binding, owner) != "active"
-                 or OwnerConnected._snapshot(binding) != grant.binding_snapshot else "allowed")
+                 else standing or "allowed")
         return RetainedSetupState(state, grant, row["launch_id"], row["launch_plan"], state == "allowed")
 
     def local(self):
@@ -497,34 +514,42 @@ class OwnerSetup:
         else:
             # Recover a lost preview response from the canonical frozen bytes,
             # not from mutable authoring or a replacement operation.
-            from ..config_plan import read_rendered
-            from ..commands.setup import _template_config
-            rendered=read_rendered(self.access.root,record["config_fingerprint"])
-            if grant.managed_owner is not None:
-                frozen = rendered.inputs.get(grant.managed_owner["override"], {}).get("state", {})
-                if (frozen.get("resolved") != grant.managed_owner["override"]
-                        or frozen.get("node", {}).get("kind") != "file"
-                        or frozen["node"].get("sha256") != grant.managed_owner["sha256"]):
-                    raise AccessDenied("setup_owner_binding_changed")
-            if rendered.revision!=grant.source_revision or rendered.fleets!=(grant.fleet,):
-                raise AccessDenied("setup_other_fleet")
-            sources=rendered.effects.get("fleet_sources")
-            if not isinstance(sources,dict) or set(sources)!={grant.fleet}:
-                raise AccessDenied("setup_original_operation_changed")
-            item=sources[grant.fleet]
-            if not isinstance(item,dict) or set(item)!={"fleet","projects"}:
-                raise AccessDenied("setup_original_operation_changed")
-            manifest,content=rendered.frozen_input(item["fleet"],required=True)
-            projects,project_content=rendered.frozen_input(item["projects"])
-            expected=self.access.root/"local"/grant.fleet/"fleet.yaml"
-            if (manifest!=expected or projects!=expected.parent/"projects.yaml" or project_content is not None
-                    or rendered.effects.get("fleet_manifests",{}).get(grant.fleet)!=str(expected)):
-                raise AccessDenied("setup_original_operation_changed")
-            if content!=_template_config(grant.template,grant.fleet,grant.repository,payload["goal"],
-                    **({"project_directory": grant.project_directory} if grant.project_directory is not None else {}),
-                    **({"account_directory": grant.account_directory} if grant.account_directory is not None else {})):
-                raise AccessDenied("setup_original_operation_changed")
+            self.check_frozen(grant,record,payload["goal"])
         return actual
+
+    def check_frozen(self, grant, record, goal):
+        """The operation's frozen configuration is exactly this approval's first team with ``goal``.
+
+        Read from the canonical frozen bytes of ``record``'s configuration fingerprint, never from the
+        team's own files. Refuses (AccessDenied) otherwise; returns nothing.
+        """
+        from ..config_plan import read_rendered
+        from ..commands.setup import _template_config
+        rendered=read_rendered(self.access.root,record["config_fingerprint"])
+        if grant.managed_owner is not None:
+            frozen = rendered.inputs.get(grant.managed_owner["override"], {}).get("state", {})
+            if (frozen.get("resolved") != grant.managed_owner["override"]
+                    or frozen.get("node", {}).get("kind") != "file"
+                    or frozen["node"].get("sha256") != grant.managed_owner["sha256"]):
+                raise AccessDenied("setup_owner_binding_changed")
+        if rendered.revision!=grant.source_revision or rendered.fleets!=(grant.fleet,):
+            raise AccessDenied("setup_other_fleet")
+        sources=rendered.effects.get("fleet_sources")
+        if not isinstance(sources,dict) or set(sources)!={grant.fleet}:
+            raise AccessDenied("setup_original_operation_changed")
+        item=sources[grant.fleet]
+        if not isinstance(item,dict) or set(item)!={"fleet","projects"}:
+            raise AccessDenied("setup_original_operation_changed")
+        manifest,content=rendered.frozen_input(item["fleet"],required=True)
+        projects,project_content=rendered.frozen_input(item["projects"])
+        expected=self.access.root/"local"/grant.fleet/"fleet.yaml"
+        if (manifest!=expected or projects!=expected.parent/"projects.yaml" or project_content is not None
+                or rendered.effects.get("fleet_manifests",{}).get(grant.fleet)!=str(expected)):
+            raise AccessDenied("setup_original_operation_changed")
+        if content!=_template_config(grant.template,grant.fleet,grant.repository,goal,
+                **({"project_directory": grant.project_directory} if grant.project_directory is not None else {}),
+                **({"account_directory": grant.account_directory} if grant.account_directory is not None else {})):
+            raise AccessDenied("setup_original_operation_changed")
 
     def preview_status(self, reader):
         """What became of this approval's Preview, for the context read only: (state, request, reserved, kept).
