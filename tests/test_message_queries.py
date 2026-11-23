@@ -236,6 +236,12 @@ def staged_receipt(root, number=1, name="1-ev_staged.batch"):
     return staged / name
 
 
+def listed_messages(ctx):
+    page = q.list_messages(ctx, since="1d", until="2026-09-28T01:00:00Z", sender=None,
+                           recipient=None, kind=None, limit=50, cursor=None, selection={})
+    return {item["message_id"]: item for item in page["items"]}
+
+
 def test_message_list_operator_scope_and_pending_receipt(estate, monkeypatch):
     ctx, conn = estate
     operator = replace(ctx, caller=ACTORS["human:operator"], caller_fleet_uid=None)
@@ -247,13 +253,7 @@ def test_message_list_operator_scope_and_pending_receipt(estate, monkeypatch):
     listed_by_envelope = communication(conn, 6, sender="bot:c/worker", recipient="bot:b/worker")
     transmission(conn, "pane_submitted", fleet="a")
 
-    def listed():
-        return {item["message_id"]: item for item in q.list_messages(
-            operator, since="1d", until="2026-09-28T01:00:00Z", sender=None,
-            recipient=None, kind=None, limit=50, cursor=None, selection={},
-        )["items"]}
-
-    rows = listed()
+    rows = listed_messages(operator)
     assert set(rows) == {pending, inbound, addressed_to_human, listed_by_envelope}
     for message_id in rows:
         assert q.show_message(operator, message_id).message_id == message_id
@@ -267,13 +267,13 @@ def test_message_list_operator_scope_and_pending_receipt(estate, monkeypatch):
     batch = staged_receipt(ctx.root)
     staged_bytes = batch.read_bytes()
     with ingest_daemon(monkeypatch):
-        rows = listed()
+        rows = listed_messages(operator)
     assert rows[pending]["receipt_observation"] == "pending"
     assert rows[pending]["integrity_verdict"] == "unconfirmed" and rows[pending]["received_at"] is None
     assert batch.read_bytes() == staged_bytes
 
     batch.write_text("{")
-    row = listed()[pending]
+    row = listed_messages(operator)[pending]
     assert row["receipt_observation"] == "unavailable" and row["integrity_verdict"] == "unconfirmed"
     assert row["received_at"] is None
 
@@ -292,6 +292,70 @@ def ingest_daemon(monkeypatch, *, answer=DAEMON_ANSWER):
             yield path
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_message_list_bounds_unanswered_receipts_per_page(estate, monkeypatch):
+    ctx, conn = estate
+    # Tied timestamps list the highest ID first.
+    pending = communication(conn, 8)
+    batch = staged_receipt(ctx.root, 8)
+    unresolved = [communication(conn, number) for number in range(2, 8)]
+    delivered = communication(conn, 1)
+    transmission(conn, "pane_submitted", fleet="a")
+    transmission(conn, "received")
+
+    with ingest_daemon(monkeypatch, answer=None):
+        start = time.monotonic()
+        rows = listed_messages(ctx)
+        elapsed = time.monotonic() - start
+
+    # Allow scheduling slack. Six separate 0.5 s timeouts took over 3 s.
+    assert 0.45 <= elapsed < 2
+    assert rows[pending]["receipt_observation"] == "pending" and batch.exists()
+    for message_id in unresolved:
+        row = rows[message_id]
+        assert (row["receipt_observation"], row["integrity_verdict"], row["received_at"]) == (
+            "unavailable", "unknown", None)
+    row = rows[delivered]
+    assert (row["receipt_observation"], row["integrity_verdict"], row["received_at"]) == (
+        "received", "delivered", "2026-09-28T00:00:00Z")
+
+
+def test_message_list_rereads_committed_proof_even_for_skipped_queue_checks(estate, monkeypatch):
+    from claudlobby.plane import daemon
+    ctx, conn = estate
+    for number in range(1, 5):
+        communication(conn, number)
+    # 4 will be seen pending. The budget will run out before 1 is checked.
+    batches = {n: staged_receipt(ctx.root, n, name=f"{n}-staged.batch") for n in (4, 1)}
+    for number in batches:
+        transmission(conn, "pane_submitted", fleet="a", number=number)
+    transmission(conn, "received", number=99)  # this destination has receipt history
+    clock = Clock()
+    timeouts = []
+
+    def probe(path, timeout):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock.sleep(0.375)
+            return "serving"
+        if len(timeouts) == 2:
+            for number, batch in batches.items():
+                transmission(conn, "received", number=number)
+                batch.unlink()
+        clock.sleep(timeout)
+        return "unanswered"
+
+    monkeypatch.setattr(q, "time", clock)
+    monkeypatch.setattr(daemon, "probe_daemon_state", probe)
+    rows = listed_messages(ctx)
+    assert timeouts == [0.5, 0.125]
+    assert rows[mid(3)]["receipt_observation"] == "missing"
+    assert rows[mid(2)]["receipt_observation"] == "unavailable"
+    for number in batches:
+        row = rows[mid(number)]
+        assert (row["receipt_observation"], row["integrity_verdict"], row["received_at"]) == (
+            "received", "delivered", "2026-09-28T00:00:00Z")
 
 
 def stage(staged, name, events, written):
