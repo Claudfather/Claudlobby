@@ -46,7 +46,11 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
   let view = "channel";
   let notice = "Choose a team to see its available actions.";
-  root.innerHTML = `<details id="work-composer" open><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
+  // The composer starts folded to its summary row (a native disclosure: reachable and announced), so the
+  // conversation keeps the screen. It opens from its summary, Message bot or a task action, and coming
+  // back from Tasks restores the state it was left in. composerKept: open when the person went to Tasks.
+  let composerKept = false;
+  root.innerHTML = `<details id="work-composer"><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
     <div class="work-loop-head"><p id="work-scope"></p><span id="work-mode" class="tag"></span></div>
     <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
@@ -87,7 +91,20 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <div id="work-recoverable"></div>
     <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button></details>`;
   const $ = id => document.getElementById(id);
-  $("work-composer").open = true;
+  // On a phone the folded row waits at the bottom of the screen; opened, the composer returns to the end
+  // of the page, so bring it into view. Elsewhere it is already in view and nothing moves.
+  $("work-composer").addEventListener("toggle", () => { if ($("work-composer").open) root.scrollIntoView?.({ block: "nearest" }); });
+  // The folded row's real height, for the phone page's scroll padding (workspace.css), so focus never lands under it.
+  if (typeof globalThis.ResizeObserver === "function") new globalThis.ResizeObserver(() =>
+    document.documentElement?.style?.setProperty("--work-loop-height", `${root.offsetHeight}px`)).observe(root);
+  // Where the composer scrolls inside its own box (wide screens), keep a send's result line in sight in that box.
+  // Only the composer's own scroll position moves; the page never does.
+  function revealNotice() {
+    const line = $("work-notice"), box = root.getBoundingClientRect?.(), at = line.getBoundingClientRect?.();
+    if (!box || !at || !line.textContent || root.scrollHeight <= root.clientHeight) return;
+    if (at.bottom > box.bottom) root.scrollTop += at.bottom - box.bottom;
+    else if (at.top < box.top) root.scrollTop -= box.top - at.top;
+  }
   const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
   const requestContext = request => {
     const value = contextsByKind.get(request.kind);
@@ -111,8 +128,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function setView(next) {
     if (view === next) return;
-    view = next;
-    $("work-composer").open = view !== "tasks";
+    const leaving = view; view = next;
+    if (view === "tasks") { composerKept = $("work-composer").open; $("work-composer").open = false; }
+    else if (leaving === "tasks") $("work-composer").open ||= composerKept;
     // Only presentation changes: the mounted form and its action selection stay
     // intact. Do not leave keyboard focus inside a newly collapsed composer.
     if (!$("work-composer").open && root.contains(document.activeElement)) $("work-composer-toggle").focus();
@@ -839,7 +857,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         : originContext.version === 2 ? originContext.actions[0] === "feedback" ? "Task feedback was not sent. Your comment is kept; refresh the task and select feedback again." : "Task nudge was not sent. Your reason is kept; refresh the task and select its nudge again." : error.message;
     } finally {
       sending = false; inFlightRequest = null;
-      paint({ restoreDraft });
+      paint({ restoreDraft }); revealNotice();
     }
   };
   $("work-clear-saved").onclick = () => {

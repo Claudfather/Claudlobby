@@ -2021,6 +2021,28 @@ test('action access check is disabled during context reads, task reads, writes, 
   const count=reads;h.get('work-check-access').onclick();await settle();assert.equal(reads,count);
 });
 
+test('composer starts folded to its announced summary and comes back from Tasks as the person left it',async()=>{
+  const h=harness();h.loop.setRoom('web');await settle();h.update();
+  const composer=h.get('work-composer');
+  assert.match(h.get('work-loop').innerHTML,/<details id="work-composer"><summary id="work-composer-toggle">/,'a native disclosure, closed in the markup');
+  assert.equal(composer.open,false,'the conversation keeps the screen until the composer is asked for');
+  assert.equal(h.get('work-composer-label').textContent,'Message team');
+  h.loop.setView('tasks');assert.equal(composer.open,false);h.loop.setView('channel');assert.equal(composer.open,false,'folded stays folded');
+  composer.open=true;h.loop.setView('tasks');assert.equal(composer.open,false);
+  h.loop.setView('channel');assert.equal(composer.open,true,'opened before Tasks is open again after it');
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+test('an opened composer stays open through a room change, an action refresh and an invalidation',async()=>{
+  const h=harness();h.loop.setRoom('north / web');await settle();h.update();
+  const composer=h.get('work-composer');composer.open=true;
+  h.get('work-body').value='Keep this draft';h.get('work-body').emit('input');
+  h.loop.setRoom('north / docs');await settle();h.update();assert.equal(composer.open,true,'room change');
+  h.loop.refreshActions('north');await settle();assert.equal(composer.open,true,'action refresh');
+  h.loop.invalidate();await settle();assert.equal(composer.open,true,'invalidation');
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
 test('Tasks view keeps one collapsed composer, its draft and receipt IDs across refresh and manual reopening',async()=>{
   const storage=store();saved(storage);const h=harness({storage});h.loop.setRoom('web');await settle();h.update();
   h.get('work-recipient').value='worker';h.get('work-recipient').onchange();

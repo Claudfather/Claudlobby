@@ -434,26 +434,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,summary:focus-visible,[
   color-scheme:dark
 }
 
-@media(min-width:1450px) {
-
-body.plane-workspace {
-  padding-left:5vw;
-  padding-right:5vw
-}
-
-.plane-workspace main {
-  grid-template-columns:190px minmax(0,1fr) 330px;
-  gap:30px
-}
-
-
-}
-
 @media(max-width:1000px) {
-
-body.plane-workspace {
-  padding:0 20px 20px
-}
 
 .plane-workspace main {
   grid-template-columns:minmax(0,1fr) 260px;
@@ -493,10 +474,6 @@ body.plane-workspace {
 }
 
 @media(max-width:650px) {
-
-body.plane-workspace {
-  padding:0 15px 15px
-}
 
 .workspace-intro {
   padding:23px 0 20px;
@@ -770,10 +747,12 @@ body.plane-workspace { padding:0 24px 24px; }
   #room-focus select { width:100%; max-width:100%; }
 }
 
-/* Keep composition reachable while the recorded feed scrolls independently. */
+/* Keep composition reachable while the recorded feed scrolls independently.
+   main takes whatever height the body leaves under the header (and anything placed above it, or a header
+   that wraps), so the bottom of the column is never cut off by a fixed guess of the header's height. */
 @media(min-width:761px) {
   body.plane-workspace { height:100dvh; overflow:hidden; padding-bottom:12px; }
-  .plane-workspace main, .plane-workspace.agent-directory-view main { height:calc(100dvh - 78px); min-height:0; }
+  .plane-workspace main, .plane-workspace.agent-directory-view main { flex:1 1 0; height:auto; min-height:0; }
   .plane-workspace #rail-fleet { height:100%; overflow:auto; }
 }
 .plane-workspace #rail-channel { display:flex; flex-direction:column; height:100%; min-height:0; }
@@ -798,12 +777,45 @@ body.plane-workspace { padding:0 24px 24px; }
 #channel .msg .body { line-height:1.5; font-size:13px; margin:4px 0; }
 #channel .msg details { margin-top:4px; }
 #channel .t-ladder { padding:0 12px 5px; }
+/* Wide screens: the conversation is the main thing. It keeps at least 45% of the column; the composer
+   takes what is left and scrolls inside itself. Folded, the composer is one summary row that never shrinks.
+   Opened, it may take more, leaving the conversation at least 30% (by the open state, not by where focus
+   is, so it does not change size as focus moves). A computer's parts or setup strip above the room
+   (data-setup-focus="shared") keeps its full height where it can: the conversation's floor is then 30%.
+   The heading and filters stay compact: labels beside their selects, and the note beside them when it fits. */
+@media(min-width:761px) {
+  .plane-workspace #channel { flex:1 1 0; min-height:max(140px, 45%); }
+  .plane-workspace #work-loop { flex:0 1 auto; min-height:0; }
+  .plane-workspace #work-loop:not(:has(> #work-composer[open])) { flex-shrink:0; }
+  .plane-workspace #rail-channel:has(> #work-loop > #work-composer[open]) > #channel,
+  .plane-workspace #rail-channel[data-setup-focus="shared"] > #channel { min-height:max(120px, 30%); }
+  .room-heading { margin-bottom:10px; }
+  #room-focus { align-items:center; gap:6px 14px; margin-bottom:10px; }
+  #room-focus label { display:inline-flex; align-items:center; gap:6px; }
+  #room-focus select { display:inline-block; margin-top:0; padding:5px 7px; }
+  #room-focus small { flex:1 1 260px; }
+}
+/* Phones: one scroller, the page. Teams, the conversation and the composer follow each other in the page
+   instead of scrolling inside fixed-height boxes; while the composer is folded to its summary row, that row
+   stays at the bottom of the screen so it is always one tap away. The whole row is its summary, at least
+   44px tall, and the page keeps focused controls clear of it (scroll padding of the row's measured height,
+   which work-loop.js keeps in --work-loop-height). Hide gets a 44px target by spacing alone. */
 @media(max-width:760px) {
-  .plane-workspace #rail-fleet { max-height:30dvh; overflow:auto; }
-  .plane-workspace #rail-channel { height:calc(100dvh - 90px); min-height:420px; }
+  .plane-workspace main, .plane-workspace.agent-directory-view main { overflow:visible; }
+  .plane-workspace #rail-fleet { height:auto; max-height:none; overflow:visible; }
+  .plane-workspace #rail-channel { height:auto; min-height:0; }
+  .plane-workspace #channel, .plane-workspace #search-results,
+  .plane-workspace #rail-right, .plane-workspace #grid,
+  .plane-workspace #fleet-room, .plane-workspace #trust { flex:none; overflow:visible; }
+  .plane-workspace #work-loop, .plane-workspace .room-bot-inspector { max-height:none; overflow:visible; }
+  .plane-workspace #work-loop:not(:has(> #work-composer[open])) { position:sticky; bottom:0; z-index:1; padding:0; }
+  .plane-workspace #work-loop:not(:has(> #work-composer[open])) #work-composer > summary { box-sizing:border-box; min-height:44px; padding:0 14px; }
+  html:has(#work-composer:not([open])) { scroll-padding-bottom:calc(var(--work-loop-height, 46px) + 8px); }
+  .fleet-tab-choice { flex:1 1 100%; flex-wrap:nowrap; }
+  .plane-workspace .fleet-tab-choice > [data-fleet] { flex:1 1 auto; min-width:0; }
+  .plane-workspace .fleet-tab-choice > .fleet-hide { min-height:44px; padding:0 12px; }
   #room-focus { gap:6px; margin-bottom:10px; }
   #room-focus small { font-size:10px; }
-  .plane-workspace #work-loop { max-height:48dvh; }
 }
 
 .room-bot-inspector { flex-shrink:0; max-height:30dvh; overflow:auto; padding:12px 14px; margin-bottom:10px;
