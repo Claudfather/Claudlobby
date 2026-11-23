@@ -7,10 +7,11 @@
 # carry this operation. Budgets: prepare 900s, status 15s including child drain.
 # recorded_complete is retained preparation evidence, never fresh runtime or
 # dependency readiness. Status alone reports recorded_in_use for that same
-# verified preparation once this product's own setup has added to it; it reads
-# none of that later state, and prepare still refuses it rather than adopt or
-# replace anything. After unknown dispatch, inspect only; absent is an
-# observation and cannot authorize an automatic retry or prove remote shutdown.
+# verified preparation once this product's own setup has added to it (its
+# updater's job definition included); it reads none of that later state, and
+# prepare still refuses it rather than adopt or replace anything. After unknown
+# dispatch, inspect only; absent is an observation and cannot authorize an
+# automatic retry or prove remote shutdown.
 # The update actions (update-status, update, update-continue) read and move an
 # installation this script prepared: one canonical line naming expected_uid and
 # the action's own keys; their answers carry the action's own names.
@@ -1477,8 +1478,19 @@ def inspect(install, data, expected, python, runner, env, in_use=False):
     entries = install / "bin"
     if entries.exists() or entries.is_symlink():
         directory(entries, private=True)
-        if {p.name for p in entries.iterdir()} - {"claudlobby", "claudlobby-update"}:
+        # Status alone may see the one job definition this installation's updater
+        # keeps beside its entry (update_job.py, update_job_label), checked by
+        # metadata only: never read or adopted. Prepare refuses it, and any other name.
+        job = ("com.claudlobby.update." + hashlib.sha256(str(install).encode()).hexdigest()[:16]
+               + (".plist" if platform.system() == "Darwin" else ".service"))
+        later = {p.name for p in entries.iterdir()} - {"claudlobby", "claudlobby-update"}
+        if later - ({job} if in_use else set()):
             raise Refusal("existing_installation", next_step="inspect")
+        if later:
+            info = (entries / job).lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_size > 8192):
+                raise Refusal("existing_installation", next_step="inspect")
         for name, module in (("claudlobby", "installation.py"), ("claudlobby-update", "git_update.py")):
             path = entries / name
             if path.exists() or path.is_symlink():
