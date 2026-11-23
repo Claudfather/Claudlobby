@@ -587,7 +587,7 @@ def test_another_owners_reference_is_dropped_before_its_other_fields_are_read(
         }},
     )
     assert merged_refs(proc) == {30: [merged(40)], 31: [merged(41)]}
-    assert "unreadable" not in proc.stderr
+    assert "mergedReferences of #" not in proc.stderr
 
 
 def test_the_kept_issues_share_one_reference_read_and_a_skipped_one_is_not_read(tmp_path):
@@ -639,7 +639,7 @@ def test_an_issue_timeline_of_ten_full_pages_is_read_to_its_end(tmp_path):
 def test_an_issue_timeline_past_ten_pages_reads_null_and_the_others_are_listed(tmp_path):
     proc, calls = read_a_timeline_of(tmp_path, 1001)
     assert merged_refs(proc) == {35: None, 36: [merged(48)]}
-    assert proc.stderr.count("unreadable") == 1
+    assert proc.stderr.count("mergedReferences of #") == 1
     assert "mergedReferences of #35 unreadable: more than 10 pages of cross-references" in (
         proc.stderr)
     assert len(reference_reads(calls)) == 10
@@ -665,7 +665,7 @@ def test_a_reference_in_another_shape_reads_null_for_its_issue_and_the_others_ar
         }},
     )
     assert merged_refs(proc) == {30: None, 31: [merged(41)]}
-    assert proc.stderr.count("unreadable") == 1
+    assert proc.stderr.count("mergedReferences of #") == 1
     assert "mergedReferences of #30 unreadable: a cross-reference not in the expected shape" in (
         proc.stderr)
     assert len(reference_reads(calls)) == 1, "an issue whose references cannot be read is read no further"

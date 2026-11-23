@@ -41,8 +41,8 @@ MERGED REFERENCES (`list --json ...,mergedReferences`)
     {number, mergedAt, url}, oldest merge first. Only a pull request whose
     repository GitHub reports under the --repo owner, in upper or lower case,
     is listed: a merged pull request under another owner is not this
-    project's work, so a reference's owner is read before its other fields,
-    and another owner's reference is dropped there. The intake computes the
+    project's work, so another owner's reference is dropped on its owner
+    alone, before its other fields are checked. The intake computes the
     field, since `gh issue list` has no such field: one GraphQL query reads the
     timelines of up to 50 kept issues at a time, and an issue with more than
     100 cross-references reads the rest in later queries, up to 10 pages. An
@@ -272,11 +272,11 @@ def label_vouches(repo, number, label, roles):
 
 def merged_pull(source, owner):
     """A timeline source as `mergedReferences` lists it when it is a merged pull request
-    in a repository of OWNER, else None: an issue ({}, since the fragment reads pull
-    requests only), another owner's pull request, or one not merged. The owner is read
-    first, so another owner's pull request is dropped before its other fields are read.
-    Raises ValueError, KeyError or TypeError for any other source not in the shape the
-    query asks for."""
+    in a repository of OWNER (in lower case), else None: an issue ({}, since the fragment
+    reads pull requests only), another owner's pull request, or one not merged. The owner
+    is checked first, so nothing else in another owner's pull request is checked. Raises
+    ValueError, KeyError or TypeError for any other source not in the shape the query
+    asks for."""
     if source == {}:
         return None
     login = source["repository"]["owner"]["login"]
@@ -294,12 +294,11 @@ def merged_pull(source, owner):
 
 def merged_references(repo, numbers):
     """(refs, unreadable, None), or (None, None, why) for a read that failed or a reply
-    not in the shape of its query. refs maps each number to the merged pull requests in
-    repositories of REPO's owner that cross-reference that issue, or to None when they
-    cannot be read: more than REFS_PAGES_PER_ISSUE pages of them, or one merged_pull
-    cannot read. unreadable says why for each None, and such an issue is read no
-    further. One GraphQL query reads REFS_PER_QUERY issues; an issue whose timeline has
-    another page goes back in the queue with its cursor."""
+    not in the shape of its query. refs maps each number to its merged pull requests, or
+    to None when its references cannot be read (MERGED REFERENCES says when), and
+    unreadable says why for each None; such an issue is read no further. One GraphQL
+    query reads REFS_PER_QUERY issues; an issue whose timeline has another page goes back
+    in the queue with its cursor."""
     owner = repo.split("/", 1)[0].lower()
     found = {number: {} for number in numbers}
     unreadable = {}
@@ -325,7 +324,7 @@ def merged_references(repo, numbers):
                 for node in timeline["nodes"]:
                     try:
                         pull = merged_pull(node["source"], owner)
-                    except (ValueError, KeyError, TypeError, AttributeError):
+                    except (ValueError, KeyError, TypeError):
                         unreadable[number] = "a cross-reference not in the expected shape"
                         break
                     if pull:
