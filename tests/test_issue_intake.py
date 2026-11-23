@@ -511,6 +511,11 @@ def mention(number: int) -> dict:
     return {"issue": number}
 
 
+def answered(source) -> dict:
+    """A cross-reference whose source the stand-in answers verbatim: a reply in another shape."""
+    return {"source": source}
+
+
 def merged_refs(proc) -> dict:
     assert proc.returncode == 0, proc.stderr
     return {row["number"]: row["mergedReferences"] for row in json.loads(proc.stdout)}
@@ -648,8 +653,11 @@ def test_an_issue_timeline_past_ten_pages_reads_null_and_the_others_are_listed(t
 @pytest.mark.parametrize("reference", [
     pull(44, "MERGED", "2026-03-01T00:00:00"),
     pull("44", "MERGED", MERGED_AT),
-    pull(44, "MERGED", MERGED_AT) | {"login": None},
-], ids=["merge-time-without-a-zone", "number-not-an-integer", "owner-unreadable"])
+    answered(merged(44) | {"repository": {"owner": {"login": None}}}),
+    answered(merged(44)),
+    answered("not an object"),
+], ids=["merge-time-without-a-zone", "number-not-an-integer", "owner-login-not-a-string",
+        "no-repository", "source-not-an-object"])
 def test_a_reference_in_another_shape_reads_null_for_its_issue_and_the_others_are_listed(
     tmp_path, reference
 ):

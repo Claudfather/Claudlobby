@@ -26,12 +26,12 @@ State file:
   events: {"N": [{event, actor, created_at, label?, rename_from?, rename_to?}]}
   edits:  {"N": {lastEditedAt, editor, editor_bot}, or a list of them}; GraphQL
           answers with the newest one's time and editor, as GitHub does
-  references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt, repo, login} or {issue}]},
-          in timeline order; a pull request's `mergedAt` is answered only when MERGED, its
-          repository's owner (when the query reads it) is `login` when given (null
-          included, for a reply in another shape), else the owner in `repo`, or in the
-          read repository when `repo` is absent, and an issue's source is {}, as GitHub
-          answers the PullRequest fragment for it
+  references: {"N": [{pr, state: OPEN|CLOSED|MERGED, mergedAt, repo} or {issue} or
+          {source}]}, in timeline order; a pull request's `mergedAt` is answered only when
+          MERGED, its repository's owner (when the query reads it) is the owner in `repo`,
+          or in the read repository when `repo` is absent, an issue's source is {}, as
+          GitHub answers the PullRequest fragment for it, and a {source} is answered
+          verbatim as the event's source, for a reply in another shape
   fail:   {issue_list: bool, issue_view: bool, permission: [LOGIN], events: [N], graphql: [N],
            references: [N], cursor: [N], repeat: [N]}; a number in references answers as
           one GitHub cannot resolve (partial data, an `errors` array, exit 1), one in cursor
@@ -238,7 +238,9 @@ def graphql(rest: list[str]) -> None:
         refuse("graphql query reads neither cross-references nor the body's last edit")
 
 
-def source(ref: dict, slug: str, query: str) -> dict:
+def source(ref: dict, slug: str, query: str):
+    if "source" in ref:
+        return ref["source"]
     if "issue" in ref:
         return {}
     repo = ref.get("repo") or slug
@@ -246,8 +248,7 @@ def source(ref: dict, slug: str, query: str) -> dict:
     pull = {"number": ref["pr"], "url": f"https://github.com/{repo}/pull/{ref['pr']}",
             "mergedAt": merged}
     if "repository{owner{login}}" in query:
-        login = ref["login"] if "login" in ref else repo.split("/", 1)[0]
-        pull["repository"] = {"owner": {"login": login}}
+        pull["repository"] = {"owner": {"login": repo.split("/", 1)[0]}}
     return pull
 
 
