@@ -235,7 +235,8 @@ shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
 computer cards, overview, diagnostics), the room heading and search, activity,
 tasks, Recorder and the Message team composer are all hidden. The page grows
 with its content and has no internal scroll container, and the panel fills the
-frame width. The bound computer's panel is the view in every connection state.
+frame width. The bound computer's panel is the view in every connection state,
+except that a started computer shows its parts instead ("A started computer's parts").
 Its first step, Connect this computer, mirrors that computer's own Connect or
 Check connection. One click sends one connect. Nothing connects, signs in or
 retries a session mutation automatically, and failures say what to choose next
@@ -244,9 +245,22 @@ sign in to Claude, describe the goal, launch. When the computer is still in
 first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
 setup approval read (`context`, which changes nothing on the computer), so
 approve setup is done without a second click. A computer that is already set up
-gets no automatic read. If the read fails, no approval is shown, Check setup
-approval stays the step's action and nothing retries it. Sign-in, preview and
-launch still each wait for their own click. Focus then moves to the next shown,
+gets no automatic approval read. If the read fails, no approval is shown, Check
+setup approval stays the step's action and nothing retries it. When the computer
+has said (`launch_reserved`) that the request this browser keeps holds a Launch,
+the browser keeps that word beside the request (`<storage key>:launch`). After
+each Connect or Check connection chosen in the panel, and after any approval
+read, the page then reads that launch's status once (`receipt`, which also
+changes nothing on the computer), exactly as Check launch status would, but only
+when the computer's word for the kept request was stored before that Connect. It
+never reads when the launch is already shown finished, when a Preview can be
+launched, or while the launch hand-over is already reading. The read lands on
+Team launched or the launch's unfinished state. A failed or refused read leaves
+the view as it was and shows nothing, and nothing retries it. The same word
+hides "Nothing runs on this computer until you choose Launch team." from the
+first paint. A request kept from a Preview alone, a word stored for another
+request, or a word this browser cannot read gets no launch status read.
+Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
 enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is
 running on this computer." This holds even after the launch handoff's status
@@ -294,6 +308,82 @@ shape-checked publisher lifetime bound; fresh website membership/session checks
 and canonical host session admission determine current access, not client clock
 interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
 this core entry does not mint or verify its document ticket.
+
+## A started computer's parts
+
+A `ready` session on a started computer offers the dashboard reads as before and
+one more read that needs no setup approval: the **parts read**, `POST
+/api/owner/connected/setup/state` with body `{}` (`setup-state`, input `{}`, on the
+SSH route and in the browser carrier's closed list). It is admitted by the
+connected session alone, checked before and after, and it writes nothing. It
+answers
+
+`{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
+
+`computer` is `started` for a computer started with no team (`start_state`) or
+one whose committed configuration lists a team; `teams` counts those teams. It
+is a count, not a running state: it is also true mid-Launch, after a failed
+Launch and after a stop, so the pane says "1 team set up" for exactly one team,
+never "running", and no status sentence for more (no plural is approved).
+`provider` is `linked` exactly when a Claude sign-in line with a value is saved
+in this computer's `.env` (`environment_linked`), under the same file checks every
+sign-in attempt already makes (`environment_ready`, unchanged); the line's value
+is never read out, and no approval and no attempt's record decides it. These read
+as `not_linked`: no `.env`; a `.env` that is not a single-link regular file of
+this user with mode 0600 and at most 64 KiB, or that changes while read; a line
+before the sign-in line that the check cannot read; an empty value
+(`CLAUDE_CODE_OAUTH_TOKEN=`, `''` or `""`); and an API key or Claude's own
+`claude login` files, which are not this line. `team.state` is
+`launch_unfinished` while a team preparation that a Launch dispatched has not
+finished cleanly (its update record is not `done`, or is `done` with health
+errors), and when the update record cannot be read; otherwise `none`. A Preview
+nothing launched is never dispatched, so it reads `none`. `helper` is
+`asleep` until Claude is linked, then `later`. Later versions add keys and states
+inside a part and entries in `bots`; `version` stays 1 while nothing is removed
+or renamed.
+
+The pane (`workspace-parts.js`) sends the parts read once for each new `ready`
+connection to a shown computer, and again whenever the window regains focus.
+A renewal of the same session (`ready`, `renewing`, `ready`) keeps the answer
+shown and sends no read; a connection change while a read is in flight is
+followed by one read for the new connection when it ends.
+Nothing else repeats it, nothing retries it, and the pane still connects only
+when the person chooses Connect. A `setup_only` session is never sent it. When the
+answer says `started`, the computer's parts show in the setup host: this
+computer, Claude, bots and, only when the embedding page names it, the helper.
+Each part is one element with `data-part` and `data-state`, a name, one status
+sentence and at most one control; the only control is a "Create a bot" that is
+visibly not available. With no team the parts are the whole view; with a team
+they stay as a strip above its teams. Over the browser carrier the five-step
+panel is the view only while the parts read has no answer or says `not_started`,
+and while that panel follows a launch in this page's lifetime: once this page
+sent a Launch or a launch status check, or followed a managed hand-off, the
+panel stays to its ending and no parts read is sent. A page opened again keeps
+the panel, with its Check launch status, while the parts read says
+`launch_unfinished`; once the Launch is done the parts show. Before that page
+reads anything, the panel shows what the computer said, for display only: the
+line that nothing runs yet is hidden, and with this browser's own request kept
+the approval step shows done. It sends, resumes and follows nothing. A browser
+with no request of its own shows approval as the step to check; Check setup
+approval reads the request, and Check launch status then follows it. A request kept in
+the browser's storage does not hold the panel by itself, so a Preview nothing
+launched never does.
+A refusal, a lost answer, an answer the pane cannot use, or a computer whose core
+has no parts read leaves the view exactly as it was.
+
+The connected document may carry `part_names`: an object whose keys are from
+`provider`, `bots` and `helper` (never a computer, which keeps its own saved
+name), and whose values are 1 to 40 ASCII letters and digits in words joined by
+one space or one hyphen, and that holds none of the view's own status sentences
+as whole words ("Linked", "Not linked", "None yet", "Coming soon", "Asleep until
+Claude is linked"), so a name cannot read like a status. The pane uses
+`part_names[<part>]` as that part's name when the whole field passes; anything
+else drops the whole field, never one name, and the document is still admitted.
+Without it the computer's saved name, "Claude" and "Bots" are used, and the
+helper row is not drawn: core holds no name for it. The browser carrier admits a
+document with the field and never sends it to the parent. A pane older than this
+refuses any document with the field, so the embedding page adds it only once it
+serves this pane.
 
 ## First-use workspace approval in the connected document
 

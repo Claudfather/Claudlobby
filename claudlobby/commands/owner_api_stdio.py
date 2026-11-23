@@ -33,7 +33,7 @@ _PUBLIC = {'status', 'pair', 'workspace-challenge', 'workspace-stage', 'session-
 _FIELDS = {
     'status': (), 'pair': (), 'workspace-challenge': (), 'workspace-stage': ('nonce', 'assertion'),
     'session-challenge': (), 'session-issue': ('nonce', 'assertion'),
-    'session-status': (), 'session-renew': (), 'session-logout': (), 'setup-context': (),
+    'session-status': (), 'session-renew': (), 'session-logout': (), 'setup-context': (), 'setup-state': (),
     'setup-signin-begin': ('generation', 'attempt_id'), 'setup-signin-status': ('generation', 'attempt_id'),
     'setup-signin-cancel': ('generation', 'attempt_id'), 'setup-signin-code': ('generation', 'attempt_id', 'code'),
     'setup-preview': ('generation', 'goal'),

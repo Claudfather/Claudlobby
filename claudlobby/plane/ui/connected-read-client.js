@@ -637,7 +637,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   return Object.freeze({ connect, start: () => setupOnly ? lifecycle('status') : handle.start(), check, activity, continuity,
     renew, logout,
-    setupContext: () => setupRequest('context',{}), setupPreview: input => setupRequest('preview',input),
+    setupContext: () => setupRequest('context',{}), setupState: () => setupRequest('state',{}), setupPreview: input => setupRequest('preview',input),
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     setupSignin: (operation,input) => {
       if (!['begin','status','code','cancel'].includes(operation)) throw new Error('Unsupported sign-in action');

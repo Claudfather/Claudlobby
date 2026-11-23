@@ -11,7 +11,9 @@ from .owner_setup import SetupEngine, _uuid
 from .owner_source import source_host_uid
 
 PREFIX="/api/owner/connected/setup/"
-OPERATIONS=frozenset({"context","preview","launch","receipt","signin-begin","signin-status","signin-code","signin-cancel"})
+OPERATIONS=frozenset({"context","state","preview","launch","receipt","signin-begin","signin-status","signin-code","signin-cancel"})
+#: Admitted by a connected session alone: the parts read needs no setup approval and changes nothing.
+SESSION_ONLY=frozenset({"state"})
 
 class SetupHTTP(ConnectedActionsHTTP):
     def __init__(self, access, *, config, authority, verify_principal):
@@ -39,14 +41,15 @@ class SetupHTTP(ConnectedActionsHTTP):
         principal=await self._principal(scope,_DEADLINE.get())
         await self._blocking(source_host_uid,self.access.root)
         reader=VerifiedReader(principal,token)
-        grant=await self._blocking(self.engine.store.authorize,reader)
+        grant=None if operation in SESSION_ONLY else await self._blocking(self.engine.store.authorize,reader)
+        if grant is None: await self._blocking(self.engine.store.session,reader)
         binding=await self._blocking(self.workspace.active_binding,principal)
         if binding.issuer!=self.config.issuer or binding.operational_origin!=self.config.operational_origin: raise AccessDenied("setup_denied")
         payload=await asyncio.wait_for(_json(receive,32768),5)
         expected={"signin-begin":{"generation","attempt_id"},"signin-status":{"generation","attempt_id"},
-            "signin-code":{"generation","attempt_id","code"},"signin-cancel":{"generation","attempt_id"},"context":set(),"preview":{"generation","goal"},"launch":{"generation","request_id","config_fingerprint","source_revision"},"receipt":{"generation","request_id","config_fingerprint","source_revision"}}[operation]
+            "signin-code":{"generation","attempt_id","code"},"signin-cancel":{"generation","attempt_id"},"context":set(),"state":set(),"preview":{"generation","goal"},"launch":{"generation","request_id","config_fingerprint","source_revision"},"receipt":{"generation","request_id","config_fingerprint","source_revision"}}[operation]
         if set(payload)!=expected: raise InvalidRequest
-        if operation!="context" and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
+        if operation not in {"context","state"} and (not _uuid(payload["generation"]) or payload["generation"]!=grant.generation): raise InvalidRequest
         if operation=="preview" and (not isinstance(payload["goal"],str) or len(payload["goal"])>2000): raise InvalidRequest
         if operation in {"launch","receipt"}:
             if (not isinstance(payload["config_fingerprint"],str) or not re.fullmatch(r"[0-9a-f]{64}",payload["config_fingerprint"])
@@ -66,7 +69,8 @@ class SetupHTTP(ConnectedActionsHTTP):
         current=await self._principal(scope,_DEADLINE.get())
         await self._blocking(source_host_uid,self.access.root)
         if current!=principal: raise AccessDenied("setup_denied")
-        await self._blocking(self.engine.store.authorize,VerifiedReader(current,token),expected=grant)
+        if grant is None: await self._blocking(self.engine.store.session,VerifiedReader(current,token))
+        else: await self._blocking(self.engine.store.authorize,VerifiedReader(current,token),expected=grant)
         return result,200
 
     async def __call__(self,scope,receive,send):
@@ -76,7 +80,7 @@ class SetupHTTP(ConnectedActionsHTTP):
         operation=scope["path"][len(PREFIX):]
         if operation not in OPERATIONS:
             await JSONResponse({"state":"denied"},404,headers={"Cache-Control":"private, no-store"})(scope,receive,send);return
-        mapped={"signin-begin":"prepare","signin-status":"receipt","signin-code":"prepare","signin-cancel":"receipt","context":"context","preview":"prepare","launch":"send","receipt":"receipt"}[operation]
+        mapped={"signin-begin":"prepare","signin-status":"receipt","signin-code":"prepare","signin-cancel":"receipt","context":"context","state":"context","preview":"prepare","launch":"send","receipt":"receipt"}[operation]
         # Concurrent requests must never modify an instance callback. Dispatch
         # translation belongs in the protected method using immutable path.
         translated={**scope,"path":"/api/owner/connected/actions/"+mapped,"setup_operation":operation}
