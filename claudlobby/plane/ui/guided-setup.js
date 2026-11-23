@@ -45,6 +45,7 @@ const PREVIEW_NOTES = {
   lost:'The connection to your computer changed, so this page stopped checking on the preview. Once connected again, choose Check setup approval.',
   kept:'Choose Check launch status to see where setup stands on your computer.'};
 const refusal = error => [400,401,403,409].includes(error?.status);
+const LAUNCH_UNCONFIRMED = 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.';
 // An answer this page will not use; an approval past its end comes apart from a malformed one.
 const rejected = (code = 'setup_answer_rejected') => Object.assign(new Error('Setup answer not used.'), {code});
 // Presentation only: the step that shows each operation's progress, and its text.
@@ -184,7 +185,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let launchHeld = null, handoffChecking = false, launchSeen = null;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
-  const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) launchSeen = pending; };
+  const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) seeLaunch(pending); };
+  // launchSeen is also kept in this browser (beside the request, as the sign-in attempt is), so a page opened again
+  // still knows the computer said this request's Launch was reserved. Presentation only; a failed write changes nothing.
+  const seeLaunch = value => {
+    if (value === launchSeen || value && launchSeen && same(value,launchSeen)) return;
+    launchSeen = value; try { storage?.setItem(storageKey+':launch',JSON.stringify(value)); } catch {}
+  };
   // previewState: the computer's last preview_state for this approval (null: not said). previewWatch: a Preview was sent
   // from this approval, or the computer reported one, so reads keep the steps already done instead of clearing them.
   // previewTried: how this page's last Preview ended without a plan ('refused' by the computer, or 'lost').
@@ -270,6 +277,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       signinPredecessor=value.replaces ?? null; signinSuccessor=value.replaced_by ?? null;
     }
     } catch { signinBlocked=true; }
+    try { const seen = JSON.parse(storage?.getItem(storageKey+':launch') ?? 'null'); if (request(seen)) launchSeen = binding(seen); }
+    catch { /* unreadable: nothing is known about a launch, as before */ }
     const text = storage?.getItem(storageKey);
     if (text) {
       if (text.length >= 8192) throw new Error();
@@ -369,7 +378,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
-          launchSeen = null; // the computer keeps this Preview only while nothing was dispatched, so nothing runs yet
+          seeLaunch(null); // the computer keeps this Preview only while nothing was dispatched, so nothing runs yet
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
         const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
@@ -493,7 +502,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           return false;
         }
         note = error?.code === 'setup_storage_unavailable' ? error.message : pending
-          ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
+          ? LAUNCH_UNCONFIRMED
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
       return false;
@@ -542,6 +551,23 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     signinRetryable=value.retryable===true; signinDeadline=url!==null && value.expires_at!==undefined ? value.expires_at : null;
     if (signinRefusal==='attempt' || value.state!=='waiting') signinRefusal=null;
     if (value.state!=='waiting') { signinCodeSent=null; if (mount) mount.code.value=''; }
+  }
+  // After a panel Connect, a page that kept the computer's word that this request's Launch was reserved (seen: launchSeen
+  // before that Connect) reads that launch's status once, as Check launch status does (receipt changes nothing on the
+  // computer). It never launches, renews or retries, and it is not this page following a launch (the click still is).
+  async function readSeenLaunch(seen) {
+    if (disposed || busy || !active() || !pending || !seen || !same(seen,pending) || launched() || launchable
+        || managedHandoff) return;
+    const original = pending, ticket = epoch; busy = true; busyOperation = 'receipt'; changed();
+    try {
+      const value = await client.setupReceipt(original);
+      if (disposed || ticket !== epoch || original !== pending || !active()) return;
+      receipt(value);
+    } catch (error) {
+      if (disposed || ticket !== epoch) return;
+      if (refusal(error)) releaseLaunch();
+      note = LAUNCH_UNCONFIRMED;
+    } finally { busy = false; busyOperation = null; if (!disposed) { changed(); scheduleHandoff(); } }
   }
   function receipt(value) {
     if (!value || ![2,3].includes(value.version) || context && value.version !== context.version || !pending || !same(value,pending) || !phases.includes(value.state)
@@ -748,7 +774,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       // computer is still in first-team setup. Focus then moves to the next action (Check setup approval if the read failed).
       connectFocus = null;
       queueMicrotask(async () => {
+        const seen = launchSeen;
         if (client.snapshot().state === 'setup_only') await run('context');
+        if (!disposed && mount === m) await readSeenLaunch(seen);
         if (!disposed && mount === m && focusFree()) nextAction(m)?.focus?.();
       });
     }

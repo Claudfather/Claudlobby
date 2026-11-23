@@ -2911,6 +2911,7 @@ test('a launch status that says the launch is no longer reserved lets go of the 
   Object.assign(l.h.context,said.ready(l.h),{launch_reserved:false});
   assert.equal(await l.h.api.run('context'),true);
   assert.equal(offered(l.panel,'Launch team'),true);assert.equal(visible(l.lede()),true);
+  assert.equal(l.h.saved.get('test:launch'),'null','a page opened again does not keep the old word either');
   assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
 });
 test('an approval read that says the held request is no longer reserved lets go of the held steps',async()=>{
@@ -3003,6 +3004,45 @@ test('a managed Launch the computer refused holds nothing, even while its status
   assert.equal(visible(l.lede()),true);
   assert.deepEqual(stepShape(l.panel)[1],['approve','current']);assert.ok(stepButtons(l.panel).includes('Check setup approval'));
   assert.equal(l.h.calls.filter(c=>c[0]==='launch').length,1);l.h.api.dispose();
+});
+// This browser after a page whose Launch the computer said was reserved: the request, and the computer's word on it.
+const keptLaunch=()=>[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})],['test:launch',JSON.stringify(settingUp)]];
+const reopenedLede=p=>descendants(p.panel).find(n=>n.className==='setup-lede');
+test('a page whose Launch the computer said was reserved keeps that word in this browser, and a page opened again hides the Launch team line before Connect',async()=>{
+  const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});l.h.context.managed_owner=undefined;
+  await l.start();
+  assert.deepEqual(JSON.parse(l.h.saved.get('test:launch')),l.h.pending,'kept beside the request');
+  l.h.api.dispose();
+  const p=connectedPanel({saved:[...l.h.saved]});
+  assert.equal(visible(reopenedLede(p)),false,'the page opened again knows a Launch was reserved before it connects');
+  assert.deepEqual(stepShape(p.panel),[['connect','current'],['approve','upcoming'],['goal','done'],['launch','upcoming']]);
+  p.h.api.dispose();
+  // A request kept from a Preview alone says nothing about a launch: the line shows, as before.
+  const preview=connectedPanel({saved:[keptLaunch()[0]]});
+  assert.equal(visible(reopenedLede(preview)),true);preview.h.api.dispose();
+});
+test('a page opened again after its Launch reads that launch\'s status once after Connect and lands on the true state, never launching',async()=>{
+  const refused=Object.assign(new Error('refused'),{status:403});
+  for(const [name,state,context,answer,note,last] of [
+    ['finished, readable session','ready',{},null,'Team launched. Your team is running on this computer.','done'],
+    ['finished, setup session','setup_only',{request:settingUp,launch_reserved:true},null,'Team launched. Your team is running on this computer.','done'],
+    ['still starting','ready',{},{state:'publish',launch_reserved:true,config_committed:false},'Still in progress. Checking status never repeats or resumes setup.','current'],
+    ['refused','ready',{},refused,'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.','current']]){
+    const client=answer?{async setupReceipt(input){p.h.calls.push(['receipt',input]);if(answer instanceof Error)throw answer;
+      return {...input,version:2,health_errors:{},...answer};}}:{};
+    const p=connectedPanel({saved:keptLaunch(),context,client});
+    await p.finish(state);await flush();
+    assert.deepEqual(p.h.calls.filter(c=>c[0]==='receipt'),[['receipt',settingUp]],'one status read of the kept request: '+name);
+    assert.equal(p.h.calls.filter(c=>['launch','preview'].includes(c[0])).length,0,'nothing is sent: '+name);
+    assert.equal(descendants(p.panel).find(n=>n.className==='setup-note').textContent,note,name);
+    assert.equal(stepShape(p.panel).at(-1)[1],last,name);
+    if(last==='done')assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['goal','done'],['launch','done']],name);
+    assert.equal(visible(reopenedLede(p)),false,name);
+    p.h.api.dispose();
+  }
+  // Without the computer's word on a launch, Connect reads no launch status.
+  const preview=connectedPanel({saved:[keptLaunch()[0]]});await preview.finish('ready');
+  assert.equal(preview.h.calls.filter(c=>c[0]==='receipt').length,0);preview.h.api.dispose();
 });
 test('a reopened page whose approval read says a launch is held hides the Launch team line',async()=>{
   const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})]],
