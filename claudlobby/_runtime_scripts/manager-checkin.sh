@@ -13,6 +13,11 @@
 # opted-out manager was never equipped). A coordinator is excluded only by
 # NOT being equipped by default -- one that hand-declares checkin is
 # equipped like any other manager, and this script injects into it too.
+#
+# THE GAP GIVES WAY ONCE PER UNSEEN REPORT (#2842): inside the minimum gap, a
+# report addressed to the manager that it has not acknowledged, recorded after
+# its newest check-in, whose one notice has no receipt, brings the beat early.
+# See ck_early.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,10 +73,13 @@ ck_skip() {   # <bot_dir> <bot_id> <reason> <log note>
 # `queue_deep` (more entries than the 256 it reads) or `queue_unreadable`.
 # Pending is not absent: the committed read's silence cannot license another
 # paid /checkin. Bounded like the message receipt's queue read; over the bound
-# is unknown, never clear.
+# is unknown, never clear. While it reads each entry it also sets
+# CK_RECEIPT_QUEUED when one may hold a receipt for this manager (a `received`
+# naming its BOT_ID, the destination the receipt hook records): ck_early reads
+# such a receipt as pending, never missing, as the message receipt does.
 ck_trigger_pending() {
     local q f n=0 spool="$ROOT/state/plane/spool"
-    CK_HOLD=""
+    CK_HOLD="" CK_RECEIPT_QUEUED=""
     for q in "$ROOT/state/plane/staged" "$spool"; do
         [ -e "$q" ] || continue
         if ! { [ -d "$q" ] && [ -r "$q" ] && [ -x "$q" ]; }; then
@@ -98,12 +106,52 @@ ck_trigger_pending() {
             if grep -qF '"checkin_triggered"' "$f" && grep -qF "\"bot:$FLEET/$1\"" "$f"; then
                 CK_HOLD=trigger; return 0
             fi
+            if grep -qF '"received"' "$f" && grep -qF "\"$1\"" "$f"; then
+                CK_RECEIPT_QUEUED=1
+            fi
         done
     done
     return 1
 }
 
-ROSTER="$(safe_mktemp)"; BAD="$(safe_mktemp)"; HITS="$(safe_mktemp)"
+# ck_early <bot_id> -- rc 0 when this beat comes before its minimum gap
+# (#2842). A worker's report reaches its manager by one send, made right after
+# the report is recorded, and nothing sends it again when that send is refused
+# (its box holding text, a menu open, its session missing). So the gap gives way
+# when the Plane holds a report addressed to this manager that it has not
+# acknowledged, recorded after its newest checkin_triggered, whose notice has
+# no receipt: plane-lookup.py --checkin-early names each one. The trigger this
+# beat records is newer than the report, so a report brings the beat early
+# only once and the next tick waits its gap. The rest of the beat is the same
+# for an early one: the second busy check, then one send, which a held box or
+# an open menu refuses. A receipt the queue scan saw still queued for ingest
+# holds the beat to its gap, and so does a read that cannot answer. CK_EARLY
+# names the first such report, CK_EARLY_N counts them, CK_EARLY_NOTE says why
+# the gap held.
+ck_early() {
+    local line rc
+    CK_EARLY="" CK_EARLY_N=0 CK_EARLY_NOTE=""
+    if [ -n "${CK_RECEIPT_QUEUED:-}" ]; then
+        CK_EARLY_NOTE="; a receipt for this manager may be pending Plane ingest, so the gap holds"
+        return 1
+    fi
+    if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --checkin-early \
+            --fleet "$FLEET" --bot "$1" > "$EARLY" 2>> "$LOG"; then
+        while read -r line; do
+            [ -n "$line" ] || continue
+            [ -n "$CK_EARLY" ] || CK_EARLY="$line"
+            CK_EARLY_N=$((CK_EARLY_N + 1))
+        done < "$EARLY"
+        [ -n "$CK_EARLY" ]
+        return
+    else
+        rc=$?
+    fi
+    CK_EARLY_NOTE="; the read for unseen reports could not answer (rc $rc), so the gap holds"
+    return 1
+}
+
+ROSTER="$(safe_mktemp)"; BAD="$(safe_mktemp)"; HITS="$(safe_mktemp)"; EARLY="$(safe_mktemp)"
 # Form D, both calls: rc 1 here means SOME manifest was bad, and the good rows
 # still printed -- a disclosure, never a reason to stop. A substitution would
 # fire the ERR trap and record a critical row for a normal outcome.
@@ -156,12 +204,14 @@ while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
     # THE RATE LIMIT IS A PLANE READ (task-recheck rule: no timer state file to
     # lose or to lie). Unreachable is NOT empty: a money-spending action must
     # not run blind, so rc 3 skips without firing and without a row -- the plane
-    # is the thing that could not be reached.
+    # is the thing that could not be reached. Inside the gap, ck_early decides
+    # whether an unseen report brings this beat early (#2842).
+    CK_EARLY="" CK_EARLY_N=0 CK_EARLY_NOTE=""
     if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$ROOT" --events \
             --fleet "$FLEET" --bot "$bot_id" --type checkin_triggered \
             --since "$SINCE" > "$HITS" 2>> "$LOG"; then
-        if [ -s "$HITS" ]; then
-            echo "$TS SKIP $FLEET/$bot_id -- checked in within ${MIN_GAP_S}s" >> "$LOG"; continue
+        if [ -s "$HITS" ] && ! ck_early "$bot_id"; then
+            echo "$TS SKIP $FLEET/$bot_id -- checked in within ${MIN_GAP_S}s$CK_EARLY_NOTE" >> "$LOG"; continue
         fi
     else
         unreachable_msg="$TS SKIP $FLEET/$bot_id -- plane unreachable, not firing"
@@ -173,7 +223,11 @@ while IFS="$(printf '\t')" read -r bot bot_fleet bot_dir; do
         ck_skip "$bot_dir" "$bot_id" busy "mid-turn"; continue
     fi
     if "$LIB_DIR/dispatch.sh" "$bot" "/checkin" </dev/null; then
-        echo "$TS DISPATCH $FLEET/$bot_id -- /checkin sent" >> "$LOG"
+        if [ -n "$CK_EARLY" ]; then
+            echo "$TS DISPATCH $FLEET/$bot_id -- /checkin sent early, inside the ${MIN_GAP_S}s gap: the notice of report $CK_EARLY has no receipt ($CK_EARLY_N unacknowledged report(s) since the last check-in)" >> "$LOG"
+        else
+            echo "$TS DISPATCH $FLEET/$bot_id -- /checkin sent" >> "$LOG"
+        fi
         emit_fleet_event checkin_triggered manager-checkin \
             "$(printf '{"bot":"%s","min_gap_s":%s}' "$(json_escape "$bot_id")" "$MIN_GAP_S")" \
             "$bot_dir" "$bot_id"

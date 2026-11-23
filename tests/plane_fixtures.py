@@ -259,3 +259,69 @@ def _write(path: Path, rows, *, extra_lines=()):
     """JSON lines to *path* — for the suites that still pin a legacy row shape."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in rows) + "".join(extra_lines))
+
+
+# --- what a report's notice leaves on the plane (#2842): the report, the
+# receipt its manager's prompt hook records, the manager's ack, and the row its
+# check-in beat records when it sends. --------------------------------------
+
+def _report_to(root, n, at, *, to="mgr", status="completed", sender="w1"):
+    """An unlinked report as the report door lands it: the `report`
+    communication addressed to *to*, then its report_status marker."""
+    initialize_plane(root)
+    msg = f"msg_{'c' * 24}{n:0>8x}"
+    ref = f"report-back:{msg}"
+    emit_batch(root, [
+        {"event_type": "communication", "emitter": "report-back", "fleet": F,
+         "source_ref": ref, "occurred_at": at,
+         "payload": {"msg_id": msg, "sender": f"bot:{F}/{sender}", "recipient": f"bot:{F}/{to}",
+                     "recipient_raw": to, "message_class": "report", "body": "r"}},
+        {"event_type": "system", "emitter": "report-back", "fleet": F,
+         "source_ref": ref, "occurred_at": at,
+         "payload": {"event": "report_status", "subject_kind": "actor",
+                     "subject": f"bot:{F}/{sender}", "data": {"status": status, "msg_id": msg}}}])
+    return msg
+
+
+def _receipt(root, msg, dest="mgr"):
+    """The `received` row the receiving bot's prompt hook records for *msg*."""
+    emit_batch(root, [{"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": F,
+                       "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
+                                   "destination": dest, "state": "received", "received_bytes": 1,
+                                   "received_sha256": "sha256:" + "0" * 64}}])
+
+
+def _receipt_history(root, dest="mgr", *, msg="msg_" + "d" * 32):
+    """A message *msg* to *dest* that it received, so a missing receipt means
+    something. A second bot's history needs a *msg* of its own."""
+    initialize_plane(root)
+    emit_batch(root, [{"event_type": "communication", "emitter": "t", "fleet": F,
+                       "payload": {"msg_id": msg, "sender": f"bot:{F}/w1", "recipient": f"bot:{F}/{dest}",
+                                   "recipient_raw": dest, "message_class": "chat", "body": "hello"}}])
+    _receipt(root, msg, dest)
+
+
+def _checkin_triggered(root, at, bot="mgr"):
+    """A checkin_triggered row as emit_fleet_event lands it, stamped *at* when
+    the beat sent `/checkin`."""
+    import hashlib
+    initialize_plane(root)
+    emit_batch(root, [{"event_type": "system", "emitter": "manager-checkin", "fleet": F,
+                       "source_ref": "fleet-events:sha:" + hashlib.sha256(f"{at} {bot}".encode()).hexdigest(),
+                       "occurred_at": at,
+                       "payload": {"event": "checkin_triggered", "subject_kind": "actor",
+                                   "subject": f"bot:{F}/{bot}",
+                                   "data": {"source": "manager-checkin",
+                                            "data": {"bot": bot, "min_gap_s": 2700}}}}])
+
+
+def _reports_acked(root, through, bot="mgr"):
+    """`fleet reports ack` by *bot*, through the report *through*."""
+    with ro(root) as conn:
+        seq = conn.execute("SELECT ingest_seq FROM communications WHERE msg_id = ?",
+                           (through,)).fetchone()[0]
+    emit_batch(root, [{"event_type": "system", "emitter": "brief", "fleet": F,
+                       "payload": {"event": "reports_acked", "subject_kind": "actor",
+                                   "subject": f"bot:{F}/{bot}",
+                                   "data": {"acked_through_seq": seq,
+                                            "acked_through_ts": "2026-11-22T12:05:00Z", "count": 1}}}])
