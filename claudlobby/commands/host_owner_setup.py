@@ -492,14 +492,15 @@ class _CardEffects:
             names = {short_alias(alias) for alias in aliases_of_kind(conn, "actor")}
         return names | set(self._selected().fleet.bots)
 
-    def register(self, alias):
-        """Register the card's name (the card was the consent) and read the ids the finish binds."""
+    def register(self, alias, check):
+        """Register the card's name (the card was the consent) and read the ids the finish binds.
+        ``check()`` runs inside the registration's admission, just before the name is written."""
         from .host_owner import _grant_preview, _register_actor
         from ..runtime_admission import RuntimeIdentity, mutation_admission
         with mutation_admission(self.paths.root, identity=RuntimeIdentity.current()) as release:
             preview = _grant_preview(self.paths, self.store, self.grant.fleet, alias, release)
         if preview["actor_uid"] is None:
-            preview = _register_actor(self.paths, self.store, self.grant.fleet, alias, preview)
+            preview = _register_actor(self.paths, self.store, self.grant.fleet, alias, preview, check)
         lead = self._selected().fleet.manager
         return {"owner": preview["owner"], "fleet_uid": preview["bindings"]["fleet_uid"],
                 "actor_uid": preview["actor_uid"], "lead_uid": preview["bindings"]["bots"].get(lead)}
@@ -549,6 +550,17 @@ def _approval_stands(store, conn, grant):
         return "revoked" if standing == "revoked" else "stale"
     owner = store._grant(conn)
     return "stale" if owner is None or not owner.active else None
+
+
+def _still_stands(store, grant):
+    """A check that raises ``_Halt`` unless the approval still stands (read-only)."""
+    def check():
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            reason = _approval_stands(store, conn, grant)
+        if reason is not None:
+            raise _Halt(reason)
+    return check
 
 
 def _stands(store, conn, grant, value):
@@ -716,25 +728,26 @@ def _card_messages(paths, store, grant, record, *, by, effects=None):
             OwnerSetup._schema(conn)
             value = _preview_payload(conn, grant).get("messages")
         if value is None or value.get("state") == "in_progress":
-            with store._connection() as conn:
-                OwnerSetup._schema(conn)
-                reason = _approval_stands(store, conn, grant)
-            if reason is not None:
-                # Before any name is read or registered: a withdrawn or re-paired approval registers nothing.
+            stands = _still_stands(store, grant)
+            try:
+                # Before any name is read, and again inside the registration's admission just before
+                # the name is written: a withdrawn or re-paired approval registers nothing.
+                stands()
+                if value is None:
+                    base = grant.messages["alias"].removeprefix("human:")
+                    name = numbered_name(base, effects.taken())
+                    if name is None:
+                        return card_answer(store, grant, _keep(store, grant, {
+                            "state": "name_taken", "by": by, "alias": grant.messages["alias"], "renamed": False,
+                            "goal": {"state": "not_sent", "reason": "name_taken"}}))
+                    # Written before anything is registered: a finish that dies resumes with this label.
+                    value = _keep(store, grant, {"state": "in_progress", "by": by, "alias": "human:" + name,
+                        "renamed": name != base, "goal": {"request_id": goal_request_id(record["request_id"])}})
+                ids = effects.register(value["alias"], stands)
+            except _Halt as halt:
                 start = value or {"by": by, "alias": grant.messages["alias"], "renamed": False}
-                return card_answer(store, grant, _keep(store, grant, {**start, "state": reason,
-                    "reason": _REASONS[reason], "goal": {"state": "not_sent", "reason": reason}}))
-            if value is None:
-                base = grant.messages["alias"].removeprefix("human:")
-                name = numbered_name(base, effects.taken())
-                if name is None:
-                    return card_answer(store, grant, _keep(store, grant, {
-                        "state": "name_taken", "by": by, "alias": grant.messages["alias"], "renamed": False,
-                        "goal": {"state": "not_sent", "reason": "name_taken"}}))
-                # Written before anything is registered: a finish that dies resumes with this label.
-                value = _keep(store, grant, {"state": "in_progress", "by": by, "alias": "human:" + name,
-                    "renamed": name != base, "goal": {"request_id": goal_request_id(record["request_id"])}})
-            ids = effects.register(value["alias"])
+                return card_answer(store, grant, _keep(store, grant, {**start, "state": halt.reason,
+                    "reason": _REASONS[halt.reason], "goal": {"state": "not_sent", "reason": halt.reason}}))
             value = _admit(store, grant, ids, value)
         if value["state"] == "allowed" and value["goal"]["state"] in ("pending", "unknown"):
             value = _keep(store, grant, {**value, "goal": _goal(paths, store, grant, record, value, effects)})

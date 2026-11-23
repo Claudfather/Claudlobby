@@ -575,7 +575,8 @@ After a healthy Launch, the guide's finish (`--_finish-setup`, run today by the
 setup page) does for a marked approval, instead of the three optional cards: it
 first checks, read-only, that the approval still stands for an active owner
 (otherwise it records `revoked` with reason `setup_withdrawn`, or `stale` with
-reason `stale_binding`, and reads or registers no name); it then takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
+reason `stale_binding`, and reads or registers no name), and checks again inside
+the registration's admission just before the name is written; it then takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
 to 38 characters) if a recorded person or bot already uses it; registers it;
 re-checks the approval, binding and owner and writes the message grant in one
 transaction; then, after the same checks plus the grant row, the goal against

@@ -3022,7 +3022,8 @@ class FakeCard:
     def taken(self):
         return set(self.names)
 
-    def register(self, alias):
+    def register(self, alias, check):
+        check()  # As inside the registration's admission, just before the name is written.
         self.registered.append(alias)
         return {"owner": self.access.current_grant(), "fleet_uid": FLEET_UID, "actor_uid": ACTOR_UID, "lead_uid": LEAD_UID}
 
@@ -3138,7 +3139,7 @@ def test_a_finish_that_died_after_choosing_its_label_resumes_with_it(setup_autho
     engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
     access = setup_authority[1]
     card = FakeCard(access)
-    card.register = lambda alias: (_ for _ in ()).throw(KeyboardInterrupt())  # Dies while registering.
+    card.register = lambda alias, check: (_ for _ in ()).throw(KeyboardInterrupt())  # Dies while registering.
     with pytest.raises(KeyboardInterrupt):
         finish(setup_authority, request, card, monkeypatch)
     assert preview_payload(access, grant)["messages"]["state"] == "in_progress"
@@ -3156,7 +3157,7 @@ def test_a_withdrawn_or_re_paired_approval_registers_grants_and_sends_nothing(se
     access = setup_authority[1]
     if resumed:  # A finish died after choosing its label, before registering it.
         dying = FakeCard(access)
-        dying.register = lambda alias: (_ for _ in ()).throw(KeyboardInterrupt())
+        dying.register = lambda alias, check: (_ for _ in ()).throw(KeyboardInterrupt())
         with pytest.raises(KeyboardInterrupt):
             finish(setup_authority, request, dying, monkeypatch)
     if change == "revoke_setup":
@@ -3286,7 +3287,7 @@ def test_an_update_after_done_refuses_the_marked_finish(setup_authority, monkeyp
         finish(setup_authority, request, None, monkeypatch)
 
 
-@pytest.mark.parametrize("change", ["second_update", "update_started"])
+@pytest.mark.parametrize("change", ["second_update", "update_started", "other_revision"])
 def test_an_update_between_the_check_and_the_send_stops_the_send(setup_authority, monkeypatch, change):
     engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
     access = setup_authority[1]
@@ -3297,13 +3298,31 @@ def test_an_update_between_the_check_and_the_send_stops_the_send(setup_authority
     def later(alias, request_id, text, check):  # After the finish's first check, before its send.
         if change == "second_update":  # Another update finished healthy at the same revision.
             retained["record"] = {**retained["record"], "request_id": str(uuid4())}
-        else:
+        elif change == "update_started":
             retained["record"] = {**retained["record"], "phase": "quiesce"}
+        else:  # The installed package moved to another revision; the update record did not.
+            from claudlobby import resources
+            monkeypatch.setattr(resources.get_resources(), "source_revision", "c" * 40)
         send(alias, request_id, text, check)
     card.send = later
     answer = finish(setup_authority, request, card, monkeypatch)["messages"]
     assert answer["state"] == "allowed" and answer["goal"] == {"state": "not_sent", "reason": "stale"}
     assert not card.sent and message_grants(access) == [(ACTOR_UID, ALIAS)]
+
+
+def test_a_revoke_between_the_first_check_and_the_registration_registers_nothing(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    register = card.register
+
+    def late(alias, check):  # The setup approval is revoked after the finish's first check.
+        OwnerSetup(access).revoke(grant)
+        return register(alias, check)
+    card.register = late
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert (answer["state"], answer["reason"], answer["alias"]) == ("revoked", "setup_withdrawn", ALIAS)
+    assert not card.registered and not card.sent and message_grants(access) == []
 
 
 def test_an_uncertain_send_is_reported_from_its_receipt_and_never_resent(setup_authority, monkeypatch):
@@ -3349,7 +3368,7 @@ def test_a_team_without_a_lead_gets_messages_but_no_goal(setup_authority, monkey
     access = setup_authority[1]
     card = FakeCard(access)
     register = card.register
-    card.register = lambda alias: {**register(alias), "lead_uid": None}
+    card.register = lambda alias, check: {**register(alias, check), "lead_uid": None}
     answer = finish(setup_authority, request, card, monkeypatch)["messages"]
     assert (answer["state"], answer["goal"]) == ("allowed", {"state": "not_sent", "reason": "no_lead"})
     assert not card.sent and message_grants(access) == [(ACTOR_UID, ALIAS)]

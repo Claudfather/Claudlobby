@@ -883,10 +883,15 @@ def test_card_finish_registers_the_name_and_sends_the_goal_through_the_local_pat
     card = _CardEffects(paths, store, SimpleNamespace(fleet="example"))
     taken = card.taken()
     assert {"local-owner", *ctx.bots} <= taken and "ada-lovelace" not in taken
-    ids = card.register("human:ada-lovelace")
+    def withdrawn():
+        raise _Halt("revoked")
+    with pytest.raises(_Halt):  # Refused inside the registration's admission: no name is written.
+        card.register("human:ada-lovelace", withdrawn)
+    assert "ada-lovelace" not in card.taken()
+    ids = card.register("human:ada-lovelace", lambda: None)
     assert ids["owner"] == owner and ids["fleet_uid"] == ctx.fleet_uid
     assert ids["lead_uid"] == ctx.bots[ctx.context.fleet.manager].uid and ids["actor_uid"].startswith("actor_")
-    assert "ada-lovelace" in card.taken() and card.register("human:ada-lovelace") == ids
+    assert "ada-lovelace" in card.taken() and card.register("human:ada-lovelace", withdrawn) == ids
     request_id = goal_request_id(str(uuid4()))
     assert card.receipt(ids["fleet_uid"], request_id) is None
     calls, checked = [], []

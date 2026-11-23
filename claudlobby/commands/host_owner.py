@@ -191,14 +191,18 @@ def _prepare_action_approval(args, paths, store, terminal, *, consent=None):
     return preview
 
 
-def _register_actor(paths, store, fleet, alias, preview):
-    """Register one local human's first contact, bound to an unregistered ``preview``; no consent here."""
+def _register_actor(paths, store, fleet, alias, preview, check=None):
+    """Register one local human's first contact, bound to an unregistered ``preview``; no consent here.
+    ``check()``, when given, runs inside the registration's admission just before the name is written
+    and refuses by raising."""
     from ..operation_context import resolve_task_mutation_context
     from ..runtime_admission import RuntimeIdentity, mutation_admission
 
     with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
                             expected_release=preview.get("release")) as release:
         _unchanged(preview, _grant_preview(paths, store, fleet, alias, release))
+        if check is not None:
+            check()
         resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
                                       operator_alias=alias, package=paths.package)
         registered = _grant_preview(paths, store, fleet, alias, release)
