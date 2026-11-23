@@ -48,6 +48,31 @@ def _valid_human_alias(alias: object) -> bool:
     return isinstance(alias, str) and _HUMAN_ALIAS.fullmatch(alias) is not None
 
 
+# Names a team reads as a role, a bot or the system, never a person's. One list: the website keeps
+# a copy, and both are checked against the shared test names. ``default-user`` is an ordinary name.
+RESERVED_SENDER_NAMES = ("owner", "lead", "manager", "engineer", "reviewer", "system", "admin",
+                         "root", "claude", "bot", "human", "team", "everyone")
+_SENDER_NAME = re.compile(r"[a-z](?:-?[a-z0-9])+")
+
+
+def sender_name_form(alias: object) -> bool:
+    """``human:`` then 2 to 40 ASCII lowercase letters, digits and single hyphens, starting with a
+    letter and not ending with a hyphen. Stricter than ``_valid_human_alias``, which still applies."""
+    if not _valid_human_alias(alias) or not alias.startswith("human:"):
+        return False
+    name = alias[len("human:"):]
+    return 2 <= len(name) <= 40 and _SENDER_NAME.fullmatch(name) is not None
+
+
+def sender_alias_refusal(alias: object) -> str | None:
+    """Why a name a team will see is refused, or ``None``: ``sender_name_form`` or ``sender_name_reserved``."""
+    if not sender_name_form(alias):
+        return "sender_name_form"
+    if alias[len("human:"):] in RESERVED_SENDER_NAMES:
+        return "sender_name_reserved"
+    return None
+
+
 def _host_uid(root: Path) -> str:
     try:
         return read_host_uid(root / "state")

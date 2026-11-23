@@ -92,6 +92,15 @@ const retryableEnding = (state, reason) => state === 'needs_attention' && reason
 // The host's CODE_MARGIN + MIN_CODE_WINDOW (provider_signin.py): with less approval left it starts no new sign-in.
 const SIGNIN_APPROVAL_ROOM = 50;
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Shown above Launch team when the team card carried the messages mark (string S24): which form
+// follows the Preview answer's finish, page when this page must stay open for the goal to be sent.
+const GOAL_SENT = {
+  page:"Launch sends this goal to your team's lead as your first message, once the team is running. Keep this page open until then. A sent goal cannot be unsent.",
+  computer:"Launch sends this goal to your team's lead as your first message, once the team is running. You can close this page. A sent goal cannot be unsent."};
+// A Preview answer's goal fields: with the mark, the finish and the exact goal; without it, no finish.
+const badGoal = (value, selected) => (value.sends_goal === true) !== (selected.sends_goal === true)
+  || value.sends_goal !== undefined && (!['page','computer'].includes(value.finish) || typeof value.goal !== 'string' || value.goal.length > 2000)
+  || value.sends_goal === undefined && 'finish' in value;
 
 export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout, visible = () => true,
@@ -121,6 +130,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // Never saved: a request kept in storage from an earlier page is not followed until this page acts on it.
   // The follow ends at a clean done receipt for the current request (launched()); see following().
   let followed=false;
+  // The computer said Launch sends the goal (its context's sends_goal); kept across connection changes for the line after Launch.
+  let sendsGoal=false;
   const launched = () => !!launchedFor && !!pending && same(launchedFor,pending);
   // The host keeps a waiting state until its worker consumes an accepted code, so remember that
   // this attempt's code was taken; and whether the computer refused (not merely missed) a code or the attempt.
@@ -358,6 +369,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
               && value.project_directory.startsWith('/') && !('repository' in value)) || !uuid(value.generation)
             || typeof value.fleet !== 'string' || !revision(value.source_revision)
             || value.managed_owner !== undefined && value.managed_owner !== true
+            || value.sends_goal !== undefined && value.sends_goal !== true
             || 'release_id' in value || 'release_seal' in value || 'plan_id' in value
             || !continuation(value.continuation) || typeof value.launch_reserved !== 'boolean' || value.launch_reserved && value.request === null || !Number.isFinite(value.expires_at) || value.expires_at <= now()
             || value.request !== null && (!request(value.request) || value.request.generation !== value.generation
@@ -371,8 +383,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         // A Preview the computer finished and kept: offered while its window is open, never beside a reserved launch.
         const kept = value.preview && !value.launch_reserved && value.request && value.preview.expires_at > now() ? value.preview : null;
         if (value.preview !== undefined && (!value.request || value.launch_reserved
-            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000))) throw rejected();
-        context = Object.freeze({...value}); plan = null; launchable = false; previewProblem = null;
+            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000
+              || badGoal(kept,value)))) throw rejected();
+        context = Object.freeze({...value}); plan = null; launchable = false; previewProblem = null; sendsGoal = value.sends_goal === true;
         previewState = said ?? null;
         if (said !== undefined && said !== 'none') previewWatch = true;
         if (said !== 'preparing') { previewUntil = 0; previewStopped = false; }
@@ -440,8 +453,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         const selected = context, authored = goal; previewWatch = true; previewTried = null;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
-        if (badPlan(value,selected) || value.expires_at <= now()) throw new Error();
-        pending = binding(value); plan = Object.freeze({...value}); planGoal = authored;
+        if (badPlan(value,selected) || value.expires_at <= now() || badGoal(value,selected)
+            || value.goal !== undefined && value.goal !== authored) throw new Error();
+        // With the mark, the goal shown above Launch is the one the computer read back.
+        pending = binding(value); plan = Object.freeze({...value}); planGoal = value.goal ?? authored;
         save(pending); launchable = true;
         note = 'Preview ready. Review it below, then choose Launch team.';
       } else if (operation === 'launch') {
@@ -588,6 +603,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
     launchedFor = done ? pending : null;
     note = done ? standalone ? 'Team launched. Your team is running on this computer.'
+      : sendsGoal || plan?.sends_goal === true ? 'Team launched. Once its bots show as running, you can message the lead here.'
       : 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
       ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Details.'
@@ -745,6 +761,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     controls.launch.hidden = !launchShown;
     setText(m.summary,launchShown ? `Your team is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
       : 'Check launch status to see where setup stands. This page never sends a launch twice.');
+    // The exact goal Launch approves, as plain text, with S24 directly above Launch team: only when Launch sends it.
+    const sends = launchShown && plan.sends_goal === true;
+    setText(m.launchGoal,sends ? planGoal : '');
+    setText(m.launchGoalNote,sends ? GOAL_SENT[plan.finish] ?? GOAL_SENT.page : '');
     setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
     setText(m.status,[note, legacyBlocked() ? LEGACY : !live && !m.connect ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
     setText(m.declaration,context ? context.template === 'local-project'
@@ -862,12 +882,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHint);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
-    launchStep.body.append(summary,row(launch,receiptButton),launchHint);
+    const launchGoal = make('p','setup-goal'), launchGoalNote = make('p','setup-step-text');
+    launchStep.body.append(summary,launchGoal,launchGoalNote,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
     disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
-      signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchHint,disclosure,declaration,authority,details,
+      signinControls:{begin,status:check,code:submit,cancel},goalDone,goalText,area,goalHint,summary,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
   }

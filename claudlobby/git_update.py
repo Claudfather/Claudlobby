@@ -485,6 +485,15 @@ def read_update(installation):
         raise UpdateError("current update record cannot be read") from exc
 
 
+def healthy_done(record):
+    """A finished update that ended cleanly: done, out of maintenance, its configuration
+    committed, no health error and no stage error. Reads only the record it is given."""
+    return (isinstance(record, dict) and record.get("phase") == "done"
+            and type(record.get("health_errors")) is dict and not record["health_errors"]
+            and record.get("maintenance") is False and record.get("config_committed") is True
+            and record.get("stage_error") is None)
+
+
 class UpdateStore:
     """One process lock and current operation; native proof belongs to its caller."""
     def __init__(self, installation, *, wait=False):

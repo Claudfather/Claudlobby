@@ -297,9 +297,10 @@ Technical detail are reachable.
 
 The working form's computer already has a team, so its first-team panel is not
 offered anywhere in that form: it is detached from the page, not only hidden, and
-the card's "Connection options and first-time setup" disclosure no longer holds
-it. Whenever the view returns to the setup form the panel comes back, in the
-setup host or in that disclosure.
+the card's disclosure no longer holds it: in that form the disclosure is labelled
+"Connection options" and drops its guided-setup paragraph. Whenever the view
+returns to the setup form the panel comes back, in the setup host or in the
+disclosure, labelled "Connection options and first-time setup" again.
 
 Messaging in the working form is reach for an existing grant, not new authority.
 With a message grant the person has approved on that computer (today the guide's
@@ -559,6 +560,40 @@ retained grant allow this receipt recovery even if partial activation left an
 unbound recorder. This grants no Plane-data read capability. New previews and
 launches retain the strict first-fleet boundary. Started canonical work stays
 owned and drained after response loss or server shutdown.
+
+When the guided team card carried the messages mark (its scope's grant holds
+`"messages": {"sender": "card"}` and its answer the `actor_alias`), the approval
+stores `{"alias": "human:<name>"}`. The name must be `human:` and 2 to 40 ASCII
+lowercase letters, digits and single hyphens, starting with a letter and not
+ending with a hyphen, and not a reserved word (`sender_alias_refusal`); otherwise
+the guide stops with `sender_name_refused` and nothing is approved. For that
+approval, `context` adds `"sends_goal": true`, and the Preview answer adds
+`"sends_goal": true`, `"finish": "page"` and the exact `goal`, which the view
+shows above Launch team; Launch approves that text. An unmarked approval answers
+exactly as before.
+
+After a healthy Launch, the guide's finish (`--_finish-setup`, run today by the
+setup page) does for a marked approval, instead of the three optional cards: it
+first checks, read-only, that the approval still stands for an active owner
+(otherwise it records `revoked` with reason `setup_withdrawn`, or `stale` with
+reason `stale_binding`, and reads or registers no name), and checks again inside
+the registration's admission just before the name is written; it then takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
+to 38 characters) if a recorded person or bot already uses it; registers it;
+re-checks the approval, binding and owner and writes the message grant in one
+transaction; then, after the same checks plus the grant row, the goal against
+the launched configuration, and the computer's update record re-read at send
+time (still this Launch's, healthy, at the running revision), sends the Preview's goal to the lead once under a
+request id derived from the Launch's. It counts the goal sent only from a
+receipt whose sender, recipient and body match. One finish runs at a time
+(`state/setup-finish-<launch request id>.lock`); its record lives in the
+approval's Preview row, so running it again answers from that record and never
+grants or sends twice. Its answer is `{"state": "setup_complete", "request_id":
+..., "messages": {"state": "allowed"|"kept"|"name_taken"|"revoked"|"stale"|"in_progress",
+"reason": ..., "by": "page"|"terminal", "alias": ..., "renamed": ...,
+"goal": {"state": "sent"|"unknown"|"pending"|"not_sent", "reason": ...}}}`.
+It reports `allowed` only while the grant row holds; otherwise `revoked` with
+reason `messages_revoked`. The status run and `host owner setup-status` carry
+the same answer and the goal text under `setup`.
 
 The browser displays team/repository/goal and plan changes, with technical
 identifiers behind a disclosure. `active` is an observed canonical activation

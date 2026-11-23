@@ -46,11 +46,24 @@ def _say(terminal, text):
 
 
 def _consent(terminal, word, consent, action, scope, *, expires_at=None):
+    """The guide's answer (``True``, or a card's typed value), or ``None`` at a terminal."""
     if consent is None:
         _approve(terminal, word)
-    else:
-        scope = {key: asdict(value) if is_dataclass(value) else value for key, value in scope.items()}
-        consent.approve(action, scope, expires_at=expires_at)
+        return None
+    scope = {key: asdict(value) if is_dataclass(value) else value for key, value in scope.items()}
+    return consent.approve(action, scope, expires_at=expires_at)
+
+
+# The team card's second effect when it carries the messages mark (string S5).
+_CARD_MESSAGES_EFFECT = ("messages to this team from your workspace under the name on this card, numbered if taken, "
+                         "once the team is running; the launched goal sent once to the lead, which starts work on it without you; "
+                         "no GitHub access")
+
+
+def _card_finish_ready():
+    """The team card carries the messages mark only while the finish that honours it exists."""
+    from . import host_owner_setup
+    return callable(getattr(host_owner_setup, "_card_messages", None))
 
 
 @contextmanager
@@ -174,17 +187,29 @@ def _prepare_action_approval(args, paths, store, terminal, *, consent=None):
         _say(terminal, "Register this local actor's first contact. Its UID is allocated only after approval.\n"
                        "Registration alone does not grant owner actions.\n")
         _consent(terminal, "REGISTER", consent, "register_actor", preview)
-        with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
-                                expected_release=preview.get("release")) as release:
-            _unchanged(preview, _grant_preview(paths, store, args.target_fleet, args.actor, release))
-            resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
-                                          operator_alias=args.actor, package=paths.package)
-            registered = _grant_preview(paths, store, args.target_fleet, args.actor, release)
-            if registered["actor_uid"] is None:
-                raise CommandFailure("conflict", "approved actor registration is unavailable")
-            _unchanged(preview, {**registered, "actor_uid": None})
-            preview = registered
+        preview = _register_actor(paths, store, args.target_fleet, args.actor, preview)
     return preview
+
+
+def _register_actor(paths, store, fleet, alias, preview, check=None):
+    """Register one local human's first contact, bound to an unregistered ``preview``; no consent here.
+    ``check()``, when given, runs inside the registration's admission just before the name is written
+    and refuses by raising."""
+    from ..operation_context import resolve_task_mutation_context
+    from ..runtime_admission import RuntimeIdentity, mutation_admission
+
+    with mutation_admission(paths.root, identity=RuntimeIdentity.current(),
+                            expected_release=preview.get("release")) as release:
+        _unchanged(preview, _grant_preview(paths, store, fleet, alias, release))
+        if check is not None:
+            check()
+        resolve_task_mutation_context(root=paths.root, fleet=preview["fleet"],
+                                      operator_alias=alias, package=paths.package)
+        registered = _grant_preview(paths, store, fleet, alias, release)
+        if registered["actor_uid"] is None:
+            raise CommandFailure("conflict", "approved actor registration is unavailable")
+        _unchanged(preview, {**registered, "actor_uid": None})
+        return registered
 
 
 def _approved_action_context(args, paths, store, preview, release):
@@ -392,7 +417,8 @@ def _grant_errors(action):
 
 
 def _allow_setup(args, paths, store, terminal, *, expected_retained=None, consent=None):
-    from ..plane.owner_setup import OwnerSetup
+    import dataclasses
+    from ..plane.owner_setup import OwnerSetup, grant_fields
     from ..plane.owner_source import fresh_owner_setup
     from ..plane.owner_setup import managed_setup
     from .operator_context import require_operator_context
@@ -425,9 +451,9 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None, consen
         _say(terminal, "Separately approve one Claude subscription sign-in through the bound browser. The official CLI may mint a one-year token; it stays in this host data root only. Cancellation may leave an uncertain provider effect. No model, native start or message approval is included.\n")
         _say(terminal, json.dumps(grant.provider_signin,ensure_ascii=True)+"\n")
         _consent(terminal,"ALLOW-CLAUDE-SIGNIN", consent, "provider_signin",
-                 {"grant": asdict(grant), "effects": ["one subscription sign-in; no model, service start or messages"]},
+                 {"grant": grant_fields(grant), "effects": ["one subscription sign-in; no model, service start or messages"]},
                  expires_at=grant.expires_at)
-    display = asdict(grant)
+    display = grant_fields(grant)
     if grant.provider_signin is None:
         display.pop("provider_signin")
     if grant.project_directory is None:
@@ -440,9 +466,20 @@ def _allow_setup(args, paths, store, terminal, *, expected_retained=None, consen
         _say(terminal, "Also approve the managed owner connection service in this SAME Preview/Launch. "
                        "It persists until explicitly stopped; pairing, messages and private ingress remain separate approvals.\n")
     _say(terminal, json.dumps(display, ensure_ascii=True) + "\n")
-    _consent(terminal, "ALLOW-SETUP", consent, "allow_setup", {"grant": display,
+    # Guided only: the card carries the messages mark and its answer the name the team will see.
+    # The terminal's card is unchanged: no mark, no name.
+    marked = consent is not None and _card_finish_ready()
+    if marked:
+        display["messages"] = {"sender": "card"}
+    answer = _consent(terminal, "ALLOW-SETUP", consent, "allow_setup", {"grant": display,
         "effects": ["one browser Preview/Launch, local project read/write, native service enrollment/start, provider usage",
-                    "no messages or GitHub access"]}, expires_at=grant.expires_at)
+                    _CARD_MESSAGES_EFFECT if marked else "no messages or GitHub access"]}, expires_at=grant.expires_at)
+    if marked:
+        from ..operation_context import sender_alias_refusal
+        from .owner_stdio import StdioRefused
+        if not isinstance(answer, str) or sender_alias_refusal(answer) is not None:
+            raise StdioRefused("sender_name_refused")
+        grant = dataclasses.replace(grant, messages={"alias": answer})
     fresh_owner_setup(paths.root)
     managed_setup(paths.root, grant)
     if managed is not None:
@@ -639,9 +676,14 @@ def dispatch(args):
             return CommandOutput({"state": "stopped"}, lines=("Owner server stopped.",))
         if args.owner_action == "setup-status":
             from ..plane.owner_setup import OwnerSetup
+            from ..plane.owner_setup import retained_fields
+            from .host_owner_setup import card_line, card_status
             state = OwnerSetup(store).retained_state()
-            return CommandOutput(asdict(state), lines=(f"First-team setup approval: {state.state}.",
-                *(() if state.launch_id is None else (f"Original request: {state.launch_id}; configuration {state.launch_plan}.",))))
+            card = card_status(store, state)
+            return CommandOutput({**retained_fields(state), **({"card": card} if card is not None else {})},
+                lines=(f"First-team setup approval: {state.state}.",
+                *(() if state.launch_id is None else (f"Original request: {state.launch_id}; configuration {state.launch_plan}.",)),
+                *(() if card is None else (card_line(card["messages"]),))))
         if args.owner_action == "workspace-status":
             state, binding = store.workspace().status()
             return CommandOutput({"state": state, "effective_active": state == "active",
@@ -678,7 +720,8 @@ def dispatch(args):
                     return _allow_setup(args, paths, store, terminal)
                 grant = setup.local()
                 if grant is None: raise CommandFailure("not_found", "no retained setup approval")
-                terminal.write(json.dumps(asdict(grant), ensure_ascii=True) + "\n")
+                from ..plane.owner_setup import grant_fields
+                terminal.write(json.dumps(grant_fields(grant), ensure_ascii=True) + "\n")
                 _approve(terminal, "REVOKE-SETUP")
                 setup.revoke(grant)
                 return CommandOutput({"state": "revoked"}, lines=("Setup approval revoked; a started update is not undone.",))

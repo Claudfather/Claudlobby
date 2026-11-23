@@ -435,7 +435,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const help = document.createElement('details'); help.className = 'connection-approval';
       const summary = document.createElement('summary'); summary.textContent = 'Connection options and first-time setup'; help.append(summary); row.append(help);
       const steps = document.createElement('p');
-      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup in the setup panel. After the original setup finishes, return to the guide for optional message approval; setup alone does not allow messages.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
+      steps.textContent = browserTransport ? 'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup in the setup panel.' : 'Already installed? Open computer access first if this computer has not been paired. Prepare local approval for this workspace, confirm its code in the computer’s local terminal, then choose Connect. These steps do not install or restart a team.';
       help.append(steps);
       const access = document.createElement('a'); access.href = reference.endpoint_origin + '/owner';
       access.target = '_blank'; access.rel = 'noopener noreferrer'; access.textContent = 'Set up computer access ↗';
@@ -473,10 +473,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     controls.rows.forEach((controls,index) => {
-      const {row,label,detail,primary,goto,buttons,help,access,setupPanel,setupHeading} = controls;
+      const {row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading} = controls;
       const {reference,client,enrollment} = clients[index], status = client.snapshot();
       row.hidden = phase !== 'ready' || !shown(reference); // a computer the browser carrier cannot reach is not listed
       const continuity = client.continuity?.();
@@ -498,6 +498,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // 'shared' layout below, so a renewal of its session (which keeps the parts shown) does not change the form.
       // With no team the parts stay the whole view, in the setup form.
       controls.working = browserTransport && bridged && partsShown && parts.teams() !== 0;
+      // The working form offers no first-time setup in the card: its disclosure holds only the connection options.
+      summary.textContent = controls.working ? 'Connection options' : 'Connection options and first-time setup';
+      steps.hidden = controls.working;
       // What the computer says of a Launch is shown in the panel's steps; it sends nothing and resumes nothing.
       if (browserTransport) setup.showLaunchUnderway?.(parts.launchUnfinished());
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown

@@ -409,9 +409,354 @@ def interrupted():
             signal.signal(sig, handler)
 
 
+# The setup finish for a team card approved with the messages mark (``grant.messages``).
+# Its effect is fixed by the stored card, whoever starts it: messages on for that one team under
+# the card's name (numbered if taken), and the launched goal sent to that team's lead once.
+# Fixed: the goal's request id is derived from the Launch's, so a second finish finds the first send.
+_GOAL_REQUEST_LABEL = "claudlobby:setup-goal:"
+
+
+def goal_request_id(launch_request_id):
+    """The setup goal's message request id, derived from the Launch's request id."""
+    from uuid import NAMESPACE_URL, uuid5
+    return str(uuid5(NAMESPACE_URL, _GOAL_REQUEST_LABEL + launch_request_id))
+
+
+def numbered_name(base, taken):
+    """The card's name if free, else the first free ``<base>-2`` .. ``<base>-9`` (the base cut to 38
+    characters, a trailing hyphen removed, so the numbered name still passes the name rule), else None."""
+    if base not in taken:
+        return base
+    stem = base[:38].rstrip("-")
+    return next((f"{stem}-{n}" for n in range(2, 10) if f"{stem}-{n}" not in taken), None)
+
+
+class _Halt(Exception):
+    """A check before the goal's send failed: the goal is not sent, for ``reason``."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@contextmanager
+def _finish_lock(root, request_id):
+    """One finish at a time per Launch: an exclusive flock on a private file in ``state/``, released
+    when the holder closes it or dies. Yields False, at once, when another process holds it."""
+    from ..plane.owner_setup import _uuid
+    import fcntl
+    state = Path(root) / "state"
+    if not _uuid(request_id) or state.resolve() != state.absolute():
+        raise AccessUnavailable("setup finish lock is unavailable")
+    fd = os.open(state / f"setup-finish-{request_id}.lock",
+                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise AccessUnavailable("setup finish lock is not a private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+class _CardEffects:
+    """The finish's reach beyond the authority database: names, registration, the lead, receipts, the send."""
+
+    def __init__(self, paths, store, grant):
+        self.paths, self.store, self.grant = paths, store, grant
+
+    def _selected(self):
+        from ..operation_context import resolve_operation_scope
+        selected, origin = resolve_operation_scope(root=self.paths.root, fleet=self.grant.fleet,
+                                                   package=self.paths.package)
+        if origin is not None:
+            raise CommandFailure("conflict", "the setup finish requires a local operator")
+        return selected
+
+    def taken(self):
+        """Every short name already used here: recorded actors (people and bots) and this team's bots."""
+        from contextlib import closing
+        from ..plane.db import connect_ro, db_file
+        from ..plane.identity import aliases_of_kind
+        from ..plane.inventory import short_alias
+        from ..plane.schema_state import require_current_schema
+        with closing(connect_ro(db_file(self.paths.root))) as conn:
+            conn.execute("BEGIN")
+            require_current_schema(conn)
+            names = {short_alias(alias) for alias in aliases_of_kind(conn, "actor")}
+        return names | set(self._selected().fleet.bots)
+
+    def register(self, alias, check):
+        """Register the card's name (the card was the consent) and read the ids the finish binds.
+        ``check()`` runs inside the registration's admission, just before the name is written."""
+        from .host_owner import _grant_preview, _register_actor
+        from ..runtime_admission import RuntimeIdentity, mutation_admission
+        with mutation_admission(self.paths.root, identity=RuntimeIdentity.current()) as release:
+            preview = _grant_preview(self.paths, self.store, self.grant.fleet, alias, release)
+        if preview["actor_uid"] is None:
+            preview = _register_actor(self.paths, self.store, self.grant.fleet, alias, preview, check)
+        lead = self._selected().fleet.manager
+        return {"owner": preview["owner"], "fleet_uid": preview["bindings"]["fleet_uid"],
+                "actor_uid": preview["actor_uid"], "lead_uid": preview["bindings"]["bots"].get(lead)}
+
+    def receipt(self, fleet_uid, request_id):
+        """The retained request under ``request_id``, or None when none exists."""
+        from ..request_queries import RequestNotFoundError, read_request
+        try:
+            return read_request(self.paths.root, fleet_uid, request_id)
+        except RequestNotFoundError:
+            return None
+
+    def send(self, alias, request_id, text, check):
+        from .message_write import send_to_lead
+        send_to_lead(self.paths.root, package=self.paths.package, fleet=self.grant.fleet, alias=alias,
+                     request_id=request_id, text=text, check=check)
+
+
+def _preview_payload(conn, grant):
+    row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+    if row is None:
+        raise AccessUnavailable("the launched Preview is not recorded")
+    return json.loads(row["payload"])
+
+
+def _keep(store, grant, value):
+    """Write the finish's record into the approval's Preview row, in its own transaction."""
+    with store._connection(write=True) as conn:
+        OwnerSetup._schema(conn)
+        payload = _preview_payload(conn, grant)
+        conn.execute("UPDATE setup_previews SET payload=? WHERE generation=?",
+                     (json.dumps({**payload, "messages": value}), grant.generation))
+    return value
+
+
+_REASONS = {"revoked": "setup_withdrawn", "stale": "stale_binding"}
+
+
+def _approval_stands(store, conn, grant):
+    """Read-only: None while this approval stands for an active owner; else ``revoked`` or ``stale``."""
+    from ..plane.owner_setup import setup_still_stands
+    row = conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+    if row is None or OwnerSetup._grant(row) != grant:
+        return "stale"
+    standing = setup_still_stands(store, conn, row["active"], grant)
+    if standing is not None:
+        return "revoked" if standing == "revoked" else "stale"
+    owner = store._grant(conn)
+    return "stale" if owner is None or not owner.active else None
+
+
+def _still_stands(store, grant):
+    """A check that raises ``_Halt`` unless the approval still stands (read-only)."""
+    def check():
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            reason = _approval_stands(store, conn, grant)
+        if reason is not None:
+            raise _Halt(reason)
+    return check
+
+
+def _stands(store, conn, grant, value):
+    """None while the approval stands, the owner is the one the finish bound, and (once granted) the
+    grant row holds the recorded actor and name; else the reason: ``revoked`` or ``stale``."""
+    reason = _approval_stands(store, conn, grant)
+    if reason is not None:
+        return reason
+    if store._grant(conn).revision != value["owner_revision"]:
+        return "stale"
+    if value.get("state") == "allowed" and not _grant_holds(store, conn, value):
+        return "revoked"
+    return None
+
+
+def _grant_holds(store, conn, value):
+    """The message grant the finish wrote still exists, for the current owner, with its actor and name."""
+    from ..plane.owner_access import OwnerAccess
+    owner = store._grant(conn)
+    if owner is None or not owner.active or owner.revision != value["owner_revision"]:
+        return False
+    held = (conn.execute("SELECT actor_uid, actor_alias FROM message_grants WHERE owner_revision=? AND fleet_uid=?",
+                         (owner.revision, value["fleet_uid"])).fetchone()
+            if OwnerAccess._has_grants(conn, "message") else None)
+    return held is not None and (held["actor_uid"], held["actor_alias"]) == (value["actor_uid"], value["alias"])
+
+
+def _admit(store, grant, ids, value):
+    """Re-check and write in one immediate transaction: the grant and the record, or neither."""
+    from ..plane.owner_access import OwnerAccess
+    value = {**value, "fleet_uid": ids["fleet_uid"], "actor_uid": ids["actor_uid"],
+             "lead_uid": ids["lead_uid"], "owner_revision": ids["owner"].revision}
+    with store._connection(write=True) as conn:
+        OwnerSetup._schema(conn)
+        payload = _preview_payload(conn, grant)
+        reason = _stands(store, conn, grant, value)
+        if reason is None and store._grant(conn) != ids["owner"]:
+            reason = "stale"
+        held = (conn.execute("SELECT actor_uid, actor_alias FROM message_grants WHERE owner_revision=? AND fleet_uid=?",
+                             (value["owner_revision"], value["fleet_uid"])).fetchone()
+                if reason is None and OwnerAccess._has_grants(conn, "message") else None)
+        if reason is not None:
+            value.update(state=reason, reason=_REASONS[reason], goal={"state": "not_sent", "reason": reason})
+        elif held is not None and (held["actor_uid"], held["actor_alias"]) != (value["actor_uid"], value["alias"]):
+            # Approved at the terminal under another name: left as it is.
+            value.update(state="kept", goal={"state": "not_sent", "reason": "other_grant"})
+        else:
+            store._allow_action_in(conn, "message", ids["owner"], value["fleet_uid"], value["actor_uid"], value["alias"])
+            value.update(state="allowed", goal={"request_id": value["goal"]["request_id"], "state": "pending"}
+                         if value["lead_uid"] is not None else {"state": "not_sent", "reason": "no_lead"})
+        conn.execute("UPDATE setup_previews SET payload=? WHERE generation=?",
+                     (json.dumps({**payload, "messages": value}), grant.generation))
+    return value
+
+
+def _sent(view, value, text):
+    """``sent`` only for a receipt whose sender, recipient and body all match, with a submitted transport."""
+    from ..message_payload import MessageBody
+    from ..request_receipts import semantic_digest
+    expected = semantic_digest({"body": MessageBody.from_input(text).text.encode("utf-8"), "kind": "chat"})
+    if (view.operation != "message.send" or view.caller_uid != value["actor_uid"]
+            or view.recipient_uid != value["lead_uid"] or view.semantic_sha256 != expected):
+        return {"state": "unknown", "reason": "request_id_taken"}
+    if any(item.transport is not None and item.transport.status == "submitted" for item in view.transmissions):
+        return {"state": "sent"}
+    return {"state": "unknown", "reason": "send_uncertain"}
+
+
+def _goal(paths, store, grant, record, value, effects):
+    """Send the launched goal once: look its id up first (never resend), then check and send."""
+    goal = value["goal"]
+    request_id = goal["request_id"]
+    with store._connection() as conn:
+        OwnerSetup._schema(conn)
+        text = _preview_payload(conn, grant)["goal"]
+    try:
+        view = effects.receipt(value["fleet_uid"], request_id)
+    except Exception:
+        return {**goal, "reason": "receipt_unavailable"}
+    if view is not None:
+        return {"request_id": request_id, **_sent(view, value, text)}
+
+    def check(ctx, route):
+        """Immediately before the send, inside runtime admission."""
+        from ..git_update import healthy_done, read_update
+        from ..plane.owner_setup import managed_setup
+        if (ctx.caller.uid, ctx.caller.alias, route.peer.uid) != (value["actor_uid"], value["alias"], value["lead_uid"]):
+            raise _Halt("stale")
+        # The Launch is still the computer's current healthy update: no later update finished since.
+        package = managed_setup(paths.root)
+        current = read_update(package.installation)
+        if current != record or not healthy_done(current) or package.source_revision != record["target"]:
+            raise _Halt("stale")
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            reason = _stands(store, conn, grant, value)
+            if reason is not None:
+                raise _Halt(reason)
+            if _preview_payload(conn, grant)["goal"] != text:
+                raise _Halt("goal_changed")
+        try:
+            OwnerSetup(store).check_frozen(grant, record, text)
+        except (AccessDenied, AccessUnavailable, OSError, ValueError, KeyError):
+            raise _Halt("goal_changed") from None
+
+    try:
+        effects.send(value["alias"], request_id, text, check)
+    except _Halt as halt:
+        return {"request_id": request_id, "state": "not_sent", "reason": halt.reason}
+    except Exception:
+        pass  # An error can follow an effect: only the receipt says what happened.
+    try:
+        view = effects.receipt(value["fleet_uid"], request_id)
+    except Exception:
+        return {"request_id": request_id, "state": "unknown", "reason": "receipt_unavailable"}
+    if view is None:
+        return {"request_id": request_id, "state": "pending", "reason": "send_unavailable"}
+    return {"request_id": request_id, **_sent(view, value, text)}
+
+
+def card_answer(store, grant, value):
+    """The finish's answer from its record; ``allowed`` only while the grant row still holds."""
+    answer = {key: value[key] for key in ("state", "reason", "by", "alias", "renamed") if key in value}
+    if "goal" in value:
+        answer["goal"] = {key: value["goal"][key] for key in ("state", "reason") if key in value["goal"]}
+    if value.get("state") == "allowed":
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            if not _grant_holds(store, conn, value):
+                answer.update(state="revoked", reason="messages_revoked")
+    return answer
+
+
+def card_status(store, retained):
+    """For the status run and ``setup-status``: the marked approval's finish answer and launched goal."""
+    grant = retained.grant if retained is not None else None
+    if grant is None or grant.messages is None:
+        return None
+    with store._connection() as conn:
+        OwnerSetup._schema(conn)
+        row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+        payload = json.loads(row["payload"]) if row is not None else {}
+    value = payload.get("messages")
+    return {"messages": card_answer(store, grant, value) if value is not None else None, "goal": payload.get("goal")}
+
+
+def card_line(answer):
+    """One key=value line for a terminal: never the goal text."""
+    if answer is None:
+        return "setup_messages state=none"
+    goal = answer.get("goal") or {}
+    fields = (("state", answer.get("state")), ("reason", answer.get("reason")), ("by", answer.get("by")),
+              ("alias", answer.get("alias")), ("goal", goal.get("state")), ("goal_reason", goal.get("reason")))
+    return "setup_messages " + " ".join(f"{key}={value}" for key, value in fields if value is not None)
+
+
+def _card_messages(paths, store, grant, record, *, by, effects=None):
+    """The finish for a marked approval, after a healthy Launch: lock, record, label, registration,
+    one checked transaction, then the goal's checked send and receipt match. Safe to run again."""
+    effects = effects or _CardEffects(paths, store, grant)
+    with _finish_lock(paths.root, record["request_id"]) as held:
+        if not held:
+            return {"state": "in_progress", "by": by}
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            value = _preview_payload(conn, grant).get("messages")
+        if value is None or value.get("state") == "in_progress":
+            stands = _still_stands(store, grant)
+            try:
+                # Before any name is read, and again inside the registration's admission just before
+                # the name is written: a withdrawn or re-paired approval registers nothing.
+                stands()
+                if value is None:
+                    base = grant.messages["alias"].removeprefix("human:")
+                    name = numbered_name(base, effects.taken())
+                    if name is None:
+                        return card_answer(store, grant, _keep(store, grant, {
+                            "state": "name_taken", "by": by, "alias": grant.messages["alias"], "renamed": False,
+                            "goal": {"state": "not_sent", "reason": "name_taken"}}))
+                    # Written before anything is registered: a finish that dies resumes with this label.
+                    value = _keep(store, grant, {"state": "in_progress", "by": by, "alias": "human:" + name,
+                        "renamed": name != base, "goal": {"request_id": goal_request_id(record["request_id"])}})
+                ids = effects.register(value["alias"], stands)
+            except _Halt as halt:
+                start = value or {"by": by, "alias": grant.messages["alias"], "renamed": False}
+                return card_answer(store, grant, _keep(store, grant, {**start, "state": halt.reason,
+                    "reason": _REASONS[halt.reason], "goal": {"state": "not_sent", "reason": halt.reason}}))
+            value = _admit(store, grant, ids, value)
+        if value["state"] == "allowed" and value["goal"]["state"] in ("pending", "unknown"):
+            value = _keep(store, grant, {**value, "goal": _goal(paths, store, grant, record, value, effects)})
+        return card_answer(store, grant, value)
+
 
 def _completed(args, paths, store, terminal, retained, record, package, *, consent=None):
     from ..plane.owner_setup import OwnerSetup
+    from ..git_update import healthy_done
     from ..installation import _setup_binding
     from .host_owner import _setup_messages
     grant = retained.grant
@@ -419,11 +764,15 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
     expected = getattr(args, "finish_setup", None)
     if (consent is not None and expected is None
             or expected is not None and _setup_binding(expected) != actual
-            or record.get("maintenance") is not False or record.get("config_committed") is not True
-            or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
+            or not healthy_done(record)
             or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
             or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
+    if grant.messages is not None:
+        # The team card carried the messages mark: its finish, never the three optional cards.
+        messages = _card_messages(paths, store, grant, record, by="page" if consent is not None else "terminal")
+        return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": messages},
+                             lines=(card_line(messages),))
     _say(terminal, "Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
     messages = _setup_messages(paths, store, terminal, grant.fleet,
         **({"consent": consent} if consent is not None else {}))
@@ -445,8 +794,9 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
 
     retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
     if retained and retained.state == "legacy_recovery_required":
+        from ..plane.owner_setup import retained_fields
         raise CommandFailure("conflict", "historical sealed setup requires local recovery; no Git operation was inferred",
-                             data=asdict(retained))
+                             data=retained_fields(retained))
     package = managed_setup(paths.root)
     installation = package.installation
     record = read_update(installation)

@@ -873,6 +873,10 @@ body.plane-workspace { padding:0 24px 24px; }
 .setup-step-text { margin:0; color:var(--dim); font-size:13px; line-height:1.55; overflow-wrap:anywhere; }
 .setup-step-text:empty, .setup-hint:empty, .setup-progress:empty, .signin-copy-note:empty { display:none; }
 .setup-hint { margin:8px 0 0; color:var(--dim); font-size:12px; }
+/* The exact goal Launch sends, shown as the person's own words above Launch team. */
+.setup-goal { margin:8px 0 6px; padding:8px 10px; border:1px solid var(--edge); border-radius:8px; background:var(--panel);
+  color:var(--ink); font-size:13px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+.setup-goal:empty { display:none; }
 .setup-progress { margin:8px 0 0; color:var(--dim); font-size:12px; font-style:italic; }
 /* A line that waits on the computer turns a small ring beside its text (still under reduced motion: see the global rule). */
 :is(.setup-panel [data-tone="working"], .setup-only-status[data-tone="working"])::before { content:""; display:inline-block; box-sizing:border-box;

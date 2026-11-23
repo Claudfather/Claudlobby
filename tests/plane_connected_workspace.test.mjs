@@ -2371,7 +2371,7 @@ test('explicit browser transport shows canonical guide recovery without native t
   const workspace=createConnectedWorkspace({...h.dependencies,fetch:browserFetch});t.after(()=>workspace.dispose());
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
   const nodes=descendants(h.ui.get('owner-session')),text=nodes.map(n=>n.textContent).join(' ');
-  assert.match(text,/guided setup/);assert.match(text,/optional message approval/);
+  assert.match(text,/guided setup/);assert.doesNotMatch(text,/does not allow messages/,'with the marked team card, setup does allow messages');
   assert.match(text,/finish first-team setup in the setup panel\./);assert.doesNotMatch(text,/setup here/,'the panel may be in the main area');assert.doesNotMatch(text,/DATA_ROOT|local terminal|confirm-workspace/);
   assert.equal(nodes.some(n=>n.dataset.operation==='enroll'),false);assert.equal(await workspace.act(0,'enroll'),false);
   assert.ok(nodes.filter(n=>n.tagName==='A').every(n=>n.hidden));
@@ -3541,6 +3541,19 @@ test('on a bridged page a started computer with a team and a ready session shows
   for(const selector of await hidingRules())
     assert.match(selector,/:root\[data-workspace-view="setup"\]|\[data-setup-focus="only"\]/,selector);
 });
+// The card's disclosure: only connection options in the working form; first-time setup with its paragraph otherwise.
+const disclosure=l=>{const help=descendants(l.cards()[0]).find(n=>n.className==='connection-approval');
+  return {summary:help.children[0].textContent,steps:help.children[1]};};
+test('in the working form the card offers only connection options; in the setup form also first-time setup',async t=>{
+  const w=await workingPage(t),{l}=w;
+  assert.deepEqual(formsPosted(l),['setup','working']);
+  const working=disclosure(l);
+  assert.equal(working.summary,'Connection options');assert.equal(working.steps.hidden,true,'no guided-setup paragraph');
+  const s=await workingPage(t,{teams:0}),setupForm=disclosure(s.l);
+  assert.equal(setupMarker(s.l),'setup');
+  assert.equal(setupForm.summary,'Connection options and first-time setup');assert.equal(setupForm.steps.hidden,false);
+  assert.equal(setupForm.steps.textContent,'Use your workspace’s guided setup to approve this computer and workspace, then finish first-team setup in the setup panel.');
+});
 test('on a bridged page a started computer with no team keeps the setup form and its parts',async t=>{
   const w=await workingPage(t,{teams:0}),{l}=w,parts=w.parts();
   assert.equal(setupMarker(l),'setup');assert.equal(l.rail.dataset.setupFocus,'only','the parts are the whole view');
@@ -3805,4 +3818,63 @@ test('the framed view posts its form to the exact shell origin: setup at mount, 
   assert.deepEqual(formsPosted(l),['setup','working','setup']);
   l.workspace.dispose();await l.workspace.checkAccount();await flush();
   assert.deepEqual(formsPosted(l),['setup','working','setup'],'nothing after the view closes');
+});
+// The team card carried the messages mark (04a with 04b1): Launch sends the computer's read-back goal once.
+const GOAL_PAGE="Launch sends this goal to your team's lead as your first message, once the team is running. Keep this page open until then. A sent goal cannot be unsent.";
+const GOAL_COMPUTER="Launch sends this goal to your team's lead as your first message, once the team is running. You can close this page. A sent goal cannot be unsent.";
+const SENT_AFTER="Team launched. Once its bots show as running, you can message the lead here.";
+function markedHarness(goal,{finish='page',marked=true}={}){
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);
+    return marked?{...h.preview,sends_goal:true,finish,goal:input.goal}:h.preview;}}});
+  if(marked)h.context.sends_goal=true;
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const launchBody=stepsOf(panel).find(n=>n.dataset.step==='launch').children.find(n=>n.className==='setup-step-body');
+  const goalNode=descendants(panel).find(n=>n.className==='setup-goal');
+  return {h,panel,launchBody,goalNode,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
+}
+test('a marked card shows the computer\'s goal and S24 directly above Launch team, and S17 after Launch',async()=>{
+  const m=markedHarness('Add a contact form to the homepage');await m.ready();
+  const order=m.launchBody.children;
+  const launchRow=order.findIndex(n=>descendants(n).some(c=>c.tagName==='BUTTON'&&c.textContent==='Launch team'));
+  assert.equal(m.goalNode.textContent,'Add a contact form to the homepage');assert.ok(visible(m.goalNode));
+  assert.equal(order[launchRow-2],m.goalNode,'the goal sits just above the note');
+  assert.equal(order[launchRow-1].textContent,GOAL_PAGE,'S24, the page form, directly above Launch team');
+  await m.h.api.run('launch');await m.h.api.run('receipt');
+  assert.equal(m.h.api.snapshot().note,SENT_AFTER);
+  assert.equal(m.goalNode.textContent,'','once launched, the goal above Launch is gone');
+  m.h.api.dispose();
+});
+test('the computer form of S24 shows only when the Preview says the computer finishes',async()=>{
+  const m=markedHarness('Review the checkout tests',{finish:'computer'});await m.ready();
+  assert.ok(descendants(m.launchBody).some(n=>n.textContent===GOAL_COMPUTER&&visible(n)));
+  assert.ok(!descendants(m.launchBody).some(n=>n.textContent===GOAL_PAGE));
+  m.h.api.dispose();
+});
+test('an unmarked card shows no goal above Launch and keeps today\'s line after Launch',async()=>{
+  const m=markedHarness('Review the checkout tests',{marked:false});await m.ready();
+  assert.equal(m.goalNode.textContent,'');
+  assert.ok(!descendants(m.panel).some(n=>[GOAL_PAGE,GOAL_COMPUTER].includes(n.textContent)));
+  await m.h.api.run('launch');await m.h.api.run('receipt');
+  assert.match(m.h.api.snapshot().note,/message the lead with one concrete request; the setup goal alone does not start a task/);
+  m.h.api.dispose();
+});
+test('a Preview answer whose goal marks disagree with the approval is not used',async()=>{
+  for(const [context,answer] of [[true,{}],[false,{sends_goal:true,finish:'page',goal:'Ship it'}],
+      [true,{sends_goal:true,finish:'later',goal:'Ship it'}],[true,{sends_goal:true,finish:'page',goal:'Another goal'}],
+      [false,{finish:'page'}]]){
+    const h=setupHarness({client:{async setupPreview(){return {...h.preview,...answer};}}});
+    if(context)h.context.sends_goal=true;
+    await h.api.run('context');h.api.setGoal('Ship it');
+    await h.api.run('preview').catch(()=>{});
+    assert.equal(h.api.snapshot().plan,null,JSON.stringify([context,answer]));h.api.dispose();
+  }
+});
+test('person-written text in the setup view is drawn as plain text: the goal above Launch',async()=>{
+  const hostile='<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+  const m=markedHarness(hostile);await m.ready();
+  assert.equal(m.goalNode.textContent,hostile,'the goal is its literal text');
+  assert.deepEqual(m.goalNode.children,[],'and never parsed into elements');
+  const source=await readFile(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url),'utf8');
+  assert.doesNotMatch(source,/innerHTML|outerHTML|insertAdjacentHTML|document\.write/,'the setup view writes no markup');
+  m.h.api.dispose();
 });

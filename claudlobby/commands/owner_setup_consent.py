@@ -60,15 +60,12 @@ def admitted_update(installation, receipt_revision, revision, named):
     it ends at ``revision``, and the receipt's revision is an ancestor of
     ``revision``. Anything else refuses. Reads only.
     """
-    from ..git_update import UpdateError, _git, read_update
+    from ..git_update import UpdateError, _git, healthy_done, read_update
     try:
         record = read_update(installation)
         if (type(named) is not list or record is None
                 or [record.get("request_id"), record.get("target")] != named
-                or record.get("phase") != "done"
-                or type(record.get("health_errors")) is not dict or record["health_errors"]
-                or record.get("maintenance") is not False or record.get("config_committed") is not True
-                or record.get("stage_error") is not None
+                or not healthy_done(record)
                 or record["target"] != revision):
             raise ValueError()
         if _git(installation, "merge-base", "--is-ancestor", receipt_revision, revision, check=False).returncode:
