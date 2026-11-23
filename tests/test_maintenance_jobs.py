@@ -493,6 +493,23 @@ class TestReloadFailureReasonIsTheRealError:
         assert "exit 127" in reason, reason
         assert "claude not found on PATH=" in reason, reason
 
+    def test_a_long_line_with_control_bytes_reaches_the_chat_cut_and_cleaned(self, tmp_path):
+        """#3107: a failed update's last line can be any length and carry control
+        bytes, and Telegram refuses a message over 4,096 characters. The reason
+        keeps the first 300 bytes of the line, cleaned as the manager's pane
+        cleans text, in the log and in the alert."""
+        r, log = self._harness(
+            tmp_path,
+            '#!/bin/bash\nprintf "\\033[31mError:\\033[0m\\t%05000d\\r\\n" 0 >&2\nexit 1\n',
+        )
+        assert r.returncode == 1
+        reason = "claude plugin update alpha@Src failed (exit 1): Error: " + "0" * 293
+        assert self._reason(log).split(" ", 1)[1] == f"reload_failed: {reason}"
+        sent = (tmp_path / "tg-capture").read_bytes().decode().rstrip("\n").split("\n")
+        texts = [line.split("|", 2)[2] for line in sent]
+        assert texts == [f"FLEET ALERT [reload_failed]: {reason}"]
+        assert len(texts[0]) <= 4096
+
     def test_absent_claude_names_the_tool_not_the_plugin(
         self, tmp_path, sysbin_excluding
     ):
