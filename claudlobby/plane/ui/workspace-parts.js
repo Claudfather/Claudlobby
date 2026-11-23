@@ -48,22 +48,29 @@ function answer(value) {
 // One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
 // hold(): true while the entry keeps today's panel for a launch this page sent or follows, when nothing is read.
 // The parts read is sent once for each new ready connection and on refresh() (the window regained focus), never
-// on a timer and never to retry. A refusal, a lost answer or a computer whose core has no parts read leaves
-// started() false, so the view shows exactly what it showed before this read existed.
+// on a timer and never to retry. A read the hold kept back is sent once by release() when the hold ends. A refusal, a lost answer or a computer whose core has no parts read leaves
+// started() false, so the view shows exactly what it showed before this read existed; once an answer is shown for this
+// connection, such a refresh keeps it, so one failed read never takes the view away.
 export function createWorkspaceParts({client, name, names = null, key, hold = () => false, onChange = () => {}}) {
   let current = null, readFor = null, reading = null, again = false, disposed = false, mount = null, last = client.snapshot();
+  let held = false; // a read for a ready connection was kept back by hold()
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
     const before = last; last = state;
-    // Renewing the same session (ready, renewing, ready again) moves the epoch once and keeps the answer: the view
-    // stays as it was through the renewal and no read is sent for it. Any other change drops the answer.
-    const renewal = before.state === 'ready' && state.state === 'renewing' || before.state === 'renewing' && state.state === 'ready';
+    // Renewing or checking the same session (ready, renewing or checking, ready again) moves the epoch once and keeps
+    // the answer: the view stays as it was through it and no read is sent for it. It must end ready on the computer the
+    // answer came from; any other change, or an end anywhere but ready, drops the answer.
+    const passing = value => value === 'renewing' || value === 'checking';
+    const renewal = before.state === 'ready' && passing(state.state)
+      || passing(before.state) && state.state === 'ready' && (state.read_profile?.host_uid ?? null) === current?.host;
     if (current && renewal && current.epoch === before.epoch) { current = {...current, epoch:state.epoch}; readFor = state.epoch; }
     else if (current && (current.epoch !== state.epoch || state.state !== 'ready')) current = null;
     if (state.state === 'ready' && readFor !== state.epoch) void read();
   }
   async function read() {
-    if (disposed || !ready() || hold() || typeof client.setupState !== 'function') return false;
+    if (disposed || !ready() || typeof client.setupState !== 'function') return false;
+    if (hold()) { held = true; return false; }
+    held = false;
     const epoch = client.snapshot().epoch;
     // A read already sent for this connection answers this one too; one sent for an earlier connection is
     // followed by one more for this connection when it ends, so a change that lands mid-read is never lost.
@@ -73,7 +80,10 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       let value = null;
       try { value = answer(await client.setupState()); } catch { value = null; }
       if (disposed || !ready() || client.snapshot().epoch !== epoch) return false;
-      current = value ? {...value, epoch} : null; return !!value;
+      // An unusable or lost refresh keeps an answer already shown for this connection.
+      if (value) current = {...value, epoch, host:client.snapshot().read_profile?.host_uid ?? null};
+      else if (current?.epoch !== epoch) current = null;
+      return !!value;
     })();
     try { return await reading; }
     finally {
@@ -81,8 +91,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       if (!disposed) { if (again) { again = false; void read(); } onChange(); }
     }
   }
-  // An answer kept through a renewal stays shown while the session renews.
-  const live = () => !!current && ['ready','renewing'].includes(client.snapshot().state) && client.snapshot().epoch === current.epoch;
+  // An answer kept through a renewal or a session check stays shown while it lasts.
+  const live = () => !!current && ['ready','renewing','checking'].includes(client.snapshot().state) && client.snapshot().epoch === current.epoch;
   const started = () => live() && current.computer === 'started';
   function mountView(document) {
     const make = (tag, className, text) => { const node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; };
@@ -126,6 +136,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     if (names?.helper) set('helper', names.helper, current.helper, current.helper === 'later' ? PART_TEXT.later : PART_TEXT.asleep);
   }
   return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
+    // The entry's hold ended: a read it kept back is sent now, once; with none kept back nothing is sent.
+    release:() => held ? read() : Promise.resolve(false),
     teams:() => started() ? current.teams : null,
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,

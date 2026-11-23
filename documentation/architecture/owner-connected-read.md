@@ -216,7 +216,8 @@ explicitly disabled because the bounded aggregate does not supply those reads.
 
 **Browser-carrier setup view.** Over the browser carrier
 (`fetch.browserOwnerTransport`) the document is the body of the website's setup
-step, not a workspace. The carrier adds two cosmetic markers beside that flag:
+step until the bound computer is ready with a team; from then on it is the
+connected view of that one computer (the working form, below). The carrier adds two cosmetic markers beside that flag:
 `browserOwnerReference`, the `reference_id` its parent's admitted offer bound
 (`null` before an offer, kept after retirement), and `browserOwnerSettled`, which
 resolves, never rejects, once an offer is admitted or the carrier retires
@@ -230,8 +231,8 @@ aggregate sources, coverage, team choices and blocker text (the reader's
 stays listed. A later offer repaints, and `presentationChanged` asks the boards
 to read again.
 
-The document marks `<html data-workspace-view="setup">`. `workspace.css` then
-shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
+In the setup form the document marks `<html data-workspace-view="setup">`.
+`workspace.css` then shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
 computer cards, overview, diagnostics), the room heading and search, activity,
 tasks, Recorder and the Message team composer are all hidden. The page grows
 with its content and has no internal scroll container, and the panel fills the
@@ -266,19 +267,70 @@ current request marks every shown step done, with "Team launched. Your team is
 running on this computer." This holds even after the launch handoff's status
 check moves the connection on and clears the approval context. A request
 rebound later is not shown as launched. Keyboard focus moves on after a panel
-Connect only while the frame has focus and nothing else took it. The full
-workspace is never revealed in this mode. While no panel can show, one status
+Connect only while the frame has focus and nothing else took it. The setup
+form never reveals the rest of the workspace. While no panel can show, one status
 line says why: checking, account unavailable, no saved computer, or reopen setup.
+
+**The working form.** Over the browser carrier, once the bound computer's
+session is `ready`, its parts read answers `started` with at least one team, and
+the page no longer follows a Launch, the document removes `data-workspace-view`
+and shows the connected view a direct connection gets for that one computer: its
+parts as a strip above the team's rooms, tasks and Message team composer
+(`data-setup-focus="shared"`). Every `workspace.css` rule that hides the header,
+sidebar, room or composer applies only under the setup marker or the `only`
+focus. A page that sent or followed a Launch stops following it at a clean done
+receipt for the current request; a parts read held back while it followed is then
+sent once, so the page that launched and a page opened again end on the same
+view. A receipt that is not clean keeps the panel and its Check launch status. A
+`setup_only` session, a lost connection or no team keeps, or brings back, the
+setup form. A renewal of the same session changes nothing, and neither does a
+session check (Check connection, the recovery after a refused read, or the
+hand-off's status check) that ends `ready` on the computer the parts answer came
+from: the answer and the form are kept through it, and no height, form or parts
+read is posted or sent. A check that ends anywhere else brings back the setup
+form. A parts refresh that is refused, lost or unusable keeps the answer already
+shown for that connection, so one failed read never takes the working form away.
+Focus that was in the panel moves to the parts, never into the composer. Rooms,
+Tasks and All agents are on; Team details, Recorder, search and bot equipment stay
+disabled, as in any connected view. The card's Disconnect and each message's
+Technical detail are reachable.
+
+The working form's computer already has a team, so its first-team panel is not
+offered anywhere in that form: it is detached from the page, not only hidden, and
+the card's "Connection options and first-time setup" disclosure no longer holds
+it. Whenever the view returns to the setup form the panel comes back, in the
+setup host or in that disclosure.
+
+Messaging in the working form is reach for an existing grant, not new authority.
+With a message grant the person has approved on that computer (today the guide's
+"Allow messages from you to this team" step), the composer and the "Message"
+buttons beside bots send through the calls the carrier already admits
+(`action-context`, `action-send`, `action-receipt`). Without one the composer says
+"Messages: not authorized." and sends nothing. Nudges, task feedback and
+permission decisions cannot be sent over this connection: their preparation is
+refused locally. The form adds no request names, grants or server routes.
 
 After its ready message, the framed document observes its root element with
 `ResizeObserver`. Browsers deliver at most one notification per rendering
-frame, and each one measures the document height. When the value changes, the
-document posts exactly
+frame, and in the setup form each one measures the document height. When the
+value changes, the document posts exactly
 `{type:"claudfather.workspace.size",version:1,height}` to the document's
 `shell_origin`, never `*`. `height` is a whole number of CSS pixels from 1 to
 20000. No other data crosses, and disposal stops observing. The website must
 accept the message only from its own frame window and the Plane origin, and must
-clamp it. Native documents post no size and keep the full workspace.
+clamp it.
+
+The framed document also says which form it shows, so the website can size the
+frame for it. Under the browser carrier only, right after its ready message, it
+posts exactly `{type:"claudfather.workspace.form",version:1,form}` to the
+document's `shell_origin`, where `form` is `"setup"` or `"working"`, and posts it
+again only when the form changes; an unchanged form is never posted again, and
+nothing is posted after disposal. It carries nothing about the computer: no name,
+count or identifier. A website that does not know the message ignores it. The
+working form fills its window instead of growing with its
+content, so on entering it the document posts one fixed height of 640 and
+measures nothing while it lasts; going back to the setup form measures again.
+Native documents post no size and keep the full workspace.
 
 Website metadata reads have one eight-second total header/body deadline and a
 16KiB body bound. The visible document rechecks on visibility and every 30 seconds.
@@ -343,8 +395,10 @@ inside a part and entries in `bots`; `version` stays 1 while nothing is removed
 or renamed.
 
 The pane (`workspace-parts.js`) sends the parts read once for each new `ready`
-connection to a shown computer, and again whenever the window regains focus.
-A renewal of the same session (`ready`, `renewing`, `ready`) keeps the answer
+connection to a shown computer, again whenever the window regains focus, and
+once when a read held back while the page followed a Launch is released.
+A renewal of the same session (`ready`, `renewing`, `ready`), or a session check
+that ends `ready` on the computer the answer came from, keeps the answer
 shown and sends no read; a connection change while a read is in flight is
 followed by one read for the new connection when it ends.
 Nothing else repeats it, nothing retries it, and the pane still connects only
@@ -358,9 +412,11 @@ they stay as a strip above its teams. Over the browser carrier the five-step
 panel is the view only while the parts read has no answer or says `not_started`,
 and while that panel follows a launch in this page's lifetime: once this page
 sent a Launch or a launch status check, or followed a managed hand-off, the
-panel stays to its ending and no parts read is sent. A page opened again keeps
+panel stays to its ending and no parts read is sent until that follow ends at a
+clean done receipt for the current request. A page opened again keeps
 the panel, with its Check launch status, while the parts read says
-`launch_unfinished`; once the Launch is done the parts show. Before that page
+`launch_unfinished`; once the Launch is done the parts show, and with a team the
+working form follows. Before that page
 reads anything, the panel shows what the computer said, for display only: the
 line that nothing runs yet is hidden, and with this browser's own request kept
 the approval step shows done. It sends, resumes and follows nothing. A browser
