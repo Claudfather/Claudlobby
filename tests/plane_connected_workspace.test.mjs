@@ -3154,10 +3154,10 @@ async function partsWorkspace(t,{answer=partsAnswer(),document={},view}={}) {
   const rail=h.ui.get('rail-channel'),host=rail.children[0];
   return {h,workspace,rail,host,parts:()=>partsOf(host)};
 }
-test('the parts view says only the drafted sentences awaiting approval (slice A, with B15 and B17)',()=>{
+test('the parts view says only the sentences the owner approved (slice A, with B15 and B17)',()=>{
   assert.deepEqual({...PART_TEXT},{linked:'Linked',provider:'Claude',notLinked:'Not linked',bots:'Bots',
-    none:'None yet',create:'Create a bot',createReason:'Creating bots here is coming. There is nothing to do yet.',
-    asleep:'Asleep until Claude is linked',later:'Coming soon'});
+    none:'None yet',create:'Create a bot',createReason:'You can’t create bots here yet.',
+    asleep:'Asleep until Claude is linked',later:'Coming soon',oneTeam:'1 team set up'});
 });
 test('a started computer with no team shows its parts in order, with no working control',async t=>{
   const w=await partsWorkspace(t),parts=w.parts();
@@ -3168,7 +3168,7 @@ test('a started computer with no team shows its parts in order, with no working 
   const buttons=descendants(parts).filter(n=>n.tagName==='BUTTON');
   assert.deepEqual(buttons.map(b=>[b.textContent,b.disabled,b.attributes['aria-disabled'],visible(b)]),[['Create a bot',true,'true',true]],'one control, visibly not available');
   const reason=descendants(parts).find(n=>n.className==='part-reason');
-  assert.equal(reason.textContent,'Creating bots here is coming. There is nothing to do yet.');assert.equal(buttons[0].attributes['aria-describedby'],reason.id);
+  assert.equal(reason.textContent,'You can’t create bots here yet.');assert.equal(buttons[0].attributes['aria-describedby'],reason.id);
   buttons[0].click();
   assert.equal(stateCalls(w.h).length,1,'one parts read for the connection');
   assert.deepEqual(w.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state'],'no approval read, no setup call');
@@ -3194,11 +3194,20 @@ test('a computer with a team keeps its parts as a strip above the dashboard',asy
   const w=await partsWorkspace(t,{answer:partsAnswer({teams:1})}),parts=w.parts();
   assert.equal(w.host.hidden,false);assert.equal(w.rail.dataset.setupFocus,'shared','its teams stay readable below');
   assert.equal(w.host.children[0],parts,'the parts lead the setup host');
-  // The count is the saved configuration's (also true mid-Launch, after a failed Launch and after a stop): no status sentence.
-  assert.deepEqual(partRows(parts)[2],['bots','teams','Bots','']);assert.equal(parts.dataset.teams,'1');
+  // The count is the saved configuration's (also true mid-Launch, after a failed Launch and after a stop): "set up".
+  assert.deepEqual(partRows(parts)[2],['bots','teams','Bots','1 team set up']);assert.equal(parts.dataset.teams,'1');
   assert.ok(descendants(parts).every(n=>!/running/i.test(n.textContent)),'nothing says a team is running');
   assert.equal(descendants(parts).some(n=>n.tagName==='BUTTON'&&visible(n)),false,'Create a bot shows only with no team');
   const fleets=await w.workspace.jget('/api/fleets');assert.equal(fleets.data.fleets.length,1,'the dashboard still reads');
+});
+test('with more than one team the bots part says nothing, since only one team has an approved sentence',async t=>{
+  for(const teams of [2,5]){
+    const w=await partsWorkspace(t,{answer:partsAnswer({teams})}),parts=w.parts();
+    assert.deepEqual(partRows(parts)[2],['bots','teams','Bots',''],String(teams));assert.equal(parts.dataset.teams,String(teams));
+    assert.ok(descendants(parts).every(n=>!/teams? (?:set up|running)/.test(n.textContent)),'no invented plural');
+    assert.equal(descendants(parts).some(n=>n.tagName==='BUTTON'&&visible(n)),false);
+    w.workspace.dispose();
+  }
 });
 test('a computer the parts read calls not started shows exactly what it showed before',async t=>{
   const w=await partsWorkspace(t,{answer:partsAnswer({computer:'not_started'})});

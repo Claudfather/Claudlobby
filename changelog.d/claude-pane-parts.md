@@ -5,8 +5,8 @@ that needs no setup approval and writes nothing: `state` on the setup door,
 `setup-state` on the SSH route and in the browser carrier's list. Claude counts
 as linked exactly when a sign-in line with a value is saved on the computer,
 never from an approval or an attempt's record, and the line's value is never
-read out; the team count is the saved configuration's and is not shown as
-running.
+read out; the team count is the saved configuration's, shown as "1 team set
+up" for one team and never as running.
 
 The pane draws the answer as a parts view (this computer, Claude, bots, and the
 helper only when the embedding page names it) with no working control: the whole

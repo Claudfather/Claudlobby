@@ -5,16 +5,17 @@ const keys = (value, fields) => value && typeof value === 'object' && !Array.isA
   && Object.keys(value).sort().join() === [...fields].sort().join();
 const has = (value, fields) => value && typeof value === 'object' && !Array.isArray(value) && fields.every(key => Object.hasOwn(value, key));
 export const PARTS = Object.freeze(['computer','provider','bots','helper']);
-// The sentences the view shows, each with its draft's id on the sheet.
+// The sentences the view shows, each with its id on the sheet; the owner approved them on 2026-11-23.
 export const PART_TEXT = Object.freeze({
   linked:'Linked',                  // A14, B15
   provider:'Claude', notLinked:'Not linked', // A15
   bots:'Bots', none:'None yet', create:'Create a bot', // A16
-  createReason:'Creating bots here is coming. There is nothing to do yet.', // A16
+  createReason:'You can’t create bots here yet.', // A16, as the owner reworded it
   asleep:'Asleep until Claude is linked', // A17
-  later:'Coming soon'});            // B17
-// With a team the bots part says nothing: the count is the saved configuration's, which is also true mid-Launch, after
-// a failed Launch and after a stop, so no sheet sentence fits it ("running" would not be true). A sentence awaits the owner.
+  later:'Coming soon',              // B17
+  oneTeam:'1 team set up'});        // the owner's sentence for one team (2026-11-23)
+// The count is the saved configuration's, also true mid-Launch, after a failed Launch and after a stop, so it says
+// "set up", never "running". Only one team has a sentence: with more the bots part says nothing (no plural is approved).
 // The embedding page may name the provider, bots and helper parts (part_names in the connected document), never a
 // computer: each computer keeps its own saved name. A name is 1 to 40 ASCII letters and digits in words joined by
 // one space or one hyphen, so it cannot read like a status ("Claude - Linked", "Claude: Linked"). Anything else
@@ -116,7 +117,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     root.setAttribute('aria-label', computer);
     set('computer', computer, 'linked', PART_TEXT.linked);
     set('provider', names?.provider ?? PART_TEXT.provider, current.provider, current.provider === 'linked' ? PART_TEXT.linked : PART_TEXT.notLinked);
-    set('bots', names?.bots ?? PART_TEXT.bots, current.teams ? 'teams' : 'none', current.teams ? '' : PART_TEXT.none);
+    set('bots', names?.bots ?? PART_TEXT.bots, current.teams ? 'teams' : 'none',
+      current.teams === 1 ? PART_TEXT.oneTeam : current.teams ? '' : PART_TEXT.none);
     control.hidden = reason.hidden = current.teams > 0;
     root.dataset.teams = String(current.teams);
     // The helper has no name in core: drawn only when the embedding page names it.

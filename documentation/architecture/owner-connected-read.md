@@ -310,7 +310,8 @@ answers
 `computer` is `started` for a computer started with no team (`start_state`) or
 one whose committed configuration lists a team; `teams` counts those teams. It
 is a count, not a running state: it is also true mid-Launch, after a failed
-Launch and after a stop, so the pane shows no status sentence beside it.
+Launch and after a stop, so the pane says "1 team set up" for exactly one team,
+never "running", and no status sentence for more (no plural is approved).
 `provider` is `linked` exactly when a Claude sign-in line with a value is saved
 in this computer's `.env` (`environment_linked`), under the same file checks every
 sign-in attempt already makes (`environment_ready`, unchanged); the line's value
