@@ -38,6 +38,26 @@ statement, a saved address or network reachability. Messages, task nudges and
 feedback each require their existing local grant in addition to a valid host
 session. Reads alone confer no action permission.
 
+The guided setup's team card (`allow_setup`) can carry a messages mark. Then it
+also lets the person message that one team from the website after a healthy
+Launch, under the name chosen on the card. Who the person is stays the bound
+website account; the name is only a label the team reads. The approval is
+still local and revocable (`host owner revoke-setup` before the finish,
+`host owner revoke-messages` after it), and the website signs nothing new.
+One message, the setup goal, is sent once by the computer's own operator on the team card's local approval, without a session; it is recorded as such.
+Its receipt carries the provenance `{"carrier": "setup_finish"}`, never a
+connected session's.
+
+The guide's cards travel over the computer's Tailscale connection, not in a
+website session, and carry no website-signed statement. Core cannot tell which
+website account a setup page is signed into: whoever can act as the computer's
+Tailscale user already reaches the guide's cards, so the team card's name is an
+accident boundary, like the operator terminal. The first guard is the page's
+own rule: it fills the card's name only for the account the computer is bound
+to. Core refuses the finish only when the binding the approval pinned has
+changed (a re-pair or re-bind); it cannot refuse a different account on the
+same binding.
+
 The shared UI retains host-qualified target identities and original request
 receipts across navigation and uncertain outcomes. Inspecting a receipt does
 not resend a request. Recorded, delivered and completed work remain different

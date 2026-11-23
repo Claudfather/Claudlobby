@@ -3806,3 +3806,62 @@ test('the framed view posts its form to the exact shell origin: setup at mount, 
   l.workspace.dispose();await l.workspace.checkAccount();await flush();
   assert.deepEqual(formsPosted(l),['setup','working','setup'],'nothing after the view closes');
 });
+// The team card carried the messages mark (04a with 04b1): Launch sends the computer's read-back goal once.
+const GOAL_PAGE="Launch sends this goal to your team's lead as your first message, under the name on your card. Keep this page open until the team is running, so the goal can be sent. A sent goal cannot be unsent.";
+const GOAL_COMPUTER="Launch sends this goal to your team's lead as your first message, under the name on your card. The team starts on it as soon as it is running, even if you close this page. A sent goal cannot be unsent.";
+const SENT_AFTER="Team launched. Once its bots show as running, you can message the lead here.";
+function markedHarness(goal,{finish='page',marked=true}={}){
+  const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);
+    return marked?{...h.preview,sends_goal:true,finish,goal:input.goal}:h.preview;}}});
+  if(marked)h.context.sends_goal=true;
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  const launchBody=stepsOf(panel).find(n=>n.dataset.step==='launch').children.find(n=>n.className==='setup-step-body');
+  const goalNode=descendants(panel).find(n=>n.className==='setup-goal');
+  return {h,panel,launchBody,goalNode,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
+}
+test('a marked card shows the computer\'s goal and S24 directly above Launch team, and S17 after Launch',async()=>{
+  const m=markedHarness('Add a contact form to the homepage');await m.ready();
+  const order=m.launchBody.children;
+  const launchRow=order.findIndex(n=>descendants(n).some(c=>c.tagName==='BUTTON'&&c.textContent==='Launch team'));
+  assert.equal(m.goalNode.textContent,'Add a contact form to the homepage');assert.ok(visible(m.goalNode));
+  assert.equal(order[launchRow-2],m.goalNode,'the goal sits just above the note');
+  assert.equal(order[launchRow-1].textContent,GOAL_PAGE,'S24, the page form, directly above Launch team');
+  await m.h.api.run('launch');await m.h.api.run('receipt');
+  assert.equal(m.h.api.snapshot().note,SENT_AFTER);
+  assert.equal(m.goalNode.textContent,'','once launched, the goal above Launch is gone');
+  m.h.api.dispose();
+});
+test('the computer form of S24 shows only when the Preview says the computer finishes',async()=>{
+  const m=markedHarness('Review the checkout tests',{finish:'computer'});await m.ready();
+  assert.ok(descendants(m.launchBody).some(n=>n.textContent===GOAL_COMPUTER&&visible(n)));
+  assert.ok(!descendants(m.launchBody).some(n=>n.textContent===GOAL_PAGE));
+  m.h.api.dispose();
+});
+test('an unmarked card shows no goal above Launch and keeps today\'s line after Launch',async()=>{
+  const m=markedHarness('Review the checkout tests',{marked:false});await m.ready();
+  assert.equal(m.goalNode.textContent,'');
+  assert.ok(!descendants(m.panel).some(n=>[GOAL_PAGE,GOAL_COMPUTER].includes(n.textContent)));
+  await m.h.api.run('launch');await m.h.api.run('receipt');
+  assert.match(m.h.api.snapshot().note,/message the lead with one concrete request; the setup goal alone does not start a task/);
+  m.h.api.dispose();
+});
+test('a Preview answer whose goal marks disagree with the approval is not used',async()=>{
+  for(const [context,answer] of [[true,{}],[false,{sends_goal:true,finish:'page',goal:'Ship it'}],
+      [true,{sends_goal:true,finish:'later',goal:'Ship it'}],[true,{sends_goal:true,finish:'page',goal:'Another goal'}],
+      [false,{finish:'page'}]]){
+    const h=setupHarness({client:{async setupPreview(){return {...h.preview,...answer};}}});
+    if(context)h.context.sends_goal=true;
+    await h.api.run('context');h.api.setGoal('Ship it');
+    await h.api.run('preview').catch(()=>{});
+    assert.equal(h.api.snapshot().plan,null,JSON.stringify([context,answer]));h.api.dispose();
+  }
+});
+test('person-written text in the setup view is drawn as plain text: the goal above Launch',async()=>{
+  const hostile='<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+  const m=markedHarness(hostile);await m.ready();
+  assert.equal(m.goalNode.textContent,hostile,'the goal is its literal text');
+  assert.deepEqual(m.goalNode.children,[],'and never parsed into elements');
+  const source=await readFile(new URL('../claudlobby/plane/ui/guided-setup.js',import.meta.url),'utf8');
+  assert.doesNotMatch(source,/innerHTML|outerHTML|insertAdjacentHTML|document\.write/,'the setup view writes no markup');
+  m.h.api.dispose();
+});

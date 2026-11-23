@@ -88,6 +88,7 @@ class OwnerStdio:
         self._began = time.monotonic()
         self._closed = False
         self._pending = None
+        self._named = False
         self._partial_since = None
         self._extra = {}
 
@@ -148,7 +149,7 @@ class OwnerStdio:
                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             kind = value.get("type") if isinstance(value, dict) else None
             fields = _BASE | _FIELDS.get(kind, set()) | self._extra.get(kind, set())
-            if kind == "decide" and self._pending == "actor_alias":
+            if kind == "decide" and (self._pending == "actor_alias" or self._named):
                 fields |= {"actor_alias"}
             if (kind not in _FIELDS or set(value) != fields or _wire(value) != raw + b"\n"
                     or type(value["version"]) is not int or value["version"] != 1
@@ -213,6 +214,9 @@ class OwnerStdio:
         digest = hashlib.sha256(_wire(proposal).rstrip(b"\n")).hexdigest()
         identifier = uuid4().hex
         self._pending = action
+        # The team card with the messages mark: its answer carries the name the team will see.
+        self._named = (action == "allow_setup" and isinstance(scope, dict) and isinstance(scope.get("grant"), dict)
+                       and scope["grant"].get("messages") == {"sender": "card"})
         try:
             self.emit("proposal", proposal_id=identifier, digest=digest, proposal=proposal)
             value = self._read({"decide"}, expires_at=expiry)
@@ -226,9 +230,15 @@ class OwnerStdio:
                 if not isinstance(value["actor_alias"], str) or not _valid_human_alias(value["actor_alias"]):
                     raise StdioRefused()
                 return value["actor_alias"]
+            if self._named:
+                from ..operation_context import sender_alias_refusal
+                if sender_alias_refusal(value["actor_alias"]) is not None:
+                    raise StdioRefused("sender_name_refused")
+                return value["actor_alias"]
             return original
         finally:
             self._pending = None
+            self._named = False
 
     def token(self, kind):
         if kind not in {"pairing", "workspace"}:
@@ -341,14 +351,19 @@ def _admit(args, request):
 def _status(paths, store, *, profile=None):
     from dataclasses import asdict
     from ..git_update import read_update
-    from ..plane.owner_setup import OwnerSetup
+    from ..plane.owner_setup import OwnerSetup, retained_fields
     retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
     record = read_update(paths.package.installation)
     owner = store.current_grant() if os.path.lexists(store.path) else None
     operation = None if record is None else {key: record.get(key) for key in (
         "phase", "request_id", "config_fingerprint", "target", "maintenance", "config_committed")}
     value = {"state": "status", "owner": asdict(owner) if owner else None,
-            "setup": asdict(retained) if retained else {"state": "absent"}, "operation": operation}
+            "setup": retained_fields(retained) if retained else {"state": "absent"}, "operation": operation}
+    from .host_owner_setup import card_status
+    card = card_status(store, retained) if retained else None
+    if card is not None:
+        # A marked approval: its finish answer (None before the finish) and the launched goal.
+        value["setup"].update(card)
     if profile is not None:
         from ..provider_install import status
         value["provider"] = asdict(status(profile.account_name, profile.uid))

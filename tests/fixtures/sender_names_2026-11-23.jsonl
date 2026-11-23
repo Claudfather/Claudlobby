@@ -1,0 +1,87 @@
+# Source: 01b_slice-1-prove-first.md, "The shared name list (row 16)", written 2026-11-23.
+# The 85 lines below are copied byte for byte from that fenced block; the website keeps the same copy.
+{"id": "form-two-words", "kind": "form", "input": "Ada Lovelace", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-three-words", "kind": "form", "input": "Ada King Lovelace", "formed": "ada-king-lovelace", "field": "ada-king-lovelace", "warning": false}
+{"id": "form-spaces", "kind": "form", "input": "  Ada   Lovelace  ", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-tab-inside", "kind": "form", "input": "Ada\tLovelace", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-upper-case", "kind": "form", "input": "ADA LOVELACE", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-already-hyphenated", "kind": "form", "input": "Jean-Luc Picard", "formed": "jean-luc-picard", "field": "jean-luc-picard", "warning": false}
+{"id": "form-double-hyphen-and-spaces", "kind": "form", "input": "Mary--Kate  O'Brien", "formed": "mary-kate-obrien", "field": "mary-kate-obrien", "warning": false}
+{"id": "form-accents", "kind": "form", "input": "José Núñez", "formed": "jose-nunez", "field": "jose-nunez", "warning": false}
+{"id": "form-umlaut-and-sharp-s", "kind": "form", "input": "Jürgen Weiß", "formed": "jurgen-weiss", "field": "jurgen-weiss", "warning": false}
+{"id": "form-o-slash-and-ring", "kind": "form", "input": "Søren Kierkegaård", "formed": "soren-kierkegaard", "field": "soren-kierkegaard", "warning": false}
+{"id": "form-fullwidth", "kind": "form", "input": "Ａｄａ Ｌｏｖｅｌａｃｅ", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-only-chinese", "kind": "form", "input": "李雷", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-only-cyrillic", "kind": "form", "input": "Владимир Петров", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-mixed-scripts", "kind": "form", "input": "李雷 Lei Li", "formed": "lei-li", "field": "lei-li", "warning": false}
+{"id": "form-apostrophe", "kind": "form", "input": "Mary O'Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-right-single-quote", "kind": "form", "input": "Mary O’Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-punctuation", "kind": "form", "input": "Dr. Ada (Lovelace), Esq.", "formed": "dr-ada-lovelace-esq", "field": "dr-ada-lovelace-esq", "warning": false}
+{"id": "form-initials", "kind": "form", "input": "J. R. R. Tolkien", "formed": "j-r-r-tolkien", "field": "j-r-r-tolkien", "warning": false}
+{"id": "form-suffix", "kind": "form", "input": "Martin King Jr.", "formed": "martin-king-jr", "field": "martin-king-jr", "warning": false}
+{"id": "form-colon", "kind": "form", "input": "Ada:Lovelace", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-slash", "kind": "form", "input": "Ada/Lovelace", "formed": "ada-lovelace", "field": "ada-lovelace", "warning": false}
+{"id": "form-digits-inside", "kind": "form", "input": "Ada Lovelace 2nd", "formed": "ada-lovelace-2nd", "field": "ada-lovelace-2nd", "warning": false}
+{"id": "form-digits-first", "kind": "form", "input": "42 Ada", "formed": "ada", "field": "ada", "warning": false}
+{"id": "form-digit-glued-first", "kind": "form", "input": "2Pac", "formed": "pac", "field": "pac", "warning": false}
+{"id": "form-empty", "kind": "form", "input": "", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-one-character", "kind": "form", "input": "X", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-two-characters", "kind": "form", "input": "Al", "formed": "al", "field": "al", "warning": false}
+{"id": "form-two-initials", "kind": "form", "input": "A B", "formed": "a-b", "field": "a-b", "warning": false}
+{"id": "form-reserved", "kind": "form", "input": "Owner", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-reserved-team", "kind": "form", "input": "Team", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-not-reserved-phrase", "kind": "form", "input": "The Team", "formed": "the-team", "field": "the-team", "warning": false}
+{"id": "form-forms-default-user", "kind": "form", "input": "Default User", "formed": "default-user", "field": "default-user", "warning": false}
+{"id": "form-exactly-40", "kind": "form", "input": "Alexandrina Victoria Wilhelmina Hanovers", "formed": "alexandrina-victoria-wilhelmina-hanovers", "field": "alexandrina-victoria-wilhelmina-hanovers", "warning": false}
+{"id": "form-41-keeps-first-and-last", "kind": "form", "input": "Alexandrina Victoria Wilhelmina Hanoveria", "formed": "alexandrina-hanoveria", "field": "alexandrina-hanoveria", "warning": false}
+{"id": "form-46-keeps-first-and-last", "kind": "form", "input": "María Fernanda de los Ángeles García Hernández", "formed": "maria-hernandez", "field": "maria-hernandez", "warning": false}
+{"id": "form-first-and-last-over-40-cut-at-hyphen", "kind": "form", "input": "Wolfeschlegelsteinhausenbergerdorff Hubert Blaine", "formed": "wolfeschlegelsteinhausenbergerdorff", "field": "wolfeschlegelsteinhausenbergerdorff", "warning": false}
+{"id": "form-capital-l-stroke", "kind": "form", "input": "Łukasz Nowak", "formed": "lukasz-nowak", "field": "lukasz-nowak", "warning": false}
+{"id": "form-capitals-in-table", "kind": "form", "input": "ÆSA ØBERG ÞÓR", "formed": "aesa-oberg-thor", "field": "aesa-oberg-thor", "warning": false}
+{"id": "form-over-40-first-and-last-words", "kind": "form", "input": "Jean-Christophe Alexandre Maximilien Robespierre-Dupont", "formed": "jean-christophe-robespierre-dupont", "field": "jean-christophe-robespierre-dupont", "warning": false}
+{"id": "form-over-40-fullwidth-spaces", "kind": "form", "input": "Alexandrina　Victoria　Wilhelmina　Hanoveria", "formed": "alexandrina-hanoveria", "field": "alexandrina-hanoveria", "warning": false}
+{"id": "form-over-40-skips-word-forming-nothing", "kind": "form", "input": "Alexandrina Victoria Wilhelmina Hanoveria 李雷", "formed": "alexandrina-hanoveria", "field": "alexandrina-hanoveria", "warning": false}
+{"id": "form-one-word-45", "kind": "form", "input": "Pneumonoultramicroscopicsilicovolcanoconiosis", "formed": "pneumonoultramicroscopicsilicovolcanocon", "field": "pneumonoultramicroscopicsilicovolcanocon", "warning": false}
+{"id": "form-first-part-exactly-40", "kind": "form", "input": "Wolfeschlegelsteinhausenbergerdorffhuber Smith Jones", "formed": "wolfeschlegelsteinhausenbergerdorffhuber", "field": "wolfeschlegelsteinhausenbergerdorffhuber", "warning": false}
+{"id": "form-modifier-apostrophe", "kind": "form", "input": "Mary OʼBrien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-backtick", "kind": "form", "input": "Mary O`Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-acute-accent-mark", "kind": "form", "input": "Mary O´Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-left-single-quote", "kind": "form", "input": "Mary O‘Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-prime", "kind": "form", "input": "Mary O′Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-fullwidth-apostrophe", "kind": "form", "input": "Mary O＇Brien", "formed": "mary-obrien", "field": "mary-obrien", "warning": false}
+{"id": "form-okina", "kind": "form", "input": "Kalaniʻopu Keawe", "formed": "kalaniopu-keawe", "field": "kalaniopu-keawe", "warning": false}
+{"id": "form-over-40-first-word-no-letter", "kind": "form", "input": "1 Alexandrina Victoria Wilhelmina Hanoveria X", "formed": "alexandrina-victoria-wilhelmina", "field": "alexandrina-victoria-wilhelmina", "warning": false}
+{"id": "form-over-40-first-and-last-reserved", "kind": "form", "input": "1 Alexandrina Victoria Wilhelmina Hanoveria Team", "formed": "alexandrina-victoria-wilhelmina", "field": "alexandrina-victoria-wilhelmina", "warning": false}
+{"id": "form-over-40-cut-reserved", "kind": "form", "input": "Owner Wolfeschlegelsteinhausenbergerdorffhuber", "formed": null, "field": "default-user", "warning": true}
+{"id": "form-over-40-cut-one-letter", "kind": "form", "input": "X Wolfeschlegelsteinhausenbergerdorffhuber", "formed": null, "field": "default-user", "warning": true}
+{"id": "check-ordinary", "kind": "check", "value": "human:ada-lovelace", "answer": "accept"}
+{"id": "check-default-user", "kind": "check", "value": "human:default-user", "answer": "accept"}
+{"id": "check-default-user-2", "kind": "check", "value": "human:default-user-2", "answer": "accept"}
+{"id": "check-three-letters", "kind": "check", "value": "human:ada", "answer": "accept"}
+{"id": "check-hyphenated", "kind": "check", "value": "human:jean-luc-picard", "answer": "accept"}
+{"id": "check-initials", "kind": "check", "value": "human:j-r-r-tolkien", "answer": "accept"}
+{"id": "check-exactly-40", "kind": "check", "value": "human:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "answer": "accept"}
+{"id": "check-41", "kind": "check", "value": "human:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "answer": "refuse"}
+{"id": "check-one-letter", "kind": "check", "value": "human:a", "answer": "refuse"}
+{"id": "check-upper-case", "kind": "check", "value": "human:Ada", "answer": "refuse"}
+{"id": "check-digits-only", "kind": "check", "value": "human:42", "answer": "refuse"}
+{"id": "check-leading-hyphen", "kind": "check", "value": "human:-x", "answer": "refuse"}
+{"id": "check-trailing-hyphen", "kind": "check", "value": "human:ada-", "answer": "refuse"}
+{"id": "check-double-hyphen", "kind": "check", "value": "human:ada--b", "answer": "refuse"}
+{"id": "check-reserved-owner", "kind": "check", "value": "human:owner", "answer": "refuse"}
+{"id": "check-reserved-lead", "kind": "check", "value": "human:lead", "answer": "refuse"}
+{"id": "check-space", "kind": "check", "value": "human:ada lovelace", "answer": "refuse"}
+{"id": "check-tab", "kind": "check", "value": "human:ada\tlovelace", "answer": "refuse"}
+{"id": "check-colon", "kind": "check", "value": "human:ada:lovelace", "answer": "refuse"}
+{"id": "check-slash", "kind": "check", "value": "human:ada/lovelace", "answer": "refuse"}
+{"id": "check-apostrophe", "kind": "check", "value": "human:mary-o'brien", "answer": "refuse"}
+{"id": "check-accent", "kind": "check", "value": "human:josé", "answer": "refuse"}
+{"id": "check-underscore", "kind": "check", "value": "human:ada_lovelace", "answer": "refuse"}
+{"id": "check-dot", "kind": "check", "value": "human:ada.lovelace", "answer": "refuse"}
+{"id": "number-free", "kind": "number", "base": "ada-lovelace", "taken": [], "answer": "ada-lovelace"}
+{"id": "number-ordinary", "kind": "number", "base": "ada-lovelace", "taken": ["ada-lovelace"], "answer": "ada-lovelace-2"}
+{"id": "number-second-taken", "kind": "number", "base": "ada-lovelace", "taken": ["ada-lovelace", "ada-lovelace-2"], "answer": "ada-lovelace-3"}
+{"id": "number-default-user", "kind": "number", "base": "default-user", "taken": ["default-user"], "answer": "default-user-2"}
+{"id": "number-40-cut-to-38", "kind": "number", "base": "alexandrina-victoria-wilhelmina-hanovers", "taken": ["alexandrina-victoria-wilhelmina-hanovers"], "answer": "alexandrina-victoria-wilhelmina-hanove-2"}
+{"id": "number-40-cut-ends-in-hyphen", "kind": "number", "base": "wolfeschlegelsteinhausenbergerdorffer-xy", "taken": ["wolfeschlegelsteinhausenbergerdorffer-xy"], "answer": "wolfeschlegelsteinhausenbergerdorffer-2"}
+{"id": "number-all-eight-taken", "kind": "number", "base": "ada-lovelace", "taken": ["ada-lovelace", "ada-lovelace-2", "ada-lovelace-3", "ada-lovelace-4", "ada-lovelace-5", "ada-lovelace-6", "ada-lovelace-7", "ada-lovelace-8", "ada-lovelace-9"], "answer": "name_taken"}

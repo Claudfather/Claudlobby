@@ -1347,3 +1347,56 @@ def test_stdio_computer_is_one_more_hidden_mode_of_the_same_exclusive_group(monk
     monkeypatch.setattr(parsers, "import_module", lambda name, package: SimpleNamespace(
         dispatch=lambda value: routed.append(name) or 0))
     assert parsers._dispatch(args) == 0 and routed == [".owner_stdio"]
+
+
+def _team_card(pipes, *, marked, answer):
+    """One allow_setup proposal, with or without the messages mark, answered by ``answer``'s extra keys."""
+    from claudlobby.commands.owner_stdio import StdioRefused
+    console, session = admitted(pipes)
+    grant = {"fleet": "example", **({"messages": {"sender": "card"}} if marked else {})}
+    outcome = []
+    def proposal():
+        try:
+            outcome.append(console.approve("allow_setup", {"grant": grant, "effects": ["displayed core effect"]}))
+        except StdioRefused as error:
+            outcome.append(error)
+    thread = threading.Thread(target=proposal)
+    thread.start()
+    pending = read_frame(pipes[3])
+    assert pending["proposal"]["scope"]["grant"] == grant
+    os.write(pipes[2], wire({"version": 1, "type": "decide", "seq": 2, "session_id": session,
+        "proposal_id": pending["proposal_id"], "digest": pending["digest"], "approve": True, **answer}))
+    thread.join(2)
+    assert not thread.is_alive() and len(outcome) == 1
+    return outcome[0], console
+
+
+def test_marked_team_card_answer_carries_the_name(pipes):
+    returned, console = _team_card(pipes, marked=True, answer={"actor_alias": "human:ada-lovelace"})
+    assert returned == "human:ada-lovelace"
+    assert console._named is False and console._pending is None
+
+
+def test_unmarked_team_card_refuses_a_name(pipes):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    returned, _ = _team_card(pipes, marked=False, answer={"actor_alias": "human:ada-lovelace"})
+    assert isinstance(returned, StdioRefused) and returned.code == "invalid_request"
+
+
+def test_marked_team_card_without_a_name_is_refused(pipes):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    returned, _ = _team_card(pipes, marked=True, answer={})
+    assert isinstance(returned, StdioRefused) and returned.code == "invalid_request"
+
+
+@pytest.mark.parametrize("name", ["human:owner", "human:Ada", "human:a", "human:ada--b", 42, None])
+def test_marked_team_card_refuses_a_name_failing_the_rule(pipes, name):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    returned, _ = _team_card(pipes, marked=True, answer={"actor_alias": name})
+    assert isinstance(returned, StdioRefused) and returned.code == "sender_name_refused"
+
+
+def test_declined_marked_team_card_is_declined(pipes):
+    from claudlobby.commands.owner_stdio import StdioRefused
+    returned, _ = _team_card(pipes, marked=True, answer={"approve": False, "actor_alias": "human:ada-lovelace"})
+    assert isinstance(returned, StdioRefused) and returned.code == "declined"

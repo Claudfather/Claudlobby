@@ -13,6 +13,36 @@ from ..request_ids import canonical_request_id
 from ..runtime_admission import bound_runtime_release as _bound_release
 
 
+def send_to_lead(root, *, package, fleet, alias, request_id, text, check, provenance):
+    """One registered local human's ordinary message to the fleet's lead, through the local send path.
+
+    ``check(ctx, route)`` runs inside runtime admission immediately before delivery and refuses by
+    raising. The durable request is required; nothing here retries or registers.
+    """
+    from ..application_messages import deliver_bound_message
+    from ..message_context import resolve_message_route
+    from ..message_payload import MessageBody
+    from ..operation_context import bind_task_context, resolve_operation_scope
+    from ..runtime_admission import (RuntimeIdentity, mutation_admission, runtime_release_id,
+                                     runtime_route_matches)
+
+    body = MessageBody.from_input(text)
+    selected, origin = resolve_operation_scope(root=root, fleet=fleet, package=package)
+    if origin is not None or selected.paths.seed:
+        raise CommandFailure("conflict", "this send requires a local operator")
+    with mutation_admission(selected.paths.root, identity=RuntimeIdentity.current(),
+                            expected_release=_bound_release(selected.paths.package, generated=False)) as release:
+        ctx = bind_task_context(selected, operator_alias=alias)
+        route = resolve_message_route(selected.fleet.manager, root=selected.paths.root, fleet=selected.fleet.name,
+                                      package=selected.paths.package, caller_context=ctx)
+        if not runtime_route_matches(release, route) or route.caller != ctx.caller:
+            raise CommandFailure("release_mismatch", "message route differs from selected release",
+                                 release_id=runtime_release_id(release))
+        check(ctx, route)
+        return deliver_bound_message(route, body=body, request_id=request_id, caller_context=ctx,
+                                     require_durable_request=True, provenance=provenance)
+
+
 def _body(args):
     from ..message_payload import MessageBody, MessagePayloadError
     from ..plane.registries import cap_for

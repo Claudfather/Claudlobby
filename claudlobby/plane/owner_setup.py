@@ -79,6 +79,8 @@ class SetupGrant:
     account_directory: str | None = None
     managed_owner: dict | None = None
     provider_signin: dict | None = None
+    # The messages mark: ``{"alias": "human:<name>"}``, the name chosen on the guided team card.
+    messages: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,33 @@ def _snapshot(grant):
         value.pop("managed_owner")
     if grant.provider_signin is None:
         value.pop("provider_signin")
+    if grant.messages is None:
+        value.pop("messages")
     return json.dumps(value,sort_keys=True,separators=(",", ":"))
+
+
+def grant_fields(grant):
+    """An approval as reported: every field, except ``messages`` when the card carried no mark,
+    so an unmarked approval reads exactly as before the mark existed."""
+    value = asdict(grant)
+    if grant.messages is None:
+        value.pop("messages")
+    return value
+
+
+def retained_fields(retained):
+    """``RetainedSetupState`` as reported, its approval through ``grant_fields``."""
+    value = asdict(retained)
+    if retained.grant is not None:
+        value["grant"] = grant_fields(retained.grant)
+    return value
+
+
+def messages_shape(value):
+    """The only stored form of the mark: the name's form, not today's reserved list, so a name
+    approved earlier still loads if the list grows."""
+    from ..operation_context import sender_name_form
+    return isinstance(value, dict) and set(value) == {"alias"} and sender_name_form(value["alias"])
 
 
 def _uuid(value):
@@ -253,6 +281,7 @@ class OwnerSetup:
 
     def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
+        if expected.messages is not None and not messages_shape(expected.messages): raise AccessDenied("setup_denied")
         check_managed_owner(expected.managed_owner, self.access.root, expected.installation)
         with self.access._connection(write=True) as conn:
             binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
@@ -323,7 +352,8 @@ class OwnerSetup:
         base={"binding_snapshot","template","fleet","repository","installation","source_revision",
               "install_directory","generation","created_at","expires_at"}
         if not isinstance(value,dict): raise AccessUnavailable()
-        fields = set(value) - {"managed_owner","provider_signin"}
+        fields = set(value) - {"managed_owner","provider_signin","messages"}
+        if "messages" in value and not messages_shape(value["messages"]): raise AccessUnavailable()
         if "provider_signin" in value:
             from .provider_signin import scope_shape
             if not scope_shape(value["provider_signin"]): raise AccessUnavailable()
@@ -650,7 +680,9 @@ class SetupEngine:
         rendered=read_rendered(self.root,request["config_fingerprint"])
         return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
             "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
-            "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase}
+            "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase,
+            # A marked approval: Launch sends this Preview's goal to the lead once. The page finishes it.
+            **({"sends_goal":True,"finish":"page"} if grant.messages is not None else {})}
 
     def _retained_plan(self,grant,request,kept):
         """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
@@ -696,6 +728,7 @@ class SetupEngine:
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
             **({"managed_owner":True} if grant.managed_owner is not None else {}),
+            **({"sends_goal":True} if grant.messages is not None else {}),
             **({"provider_signin":True,"signin_attempt":self.signin.summary(reader,grant) if request is None else None} if grant.provider_signin is not None else {}),
             "request":request,"launch_reserved":reserved,
             **({"preview_state":state} if state is not None else {}),
@@ -800,7 +833,9 @@ class SetupEngine:
             install_directory=grant.install_directory,account_directory=grant.account_directory))
         record=output.data["update"]
         request,expires_at=self.store.retain(reader,grant,record)
-        return self._plan(grant,request,expires_at,record["phase"])
+        plan=self._plan(grant,request,expires_at,record["phase"])
+        # The exact text Launch approves, read back from the computer, not from the page's box.
+        return {**plan,"goal":goal} if grant.messages is not None else plan
 
     def launch(self,reader,generation,request_id,config_fingerprint,source_revision):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()

@@ -747,6 +747,7 @@ def test_repository_snapshot_stays_byte_compatible(setup_authority):
     from claudlobby.plane.owner_setup import _snapshot
     store, _, grant, *_ = setup_authority
     old = asdict(grant); old.pop("project_directory"); old.pop("account_directory"); old.pop("managed_owner"); old.pop("provider_signin")
+    old.pop("messages")  # The messages mark, like the fields above, is absent from an unmarked snapshot.
     expected = json.dumps(old, sort_keys=True, separators=(",", ":"))
     assert _snapshot(grant) == expected
     store.allow(grant)
@@ -2856,6 +2857,11 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
                              "binding_sha256": "b" * 64, "finish_setup": None}
                     starts.append(start)
                     send("start", **start)
+                elif frame["type"] == "proposal" and frame["proposal"]["action"] == "allow_setup":
+                    # The team card carries the messages mark; its answer carries the name (04a).
+                    assert frame["proposal"]["scope"]["grant"]["messages"] == {"sender": "card"}
+                    send("decide", proposal_id=frame["proposal_id"], digest=frame["digest"], approve=True,
+                         actor_alias="human:ada-lovelace")
                 elif frame["type"] == "proposal":
                     send("decide", proposal_id=frame["proposal_id"], digest=frame["digest"], approve=True)
                 elif frame.get("state") == "awaiting_pairing":
@@ -2889,6 +2895,7 @@ def test_todays_guide_is_unchanged_on_the_wire(team_setup, monkeypatch, tmp_path
     grant = OwnerSetup(access).local()
     assert (grant.template, grant.fleet, grant.project_directory) == ("local-project", "web-app", str(profile.project))
     assert grant.provider_signin["binary"] == str(profile.provider) and grant.managed_owner is not None
+    assert grant.messages == {"alias": "human:ada-lovelace"}
 
 
 from tests.test_owner_guide_preinstall import installed  # noqa: E402,F401
@@ -2989,3 +2996,288 @@ def test_preview_and_the_context_read_answer_units_without_their_working_data(se
         assert len(json.dumps(answer).encode())<SETUP_ANSWER_BYTES
         assert answer["effects"]["restart_bots"]==effects["restart_bots"] and answer["dispatch"]=="prepared"
     assert "environment" in whole.effects["units"][0]
+
+
+
+# The team card with the messages mark (04a) and its finish after a healthy Launch (04b1).
+# The finish's reach beyond the authority database is a stand-in here; tests/test_host_owner.py
+# runs the real registration and send.
+ALIAS = "human:ada-lovelace"
+FLEET_UID, ACTOR_UID, LEAD_UID = "fleet_" + "1" * 32, "actor_" + "2" * 32, "actor_" + "3" * 32
+
+
+def _receipt(caller, recipient, text, status="submitted"):
+    from claudlobby.message_payload import MessageBody
+    from claudlobby.request_receipts import semantic_digest
+    digest = semantic_digest({"body": MessageBody.from_input(text).text.encode("utf-8"), "kind": "chat"})
+    return SimpleNamespace(operation="message.send", caller_uid=caller, recipient_uid=recipient, semantic_sha256=digest,
+                           transmissions=(SimpleNamespace(transport=SimpleNamespace(status=status)),))
+
+
+class FakeCard:
+    def __init__(self, access, *, taken=(), fail_send=False):
+        self.access, self.names, self.fail_send = access, set(taken), fail_send
+        self.receipts, self.sent, self.registered = {}, [], []
+
+    def taken(self):
+        return set(self.names)
+
+    def register(self, alias):
+        self.registered.append(alias)
+        return {"owner": self.access.current_grant(), "fleet_uid": FLEET_UID, "actor_uid": ACTOR_UID, "lead_uid": LEAD_UID}
+
+    def receipt(self, fleet_uid, request_id):
+        assert fleet_uid == FLEET_UID
+        return self.receipts.get(request_id)
+
+    def send(self, alias, request_id, text, check):
+        check(SimpleNamespace(caller=SimpleNamespace(uid=ACTOR_UID, alias=alias)),
+              SimpleNamespace(peer=SimpleNamespace(uid=LEAD_UID)))
+        if self.fail_send:
+            raise OSError("synthetic native send failure before any receipt")
+        self.sent.append((alias, request_id, text))
+        self.receipts[request_id] = _receipt(ACTOR_UID, LEAD_UID, text)
+
+
+def marked_setup(fixture, monkeypatch, alias=ALIAS):
+    fixture = (fixture[0], fixture[1], replace(fixture[2], messages={"alias": alias}), *fixture[3:])
+    return completed_setup(fixture, monkeypatch)
+
+
+def finish(fixture, request, card, monkeypatch, *, consent=True):
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.context import resolve_paths
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: card)
+    access = fixture[1]
+    return guide.run(SimpleNamespace(finish_setup=list(request.values()), target_fleet=None),
+                     resolve_paths(root=access.root), access, None,
+                     **({"consent": object()} if consent else {})).data
+
+
+def preview_payload(access, grant):
+    import sqlite3
+    with sqlite3.connect(access.path) as conn:
+        return json.loads(conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()[0])
+
+
+def message_grants(access):
+    return [(g.actor_uid, g.actor_alias) for g in access.local_action_status().message_grants]
+
+
+def test_marked_approval_stores_the_name_and_a_malformed_mark_refuses_to_load(setup_authority):
+    import sqlite3
+    from claudlobby.plane.owner_setup import _snapshot
+    store, access, grant, *_ = setup_authority
+    marked = replace(grant, messages={"alias": ALIAS})
+    assert json.loads(_snapshot(marked))["messages"] == {"alias": ALIAS}
+    with pytest.raises(AccessDenied):
+        store.allow(replace(grant, messages={"alias": "human:Ada"}))
+    store.allow(marked)
+    assert store.local() == marked
+    for bad in ({"alias": "human:Ada"}, {"alias": ALIAS, "sender": "card"}, {"sender": "card"}, "human:ada"):
+        value = json.loads(_snapshot(marked)); value["messages"] = bad
+        with sqlite3.connect(access.path) as conn:
+            conn.execute("UPDATE setup_grant SET snapshot=?", (json.dumps(value, sort_keys=True, separators=(",", ":")),))
+        with pytest.raises(AccessUnavailable):
+            store.local()
+
+
+@pytest.mark.parametrize("marked", [True, False])
+def test_preview_says_the_goal_is_sent_only_for_a_marked_approval(setup_authority, marked):
+    store, access, grant, reader, *_ = setup_authority
+    if marked:
+        grant = replace(grant, messages={"alias": ALIAS})
+    store.allow(grant)
+    engine = SetupEngine(access)
+    plan = engine.preview(reader, grant.generation, "Review requested local code")
+    context = engine.context(reader)
+    if marked:
+        assert (plan["sends_goal"], plan["finish"], plan["goal"]) == (True, "page", "Review requested local code")
+        assert context["sends_goal"] is True and context["preview"]["sends_goal"] is True
+    else:
+        assert not {"sends_goal", "finish", "goal"} & set(plan) and "sends_goal" not in context
+        assert not {"sends_goal", "finish"} & set(context["preview"])
+
+
+def test_page_finish_turns_messages_on_and_sends_the_goal_once(setup_authority, monkeypatch):
+    from claudlobby.commands.host_owner_setup import card_status, goal_request_id
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access, taken={"lead", "engineer"})
+    first = finish(setup_authority, request, card, monkeypatch)
+    expected = {"state": "allowed", "by": "page", "alias": ALIAS, "renamed": False, "goal": {"state": "sent"}}
+    assert first == {"state": "setup_complete", "request_id": record["request_id"], "messages": expected}
+    goal_id = goal_request_id(record["request_id"])
+    assert card.sent == [(ALIAS, goal_id, "Review requested local code")] and goal_id != record["request_id"]
+    assert message_grants(access) == [(ACTOR_UID, ALIAS)]
+    # Again, as a reopened page would: the record answers, nothing is granted or sent again.
+    assert finish(setup_authority, request, card, monkeypatch)["messages"] == expected
+    assert len(card.sent) == 1 and card.registered == [ALIAS]
+    status = card_status(access, OwnerSetup(access).retained_state())
+    assert status == {"messages": expected, "goal": "Review requested local code"}
+
+
+def test_a_held_finish_lock_answers_in_progress_and_writes_nothing(setup_authority, monkeypatch):
+    import fcntl, os
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    path = access.root / "state" / f"setup-finish-{record['request_id']}.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # Another finish, blocked for as long as it likes.
+        assert finish(setup_authority, request, card, monkeypatch)["messages"] == {"state": "in_progress", "by": "page"}
+        assert "messages" not in preview_payload(access, grant) and not card.registered and not card.sent
+    finally:
+        os.close(fd)
+    assert finish(setup_authority, request, card, monkeypatch)["messages"]["state"] == "allowed"
+    assert len(card.sent) == 1
+
+
+def test_a_finish_that_died_after_choosing_its_label_resumes_with_it(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    card.register = lambda alias: (_ for _ in ()).throw(KeyboardInterrupt())  # Dies while registering.
+    with pytest.raises(KeyboardInterrupt):
+        finish(setup_authority, request, card, monkeypatch)
+    assert preview_payload(access, grant)["messages"]["state"] == "in_progress"
+    resumed = FakeCard(access, taken={"ada-lovelace"})  # Its own registration now reads as taken.
+    answer = finish(setup_authority, request, resumed, monkeypatch)["messages"]
+    assert (answer["state"], answer["alias"], answer["renamed"]) == ("allowed", ALIAS, False)
+    assert resumed.registered == [ALIAS] and message_grants(access) == [(ACTOR_UID, ALIAS)]
+
+
+@pytest.mark.parametrize("change", ["revoke_setup", "re_pair"])
+def test_a_withdrawn_or_re_paired_approval_grants_and_sends_nothing(setup_authority, monkeypatch, change):
+    from tests.test_plane_owner_workspace import OWNER as PRINCIPAL
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    if change == "revoke_setup":
+        OwnerSetup(access).revoke(grant)
+    else:
+        access.revoke_owner(expected_revision=access.current_grant().revision)
+        access.confirm_pairing(access.begin_pairing(PRINCIPAL).token, expected_principal=PRINCIPAL)
+    card = FakeCard(access)
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert answer["state"] == ("revoked" if change == "revoke_setup" else "stale")
+    assert answer["goal"]["state"] == "not_sent" and not card.sent and message_grants(access) == []
+
+
+@pytest.mark.parametrize("binding", ["as_approved", "rebound_before_finish"])
+def test_finish_takes_no_website_account_and_stops_only_on_a_changed_binding(setup_authority, monkeypatch, binding):
+    """The open question for the build (04a): core cannot tell which website account drives the guide.
+
+    The finish takes no account input: whoever drives the guide over the computer's Tailscale user (a
+    bare consent object here) gets exactly the card's effect under the card's name, for the binding the
+    approval pinned. It refuses only when that binding changed (a re-pair or a re-bind). The page-side
+    rule (the page fills the name only for its own bound account) is the first guard."""
+    import inspect
+    from claudlobby.commands.host_owner_setup import _card_messages
+    assert set(inspect.signature(_card_messages).parameters) == {"paths", "store", "grant", "record", "by", "effects"}
+    import sqlite3
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+
+    def rebind():  # Another website account bound to this computer, as the binding row would read.
+        with sqlite3.connect(access.path) as conn:
+            conn.execute("UPDATE workspace_bindings SET subject=?", ("00000000-0000-4000-8000-00000000000b",))
+    if binding == "rebound_before_finish":
+        rebind()
+        card = FakeCard(access)
+        answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+        assert (answer["state"], answer["goal"]["state"]) == ("stale", "not_sent")
+        assert not card.sent and message_grants(access) == []
+        return
+    card = FakeCard(access)
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert (answer["state"], answer["alias"]) == ("allowed", ALIAS) and len(card.sent) == 1
+    rebind()
+    other = FakeCard(access)
+    later = finish(setup_authority, request, other, monkeypatch)["messages"]
+    assert later["state"] == "allowed", "a final record is never re-granted or re-sent"
+    assert not other.sent and not other.registered
+
+
+def test_messages_revoked_while_the_goal_is_pending_stops_the_send(setup_authority, monkeypatch):
+    from claudlobby.commands.host_owner_setup import card_status
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    failing = FakeCard(access, fail_send=True)
+    answer = finish(setup_authority, request, failing, monkeypatch)["messages"]
+    assert answer["state"] == "allowed" and answer["goal"] == {"state": "pending", "reason": "send_unavailable"}
+    access.revoke_messages(expected_owner=access.current_grant(), fleet_uid=FLEET_UID)
+    card = FakeCard(access)
+    later = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert not card.sent and later["goal"] == {"state": "not_sent", "reason": "revoked"}
+    assert (later["state"], later["reason"]) == ("revoked", "messages_revoked")
+    assert card_status(access, OwnerSetup(access).retained_state())["messages"]["state"] == "revoked"
+
+
+def test_a_goal_changed_after_launch_is_not_sent(setup_authority, monkeypatch):
+    import sqlite3
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    payload = preview_payload(access, grant)
+    payload["goal"] = "Delete the production database"
+    with sqlite3.connect(access.path) as conn:
+        conn.execute("UPDATE setup_previews SET payload=?", (json.dumps(payload),))
+    card = FakeCard(access)
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert answer["goal"] == {"state": "not_sent", "reason": "goal_changed"} and not card.sent
+
+
+def test_a_receipt_under_the_goal_id_that_does_not_match_is_never_resent(setup_authority, monkeypatch):
+    from claudlobby.commands.host_owner_setup import goal_request_id
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    card.receipts[goal_request_id(record["request_id"])] = _receipt("actor_" + "9" * 32, LEAD_UID, "Another body")
+    for _ in range(2):
+        answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+        assert answer["goal"] == {"state": "unknown", "reason": "request_id_taken"} and not card.sent
+
+
+@pytest.mark.parametrize("alias,taken,expected", [
+    ("human:ada-lovelace", {"ada-lovelace"}, "human:ada-lovelace-2"),
+    ("human:default-user", {"default-user"}, "human:default-user-2"),
+    ("human:" + "c" * 40, {"c" * 40}, "human:" + "c" * 38 + "-2"),
+    ("human:ada-lovelace", {"ada-lovelace", *(f"ada-lovelace-{n}" for n in range(2, 10))}, None),
+])
+def test_a_taken_name_gets_a_number_or_name_taken(setup_authority, monkeypatch, alias, taken, expected):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch, alias=alias)
+    access = setup_authority[1]
+    card = FakeCard(access, taken=taken)
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    if expected is None:
+        assert answer["state"] == "name_taken" and not card.registered and not card.sent and message_grants(access) == []
+    else:
+        assert (answer["state"], answer["alias"], answer["renamed"]) == ("allowed", expected, True)
+        assert card.sent[0][0] == expected and message_grants(access) == [(ACTOR_UID, expected)]
+
+
+def test_a_terminal_grant_for_this_team_is_kept_and_its_actor_never_reused(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    other = ("actor_" + "4" * 32, "human:someone-else")
+    access.allow_messages(expected_owner=access.current_grant(), fleet_uid=FLEET_UID, actor_uid=other[0], actor_alias=other[1])
+    card = FakeCard(access)
+    answer = finish(setup_authority, request, card, monkeypatch)["messages"]
+    assert (answer["state"], answer["alias"], answer["goal"]) == ("kept", ALIAS, {"state": "not_sent", "reason": "other_grant"})
+    assert message_grants(access) == [other] and not card.sent and card.registered == [ALIAS]
+
+
+def test_an_update_after_done_refuses_the_marked_finish(setup_authority, monkeypatch):
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    record["target"] = "f" * 40
+    from claudlobby.commands import host_owner_setup as guide
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: pytest.fail("a stale Launch reached the finish"))
+    with pytest.raises((CommandFailure, ValueError, RuntimeError)):
+        finish(setup_authority, request, None, monkeypatch)
+
+
+def test_the_card_carries_the_mark_only_while_its_finish_exists(monkeypatch):
+    from claudlobby.commands import host_owner, host_owner_setup
+    assert host_owner._card_finish_ready() is True
+    monkeypatch.delattr(host_owner_setup, "_card_messages")
+    assert host_owner._card_finish_ready() is False
