@@ -126,6 +126,15 @@ def test_a_hit_across_a_line_break_counts_each_line_it_touches(env):
     assert (rc, out) == (1, "standard input: 2 line(s) with a hit\n")
 
 
+def test_a_hit_of_no_width_at_a_line_start_counts_its_line(env):
+    """A list line that is only a lookahead matches with no width. A match of no width
+    at the start of a line still touches that line, so each line here that starts
+    with the term counts, as the hook finds a hit in each."""
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_text("(?=zephyr[ ._-]?widgets)\n")
+    rc, out, _ = count(env, stdin="Zephyr widgets\nplain words\nzephyr-widgets too\n")
+    assert (rc, out) == (1, "standard input: 2 line(s) with a hit\n")
+
+
 def test_an_input_that_cannot_be_read_counts_as_a_hit(env, tmp_path):
     missing = tmp_path / "not-there.txt"
     rc, out, _ = count(env, missing, tmp_path)

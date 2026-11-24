@@ -608,8 +608,8 @@ bots:
 
   | case | what happens |
   |---|---|
-  | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby event list` (it does not page) |
-  | a broken list: a file that is not UTF-8 text, a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming a bad line by its number and column, never its text |
+  | no list: no list file, or one with only comments and blank lines | allow, and a critical `public_write_guard_unarmed` event in `claudlobby event list` (it does not page) |
+  | a broken list, whatever stops it loading: a list path that cannot be read as a file (a directory, a named pipe or a device, for example), a file that is not UTF-8 text, a line that does not compile (too large a repeat count or groups nested too deep among them), lines that do not compile together, or a line that can match an empty string (every write would be a hit) | refuse every guarded write, naming a bad line by its number and column, never its text |
   | a payload that is not JSON | allow, with a `script_error` breadcrumb |
   | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
   | content it cannot read: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name | counts as a hit (a substitution in any other flag, such as `--match-head-commit`, is not content and is left as written) |

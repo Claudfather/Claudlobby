@@ -51,14 +51,18 @@ list's own reader instead of reading the list itself. It exits 0 when every
 count is 0, 1 when any is above 0, and 2 when the list is absent or broken.
 
 Failure directions, each chosen on purpose:
-  - no list file: ALLOW, and record ``public_write_guard_unarmed``. There is
-    nothing to match, and refusing every GitHub write on a host that was never
-    configured is an outage; the canary checks that the file exists.
-  - a broken list (a file that is not UTF-8 text, a line that does not
-    compile, or one that can match an empty string, so every write would be a
-    hit): REFUSE every guarded write, naming a bad line by its number and
-    column, never by its text. Someone meant to protect this host, and a
-    broken list must not read as none.
+  - no list (no list file, or one with only comments and blank lines): ALLOW,
+    and record ``public_write_guard_unarmed``. There is nothing to match, and
+    refusing every GitHub write on a host that was never configured is an
+    outage; the canary checks that the file exists.
+  - a broken list, whatever stops it loading (a list path that cannot be read
+    as a file, such as a directory, a named pipe or a device; a file that is
+    not UTF-8 text; a line that does not compile, too large a repeat count or
+    groups nested too deep among them; lines that do not compile together; or a
+    line that can match an empty string, so every write would be a hit): REFUSE
+    every guarded write, naming a bad line by its number and column, never by
+    its text. Someone meant to protect this host, and a broken list must not
+    read as none.
   - a payload that is not JSON: ALLOW, loudly (exit 3: the hook leaves a
     breadcrumb). A hook that cannot read the harness's own payload must not
     wedge every call.
@@ -97,6 +101,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -260,9 +265,15 @@ def _list_label() -> str:
 def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
     """(compiled list, state): state is ``ok``, ``absent`` or ``broken: <why>``.
 
-    A broken list is named by line and column, never by the line's text: the
-    reason reaches the bot, and the list is what must not travel."""
+    A list that does not load is broken, whatever stops it at the read or at
+    either compile, and never reads as absent. A broken list is named by line
+    and column, never by the line's text: the reason reaches the bot, and the
+    list is what must not travel."""
     try:
+        # a named pipe would wait for a writer, and a device need never end
+        mode = path.stat().st_mode
+        if stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+            return None, "broken: it is a named pipe or a device, not a file"
         # "utf-8-sig": a byte-order mark at the start of the file is not part of line 1
         lines = path.read_text(encoding="utf-8-sig").splitlines()
     except FileNotFoundError:
@@ -271,6 +282,8 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
         return None, f"broken: {exc.strerror or exc}"
     except UnicodeDecodeError:
         return None, "broken: it is not UTF-8 text"
+    except Exception as exc:  # anything else that stops the read: a MemoryError, for one
+        return None, f"broken: it cannot be read: {type(exc).__name__}"
     parts = [
         (n, ln.strip())
         for n, ln in enumerate(lines, 1)
@@ -284,6 +297,8 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
         except re.error as exc:
             col = "" if exc.colno is None else f", column {max(exc.colno - 3, 1)}"
             return None, f"broken: line {n} does not compile{col}"
+        except Exception as exc:  # too large a repeat count, groups nested too deep
+            return None, f"broken: line {n} does not compile: {type(exc).__name__}"
         if any(m.start() == m.end() for probe in _PROBES for m in one.finditer(probe)):
             return None, (
                 f"broken: line {n} can match an empty string, so every write "
@@ -293,6 +308,8 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
         return re.compile("|".join(f"(?:{p})" for _, p in parts), re.IGNORECASE), "ok"
     except re.error:
         return None, "broken: its lines do not compile together (a group name used twice?)"
+    except Exception as exc:  # as for one line
+        return None, f"broken: its lines do not compile together: {type(exc).__name__}"
 
 
 # --- reading the shell ----------------------------------------------------------------

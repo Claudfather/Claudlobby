@@ -11,6 +11,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import resource
 import shutil
 import subprocess
 import sys
@@ -871,6 +872,103 @@ def test_a_list_led_by_a_byte_order_mark_matches_its_line_1_term(env, tmp_path):
     terms.write_bytes(b"\xef\xbb\xbf# invented terms\nzephyr[ ._-]?widgets\n")
     rc, out = check_list(env)
     assert rc == 0 and "ok, 1 pattern(s)" in out
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda p: (p.unlink(), p.mkdir()),
+        lambda p: p.write_text("(?P<w>zephyr)\n(?P<w>quillon)\n"),
+    ],
+    ids=["cannot-be-read", "do-not-compile-together"],
+)
+def test_a_list_that_does_not_load_is_broken_on_every_path(env, tmp_path, make):
+    """A list that does not load is broken, whatever the cause: a list file that cannot
+    be read (here a directory), or lines that compile alone but not together (a group
+    name used twice). Every guarded write is refused, `--check` says broken and
+    `--count` exits 2."""
+    make(Path(env["PUBLIC_WRITE_GUARD_TERMS"]))
+    verdict, why = run(env, "mcp__github__create_issue", issue("priv-org", "priv-repo", "plain"),
+                       tmp_path)
+    assert verdict == "deny" and "is broken" in why
+    rc, out = check_list(env)
+    assert rc == 1 and ": broken: " in out
+    p = subprocess.run(["python3", str(SCRIPTS / "public-write-guard.py"), "--count"],
+                       input="plain\n", capture_output=True, text=True, env=env, timeout=30)
+    assert (p.returncode, p.stdout) == (2, "") and ": broken: " in p.stderr
+    assert not any(w in (why + out + p.stderr).lower() for w in ("zephyr", "quillon"))
+
+
+def _release(fifo):
+    """Open the named pipe for writing and close it, so a reader still waiting on it
+    (a guard that waited) reads an empty file and ends: no process is left behind."""
+    try:
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+    except OSError:
+        pass  # no reader is waiting
+
+
+@pytest.mark.parametrize(
+    "make, why",
+    [
+        (lambda p: p.write_text("zephyr[ ._-]?widgets\nquillon{4294967295}\n"),
+         "line 2 does not compile: OverflowError"),
+        (lambda p: p.write_text("zephyr[ ._-]?widgets\n" + "(" * 600 + "quillon" + ")" * 600 + "\n"),
+         "line 2 does not compile: RecursionError"),
+        (lambda p: (p.unlink(), os.mkfifo(p)), "it is a named pipe or a device, not a file"),
+    ],
+    ids=["a-repeat-count-too-large", "groups-nested-too-deep", "a-named-pipe"],
+)
+def test_whatever_stops_the_list_loading_makes_it_broken(env, tmp_path, make, why):
+    """Anything that stops the list loading makes it broken: a line Python cannot
+    compile for a reason of its own (a repeat count too large, groups nested too
+    deep), or a list path that is a named pipe, which a read would wait on. Every
+    guarded write is refused, `--check` says broken and `--count` exits 2, and none
+    of them waits."""
+    terms = Path(env["PUBLIC_WRITE_GUARD_TERMS"])
+    make(terms)
+    try:
+        verdict, said = run(env, "mcp__github__create_issue",
+                            issue("priv-org", "priv-repo", "plain"), tmp_path)
+        assert verdict == "deny" and f"is broken ({why})" in said
+        rc, out = check_list(env)
+        assert rc == 1 and f": broken: {why}" in out
+        p = subprocess.run(["python3", str(SCRIPTS / "public-write-guard.py"), "--count"],
+                           input="plain\n", capture_output=True, text=True, env=env, timeout=30)
+        assert (p.returncode, p.stdout) == (2, "") and f": broken: {why}" in p.stderr
+        assert not any(w in (said + out + p.stderr).lower() for w in ("zephyr", "quillon"))
+    finally:
+        if terms.is_fifo():
+            _release(terms)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS does not enforce RLIMIT_AS")
+def test_a_list_too_large_to_read_is_broken(env, tmp_path):
+    """A read of the list that runs out of memory makes it broken too, on all three
+    paths. The list file is sparse (768 MiB, none of it on disk), and each run may use
+    at most 256 MiB of address space, so the read fails at once and costs nothing."""
+    with open(env["PUBLIC_WRITE_GUARD_TERMS"], "wb") as f:
+        f.truncate(768 << 20)
+
+    def cap():
+        resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))
+
+    why = "it cannot be read: MemoryError"
+    payload = json.dumps({"tool_name": "mcp__github__create_issue",
+                          "tool_input": issue("priv-org", "priv-repo", "plain"),
+                          "cwd": str(tmp_path)})
+    hook = subprocess.run(["bash", str(HOOK)], input=payload, capture_output=True, text=True,
+                          env=env, cwd=tmp_path, timeout=60, preexec_fn=cap)
+    decision = json.loads(hook.stdout)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert f"is broken ({why})" in decision["permissionDecisionReason"]
+    guard = ["python3", str(SCRIPTS / "public-write-guard.py")]
+    p = subprocess.run(guard + ["--check"], capture_output=True, text=True, env=env,
+                       timeout=30, preexec_fn=cap)
+    assert p.returncode == 1 and f": broken: {why}" in p.stdout
+    p = subprocess.run(guard + ["--count"], input="plain\n", capture_output=True, text=True,
+                       env=env, timeout=30, preexec_fn=cap)
+    assert (p.returncode, p.stdout) == (2, "") and f": broken: {why}" in p.stderr
 
 
 def test_check_names_the_off_switch(env, tmp_path):
