@@ -1,12 +1,12 @@
 # Phase 0 proof B — systemd and a surviving tmux worker
 
-On 2026-11-22, the Pi's systemd user manager restarted a killed observer in 2.257 seconds. The replacement observed the same private tmux server and sleeping worker. During the retry interval the unit reported `activating/auto-restart` with no main PID. A separate, explicitly non-retryable exit produced `failed/failed`.
+On 2026-11-22, the Raspberry Pi’s systemd user manager restarted a killed observer in 2.257 seconds. The replacement observed the same private tmux server and sleeping worker. During the retry interval the unit reported `activating/auto-restart` with no main PID. A separate, explicitly non-retryable exit produced `failed/failed`.
 
 ## Setup
 
-The Pi ran Linux aarch64, systemd 252.39 and tmux 3.3a. Its one-minute load average just before the run was 10.25. One temporary Python observer ran in a uniquely named transient user unit created by `systemd-run --user`. The unit used `Type=simple`, `KillMode=process`, `Restart=on-failure` and `RestartSec=2`. Its private socket, tmux configuration (empty), readiness record and sleeping worker were isolated from the fleet.
+The Raspberry Pi ran Linux aarch64, systemd 252.39 and tmux 3.3a. Its one-minute load average just before the run was 10.25. One temporary Python observer ran in a uniquely named transient user unit created by `systemd-run --user`. The unit used `Type=simple`, `KillMode=process`, `Restart=on-failure` and `RestartSec=2`. Its private socket, tmux configuration (empty), readiness record and sleeping worker were isolated from the fleet.
 
-The observer created a session when its socket had none. It atomically published its PID and the live server and pane PIDs. The probe compared those identities to the unit's MainPID and a separate tmux query. On SIGTERM the observer stopped its server and exited successfully. For the terminal-failure control only, SIGUSR1 made it stop its server and exit 42, which the fixture declared in `RestartPreventExitStatus`. This control demonstrates a distinct manager state without exhausting a retry quota.
+The observer created a session when its socket had none. It atomically published its PID and the live server and pane PIDs. The probe polled at 50 ms intervals. Restart timing ran from requesting SIGKILL to observing the new readiness record and verifying PID continuity. Stop timing ran from requesting stop to observing process and session absence. These timings include command and polling overhead under the observed host load and configured restart delay. The probe compared those identities to the unit's MainPID and a separate tmux query. With KillMode=process the stop targeted the observer. The server survived observer SIGKILL, so this result cannot be generalized to other kill modes. On SIGTERM the observer stopped its server and exited successfully. For the terminal-failure control only, SIGUSR1 made it stop its server and exit 42, which the fixture declared in `RestartPreventExitStatus`. This control demonstrates a distinct manager state without exhausting a retry quota.
 
 ## Observations
 

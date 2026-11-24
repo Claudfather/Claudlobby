@@ -1,10 +1,10 @@
 # Phase 0 proof A — launchd and a surviving tmux worker
 
-On 2026-11-22, an isolated GUI LaunchAgent on macOS 26.1 restarted a killed observer in 2.108 seconds. The replacement found the same private tmux server and worker. Removing the job stopped all three processes in 0.064 seconds. The job remained absent throughout a further six-second observation window.
+On 2026-11-22, an isolated GUI LaunchAgent on macOS 26.1 restarted a killed observer in 2.108 seconds. The replacement found the same private tmux server and worker. On bootout, the observer’s SIGTERM handler shut down its server, and the probe observed all three processes gone in 0.064 seconds. The job remained absent throughout a further six-second observation window.
 
 ## Setup and observations
 
-The source baseline was `c06c5693`. The temporary agent ran an independent Python 3.12 observer with tmux 3.6a, a unique launchd label, an absolute private socket, a single named session and a sleeping worker. The plist used RunAtLoad, KeepAlive with SuccessfulExit false, and a two-second ThrottleInterval. The observer created the session if absent, published its own PID plus the server and pane PIDs in an atomic readiness record, and handled SIGTERM by shutting down its own server. The probe polled at 50 ms intervals.
+The source baseline was `c06c5693`. The temporary agent ran an independent Python 3.12 observer with tmux 3.6a, a unique launchd label, an absolute private socket, a single named session and a sleeping worker. The plist used RunAtLoad, KeepAlive with SuccessfulExit false, and a two-second ThrottleInterval. The plist omitted AbandonProcessGroup. The probe observed server survival after observer SIGKILL; it did not measure process-group membership. The observer created the session if absent, published its own PID plus the server and pane PIDs in an atomic readiness record, and handled SIGTERM by shutting down its own server. The probe polled at 50 ms intervals. Restart timing ran from immediately after sending SIGKILL to observing the new readiness record. Stop timing ran from issuing bootout to observing process and session absence. These elapsed times include polling delay; the run did not isolate the throttle’s contribution.
 
 | Action | Observer PID | Server PID | Worker PID | Observation |
 |---|---:|---:|---:|---|
