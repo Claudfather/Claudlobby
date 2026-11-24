@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import codecs
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 import errno
 import fcntl
 import hashlib
@@ -30,6 +31,7 @@ import termios
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from .owner_access import AccessDenied, AccessUnavailable
 
@@ -543,6 +545,234 @@ def discard_binary(parent, attempt):
     except Exception: pass
 
 
+# The sign-in lease: held while a link sign-in may be live, so any process (the guide's too) can
+# tell. One private file per computer, under state/ beside staging(root) and the preview lease;
+# it is never removed (removing a lock file races with a process opening it). Only the link path
+# takes it: begin, just before it inserts a new link attempt, inside its write transaction; the
+# worker closes it after its last write. Every flock on it is non-blocking. The operating system
+# releases it when its holder closes it or dies, so a crash leaves a file that reads as free.
+SIGNIN_LEASE = "provider-signin.lock"
+
+
+def _lease_path(root):
+    state = Path(root) / "state"
+    if state.resolve() != state.absolute():
+        raise AccessUnavailable("sign-in state directory is not a plain directory")
+    return state / SIGNIN_LEASE
+
+
+def _private_lease(fd):
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise AccessUnavailable("sign-in lease is not a private regular file")
+
+
+def take_lease(root, attempt):
+    """The sign-in lease for a new link attempt, open and held; None while another holder has it.
+
+    Tried non-blocking, 50 times 0.01 seconds apart (a probe holds it only for an instant), never
+    waiting on it. The holder's attempt ID is written into the file for the record; no rule reads it.
+    """
+    try:
+        fd = os.open(_lease_path(root), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    except OSError:
+        raise AccessUnavailable("sign-in lease cannot be opened") from None
+    held = False
+    try:
+        _private_lease(fd)
+        for tries in range(50):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); held = True; break
+            except BlockingIOError:
+                if tries < 49: time.sleep(0.01)
+        if held:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, attempt.encode("ascii") + b"\n", 0)
+            return fd
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    return None
+
+
+def signin_running(root):
+    """Is the sign-in lease held by any process? True held, False free (or never made). Never blocks.
+
+    Anything else, a link, another owner, a second name, a mode other than 0600 or an error, refuses
+    with AccessUnavailable: it never reads as free.
+    """
+    try:
+        fd = os.open(_lease_path(root), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False  # begin makes it before any attempt it covers
+    except OSError:
+        raise AccessUnavailable("sign-in lease cannot be read") from None
+    try:
+        _private_lease(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            raise AccessUnavailable("sign-in lease cannot be read") from None
+        return False
+    finally:
+        os.close(fd)
+
+
+# A link approval: one yes, on a started computer, to Claude sign-ins for a short time. It is its
+# own record (setup_link), never a team approval (setup_grant): any setup_grant row makes the
+# computer read as set up to the computer run, and an older core reads only the team tables.
+LINK_UNUSED_SECONDS = 900  # the window in which a first sign-in must begin
+LINK_SECONDS = 1500  # the whole approval: a sign-in begun at the end of that window keeps its full time
+_LINK_FIELDS = frozenset({"generation", "binding_snapshot", "installation", "source_revision", "provider_signin",
+                          "created_at", "unused_until", "expires_at"})
+_TEAM_TABLES = frozenset({"setup_metadata", "setup_grant", "setup_previews"})
+
+
+@dataclass(frozen=True)
+class LinkApproval:
+    """The setup_link row. The worker reads generation, installation, source_revision,
+    provider_signin and expires_at, the names a team approval has, so it reads either."""
+    generation: str
+    binding_snapshot: str
+    installation: str
+    source_revision: str
+    provider_signin: dict
+    created_at: float
+    unused_until: float
+    expires_at: float
+
+
+def _names(conn):
+    """Every name in the database's schema, of any kind, as the team setup's own table test reads them."""
+    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+
+
+def team_retained(access, conn):
+    """A team approval or Launch is retained: the computer run's own test for ``use_full_guide``.
+
+    Reads only the database. With none of the team tables there is nothing to read; with some but
+    not all, every team read raises AccessUnavailable, and so does this one.
+    """
+    if not _names(conn) & _TEAM_TABLES:
+        return False
+    from .owner_setup import OwnerSetup
+    retained = OwnerSetup(access)._retained_state(conn)
+    return retained.state != "absent" or retained.launch_id is not None
+
+
+def link_snapshot(approval):
+    return json.dumps(asdict(approval), sort_keys=True, separators=(",", ":"))
+
+
+def link_approval(snapshot):
+    """The approval a setup_link snapshot holds, checked as a team approval is; AccessUnavailable otherwise."""
+    from .owner_setup import _uuid
+    try:
+        value = json.loads(snapshot)
+    except (TypeError, ValueError):
+        raise AccessUnavailable() from None
+    if not isinstance(value, dict) or set(value) != _LINK_FIELDS:
+        raise AccessUnavailable()
+    times = (value["created_at"], value["unused_until"], value["expires_at"])
+    if (not _uuid(value["generation"]) or not isinstance(value["binding_snapshot"], str)
+            or not isinstance(value["installation"], str) or not isinstance(value["source_revision"], str)
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["source_revision"])
+            or not scope_shape(value["provider_signin"])
+            or not all(type(item) in (int, float) and math.isfinite(item) for item in times)
+            or value["unused_until"] - value["created_at"] != LINK_UNUSED_SECONDS
+            or value["expires_at"] - value["created_at"] != LINK_SECONDS):
+        raise AccessUnavailable()
+    return LinkApproval(**value)
+
+
+class LinkStore:
+    """The link approval's record and its doors: ``write`` after the person's yes, ``authorize`` for each call."""
+    def __init__(self, access):
+        self.access = access
+        self.connected = access.connected()
+
+    @staticmethod
+    def _read(conn):
+        """The stored approval; None with no setup_link table or no row."""
+        if "setup_link" not in _names(conn):
+            return None
+        rows = conn.execute("SELECT singleton,snapshot FROM setup_link").fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1 or rows[0]["singleton"] != 1:
+            raise AccessUnavailable()
+        return link_approval(rows[0]["snapshot"])
+
+    def write(self, scope):
+        """Record one link approval for ``scope`` (``approved_scope``'s answer) and return it.
+
+        Called only by the computer run with the link intent, after the person's yes. One write
+        transaction; its checks run in this order, and a refusal writes nothing. It never touches a
+        setup_grant or setup_provider row.
+        """
+        from .owner_connected import OwnerConnected
+        from .owner_setup import managed_setup
+        from .owner_source import start_state
+        if not scope_shape(scope):
+            raise AccessDenied("setup_denied")
+        with self.access._connection(write=True) as conn:
+            owner = self.access._grant(conn)  # L1: the owner's access grant
+            if owner is None:
+                raise AccessDenied("setup_denied")
+            binding = self.access.workspace()._active_binding(conn, owner.principal)  # L2: the active binding
+            package = managed_setup(self.access.root)  # L3: the installation and the active revision
+            if team_retained(self.access, conn):  # L4: today's guide set this computer up
+                raise AccessDenied("use_full_guide")
+            if start_state(self.access.root, package.installation) != "started":  # L5
+                raise AccessDenied("not_started")
+            if signin_running(self.access.root):  # L6: a sign-in may be live
+                current = ProviderSignin._current(conn)[0] if "setup_provider" in _names(conn) else None
+                # L6b: held over an ended row, in practice a child whose reap went unproven and whose
+                # worker keeps the lease until its process exits. Not a live sign-in to resume.
+                raise AccessDenied("signin_unconfirmed" if current is not None and current["state"] in _TERMINAL
+                                   else "signin_live")
+            # L7: a starting or waiting row here, with the lease free, has ended (its worker is gone).
+            # It is left as it is; nothing to refuse.
+            ProviderSignin.initialize(conn)
+            now = self.access._now()
+            approval = LinkApproval(str(uuid4()), OwnerConnected._snapshot(binding), str(package.installation.directory),
+                                    package.source_revision, scope, now, now + LINK_UNUSED_SECONDS, now + LINK_SECONDS)
+            snapshot = link_snapshot(approval)
+            if link_approval(snapshot) != approval:
+                raise AccessUnavailable()
+            conn.execute("CREATE TABLE IF NOT EXISTS setup_link(singleton INTEGER PRIMARY KEY CHECK(singleton=1),snapshot TEXT NOT NULL)")
+            conn.execute("INSERT OR REPLACE INTO setup_link VALUES(1,?)", (snapshot,))
+        return approval
+
+    def authorize(self, reader, *, expected=None, effects=False):
+        """Admit a call under the link approval, with the team approval's fences; returns it.
+
+        Reads only the database (and the computer's ID, as the team admission does): the worker
+        calls it about every 0.1 seconds, so it never reads ``start_state``. ``effects`` is the
+        team store's signature; a link approval has no Launch to fence.
+        """
+        from .owner_connected import OwnerConnected
+        from .owner_source import source_host_uid
+        host = source_host_uid(self.access.root)
+        with self.access._connection() as conn:
+            admission = self.connected._admit(conn, reader.token, reader.principal, host,  # A1
+                self.access.workspace()._active_binding(conn, reader.principal).operational_origin)
+            approval = self._read(conn)  # A3: a row that does not read raises
+            if approval is None:  # A2
+                raise AccessDenied("setup_not_allowed")
+            if (approval.binding_snapshot != OwnerConnected._snapshot(admission.binding)  # A4
+                    or not approval.created_at <= self.access._now() < approval.expires_at
+                    or expected is not None and approval != expected):
+                raise AccessDenied("setup_denied")
+            if team_retained(self.access, conn):  # A5
+                raise AccessDenied("setup_denied")
+            return approval
+
+
 class ProviderSignin:
     """One current attempt bound to one SetupEngine; no restart recovery.
 
@@ -559,6 +789,16 @@ class ProviderSignin:
         self._closed = False  # set by shutdown: this process starts no successor
         self._expires_at = None  # whole host-clock seconds: the last moment a code is taken
         self._code_until = None  # the same cutoff on the monotonic clock, which code() enforces
+        self.link = LinkStore(store.access)
+        self._kept = []  # sign-in leases of children whose reap went unproven: held until this process exits
+
+    def store_for(self, grant):
+        """The store that admits ``grant``: the link store for a link approval, else the team store."""
+        return self.link if type(grant) is LinkApproval else self.store
+
+    @staticmethod
+    def signin_running(root):
+        return signin_running(root)
 
     @staticmethod
     def initialize(conn):
@@ -646,7 +886,7 @@ class ProviderSignin:
         return thread is None or not thread.is_alive()
 
     def _admit(self, reader, grant, *, native=True):
-        self.store.authorize(reader,expected=grant,effects=True)
+        self.store_for(grant).authorize(reader,expected=grant,effects=True)
         from .owner_setup import managed_setup
         package=managed_setup(self.store.access.root,grant)
         from ..installation import _check_maintenance
@@ -666,13 +906,40 @@ class ProviderSignin:
     def begin(self, reader, grant, attempt):
         with self._lock:
             self._admit(reader,grant)
-            started = replaces = False  # set only inside the committed admission below
+            lease = None  # a link attempt's sign-in lease, until its worker owns it
+            try:
+                started, replaces, current, lease = self._begin(reader, grant, attempt)
+                if started:
+                    # Only after the commit, so a refused or rolled-back admission leaves no worker.
+                    if replaces:
+                        # A fresh event: the ended attempt's may be set (Cancel or a drain), and a set
+                        # event would stop the new worker at once. Nothing of its link or code carries over.
+                        self._cancel = threading.Event()
+                        self._code = self._url = self._expires_at = self._code_until = None
+                    self._attempt = attempt
+                    self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),
+                                                    kwargs={"lease":lease} if lease is not None else {},daemon=False)
+                    self._thread.start()
+                    lease = None  # its worker's now: closed after its last write
+                    if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])  # fallback: a copy its worker left
+            finally:
+                if lease is not None: os.close(lease)  # refused, rolled back or never started: released at once
+            return self.status(reader,grant,attempt)
+
+    def _begin(self, reader, grant, attempt):
+        """begin's write transaction: (started, replaces, the current row, a link attempt's lease or None)."""
+        started = replaces = False  # set only inside the committed admission below
+        lease = None
+        try:
             with self.store.access._connection(write=True) as conn:
                 self._migrate(conn)
                 current,attempts = self._current(conn)
                 if current is not None and current['attempt_id'] == attempt:
                     self._row(conn,grant,attempt)  # Original identity is retained even after a restart.
                 else:
+                    link = type(grant) is LinkApproval
+                    # A link write that landed after the admission above replaced this approval.
+                    if link and LinkStore._read(conn) != grant: raise AccessDenied("setup_denied")
                     if current is not None:
                         # Another ID replaces the current attempt only after a RETRYABLE ending
                         # with no worker of it still running here, and never reuses a retired ID.
@@ -686,22 +953,21 @@ class ProviderSignin:
                         raise AccessDenied("signin_approval_ending")  # refused before anything is staged
                     check_scope(grant.provider_signin,self.store.access.root)
                     environment_ready(self.store.access.root)  # A saved credential still refuses any attempt.
+                    if link:
+                        # Taken inside this transaction, just before the insert: a link write runs wholly
+                        # before it (and this begin finds its approval replaced) or wholly after (and sees it held).
+                        lease = take_lease(self.store.access.root, attempt)
+                        if lease is None:
+                            raise AccessDenied("signin_unconfirmed" if current is not None and current['state'] in _TERMINAL
+                                               else "signin_original_attempt_required")
                     if current is not None:
                         conn.execute("UPDATE setup_provider SET retired=1 WHERE attempt_id=?", (current['attempt_id'],))
                     conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0,NULL)", (attempt,grant.generation,"starting"))
                     started, replaces = True, current is not None
-            if started:
-                # Only after the commit, so a refused or rolled-back admission leaves no worker.
-                if replaces:
-                    # A fresh event: the ended attempt's may be set (Cancel or a drain), and a set
-                    # event would stop the new worker at once. Nothing of its link or code carries over.
-                    self._cancel = threading.Event()
-                    self._code = self._url = self._expires_at = self._code_until = None
-                self._attempt = attempt
-                self._thread = threading.Thread(target=self._run,args=(reader,grant,attempt),daemon=False)
-                self._thread.start()
-                if replaces: discard_binary(staging(self.store.access.root),current['attempt_id'])  # fallback: a copy its worker left
-            return self.status(reader,grant,attempt)
+        except BaseException:
+            if lease is not None: os.close(lease)
+            raise
+        return started, replaces, current, lease
 
     def status(self, reader, grant, attempt, *, native=True):
         self._admit(reader,grant,native=native)
@@ -770,7 +1036,7 @@ class ProviderSignin:
         if row is None or self.status(reader,grant,row['attempt_id'],native=False)['state'] != 'connected':
             raise AccessDenied("signin_not_complete")
 
-    def _run(self, reader, grant, attempt):
+    def _run(self, reader, grant, attempt, lease=None):
         process = None
         master = slave = binary_fd = staged_fd = None
         staged = staged_info = None
@@ -889,6 +1155,14 @@ class ProviderSignin:
                 if fd is not None: os.close(fd)
             # Its own copy, child reaped above; before the terminal row, which stays the final write.
             if staged is not None and state!="unknown": discard_binary(staging(self.store.access.root),attempt)
-            with self._lock:
-                self._code=self._url=self._expires_at=self._code_until=None
-                self._set(grant,attempt,state,reason,detail)
+            try:
+                with self._lock:
+                    self._code=self._url=self._expires_at=self._code_until=None
+                    self._set(grant,attempt,state,reason,detail)
+            finally:
+                # A link attempt's lease: after the last write, and outside the lock, so a begin that
+                # holds the lock never waits on it. A child whose reap went unproven may still run, so
+                # its lease is kept, held until this process exits.
+                if lease is not None:
+                    if (state,reason)==("unknown","child_quiet_unproven"): self._kept.append(lease)
+                    else: os.close(lease)

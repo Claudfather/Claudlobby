@@ -646,3 +646,29 @@ def test_admission_reads_a_finished_record_as_strictly_as_todays_finish(tmp_path
         assert read_update(computer.case.installation)[field] == value
     with pytest.raises(StdioRefused, match="installation_changed"):
         admitted_update(computer.case.installation, computer.case.target, later, [request_id, later])
+
+
+def test_computer_run_after_link_still_ready(tmp_path, monkeypatch):
+    """A link approval is its own record (setup_link), never a team approval: the computer run
+    still reads a started computer with no team setup, asks nothing and answers computer_ready."""
+    import hashlib
+    from claudlobby.plane import provider_signin
+    from claudlobby.plane.owner_setup import OwnerSetup
+    computer = Computer(tmp_path, monkeypatch)
+    computer.run()
+    computer.case.run_job()
+    assert start_state(computer.case.root, computer.case.installation) == "started"
+    digest = hashlib.sha256(b"a synthetic provider").hexdigest()
+    monkeypatch.setattr(provider_signin, "SUPPORTED", {digest: "2.1.325"})
+    scope = {"binary": str(tmp_path / "provider/claude"), "sha256": digest, "version": "2.1.325",
+             "home": str(tmp_path / "home"), "account_directory": str(tmp_path / "home/.claude"),
+             "environment": str(computer.case.root / ".env")}
+    approval = provider_signin.LinkStore(computer.access).write(scope)
+    with computer.access._connection() as conn:
+        assert provider_signin.LinkStore._read(conn) == approval
+    assert OwnerSetup(computer.access).retained_state().state == "absent"
+    monkeypatch.setattr(guide, "_serving", lambda *_a, **_k: pytest.fail("a guide started a listener"))
+    with lasting_service(computer):
+        again = computer.run()
+    assert again.data == {"state": "computer_ready", "origin": HOST}
+    assert computer.channel.cards == [] and computer.channel.states == []
