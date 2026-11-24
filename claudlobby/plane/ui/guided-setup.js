@@ -111,6 +111,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // and with this browser's own request kept, the approval is shown done. It sends, resumes and follows nothing.
   let launchUnderway = false;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
+  // An approval is known for this page's setup: one the computer holds a launch for, a launch it says is under way, or
+  // a live approval read. Until one is, Check setup approval leads (render) and a failed approval read says so (run).
+  const approvalKnown = (time = now()) => launchHolding() || standalone && launchUnderway && !!pending
+    || !!context && context.expires_at > time;
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
   const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) seeLaunch(pending); };
   // launchSeen is also kept in this browser (beside the request, as the sign-in attempt is), so a page opened again
@@ -389,7 +393,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           });
           return false;
         }
-        note = error?.code === 'setup_storage_unavailable' ? error.message : pending
+        // A failed approval read with no approval known says so, as Check setup approval then leads (render).
+        note = error?.code === 'setup_storage_unavailable' ? error.message : pending && (operation !== 'context' || approvalKnown())
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
@@ -444,7 +449,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const m = mount, live = active(), time = now();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
     const holding = launchHolding(), underway = standalone && launchUnderway;
-    const approved = holding || underway && !!pending || !!context && context.expires_at > time;
+    const approved = approvalKnown(time);
     // It keeps a sign-in this page saw connected for the same approval.
     const signinKnown = context?.provider_signin === true || holding && !context && signin.state() === 'connected'
       && signin.attempt()?.generation === pending.generation;

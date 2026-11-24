@@ -3235,6 +3235,12 @@ test('after a failed first approval read, Check setup approval leads; once the c
   assert.equal(reads,1);assert.deepEqual(p.h.api.snapshot().pending,settingUp);
   assert.deepEqual(stepsOf(p.panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[]],'the approval check leads');
   assert.equal(p.focused()?.textContent,'Check setup approval');
+  assert.equal(p.h.api.snapshot().note,'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.',
+    'the note matches the leading approval check');
+  // A failed launch status read keeps the launch's own note.
+  buttonOf(p.panel,'Check launch status').click();await flush();
+  assert.match(p.h.api.snapshot().note,/^The launch could not be confirmed\. Choose Check launch status/);
+  assert.deepEqual(stepsOf(p.panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[]],'the approval check still leads');
   buttonOf(p.panel,'Check setup approval').click();await flush();
   assert.equal(reads,2);assert.equal(p.h.api.snapshot().pending,null);assert.deepEqual(p.h.api.snapshot().conflicts,[settingUp]);
   assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
