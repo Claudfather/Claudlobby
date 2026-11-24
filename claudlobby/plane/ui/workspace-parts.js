@@ -139,6 +139,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     // The entry's hold ended: a read it kept back is sent now, once; with none kept back nothing is sent.
     release:() => held ? read() : Promise.resolve(false),
     teams:() => started() ? current.teams : null,
+    // Whether an answer for this connection is held, whatever it says; until one is, the entry keeps its form.
+    answered:() => live(),
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
     // and the panel must not say "nothing runs yet" there either. It only hides that line and holds the panel.

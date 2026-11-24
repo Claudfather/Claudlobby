@@ -444,9 +444,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (m.steps.connect) states.connect = live || settling ? 'done' : 'current';
     if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
     // The whole view ends on finished steps, even after the handoff's status check moved the connection
-    // on and cleared the approval context: nothing is left to approve or check again.
+    // on and cleared the approval context: nothing is left to approve or check again. Only its Connect step stays
+    // current while this computer is not connected, so the view keeps its way back.
     const finished = standalone && launched();
-    if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
+    if (finished) for (const name of Object.keys(states))
+      if (states[name] !== null && !(name === 'connect' && connecting)) states[name] = 'done';
     const progress = {approve:'',signin:'',goal:'',launch:''};
     progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
     // A starting sign-in says so in its own line above the buttons instead, wherever that line is shown.

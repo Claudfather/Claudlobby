@@ -115,7 +115,18 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     ["workspace", "host", "fleet"].every(field => value.scope[field] === request.scope[field])))
     || retainedScopes.has(scopeKey(request.scope));
   const selectionKey = () => row() ? rowKey(row()) : "";
-  const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
+  // The lead: the one this context marks, else the one this team's task contexts name; otherwise its first bot.
+  const leadId = c => (c.recipients.find(r => r.lead) || c.recipients.find(r => r.id === managerRecipient()) || c.recipients[0]).id;
+  // A message target this view chose (the lead, else the first bot) until the person chooses a bot or writes.
+  // Only a bot the person chose or wrote to is remembered for the team; a default is chosen again each time.
+  let defaultTarget = null;
+  function messageTarget(value) {
+    const remembered = messageRecipients.get(scopeKey(value.scope));
+    if (value.recipients.some(r => r.id === remembered)) return { recipient: remembered, task_id: null };
+    return defaultTarget = { recipient: leadId(value), task_id: null };
+  }
+  const rememberRecipient = scope => target === defaultTarget ? messageRecipients.delete(scopeKey(scope))
+    : messageRecipients.set(scopeKey(scope), target.recipient);
   const readDraft = () => row() ? state.draft(row()) : "";
   const roomLabel = value => api.roomLabel?.(value) || value;
   function paintComposer() {
@@ -296,7 +307,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       retainPresentation();
       if (kind === affectedKind) {
         saveDraft(); ++compositionEpoch;
-        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(affected.scope), target.recipient);
+        if (kind === "message" && target?.task_id === null) rememberRecipient(affected.scope);
         context = null; target = null; targetTitle = null; $("work-body").value = "";
         // Restore the independent message draft without retargeting a task action.
         if (["nudge", "feedback"].includes(affectedKind)) {
@@ -304,8 +315,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
           const messageContext = contextsByKind.get("message");
           if (messageContext) {
             context = messageContext;
-            const remembered = messageRecipients.get(scopeKey(context.scope));
-            target = { recipient: context.recipients.some(r => r.id === remembered) ? remembered : leadId(context), task_id: null };
+            target = messageTarget(context);
             $("work-body").value = readDraft();
           }
         }
@@ -341,7 +351,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     saveDraft();
     retainPresentation();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
-      messageRecipients.set(scopeKey(context.scope), target.recipient);
+      rememberRecipient(context.scope);
     ++epoch;
     contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); ++compositionEpoch;
     context = null; target = null; targetTitle = null;
@@ -371,8 +381,12 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
       if (kind === "message" && contextsByKind.has("message") && !target) {
         context = contextsByKind.get("message");
-        const remembered = messageRecipients.get(scopeKey(context.scope));
-        target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+        target = messageTarget(context);
+        paint({ restoreDraft: true });
+      } else if (taskKind && kind === "message" && target && target === defaultTarget && context === contextsByKind.get("message")
+          && !$("work-body").value && !sending && leadId(context) !== target.recipient) {
+        // A lead first named by a task context takes over a default the person has not changed or written to.
+        ++compositionEpoch; target = defaultTarget = { recipient: leadId(context), task_id: null };
         paint({ restoreDraft: true });
       }
       notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
@@ -386,7 +400,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (room === (fleet || "all")) retainPresentation();
     else { retainedScopes.clear(); retainedComposition = null; }
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
-      messageRecipients.set(scopeKey(context.scope), target.recipient);
+      rememberRecipient(context.scope);
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
     contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); context = null; target = null; targetTitle = null; kind = "message";
@@ -673,7 +687,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         const nextKind = button.dataset.kind, nextContext = capability(nextKind);
         if (!nextContext) return;
         saveDraft(); ++compositionEpoch;
-        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(context.scope), target.recipient);
+        if (kind === "message" && target?.task_id === null) rememberRecipient(context.scope);
         kind = nextKind; context = nextContext; targetTitle = task.title;
         target = context.version === 2 ? frozenTaskTarget(task, context, boardOnly, kind) : { recipient: leadId(context), task_id: task.task_id };
         composerTask = { selection: Object.freeze({ ...selected }), room, epoch, context, target };
@@ -767,7 +781,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
-  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); paintComposer(); });
+  $("work-body").addEventListener("input", () => { ++compositionEpoch; defaultTarget = null; saveDraft(); paintComposer(); });
   $("work-check-access").onclick = async () => {
     if (!canCheckAccess()) return;
     const token = epoch, selectedRoom = room, missing = missingAccess();
@@ -797,8 +811,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("work-reset").onclick = () => {
     const message = contextsByKind.get("message"); if (!message) return;
     saveDraft(); ++compositionEpoch; context = message; kind = "message"; targetTitle = null;
-    const remembered = messageRecipients.get(scopeKey(context.scope));
-    target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+    target = messageTarget(context);
     notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
   };
   const requestLabel = request => `${request.kind} to ${recipientLabel(request)}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
