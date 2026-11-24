@@ -635,3 +635,28 @@ def test_link_refusal_order_door(link_signin,profile,monkeypatch,row):
               'H8':['H3','H6','H8'],'H9':['H3','H6','H8','H9'],'H10':['H3','H6','H8','H9']}[row]
     assert log==expected,(row,log)
     if row!='H10': assert _attempts(link_signin.access)==rows_before, 'a refusal writes nothing'
+
+
+@pytest.mark.parametrize('computer',['no team tables','team tables unreadable'])
+@pytest.mark.parametrize('body',['valid','malformed'])
+def test_signin_door_without_link_approval_answers_as_today(link_signin,profile,monkeypatch,computer,body):
+    # A computer that holds no link approval: the four sign-in calls are today's team calls, in today's
+    # order (the team approval first, then the payload), so they answer exactly as before.
+    app,fixture=_link_app(link_signin,profile)
+    engine=app.connected_setup.engine; log=[]
+    with link_signin.access._connection(write=True) as conn:
+        conn.execute('DROP TABLE setup_link')
+        if computer=='team tables unreadable': conn.execute('CREATE TABLE setup_metadata(singleton INTEGER)')
+    def wrap(name,owner,attribute):
+        original=getattr(owner,attribute)
+        def step(*args,**kwargs): log.append(name); return original(*args,**kwargs)
+        monkeypatch.setattr(owner,attribute,step)
+    args={'generation':link_signin.approval.generation,'attempt_id':str(uuid4()) if body=='valid' else 'not-an-attempt'}
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        wrap('team',engine.store,'authorize'); wrap('session',engine.store,'session'); wrap('link',engine,'signin_approval')
+        answers=[post(client,operation,bearer,{**args,**extra}) for operation,extra in
+                 (('signin-begin',{}),('signin-status',{}),('signin-code',{'code':'accepted#'+'b'*32}),('signin-cancel',{}))]
+    assert [(answer.status_code,answer.json()) for answer in answers]==[(503,{'state':'unavailable'})]*4
+    assert log==['team']*4, 'the team approval is read first, as today, and nothing after it'
+    assert _attempts(link_signin.access)==[]

@@ -14,8 +14,9 @@ PREFIX="/api/owner/connected/setup/"
 OPERATIONS=frozenset({"context","state","preview","launch","receipt","signin-begin","signin-status","signin-code","signin-cancel"})
 #: Admitted by a connected session alone: the parts read needs no setup approval and changes nothing.
 SESSION_ONLY=frozenset({"state"})
-#: The sign-in calls: a team approval's or a link approval's, so the approval is read only once the
-#: payload names its generation (SetupEngine.signin_approval). Every other call admits the team approval first.
+#: The sign-in calls: a team approval's or a link approval's. On a computer that holds no link approval
+#: they admit the team approval first, as every other call does, so their answers are today's; on one
+#: that does, the approval is read once the payload names its generation (SetupEngine.signin_approval).
 SIGNIN=frozenset({"signin-begin","signin-status","signin-code","signin-cancel"})
 
 class SetupHTTP(ConnectedActionsHTTP):
@@ -44,7 +45,8 @@ class SetupHTTP(ConnectedActionsHTTP):
         principal=await self._principal(scope,_DEADLINE.get())
         await self._blocking(source_host_uid,self.access.root)
         reader=VerifiedReader(principal,token)
-        grant=None if operation in SESSION_ONLY|SIGNIN else await self._blocking(self.engine.store.authorize,reader)
+        linked=operation in SIGNIN and await self._blocking(self.engine.signin_link_held)
+        grant=None if operation in SESSION_ONLY or linked else await self._blocking(self.engine.store.authorize,reader)
         if grant is None: await self._blocking(self.engine.store.session,reader)
         binding=await self._blocking(self.workspace.active_binding,principal)
         if binding.issuer!=self.config.issuer or binding.operational_origin!=self.config.operational_origin: raise AccessDenied("setup_denied")
@@ -61,7 +63,7 @@ class SetupHTTP(ConnectedActionsHTTP):
         if operation.startswith("signin-"):
             if not _uuid(payload["attempt_id"]): raise InvalidRequest
             if operation=="signin-code" and (not isinstance(payload["code"],str) or not 1<=len(payload["code"])<=2305): raise InvalidRequest
-        if operation in SIGNIN: grant=await self._blocking(self.engine.signin_approval,reader,payload["generation"])
+        if linked: grant=await self._blocking(self.engine.signin_approval,reader,payload["generation"])
         fn=getattr(self.engine,operation.replace("-","_"))
         progress[0]=True  # No refusal after engine entry implies no earlier effect.
         try:

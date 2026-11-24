@@ -3498,12 +3498,12 @@ def test_link_signin_refused_without_link_approval(setup_authority,monkeypatch,t
         before=access.path.read_bytes()
         for call in (lambda a:engine.signin_begin(reader,generation,a),lambda a:engine.signin_status(reader,generation,a),
                      lambda a:engine.signin_code(reader,generation,a,'accepted#'+'b'*32),lambda a:engine.signin_cancel(reader,generation,a)):
-            with pytest.raises(AccessDenied) as raised: call(str(uuid4()))
-            assert raised.value.code==expected
+            with pytest.raises((AccessDenied,AccessUnavailable)) as raised: call(str(uuid4()))
+            assert (raised.type is AccessUnavailable if expected is AccessUnavailable else raised.value.code==expected)
         assert access.path.read_bytes()==before and engine.signin._thread is None
         assert not (access.root/'state/provider-signin.lock').exists() and not (access.root/'state/provider-signin').exists()
     try:
-        refused(str(uuid4()),'setup_not_allowed')  # no link approval on this computer at all
+        refused(str(uuid4()),AccessUnavailable)  # no link approval: today's team call, which has no team tables to read
         first=LinkStore(access).write(scope)
         refused(team.generation,'setup_denied')  # a team approval's generation (never allowed here)
         second=LinkStore(access).write(scope)
@@ -3689,13 +3689,15 @@ def test_lease_file_not_private_refuses(link_signin,monkeypatch,kind):
     assert _attempts(link.access)==[] and link.engine.signin._thread is None
 
 
-def test_link_authorize_reads_no_start_state(link_signin,monkeypatch):
+def test_link_worker_loop_reads_no_start_state(link_signin,monkeypatch):
+    # "Started" is checked when the approval is written and when a sign-in begins (begin's check comes
+    # with the next step, C1b), never by authorize, which the worker's loop calls about every 0.1 s.
     from claudlobby.plane import owner_source
     link=link_signin; engine=link.engine; attempt=str(uuid4())
     def start_state(root,installation): raise AssertionError('start_state read on the sign-in path')
+    engine.signin_begin(link.reader,link.approval.generation,attempt)  # begin may read it
     monkeypatch.setattr(owner_source,'start_state',start_state)
     engine.signin.link.authorize(link.reader,expected=link.approval)
-    engine.signin_begin(link.reader,link.approval.generation,attempt)
     _signin_until(engine,link.approval,link.reader,attempt,'waiting')  # the worker's loop admits about every 0.1 s
     engine.signin_code(link.reader,link.approval.generation,attempt,'accepted#'+'b'*32)
     assert _signin_until(engine,link.approval,link.reader,attempt,'connected')['state']=='connected'
@@ -3843,17 +3845,71 @@ def test_older_core_reads_database_with_link_table(link_signin):
     assert store.retained_state().state=='absent' and store.retained_state().grant is None and store.local() is None
 
 
-def test_team_signin_unchanged(synthetic_signin):
-    # The lease is the link path's only: a team sign-in takes none and keeps none.
-    from claudlobby.plane.provider_signin import signin_running
+def test_team_signin_never_opens_lease(synthetic_signin,monkeypatch):
+    # The lease is the link path's only: a team sign-in never opens, probes or takes it, and keeps none.
+    from claudlobby.plane import provider_signin
     engine,grant,reader,*_=synthetic_signin
     attempt=str(uuid4())
+    def never(*args,**kwargs): raise AssertionError('the team sign-in reached the sign-in lease')
+    for name in ('_lease_path','take_lease','signin_running'): monkeypatch.setattr(provider_signin,name,never)
     try:
         engine.signin_begin(reader,grant.generation,attempt)
         _signin_until(engine,grant,reader,attempt,'waiting')
-        assert signin_running(engine.root) is False and not (engine.root/'state/provider-signin.lock').exists()
+        assert not (engine.root/'state/provider-signin.lock').exists()
         assert engine.signin.store_for(grant) is engine.store
         engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
         assert _signin_until(engine,grant,reader,attempt,'connected')['state']=='connected'
         assert engine.signin._kept==[] and not (engine.root/'state/provider-signin.lock').exists()
     finally:engine.signin.shutdown()
+
+
+def test_worker_closes_lease_after_leaving_lock(link_signin,monkeypatch):
+    # The worker closes the lease after its last row and outside self._lock, so a begin that takes the
+    # lock the moment the worker leaves it (a "Try again") takes the lease within its tries, not refused.
+    import os,time
+    from claudlobby.plane import provider_signin
+    link=link_signin; engine=link.engine; signin=engine.signin; first=str(uuid4()); second=str(uuid4())
+    leases=set(); seen=[]
+    take=provider_signin.take_lease
+    def taken(root,attempt):
+        fd=take(root,attempt)
+        if fd is not None: leases.add(fd)
+        return fd
+    close=os.close
+    def closing(fd):
+        if fd in leases:
+            leases.discard(fd)
+            rows={row['attempt_id']:(row['state'],row['reason']) for row in _attempts(link.access)}
+            seen.append((signin._lock._is_owned(),rows.get(first)))
+            time.sleep(0.2)  # a begin arriving now must not wait on this close
+        return close(fd)
+    monkeypatch.setattr(provider_signin,'take_lease',taken)
+    monkeypatch.setattr(provider_signin.os,'close',closing)
+    engine.signin_begin(link.reader,link.approval.generation,first)
+    _signin_until(engine,link.approval,link.reader,first,'waiting')
+    signin._cancel.set()  # the worker ends cancelled/effect_uncertain, no code sent: a retryable ending
+    deadline=time.monotonic()+8
+    while [row['state'] for row in _attempts(link.access)]!=['cancelled']:
+        assert time.monotonic()<deadline; time.sleep(0.005)
+    assert engine.signin_begin(link.reader,link.approval.generation,second)['attempt_id']==second
+    assert seen[:1]==[(False,('cancelled','effect_uncertain'))], 'closed outside the lock, after the last row'
+    assert _signin_until(engine,link.approval,link.reader,second,'waiting')['url']
+    assert _lease(link.access) is True and provider_signin._lease_path(link.access.root).read_text()==second+'\n'
+
+
+def test_link_try_again_after_timeout_same_approval(link_signin,monkeypatch):
+    # Try again: a begin right after a timed-out attempt, under the same approval, is admitted.
+    import time
+    from claudlobby.plane import provider_signin
+    link=link_signin; engine=link.engine; first=str(uuid4()); second=str(uuid4())
+    monkeypatch.setattr(provider_signin,'SECONDS',0.5)  # no code can be taken: it times out at once
+    engine.signin_begin(link.reader,link.approval.generation,first)
+    deadline=time.monotonic()+8
+    while [(row['state'],row['reason']) for row in _attempts(link.access)]!=[('needs_attention','timeout')]:
+        assert time.monotonic()<deadline; time.sleep(0.005)
+    monkeypatch.setattr(provider_signin,'SECONDS',600)
+    assert engine.signin_begin(link.reader,link.approval.generation,second)['attempt_id']==second
+    assert _signin_until(engine,link.approval,link.reader,second,'waiting')['url']
+    rows={row['attempt_id']:row for row in _attempts(link.access)}
+    assert (rows[first]['retired'],rows[second]['retired'])==(1,0) and rows[second]['generation']==link.approval.generation
+    assert _lease(link.access) is True and _link_row(link.access)==provider_snapshot(link.approval), 'the same approval, unchanged'

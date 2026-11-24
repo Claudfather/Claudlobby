@@ -467,7 +467,11 @@ workspace binding, read inside the write), `installation` and `source_revision`
 carries it), `created_at`, `unused_until` (`created_at` + 900) and `expires_at`
 (`created_at` + 1500). A row with any other key set, a non-UUID generation,
 other offsets, a time that is not a finite number or a scope of another shape
-does not read, and every door refuses it as unavailable.
+does not read, and every door refuses it as unavailable. At this point the doors
+enforce `created_at` and `expires_at` only. The next step adds the rest of
+begin's checks: the unused window (a first sign-in must begin before
+`unused_until`), "spent" (an attempt row with the approval's generation), the
+attempt cap counted per approval, and the started check at begin.
 
 **The writer** runs in one write transaction and writes nothing when it refuses.
 In order: the owner's grant and the active binding (their own refusals); the
@@ -479,13 +483,15 @@ that has ended). A `starting` or `waiting` attempt with the lease free has ended
 (its worker is gone) and is left as it is. A new yes replaces the row.
 
 **The doors.** The four sign-in calls (`setup-signin-begin`, `-status`,
-`-code`, `-cancel`) keep their names and keys. Their door checks the headers,
-the principal, the connected session alone, the binding's issuer and origin, and
-the payload, then reads which approval the payload's `generation` names: with
-none of the team tables, the link approval; with some but not all, unavailable;
-with all three, the team approval when it is active and names that generation,
-or when the computer holds no link approval (so a team computer's calls answer
-exactly as before), and otherwise the link approval. The engine call follows,
+`-code`, `-cancel`) keep their names and keys. On a computer that holds no link
+approval they are exactly today's team calls, in today's order: the team
+approval is admitted first, then the payload, so every answer is as before. On a
+computer that holds one, their door checks the headers, the principal, the
+connected session alone, the binding's issuer and origin, and the payload, then
+reads which approval the payload's `generation` names: with none of the team
+tables, the link approval; with some but not all, unavailable; with all three,
+the team approval when it is active and names that generation, and otherwise
+the link approval. The engine call follows,
 then the principal again and the same approval's own admission with the
 approval it read. A link approval is admitted with the team approval's fences:
 the connected session, the row, the same binding, its time window, the exact
@@ -502,7 +508,9 @@ Only a link sign-in takes it: begin, on the path that inserts a new attempt,
 inside its write transaction just before the insert, with non-blocking tries
 only; a refused or rolled-back begin releases it at once. The worker closes it
 after its last write and outside its lock; a worker whose child's reap is
-unproven keeps it until the lasting service exits. Any process can probe it
+unproven keeps it until its own process exits. Workers run in the process that
+began them: the lasting service, or the process of an `owner-signin-v1`
+conversation over the SSH carrier. Any process can probe it
 without blocking: held means a sign-in may be live; a file that is absent or
 unlocked is free (the system releases a dead holder's lock); anything else (a
 link, another owner, another name, another mode) refuses as unavailable, never

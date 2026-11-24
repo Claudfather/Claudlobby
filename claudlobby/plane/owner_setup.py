@@ -788,19 +788,26 @@ class SetupEngine:
             "provider":{"state":"linked" if linked else "not_linked","link":link},"team":{"state":"launch_unfinished" if unfinished else "none"},
             "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
 
+    def signin_link_held(self):
+        """Does this computer hold a link approval? Without one, a sign-in call is today's team call, in today's order."""
+        from .provider_signin import LinkStore
+        with self.store.access._connection() as conn:
+            return LinkStore._read(conn) is not None
+
     def _team_signin(self,generation):
         """Does a sign-in call naming ``generation`` go to the team approval? Otherwise to the link approval.
 
-        None of the three team tables: the link approval. Some but not all: AccessUnavailable, as every
-        team read. All three: the team approval when it is active and names this generation, and on any
-        computer that holds no link approval, so a team computer's calls keep exactly today's answers.
+        A computer that holds no link approval: the team approval, so every computer without one keeps
+        exactly today's calls and answers. With one: none of the three team tables, the link approval;
+        some but not all, AccessUnavailable, as every team read; all three, the team approval when it is
+        active and names this generation, else the link approval.
         """
         from .provider_signin import LinkStore, _TEAM_TABLES, _names
         with self.store.access._connection() as conn:
+            if LinkStore._read(conn) is None: return True
             present=_names(conn)&_TEAM_TABLES
             if not present: return False
             if present!=_TEAM_TABLES: raise AccessUnavailable()
-            if LinkStore._read(conn) is None: return True
             self.store._schema(conn)
             row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
             return row is not None and row["active"]==1 and self.store._grant(row).generation==generation
