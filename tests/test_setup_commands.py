@@ -1006,6 +1006,8 @@ def test_local_template_declares_the_approved_folder_as_the_leads_project(tmp_pa
     _scope_links(ctx, None, "first-team", None, None)
     with pytest.raises(TaskQueryError, match="not declared"):
         _scope_links(ctx, None, "web-app", None, None)
+    with pytest.raises(TaskQueryError, match="does not belong to the declared project"):
+        _scope_links(ctx, None, "first-team", None, "example-org/shop")
     assert fleet.projects_derived and set(fleet.projects) == {"first-team"}
     declared = fleet.projects["first-team"]
     assert (declared.directory, declared.title, declared.repos, declared.validation.tier) == (

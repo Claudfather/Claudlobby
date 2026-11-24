@@ -224,7 +224,10 @@ def _scope_links(ctx, conn, project_key, workstream_id, repo):
     if project_key is not None:
         if project_key not in projects:
             raise TaskQueryError("project is not declared in the selected fleet")
-        if repo is not None and projects[project_key].repos and repo not in projects[project_key].repos:
+        declared = projects[project_key]
+        # A folder project has no repos, so any repository is not one of its own.
+        if (repo is not None and (declared.repos or declared.directory is not None)
+                and repo not in declared.repos):
             raise TaskQueryError("repository does not belong to the declared project")
     if workstream_id is not None:
         row = conn.execute("SELECT fleet_uid, project_key FROM workstreams WHERE workstream_id=?",

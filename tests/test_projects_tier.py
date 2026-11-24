@@ -837,3 +837,34 @@ def test_a_declared_project_without_repos_still_errors_beside_a_mount(fleet_dir)
     _write_projects(fleet_dir, "projects:\n  first-team:\n    title: First team\n")
     report = validate(_load(fleet_dir), _paths(fleet_dir))
     assert any("repos is empty" in e for e in report.errors), report.errors
+
+
+def test_a_folder_only_table_does_not_ask_for_projects_yaml(fleet_dir):
+    """A website lead relayed "Declare one" as "ask the operator for projects.yaml"."""
+    install_real_template(fleet_dir)
+    _mounted_fleet(fleet_dir)
+    fleet = _load(fleet_dir)
+    md = " ".join(compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir)).split())
+    assert "declares no `projects.yaml`." in md
+    assert "Declare one to set a real closure bar" not in md
+    assert "is what closing work in its folder requires" in md
+
+
+def test_a_repo_table_keeps_its_closure_bar_sentences(fleet_dir):
+    install_real_template(fleet_dir)
+    _write_fleet(fleet_dir, SCOPED_FLEET_YAML)
+    fleet = _load(fleet_dir)
+    md = " ".join(compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir)).split())
+    assert "Declare one to set a real closure bar per project." in md
+    assert "is what closing work in its repos requires" in md
+
+
+def test_two_spellings_of_one_project_folder_are_one_project(fleet_dir, monkeypatch):
+    monkeypatch.setenv("HOME", str(fleet_dir.parent))
+    folder = fleet_dir.parent / "claudfather-projects" / "first-team"
+    folder.mkdir(parents=True)
+    text = _with_mount(MINIMAL_FLEET_YAML, "lead", "project", "~/claudfather-projects/first-team/")
+    _write_fleet(fleet_dir, _with_mount(text, "worker-1", "project", folder))
+    fleet = _load(fleet_dir)
+    assert set(fleet.projects) == {"first-team"}
+    assert fleet.projects["first-team"].directory == str(folder)

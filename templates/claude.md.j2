@@ -259,11 +259,11 @@ Every task belongs to a workstream: `task admit` opens the task's own, or `--wor
 
 {% if projects_derived -%}
 Derived from each bot's {% for source in projects_sources %}{{ ' and ' if not loop.first else '' }}`{{ source }}`{% endfor %} at tier `review` because this fleet
-declares no `projects.yaml`. Declare one to set a real closure bar per project.
+declares no `projects.yaml`.{% if 'mounts.project' not in projects_sources %} Declare one to set a real closure bar per project.{% endif %}
 
 {% endif -%}
 The fleet serves these projects ({{ ('derived from ' ~ (projects_sources | join(' and '))) if projects_derived else 'projects.yaml' }}). A project's validation tier
-is what closing work in its repos requires — the tiers are alternatives, not
+is what closing work in its {{ 'folder' if projects_sources == ['mounts.project'] else 'repos or folder' if 'mounts.project' in projects_sources else 'repos' }} requires — the tiers are alternatives, not
 levels: auto: green CI · human: explicit operator approval · preview: preview
 link + operator ack · review: reviewer verdict. Never close work without
 meeting its project's declared tier.

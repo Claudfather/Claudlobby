@@ -1302,6 +1302,23 @@ class TestGoalBindingCheck:
         assert "derived from scope.repos" in check.detail
         assert "1 project" in check.detail
 
+    def test_folder_projects_pass_and_the_line_says_mounts_project(self, fleet_dir):
+        from claudlobby.doctor import check_goal_binding
+
+        folder = fleet_dir.parent / "claudfather-projects" / "first-team"
+        folder.mkdir(parents=True)
+        import yaml
+
+        doc = yaml.safe_load((fleet_dir / "fleet.yaml").read_text())
+        doc["fleet"]["bots"]["lead"]["mounts"] = {"project": str(folder)}
+        (fleet_dir / "fleet.yaml").write_text(yaml.safe_dump(doc))
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = DoctorReport()
+        check_goal_binding(fleet, self._paths(fleet_dir), report)
+        check = report.checks[0]
+        assert check.status == "pass", check.detail
+        assert "1 project(s) (derived from mounts.project)" in check.detail
+
     def test_declared_projects_pass_and_the_line_says_projects_yaml(self, fleet_dir):
         from claudlobby.doctor import check_goal_binding
 

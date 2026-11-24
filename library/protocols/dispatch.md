@@ -26,6 +26,8 @@ steps that follow:
 claudlobby --json task admit --title "Run the security audit" --repo org/repo-a --project PROJECT_KEY --request-id ADMIT_UUID
 ```
 
+A folder project has no repo: leave out `--repo`.
+
 Every admitted task belongs to a workstream: admit opens the task's own, or
 `--workstream ID` joins an open one. File the next related task with
 `--workstream` before the current one closes. Once every task in a workstream

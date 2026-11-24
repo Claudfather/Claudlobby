@@ -1415,7 +1415,8 @@ def check_goal_binding(
             )
             return
         detail = (
-            "no projects: neither a projects.yaml nor any bot's scope.repos — "
+            "no projects: neither a projects.yaml nor any bot's scope.repos "
+            "or project mount — "
             "nothing to dispatch against"
         )
         if ignition_gap(fleet, paths, doors):

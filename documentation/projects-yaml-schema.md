@@ -21,10 +21,12 @@ against a declared one.
 
 A folder counts too. Each distinct folder that a bot mounts under the name
 `project` (the folder approved for a `local-project` team) becomes one
-project named after the folder, at tier `review`, with no repos: the folder
-is its join key. So the lead of a team set up from the website can admit
-work there without anyone writing this file. Repo keys are claimed first,
-and a folder whose name is taken gets the next free number. The composed
+project named after the folder, at tier `review`, with no repos. `project
+show` reports the folder; no door joins work on it. So the lead of a team set
+up from the website can admit work there without anyone writing this file. A
+task in a folder project takes no `--repo`. `~` is expanded and the path is
+normalised, so two spellings of one folder are one project. Repo keys are
+claimed first, and a folder whose name is taken gets the next free number. The composed
 labels name what the registry came from: `scope.repos`, `mounts.project`
 or both.
 

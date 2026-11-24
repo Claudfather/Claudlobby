@@ -528,10 +528,9 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
     # claimed first, so a fleet that mounts no `project` keeps exactly the
     # keys it had; a folder whose name is taken gets the next free number.
     folders = {
-        os.path.normpath(target)
+        folder
         for bot in bots.values()
-        for name, target in bot.mounts.items()
-        if name == "project" and isinstance(target, str) and target.strip()
+        if (folder := project_mount_folder(bot.mounts.get("project"))) is not None
     }
     for folder in sorted(folders):
         base = _slugify_repo_part(os.path.basename(folder)) or "project"
@@ -549,11 +548,23 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
     return dict(sorted(projects.items()))
 
 
+def project_mount_folder(target: Any) -> str | None:
+    """A bot's `project` mount as its derived project names the folder.
+
+    `~` is expanded as the composer expands a mount target, then the path is
+    normalised, so two spellings of one folder are one project.
+    """
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return os.path.normpath(os.path.expanduser(target))
+
+
 def derived_project_sources(projects: dict[str, ProjectConfig]) -> list[str]:
     """The bot fields a derived registry came from, as its composed labels name them.
 
     A registry derived from repos alone keeps the `scope.repos` label it has
-    always had, so an unchanged fleet composes unchanged text.
+    always had, so an unchanged fleet composes unchanged text. An empty
+    registry also answers `scope.repos`; no label is composed for it.
     """
     folders = any(p.directory is not None for p in projects.values())
     repos = any(p.directory is None for p in projects.values())
