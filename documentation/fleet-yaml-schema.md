@@ -594,7 +594,7 @@ bots:
     public_write_guard: true   # STRICT bool: a typo string is a parse error, never an arming
 ```
 
-- **The list is host configuration, never repository content.** It lives in `~/.config/claudlobby/public-write-terms`: one case-insensitive regular expression per line, with `#` comment lines. No term goes in a repository, test, issue, PR, commit or doc.
+- **The list is host configuration, never repository content.** It lives in `~/.config/claudlobby/public-write-terms`, a UTF-8 text file: one case-insensitive regular expression per line, with `#` comment lines (a byte-order mark at the start of the file is skipped). A file that is not UTF-8 text is a broken list (below). No term goes in a repository, test, issue, PR, commit or doc.
 - **What it reads is what the write puts in the repository:**
   - an `mcp__github__*` tool that is not a read (`get_`, `list_`, `search_`): every string in its input except `owner` and `repo`;
   - a `gh` command in the issue, pr, release, gist, repo or label group that is not a read (`view`, `list`, `status`, `diff`, `checks`, `checkout`, `download`, `clone`, `browse`): its own words, the files it names as a body, and its standard input. `gh api` counts when it sends fields, unless it is a GET or a GraphQL query;
@@ -609,7 +609,7 @@ bots:
   | case | what happens |
   |---|---|
   | no list file | allow, and a critical `public_write_guard_unarmed` event in `claudlobby event list` (it does not page) |
-  | a broken list: a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming the line and column, never its text |
+  | a broken list: a file that is not UTF-8 text, a line that does not compile, or one that can match an empty string (every write would be a hit) | refuse every guarded write, naming a bad line by its number and column, never its text |
   | a payload that is not JSON | allow, with a `script_error` breadcrumb |
   | a hit whose repository cannot be named, or whose visibility cannot be read | refuse, saying which |
   | content it cannot read: a missing body file, a program's output piped into the write or substituted into its content (`$(...)` or backticks, except `cat` of a file or of a heredoc, in a commit message, a body, title, notes, subject, comment or description flag, or a `gh api` field such as `body` or `query`), a git command run from a directory it cannot name | counts as a hit (a substitution in any other flag, such as `--match-head-commit`, is not content and is left as written) |

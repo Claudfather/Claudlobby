@@ -19,7 +19,7 @@ GUARD = (
     / "public-write-guard.py"
 )
 TERMS = "# invented terms for the tests\nzephyr[ ._-]?widgets\nquillon\\s+media\n"
-# Every match of either term holds one of these words, so an output that held a
+# Every match of either term holds one of these words, so an output that showed a
 # term, a matched line or a line of the input would hold one of them too.
 WORDS = ("zephyr", "quillon")
 

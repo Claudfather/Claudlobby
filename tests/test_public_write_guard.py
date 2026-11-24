@@ -847,6 +847,32 @@ def test_a_list_that_is_not_utf8_text_is_broken(env, tmp_path):
     assert "quillon" not in (why + out + p.stderr).lower()
 
 
+def test_a_utf8_list_is_read_as_utf8_under_a_locale_that_is_not(env, tmp_path):
+    """The list is read as UTF-8 under any locale. Under the C locale with Python's
+    UTF-8 mode off, the locale's encoding is ASCII: a UTF-8 list holding a character
+    outside ASCII is still read, so `--check` says ok and a write without a hit passes."""
+    env.update(LC_ALL="C", PYTHONUTF8="0")
+    Path(env["PUBLIC_WRITE_GUARD_TERMS"]).write_bytes(
+        b"# invented terms, caf\xc3\xa9\nzephyr[ ._-]?widgets\n")
+    rc, out = check_list(env)
+    assert rc == 0 and "ok, 1 pattern(s)" in out
+    verdict, _ = run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo", "plain"),
+                     tmp_path)
+    assert verdict == "allow"
+
+
+def test_a_list_led_by_a_byte_order_mark_matches_its_line_1_term(env, tmp_path):
+    """A UTF-8 byte-order mark at the start of the list is skipped: a term on line 1
+    is a hit like any other, and a comment on line 1 is a comment."""
+    terms = Path(env["PUBLIC_WRITE_GUARD_TERMS"])
+    terms.write_bytes(b"\xef\xbb\xbfzephyr[ ._-]?widgets\n")
+    verdict, why = run(env, "mcp__github__create_issue", issue("pub-org", "pub-repo"), tmp_path)
+    assert verdict == "deny" and "pub-org/pub-repo, which is public" in why
+    terms.write_bytes(b"\xef\xbb\xbf# invented terms\nzephyr[ ._-]?widgets\n")
+    rc, out = check_list(env)
+    assert rc == 0 and "ok, 1 pattern(s)" in out
+
+
 def test_check_names_the_off_switch(env, tmp_path):
     off = Path(env["CLAUDLOBBY_ROOT"]) / "state" / "public-write-guard"
     off.mkdir(parents=True)

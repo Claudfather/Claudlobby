@@ -6,9 +6,9 @@ PUBLIC repository. Composed only for a bot with ``public_write_guard: true``.
 
 The list is host configuration, never repository content:
 ``~/.config/claudlobby/public-write-terms`` is UTF-8 text holding one
-case-insensitive regular expression per line (``#`` starts a comment line). No
-term appears in this file, its tests or its messages; the tests use invented
-terms.
+case-insensitive regular expression per line (``#`` starts a comment line, and a
+byte-order mark at the start of the file is skipped). No term appears in this
+file, its tests or its messages; the tests use invented terms.
 
 WHAT A WRITE PUTS IN THE REPOSITORY is all this guard reads for terms:
   - an ``mcp__github__*`` tool that is not a read (``get_``, ``list_``,
@@ -263,7 +263,8 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
     A broken list is named by line and column, never by the line's text: the
     reason reaches the bot, and the list is what must not travel."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # "utf-8-sig": a byte-order mark at the start of the file is not part of line 1
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
     except FileNotFoundError:
         return None, "absent"
     except OSError as exc:
@@ -1612,7 +1613,7 @@ def check() -> int:
     else:
         n = sum(
             1
-            for ln in terms_path().read_text(encoding="utf-8").splitlines()
+            for ln in terms_path().read_text(encoding="utf-8-sig").splitlines()
             if ln.strip() and not ln.strip().startswith("#")
         )
         print(f"{_list_label()}: ok, {n} pattern(s)")
