@@ -1,6 +1,7 @@
 // The Claude sign-in step on its own: its state, its four calls (begin, status, code, cancel), its retry rules,
 // its status lines and its markup. It was lifted out of guided-setup.js without a change in behaviour, so that the
-// team road and any other road that signs in to Claude share one step.
+// team road and any other road that signs in to Claude share one step. Since then it can also stop following an
+// attempt kept under another approval (setAside), for a computer set up again from nothing.
 // It is given: the four calls, a storage policy (where the one kept attempt lives, or nowhere) and a host that
 // answers about the approval it belongs to (its generation and end) and the page around it.
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);

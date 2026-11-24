@@ -1718,8 +1718,11 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   const ui=dom(),again=new ui.Element();reopened.mountPanel({document:ui.document,element:again});
   const shownAgain=stepsOf(again).filter(visible);
   assert.deepEqual(shownAgain.map(n=>[n.dataset.step,n.dataset.state]),[['approve','current'],['goal','done'],['launch','current']]);
-  assert.deepEqual(shownAgain.map(filledIn),[[],[],['Check launch status']],'a reopened launch leads with its status check');
+  // Until an approval is read, Check setup approval leads: that read is what shows a computer set up again.
+  assert.deepEqual(shownAgain.map(filledIn),[['Check setup approval'],[],[]],'a reopened launch leads with the approval check');
   assert.equal(descendants(again).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again').hidden,true,'with approval not yet read, only the step\'s own check is offered');
+  assert.equal(await reopened.run('context'),true);
+  assert.deepEqual(stepsOf(again).filter(visible).map(filledIn).at(-1),['Check launch status'],'once read, the launch\'s status check leads');
   reopened.dispose();
 });
 test('Sign in to Claude says it is starting in one place, and a session renewal meanwhile moves nothing and offers no check',async()=>{
@@ -3205,6 +3208,63 @@ test('on the same installation, a kept request still blocks Sign in, Preview and
   assert.deepEqual(new Map(p.h.saved),before,'nothing this browser kept is changed');
   p.h.api.dispose();
 });
+test('a full list of conflicting identifiers drops its oldest when a computer set up again sets its request aside',async()=>{
+  const older=Array.from({length:16},(_,i)=>({generation:id(100+i),request_id:id(200+i),config_fingerprint:'d'.repeat(64),source_revision:settingUp.source_revision}));
+  const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:older,legacy:[]})]],
+    context:{generation:id(20),preview_state:'none'}});
+  assert.deepEqual(p.h.api.snapshot().conflicts,older);
+  await p.finish();await flush();
+  assert.equal(p.h.api.snapshot().note,'');assert.equal(p.h.api.snapshot().pending,null);
+  const kept=[...older.slice(1),settingUp];
+  assert.deepEqual(p.h.api.snapshot().conflicts,kept,'the oldest goes; the list stays at 16');
+  assert.deepEqual(JSON.parse(p.h.saved.get('test')),{version:2,pending:null,conflicts:kept,legacy:[]});
+  assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['goal','current'],['launch','upcoming']]);
+  const details=descendants(p.panel).find(n=>n.tagName==='PRE').textContent;
+  assert.ok(details.includes(settingUp.request_id),'the request set aside is listed under Details');
+  assert.ok(!details.includes(older[0].request_id));
+  const reloaded=createGuidedSetup({client:p.h.client,storage:p.h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().conflicts,kept);assert.equal(reloaded.snapshot().pending,null);
+  reloaded.dispose();p.h.api.dispose();
+});
+test('after a failed first approval read, Check setup approval leads; once the computer approved, the earlier request is set aside',async()=>{
+  let reads=0;const refused=()=>Object.assign(new Error('refused'),{status:403});
+  const p=connectedPanel({saved:earlierInstallation(),context:{generation:id(20),provider_signin:true,signin_attempt:null,preview_state:'none'},
+    client:{async setupContext(){p.h.calls.push(['context']);if(++reads===1)throw refused();return p.h.context;},
+      async setupReceipt(input){p.h.calls.push(['receipt',input]);throw refused();}}});
+  await p.finish();await flush();
+  assert.equal(reads,1);assert.deepEqual(p.h.api.snapshot().pending,settingUp);
+  assert.deepEqual(stepsOf(p.panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[]],'the approval check leads');
+  assert.equal(p.focused()?.textContent,'Check setup approval');
+  buttonOf(p.panel,'Check setup approval').click();await flush();
+  assert.equal(reads,2);assert.equal(p.h.api.snapshot().pending,null);assert.deepEqual(p.h.api.snapshot().conflicts,[settingUp]);
+  assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
+  assert.equal(offered(p.panel,'Sign in to Claude'),true);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])).length,0);
+  p.h.api.dispose();
+});
+test('a browser that cannot save keeps the earlier request as it was, shown once, when a new approval is read',async()=>{
+  const p=connectedPanel({saved:[keptLaunch()[0]],context:{generation:id(20),preview_state:'none'},
+    storage:saved=>({setItem:(key,value)=>{if(key==='test')throw new Error('full');saved.set(key,value);}})});
+  const before=p.h.saved.get('test');
+  await p.finish();await flush();
+  assert.equal(p.h.api.snapshot().note,'This browser could not save the setup identifiers, so nothing was launched. Allow site storage for this page, then try again.');
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);
+  assert.deepEqual(p.h.api.snapshot().conflicts,[],'never both kept and conflicting');
+  assert.equal(p.h.saved.get('test'),before);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])).length,0);
+  p.h.api.dispose();
+});
+test('a new approval\'s read naming a sign-in this page cannot use is rejected before anything kept is set aside',async()=>{
+  const saved=earlierInstallation(),before=new Map(saved);
+  const p=connectedPanel({saved,context:{generation:id(20),provider_signin:true,preview_state:'none',
+      signin_attempt:{generation:id(20),attempt_id:id(30),state:'not-a-state',reason:null}},
+    client:{async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+  await p.finish();await flush();
+  assert.equal(p.reads(),1);assert.equal(p.h.api.snapshot().context,null,'the read is rejected');
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);assert.deepEqual(p.h.api.snapshot().conflicts,[]);
+  assert.deepEqual(new Map(p.h.saved),before,'no storage changed');
+  p.h.api.dispose();
+});
 test('the Launch team reassurance goes once the launch is held and stays gone after it finished',async()=>{
   const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});l.h.context.managed_owner=undefined;
   await l.h.api.run('context');l.h.api.setGoal('Improve checkout tests');await l.h.api.run('preview');
@@ -3537,7 +3597,7 @@ test('the panel lets go of the Launch it showed under way when the next parts re
     else{
       assert.equal(l.panel(),panel,name);
       assert.deepEqual(stepShape(panel),[['connect','done'],['approve','current'],['goal','done'],['launch','current']]);
-      assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'Check launch status leads');
+      assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[]],'with no approval known, Check setup approval leads');
       assert.equal(lede(),true,'the "Nothing runs" line is back');
     }
     assert.equal(l.h.calls.filter(c=>/\/setup\/(?:launch|preview|context|receipt)$/.test(c.url)).length,0,'nothing was sent');
