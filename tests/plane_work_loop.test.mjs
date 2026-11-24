@@ -1070,6 +1070,18 @@ test('a message-only grant whose context marks the lead addresses a new message 
   assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
+// A lead bot already named lead is listed once by name; any other lead keeps the mark.
+test('a lead whose name already is lead is not marked lead again in the To list',async()=>{
+  const lead=ownerNudge.recipients[0].id;
+  for(const [label,shown] of [['lead','lead'],['Lead','Lead'],['LEAD','LEAD'],['manager','manager · lead'],['team lead','team lead · lead']]){
+    const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label,lead:true},{id:'reviewer',label:'reviewer'}]};
+    const h=harness({interactionContext:()=>marked});
+    h.loop.setRoom('web');await settle();
+    const options=[...h.get('work-recipient').innerHTML.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)].map(m=>[m[1],m[2]]);
+    assert.deepEqual(options,[['engineer','engineer'],[lead,shown],['reviewer','reviewer']],label);
+    assert.equal(h.get('work-recipient').value,lead,`${label}: still the default`);
+  }
+});
 test('a bot the person chose, or a message already written, is not moved when the lead becomes known',async()=>{
   for(const touch of ['chosen','written']){
     const nudge=deferred(),h=harness({interactionContext:()=>unmarkedMessage,nudgeContext:()=>nudge.promise});

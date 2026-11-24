@@ -256,7 +256,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : deniedContexts.size ? deniedNote
       : "Browser actions are unavailable for this view. Check the task and activity panels for read status.";
     if (usable) {
-      const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead ? " · lead" : ""}</option>`).join("");
+      // A lead whose name already says lead is not marked again ("lead · lead").
+      const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead && r.label.toLowerCase() !== "lead" ? " · lead" : ""}</option>`).join("");
       if ($("work-recipient").innerHTML !== options) $("work-recipient").innerHTML = options;
       $("work-recipient").value = target.recipient;
       $("work-recipient").disabled = kind !== "message";
