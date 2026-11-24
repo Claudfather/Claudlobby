@@ -261,6 +261,24 @@ the view as it was and shows nothing, and nothing retries it. The same word
 hides "Nothing runs on this computer until you choose Launch team." from the
 first paint. A request kept from a Preview alone, a word stored for another
 request, or a word this browser cannot read gets no launch status read.
+A computer set up again from nothing answers the approval read with a new
+approval that holds no request. A computer cannot hold a new approval while it
+keeps any Preview or Launch (`allow` refuses it with
+`setup_original_request_retained`), so the page then sets the request it kept
+under the earlier approval aside with the conflicting identifiers (still listed
+under Details, never launched or followed), and stops following a Claude
+sign-in it kept under the earlier approval. When that list already holds 16,
+its oldest entry goes, since conflicting identifiers gate nothing. The earlier
+request's `:launch` word stays in storage but has no effect, because it only
+counts for the request the page keeps. The new approval's sign-in, preview and
+launch are offered as on a fresh page. A null request under the same approval
+changes nothing. Until an approval read succeeds, Check setup approval leads
+over Check launch status, since that read is what shows a computer set up
+again. If only the owner database were wiped while the installation and its
+team stayed, the page would also set its request aside and no longer say "Do
+not launch again"; what then prevents a second team is the computer's own
+first-team checks (`setup_other_fleet`, `setup_other_inputs`,
+`setup_existing_runtime`), not this browser's record.
 Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
 enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is

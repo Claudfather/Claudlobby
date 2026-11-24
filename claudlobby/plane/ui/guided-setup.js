@@ -111,6 +111,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // and with this browser's own request kept, the approval is shown done. It sends, resumes and follows nothing.
   let launchUnderway = false;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
+  // An approval is known for this page's setup: one the computer holds a launch for, a launch it says is under way, or
+  // a live approval read. Until one is, Check setup approval leads (render) and a failed approval read says so (run).
+  const approvalKnown = (time = now()) => launchHolding() || standalone && launchUnderway && !!pending
+    || !!context && context.expires_at > time;
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
   const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) seeLaunch(pending); };
   // launchSeen is also kept in this browser (beside the request, as the sign-in attempt is), so a page opened again
@@ -216,13 +220,23 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   } catch { incompatible = true; }
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
   const legacyBlocked = () => incompatible || legacy.length > 0;
-  function save(value) {
+  function save(value, kept = conflicts) {
     try {
       if (incompatible || !storage || typeof storage.setItem !== 'function') throw new Error();
-      storage.setItem(storageKey,JSON.stringify({version:2,pending:value,conflicts,legacy}));
+      storage.setItem(storageKey,JSON.stringify({version:2,pending:value,conflicts:kept,legacy}));
     } catch { throw Object.assign(new Error('This browser could not save the setup identifiers, so nothing was launched. Allow site storage for this page, then try again.'), {code:'setup_storage_unavailable'}); }
   }
   function changed() { render(); onChange(); }
+  // The kept request belongs to another approval, which the computer no longer holds (see the approval read in run):
+  // it joins the conflicting ones, still shown under Details, and this page stops following it. Saved first, and only
+  // then changed here, so a browser that cannot save keeps it as before. Conflicting identifiers gate nothing, so a full
+  // list drops its oldest one here, instead of a computer set up again many times stopping at the cap.
+  function setAside() {
+    const next = conflicts.some(item => request(item) && same(item,pending)) ? conflicts
+      : [...conflicts.slice(Math.max(0,conflicts.length-15)),Object.freeze({...pending})];
+    save(null,next); conflicts = next; pending = null;
+    stopHandoff(); followed = false; handoffUntil = 0; handoffReads = 0; connectionChecked = false;
+  }
   const RENEWAL_STATES=['renewing','ready','setup_only'];
   function connectionChanged(next) {
     // The client's own pre-begin renewal of a still-valid session rotates the epoch but is not
@@ -289,7 +303,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         previewState = said ?? null;
         if (said !== undefined && said !== 'none') previewWatch = true;
         if (said !== 'preparing') { previewUntil = 0; previewStopped = false; }
+        // An approval that holds no request, under another generation than a request or sign-in this browser kept: the
+        // computer holds neither, as after it was set up again from nothing. It cannot get here while it keeps that
+        // request: a new approval is refused while any Preview or Launch is retained (OwnerSetup.allow), and this read is
+        // refused while its sign-in attempt belongs to another approval (provider_signin.py _row). Never launched; see setAside.
+        // The sign-in is set aside and the computer's attempt checked first, so a read rejected there changes no storage.
+        if (value.request === null && value.provider_signin === true) signin.setAside(value.generation);
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
+        if (value.request === null && pending && pending.generation !== value.generation) setAside();
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
@@ -302,7 +323,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
         const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
-        // A null request or new grant is never proof that an original request vanished.
+        // A null request under the same approval is never proof that an original request vanished.
         note = value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
           : shown === 'ready' ? PREVIEW_NOTES.ready
           : shown === 'expired' ? PREVIEW_NOTES.expired(value)
@@ -372,7 +393,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           });
           return false;
         }
-        note = error?.code === 'setup_storage_unavailable' ? error.message : pending
+        // A failed approval read with no approval known says so, as Check setup approval then leads (render).
+        note = error?.code === 'setup_storage_unavailable' ? error.message : pending && (operation !== 'context' || approvalKnown())
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
@@ -427,7 +449,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const m = mount, live = active(), time = now();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
     const holding = launchHolding(), underway = standalone && launchUnderway;
-    const approved = holding || underway && !!pending || !!context && context.expires_at > time;
+    const approved = approvalKnown(time);
     // It keeps a sign-in this page saw connected for the same approval.
     const signinKnown = context?.provider_signin === true || holding && !context && signin.state() === 'connected'
       && signin.attempt()?.generation === pending.generation;
@@ -481,8 +503,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const checkShown = approved && !pending && previewWatch && !previewOpen() && !previewPolling() && !previewChecking
       && !['refused','expired'].includes(previewProblem); // a refusal or an ended approval cannot change by looking again
     // One filled action: the step that can move leads. Preview team and Launch team are filled whenever shown;
-    // so is Sign in to Claude, except while it is held as sign-in starts.
-    const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
+    // so is Sign in to Claude, except while it is held as sign-in starts. A retained launch's status check leads once
+    // an approval for it is known; until then Check setup approval does, since that read is what can show the computer
+    // was set up again (and the request set aside).
+    const lead = pending && approved ? launchShown ? null : 'receipt'
       : !approved ? 'context'
       : checkShown ? 'check'
       : states.signin !== 'current' ? null
@@ -513,8 +537,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       ? `Your team ${context.fleet} works in ${context.project_directory}. Once the team has finished starting and you’ve allowed messages to it, tell the lead what to do. The lead writes down the task and coordinates the work and an independent review.`
       : `Your team ${context.fleet} works on ${context.repository}, with a lead, an engineer and a reviewer. The team needs your permission before it merges a pull request.` : '');
     setText(m.authority,context ? `This approval covers ${context.template === 'local-project' ? `reading and changing files in ${context.project_directory}` : `work on ${context.repository}`}, for app version ${context.source_revision} only. Launching starts the team and the app’s background services on this computer and may use the provider accounts you set up. Some folders, tools or accounts may still need your approval on this computer. Merging, deploying, extra spending and destructive changes each need your separate permission.` : '');
-    // conflicts and legacy only grow (retain), so their lengths track every change.
-    const detailsKey = [plan, pending, conflicts.length, legacy.length];
+    // retain only grows conflicts and legacy, and a set-aside replaces conflicts whole (setAside, which may drop the
+    // oldest), so their identity and lengths track every change.
+    const detailsKey = [plan, pending, conflicts, conflicts.length, legacy.length];
     if (!detailsFor || detailsKey.some((value,index) => value !== detailsFor[index])) {
       detailsFor = detailsKey;
       setText(m.details,plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
