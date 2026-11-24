@@ -202,7 +202,10 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   function beginSignin(mode) {
     const signin = current?.signin;
-    if (!mount || !signin || signin.phase !== 'ended') return false; // only Try again starts one by this road's own press
+    // Only Try again starts one by this road's own press: the last read says the sign-in ended, or the step's own
+    // status check saw it end (the poll reads nothing, so the read may still say waiting).
+    const own = sg && sg.generation === signin?.generation && ['needs_attention','cancelled','unknown'].includes(sg.module.state());
+    if (!mount || !signin || signin.phase !== 'ended' && !own) return false;
     startSignin(signin.generation, null, mode);
     void runOp('signin-begin');
     return true;
@@ -276,7 +279,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     const computer = name();
     root.setAttribute('aria-label', computer);
     set('computer', computer, 'linked', PART_TEXT.linked);
-    set('provider', names?.provider ?? PART_TEXT.provider, current.provider, current.provider === 'linked' ? PART_TEXT.linked : PART_TEXT.notLinked);
+    const linked = current.provider === 'linked' || sg?.module.state() === 'connected'; // the step's own answer counts before a read says it
+    set('provider', names?.provider ?? PART_TEXT.provider, linked ? 'linked' : current.provider, linked ? PART_TEXT.linked : PART_TEXT.notLinked);
     set('bots', names?.bots ?? PART_TEXT.bots, current.teams ? 'teams' : 'none',
       current.teams === 1 ? PART_TEXT.oneTeam : current.teams ? '' : PART_TEXT.none);
     control.hidden = reason.hidden = current.teams > 0;
@@ -298,7 +302,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   function claudeView() {
     const c = current, signin = c.signin;
-    if (c.provider === 'linked') return {line:CLAUDE_TEXT.saved};       // linked wins over any sign-in
+    if (c.provider === 'linked' || sg?.module.state() === 'connected') return {line:CLAUDE_TEXT.saved};       // linked wins over any sign-in
     if (notice === 'closing') return {line:LINK_CLOSING, button:onSetupPage ? 'link' : null};
     if (signin && signin.phase !== 'ended') {
       const done = endedView();

@@ -4088,6 +4088,37 @@ test('no parts read on a timer',async t=>{
   assert.equal(claudeLine(l).textContent,'The sign-in ran out of time before a code was entered.');
   assert.deepEqual(claudeButtons(l),['Try again']);
 });
+// A poll that sees the attempt end offers Try again, and pressing it begins a new attempt although no read has said it ended.
+for(const [name,ending] of [['a timeout',{state:'needs_attention',reason:'timeout',retryable:true}],['a cancel before any code',{state:'cancelled',reason:'effect_uncertain',retryable:true}]]){
+  test('Try again after '+name+' seen by the poll begins a new attempt',async t=>{
+    const {l,holder}=await claudePage(t,linkAnswer());
+    l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+    l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+    claudeButton(l,'Link Claude').click();await flush();
+    holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+    const begins=()=>l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length;
+    assert.equal(begins(),1);
+    l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,...ending}));
+    for(let round=0;round<3;round++){fireShort(l);await flush();}
+    assert.deepEqual(claudeButtons(l),['Try again']);
+    claudeButton(l,'Try again').click();await flush();
+    assert.equal(begins(),2,'the press began a new attempt');
+  });
+}
+test('the provider row says Linked when the sign-in step\'s own answer is connected, before any read',async t=>{
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  claudeButton(l,'Link Claude').click();await flush();
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  assert.equal(partRows(partsOf(l.host))[1][3],'Not linked');
+  const reads=stateCalls(l.h).length;
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'connected',reason:null}));
+  for(let round=0;round<3;round++){fireShort(l);await flush();}
+  assert.equal(stateCalls(l.h).length,reads,'no parts read');
+  assert.deepEqual(partRows(partsOf(l.host))[1],['provider','linked','Claude','Linked']);
+  assert.equal(claudeLine(l).textContent,claudeSentences.saved);
+});
 const endingRows=[
   [{state:'needs_attention',reason:'timeout',retryable:true},'The sign-in ran out of time before a code was entered.','Try again'],
   [{state:'needs_attention',reason:'timeout',retryable:false},'The sign-in ran out of time before a code was entered.','Link Claude'],
