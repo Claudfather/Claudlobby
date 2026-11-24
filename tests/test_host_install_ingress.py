@@ -17,7 +17,8 @@ import pytest
 from tests import test_linux_system_preinstall as root_card
 from tests.conftest import constructed_env
 from tests.test_host_install import (  # noqa: F401 — the preparation fixture and its helpers
-    ROOT, SCRIPT, STATUS_KEYS, UPDATE_DRIVER, _prepared, local_install_source, payload, snapshot, update_frame)
+    REQUEST_ID, ROOT, SCRIPT, STATUS_KEYS, UPDATE_DRIVER, _prepared, local_install_source, payload, snapshot,
+    update_frame)
 
 NODE_KEY = "nodekey:" + "a" * 64
 DNS = "fixture.example.ts.net"
@@ -70,21 +71,23 @@ STATUS = {
     "no_https": (daemon_status(CertDomains=None), "differs"),
     "other_certificate": (daemon_status(CertDomains=["other.example.ts.net"]), "differs"),
     "not_a_tailnet_name": (daemon_status(Self={"DNSName": "fixture.example.com."}), "differs"),
+    "listed_name_outside_tailnet": (daemon_status(Self={"DNSName": "fixture.example.com."},
+                                                  CertDomains=["fixture.example.com"]), "differs"),
 }
 CASES = {**{"serve_" + name: (daemon_status(), serve, expected) for name, (serve, expected) in SERVE.items()},
          **{"status_" + name: (status, EXACT, expected) for name, (status, expected) in STATUS.items()}}
 
 
-def root_verdict(monkeypatch, status, serve):
-    """What the root card's own inspect makes of the same daemon: exact for its no_op,
-    differs for a change or a refusal."""
+def root_inspect(monkeypatch, status, serve, *, serve_etag="fixture-etag", profile="p001", shell="/bin/bash"):
+    """The root card's own inspect against a fake daemon: (its plan, None), or (None,
+    its refusal code)."""
     root = root_card.payload()
     with monkeypatch.context() as patch:
         patch.setattr(root.os, "geteuid", lambda: 0)
         patch.setattr(root.platform, "system", lambda: "Linux")
         patch.setattr(root.platform, "machine", lambda: "x86_64")
         patch.setattr(root.pwd, "getpwnam", lambda name: types.SimpleNamespace(
-            pw_uid=1001, pw_gid=1001, pw_dir=HOME, pw_shell="/bin/bash"))
+            pw_uid=1001, pw_gid=1001, pw_dir=HOME, pw_shell=shell))
         patch.setattr(root.Path, "read_text", lambda path: 'ID=ubuntu\nVERSION_ID="24.04"\n')
         patch.setattr(root.Path, "read_bytes", lambda path: b"synthetic-machine")
 
@@ -94,18 +97,24 @@ def root_verdict(monkeypatch, status, serve):
             def __call__(self, method, endpoint, body=None, etag=None):
                 assert method == "GET"
                 if endpoint == "profiles/current":
-                    return 200, None, {"ID": "p001"}
-                return 200, "fixture-etag", {"status": status, "serve-config": serve}[endpoint]
+                    return 200, None, {"ID": profile}
+                return 200, serve_etag, {"status": status, "serve-config": serve}[endpoint]
         try:
-            plan = root.inspect_plan("ingress", root_card.selection(), API())
-        except root.Refusal:
-            return "differs"
-    return "exact" if plan["no_op"] else "differs"
+            return root.inspect_plan("ingress", root_card.selection(), API()), None
+        except root.Refusal as error:
+            return None, error.code
 
 
-def host_verdict(monkeypatch, served, node_key=NODE_KEY, system="Linux"):
+def root_verdict(monkeypatch, status, serve):
+    """What the root card's own inspect makes of the same daemon: exact for its no_op,
+    differs for a change or a refusal."""
+    plan, _code = root_inspect(monkeypatch, status, serve)
+    return "differs" if plan is None else "exact" if plan["no_op"] else "differs"
+
+
+def host_verdict(monkeypatch, served, node_key=NODE_KEY, system="Linux", host=None):
     """The read, with `served` standing in for the daemon: endpoint to bytes or an exception."""
-    host = payload()
+    host = host or payload()
     monkeypatch.setattr(host.platform, "system", lambda: system)
     reads = []
 
@@ -134,9 +143,11 @@ def test_the_predicate_is_the_root_cards_own_byte_for_byte():
                            "ingress_after"}
     for name, source in copied.items():
         assert source == original[name], name
-    # Nothing else runs in the copy: its two imports, then those definitions.
-    assert [type(node).__name__ for node in ast.parse(host._SERVE_PREDICATE_SOURCE).body
-            if not isinstance(node, (ast.FunctionDef, ast.ClassDef))] == ["Import", "Import"]
+    # Nothing else runs in the copy: its two imports, json and re, then those definitions.
+    rest = [node for node in ast.parse(host._SERVE_PREDICATE_SOURCE).body
+            if not isinstance(node, (ast.FunctionDef, ast.ClassDef))]
+    assert [(type(node).__name__, [(alias.name, alias.asname) for alias in node.names]) for node in rest] == [
+        ("Import", [("json", None)]), ("Import", [("re", None)])]
     # What the read shares with the root card beside the predicate.
     assert (host.NATIVE_VERSION, host.TAILSCALE_SOCKET, host.LOCAL_API_LIMIT) == (root.NATIVE_VERSION, root.SOCKET,
                                                                                   root.LIMIT)
@@ -155,13 +166,34 @@ def test_the_predicate_is_the_root_cards_own_byte_for_byte():
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_read_agrees_with_the_root_cards_own_inspect(name, monkeypatch):
-    """exact exactly when the root card would answer that nothing changes."""
+    """With everything else the root card checks in order, exact exactly when its
+    inspect finds nothing to change."""
     status, serve, expected = CASES[name]
     assert root_verdict(monkeypatch, status, serve) == expected
     verdict, reads = host_verdict(monkeypatch, {"status": json.dumps(status).encode(),
                                                 "serve-config": json.dumps(serve).encode()})
     assert verdict == expected
     assert reads == (["status", "serve-config"] if name.startswith("serve_") else ["status"])
+
+
+def test_a_listed_name_outside_the_tailnet_is_never_exact(monkeypatch):
+    """CertDomains alone does not admit a name: the root card wants a ts.net name."""
+    status = daemon_status(Self={"DNSName": "fixture.example.com."}, CertDomains=["fixture.example.com"])
+    assert root_inspect(monkeypatch, status, EXACT) == (None, "native_dns_unavailable")
+    verdict, reads = host_verdict(monkeypatch, {"status": json.dumps(status).encode(),
+                                                "serve-config": json.dumps(EXACT).encode()})
+    assert (verdict, reads) == ("differs", ["status"])
+
+
+@pytest.mark.parametrize("change, code", [({"serve_etag": None}, "missing_etag"),
+                                          ({"profile": "p002"}, "node_or_profile_changed"),
+                                          ({"shell": "/usr/sbin/nologin"}, "account_changed")])
+def test_exact_says_the_card_cannot_change_serve_not_that_it_would_succeed(change, code, monkeypatch):
+    """The root card checks more than this read can: with Serve already exact it can
+    still refuse, for an ETag the daemon left out, another profile or the account's shell."""
+    assert root_inspect(monkeypatch, daemon_status(), EXACT, **change) == (None, code)
+    verdict, _reads = host_verdict(monkeypatch, _good())
+    assert verdict == "exact"
 
 
 def test_the_route_is_this_accounts_own():
@@ -203,12 +235,14 @@ def test_what_cannot_be_read_is_unknown(name, monkeypatch):
     assert verdict == "unknown"
 
 
-def test_the_read_never_refuses(monkeypatch):
-    """Even the action's own budget alarm, arriving during the read, reads as unknown."""
+def test_the_actions_own_signals_still_end_it(monkeypatch):
+    """SIGTERM, SIGINT and the budget alarm raise the action's own Refusal: the read
+    passes it on rather than answer for a process that was told to stop."""
     host = payload()
-    alarm = host.Refusal("unavailable", "unavailable", "inspect", 6)
-    verdict, _reads = host_verdict(monkeypatch, {"status": alarm})
-    assert verdict == "unknown"
+    signalled = host.Refusal("unavailable", "unavailable", "inspect", 6)
+    with pytest.raises(host.Refusal) as raised:
+        host_verdict(monkeypatch, {"status": signalled}, host=host)
+    assert raised.value is signalled
 
 
 def test_off_linux_the_read_is_unknown_and_reads_nothing(monkeypatch):
@@ -288,7 +322,7 @@ def daemon(monkeypatch):
     """The read pointed at a stand-in daemon; `trusted` admits its socket and peer as root's."""
     started = []
 
-    def start(answers, *, trusted=True, socket_trusted=True):
+    def start(answers, *, trusted=True, socket_trusted=True, folders_trusted=False):
         host = payload()
         monkeypatch.setattr(host.platform, "system", lambda: "Linux")
         stand_in = StandInDaemon(answers)
@@ -297,6 +331,8 @@ def daemon(monkeypatch):
             monkeypatch.setattr(host, "_native_socket", lambda: Path(stand_in.path))
         else:
             monkeypatch.setattr(host, "TAILSCALE_SOCKET", stand_in.path)
+            if folders_trusted:
+                monkeypatch.setattr(host, "_root_folders", lambda path: None)
         if trusted:
             monkeypatch.setattr(host, "_root_daemon", lambda connection: None)
         return host, stand_in
@@ -322,14 +358,28 @@ def test_a_daemon_not_run_by_root_is_unknown_before_any_request(daemon):
     assert stand_in.requests == []
 
 
-def test_a_socket_that_is_not_roots_is_unknown_before_any_request(daemon):
+def test_a_socket_under_folders_that_are_not_roots_is_unknown_before_any_request(daemon):
     if os.geteuid() == 0:
         pytest.skip("the stand-in socket is root's here")
     host, stand_in = daemon({"status": _http(daemon_status()), "serve-config": _http(EXACT)}, socket_trusted=False)
+    with pytest.raises(OSError):
+        host._root_folders(Path(stand_in.path).resolve())
     assert host.ingress(NODE_KEY, Path(HOME), time.monotonic() + 15) == "unknown"
     assert stand_in.requests == []
     host.TAILSCALE_SOCKET = stand_in.path + "-missing"
     assert host.ingress(NODE_KEY, Path(HOME), time.monotonic() + 15) == "unknown"
+
+
+def test_a_socket_that_is_not_roots_is_unknown_under_trusted_folders(daemon):
+    """The socket's own owner check, reached on its own."""
+    if os.geteuid() == 0:
+        pytest.skip("the stand-in socket is root's here")
+    host, stand_in = daemon({"status": _http(daemon_status()), "serve-config": _http(EXACT)}, socket_trusted=False,
+                            folders_trusted=True)
+    with pytest.raises(OSError, match="untrusted socket$"):
+        host._native_socket()
+    assert host.ingress(NODE_KEY, Path(HOME), time.monotonic() + 15) == "unknown"
+    assert stand_in.requests == []
 
 
 @pytest.mark.parametrize("case", ["refused", "oversize", "not_http"])
@@ -438,18 +488,34 @@ def test_update_status_on_an_absent_computer_answers_ingress_too(tmp_path):
     assert snapshot(home) == before
 
 
+def _read(module, raw, action):
+    reader, writer = os.pipe()
+    os.write(writer, raw)
+    os.close(writer)
+    try:
+        return module.request(reader, time.monotonic() + 10, action)
+    finally:
+        os.close(reader)
+
+
 @pytest.mark.parametrize("key", ["nodekey:" + "A" * 64, "nodekey:" + "a" * 63, "nodekey:" + "a" * 65,
                                  "mkey:" + "a" * 64, "a" * 64, "", None, 1])
 def test_update_status_refuses_a_malformed_node_key(key):
     module = payload()
-    reader, writer = os.pipe()
-    os.write(writer, update_frame(ingress_node_key=key))
-    os.close(writer)
-    try:
-        with pytest.raises(module.Refusal) as refused:
-            module.request(reader, time.monotonic() + 10, "update-status")
-    finally:
-        os.close(reader)
+    with pytest.raises(module.Refusal) as refused:
+        _read(module, update_frame(ingress_node_key=key), "update-status")
+    assert (refused.value.code, refused.value.exit_code) == ("invalid_request", 2)
+
+
+@pytest.mark.parametrize("action, value", [
+    ("update", {"expected_installed_revision": "a" * 40, "target_revision": "b" * 40}),
+    ("update-continue", {"request_id": REQUEST_ID})])
+def test_update_and_update_continue_refuse_the_ingress_key(action, value):
+    """Their own frames are read; the same frame with the key is invalid_request."""
+    module = payload()
+    assert _read(module, update_frame(**value), action) == {"schema_version": 1, "expected_uid": os.getuid(), **value}
+    with pytest.raises(module.Refusal) as refused:
+        _read(module, update_frame(**value, ingress_node_key=NODE_KEY), action)
     assert (refused.value.code, refused.value.exit_code) == ("invalid_request", 2)
 
 

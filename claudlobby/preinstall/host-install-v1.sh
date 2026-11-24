@@ -1910,14 +1910,19 @@ def _serve_predicate():
     return namespace
 
 
-def _native_socket():
-    # The system daemon's socket, as the root card admits it: a root-owned socket
-    # under root-owned folders that no one else can write.
-    path = Path(TAILSCALE_SOCKET).resolve(strict=True)
+def _root_folders(path):
+    # Each folder above the socket is root's and no one else can write it.
     for parent in reversed(path.parents):
         info = parent.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise OSError("untrusted socket folder")
+
+
+def _native_socket():
+    # The system daemon's socket, as the root card admits it: a root-owned socket
+    # under root-owned folders that no one else can write.
+    path = Path(TAILSCALE_SOCKET).resolve(strict=True)
+    _root_folders(path)
     info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
         raise OSError("untrusted socket")
@@ -1974,7 +1979,11 @@ def ingress(node_key, home, deadline):
     """exact: Serve already holds exactly the route the root card would set for this
     account, on the node named, with the daemon as that card requires it; differs: a
     fact read is otherwise, or the card would refuse what Serve holds; unknown:
-    something could not be read, and always off Linux. Never refuses, never writes."""
+    something could not be read, and always off Linux. Never refuses, never writes.
+    exact says only that the card could not change Serve, not that it would succeed:
+    the card also checks what this read does not or cannot (the daemon's executable,
+    the current profile, the configuration's ETag, operations pending in its store,
+    the account's shell and the shape of its home)."""
     end = min(time.monotonic() + INGRESS_SECONDS, deadline - 5)
     try:
         if platform.system() != "Linux":
@@ -2002,6 +2011,11 @@ def ingress(node_key, home, deadline):
         except predicate["Refusal"]:
             return "differs"
         return "exact" if before == after else "differs"
+    except Refusal:
+        # Only the action's own signal handler raises this here: SIGTERM, SIGINT, or
+        # its budget alarm, which the read's own end keeps clear of. Each ends the
+        # action as it does anywhere else.
+        raise
     except Exception:
         return "unknown"
 
@@ -2039,6 +2053,8 @@ def update_execute(action, value, deadline):
                                       if ancestor(runner, reads, source, compare, head) else "other")
             if "ingress_node_key" in value:
                 # Last: everything above is read before this read's own time starts.
+                # At most 20 bytes more (,"ingress":"differs"): an answer already
+                # within 20 bytes of 8192 answers unavailable, as any longer one does.
                 answer["ingress"] = ingress(value["ingress_node_key"], home, deadline)
             return answer
         if action == "update":

@@ -351,17 +351,23 @@ system `tailscaled`'s local API (`status`, then `serve-config`) over its
 root-owned socket from a peer running as root; the executable behind that peer
 is not checked, because an ordinary account cannot read it. The answer is
 `exact` when the daemon is `Running` with `TUN`, at the `Version` the root card
-admits, its own `PublicKey` is the named key, its DNS name is in
-`CertDomains`, and Serve already holds exactly what the card would set for this
-account: the card's own predicate (`ingress_after`), copied byte for byte and
-held to the original by a test. Routes on other ports do not matter, as they do
-not to the card. It is `differs` when a fact read is otherwise or the card
-would refuse what Serve holds (Funnel on the route, another mount or another
-target on port 443, a TCP forward on 443, another account's socket). It is
-`unknown` when anything could not be read within the read's own time (at most
-4 seconds, ending 5 seconds before the action's budget), and always on a Mac.
-An absent computer is read the same way. The key never makes the action refuse,
-and without it the answer is unchanged.
+admits, its own `PublicKey` is the named key, its DNS name is a `ts.net` name
+listed in `CertDomains`, and Serve already holds exactly what the card would set
+for this account: the card's own predicate (`ingress_after`), copied byte for
+byte and held to the original by a test. Routes on other ports do not matter, as
+they do not to the card. `exact` means only that the card could not change
+Serve, not that the card would succeed or that a root ingress receipt exists,
+because the card also checks what this read does not or cannot: the daemon's
+executable, the current profile, the configuration's ETag, operations pending in
+the root store, and the account's shell and the shape of its home. It is
+`differs` when a fact read is otherwise or the card would refuse what Serve
+holds (Funnel on the route, another mount or another target on port 443, a TCP
+forward on 443, another account's socket). It is `unknown` when anything could
+not be read within the read's own time (at most 4 seconds, ending 5 seconds
+before the action's budget), and always on a Mac. An absent computer is read
+the same way. The key never makes the action refuse (the action's own SIGTERM,
+SIGINT and budget alarm still end it, as anywhere else), and without it the
+answer is unchanged.
 
 `update` in a status answer is `null` or the update record in the names a
 client reads: `request_id`, `kind` (`update`, `start`, `first_team` or
