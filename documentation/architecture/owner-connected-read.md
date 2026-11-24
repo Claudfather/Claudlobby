@@ -568,12 +568,17 @@ lowercase letters, digits and single hyphens, starting with a letter and not
 ending with a hyphen, and not a reserved word (`sender_alias_refusal`); otherwise
 the guide stops with `sender_name_refused` and nothing is approved. For that
 approval, `context` adds `"sends_goal": true`, and the Preview answer adds
-`"sends_goal": true`, `"finish": "page"` and the exact `goal`, which the view
-shows above Launch team; Launch approves that text. An unmarked approval answers
-exactly as before.
+`"sends_goal": true`, `"finish"` and the exact `goal`, which the view
+shows above Launch team; Launch approves that text. `finish` is `"computer"`
+where this computer's own starter can finish the Launch, by one shared check
+(`computer_can_finish`: a Linux service manager, not the managed Mac runtime,
+and the stable launcher `setup_handoff_argv` accepts), and `"page"` otherwise. It
+is a forecast made before Launch; `setup.finish` (below) is what happened. An
+unmarked approval answers exactly as before.
 
-After a healthy Launch, the guide's finish (`--_finish-setup`, run today by the
-setup page) does for a marked approval, instead of the three optional cards: it
+After a healthy Launch, the guide's finish (`--_finish-setup`, run by the setup
+page, an operator terminal, or the computer itself after a marked Launch) does
+for a marked approval, instead of the three optional cards: it
 first checks, read-only, that the approval still stands for an active owner
 (otherwise it records `revoked` with reason `setup_withdrawn`, or `stale` with
 reason `stale_binding`, and reads or registers no name), and checks again inside
@@ -589,11 +594,46 @@ receipt whose sender, recipient and body match. One finish runs at a time
 approval's Preview row, so running it again answers from that record and never
 grants or sends twice. Its answer is `{"state": "setup_complete", "request_id":
 ..., "messages": {"state": "allowed"|"kept"|"name_taken"|"revoked"|"stale"|"in_progress",
-"reason": ..., "by": "page"|"terminal", "alias": ..., "renamed": ...,
+"reason": ..., "by": "computer"|"page"|"terminal", "alias": ..., "renamed": ...,
 "goal": {"state": "sent"|"unknown"|"pending"|"not_sent", "reason": ...}}}`.
-It reports `allowed` only while the grant row holds; otherwise `revoked` with
-reason `messages_revoked`. The status run and `host owner setup-status` carry
-the same answer and the goal text under `setup`.
+`by` is a label only: `computer` is set only when the finish ran with no
+terminal (`_unattended_finish`). It reports `allowed` only while the grant row
+holds; otherwise `revoked` with reason `messages_revoked`. The status run and
+`host owner setup-status` carry the same answer and the goal text under `setup`.
+
+Who starts the finish. When the guide's run returns `launch_handoff` for a
+stored approval carrying the mark (read from the store, never from a frame), and
+`computer_can_finish` holds, the guide starts the terminal's setup waiter
+(`setup_handoff_argv`) once, as a detached child: its own session, working
+directory `/`, umask 077, stdin `/dev/null`, stdout and stderr written to
+`state/setup-finish-<launch request id>.log` (created once, mode 0600, no
+symlink followed), no other descriptor, and the guide's fixed profile
+environment. The guide never waits for it. When the Launch is healthy and DONE,
+the waiter runs the finish once with no terminal, through the same operator gate;
+an approval without the mark is refused there before any output or write. In that
+mode the finish's line in the log carries neither the name nor the goal. One
+attempt: a waiter that is not started, is stopped, or times out sends nothing,
+and the page finishes. The finish it runs ends by itself
+`UNATTENDED_FINISH_DEADLINE_S` (240 s) after it starts, twice the longest wait
+of the goal's send (about 110 s), wherever it is blocked: the process exits at
+once, sends nothing further and the kernel releases its lock, so the record
+reads stale and the page's finish carries it on. That cannot send the goal
+twice: a strict owner send commits the request under the derived id before any
+native effect, and the next finish reads that id first and never sends when a
+request exists. The page's finish and a terminal's have no deadline.
+The `launch_handoff` result keeps exactly its five keys.
+Before emitting it, the guide records who will finish in the approval's Preview
+row, and the status run reports it as `setup.finish`: `{"starter": "computer"}`;
+`{"starter": "page", "reason": "not_supported"}` where the check does not hold;
+`{"starter": "page", "reason": "waiter_unavailable"}` when the start failed
+(the Launch result is unchanged and the guide exits 0); or `null` when nothing
+was recorded. When `setup.messages.state` is `in_progress`, or `allowed` with
+the goal `pending`, `setup.finish` also carries `running`: whether a process
+holds the finish's lock now (a non-creating open and a shared, non-blocking probe, released at once). Either
+and not running means the finish that wrote the record is dead: a later
+finish resumes it under the same name. `setup.finish` is a display hint; nothing
+decides from it. `host owner setup-status` adds the log's path and whether it
+exists (`card.log`); the status run sent to a page carries no path.
 
 The browser displays team/repository/goal and plan changes, with technical
 identifiers behind a disclosure. `active` is an observed canonical activation

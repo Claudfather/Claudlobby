@@ -44,9 +44,12 @@ Launch, under the name chosen on the card. Who the person is stays the bound
 website account; the name is only a label the team reads. The approval is
 still local and revocable (`host owner revoke-setup` before the finish,
 `host owner revoke-messages` after it), and the website signs nothing new.
-One message, the setup goal, is sent once by the computer's own operator on the team card's local approval, without a session; it is recorded as such.
+One message, the setup goal, is sent once by the computer's setup finish, started by the setup page or by the computer itself after Launch, on the team card's local approval, without a session; it is recorded as such.
 Its receipt carries the provenance `{"carrier": "setup_finish"}`, never a
 connected session's.
+
+The owner commands' rule: Owner changes require an interactive operator terminal, or the setup guide with its page's approvals. One exception: the finish of a Launch whose team card was approved with the messages mark may run without a terminal. It applies only what that card approved (messages on for that team under the card's name, and the card's goal sent once to the lead) and asks for nothing else.
+The terminal and the operator gate stop accidents, not this account's own processes: any of them may start that one finish, and what it does is fixed by the stored card, once, re-checked as it acts.
 
 The guide's cards travel over the computer's Tailscale connection, not in a
 website session, and carry no website-signed statement. Core cannot tell which

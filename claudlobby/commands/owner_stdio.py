@@ -412,6 +412,10 @@ def dispatch(args):
             else:
                 result = run(configured, paths, store, None, consent=consent, profile=profile,
                              **({"ssh": ssh} if ssh is not None else {}))
+            # After a marked Launch, the computer starts its own finish and records who will finish.
+            # It never changes the result, never raises and never waits: the page finishes otherwise.
+            from .host_owner_setup import start_computer_finish
+            start_computer_finish(paths, store, result.data)
             channel.emit("result", **result.data)
         return 0
     except StdioRefused as exc:

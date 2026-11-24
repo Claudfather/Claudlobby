@@ -677,12 +677,15 @@ class SetupEngine:
 
     def _plan(self,grant,request,expires_at,phase):
         from ..config_plan import read_rendered
+        from ..commands.host_owner_setup import computer_can_finish
         rendered=read_rendered(self.root,request["config_fingerprint"])
         return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
             "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
             "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase,
-            # A marked approval: Launch sends this Preview's goal to the lead once. The page finishes it.
-            **({"sends_goal":True,"finish":"page"} if grant.messages is not None else {})}
+            # A marked approval: Launch sends this Preview's goal to the lead once. The computer finishes it
+            # where its own starter can (the guide's start asks the same check), else the page.
+            **({"sends_goal":True,"finish":"computer" if computer_can_finish(self.root) else "page"}
+               if grant.messages is not None else {})}
 
     def _retained_plan(self,grant,request,kept):
         """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
