@@ -337,6 +337,25 @@ def test_mission_carries_pointers_not_inlined_charters(paths: Paths, tmp_path: P
     assert m["projects"][0]["mission_file"].endswith("missions/widget.md")
 
 
+def test_mission_lists_the_bots_own_folder_project_without_a_mission_file(paths: Paths, tmp_path: Path):  # noqa: F811
+    """The lead of a local team read "projects: []" at start-up (41-05)."""
+    from claudlobby.config import derive_projects
+    folder = str(tmp_path / "claudfather-projects" / "first-team")
+    alex = BotConfig(bot_id="alex", name="Alex", expertise=[], mounts={"project": folder})
+    ari = BotConfig(bot_id="ari", name="Ari", expertise=[])
+    projects = {**derive_projects({"alex": alex}),
+                "widget": ProjectConfig(key="widget", title="Widget", repos=["acme/widget"])}
+    fleet = _fleet(bots={"alex": alex, "ari": ari}, projects=projects)
+    _seed_plane(paths)
+    brief = build_brief(fleet, paths, "alex", NOW)
+    # The repo project with no mission file is still left out.
+    assert brief["mission"]["projects"] == [
+        {"project": "first-team", "mission_file": None, "directory": folder}]
+    assert f"  project:  first-team in {folder}\n" in format_brief(brief)
+    # A bot that does not mount the folder is not pointed at it.
+    assert build_brief(fleet, paths, "ari", NOW)["mission"]["projects"] == []
+
+
 # --- canonical work with assignment-keyed attention ---------------------------
 
 

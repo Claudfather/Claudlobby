@@ -733,6 +733,36 @@ def test_local_grant_preview_recovery_and_launch_keep_original(setup_authority, 
     assert len(setup_authority[-1].dispatches) == 1
 
 
+def test_local_preview_check_keeps_the_original_and_its_folder_project(setup_authority, tmp_path, monkeypatch):
+    """The frozen operation is still exactly fleet.yaml with no projects.yaml, and
+    it composes the approved folder as the lead's project; a changed one refuses."""
+    from claudlobby.config import load_fleet_snapshot
+    from claudlobby.config_plan import read_rendered
+    store, access, old, reader, *_ = setup_authority
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "claudfather-projects" / "first-team"; project.mkdir(parents=True)
+    other = tmp_path / "claudfather-projects" / "second-team"; other.mkdir()
+    grant = store.candidate(OWNER, template="local-project", fleet="shop", repository=None,
+                            project_directory=str(project), install_directory=old.install_directory)
+    store.allow(grant)
+    engine = SetupEngine(access)
+    goal = "Build a one-page hello website"
+    preview = engine.preview(reader, grant.generation, goal)
+    record = engine.store.operation(grant)
+    engine.store.check_frozen(grant, record, goal)
+    rendered = read_rendered(engine.root, preview["config_fingerprint"])
+    item = rendered.effects["fleet_sources"]["shop"]
+    manifest, content = rendered.frozen_input(item["fleet"], required=True)
+    _, project_content = rendered.frozen_input(item["projects"])
+    assert project_content is None
+    fleet, _ = load_fleet_snapshot(manifest, content, project_content)
+    assert set(fleet.projects) == {"first-team"} and fleet.projects["first-team"].directory == str(project)
+    for changed, text in ((grant, "A changed goal"), (replace(grant, project_directory=str(other)), goal)):
+        with pytest.raises(AccessDenied, match="setup_original_operation_changed"):
+            engine.store.check_frozen(changed, record, text)
+    assert not setup_authority[-1].dispatches
+
+
 def test_local_grant_refuses_project_retarget_and_authority_overlap(setup_authority, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     store, access, old, *_ = setup_authority

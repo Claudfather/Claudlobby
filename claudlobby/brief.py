@@ -351,17 +351,28 @@ def _mission_section(fleet, bot, paths: Paths) -> dict:
 
     # Projects the bot actually touches, joined on scope repos — the same join
     # the config already models (projects declare `repos`, bots declare scope).
+    # A folder project is joined on the bot's own `project` mount instead, and
+    # is listed with or without a mission file: it is where the bot may work.
+    from .config import project_mount_folder
+
     bot_repos = {r.lower() for r in (bot.scope.repos if bot.scope else [])}
+    bot_folder = project_mount_folder((getattr(bot, "mounts", None) or {}).get("project"))
     projects = []
     for key, proj in sorted(getattr(fleet, "projects", {}).items()):
-        if not proj.mission_file:
+        directory = getattr(proj, "directory", None)
+        if directory is not None:
+            if directory != bot_folder:
+                continue
+        elif not proj.mission_file:
             continue
-        if bot_repos and not {r.lower() for r in proj.repos} & bot_repos:
+        elif bot_repos and not {r.lower() for r in proj.repos} & bot_repos:
             continue
         projects.append(
             {
                 "project": key,
-                "mission_file": str(paths.fleet_config_dir / proj.mission_file),
+                "mission_file": (str(paths.fleet_config_dir / proj.mission_file)
+                                 if proj.mission_file else None),
+                "directory": directory,
             }
         )
 
@@ -922,7 +933,12 @@ def format_brief(brief: dict) -> str:
     if m.get("charter"):
         out.append(f"  charter:  {m['charter']}")
     for p in m.get("projects", []):
-        out.append(f"  project:  {p['project']} -> {p['mission_file']}")
+        line = f"  project:  {p['project']}"
+        if p.get("directory"):
+            line += f" in {p['directory']}"
+        if p.get("mission_file"):
+            line += f" -> {p['mission_file']}"
+        out.append(line)
     out.append("")
 
     work = brief.get("work")

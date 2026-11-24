@@ -33,15 +33,16 @@ doors also resolve that active selected context.
 `$BOT_ID`, `$FLEET_NAME` and `$CLAUDLOBBY_ROOT` come from your `bot.conf`; each
 project's key, repos and tier come from the `## Projects` table in your own
 CLAUDE.md, which is in your context before this skill runs. That table may be
-**derived** — the compositor builds one from each bot's `scope.repos` at tier
+**derived** — the compositor builds one from each bot's `scope.repos` (a project
+per repo) and `project` mount (a project per folder, with no repos) at tier
 `review` when the fleet declares no `projects.yaml`, and says so in a line above
 the table. A derived tier is the framework's default, not the operator's
 declaration: dispatch against it normally, and when a project's real closure bar
 differs, say so in the rationale so someone writes it into `projects.yaml`. If no
 `## Projects` table is composed into your CLAUDE.md at all, this fleet has no
-`projects.yaml` **and no bot declares any repos**: `dispatch` is not available to
-you (it needs `--project`), and the check-in ends in `ask` or `nothing` — say so
-in the rationale.
+`projects.yaml` **and no bot declares any repos or `project` mount**: `dispatch`
+is not available to you (it needs `--project`), and the check-in ends in `ask`
+or `nothing` — say so in the rationale.
 
 ## Arguments
 
@@ -104,11 +105,12 @@ A step that fails is **recorded, never guessed around**: add its name to
 3. **The goal and each project's rigor** — both are already in your context, no
    call needed: the `## Fleet Mission` section of your own CLAUDE.md (the charter is
    composed in for a manager) and the `## Projects` table (Project · Title · Repos ·
-   Tier · Mission, composed from `projects.yaml`, or derived from `scope.repos` at
-   tier `review` when the fleet declares none — the table says which): the Tier is
-   how that project's work CLOSES, the Repos are what step 4 reads. If there is no
-   `## Projects` table at all, this fleet has neither a `projects.yaml` nor a bot
-   declaring repos, and `dispatch` is not available to you (it needs `--project`). **If there is no `## Fleet Mission` section and no mission line,
+   Tier · Mission, composed from `projects.yaml`, or derived from `scope.repos` and
+   `project` mounts at tier `review` when the fleet declares none — the table says
+   which): the Tier is how that project's work CLOSES, the Repos are what step 4
+   reads (a folder project has none). If there is no `## Projects` table at all,
+   this fleet has neither a `projects.yaml` nor a bot declaring repos or a
+   `project` mount, and `dispatch` is not available to you (it needs `--project`). **If there is no `## Fleet Mission` section and no mission line,
    record it**: put `mission` in `inputs_seen.unavailable`, set `issues_considered`
    to `null` (a count filtered by a mission you could not read is fabricated), and
    say so in the rationale — a decision taken against no charter must not look like
@@ -227,7 +229,8 @@ claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELI
 
 Use an already open canonical task ID instead of admitting duplicate intake.
 `--repo` is optional if no repository applies; `--project` is the project key
-chosen in the decision. Prepare and retain the UTF-8 delivery file before the
+chosen in the decision. A folder project (empty Repos column) takes no `--repo`:
+omit it. Prepare and retain the UTF-8 delivery file before the
 send; it names a backlog issue by its number and URL and never carries the
 issue's text, which the worker reads itself, as data. The assignment's `--checkin` is the join to the committed decision; it
 must not be added to `task admit`. A queued task, assignment, and delivered

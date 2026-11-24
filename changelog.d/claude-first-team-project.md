@@ -1,0 +1,7 @@
+### Fixed — a first team set up from the website can admit work in its approved folder
+
+A `local-project` team gives each bot a `project` mount: the one folder the person approved. With no `projects.yaml`, the fleet declared no project, so `project show` refused the folder's name and the lead would not admit work until an operator declared it, which nobody using only the website can do. Each distinct folder that a bot mounts as `project` is now a derived project named after the folder, at tier `review`, with no repos, next to the projects derived from `scope.repos`. `~` is expanded first, so two spellings of one folder are one project.
+
+The lead sees it everywhere it looked in that run. `project list` and `project show` report the folder as `directory`, with source `derived_from_bot_mounts`. The start-up brief lists the bot's own folder project even without a mission file. The lead's Projects table, every `bot.conf` and `host doctor` name the source as `mounts.project`; a table of folder projects only omits the "Declare one to set a real closure bar per project." sentence. A task in a folder project takes no `--repo`: admission used to accept any repository there and now refuses every one, saying to omit `--repo`. The dispatch protocol and the check-in skill say to leave it out. The check-in skill and the no-projects warnings now name the `project` mount too.
+
+The setup template, its `fleet.yaml` and the approval are unchanged, and a fleet with no `project` mount composes the same project text as before.
