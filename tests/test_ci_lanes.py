@@ -9,12 +9,14 @@ still fails where people can see it, without turning a merge red. The
 end-to-end harness is marked ``harness`` and runs in a job of its own on each
 platform.
 
-A pull request runs the rest of the suite once on each supported platform,
-Linux with Python 3.10 and macOS with Python 3.11, in shards that pytest-split
-divides it into; ``pytest``, Linux with Python 3.11, runs on push to main only
-(#1945). Each platform's gate job carries the platform's check name and passes
-only when its shards ran the suite they collected, each test once
-(tests/ci_shards.py, tests/test_ci_shards.py).
+A pull request runs the rest of the suite on Linux with Python 3.10 and, once
+it is ready for review, on macOS with Python 3.11, each once and in shards that
+pytest-split divides it into. A draft runs no macOS job unless it carries the
+``macos-on-draft`` label; marking it ready starts a run with every lane.
+``pytest``, Linux with Python 3.11, runs on push
+to main only (#1945). Each platform's gate job carries the platform's check
+name and passes only when its shards ran the suite they collected, each test
+once (tests/ci_shards.py, tests/test_ci_shards.py).
 
 Pinned here, by running pytest's own selection on each job's real ``-m``
 expression rather than by reading the expressions:
@@ -28,7 +30,10 @@ expression rather than by reading the expressions:
   match on names, so both drop tests without a trace;
 - an empty quarantine is a green lane, not a red one;
 - every shard lists the suite it collected in the step and environment it runs
-  it in, and each gate waits for every shard and passes only when each passed.
+  it in, and each gate waits for every shard and passes only when each passed;
+- the macOS lane skips a draft pull request without the ``macos-on-draft``
+  label and nothing else, marking a draft ready starts a run, and the gate a
+  skipped lane leaves behind does not carry the gate's check name.
 """
 
 from __future__ import annotations
@@ -67,7 +72,8 @@ GATES = {
     MACOS_SHARDS: ("supported-macos", "supported (macos-latest, py3.11)"),
 }
 # The tests side of each run: the full-suite lane, the harness lane and the
-# quarantine lane that one event runs for one platform.
+# quarantine lane that one event runs for one platform. The macOS side is a
+# pull request that is ready for review or carries the label (MACOS_LANE below).
 SIDES = {
     "push-linux": (PYTEST, HARNESS, QUARANTINE),
     "pull-request-linux": (UBUNTU_SHARDS, HARNESS, QUARANTINE),
@@ -363,14 +369,93 @@ def _shard_step(lane):
     return steps[0]
 
 
+# When the macOS lane runs. The first half is the test verify-rollout.yml's
+# check uses: true on a push to main, which has no pull request, and on a pull
+# request that is not a draft. The second half lets a draft opt in.
+MACOS_ON_DRAFT_LABEL = "macos-on-draft"
+MACOS_RUNS = (
+    "github.event.pull_request.draft != true"
+    f" || contains(github.event.pull_request.labels.*.name, '{MACOS_ON_DRAFT_LABEL}')"
+)
+# The `if` of each job of the macOS lane: its shards, its harness and its gate.
+MACOS_LANE = {
+    MACOS_SHARDS[1]: MACOS_RUNS,
+    HARNESS_MACOS[1]: MACOS_RUNS,
+    GATES[MACOS_SHARDS][0]: f"always() && ({MACOS_RUNS})",
+}
+# The matrix key that gives the macOS gate job its name. GitHub shows a job its
+# `if` skips under its unexpanded name, so this is what a skipped gate is called.
+MACOS_GATE_NAME_KEY = "macos-not-run-on-a-draft-pull-request"
+
+
 def test_the_linux_311_lane_runs_on_push_to_main_only():
     """A pull request runs the Linux suite once, on 3.10, the floor version;
     3.11 runs on macOS there, and on Linux in the push run after the merge.
-    Every other job of the tests side runs on both events."""
+    Every other Linux job of the tests side runs on both events, draft or not."""
     jobs = _workflow("test.yml")["jobs"]
     assert jobs["pytest"]["if"] == "github.event_name == 'push'"
-    others = {job: spec.get("if") for job, spec in jobs.items() if job != "pytest"}
+    others = {
+        job: spec.get("if") for job, spec in jobs.items()
+        if job != "pytest" and job not in MACOS_LANE
+    }
     assert set(others.values()) <= {None, "always()"}, others
+
+
+def test_the_macos_lane_skips_a_draft_pull_request_and_nothing_else():
+    """The account runs five macOS jobs at once and one run needs all five, so
+    with macOS on every push of every pull request the jobs waited for runners
+    longer than they ran. A draft cannot merge, so a draft runs no macOS job,
+    unless it carries the label: a long-lived draft that other pull requests
+    merge into keeps a macOS run for each merge that way. Every job on a macOS
+    runner carries the one condition, with the lane's gate, and no Linux job
+    does."""
+    jobs = _workflow("test.yml")["jobs"]
+    assert {job: jobs[job].get("if") for job in MACOS_LANE} == MACOS_LANE
+    on_macos = {
+        job for job, spec in jobs.items()
+        if str(spec.get("runs-on", "")).startswith("macos")
+    }
+    assert on_macos | {GATES[MACOS_SHARDS][0]} == set(MACOS_LANE), on_macos
+    elsewhere = [
+        job for job, spec in jobs.items()
+        if job not in MACOS_LANE and "draft" in str(spec.get("if", ""))
+    ]
+    assert not elsewhere, elsewhere
+
+
+def test_a_skipped_macos_gate_does_not_carry_the_gates_check_name():
+    """A run creates its gate job only once the shards have finished. After a
+    draft is marked ready, the draft run's skipped gate is therefore the only
+    result on the commit for as long as the new run's macOS shards take, and a
+    required check reads a skipped job as met. So the gate's name is not
+    written on the job: it is the one value of a matrix, which GitHub expands
+    only for a job that runs. A skipped gate shows as the matrix key, and
+    nothing called by the gate's check name exists on a commit until a run that
+    ran the lane has judged it."""
+    gate_id, check_name = GATES[MACOS_SHARDS]
+    gate = _workflow("test.yml")["jobs"][gate_id]
+    assert gate["name"] == f"${{{{ matrix.{MACOS_GATE_NAME_KEY} }}}}"
+    assert gate["strategy"] == {"matrix": {MACOS_GATE_NAME_KEY: [check_name]}}
+    # The check name is nowhere else on the job that a skipped run could show.
+    assert check_name not in gate["name"]
+    # The Linux gate never skips, so its name is the check name outright.
+    linux_id, linux_name = GATES[UBUNTU_SHARDS]
+    assert _workflow("test.yml")["jobs"][linux_id]["name"] == linux_name
+
+
+def test_marking_a_draft_ready_starts_a_run():
+    """Nothing else starts a run when the draft flag changes: without
+    ready_for_review a pull request opened as a draft would reach review with
+    no macOS run on its head. The rest are the event's defaults, and a push
+    still means a push to main. `labeled` is not among them: the label is read
+    when a run starts, and a run started by any label would put a skipped
+    result over a green one."""
+    doc = _workflow("test.yml")
+    triggers = doc.get("on", doc.get(True))  # YAML 1.1 reads a bare `on` as true
+    assert set(triggers["pull_request"]["types"]) == {
+        "opened", "synchronize", "reopened", "ready_for_review",
+    }
+    assert triggers["push"] == {"branches": ["main"]}
 
 
 def test_the_git_installation_rehearsal_runs_on_every_pull_request():
@@ -511,10 +596,17 @@ def test_a_shard_step_lists_and_runs_its_suite_in_one_environment(
 def test_each_gate_carries_its_check_name_and_waits_for_every_shard(lane):
     gate_id, check_name = GATES[lane]
     gate = _workflow(lane[0])["jobs"][gate_id]
-    assert gate["name"] == check_name
+    # The macOS gate takes its check name from a matrix of one value
+    # (test_a_skipped_macos_gate_does_not_carry_the_gates_check_name).
+    if gate_id in MACOS_LANE:
+        assert gate["strategy"]["matrix"][MACOS_GATE_NAME_KEY] == [check_name]
+    else:
+        assert gate["name"] == check_name
     assert gate["needs"] == [lane[1]]
-    # always(), so it never skips: a skipped job reports success.
-    assert gate["if"] == "always()"
+    # always(), so a failed or cancelled shard never skips it: a skipped job
+    # reports success. The macOS gate skips with its shards where the lane does
+    # not run, and only then (MACOS_LANE), under another name.
+    assert gate["if"] == MACOS_LANE.get(gate_id, "always()")
 
 
 @pytest.mark.parametrize("lane", GATES, ids=lambda lane: lane[1])
