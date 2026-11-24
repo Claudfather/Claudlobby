@@ -108,10 +108,13 @@ def _terminal(root):
 def _unattended_finish(root):
     """The rule's one exception: ``setup --_finish-setup`` with no terminal (the computer's own setup
     waiter, after a marked Launch). The same operator gate as a terminal, on the selected root; no
-    terminal is opened. ``_completed`` then refuses anything but a card-approved Launch's finish."""
+    terminal is opened. ``_completed`` then refuses anything but a card-approved Launch's finish. The
+    whole of it, gate included, runs under ``unattended_deadline``."""
     from .operator_context import require_operator_context
-    require_operator_context(root)
-    yield None
+    from .host_owner_setup import unattended_deadline
+    with unattended_deadline():
+        require_operator_context(root)
+        yield None
 
 
 def _challenge(terminal, *, label="browser pairing"):

@@ -613,16 +613,24 @@ the waiter runs the finish once with no terminal, through the same operator gate
 an approval without the mark is refused there before any output or write. In that
 mode the finish's line in the log carries neither the name nor the goal. One
 attempt: a waiter that is not started, is stopped, or times out sends nothing,
-and the page finishes. The `launch_handoff` result keeps exactly its five keys.
+and the page finishes. The finish it runs ends by itself
+`UNATTENDED_FINISH_DEADLINE_S` (240 s) after it starts, twice the longest wait
+of the goal's send (about 110 s), wherever it is blocked: the process exits at
+once, sends nothing further and the kernel releases its lock, so the record
+reads stale and the page's finish carries it on. That cannot send the goal
+twice: a strict owner send commits the request under the derived id before any
+native effect, and the next finish reads that id first and never sends when a
+request exists. The page's finish and a terminal's have no deadline.
+The `launch_handoff` result keeps exactly its five keys.
 Before emitting it, the guide records who will finish in the approval's Preview
 row, and the status run reports it as `setup.finish`: `{"starter": "computer"}`;
 `{"starter": "page", "reason": "not_supported"}` where the check does not hold;
 `{"starter": "page", "reason": "waiter_unavailable"}` when the start failed
 (the Launch result is unchanged and the guide exits 0); or `null` when nothing
-was recorded. When `setup.messages.state` is `in_progress`, `setup.finish`
-also carries `running`: whether a process holds the finish's lock now (a
-non-creating open and a shared, non-blocking probe, released at once). In
-progress and not running means the finish that wrote the record is dead: a later
+was recorded. When `setup.messages.state` is `in_progress`, or `allowed` with
+the goal `pending`, `setup.finish` also carries `running`: whether a process
+holds the finish's lock now (a non-creating open and a shared, non-blocking probe, released at once). Either
+and not running means the finish that wrote the record is dead: a later
 finish resumes it under the same name. `setup.finish` is a display hint; nothing
 decides from it. `host owner setup-status` adds the log's path and whether it
 exists (`card.log`); the status run sent to a page carries no path.

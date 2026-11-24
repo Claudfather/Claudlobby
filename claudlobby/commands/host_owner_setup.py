@@ -21,6 +21,7 @@ import subprocess
 import stat
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -699,6 +700,13 @@ def card_answer(store, grant, value):
     return answer
 
 
+def _unsettled(value):
+    """A record a later finish carries on: in progress, or allowed with its goal still ``pending`` (a
+    finish that ended between the checked transaction and the goal's record)."""
+    return value.get("state") == "in_progress" or (
+        value.get("state") == "allowed" and (value.get("goal") or {}).get("state") == "pending")
+
+
 def card_status(store, retained):
     """For the status run and ``setup-status``: the marked approval's finish answer and launched goal."""
     grant = retained.grant if retained is not None else None
@@ -710,8 +718,8 @@ def card_status(store, retained):
         payload = json.loads(row["payload"]) if row is not None else {}
     value = payload.get("messages")
     finish = payload.get("finish")
-    if value is not None and value.get("state") == "in_progress":
-        # Stale is exact: in progress, and no process holds the finish's lock (every finish holds it from
+    if value is not None and _unsettled(value):
+        # Stale is exact: unsettled, and no process holds the finish's lock (every finish holds it from
         # before it reads the record until it ends, and the kernel frees it when the process dies).
         finish = {**(finish or {}), "running": finish_running(store.root, retained.launch_id)}
     return {"messages": card_answer(store, grant, value) if value is not None else None, "goal": payload.get("goal"),
@@ -734,6 +742,45 @@ def card_line(answer):
 COMPUTER_FINISH_MANAGERS = frozenset({"Linux"})
 #: A starter's environment never carries these: no bot or fleet selector, no sealed release.
 _STARTER_REFUSED = ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")
+
+
+#: The computer's own finish (the unattended ``--_finish-setup``) ends by itself this many seconds after
+#: it starts. What it waits for is bounded, and the longest is the goal's send (``deliver_bound_message``):
+#: the box read (5 s), the native send (30 s, then up to 3 s to stop it), the receipt wait (10 s) and at
+#: most two Enter repairs (15 s press, 12 s recheck each): about 110 s, plus 5 s for each busy Plane
+#: connection on the way. Twice that, rounded up. The page's and a terminal's finish have no deadline.
+UNATTENDED_FINISH_DEADLINE_S = 240
+_DEADLINE_EXIT = 124
+
+
+@contextmanager
+def unattended_deadline():
+    """Arm the unattended finish's deadline for the block. A daemon timer, not a signal: it fires whatever
+    the main thread is blocked in. At the deadline the process ends at once (``os._exit``): no handler,
+    no cleanup and no further step or send runs, and the kernel releases the finish's lock with the
+    process, so the record reads stale (``running: false``) and the page's finish carries it on.
+
+    No second send: the goal's request id is derived from the Launch (``goal_request_id``), a strict owner
+    send commits that request before any native effect, and ``_goal`` reads the request by that id before
+    it would send, and never sends when one exists. Ending between the send and the record therefore
+    leaves the request for the next finish to find and match; ending before the commit leaves nothing
+    sent."""
+    timer = threading.Timer(UNATTENDED_FINISH_DEADLINE_S, _deadline_reached)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+def _deadline_reached():
+    """One key=value line to the finish's log, then out."""
+    try:
+        os.write(2, b"setup_finish state=deadline\n")
+    except OSError:
+        pass
+    os._exit(_DEADLINE_EXIT)
 
 
 def computer_can_finish(root):
@@ -826,7 +873,13 @@ def start_computer_finish(paths, store, data):
     false; ``{"starter": "page", "reason": "waiter_unavailable"}`` when the start failed. It is a display
     hint: nothing decides from it. Never raises and never waits; the Launch result is the caller's,
     unchanged. Returns the record, or None for anything else (an unmarked approval starts and records
-    nothing)."""
+    nothing).
+
+    Every exception stops here, ``KeyboardInterrupt`` too: ``interrupted`` turns SIGTERM and SIGHUP into
+    one, and a signal during the start or the record must not turn a good Launch into an error frame.
+    A start that did not complete records ``waiter_unavailable``, even if a waiter was already started:
+    the page then finishes as well, and the finish's lock and once-only record keep that to one finish."""
+    grant = value = None
     try:
         if not isinstance(data, dict) or data.get("state") != "launch_handoff":
             return None
@@ -835,17 +888,17 @@ def start_computer_finish(paths, store, data):
         if (grant is None or grant.messages is None or retained.launch_id != data.get("request_id")
                 or grant.generation != data.get("generation")):
             return None
+        value = {"starter": "page", "reason": "waiter_unavailable"}  # Until the start completes.
         if not computer_can_finish(paths.root):
             value = {"starter": "page", "reason": "not_supported"}
         elif _start_waiter(paths, data):
             value = {"starter": "computer"}
-        else:
-            value = {"starter": "page", "reason": "waiter_unavailable"}
-    except Exception:
-        return None
+    except BaseException:
+        if value is None:
+            return None
     try:
         _keep(store, grant, value, key="finish")
-    except Exception:
+    except BaseException:
         pass  # The status then shows no ``finish``; the page reads that as its own finish.
     return value
 

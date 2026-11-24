@@ -3711,6 +3711,101 @@ def test_a_dead_in_progress_reads_stale_and_a_press_resumes_it_with_the_same_nam
     assert status()["finish"] == {"starter": "computer"}, "running is read only while in progress"
 
 
+@pytest.mark.parametrize("point", ["start", "record"])
+def test_a_signal_during_the_start_or_its_record_keeps_launch_handoff(setup_authority, monkeypatch, point):
+    """A SIGTERM or SIGHUP (``interrupted`` turns either into ``KeyboardInterrupt``) while the guide starts the
+    computer's finish, or while it records who finishes, leaves the Launch's five-key result and exit 0."""
+    import subprocess
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    from claudlobby.context import resolve_paths
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    monkeypatch.setattr(host_owner_setup, "computer_can_finish", lambda root: True)
+    _stand_in_waiter(monkeypatch)
+    started = []
+    if point == "start":
+        real = subprocess.Popen
+
+        def signalled(*args, **kwargs):
+            started.append(real(*args, **kwargs))  # The waiter is already started, and not yet recorded.
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(subprocess, "Popen", signalled)
+    else:
+        def signalled(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(host_owner_setup, "_keep", signalled)
+    code, frames = _guide_dispatch(access, monkeypatch, _launch_data(request))
+    for child in started:
+        child.wait(timeout=10)
+    assert len(started) == (1 if point == "start" else 0)
+    assert code == 0 and frames[-1]["type"] == "result" and frames[-1]["state"] == "launch_handoff"
+    assert sorted(frames[-1]) == sorted([*LAUNCH_KEYS, *FRAMING_KEYS])
+    assert {key: frames[-1][key] for key in LAUNCH_KEYS} == _launch_data(request)
+    status = owner_stdio._status(resolve_paths(root=access.root), access)
+    assert status["setup"]["finish"] == (
+        {"starter": "page", "reason": "waiter_unavailable"} if point == "start" else None)
+    assert status["setup"]["messages"] is None
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="the cut-off finish runs in a forked child")
+@pytest.mark.parametrize("cut", ["before_the_request", "after_the_send"])
+def test_a_hanging_unattended_finish_is_cut_off_and_the_page_sends_once(setup_authority, monkeypatch, tmp_path, cut):
+    """At its deadline the computer's own finish ends at once, wherever it hangs: it sends nothing further,
+    the kernel frees its lock and the status reads stale (``running: false``), and the page's finish carries
+    it on. Cut off before the goal's request was committed, the page sends the goal; cut off after the send
+    and before the record, the page finds the request by its derived id and sends nothing."""
+    import os, signal, time
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands.host_owner_setup import _keep, card_status, goal_request_id
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _keep(access, grant, {"starter": "computer"}, key="finish")
+    sent = tmp_path / "sent"
+
+    class Hanging(FakeCard):
+        def send(self, alias, request_id, text, check):
+            if cut == "after_the_send":
+                super().send(alias, request_id, text, check)
+                sent.write_text(request_id)
+            time.sleep(60)  # A send that never returns.
+
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: Hanging(access))
+    monkeypatch.setattr(guide, "UNATTENDED_FINISH_DEADLINE_S", 0.5)
+    pid = os.fork()
+    if pid == 0:  # The waiter's exec of the finish, with no terminal.
+        code = 0
+        try:
+            _unattended(access, request, monkeypatch)
+        except BaseException:
+            code = 1
+        os._exit(code)  # Reached only when the deadline did not end it.
+    limit = time.monotonic() + 30
+    while True:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        if time.monotonic() > limit:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            pytest.fail("the unattended finish was not cut off")
+        time.sleep(0.05)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == guide._DEADLINE_EXIT
+    read = lambda: card_status(access, OwnerSetup(access).retained_state())
+    assert read()["messages"]["state"] == "allowed" and read()["messages"]["goal"] == {"state": "pending"}
+    assert read()["finish"] == {"starter": "computer", "running": False}, "stale: no process holds the lock"
+    pressed = FakeCard(access)
+    if cut == "after_the_send":
+        assert sent.read_text() == goal_request_id(record["request_id"])
+        # What the cut-off send left: the committed request under the derived id.
+        pressed.receipts[sent.read_text()] = _receipt(ACTOR_UID, LEAD_UID, preview_payload(access, grant)["goal"])
+    answer = finish(setup_authority, request, pressed, monkeypatch)["messages"]
+    assert answer["state"] == "allowed" and answer["by"] == "computer" and answer["goal"] == {"state": "sent"}
+    assert len(pressed.sent) == (1 if cut == "before_the_request" else 0), "the goal is sent once in all"
+    assert pressed.registered == [], "the checked transaction stood; nothing is registered again"
+    assert read()["finish"] == {"starter": "computer"}
+
+
 def test_gate_unknown_unattended_writes_nothing(setup_authority, monkeypatch):
     """R6: the gate answering "could not be verified" at the moment units start leaves ``setup.messages`` absent."""
     from claudlobby.command_result import CommandFailure
