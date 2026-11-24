@@ -3115,7 +3115,7 @@ def test_page_finish_turns_messages_on_and_sends_the_goal_once(setup_authority, 
     assert finish(setup_authority, request, card, monkeypatch)["messages"] == expected
     assert len(card.sent) == 1 and card.registered == [ALIAS]
     status = card_status(access, OwnerSetup(access).retained_state())
-    assert status == {"messages": expected, "goal": "Review requested local code"}
+    assert status == {"messages": expected, "goal": "Review requested local code", "finish": None}
 
 
 def test_a_held_finish_lock_answers_in_progress_and_writes_nothing(setup_authority, monkeypatch):
@@ -3388,3 +3388,417 @@ def test_the_card_carries_the_mark_only_while_its_finish_exists(monkeypatch):
     assert host_owner._card_finish_ready() is True
     monkeypatch.delattr(host_owner_setup, "_card_messages")
     assert host_owner._card_finish_ready() is False
+
+
+# 04b2: the computer starts the finish. After a marked Launch the guide starts the terminal's setup
+# waiter (where the one shared check holds), the finish then runs with no terminal, and the status
+# says who will finish. The Launch result itself never changes.
+LAUNCH_KEYS = ["config_fingerprint", "generation", "request_id", "source_revision", "state"]
+FRAMING_KEYS = ["seq", "session_id", "type", "version"]
+
+
+def _launch_data(request):
+    return {"state": "launch_handoff", **request}
+
+
+def _private_state(access, monkeypatch):
+    """A browser installation's ``state/`` is private; and no bot, fleet or release selector is set."""
+    from claudlobby.commands import host_owner
+    from claudlobby.commands.host_owner_setup import _STARTER_REFUSED
+    (access.root / "state").chmod(0o700)
+    for name in (*host_owner._GENERATED, *_STARTER_REFUSED):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _stand_in_waiter(monkeypatch, script="pass"):
+    """The waiter's argv, as ``setup_handoff_argv`` would give it, replaced by a short real child."""
+    import sys
+    from claudlobby import installation
+    monkeypatch.setattr(installation, "setup_handoff_argv",
+                        lambda _installation, _data: [sys.executable, "-I", "-c", script])
+
+
+def _guide_dispatch(access, monkeypatch, data):
+    """Today's guide (``owner_stdio.dispatch``) whose run returns this Launch's handoff: the frames the
+    page receives and the exit code. Stand-ins: admission, the fixed profile and the start frame."""
+    import contextlib, os
+    from claudlobby.command_result import CommandOutput
+    from claudlobby.commands import host_owner_setup, owner_setup_consent, owner_stdio
+    from claudlobby.context import resolve_paths
+    paths = resolve_paths(root=access.root)
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile",
+                        lambda *_a, **_k: SimpleNamespace(runtime=None, environment=contextlib.nullcontext))
+    monkeypatch.setattr(host_owner_setup, "run", lambda *_a, **_k: CommandOutput(dict(data)))
+    monkeypatch.setattr(host_owner_setup, "run_computer", lambda *_a, **_k: pytest.fail("ran the computer run"))
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            return {"profile": "owner-setup-v1", "expected_uid": os.getuid(), "source_revision": "a" * 40,
+                    "binding_sha256": "b" * 64, "finish_setup": None}
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=False, root=str(access.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    return code, frames
+
+
+def _unattended(access, request, monkeypatch, *, gate=None):
+    """``host owner setup --_finish-setup <ids>`` with no terminal on stdin, as the waiter execs it."""
+    from claudlobby.commands import host_owner, operator_context
+    for name in host_owner._GENERATED:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(host_owner, "_terminal", lambda root: pytest.fail("a terminal was opened"))
+    monkeypatch.setattr(operator_context, "require_operator_context", gate or (lambda root=None: None))
+    return host_owner.dispatch(SimpleNamespace(root=str(access.root), fleet=None, seed=False, json=False,
+                                               owner_action="setup", finish_setup=list(request.values()),
+                                               target_fleet=None))
+
+
+@pytest.mark.parametrize("start", ["computer", "not_supported", "waiter_unavailable", "unmarked"])
+def test_launch_handoff_result_keys_unchanged(setup_authority, monkeypatch, start):
+    """B1: the website's in-page connection accepts ``launch_handoff`` only with exactly its five keys.
+    Who will finish goes to the Preview row (``setup.finish``), never into the result."""
+    from claudlobby import installation
+    from claudlobby.commands import host_owner_setup
+    engine, grant, request, record = (completed_setup if start == "unmarked" else marked_setup)(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    monkeypatch.setattr(host_owner_setup, "computer_can_finish", lambda root: start != "not_supported")
+    if start == "waiter_unavailable":
+        def stale(_installation, _data):
+            raise installation.InstallationError("synthetic: the installed launcher cannot finish setup")
+        monkeypatch.setattr(installation, "setup_handoff_argv", stale)
+    else:
+        _stand_in_waiter(monkeypatch)
+    code, frames = _guide_dispatch(access, monkeypatch, _launch_data(request))
+    assert code == 0 and frames[-1]["type"] == "result"
+    assert sorted(frames[-1]) == sorted([*LAUNCH_KEYS, *FRAMING_KEYS])
+    assert {key: frames[-1][key] for key in LAUNCH_KEYS} == _launch_data(request)
+    assert preview_payload(access, grant).get("finish") == {
+        "computer": {"starter": "computer"}, "not_supported": {"starter": "page", "reason": "not_supported"},
+        "waiter_unavailable": {"starter": "page", "reason": "waiter_unavailable"}, "unmarked": None}[start]
+
+
+@pytest.mark.parametrize("cause", ["log_exists", "state_refused", "popen_raises"])
+def test_waiter_start_failure_keeps_launch_handoff(setup_authority, monkeypatch, cause):
+    """R1: a waiter that cannot be started never turns a good Launch into an error frame."""
+    import subprocess
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    from claudlobby.context import resolve_paths
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    monkeypatch.setattr(host_owner_setup, "computer_can_finish", lambda root: True)
+    _stand_in_waiter(monkeypatch)
+    log = access.root / "state" / f"setup-finish-{request['request_id']}.log"
+    if cause == "log_exists":
+        log.write_text("an earlier start\n")
+    elif cause == "state_refused":
+        (access.root / "state").chmod(0o755)
+    else:
+        def refuse(*_args, **_kwargs):
+            raise OSError("synthetic: the process cannot be spawned")
+        monkeypatch.setattr(subprocess, "Popen", refuse)
+    code, frames = _guide_dispatch(access, monkeypatch, _launch_data(request))
+    assert code == 0 and frames[-1]["type"] == "result" and frames[-1]["state"] == "launch_handoff"
+    assert sorted(frames[-1]) == sorted([*LAUNCH_KEYS, *FRAMING_KEYS])
+    assert not log.exists() or log.read_text() == ("an earlier start\n" if cause == "log_exists" else "")
+    status = owner_stdio._status(resolve_paths(root=access.root), access)
+    assert status["setup"]["finish"] == {"starter": "page", "reason": "waiter_unavailable"}
+    assert status["setup"]["messages"] is None
+
+
+def test_waiter_child_has_only_null_stdin_and_log(setup_authority, monkeypatch):
+    """N3: no descriptor but ``/dev/null`` and the log. An inherited SSH channel descriptor would hold the
+    page's session open for up to 600 seconds; an inherited ``runtime-use.lock`` descriptor would hold a
+    reader lease against the cutover. Read by the started child itself, so it holds on any platform."""
+    import fcntl, os, stat, time
+    from claudlobby.commands import host_owner
+    from claudlobby.commands.host_owner_setup import _STARTER_REFUSED, _start_waiter
+    from claudlobby.context import resolve_paths
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    _stand_in_waiter(monkeypatch, "\n".join([
+        "import json, os",
+        "fds = []",
+        "for fd in range(1024):",
+        "    try:",
+        "        info = os.fstat(fd)",
+        "    except OSError:",
+        "        continue",
+        "    fds.append([fd, info.st_dev, info.st_ino])",
+        "null = os.stat(os.devnull)",
+        "print(json.dumps({'fds': fds, 'null': [null.st_dev, null.st_ino], 'cwd': os.getcwd(), 'umask': os.umask(0),",
+        "                  'leader': os.getsid(0) == os.getpid(), 'env': sorted(os.environ)}), flush=True)", ""]))
+    channel, other = os.pipe()  # Stands in for the page's SSH channel, inheritable as a session's descriptors are.
+    os.set_inheritable(channel, True)
+    lease = os.open(access.root / "state/runtime-use.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lease, fcntl.LOCK_SH)
+    os.set_inheritable(lease, True)
+    log = access.root / "state" / f"setup-finish-{request['request_id']}.log"
+    try:
+        assert _start_waiter(resolve_paths(root=access.root), _launch_data(request)) is True
+        deadline = time.monotonic() + 30
+        while not log.read_text().endswith("\n"):
+            assert time.monotonic() < deadline, "the started child wrote nothing"
+            time.sleep(0.05)
+    finally:
+        for fd in (channel, other, lease):
+            os.close(fd)
+    seen, info = json.loads(log.read_text()), log.stat()
+    assert stat.S_IMODE(info.st_mode) == 0o600 and log.parent == access.root / "state"
+    assert seen["fds"] == [[0, *seen["null"]], [1, info.st_dev, info.st_ino], [2, info.st_dev, info.st_ino]]
+    assert seen["cwd"] == "/" and seen["umask"] == 0o077 and seen["leader"] is True
+    assert not set(seen["env"]) & {*host_owner._GENERATED, *_STARTER_REFUSED}
+
+
+@pytest.mark.parametrize("name", ["BOT_ID", "FLEET_ROOT", "CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID"])
+def test_waiter_is_never_started_with_a_bot_fleet_or_release_selector(setup_authority, monkeypatch, name):
+    """N2: the guide's fixed profile environment, as it is; one with a generated or release key starts nothing."""
+    from claudlobby.commands.host_owner_setup import _start_waiter
+    from claudlobby.context import resolve_paths
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    _stand_in_waiter(monkeypatch)
+    monkeypatch.setenv(name, "synthetic")
+    assert _start_waiter(resolve_paths(root=access.root), _launch_data(request)) is False
+    assert not (access.root / "state" / f"setup-finish-{request['request_id']}.log").exists()
+
+
+@pytest.mark.parametrize("case", ["unmarked_with_a_mark_in_the_result", "marked_with_a_page_finish_in_the_result",
+                                  "another_launch"])
+def test_waiter_started_only_from_stored_mark(setup_authority, monkeypatch, case):
+    """Only the stored approval's ``grant.messages`` starts the waiter: nothing the run hands over (or a
+    page sent) can cause or suppress it. An unmarked approval starts nothing and records nothing."""
+    from claudlobby.commands import host_owner_setup
+    from claudlobby.commands.host_owner_setup import start_computer_finish
+    from claudlobby.context import resolve_paths
+    marked = case != "unmarked_with_a_mark_in_the_result"
+    engine, grant, request, record = (marked_setup if marked else completed_setup)(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    started = []
+    monkeypatch.setattr(host_owner_setup, "computer_can_finish", lambda root: True)
+    monkeypatch.setattr(host_owner_setup, "_start_waiter", lambda paths, data: started.append(data) or True)
+    data = _launch_data(request)
+    if case == "unmarked_with_a_mark_in_the_result":
+        data.update(messages={"sender": "card"}, sends_goal=True, finish="computer")
+    elif case == "marked_with_a_page_finish_in_the_result":
+        data.update(finish="page", messages=None)
+    else:
+        data["request_id"] = str(uuid4())
+    value = start_computer_finish(resolve_paths(root=access.root), access, data)
+    if case == "marked_with_a_page_finish_in_the_result":
+        assert value == {"starter": "computer"} and len(started) == 1
+        assert preview_payload(access, grant)["finish"] == {"starter": "computer"}
+    else:
+        assert value is None and started == [] and "finish" not in preview_payload(access, grant)
+
+
+@pytest.mark.parametrize("by", ["computer", "page", "terminal"])
+def test_by_computer_only_from_unattended_branch(setup_authority, monkeypatch, by):
+    """G1: ``by`` is ``page``, ``terminal`` or ``computer``; ``computer`` only from ``_unattended_finish``.
+    Unattended, the finish's line (which goes to its log) never carries the name."""
+    from claudlobby.commands import host_owner_setup as guide
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    card = FakeCard(access)
+    if by == "computer":
+        monkeypatch.setattr(guide, "_CardEffects", lambda *_: card)
+        result = _unattended(access, request, monkeypatch)
+        answer = result.data["messages"]
+        assert result.lines == ("setup_messages state=allowed by=computer goal=sent",)
+    else:
+        answer = finish(setup_authority, request, card, monkeypatch, consent=by == "page")["messages"]
+    assert answer == {"state": "allowed", "by": by, "alias": ALIAS, "renamed": False, "goal": {"state": "sent"}}
+    assert len(card.sent) == 1 and message_grants(access) == [(ACTOR_UID, ALIAS)]
+
+
+def test_unattended_unmarked_refused_before_output(setup_authority, monkeypatch):
+    """An approval without the mark is refused unattended: no ``_say``, no ``/dev/tty``, nothing written."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host_owner, host_owner_setup as guide
+    engine, grant, request, record = completed_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    before = preview_payload(access, grant)
+    monkeypatch.setattr(guide, "_say", lambda *_: pytest.fail("the finish wrote to a terminal"))
+    monkeypatch.setattr(host_owner, "_setup_messages", lambda *_a, **_k: pytest.fail("the optional cards ran"))
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: pytest.fail("the card's finish ran"))
+    monkeypatch.setattr(host_owner, "io", SimpleNamespace(FileIO=lambda *_a, **_k: pytest.fail("/dev/tty was opened")))
+    with pytest.raises(CommandFailure, match="owner changes require an interactive operator terminal"):
+        _unattended(access, request, monkeypatch)
+    assert preview_payload(access, grant) == before and message_grants(access) == []
+
+
+@pytest.mark.parametrize("computer", ["linux", "mac", "managed_runtime", "other_launcher"])
+def test_preview_finish_matches_start_predicate(setup_authority, monkeypatch, computer):
+    """R5: the Preview says ``computer`` only where the guide's own start check holds; a Mac's service
+    manager, the managed runtime or a launcher ``setup_handoff_argv`` refuses says ``page``, and the
+    guide there starts nothing and records ``not_supported``."""
+    import os, sys
+    from claudlobby import installation as module, resources
+    from claudlobby.commands import host_owner_setup
+    from claudlobby.commands.host_owner_setup import computer_can_finish, start_computer_finish
+    from claudlobby.context import resolve_paths
+    store, access, grant, reader, *_ = setup_authority
+    launcher = resources.get_resources().installation.cli
+    body = Path(module.__file__).read_bytes() if computer != "other_launcher" else b"raise SystemExit(6)\n"
+    launcher.write_bytes(b"#!" + os.path.realpath(sys.executable).encode() + b"\n" + body)
+    launcher.chmod(0o755)
+    monkeypatch.setattr(host_owner_setup, "platform", SimpleNamespace(system=lambda: "Darwin" if computer == "mac" else "Linux"))
+    if computer == "managed_runtime":
+        monkeypatch.setattr(module, "managed_browser_runtime", lambda _installation: object())
+    else:
+        monkeypatch.setattr(module, "managed_browser_runtime", lambda _installation: None)
+    holds = computer == "linux"
+    assert computer_can_finish(access.root) is holds
+    grant = replace(grant, messages={"alias": ALIAS})
+    store.allow(grant)
+    engine = SetupEngine(access)
+    preview = engine.preview(reader, grant.generation, "Review requested local code")
+    assert preview["finish"] == ("computer" if holds else "page")
+    engine.launch(reader, **binding(preview))
+    started = []
+    monkeypatch.setattr(host_owner_setup, "_start_waiter", lambda paths, data: started.append(data) or True)
+    value = start_computer_finish(resolve_paths(root=access.root), access, _launch_data(binding(preview)))
+    assert value == ({"starter": "computer"} if holds else {"starter": "page", "reason": "not_supported"})
+    assert len(started) == (1 if holds else 0)
+
+
+def test_a_dead_in_progress_reads_stale_and_a_press_resumes_it_with_the_same_name(setup_authority, monkeypatch):
+    """R4 (core half): in progress with no process holding the finish's lock is stale (``running: false``),
+    in progress while one holds it is ``running: true``, and a press resumes the dead finish under its name."""
+    import fcntl, os
+    from claudlobby.commands.host_owner_setup import _keep, card_status
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _keep(access, grant, {"starter": "computer"}, key="finish")
+    from claudlobby.commands import host_owner_setup as guide
+    dying = FakeCard(access)
+    dying.register = lambda alias, check: (_ for _ in ()).throw(KeyboardInterrupt())  # Killed while registering.
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: dying)
+    with pytest.raises(KeyboardInterrupt):
+        _unattended(access, request, monkeypatch)
+    status = lambda: card_status(access, OwnerSetup(access).retained_state())
+    assert status()["messages"]["state"] == "in_progress"
+    assert status()["finish"] == {"starter": "computer", "running": False}
+    fd = os.open(access.root / "state" / f"setup-finish-{record['request_id']}.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # A finish alive and holding its lock.
+        assert status()["finish"] == {"starter": "computer", "running": True}
+    finally:
+        os.close(fd)
+    pressed = FakeCard(access, taken={"ada-lovelace"})  # Its own registration now reads as taken.
+    answer = finish(setup_authority, request, pressed, monkeypatch)["messages"]
+    assert (answer["state"], answer["alias"], answer["renamed"], answer["by"]) == ("allowed", ALIAS, False, "computer")
+    assert pressed.registered == [ALIAS] and len(pressed.sent) == 1
+    assert status()["finish"] == {"starter": "computer"}, "running is read only while in progress"
+
+
+def test_gate_unknown_unattended_writes_nothing(setup_authority, monkeypatch):
+    """R6: the gate answering "could not be verified" at the moment units start leaves ``setup.messages`` absent."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host_owner_setup as guide
+    from claudlobby.commands.host_owner_setup import card_status
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: pytest.fail("the finish ran past the gate"))
+
+    def unknown(root=None):
+        raise CommandFailure("unavailable", "operator ancestry could not be verified")
+    with pytest.raises(CommandFailure, match="could not be verified"):
+        _unattended(access, request, monkeypatch, gate=unknown)
+    assert "messages" not in preview_payload(access, grant)
+    assert card_status(access, OwnerSetup(access).retained_state())["messages"] is None
+
+
+def test_unattended_finish_with_bot_variables_is_refused(setup_authority, monkeypatch):
+    """The only gate claim tested: a call carrying a bot's variables is refused, and nothing is written."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import host_owner
+    from claudlobby.commands import host_owner_setup as guide
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: pytest.fail("the finish ran for a bot"))
+    monkeypatch.setenv("BOT_ID", "synthetic-bot")
+    with pytest.raises(CommandFailure):
+        host_owner.dispatch(SimpleNamespace(root=str(access.root), fleet=None, seed=False, json=False,
+                                            owner_action="setup", finish_setup=list(request.values()), target_fleet=None))
+    with pytest.raises(CommandFailure, match="outside generated bot context"):
+        with host_owner._unattended_finish(access.root):
+            pytest.fail("the unattended finish was admitted with a bot's variables")
+    assert "messages" not in preview_payload(access, grant)
+
+
+def test_unattended_gate_from_a_detached_child_admits_no_bot_variables(tmp_path):
+    """The gate's environment half, run in a real detached child as the waiter's finish is: passes with no
+    bot variables and refuses with ``BOT_ID``. (Its ancestry half needs a real service manager: the live
+    check before merging reads it.)"""
+    import os, subprocess, sys
+    from claudlobby.commands import host_owner
+    script = "from claudlobby.commands.operator_context import require_operator_context\nrequire_operator_context()\n"
+    environment = {key: value for key, value in os.environ.items() if key not in host_owner._GENERATED}
+    clean = subprocess.run([sys.executable, "-c", script], env=environment, cwd="/", stdin=subprocess.DEVNULL,
+                           capture_output=True, start_new_session=True, timeout=60)
+    bot = subprocess.run([sys.executable, "-c", script], env={**environment, "BOT_ID": "synthetic-bot"}, cwd="/",
+                         stdin=subprocess.DEVNULL, capture_output=True, start_new_session=True, timeout=60)
+    assert clean.returncode == 0, clean.stderr
+    assert bot.returncode != 0 and b"outside generated bot context" in bot.stderr
+
+
+def test_finish_log_in_state_dir(setup_authority, monkeypatch, capsys):
+    """R2: the log sits in ``state/``, never in the composer's ``runtime/`` tree; created once (``O_EXCL``),
+    mode 0600, a planted symlink refused; the unattended finish's output carries neither the name nor the
+    goal; ``setup-status`` reports only its path and existence; the status run carries no path."""
+    import os, stat
+    from claudlobby.command_result import emit, CommandResult
+    from claudlobby.commands import host_owner, host_owner_setup as guide, owner_stdio
+    from claudlobby.commands.host_owner_setup import _open_finish_log
+    from claudlobby.context import resolve_paths
+    engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
+    access = setup_authority[1]
+    _private_state(access, monkeypatch)
+    state = access.root / "state"
+    log = state / f"setup-finish-{record['request_id']}.log"
+    planted = state / "planted-target"
+    log.symlink_to(planted)
+    with pytest.raises(OSError):
+        _open_finish_log(access.root, record["request_id"])
+    assert not planted.exists()
+    log.unlink()
+    os.close(_open_finish_log(access.root, record["request_id"]))
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600 and log.parent == state
+    assert not (access.root / "runtime").exists() or not list((access.root / "runtime").glob("setup-finish-*"))
+    with pytest.raises(FileExistsError):
+        _open_finish_log(access.root, record["request_id"])
+    monkeypatch.setattr(guide, "_CardEffects", lambda *_: FakeCard(access))
+    result = _unattended(access, request, monkeypatch)
+    emit(CommandResult(True, "host.owner.setup", None, None, result.data, None), json_output=False, lines=result.lines)
+    printed = capsys.readouterr()
+    assert "ada-lovelace" not in printed.out + printed.err and "Review requested local code" not in printed.out + printed.err
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
+    status = host_owner.dispatch(SimpleNamespace(root=str(access.root), fleet=None, seed=False, json=True,
+                                                 owner_action="setup-status"))
+    assert status.data["card"]["log"] == {"path": str(log), "exists": True}
+    log.unlink()
+    status = host_owner.dispatch(SimpleNamespace(root=str(access.root), fleet=None, seed=False, json=True,
+                                                 owner_action="setup-status"))
+    assert status.data["card"]["log"] == {"path": str(log), "exists": False}
+    page = json.dumps(owner_stdio._status(resolve_paths(root=access.root), access))
+    assert "setup-finish" not in page and str(state) not in page and '"log"' not in page

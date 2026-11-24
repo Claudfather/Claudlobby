@@ -914,3 +914,19 @@ def test_card_finish_registers_the_name_and_sends_the_goal_through_the_local_pat
     assert _sent(view, value, "Ship the signup form") == {"state": "sent"}
     assert _sent(view, value, "Another body") == {"state": "unknown", "reason": "request_id_taken"}
     assert store.local_action_status().message_grants == (), "the send path never grants"
+
+
+@pytest.mark.parametrize("action", ["allow-setup", "revoke-setup", "allow-actions", "revoke-messages", "setup"])
+def test_owner_commands_without_terminal_still_refused(owner, monkeypatch, action):
+    """The rule's one exception is ``setup --_finish-setup`` only: every other owner change, and ``setup``
+    without it, still needs an interactive operator terminal, refused before the gate or any read."""
+    from claudlobby.command_result import CommandFailure
+    from claudlobby.commands import operator_context
+    monkeypatch.setattr(host_owner.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(host_owner, "_unattended_finish", lambda root: pytest.fail("the exception was taken"))
+    monkeypatch.setattr(operator_context, "require_operator_context",
+                        lambda root=None: pytest.fail("the gate ran before the terminal refusal"))
+    args = SimpleNamespace(root=str(owner.root), fleet=None, seed=False, json=False, owner_action=action,
+                           finish_setup=None)
+    with pytest.raises(CommandFailure, match="owner changes require an interactive operator terminal"):
+        host_owner.dispatch(args)

@@ -66,6 +66,17 @@ def _card_finish_ready():
     return callable(getattr(host_owner_setup, "_card_messages", None))
 
 
+# The rule (owner-approved wording, D14a): Owner changes require an interactive operator terminal, or
+# the setup guide with its page's approvals. One exception: the finish of a Launch whose team card was
+# approved with the messages mark may run without a terminal. It applies only what that card approved
+# (messages on for that team under the card's name, and the card's goal sent once to the lead) and asks
+# for nothing else.
+#
+# The threat model above stands: an operator terminal is a usability/accident boundary, not same-UID
+# isolation, and processes with the operator's privileges can edit the same authority files. So any
+# process of this account may start that one finish (``_unattended_finish``); the operator gate does
+# not keep the account's own processes out. What the finish does is fixed by the stored card: it runs
+# once under its lock and re-checks the approval, binding, grant and goal as it acts.
 @contextmanager
 def _terminal(root):
     if not sys.stdin.isatty():
@@ -91,6 +102,16 @@ def _terminal(root):
             yield terminal
     except (OSError, EOFError, KeyboardInterrupt) as exc:
         raise CommandFailure("conflict", "owner confirmation did not complete; inspect owner status") from exc
+
+
+@contextmanager
+def _unattended_finish(root):
+    """The rule's one exception: ``setup --_finish-setup`` with no terminal (the computer's own setup
+    waiter, after a marked Launch). The same operator gate as a terminal, on the selected root; no
+    terminal is opened. ``_completed`` then refuses anything but a card-approved Launch's finish."""
+    from .operator_context import require_operator_context
+    require_operator_context(root)
+    yield None
 
 
 def _challenge(terminal, *, label="browser pairing"):
@@ -644,6 +665,9 @@ def dispatch(args):
         store = OwnerAccess(paths.root)
         if args.owner_action == "setup":
             from .host_owner_setup import run, interrupted
+            if getattr(args, "finish_setup", None) is not None and not sys.stdin.isatty():
+                with _unattended_finish(paths.root) as terminal, interrupted():
+                    return run(args, paths, store, terminal, unattended=True)
             with _terminal(paths.root) as terminal, interrupted():
                 result = run(args, paths, store, terminal)
             if result.data.get("state") == "launch_handoff":
@@ -677,9 +701,11 @@ def dispatch(args):
         if args.owner_action == "setup-status":
             from ..plane.owner_setup import OwnerSetup
             from ..plane.owner_setup import retained_fields
-            from .host_owner_setup import card_line, card_status
+            from .host_owner_setup import card_line, card_status, finish_log_status
             state = OwnerSetup(store).retained_state()
             card = card_status(store, state)
+            if card is not None and state.launch_id is not None:
+                card["log"] = finish_log_status(paths.root, state.launch_id)  # Its path and existence only.
             return CommandOutput({**retained_fields(state), **({"card": card} if card is not None else {})},
                 lines=(f"First-team setup approval: {state.state}.",
                 *(() if state.launch_id is None else (f"Original request: {state.launch_id}; configuration {state.launch_plan}.",)),
