@@ -35,9 +35,11 @@ LIB_COMMON = Path(__file__).resolve().parent.parent / "claudlobby/_runtime_scrip
 #     GIT_DIR or GIT_WORK_TREE reproduces that exact 6-of-7 signature on demand,
 #     and the one survivor is test_non_git_dir_blocks — which passes for the
 #     WRONG REASON, because every repo now looks like "not a git checkout".
-#     Env leaks across files are real here: `_load_env` (commands/_helpers.py)
-#     injects a fleet .env into os.environ permanently, and test_main.py leaves
-#     MY_TEST_VAR/MY_OTHER_VAR behind — measured reaching this module mid-suite.
+#     Other test files can change the environment this module starts with:
+#     `_load_env` (commands/_helpers.py) writes a fleet .env into os.environ for
+#     the rest of the run. The measurement behind the closed env: test_main.py's
+#     MY_TEST_VAR and MY_OTHER_VAR reached this module mid-suite. Since #3078 that
+#     test removes both at teardown.
 #   * HOME pointed at /tmp, which is shared with every process on the host. Any
 #     /tmp/.gitconfig any of them writes becomes this module's GLOBAL git config.
 #
