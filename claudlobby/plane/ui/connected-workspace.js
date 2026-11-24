@@ -91,6 +91,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   // The Connect step's hint in the setup-only view: what happened and what to choose, without builder detail.
   function connectHint(status, connection, continuity, expired) {
     if (connection === 'not_connected' || ['ready','setup_only','checking','renewing','logout'].includes(status.state)) return '';
+    // Ended for this page: no Connect or check here can undo it, so the hint says what to do instead of either.
+    if (continuity?.ended) return continuity.changed ? 'Your account or saved computers changed. Reopen setup from your workspace.'
+      : status.remediation || '';
     if (expired) return 'Your connection to this computer expired. Choose Connect to continue.';
     if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect again.';
     if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect again.';
@@ -498,15 +501,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // 'shared' layout below, so a renewal of its session (which keeps the parts shown) does not change the form.
       // With no team the parts stay the whole view, in the setup form.
       // A computer that showed it in this page keeps it through a lapse of its session, when no parts answer is held:
-      // its session ran out (a page left idle is not renewed, and a check of it then ends unavailable), a renewal's
-      // answer was lost, a Connect or check from its card is under way or a Connect did not reach the computer, or a
-      // new session's parts read has not answered or failed. Its card then offers Connect or Check connection.
+      // its session ran out (a page left idle is not renewed, and a check of it then ends unavailable), a renewal is
+      // under way or its answer was lost (automatic or Keep connected), a Connect or check from its card is under way or
+      // a Connect did not reach the computer, or a new session's parts read has not answered or failed. Its card then offers Connect or Check connection.
       // A refusal or a sign-out ends the lapse, even one whose follow-up check was lost. Other ends bring back the
       // setup form too: a check of a live session that does not end ready (its answer lost included), a Connect that
       // finds another computer or binding, and a parts answer with no team.
       const lapsed = pending.has(index) || !['denied','disconnected','signed_out'].includes(connection)
         && (['renewing','checking'].includes(status.state)
-          || !!(continuity?.reconnectRequired || continuity?.renewalUnknown || continuity?.connectRequired)
+          || !!(continuity?.renewing || continuity?.reconnectRequired || continuity?.renewalUnknown || continuity?.connectRequired)
           || status.state === 'ready' && !parts.answered());
       controls.working = browserTransport && bridged && phase === 'ready' && !row.hidden && !held
         && (partsShown ? parts.teams() !== 0 : controls.working && lapsed);
@@ -572,7 +575,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         || ['connect','enroll'].includes(operation) && ['ready','setup_only'].includes(status.state)
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
         || operation === 'renew' && !['ready','setup_only'].includes(status.state)
-        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state);
+        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state)
+        || ['connect','check','renew','logout'].includes(operation) && !!continuity?.ended; // nothing left to do here
       primary.disabled = disabled(primaryOperation);
       for (const {button,operation} of buttons) {
         button.hidden = operation === primaryOperation

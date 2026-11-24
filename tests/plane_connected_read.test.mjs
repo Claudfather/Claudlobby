@@ -232,6 +232,18 @@ test('unknown automatic renewal never retries on input, polling or timer callbac
   h.api.dispose();
 });
 
+test('continuity says a renewal is under way until its outcome is recorded, and only a permanent end is ended',async()=>{
+  const h=harness();await h.api.connect();
+  assert.deepEqual([h.api.continuity().renewing,h.api.continuity().ended,h.api.continuity().changed],[false,false,false]);
+  const held=deferred();h.overrides.set('renew',()=>held.promise);
+  const renewal=h.api.renew();await flush();
+  assert.equal(h.api.continuity().renewing,true);
+  held.resolve(Promise.reject(new Error('lost')));await renewal;await flush();
+  assert.deepEqual([h.api.continuity().renewing,h.api.continuity().renewalUnknown],[false,true]);
+  h.time=900000;h.runTimer(900000);await flush();
+  assert.equal(h.api.continuity().ended,false,'an expired session can Connect again');
+  h.api.dispose();
+});
 // A renewal the computer refused is a known outcome: only a renewal no answer settled is unknown.
 for(const [name,status,state,unknown] of [['refused',()=>reply(403,{state:'denied'}),'denied',false],
   ['lost',()=>{throw new Error('lost status');},'unavailable',true]])
@@ -254,6 +266,7 @@ for(const [name,change] of [['another computer',{host_uid:'host_'+'d'.repeat(32)
     assert.equal(await h.api.connect(),false);
     assert.equal(h.api.snapshot().state,'unavailable');
     assert.deepEqual([h.api.continuity().connectRequired,h.api.continuity().reconnectRequired],[false,false],'nothing to retry');
+    assert.deepEqual([h.api.continuity().ended,h.api.continuity().changed],[true,true],'ended because the computer changed');
     assert.match(h.api.snapshot().remediation,/Reopen Plane/);
     assert.equal(h.signings.length,1,'no website assertion is asked for');
     assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,issued,'no session issue is sent');

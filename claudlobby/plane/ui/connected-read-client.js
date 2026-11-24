@@ -86,6 +86,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   const ref = Object.freeze({ ...reference }), doc = Object.freeze({ ...documentContext });
   let token = null, pending = null, binding = null, hostUID = null, expires = 0;
   let epoch = 0, disposed = false, ended = false, busy = false, lastNow = null, expiryTimer = null;
+  let changed = false; // ended because the account, workspace, saved computer or its binding changed
   let continuityTimer = null, visible = false, lastActivity = null, autoAttempted = false;
   let renewalUnknown = false, continuityPaused = false, actionRequests = 0;
   let renewing = false, disconnectRequested = false, reconnectRequired = false;
@@ -123,8 +124,8 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
   }
-  function stop(note, permanent = false) {
-    epoch++; ended ||= permanent; wipe();
+  function stop(note, permanent = false, identity = false) {
+    epoch++; ended ||= permanent; changed ||= permanent && identity; wipe();
     if (permanent) { reconnectRequired = false; connectIncomplete = false; } // Presentation cannot override a terminal refusal.
     owner?.sessionControls.suspend(note); notify();
   }
@@ -149,7 +150,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       return false;
     }
     if (!matches) {
-      stop('The authenticated account, workspace or saved computer changed. Reopen Plane.', true);
+      stop('The authenticated account, workspace or saved computer changed. Reopen Plane.', true, true);
       return false;
     }
     let time;
@@ -177,7 +178,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       // An incomplete Connect needs a new explicit handshake, not a status probe.
       // Keep that recovery separate from known expiry and terminal refusals.
       connectRequired: connectIncomplete && !token && !ended && !accessRejected && handle.snapshot().state === 'unavailable',
-      renewalUnknown, reconnectRequired, remainingSeconds: Math.ceil(remaining / 1000) });
+      renewalUnknown, reconnectRequired, remainingSeconds: Math.ceil(remaining / 1000),
+      // A renewal under way, before its outcome is recorded; and an end no Connect or check in this page can undo.
+      renewing, ended, changed });
   }
   function continuityChanged() {
     try { onContinuityChange(); } catch { /* presentation cannot change admission */ }
@@ -483,7 +486,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       // this page stays bound to what it first reached, so another Connect here cannot reach that again.
       if ((hostUID !== null && hostUID !== c.host_uid)
           || (binding && (binding.binding_revision !== c.binding_revision || binding.binding_generation !== c.binding_generation))) {
-        stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true);
+        stop('Connected session compatibility or bound identity could not be verified. Reopen Plane.', true, true);
         return false;
       }
       hostUID = c.host_uid;
