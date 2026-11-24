@@ -3388,3 +3388,472 @@ def test_the_card_carries_the_mark_only_while_its_finish_exists(monkeypatch):
     assert host_owner._card_finish_ready() is True
     monkeypatch.delattr(host_owner_setup, "_card_messages")
     assert host_owner._card_finish_ready() is False
+
+
+# The link approval (setup_link): one yes on a started computer from the newer setup, which has no
+# team tables, to Claude sign-ins for a short time. Only the provider is synthetic, as in
+# synthetic_signin. A second OwnerAccess on the same root stands for a second process (the guide's):
+# a flock belongs to the open file, so a second open in this process meets the lease as another
+# process would; the tests that need a real second process start one.
+
+def _link_provider(access,monkeypatch,tmp_path):
+    """synthetic_signin's provider, for a computer the team approval never touched."""
+    import hashlib,sys
+    from claudlobby.plane import provider_signin
+    access.root.chmod(0o700)
+    env=access.root/'.env'; env.write_text('export ROUTE=private\n'); env.chmod(0o600)
+    (access.root/'state/runtime-use.lock').touch(mode=0o600)
+    profile=Path.home()/'.claude'; profile.mkdir(mode=0o700,exist_ok=True)
+    program=tmp_path/'synthetic-provider'
+    url=('https://claude.com/cai/oauth/authorize?code=true&client_id=test&response_type=code'
+         '&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+         '&scope=user%3Ainference&code_challenge='+'a'*43+'&code_challenge_method=S256&state='+'b'*32)
+    token='sk-ant-oat01-'+'s'*80
+    program.write_text(f'''#!{sys.executable}
+import os,sys,tty
+tty.setraw(0)
+sys.stdout.write('\\x1b]8;;'+{url!r}+'\\x07Open Claude\\x1b]8;;\\x07\\r\\n');sys.stdout.flush()
+typed=b''
+while not typed.endswith(b'\\r'):
+    ch=os.read(0,1)
+    if not ch or ch==b'\\n':sys.exit(3)
+    typed+=ch
+assert typed[:-1].decode()=='accepted#'+'b'*32
+sys.stdout.write('\\x1b[2K\\r✓ Long-lived authentication token created successfully!\\r\\nYour OAuth token (valid for 1 year):\\r\\n'+{token!r}+'\\r\\nStore this token securely. You won\\\'t be able to see it again.\\r\\n');sys.stdout.flush()
+''')
+    program.chmod(0o700)
+    monkeypatch.setattr(provider_signin,'SUPPORTED',{hashlib.sha256(program.read_bytes()).hexdigest():'2.1.325'})
+    return provider_signin.approved_scope(program,access.root,str(profile)),program,token,env
+
+
+@pytest.fixture
+def link_signin(setup_authority,monkeypatch,tmp_path):
+    """A started computer with no team tables and one link approval, written as the computer run writes it."""
+    from claudlobby.plane import owner_source
+    store,access,grant,reader,clock,args=setup_authority
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    scope,program,token,env=_link_provider(access,monkeypatch,tmp_path)
+    engine=SetupEngine(access)
+    approval=engine.signin.link.write(scope)
+    try:
+        yield SimpleNamespace(engine=engine,approval=approval,reader=reader,program=program,token=token,env=env,
+                              scope=scope,clock=clock,access=access,team=grant,args=args)
+    finally:
+        engine.signin.shutdown()
+
+
+def _second_process(link):
+    """Another process's store on the same computer, as the guide's run opens it."""
+    from claudlobby.plane.provider_signin import LinkStore
+    return LinkStore(OwnerAccess(link.access.root,clock=link.access._clock))
+
+
+def _link_row(access):
+    with access._connection() as conn:
+        names={row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        return conn.execute('SELECT snapshot FROM setup_link').fetchone()[0] if 'setup_link' in names else None
+
+
+def _attempts(access):
+    with access._connection() as conn:
+        names={row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        return [dict(row) for row in conn.execute('SELECT * FROM setup_provider')] if 'setup_provider' in names else []
+
+
+def _lease(access):
+    from claudlobby.plane.provider_signin import signin_running
+    return signin_running(access.root)
+
+
+def test_link_record_holds_scope_and_revision(link_signin):
+    from claudlobby.plane.owner_connected import OwnerConnected
+    from claudlobby.plane.owner_setup import managed_setup, _uuid
+    from claudlobby.plane.provider_signin import LINK_SECONDS, LINK_UNUSED_SECONDS, link_approval, link_snapshot
+    link=link_signin; approval=link.approval; access=link.access
+    package=managed_setup(access.root)
+    with access._connection() as conn:
+        binding=access.workspace()._active_binding(conn,access._grant(conn).principal)
+        names={row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    assert _uuid(approval.generation) and approval.provider_signin==link.scope
+    assert approval.source_revision==package.source_revision and approval.installation==str(package.installation.directory)
+    assert approval.binding_snapshot==OwnerConnected._snapshot(binding)
+    assert (approval.created_at,approval.unused_until,approval.expires_at)==(link.clock[0],link.clock[0]+900,link.clock[0]+1500)
+    assert (LINK_UNUSED_SECONDS,LINK_SECONDS)==(900,1500)
+    assert _link_row(access)==link_snapshot(approval) and link_approval(_link_row(access))==approval
+    assert json.loads(_link_row(access)).keys()=={'generation','binding_snapshot','installation','source_revision',
+        'provider_signin','created_at','unused_until','expires_at'}
+    # Its own table: no team table is made, and no attempt is written.
+    assert not names & {'setup_metadata','setup_grant','setup_previews'} and _attempts(access)==[]
+    assert link.engine.signin.link.authorize(link.reader)==approval
+
+
+def test_link_signin_refused_without_link_approval(setup_authority,monkeypatch,tmp_path):
+    from claudlobby.plane import owner_source
+    from claudlobby.plane.provider_signin import LinkStore
+    store,access,team,reader,clock,_=setup_authority
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    scope,*_=_link_provider(access,monkeypatch,tmp_path)
+    engine=SetupEngine(access)
+    def refused(generation,expected):
+        before=access.path.read_bytes()
+        for call in (lambda a:engine.signin_begin(reader,generation,a),lambda a:engine.signin_status(reader,generation,a),
+                     lambda a:engine.signin_code(reader,generation,a,'accepted#'+'b'*32),lambda a:engine.signin_cancel(reader,generation,a)):
+            with pytest.raises(AccessDenied) as raised: call(str(uuid4()))
+            assert raised.value.code==expected
+        assert access.path.read_bytes()==before and engine.signin._thread is None
+        assert not (access.root/'state/provider-signin.lock').exists() and not (access.root/'state/provider-signin').exists()
+    try:
+        refused(str(uuid4()),'setup_not_allowed')  # no link approval on this computer at all
+        first=LinkStore(access).write(scope)
+        refused(team.generation,'setup_denied')  # a team approval's generation (never allowed here)
+        second=LinkStore(access).write(scope)
+        assert second.generation!=first.generation
+        refused(first.generation,'setup_denied')  # a link approval that a later yes replaced
+        aged={**json.loads(_link_row(access))}  # the same approval, made LINK_SECONDS ago: its end is now
+        for key in ('created_at','unused_until','expires_at'): aged[key]-=1500
+        with access._connection(write=True) as conn: conn.execute('UPDATE setup_link SET snapshot=?',(json.dumps(aged),))
+        refused(second.generation,'setup_denied')  # past its end
+        assert _attempts(access)==[]
+    finally:engine.signin.shutdown()
+
+
+def test_link_approval_cannot_preview_or_launch(link_signin):
+    link=link_signin; engine=link.engine; generation=link.approval.generation
+    before=link.access.path.read_bytes()
+    request={'generation':generation,'request_id':str(uuid4()),'config_fingerprint':'c'*64,'source_revision':link.approval.source_revision}
+    for call in (lambda:engine.preview(link.reader,generation,'Improve checkout tests'),lambda:engine.launch(link.reader,**request),
+                 lambda:engine.receipt(link.reader,**request),lambda:engine.context(link.reader)):
+        with pytest.raises((AccessDenied,AccessUnavailable)): call()
+    assert link.access.path.read_bytes()==before and not link.args.dispatches and not (link.access.root/'local').exists()
+
+
+def test_link_begin_refused_after_update(link_signin,monkeypatch):
+    from claudlobby import resources
+    link=link_signin
+    package=resources.get_resources()
+    monkeypatch.setattr(resources,'get_resources',lambda *a,**k:SimpleNamespace(installation=package.installation,source_revision='c'*40))
+    with pytest.raises(AccessDenied) as raised: link.engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert raised.value.code=='setup_source_changed'
+    assert _attempts(link.access)==[] and link.engine.signin._thread is None and not _lease(link.access)
+
+
+def test_link_begin_refused_when_binary_changes(link_signin):
+    link=link_signin
+    link.program.write_text('#!/bin/sh\nexit 0\n')
+    with pytest.raises(ValueError): link.engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert _attempts(link.access)==[] and link.engine.signin._thread is None and not _lease(link.access)
+
+
+def test_link_write_refused_while_signin_live(link_signin):
+    from claudlobby.plane.provider_signin import LinkStore
+    link=link_signin; attempt=str(uuid4())
+    link.engine.signin_begin(link.reader,link.approval.generation,attempt)
+    _signin_until(link.engine,link.approval,link.reader,attempt,'waiting')
+    before=_link_row(link.access)
+    with pytest.raises(AccessDenied) as raised: LinkStore(link.access).write(link.scope)
+    assert raised.value.code=='signin_live' and _link_row(link.access)==before
+    assert _signin_until(link.engine,link.approval,link.reader,attempt,'waiting')['url']
+
+
+def test_second_link_request_during_live_signin_resumes_and_replaces_nothing_across_processes(link_signin,monkeypatch):
+    import subprocess,sys
+    from claudlobby.plane import owner_setup
+    monkeypatch.setattr(owner_setup,'_linux',lambda:True)
+    link=link_signin; engine=link.engine; attempt=str(uuid4())
+    engine.signin_begin(link.reader,link.approval.generation,attempt)  # the lasting service, process 1
+    _signin_until(engine,link.approval,link.reader,attempt,'waiting')
+    before=_link_row(link.access)
+    # A real second process sees the sign-in as live, with nothing of process 1's memory.
+    probe=subprocess.run([sys.executable,'-c','import sys;from pathlib import Path;'
+        'from claudlobby.plane.provider_signin import signin_running;print(signin_running(Path(sys.argv[1])))',
+        str(link.access.root)],capture_output=True,text=True,timeout=60)
+    assert probe.returncode==0 and probe.stdout.strip()=='True',probe.stderr
+    with pytest.raises(AccessDenied) as raised: _second_process(link).write(link.scope)  # the guide's run, its own store
+    assert raised.value.code=='signin_live'
+    assert _link_row(link.access)==before, 'the approval in use is byte-identical'
+    engine.signin.link.authorize(link.reader,expected=link.approval)  # process 1's next expected= check
+    resumed=engine.signin_status(link.reader,link.approval.generation,attempt)
+    assert resumed['state']=='waiting' and resumed['url'], 'the view resumes the same live attempt'
+    assert engine.state(link.reader)['provider']=={'state':'not_linked','link':'available'}
+    assert [row['attempt_id'] for row in _attempts(link.access)]==[attempt]
+
+
+def test_stale_lease_after_crash_does_not_block(link_signin):
+    import signal,subprocess,sys
+    from claudlobby.plane.provider_signin import _lease_path
+    link=link_signin; path=_lease_path(link.access.root)
+    holder=subprocess.Popen([sys.executable,'-c','import fcntl,os,sys,time\n'
+        'fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);fcntl.flock(fd,fcntl.LOCK_EX)\n'
+        'print("held",flush=True);time.sleep(120)',str(path)],stdout=subprocess.PIPE,text=True)
+    try:
+        assert holder.stdout.readline().strip()=='held'
+        assert _lease(link.access) is True
+        with pytest.raises(AccessDenied,match='signin_live'): _second_process(link).write(link.scope)
+    finally:
+        holder.send_signal(signal.SIGKILL); holder.wait(timeout=30); holder.stdout.close()
+    assert path.is_file() and _lease(link.access) is False, 'the file stays and reads as free'
+    approval=_second_process(link).write(link.scope)  # a new link write succeeds
+    attempt=str(uuid4())
+    assert link.engine.signin_begin(link.reader,approval.generation,attempt)['attempt_id']==attempt  # and a new begin
+    _signin_until(link.engine,approval,link.reader,attempt,'waiting')
+    assert _lease(link.access) is True and path.read_text()==attempt+'\n'
+
+
+def test_quiet_child_keeps_lease_until_process_exit(link_signin,monkeypatch):
+    import os,signal,subprocess
+    from claudlobby.plane import provider_signin
+    link=link_signin; engine=link.engine
+    monkeypatch.setattr(provider_signin,'SECONDS',0.5)
+    children=[];original_popen=subprocess.Popen;original_getpgid=os.getpgid
+    def observed_popen(argv,*args,**kwargs):
+        child=original_popen(argv,*args,**kwargs)
+        if argv[1:]==['setup-token']:children.append(child)
+        return child
+    def getpgid(pid):  # only the sign-in child's reap goes unproven
+        if any(child.pid==pid for child in children): raise OSError('reap not proven')
+        return original_getpgid(pid)
+    monkeypatch.setattr(provider_signin.subprocess,'Popen',observed_popen)
+    monkeypatch.setattr(provider_signin.os,'getpgid',getpgid)
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(link.reader,link.approval.generation,attempt)
+        ended=_signin_ended(engine,link.approval,link.reader,attempt)
+        assert (ended['state'],ended['reason'])==('unknown','child_quiet_unproven')
+        assert _lease(link.access) is True and len(engine.signin._kept)==1, 'its worker keeps the lease'
+        before=_link_row(link.access)
+        with pytest.raises(AccessDenied) as raised: _second_process(link).write(link.scope)
+        assert raised.value.code=='signin_unconfirmed' and _link_row(link.access)==before  # not a live sign-in to resume
+        for fd in engine.signin._kept: os.close(fd)  # process 1 exits: the system closes its files
+        engine.signin._kept.clear()
+        assert _lease(link.access) is False
+        assert _second_process(link).write(link.scope).generation!=link.approval.generation
+    finally:
+        for child in children:
+            try: os.killpg(child.pid,signal.SIGKILL)
+            except (ProcessLookupError,PermissionError): pass
+            child.wait(timeout=5)
+
+
+def test_begin_takes_lease_inside_transaction(link_signin,monkeypatch):
+    from claudlobby.plane.provider_signin import LinkStore
+    link=link_signin; engine=link.engine
+    # A link write that lands between begin's admission and its transaction: begin finds its
+    # approval replaced, refuses and inserts nothing, and leaves the lease free.
+    admit=engine.signin._admit; landed=[]
+    def admit_then_write(reader,grant,**kwargs):
+        admit(reader,grant,**kwargs)
+        if not landed: landed.append(LinkStore(link.access).write(link.scope))
+    monkeypatch.setattr(engine.signin,'_admit',admit_then_write)
+    with pytest.raises(AccessDenied) as raised: engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert raised.value.code=='setup_denied' and landed and _attempts(link.access)==[]
+    assert engine.signin._thread is None and _lease(link.access) is False
+    monkeypatch.setattr(engine.signin,'_admit',admit)
+    # A link write after begin's commit sees the lease held: never a starting row with a free lease.
+    approval=landed[0]; attempt=str(uuid4())
+    seen=[]
+    insert=engine.signin._begin
+    def observed(reader,grant,attempt):
+        result=insert(reader,grant,attempt)
+        seen.append((_lease(link.access),[row['state'] for row in _attempts(link.access)]))
+        return result
+    monkeypatch.setattr(engine.signin,'_begin',observed)
+    engine.signin_begin(link.reader,approval.generation,attempt)
+    assert seen==[(True,['starting'])], 'committed with the lease already held'
+    with pytest.raises(AccessDenied,match='signin_live'): LinkStore(link.access).write(link.scope)
+    assert _link_row(link.access)==provider_snapshot(approval)
+
+
+def provider_snapshot(approval):
+    from claudlobby.plane.provider_signin import link_snapshot
+    return link_snapshot(approval)
+
+
+@pytest.mark.parametrize('kind',['symlink','owner','second_link','mode'])
+def test_lease_file_not_private_refuses(link_signin,monkeypatch,kind):
+    import os
+    from claudlobby.plane import provider_signin
+    link=link_signin; path=provider_signin._lease_path(link.access.root)
+    other=path.with_name('elsewhere.lock'); other.touch(mode=0o600)
+    if kind=='symlink': path.symlink_to(other)
+    elif kind=='second_link': os.link(other,path)
+    else:
+        path.touch(mode=0o600)
+        if kind=='mode': path.chmod(0o644)
+    with monkeypatch.context() as patch:
+        if kind=='owner':
+            uid=os.geteuid(); patch.setattr(provider_signin.os,'geteuid',lambda:uid+1)
+        for call in (lambda:provider_signin.signin_running(link.access.root),lambda:provider_signin.take_lease(link.access.root,str(uuid4())),
+                     lambda:_second_process(link).write(link.scope),
+                     lambda:link.engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))):
+            with pytest.raises(AccessUnavailable): call()
+    assert _attempts(link.access)==[] and link.engine.signin._thread is None
+
+
+def test_link_authorize_reads_no_start_state(link_signin,monkeypatch):
+    from claudlobby.plane import owner_source
+    link=link_signin; engine=link.engine; attempt=str(uuid4())
+    def start_state(root,installation): raise AssertionError('start_state read on the sign-in path')
+    monkeypatch.setattr(owner_source,'start_state',start_state)
+    engine.signin.link.authorize(link.reader,expected=link.approval)
+    engine.signin_begin(link.reader,link.approval.generation,attempt)
+    _signin_until(engine,link.approval,link.reader,attempt,'waiting')  # the worker's loop admits about every 0.1 s
+    engine.signin_code(link.reader,link.approval.generation,attempt,'accepted#'+'b'*32)
+    assert _signin_until(engine,link.approval,link.reader,attempt,'connected')['state']=='connected'
+    assert link.env.read_text()=='export ROUTE=private\n'+f"export CLAUDE_CODE_OAUTH_TOKEN='{link.token}'\n"
+    with pytest.raises(AssertionError,match='start_state'): _second_process(link).write(link.scope)  # the write reads it
+
+
+def _bad_rows():
+    good=lambda link:json.loads(_link_row(link.access))
+    def change(**fields): return lambda link:{**good(link),**fields}
+    def drop(key): return lambda link:{k:v for k,v in good(link).items() if k!=key}
+    def offsets(unused,end): return lambda link:{**good(link),'unused_until':good(link)['created_at']+unused,'expires_at':good(link)['created_at']+end}
+    return {'missing key':drop('expires_at'),'extra key':change(account='x'),'generation not a UUID':change(generation='not-a-uuid'),
+            'unused 899':offsets(899,1500),'end 1501':offsets(900,1501),'time NaN':change(created_at=float('nan')),
+            'time a boolean':change(created_at=True),'bad scope':lambda link:{**good(link),'provider_signin':{**good(link)['provider_signin'],'sha256':'0'*64}},
+            'revision not hex':change(source_revision='g'*40),'not an object':lambda link:[1]}
+
+
+@pytest.mark.parametrize('case',sorted(_bad_rows()))
+def test_link_record_rejects_bad_rows(link_signin,case):
+    from claudlobby.plane.provider_signin import LinkStore
+    link=link_signin
+    value=_bad_rows()[case](link)
+    with link.access._connection(write=True) as conn:
+        conn.execute('UPDATE setup_link SET snapshot=? WHERE singleton=1',(json.dumps(value),))
+    with link.access._connection() as conn:
+        with pytest.raises(AccessUnavailable): LinkStore._read(conn)
+    with pytest.raises(AccessUnavailable): link.engine.signin.link.authorize(link.reader)
+    with pytest.raises(AccessUnavailable): link.engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert _attempts(link.access)==[]
+
+
+def test_link_record_rejects_a_second_row(link_signin):
+    from claudlobby.plane.provider_signin import LinkStore
+    link=link_signin; row=_link_row(link.access)
+    with link.access._connection(write=True) as conn:  # a table without the singleton check, as no core writes it
+        conn.execute('DROP TABLE setup_link')
+        conn.execute('CREATE TABLE setup_link(singleton INTEGER,snapshot TEXT)')
+        conn.executemany('INSERT INTO setup_link VALUES(?,?)',[(1,row),(2,row)])
+    with link.access._connection() as conn:
+        with pytest.raises(AccessUnavailable): LinkStore._read(conn)
+
+
+L_STEPS=['L1','L2','L3','L4','L5','L6','L7']
+
+
+def _refuse(code):
+    def refuse(*_): raise AccessDenied(code)
+    return refuse
+
+
+@pytest.mark.parametrize('row',['L1','L2','L3','L4','L5','L6','L6b','L7'])
+def test_link_refusal_order_writer(link_signin,monkeypatch,row):
+    import os
+    from claudlobby.plane import owner_setup, owner_source, provider_signin
+    from claudlobby.plane.owner_workspace import OwnerWorkspace
+    from claudlobby.plane.provider_signin import LinkStore, ProviderSignin, take_lease
+    link=link_signin; access=OwnerAccess(link.access.root,clock=link.access._clock)
+    before=_link_row(link.access); held=None
+    log=[]
+    def wrap(name,owner,attribute,replace=None,static=False):
+        original=getattr(owner,attribute)
+        def step(*args,**kwargs):
+            if name not in log: log.append(name)  # each check by its first run (a check may read through another)
+            return (replace or original)(*args,**kwargs)
+        monkeypatch.setattr(owner,attribute,staticmethod(step) if static else step)
+    expected={'L1':'setup_denied','L2':'workspace_binding_required','L3':'setup_source_changed','L4':'use_full_guide',
+              'L5':'not_started','L6':'signin_live','L6b':'signin_unconfirmed'}.get(row)
+    if row=='L4':
+        OwnerSetup(link.access).allow(link.team)
+    if row=='L6': held=take_lease(link.access.root,str(uuid4()))
+    if row=='L6b':
+        held=take_lease(link.access.root,str(uuid4()))
+        with link.access._connection(write=True) as conn:
+            ProviderSignin.initialize(conn)
+            conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',(str(uuid4()),link.approval.generation,'unknown','child_quiet_unproven',0,0))
+    if row=='L7':
+        with link.access._connection(write=True) as conn:
+            ProviderSignin.initialize(conn)
+            conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',(str(uuid4()),link.approval.generation,'waiting',None,0,0))
+    rows_before=_attempts(link.access)
+    wrap('L1',access,'_grant',(lambda conn:None) if row=='L1' else None)
+    wrap('L2',OwnerWorkspace,'_active_binding',_refuse('workspace_binding_required') if row=='L2' else None)
+    wrap('L3',owner_setup,'managed_setup',_refuse('setup_source_changed') if row=='L3' else None)
+    wrap('L4',provider_signin,'team_retained')
+    wrap('L5',owner_source,'start_state',(lambda root,installation:'fresh') if row=='L5' else None)
+    wrap('L6',provider_signin,'signin_running')
+    wrap('L7',ProviderSignin,'initialize',static=True)
+    try:
+        if expected is None:
+            assert LinkStore(access).write(link.scope).generation!=link.approval.generation
+            assert log==L_STEPS and _attempts(link.access)==rows_before, 'the ended row is left as it is'
+            return
+        with pytest.raises(AccessDenied) as raised: LinkStore(access).write(link.scope)
+        assert raised.value.code==expected
+        upto=L_STEPS.index(row[:2])+1
+        assert log==L_STEPS[:upto], 'every earlier check ran and passed, none after it'
+        assert _link_row(link.access)==before and _attempts(link.access)==rows_before, 'a refusal writes nothing'
+    finally:
+        if held is not None: os.close(held)
+
+
+A_STEPS=['A1','A3','A5']
+
+
+@pytest.mark.parametrize('row',['A1','A2','A3','A4 binding','A4 time','A4 expected','A5'])
+def test_link_refusal_order_admission(link_signin,monkeypatch,row):
+    from dataclasses import replace
+    from claudlobby.plane import provider_signin
+    link=link_signin; store=link.engine.signin.link; log=[]
+    def wrap(name,owner,attribute,replacement=None,static=False):
+        original=getattr(owner,attribute)
+        def step(*args,**kwargs):
+            if name not in log: log.append(name)  # each check by its first run (a check may read through another)
+            return (replacement or original)(*args,**kwargs)
+        monkeypatch.setattr(owner,attribute,staticmethod(step) if static else step)
+    if row=='A2':
+        with link.access._connection(write=True) as conn: conn.execute('DELETE FROM setup_link')
+    if row=='A3':
+        with link.access._connection(write=True) as conn: conn.execute("UPDATE setup_link SET snapshot='{}'")
+    if row=='A4 time':  # the approval made LINK_SECONDS ago; the session stays live
+        aged=json.loads(_link_row(link.access))
+        for key in ('created_at','unused_until','expires_at'): aged[key]-=1500
+        with link.access._connection(write=True) as conn: conn.execute('UPDATE setup_link SET snapshot=?',(json.dumps(aged),))
+    if row=='A4 binding':
+        changed=json.loads(_link_row(link.access)); changed['binding_snapshot']='{}'
+        with link.access._connection(write=True) as conn: conn.execute('UPDATE setup_link SET snapshot=?',(json.dumps(changed),))
+    if row=='A5': OwnerSetup(link.access).allow(link.team)
+    wrap('A1',store.connected,'_admit',_refuse('connected_session_denied') if row=='A1' else None)
+    wrap('A3',provider_signin.LinkStore,'_read',static=True)
+    wrap('A5',provider_signin,'team_retained')
+    rows_before=_attempts(link.access)
+    kwargs={'expected':replace(link.approval,expires_at=link.approval.expires_at+1)} if row=='A4 expected' else {}
+    with pytest.raises((AccessDenied,AccessUnavailable)) as raised: store.authorize(link.reader,**kwargs)
+    code=getattr(raised.value,'code',None)
+    assert code==({'A1':'connected_session_denied','A2':'setup_not_allowed','A3':None,'A5':'setup_denied'}.get(row,'setup_denied'))
+    assert log==A_STEPS[:{'A1':1,'A2':2,'A3':2,'A5':3}.get(row,2)]
+    assert _attempts(link.access)==rows_before
+
+
+def test_older_core_reads_database_with_link_table(link_signin):
+    link=link_signin
+    assert _link_row(link.access) is not None
+    store=OwnerSetup(link.access)  # today's reads, which look only at the three team tables
+    assert store.retained_state().state=='absent' and store.retained_state().grant is None and store.local() is None
+
+
+def test_team_signin_unchanged(synthetic_signin):
+    # The lease is the link path's only: a team sign-in takes none and keeps none.
+    from claudlobby.plane.provider_signin import signin_running
+    engine,grant,reader,*_=synthetic_signin
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        assert signin_running(engine.root) is False and not (engine.root/'state/provider-signin.lock').exists()
+        assert engine.signin.store_for(grant) is engine.store
+        engine.signin_code(reader,grant.generation,attempt,'accepted#'+'b'*32)
+        assert _signin_until(engine,grant,reader,attempt,'connected')['state']=='connected'
+        assert engine.signin._kept==[] and not (engine.root/'state/provider-signin.lock').exists()
+    finally:engine.signin.shutdown()

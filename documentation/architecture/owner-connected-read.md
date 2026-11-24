@@ -371,7 +371,7 @@ SSH route and in the browser carrier's closed list). It is admitted by the
 connected session alone, checked before and after, and it writes nothing. It
 answers
 
-`{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
+`{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked","link":"available"|"not_here"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
 
 `computer` is `started` for a computer started with no team (`start_state`) or
 one whose committed configuration lists a team; `teams` counts those teams. It
@@ -386,7 +386,14 @@ as `not_linked`: no `.env`; a `.env` that is not a single-link regular file of
 this user with mode 0600 and at most 64 KiB, or that changes while read; a line
 before the sign-in line that the check cannot read; an empty value
 (`CLAUDE_CODE_OAUTH_TOKEN=`, `''` or `""`); and an API key or Claude's own
-`claude login` files, which are not this line. `team.state` is
+`claude login` files, which are not this line. `provider.link` says whether
+this computer takes a link approval (below): `available` on a Linux computer
+that `start_state` reads as `started` and where no team approval or Launch is
+retained, `not_here` on every other computer (one today's nine-card guide set
+up, one not started, a Mac, or one whose team tables cannot be read). It depends
+on no approval and no attempt, so it reads the same for a computer read after
+read; a view that finds no `link` key is talking to an older core. Every other
+byte of the answer is as it was before the key existed. `team.state` is
 `launch_unfinished` while a team preparation that a Launch dispatched has not
 finished cleanly (its update record is not `done`, or is `done` with health
 errors), and when the update record cannot be read; otherwise `none`. A Preview
@@ -441,6 +448,67 @@ helper row is not drawn: core holds no name for it. The browser carrier admits a
 document with the field and never sends it to the parent. A pane older than this
 refuses any document with the field, so the embedding page adds it only once it
 serves this pane.
+
+## A link approval for Claude sign-ins
+
+A started computer from the newer setup has no team approval and no team tables
+(`setup_metadata`, `setup_grant`, `setup_previews`). A **link approval** is one
+yes, on such a computer, to Claude sign-ins for a short time. Core records it;
+nothing in this core yet asks for it (the computer run's link intent comes
+later), and nothing a person sees changes.
+
+**The record.** One row in its own table, `setup_link(singleton, snapshot)`,
+never a `setup_grant` row: any team row makes the computer read as set up to the
+computer run, and a core without this record reads only the three team tables,
+so to it the computer still has no team setup. The snapshot holds exactly
+`generation` (a UUID string the writer makes), `binding_snapshot` (the active
+workspace binding, read inside the write), `installation` and `source_revision`
+(the active ones), `provider_signin` (the sign-in scope, as a team approval
+carries it), `created_at`, `unused_until` (`created_at` + 900) and `expires_at`
+(`created_at` + 1500). A row with any other key set, a non-UUID generation,
+other offsets, a time that is not a finite number or a scope of another shape
+does not read, and every door refuses it as unavailable.
+
+**The writer** runs in one write transaction and writes nothing when it refuses.
+In order: the owner's grant and the active binding (their own refusals); the
+installation and active revision (`setup_source_changed`); a retained team
+approval or Launch, by the computer run's own test (`use_full_guide`);
+`start_state` is `started` (`not_started`); the sign-in lease is free
+(`signin_live`, or `signin_unconfirmed` when the lease is held over an attempt
+that has ended). A `starting` or `waiting` attempt with the lease free has ended
+(its worker is gone) and is left as it is. A new yes replaces the row.
+
+**The doors.** The four sign-in calls (`setup-signin-begin`, `-status`,
+`-code`, `-cancel`) keep their names and keys. Their door checks the headers,
+the principal, the connected session alone, the binding's issuer and origin, and
+the payload, then reads which approval the payload's `generation` names: with
+none of the team tables, the link approval; with some but not all, unavailable;
+with all three, the team approval when it is active and names that generation,
+or when the computer holds no link approval (so a team computer's calls answer
+exactly as before), and otherwise the link approval. The engine call follows,
+then the principal again and the same approval's own admission with the
+approval it read. A link approval is admitted with the team approval's fences:
+the connected session, the row, the same binding, its time window, the exact
+approval, and no team approval or Launch retained; then the update fence
+(`managed_setup`), maintenance and the provider's pinned binary, as a team
+sign-in has. Admission reads only the database, never `start_state`: the
+worker re-admits about every 0.1 seconds. `setup-preview`, `-launch`,
+`-receipt` and `-context` never read a link approval, so they refuse its
+generation.
+
+**The sign-in lease.** `state/provider-signin.lock`, one private file per
+computer (a regular file of this user, one link, mode 0600), never removed.
+Only a link sign-in takes it: begin, on the path that inserts a new attempt,
+inside its write transaction just before the insert, with non-blocking tries
+only; a refused or rolled-back begin releases it at once. The worker closes it
+after its last write and outside its lock; a worker whose child's reap is
+unproven keeps it until the lasting service exits. Any process can probe it
+without blocking: held means a sign-in may be live; a file that is absent or
+unlocked is free (the system releases a dead holder's lock); anything else (a
+link, another owner, another name, another mode) refuses as unavailable, never
+as free. A team sign-in takes no lease and is unchanged; the two cannot be live
+together, because the writer and the link admission refuse a retained team
+approval and begin refuses a current attempt of another approval.
 
 ## First-use workspace approval in the connected document
 

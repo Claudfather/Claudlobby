@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
 from types import SimpleNamespace
 from uuid import uuid4
@@ -40,6 +41,11 @@ def shown_effects(effects):
                                for unit in units]}
 
 GRANT_SECONDS = 86400
+
+
+def _linux():
+    """The link marker's platform test: the computer run, and so the link, is Linux only for now."""
+    return sys.platform.startswith("linux")
 
 
 def preparing_seconds():
@@ -745,6 +751,9 @@ class SetupEngine:
         attempt already makes (the line's value is never read out); no approval and no attempt's record
         decides it, and an empty value or an unreadable file is not linked (``environment_linked``). ``teams`` is a
         count, not a running state: it is also true mid-Launch, after a failed Launch and after a stop.
+        ``provider.link`` is ``available`` on a started Linux computer (phase 1's ``start_state``) with no team
+        approval or Launch retained, where Claude is linked with a link approval; ``not_here`` on every other
+        computer (a nine-card one, an unstarted one, a Mac). It is the same for a computer whatever its approvals.
         ``team.state`` is ``launch_unfinished`` while a team preparation that a Launch dispatched has not
         finished cleanly (its update record is not ``done``, or is ``done`` with health errors), or when the
         update record cannot be read; otherwise ``none``. A Preview nothing launched is never dispatched, so it
@@ -754,12 +763,19 @@ class SetupEngine:
         from ..config_plan import PlanError
         from ..git_update import UpdateError, read_update, team_preparation
         from .owner_source import start_state
-        from .provider_signin import SigninRefused, environment_linked
+        from .provider_signin import SigninRefused, environment_linked, team_retained
         self.store.session(reader)
         installation=managed_setup(self.root).installation
         try: teams=len(read_current_config(self.root,installation=installation)["fleets"])
         except (PlanError,OSError,ValueError,KeyError,TypeError): teams=0
-        started=start_state(self.root,installation)=="started" or teams>0
+        here=start_state(self.root,installation)=="started"
+        started=here or teams>0
+        link="not_here"
+        if here and _linux():
+            try:
+                with self.store.access._connection() as conn:
+                    if not team_retained(self.store.access,conn): link="available"
+            except (AccessDenied,AccessUnavailable): pass  # a team setup that cannot be read is not this road
         try: linked=environment_linked(self.root)
         except (SigninRefused,OSError): linked=False  # no environment file, or one the sign-in check refuses
         try:
@@ -769,10 +785,45 @@ class SetupEngine:
         except FileNotFoundError: unfinished=False
         except (UpdateError,OSError,ValueError,KeyError,TypeError): unfinished=True  # the guide's own view stays
         return {"version":1,"computer":"started" if started else "not_started",
-            "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"launch_unfinished" if unfinished else "none"},
+            "provider":{"state":"linked" if linked else "not_linked","link":link},"team":{"state":"launch_unfinished" if unfinished else "none"},
             "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
 
+    def _team_signin(self,generation):
+        """Does a sign-in call naming ``generation`` go to the team approval? Otherwise to the link approval.
+
+        None of the three team tables: the link approval. Some but not all: AccessUnavailable, as every
+        team read. All three: the team approval when it is active and names this generation, and on any
+        computer that holds no link approval, so a team computer's calls keep exactly today's answers.
+        """
+        from .provider_signin import LinkStore, _TEAM_TABLES, _names
+        with self.store.access._connection() as conn:
+            present=_names(conn)&_TEAM_TABLES
+            if not present: return False
+            if present!=_TEAM_TABLES: raise AccessUnavailable()
+            if LinkStore._read(conn) is None: return True
+            self.store._schema(conn)
+            row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+            return row is not None and row["active"]==1 and self.store._grant(row).generation==generation
+
+    def signin_approval(self,reader,generation):
+        """The approval a sign-in call names, team or link, admitted; the HTTP door closes with it."""
+        if self._team_signin(generation):
+            grant=self.store.authorize(reader)
+        else:
+            grant=self.signin.link.authorize(reader)
+        if grant.generation!=generation: raise AccessDenied("setup_denied")
+        return grant
+
+    def _link_signin_grant(self,reader,generation,attempt_id):
+        """A sign-in call under the link approval: its own fences, none of Preview's or Launch's."""
+        approval=self.signin.link.authorize(reader,effects=True)
+        if approval.generation!=generation: raise AccessDenied("setup_denied")
+        if not _uuid(attempt_id): raise AccessDenied("signin_not_allowed")
+        managed_setup(self.root,approval)
+        return approval
+
     def _signin_grant(self,reader,generation,attempt_id):
+        if not self._team_signin(generation): return self._link_signin_grant(reader,generation,attempt_id)
         grant=self.store.authorize(reader,effects=True)
         if grant.provider_signin is None or grant.generation!=generation or not _uuid(attempt_id):
             raise AccessDenied("signin_not_allowed")
