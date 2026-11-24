@@ -3749,25 +3749,35 @@ def test_a_signal_during_the_start_or_its_record_keeps_launch_handoff(setup_auth
 
 
 @pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="the cut-off finish runs in a forked child")
-@pytest.mark.parametrize("cut", ["before_the_request", "after_the_send"])
+@pytest.mark.parametrize("cut", ["before_the_request", "while_the_transport_runs", "after_the_send"])
 def test_a_hanging_unattended_finish_is_cut_off_and_the_page_sends_once(setup_authority, monkeypatch, tmp_path, cut):
     """At its deadline the computer's own finish ends at once, wherever it hangs: it sends nothing further,
     the kernel frees its lock and the status reads stale (``running: false``), and the page's finish carries
     it on. Cut off before the goal's request was committed, the page sends the goal; cut off after the send
-    and before the record, the page finds the request by its derived id and sends nothing."""
-    import os, signal, time
+    and before the record, the page finds the request by its derived id and sends nothing. Cut off while the
+    native transport child runs (its own session, so the exit leaves it), that child may still finish the
+    paste; the request was committed with its transport unrecorded, so the page finds it by the same id,
+    records ``unknown`` (``send_uncertain``) and sends nothing."""
+    import os, signal, subprocess, sys, time
     from claudlobby.commands import host_owner_setup as guide
     from claudlobby.commands.host_owner_setup import _keep, card_status, goal_request_id
     engine, grant, request, record = marked_setup(setup_authority, monkeypatch)
     access = setup_authority[1]
     _keep(access, grant, {"starter": "computer"}, key="finish")
-    sent = tmp_path / "sent"
+    sent, landed = tmp_path / "sent", tmp_path / "landed"
 
     class Hanging(FakeCard):
         def send(self, alias, request_id, text, check):
             if cut == "after_the_send":
                 super().send(alias, request_id, text, check)
                 sent.write_text(request_id)
+            elif cut == "while_the_transport_runs":
+                check(SimpleNamespace(caller=SimpleNamespace(uid=ACTOR_UID, alias=alias)),
+                      SimpleNamespace(peer=SimpleNamespace(uid=LEAD_UID)))
+                sent.write_text(request_id)  # Committed and reserved before any native effect.
+                subprocess.Popen([sys.executable, "-I", "-c", "import sys, time; time.sleep(1); "
+                                  "open(sys.argv[1], 'w').write('pasted')", str(landed)],
+                                 stdin=subprocess.DEVNULL, start_new_session=True)  # As the transport's _run.
             time.sleep(60)  # A send that never returns.
 
     monkeypatch.setattr(guide, "_CardEffects", lambda *_: Hanging(access))
@@ -3795,12 +3805,22 @@ def test_a_hanging_unattended_finish_is_cut_off_and_the_page_sends_once(setup_au
     assert read()["messages"]["state"] == "allowed" and read()["messages"]["goal"] == {"state": "pending"}
     assert read()["finish"] == {"starter": "computer", "running": False}, "stale: no process holds the lock"
     pressed = FakeCard(access)
-    if cut == "after_the_send":
+    if cut != "before_the_request":
         assert sent.read_text() == goal_request_id(record["request_id"])
         # What the cut-off send left: the committed request under the derived id.
         pressed.receipts[sent.read_text()] = _receipt(ACTOR_UID, LEAD_UID, preview_payload(access, grant)["goal"])
+    if cut == "while_the_transport_runs":
+        # The transport child outlives the finish and may complete the paste after the exit.
+        limit = time.monotonic() + 15
+        while not landed.exists() and time.monotonic() < limit:
+            time.sleep(0.05)
+        assert landed.read_text() == "pasted"
+        # Its transport outcome was never recorded: reserved, the effect may have happened.
+        pressed.receipts[sent.read_text()].transmissions = (SimpleNamespace(transport=None),)
     answer = finish(setup_authority, request, pressed, monkeypatch)["messages"]
-    assert answer["state"] == "allowed" and answer["by"] == "computer" and answer["goal"] == {"state": "sent"}
+    assert answer["state"] == "allowed" and answer["by"] == "computer"
+    assert answer["goal"] == ({"state": "unknown", "reason": "send_uncertain"} if cut == "while_the_transport_runs"
+                              else {"state": "sent"})
     assert len(pressed.sent) == (1 if cut == "before_the_request" else 0), "the goal is sent once in all"
     assert pressed.registered == [], "the checked transaction stood; nothing is registered again"
     assert read()["finish"] == {"starter": "computer"}
