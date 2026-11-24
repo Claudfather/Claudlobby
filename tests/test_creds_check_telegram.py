@@ -128,6 +128,9 @@ def _fleet(
     # Tuples are splatted into bot(): (name, handle, token_var, token,
     # [expect_no_token], [declare_username]).
     roster: list[tuple] | None = None,
+    # The fleet manager every bot.conf names in MANAGER_TMUX, as the composer
+    # writes it; None leaves the line out, so no bot reads as the manager.
+    manager: str | None = None,
 ) -> dict:
     root = tmp_path / "root"
     native = _native_fixture(tmp_path, "creds-check.sh")
@@ -159,6 +162,8 @@ def _fleet(
         d = root / "local" / "f" / "runtime" / "bots" / name
         (d / "data").mkdir(parents=True)
         conf = [f'export BOT_ID="{name}"', f'export BOT_SERVICE="com.t.f.{name}"']
+        if manager:
+            conf.append(f'export MANAGER_TMUX="{manager}"')
         if handle:
             conf.append(f'export TELEGRAM_BOT_HANDLE="{handle}"')
             # Mirrors the composer: a DECLARED handle emits the @username too, a
@@ -456,6 +461,19 @@ def test_delivery_token_skips_dead_bot_picks_live(tmp_path):
     # Plain-text contract: tg-post must never force a parse_mode.
     assert "parse_mode" not in sends
     assert "parse_mode" not in (f["bindir"] / "argv.log").read_text()
+
+
+def test_the_fleet_manager_sends_the_alerts_though_a_live_worker_sorts_first(tmp_path):
+    """#3127: the pair's sender and the bot whose token delivers are the fleet
+    manager's, though a worker with a live token in the same chat sorts first:
+    a walk by name alone would pick the worker."""
+    f = _fleet(tmp_path, manager="zbot", roster=[
+        ("abot", "a_bot", "T_ABOT_TOKEN", VALID_TOKEN),
+        ("zbot", "z_bot", "T_ZBOT_TOKEN", VALID_TOKEN),
+    ])
+    state = _run(f)
+    pair = state["telegram_alert_pair_f"]
+    assert "manager:zbot, delivered by bot:zbot)" in pair["detail"], pair
 
 
 def test_no_live_channel_exports_no_delivery_token(tmp_path):

@@ -356,14 +356,13 @@ def test_a_declared_pair_wins_over_the_managers_own(private_alert, monkeypatch, 
 
 
 @pytest.mark.parametrize(("chat", "manager_yaml", "pulse"), [
-    ('"-1004444444444"', "channels: []", ""),
     ("", _TELEGRAM, ""),
     ('"-1004444444444"', _TELEGRAM, 'fleet_pulse:\n  escalation_chat_id: "-1002222222222"'),
-], ids=["manager-without-telegram", "manager-without-a-chat", "chat-without-its-sender"])
+], ids=["manager-without-a-chat", "chat-without-its-sender"])
 def test_with_no_pair_and_no_managers_own_chat_the_second_channel_stays_unconfigured(
         private_alert, monkeypatch, tmp_path, chat, manager_yaml, pulse):  # noqa: F811
-    """As before #2654: no other bot's sender is scanned for, and a chat declared
-    without its sender is refused, as the pulse refuses it, not replaced."""
+    """With no chat for the manager there is no chat to send to, and a chat
+    declared without its sender is refused, as the pulse refuses it, not replaced."""
     context, package, manager, _ = private_alert
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     context = replace(context, fleet=_no_pair_fleet(tmp_path, chat=chat, manager=manager_yaml,
@@ -372,6 +371,49 @@ def test_with_no_pair_and_no_managers_own_chat_the_second_channel_stays_unconfig
     result = _notify_with(context, package, manager, monkeypatch)
     assert (result.manager.status, result.telegram.status) == ("submitted", "unconfigured")
     assert _targets(context) == []
+
+
+@pytest.mark.parametrize(("manager_yaml", "token_files", "why"), [
+    ("channels: []", ("aide",), "manager is not a Telegram channel bot"),
+    (_TELEGRAM, ("aide",), "the channel state dir of manager holds no .env"),
+], ids=["manager-without-telegram", "manager-without-a-token-file"])
+def test_a_manager_that_cannot_send_leaves_the_alert_to_the_first_channel_bot_in_its_chat(
+        private_alert, monkeypatch, tmp_path, capsys, manager_yaml, token_files, why):  # noqa: F811
+    """#3127: the rule the shell resolver applies. The manager sends when it is a
+    channel bot in its chat whose channel dir holds the token file tg-post reads;
+    else the first other channel bot in that chat does, and a line says why."""
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for bot in token_files:
+        channel = tmp_path / "home" / f".claude/channels/telegram-{bot}"
+        channel.mkdir(parents=True)
+        (channel / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n")
+    context = replace(context, fleet=_no_pair_fleet(tmp_path, manager=manager_yaml))
+    _record_senders(package)
+    result = _notify_with(context, package, manager, monkeypatch)
+    assert (result.manager.status, result.telegram.status) == ("submitted", "carrier_accepted")
+    sender = tmp_path / "home" / ".claude/channels/telegram-aide"
+    assert _targets(context) == [f"-1004444444444|{sender}|"]
+    err = capsys.readouterr().err
+    assert f"alert-sender: aide sends this fleet alert, not the fleet manager: {why}" in err, err
+
+
+def test_the_manager_sends_when_its_channel_holds_the_token_file(
+        private_alert, monkeypatch, tmp_path, capsys):  # noqa: F811
+    """#3127: `aide` sorts first and holds a token file too; the manager still sends."""
+    context, package, manager, _ = private_alert
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for bot in ("aide", "manager"):
+        channel = tmp_path / "home" / f".claude/channels/telegram-{bot}"
+        channel.mkdir(parents=True)
+        (channel / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n")
+    context = replace(context, fleet=_no_pair_fleet(tmp_path))
+    _record_senders(package)
+    result = _notify_with(context, package, manager, monkeypatch)
+    assert result.telegram.status == "carrier_accepted"
+    sender = tmp_path / "home" / ".claude/channels/telegram-manager"
+    assert _targets(context) == [f"-1004444444444|{sender}|"]
+    assert "alert-sender" not in capsys.readouterr().err
 
 
 def test_a_tier_pair_still_wins_and_a_lone_tier_token_never_rides_the_managers_pair(
