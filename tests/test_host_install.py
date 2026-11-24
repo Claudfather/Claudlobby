@@ -1218,6 +1218,8 @@ def test_the_update_actions_build_their_own_environment(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("action, request_value", [
     ("update-status", {}), ("update-status", {"compare_revision": "a" * 40}),
+    ("update-status", {"ingress_node_key": "nodekey:" + "a" * 64}),
+    ("update-status", {"compare_revision": "a" * 40, "ingress_node_key": "nodekey:" + "a" * 64}),
     ("update", {"expected_installed_revision": "a" * 40, "target_revision": "b" * 40}),
     ("update-continue", {"request_id": REQUEST_ID}),
 ])
