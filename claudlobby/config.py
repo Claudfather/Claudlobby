@@ -1091,19 +1091,23 @@ def _own_chat(fleet: FleetConfig, bot: BotConfig) -> str:
     return str(bot.telegram.chat_id or fleet.telegram_group_chat_id or "")
 
 
+#: The file in a channel state dir that tg-post reads the bot's token from
+#: (lib-common's ``channel_state_token``).
+CHANNEL_TOKEN_FILE = ".env"
+
+
 def fleet_alert_sender(fleet: FleetConfig, chat: str, *,
-                       holds_token: Callable[[str], bool] | None = None) -> AlertSender | None:
+                       require_token_file: bool = False) -> AlertSender | None:
     """The bot that sends this fleet's alerts to ``chat``, or None when none can (#3127).
 
     The rule lib-common's ``_bot_with_own_chat`` applies when it sends, read from
     the configuration: a bot can be paired with the chat when it is a channel bot
     whose own chat (``_own_chat``) is ``chat``, since a bot's own chat is one it is
     in (#1771). Of those, the fleet manager first and then the others by bot id,
-    the sender is the first whose channel state dir holds the ``.env`` tg-post
-    reads its token from (``holds_token``, given that dir), else the first. With
-    no ``holds_token``, as at generate time, where no channel dir is there to
-    look at, every dir counts as holding one, so the manager sends whenever it can
-    be paired.
+    the sender is the first whose channel state dir holds ``CHANNEL_TOKEN_FILE``
+    (looked for only with ``require_token_file``, never read), else the first.
+    Without it, as at generate time, where no channel dir is there to look at,
+    the manager sends whenever it can be paired.
     """
     if not chat:
         return None
@@ -1125,15 +1129,15 @@ def fleet_alert_sender(fleet: FleetConfig, chat: str, *,
     if not fit:
         return None
     bot_id, state_dir = next(
-        (pair for pair in fit if holds_token is None or holds_token(pair[1])), fit[0])
-    if bot_id == manager:
-        return AlertSender(bot_id, state_dir)
-    return AlertSender(bot_id, state_dir, manager_why or (
-        f"the channel state dir of {manager} holds no .env, where tg-post reads the token"))
+        (pair for pair in fit if not require_token_file
+         or os.path.isfile(os.path.join(pair[1], CHANNEL_TOKEN_FILE))), fit[0])
+    why = "" if bot_id == manager else manager_why or (
+        f"the channel state dir of {manager} holds no {CHANNEL_TOKEN_FILE}, "
+        "where tg-post reads the token")
+    return AlertSender(bot_id, state_dir, why)
 
 
-def manager_alert_target(fleet: FleetConfig, *,
-                         holds_token: Callable[[str], bool] | None = None,
+def manager_alert_target(fleet: FleetConfig, *, require_token_file: bool = False,
                          ) -> tuple[str, AlertSender] | None:
     """Where a fleet alert goes with no ``fleet_pulse`` pair, and who sends it, or None.
 
@@ -1146,7 +1150,7 @@ def manager_alert_target(fleet: FleetConfig, *,
     pair. None when the manager has no chat, or no channel bot is in it.
     """
     chat = _own_chat(fleet, fleet.bots[fleet.manager])
-    sender = fleet_alert_sender(fleet, chat, holds_token=holds_token)
+    sender = fleet_alert_sender(fleet, chat, require_token_file=require_token_file)
     return None if sender is None else (chat, sender)
 
 

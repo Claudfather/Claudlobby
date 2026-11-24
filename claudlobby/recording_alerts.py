@@ -165,13 +165,6 @@ def _validate(context: Context, package: PackageResources, manager: TransportDes
         raise ValueError("selected package differs from active context")
 
 
-def _holds_token_file(state_dir: str) -> bool:
-    """Whether a channel state dir holds the .env tg-post reads its token from.
-
-    Asks only whether the file is there; its contents are never read here."""
-    return os.path.isfile(os.path.join(state_dir, ".env"))
-
-
 def _environment(context: Context, manager: TransportDestination,
                  trusted_tiers: Mapping[str, str]) -> tuple[dict[str, str], AlertSender | None]:
     """The native child's environment, and the sender ``manager_alert_target``
@@ -198,7 +191,7 @@ def _environment(context: Context, manager: TransportDestination,
         # no tier token rides it, so tg-post reads the sender's own token and
         # nothing splits the pair (#1771). A chat declared without its sender is
         # still refused, as the pulse refuses it.
-        target = manager_alert_target(context.fleet, holds_token=_holds_token_file)
+        target = manager_alert_target(context.fleet, require_token_file=True)
         if target is not None:
             env["TELEGRAM_GROUP_CHAT_ID"], sender = target
             env["TELEGRAM_STATE_DIR"] = sender.state_dir

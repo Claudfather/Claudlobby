@@ -2394,33 +2394,29 @@ def _fleet_timers_emitted(fleet: FleetConfig) -> bool:
 def _validate_alert_sender(fleet: FleetConfig, report: ValidationReport) -> None:
     """Warn where a fleet alert is sent as a bot that is not the fleet manager (#3127).
 
-    The sender is ``fleet_alert_sender``'s, the rule the runtime applies: the
-    manager when it is a channel bot in the alert chat, else the first other
-    channel bot in it by id. The timers alert the fleet chat; `fleet notify`, a
-    failed job and a failed message write alert the manager's own chat. A
-    declared ``fleet_pulse`` pair sends them all, so it is not warned. This reads
-    the configuration only: when it sends, the runtime also passes over a
-    manager whose channel state dir holds no token file, and logs that line."""
+    The sender is ``fleet_alert_sender``'s. The timers alert the fleet chat;
+    `fleet notify`, a failed job and a failed message write alert the manager's
+    own chat. A declared ``fleet_pulse`` pair sends them all, so it is not warned.
+    This reads the configuration only: at send time the runtime also passes over
+    a manager whose channel state dir holds no token file, and logs that line."""
     fp = fleet.fleet_pulse
     if fp is not None and fp.escalation_chat_id:
         return
-    paths: dict[str, list[str]] = {}
-    senders: dict[str, AlertSender] = {}
+    uses: dict[str, tuple[AlertSender, list[str]]] = {}
     chat = fleet.telegram_group_chat_id
     if chat and _fleet_timers_emitted(fleet):
         sender = fleet_alert_sender(fleet, str(chat))
         if sender is not None and sender.bot_id != fleet.manager:
-            senders[sender.bot_id] = sender
-            paths.setdefault(sender.bot_id, []).append("the fleet-timer alerts to the fleet chat")
+            uses.setdefault(sender.bot_id, (sender, []))[1].append(
+                "the fleet-timer alerts to the fleet chat")
     target = manager_alert_target(fleet)
     if target is not None and target[1].bot_id != fleet.manager:
-        senders[target[1].bot_id] = target[1]
-        paths.setdefault(target[1].bot_id, []).append(
+        uses.setdefault(target[1].bot_id, (target[1], []))[1].append(
             "`fleet notify`, a failed job and a failed message write")
-    for bot_id, sender in senders.items():
+    for bot_id, (sender, what) in uses.items():
         report.warn(
             "alert-sender",
-            f"{' and '.join(paths[bot_id])} are sent as '{bot_id}', not the fleet manager "
+            f"{' and '.join(what)} are sent as '{bot_id}', not the fleet manager "
             f"'{fleet.manager}': {sender.manager_why}. To send them as the manager, make "
             "it a Telegram channel bot whose own chat is that chat, or declare "
             "fleet_pulse.escalation_chat_id and escalation_state_dir (#3127)"

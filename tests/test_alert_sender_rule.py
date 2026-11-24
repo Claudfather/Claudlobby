@@ -37,9 +37,12 @@ def _bot(bot_id: str, kind: str) -> BotConfig:
                      telegram=TelegramConfig(chat_id=chat))
 
 
-# The manager is `zed`; its workers `able` and `baker` sort before it. Each case:
-# what kind of bot each one is, whose channel dir holds the token file, the sender.
+# The manager is `zed`; its workers sort before it. Each case: what kind of bot
+# each one is, whose channel dir holds the token file, the sender.
 CASES = {
+    # A name comes before the longer names it starts, in both halves.
+    "a-name-before-the-names-it-starts": ({"zed": "none", "abc-d": "in", "abc": "in"},
+                                          "abc-d abc", "abc"),
     "workers-sort-first": ({"zed": "in", "able": "in", "baker": "in"}, "zed able baker", "zed"),
     "manager-not-a-channel-bot": ({"zed": "none", "able": "in", "baker": "in"}, "able baker", "able"),
     "manager-in-another-chat": ({"zed": "other-chat", "able": "in", "baker": "in"}, "zed able baker",
@@ -73,8 +76,7 @@ def test_the_shell_and_the_python_rule_name_the_same_sender(tmp_path, monkeypatc
         channel.mkdir(parents=True)
         (channel / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n")
 
-    python = fleet_alert_sender(fleet, CHAT,
-                                holds_token=lambda state_dir: (Path(state_dir) / ".env").is_file())
+    python = fleet_alert_sender(fleet, CHAT, require_token_file=True)
     r = subprocess.run(
         ["bash", "-c", f'. "{LIB}"; resolve_alert_target "{bots}" fleet; '
                        'printf "%s\\n%s\\n" "$_alert_state_dir" "$_alert_target_src"'],

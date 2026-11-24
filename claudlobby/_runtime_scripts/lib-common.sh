@@ -6808,7 +6808,7 @@ EOF
 # never a send.
 # Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
-    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot
+    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot _scan_roster
     _alert_chat_id=""
     _alert_state_dir=""
     _alert_target_src=""
@@ -6838,7 +6838,7 @@ resolve_alert_target() {
         if _bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" "$roster"; then
             _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
             _alert_state_dir=$(bot_conf_get_path "$_alert_sender" TELEGRAM_STATE_DIR "")
-            _alert_target_src="env:TELEGRAM_GROUP_CHAT_ID+$(_alert_sender_src "$_alert_sender")"
+            _alert_sender_source "env:TELEGRAM_GROUP_CHAT_ID+" "$_alert_sender"
         else
             _alert_target_src="refused"
             _alert_refusal="TELEGRAM_GROUP_CHAT_ID from the environment has no sender: no bot in this fleet has it as its own chat, and no TELEGRAM_STATE_DIR was set beside it -- a scanned bot's token is not guessed for it"
@@ -6852,41 +6852,58 @@ resolve_alert_target() {
     fi
     if [ -n "$_bot" ]; then
         _alert_chat_id=$(bot_conf_get "$_bot" TELEGRAM_GROUP_CHAT_ID "")
-        if _bot_with_own_chat "$(dirname "$_bot")" "$_alert_chat_id"; then
+        # <roster> names the caller's own fleet; another fleet's bots dir is
+        # read against its own fleet.yaml.
+        _scan_roster=""
+        [ "$(dirname "$_bot")" != "${bots_dir%/}" ] || _scan_roster="$roster"
+        if _bot_with_own_chat "$(dirname "$_bot")" "$_alert_chat_id" "$_scan_roster"; then
             _bot="$_alert_sender"
         fi
         _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
-        _alert_target_src="scan:$(_alert_sender_src "$_bot")"
+        _alert_sender_source "scan:" "$_bot"
     fi
 }
 
-# alert_sender_order <bots_dir>
-# The bot dirs of <bots_dir> that hold a bot.conf, one per line, in the order a
-# fleet alert sender is chosen from (#3127): the fleet manager first
-# (bot_is_manager), then the others by name in byte order, whatever the caller
-# locale, so a timer (the C locale) and a bot session walk them alike.
-alert_sender_order() {
-    local bots_dir="${1:-}" d mgr="" all
+# _bot_dirs_by_name <bots_dir>
+# The bot dirs of <bots_dir> that hold a bot.conf, one per line with no trailing
+# slash, by name in byte order whatever the caller locale, so a timer (the C
+# locale) and a bot session walk them alike. Sorted without the slash, so a name
+# comes before the longer names it starts, as Python sorts them.
+_bot_dirs_by_name() {
+    local bots_dir="${1:-}" d
     [ -n "$bots_dir" ] && [ -d "$bots_dir" ] || return 0
-    all=$(printf '%s\n' "$bots_dir"/*/ | LC_ALL=C sort)
-    while IFS= read -r d; do
+    for d in "$bots_dir"/*/; do
         d="${d%/}"
-        if [ -f "$d/bot.conf" ] && bot_is_manager "$d"; then
-            mgr="$d"
-            printf '%s\n' "$d"
+        if [ -f "$d/bot.conf" ]; then printf '%s\n' "$d"; fi
+    done | LC_ALL=C sort
+}
+
+# fleet_manager_dir <bots_dir>
+# The bot dir of <bots_dir> that is the fleet manager (bot_is_manager), the first
+# by name should a hand edit make two; prints nothing when none is.
+fleet_manager_dir() {
+    local d
+    while IFS= read -r d; do
+        if [ -n "$d" ] && bot_is_manager "$d"; then
+            printf '%s' "$d"
             break
         fi
     done <<EOF
-$all
+$(_bot_dirs_by_name "${1:-}")
 EOF
-    while IFS= read -r d; do
-        d="${d%/}"
-        if [ -f "$d/bot.conf" ] && [ "$d" != "$mgr" ]; then
-            printf '%s\n' "$d"
-        fi
-    done <<EOF
-$all
-EOF
+}
+
+# alert_sender_order <bots_dir> [manager_dir]
+# The bot dirs of <bots_dir> that hold a bot.conf, one per line, in the order a
+# fleet alert sender is chosen from: the fleet manager first (<manager_dir> when
+# given, empty for none; else fleet_manager_dir), then the others by name.
+alert_sender_order() {
+    local bots_dir="${1:-}" mgr="${2-}" d
+    [ "$#" -ge 2 ] || mgr=$(fleet_manager_dir "$bots_dir")
+    if [ -n "$mgr" ]; then printf '%s\n' "$mgr"; fi
+    _bot_dirs_by_name "$bots_dir" | while IFS= read -r d; do
+        if [ "$d" != "$mgr" ]; then printf '%s\n' "$d"; fi
+    done
 }
 
 # _alert_sender_unfit <bot_dir> <chat_id> <roster>
@@ -6915,27 +6932,23 @@ _alert_sender_unfit() {
 # taken in alert_sender_order, the fleet manager first: the first whose channel
 # state dir holds the .env tg-post reads its token from, else the first, whose
 # send then fails naming the missing token, as it did before. The roster filter
-# is creds-check's: move-bot leaves a moved bot's old dir behind by default. The
-# validator warns at generate time when no declared bot qualifies, and when the
-# sender is not the manager (config.fleet_alert_sender: the same rule).
+# is creds-check's: move-bot leaves a moved bot's old dir behind by default.
+# config.fleet_alert_sender is the same rule at generate time.
 # Sets _alert_sender (the bot dir; empty, returning 1, when none qualifies) and
 # _alert_manager_why: empty when the sender is the fleet manager, else why the
 # manager does not send. Call it in the caller's shell, never in a command
 # substitution, so both reach the caller.
 _bot_with_own_chat() {
-    local bots_dir="$1" chat="$2" declared="${3:-}" d why first="" mgr="" mgr_why="" seen=0
+    local bots_dir="$1" chat="$2" declared="${3:-}" d why first="" mgr="" mgr_why=""
     _alert_sender=""
     _alert_manager_why=""
     if [ -d "$bots_dir" ]; then
         [ -n "$declared" ] || declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
+        mgr=$(fleet_manager_dir "$bots_dir")
         while IFS= read -r d; do
             [ -n "$d" ] || continue
             why=$(_alert_sender_unfit "$d" "$chat" "$declared")
-            if [ "$seen" -eq 0 ] && bot_is_manager "$d"; then
-                mgr="$d"
-                mgr_why="$why"
-            fi
-            seen=1
+            [ "$d" != "$mgr" ] || mgr_why="$why"
             [ -z "$why" ] || continue
             [ -n "$first" ] || first="$d"
             if [ -f "$(bot_conf_get_path "$d" TELEGRAM_STATE_DIR "")/.env" ]; then
@@ -6943,12 +6956,12 @@ _bot_with_own_chat() {
                 break
             fi
         done <<EOF
-$(alert_sender_order "$bots_dir")
+$(alert_sender_order "$bots_dir" "$mgr")
 EOF
         [ -n "$_alert_sender" ] || _alert_sender="$first"
     fi
     if [ -z "$mgr" ]; then
-        _alert_manager_why="no bot here is the fleet manager (a bot.conf whose MANAGER_TMUX is its own BOT_ID)"
+        _alert_manager_why="no bot.conf here is the fleet manager's (MANAGER_TMUX equal to its BOT_ID)"
     elif [ -n "$mgr_why" ]; then
         _alert_manager_why="$(basename "$mgr") $mgr_why"
     elif [ "$_alert_sender" != "$mgr" ]; then
@@ -6957,21 +6970,23 @@ EOF
     [ -n "$_alert_sender" ]
 }
 
-# _alert_sender_src <bot_dir>
-# The source label of the bot a scanned pair is sent as: manager:<bot> when it is
-# the fleet manager, else bot:<bot>, after one stderr line saying why the fleet
-# manager does not send it (_alert_manager_why), so a fallback is never silent
-# (#3127). Names bots, never a chat id or a token.
-_alert_sender_src() {
+# _alert_sender_source <label prefix> <bot_dir>
+# Sets _alert_target_src for a pair sent as <bot_dir>: <prefix>manager:<bot> when
+# it is the fleet manager, else <prefix>bot:<bot>, and then prints one stderr
+# line saying why the fleet manager does not send it (_alert_manager_why), so a
+# fallback is never silent (#3127). Names bots, never a chat id or a token. Call
+# it in the caller's shell, so the label reaches the caller and the line prints
+# once.
+_alert_sender_source() {
     local name
-    name=$(basename "$1")
-    if bot_is_manager "$1"; then
-        printf 'manager:%s' "$name"
+    name=$(basename "$2")
+    if bot_is_manager "$2"; then
+        _alert_target_src="${1}manager:$name"
         return 0
     fi
+    _alert_target_src="${1}bot:$name"
     printf '%s alert-sender: %s sends this fleet alert, not the fleet manager: %s\n' \
         "$(ts_iso)" "$name" "${_alert_manager_why:-it was not found}" >&2
-    printf 'bot:%s' "$name"
 }
 
 # bot_is_manager <bot_dir>

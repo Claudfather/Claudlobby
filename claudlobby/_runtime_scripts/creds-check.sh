@@ -1073,8 +1073,9 @@ else
 fi
 
 # resolve_delivery_token sets _delivery_token / _delivery_state_dir /
-# _delivery_bot to the first declared channel bot IN the resolved chat (its own
-# TELEGRAM_GROUP_CHAT_ID is that chat) whose token getMe confirms live, the token
+# _delivery_bot to the first bot the resolver could pair with the resolved chat
+# (_alert_sender_unfit: declared, a channel bot, its own TELEGRAM_GROUP_CHAT_ID
+# that chat, a channel state dir) whose token getMe confirms live, the token
 # resolved through the token SSOT (resolve_bot_telegram_token, which reaches the
 # fleet's real tokens), taken in alert_sender_order: the fleet manager first,
 # then by name, the order the resolver picks a sender in (#3127). That is #542's
@@ -1097,9 +1098,7 @@ resolve_delivery_token() {
     # swallow the rest of it.
     while IFS= read -r _d <&3; do
         [ -n "$_d" ] || continue
-        bot_in_fleet "$(basename "$_d")" "$_declared" || continue
-        [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
-        [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
+        [ -z "$(_alert_sender_unfit "$_d" "$_alert_chat_id" "$_declared")" ] || continue
         _tok="$(resolve_bot_telegram_token "$_d")" || true
         [ -n "$_tok" ] || continue
         if [ "$(_telegram_api "$_tok" getMe | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
