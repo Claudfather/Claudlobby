@@ -1403,3 +1403,190 @@ def test_declined_marked_team_card_is_declined(pipes):
     from claudlobby.commands.owner_stdio import StdioRefused
     returned, _ = _team_card(pipes, marked=True, answer={"approve": False, "actor_alias": "human:ada-lovelace"})
     assert isinstance(returned, StdioRefused) and returned.code == "declined"
+
+
+# The computer run's link intent (C2): its start key, its card and its refusals on the wire.
+@pytest.mark.parametrize("value, admitted", [(True, True), (False, False), (None, False), (1, False),
+                                             ("true", False), ([], False)])
+def test_stdio_computer_start_takes_link_claude_only_as_true(pipes, value, admitted):
+    from claudlobby.commands.owner_stdio import OwnerStdio, StdioRefused
+    console = OwnerStdio(pipes[0], pipes[1])
+    console.hello()
+    hello = read_frame(pipes[3])
+    os.write(pipes[2], wire(start(hello["session_id"], update_record=None, link_claude=value)))
+    if admitted:
+        assert console.start(computer=True) == start(hello["session_id"], update_record=None, link_claude=True)
+        return
+    with pytest.raises(StdioRefused) as refused:
+        console.start(computer=True)
+    assert refused.value.code == "invalid_request" and refused.value.data == {}
+
+
+def test_stdio_todays_start_refuses_the_link_key(pipes):
+    """Only the computer run takes the link intent; today's guide refuses it, alone or with update_record."""
+    from claudlobby.commands.owner_stdio import OwnerStdio, StdioRefused
+    for extra in ({"link_claude": True}, {"link_claude": True, "update_record": None}):
+        incoming, outgoing = os.pipe(), os.pipe()
+        console = OwnerStdio(incoming[0], outgoing[1])
+        try:
+            console.hello()
+            hello = read_frame(outgoing[0])
+            os.write(incoming[1], wire(start(hello["session_id"], **extra)))
+            with pytest.raises(StdioRefused) as refused:
+                console.start()
+            assert refused.value.code == "invalid_request"
+        finally:
+            for fd in (*incoming, *outgoing):
+                os.close(fd)
+
+
+def test_stdio_proposes_the_link_card(pipes):
+    """``link_provider`` passes the channel's closed list."""
+    console, session = admitted(pipes)
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(console.approve(
+        "link_provider", {"provider_signin": {"binary": "/synthetic"}}, original="approved")), daemon=True)
+    thread.start()
+    import select
+    assert select.select([pipes[3]], [], [], 5)[0], "the channel refused the action"
+    proposal = read_frame(pipes[3])
+    assert proposal["type"] == "proposal" and proposal["proposal"]["action"] == "link_provider"
+    os.write(pipes[2], wire({"version": 1, "type": "decide", "seq": 2,
+        "session_id": session, "proposal_id": proposal["proposal_id"],
+        "digest": proposal["digest"], "approve": True}))
+    thread.join(2)
+    assert not thread.is_alive() and outcome == ["approved"]
+
+
+def _dispatch_computer(fixed_profile, monkeypatch, request, run_computer):
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    paths = fixed_profile[0]
+    monkeypatch.setattr(host_owner_setup, "run", lambda *a, **k: pytest.fail("ran today's guide"))
+    monkeypatch.setattr(host_owner_setup, "run_computer", run_computer)
+    monkeypatch.setattr(owner_stdio, "_selectors", lambda args: None)
+    monkeypatch.setattr(owner_stdio, "_admit", lambda args, value: paths)
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+
+    class Channel(owner_stdio.OwnerStdio):
+        def __init__(self, _in, _out):
+            super().__init__(incoming, outgoing)
+
+        def start(self, *, computer=False):
+            assert computer is True
+            return dict(request)
+
+    monkeypatch.setattr(owner_stdio, "OwnerStdio", Channel)
+    try:
+        code = owner_stdio.dispatch(SimpleNamespace(stdio_status=False, stdio_computer=True, root=str(paths.root)))
+        os.close(outgoing)
+        outgoing = None
+        frames = [json.loads(line) for line in os.read(observer, 65536).splitlines()]
+    finally:
+        for fd in (incoming, client, observer, outgoing):
+            if fd is not None:
+                os.close(fd)
+    return code, frames
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_dispatch_carries_the_link_intent_only_when_sent(fixed_profile, monkeypatch, sent):
+    from uuid import uuid4
+    from claudlobby.command_result import CommandOutput
+    request = dict(fixed_profile[1], update_record=None, **({"link_claude": True} if sent else {}))
+    seen = []
+
+    def run_computer(args, admitted, store, *, consent, profile):
+        seen.append(args.link_claude)
+        return CommandOutput({"state": "link_ready", "generation": str(uuid4())}
+                             if sent else {"state": "computer_ready", "origin": "https://host.example.test"})
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    assert code == 0 and seen == [sent]
+    assert sorted(frames[-1]) == sorted(["seq", "session_id", "type", "version", "state",
+                                         "generation" if sent else "origin"])
+
+
+@pytest.mark.parametrize("refusal", ["not_here", "not_started", "already_linked", "signin_live", "signin_unconfirmed",
+                                     "busy", "credential_present", "environment_format", "declined", "expired",
+                                     "installed_declined", "installed_expired", "scope_changed", "setup_denied"])
+def test_link_refusals_on_the_wire_keep_todays_error_keys(fixed_profile, monkeypatch, refusal):
+    """A link run's refusal is an error frame with exactly code, state and retry: no line, no next."""
+    from claudlobby.commands import owner_stdio
+    request = dict(fixed_profile[1], update_record=None, link_claude=True)
+
+    def run_computer(*_args, **_kwargs):
+        raise owner_stdio.StdioRefused(refusal)
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    assert code == 4 and frames[-1]["type"] == "error" and frames[-1]["code"] == refusal
+    assert sorted(frames[-1]) == ["code", "retry", "seq", "session_id", "state", "type", "version"]
+    assert frames[-1]["state"] == "stopped" and frames[-1]["retry"] is False
+
+
+@pytest.mark.parametrize("computer", [False, True])
+def test_the_install_card_rechecks_the_profile_as_it_was_admitted(fixed_profile, monkeypatch, computer):
+    """After the install card the profile is checked again as its run admitted it: the computer run (and so
+    its link intent, at a later installed revision) as the computer run; today's guide with today's call."""
+    from claudlobby.commands import owner_setup_consent
+    from claudlobby.commands.owner_setup_consent import FixedOwnerProfile
+    from claudlobby import provider_install
+    paths, request, _home, _ = fixed_profile
+    profile = FixedOwnerProfile(paths, dict(request, update_record=None) if computer else request,
+                                **({"computer": True} if computer else {}))
+    answers = iter([provider_result(profile), provider_result(profile, "ready")])
+    monkeypatch.setattr(provider_install, "status", lambda *_: next(answers))
+    checks = []
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", lambda *args, **kwargs: checks.append(kwargs))
+    consent = SimpleNamespace(approve=lambda *_a, **_k: None, check_cancel=lambda: None)
+    assert profile.prepare_provider(consent, paths).state == "ready"
+    assert checks == [{"computer": True} if computer else {}]
+
+
+@pytest.mark.parametrize("refusal", ["installed_declined", "installed_expired", "installed_cancelled",
+                                     "installed_internal_error", "installed_unavailable", "installed_not_started",
+                                     "installed_unsupported_provider", "installed_scope_changed",
+                                     "installed_setup_denied", "installed_disconnected"])
+def test_link_installed_endings_on_the_wire_keep_todays_error_keys(fixed_profile, monkeypatch, refusal):
+    """After this run installed Claude, its endings are error frames with exactly today's keys: no next."""
+    import re
+    from claudlobby.commands import owner_stdio
+    request = dict(fixed_profile[1], update_record=None, link_claude=True)
+
+    def run_computer(*_args, **_kwargs):
+        raise owner_stdio.StdioRefused(refusal)
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    assert code == 4 and frames[-1]["type"] == "error" and frames[-1]["code"] == refusal
+    assert sorted(frames[-1]) == ["code", "retry", "seq", "session_id", "state", "type", "version"]
+    assert frames[-1]["state"] == "stopped" and frames[-1]["retry"] is False
+    assert re.fullmatch(r"[a-z0-9_]{1,96}", refusal)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("failure", ["signal", "exception"])
+def test_link_signal_or_failure_on_the_wire(fixed_profile, monkeypatch, failure, installed):
+    """A real SIGTERM (dispatch's interrupted()) or an unexpected exception during a link run: one error
+    frame the website's client admits, exactly code, state and retry; ``installed_`` when this run installed
+    Claude (as _link_claude maps it)."""
+    import signal
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    request = dict(fixed_profile[1], update_record=None, link_claude=True)
+
+    def fail():
+        if failure == "signal":
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+            pytest.fail("the signal was not delivered")
+        raise RuntimeError("a synthetic failure")
+
+    def run_computer(*_args, **_kwargs):
+        if not installed:
+            fail()
+        try:
+            fail()
+        except BaseException as exc:
+            raise owner_stdio.StdioRefused(host_owner_setup._installed_ending(exc)) from exc
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    word = "cancelled" if failure == "signal" else "internal_error"
+    assert code == 4 and [frame["type"] for frame in frames].count("error") == 1
+    assert frames[-1]["code"] == ("installed_" if installed else "") + word
+    assert sorted(frames[-1]) == ["code", "retry", "seq", "session_id", "state", "type", "version"]
+    assert frames[-1]["state"] == "stopped" and frames[-1]["retry"] is False

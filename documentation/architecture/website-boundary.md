@@ -74,6 +74,51 @@ source contract, including the saved-reference `transport` field, is in
 The reciprocal [website and host contract](https://github.com/Claudfather/claudfather.ai/blob/main/documentation/architecture/host-contract.md)
 describes the account and document handoff side.
 
+### The computer run's link intent
+
+The computer run (`owner-guide-computer-v1`, prelude word `computer`) can be
+asked one thing more on a started computer: a link approval for Claude sign-ins
+([owner-connected-read](owner-connected-read.md#a-link-approval-for-claude-sign-ins)).
+The client asks only by sending `link_claude: true`, on the prelude's first line
+and on the start; without it both are exactly as before, and the run can ask no
+Claude card. The key is only ever `true`, and only the computer run takes it;
+anything else is `invalid_request`. A link run sends only the hello, the cards
+`install_provider` (only when Claude is missing) and `link_provider`, the state
+`provider_installing` (`state`, `platform`, `provider_version`), the result
+`link_ready` (`state` and the approval's `generation`, a lowercase UUID) and
+error frames with `code`, `state` and `retry` (and `next: inspect_status` for an
+install that did not finish). It never sends a pairing or workspace state,
+`computer_ready`, `computer_starting` or `start_failed`. The `link_provider`
+card carries details only: the sign-in scope, the active source revision and the
+approval's two windows in seconds; the words a person reads are the website's.
+
+Before any card the run refuses, in this order: the prelude's own
+`revision_differs` (against the active source); the run's own admission
+(`installation_changed`, `use_full_guide`); then `not_here` (not Linux for now),
+`not_started`, `already_linked`, `signin_live` or `signin_unconfirmed` (the
+sign-in lease, probed from the run's own process), `busy` (maintenance or an
+update in the way), `credential_present` (an empty sign-in line in `.env`) and
+`environment_format` (a `.env` the sign-in cannot read). When two hold at once
+the first in this order is the answer. Then the started
+computer's operator check, the install card and its own refusals
+(`provider_install_*`), and the sign-in scope's own refusal. A no or no answer
+on the first card is `declined` or `expired` and changes nothing. A yes writes
+the approval, whose writer checks the computer again (its refusals end the run
+with nothing written), and answers `link_ready`.
+
+Every ending after the install card installed Claude in this run that writes no
+approval is that ending's word prefixed `installed_`, so the page can say Claude
+is installed but not linked: `installed_declined` and `installed_expired` (the
+link card), `installed_` with the scope's refusal (`unsupported_provider`,
+`profile_changed`, `file_binding_changed`, `private_path_changed`), with
+`scope_changed`, with a writer refusal (`setup_denied`, `use_full_guide`,
+`not_started`, `signin_live`, `signin_unconfirmed`, `setup_source_changed`),
+with the channel's own endings (`cancelled`, `disconnected`, `invalid_request`,
+`session_closed`, `output_unavailable`, `output_limit`), and
+`installed_cancelled` (a signal), `installed_unavailable` and
+`installed_internal_error` (any other failure). Without an install in this run
+the same endings keep their plain words.
+
 ## Setup, availability and current limits
 
 [Getting started](../getting-started.md) owns the installed-release path.

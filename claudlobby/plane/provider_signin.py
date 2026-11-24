@@ -624,6 +624,34 @@ def signin_running(root):
         os.close(fd)
 
 
+def held_refusal(root, current):
+    """For a sign-in lease just read as held: the refusal it gives over ``current``, or None once it is free.
+
+    ``current`` is the current attempt's row, or None. Held over no attempt, or over a starting or waiting
+    one: ``signin_live``. Held over an ``unknown``/``child_quiet_unproven`` attempt, whose worker keeps the
+    lease until its process exits: ``signin_unconfirmed``. Held over any other ended attempt: a worker in
+    another process can sit a few milliseconds between its last row and closing the lease, so the lease is
+    probed again, up to 50 times 0.01 seconds apart (as take_lease tries it); free, None; still held,
+    ``signin_unconfirmed``. The writer, begin and the computer run's link checks all decide with this.
+
+    It sleeps where its caller stands, on purpose: the writer inside its ``BEGIN IMMEDIATE`` transaction,
+    begin inside ``self._lock`` and its ``BEGIN IMMEDIATE`` transaction. No new attempt can be committed
+    while they wait, which is what makes "released means ended" safe there. (The computer run reads the
+    row in its own short read and so reads it again afterwards.) The bound is 0.5 seconds; under begin's
+    lock about 2 seconds at worst, with ``_settled``'s 1-second join and ``take_lease``'s 0.5 seconds of
+    tries. It cannot deadlock: a worker closes its lease after leaving ``self._lock`` and after its last
+    row has committed, needing neither the lock nor a database write to do it.
+    """
+    if current is None or current["state"] not in _TERMINAL:
+        return "signin_live"
+    if (current["state"], current["reason"]) != ("unknown", "child_quiet_unproven"):
+        for _ in range(50):
+            time.sleep(0.01)
+            if not signin_running(root):
+                return None
+    return "signin_unconfirmed"
+
+
 # A link approval: one yes, on a started computer, to Claude sign-ins for a short time. It is its
 # own record (setup_link), never a team approval (setup_grant): any setup_grant row makes the
 # computer read as set up to the computer run, and an older core reads only the team tables.
@@ -734,9 +762,11 @@ class LinkStore:
             if signin_running(self.access.root):  # L6: a sign-in may be live
                 current = ProviderSignin._current(conn)[0] if "setup_provider" in _names(conn) else None
                 # L6b: held over an ended row, in practice a child whose reap went unproven and whose
-                # worker keeps the lease until its process exits. Not a live sign-in to resume.
-                raise AccessDenied("signin_unconfirmed" if current is not None and current["state"] in _TERMINAL
-                                   else "signin_live")
+                # worker keeps the lease until its process exits. Not a live sign-in to resume. A lease
+                # released within held_refusal's probes was a worker closing it after its last row.
+                refusal = held_refusal(self.access.root, current)
+                if refusal is not None:
+                    raise AccessDenied(refusal)
             # L7: a starting or waiting row here, with the lease free, has ended (its worker is gone).
             # It is left as it is; nothing to refuse.
             ProviderSignin.initialize(conn)
@@ -987,7 +1017,8 @@ class ProviderSignin:
         unused window, while no attempt has this generation (setup_denied, as an expired approval);
         the computer is started (not_started; with the writer, the only start_state reads of a link
         sign-in); then the current attempt. A held lease over an ended row is a child whose reap went
-        unproven, or a worker of this process not yet past its last close: signin_unconfirmed. So is
+        unproven, or a worker not yet past its last close (held_refusal probes again for that one, any
+        process's): signin_unconfirmed while it stays held. So is
         this process's own quiet child. Another approval's attempt that has not ended is signin_live:
         ended is a terminal row, or a starting or waiting one whose lease is free and whose worker is
         not this process's. Returns this approval's attempt count, which its cap counts.
@@ -1006,7 +1037,7 @@ class ProviderSignin:
             if current['state'] in _TERMINAL:
                 self._settled(current['attempt_id'])  # this process's worker, if it wrote the row, has closed its lease
                 quiet = (current['state'], current['reason']) == ("unknown", "child_quiet_unproven")
-                if signin_running(root) or quiet and current['attempt_id'] == self._attempt:
+                if quiet and current['attempt_id'] == self._attempt or signin_running(root) and held_refusal(root, current):
                     raise AccessDenied("signin_unconfirmed")
             elif current['generation'] != grant.generation:
                 mine = (current['attempt_id'] == self._attempt and self._thread is not None and self._thread.is_alive())

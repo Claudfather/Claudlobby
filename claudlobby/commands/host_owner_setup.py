@@ -999,6 +999,113 @@ def _computer_ready(paths, installation, profile, ssh, carrier, consent):
                                              "request_id": record["request_id"] if record else None})
 
 
+def _link_claude(paths, store, package, state, *, consent, profile, ssh):
+    """The computer run with the link intent: one link approval for Claude sign-ins on a started computer.
+
+    Reached only when the start carries ``link_claude: true``, after the run's own admission (the
+    guide's ``revision_differs`` against the active source, ``admitted_update``, ``use_full_guide``).
+    It never answers ``computer_ready`` or ``computer_starting``, never refuses ``start_failed`` and
+    sends no pairing or workspace state. These refusals are decided before any card, in this order:
+    ``not_here`` (not Linux, or over SSH: Linux first; a Mac later through this same run),
+    ``not_started``, ``already_linked``, then the sign-in lease probed from this process, whose memory
+    proves nothing (``signin_live``, ``signin_unconfirmed``), ``busy`` (maintenance, or an update in
+    the way), ``credential_present`` (an empty sign-in line in ``.env``) and ``environment_format``
+    (a ``.env`` the sign-in cannot read). Then the started computer's own operator gate; the
+    ``install_provider`` card only when Claude is missing (its own refusals, ``provider_install_*``);
+    the sign-in scope (its own refusal, after the install card when there was one); and the
+    ``link_provider`` card, whose scope is details only; the writer's checks come after its yes.
+    A yes writes the approval (``LinkStore.write``, which checks again inside its transaction) and
+    answers ``link_ready`` with its generation. A no or no answer writes nothing: ``declined`` or
+    ``expired``. Every ending after this run installed Claude that writes no approval (a no, no
+    answer, the scope's refusal, a writer's refusal, a signal or any other failure) is that ending's
+    word prefixed ``installed_`` (``_installed_ending``), so the page can say Claude is installed.
+    """
+    from .operator_context import require_operator_context
+    from .owner_stdio import StdioRefused
+    from ..installation import InstallationError, _check_maintenance
+    from ..plane.owner_access import AccessDenied
+    from ..plane.owner_setup import _linux
+    from ..plane.provider_signin import (LINK_SECONDS, LINK_UNUSED_SECONDS, LinkStore, ProviderSignin,
+        SigninRefused, _names, approved_scope, check_scope, environment_linked, environment_ready,
+        _TERMINAL, held_refusal, signin_running)
+    root = paths.root
+    if ssh is not None or not _linux():
+        raise StdioRefused("not_here")
+    if state != "started":
+        raise StdioRefused("not_started")
+    try:
+        linked = environment_linked(root)
+    except (SigninRefused, OSError):
+        linked = False  # not linked; the .env checks below name what is wrong
+    if linked:
+        raise StdioRefused("already_linked")
+    def current():
+        with store._connection() as conn:
+            return ProviderSignin._current(conn)[0] if "setup_provider" in _names(conn) else None
+    if signin_running(root):
+        refusal = held_refusal(root, current())
+        if refusal == "signin_unconfirmed":
+            # A begin elsewhere may have committed a new attempt since the row was read: decide from a fresh read.
+            fresh = current()
+            if fresh is None or fresh["state"] not in _TERMINAL:
+                refusal = "signin_live"
+        if refusal is not None:
+            raise StdioRefused(refusal)
+    try:
+        _check_maintenance(package.installation, native=True)  # as begin checks it
+    except InstallationError:
+        raise StdioRefused("busy") from None
+    try:
+        environment_ready(root)
+    except SigninRefused as exc:
+        raise StdioRefused("credential_present" if exc.code == "credential_already_present"
+                           else "environment_format") from None
+    except OSError:
+        raise StdioRefused("environment_format") from None
+    require_operator_context(root)  # the started computer's own gate, never a fresh computer's
+    attempted = getattr(profile, "_provider_attempted", False) is True
+    profile.prepare_provider(consent, paths)
+    installed = not attempted and getattr(profile, "_provider_attempted", False) is True  # this run installed Claude
+    try:
+        try:
+            scope = approved_scope(profile.provider, root, str(profile.account))
+        except SigninRefused as exc:
+            raise StdioRefused(exc.code) from None
+        consent.approve("link_provider", {"provider_signin": scope, "source_revision": package.source_revision,
+                                          "unused_seconds": LINK_UNUSED_SECONDS, "seconds": LINK_SECONDS})
+        consent.check_cancel()
+        try:
+            check_scope(scope, root)  # the approved card names what is written
+            approval = LinkStore(store).write(scope)
+        except AccessDenied as exc:
+            raise StdioRefused(exc.code) from None
+    except BaseException as exc:
+        if not installed:
+            raise
+        raise StdioRefused(_installed_ending(exc)) from exc
+    return CommandOutput({"state": "link_ready", "generation": approval.generation})
+
+
+def _installed_ending(exc):
+    """A link run's ending after it installed Claude and wrote no approval: ``installed_`` and the word
+    the run would have ended with otherwise (``owner_stdio.dispatch``'s mapping), within the client's
+    code pattern; ``installed_internal_error`` for anything else."""
+    import re
+    from .owner_stdio import StdioRefused
+    from ..plane.owner_access import AccessDenied, AccessUnavailable
+    if isinstance(exc, StdioRefused) and not exc.data:
+        code = exc.code
+    elif isinstance(exc, CommandFailure):
+        code = exc.error.code
+    elif isinstance(exc, (AccessDenied, AccessUnavailable, OSError, ValueError, ImportError, TimeoutError)):
+        code = "unavailable"
+    elif isinstance(exc, (EOFError, KeyboardInterrupt)):
+        code = "cancelled"  # a signal: interrupted() turns SIGTERM and SIGHUP into KeyboardInterrupt
+    else:
+        code = "internal_error"
+    return "installed_" + (code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,86}", code) else "internal_error")
+
+
 def run_computer(args, paths, store, *, consent, profile, ssh=None):
     """The computer run: the cards that add a computer, then its start; and the way back into it.
 
@@ -1012,7 +1119,8 @@ def run_computer(args, paths, store, *, consent, profile, ssh=None):
     dispatches. It never waits for the updater and never continues a record:
     its exit is what lets the updater proceed, so it never answers
     ``computer_ready`` in the process that dispatched a start. No Claude and no
-    team card is asked. ``ssh`` is as for ``run``.
+    team card is asked without the link intent (``args.link_claude``, only ever
+    ``True``), which goes to ``_link_claude`` instead. ``ssh`` is as for ``run``.
     """
     from . import host_owner as console
     from .owner_setup_consent import admitted_update
@@ -1038,6 +1146,8 @@ def run_computer(args, paths, store, *, consent, profile, ssh=None):
     state = start_state(paths.root, installation)
     if state == "other":
         raise StdioRefused("use_full_guide")
+    if getattr(args, "link_claude", False) is True:
+        return _link_claude(paths, store, package, state, consent=consent, profile=profile, ssh=ssh)
     carrier = {}
     if ssh is not None:
         from ..plane.owner_ssh import TRANSPORT

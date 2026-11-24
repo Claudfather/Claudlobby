@@ -642,3 +642,66 @@ def test_shell_computer_mode_is_one_exact_word(arguments):
 def test_the_guide_script_stays_within_its_byte_bound():
     """The guide script's hard bound, 64 KiB; no existing check is trimmed to meet it."""
     assert SCRIPT.stat().st_size <= 65536
+
+
+# The computer run's link intent (C2): link_claude on the first line, only as true, only for the computer run.
+@pytest.mark.parametrize("known", [None, RECORD])
+def test_prelude_computer_request_takes_the_link_key(known):
+    module = payload()
+    raw = frame(update_record=known, link_claude=True)
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, raw)
+        assert module.request(reader, time.monotonic() + .2, "computer") == json.loads(raw)
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+@pytest.mark.parametrize("action, raw", [
+    *[("computer", frame(update_record=None, link_claude=value)) for value in (False, None, 1, "true", [True])],
+    ("computer", frame(link_claude=True)),  # the computer run's record key is still required
+    *[(action, frame(link_claude=True)) for action in ("setup", "status", "api")],
+    *[(action, frame(update_record=None, link_claude=True)) for action in ("setup", "status", "api")],
+])
+def test_prelude_link_key_refuses_anything_else(action, raw):
+    module = payload()
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, raw)
+        with pytest.raises(module.Refusal) as error:
+            module.request(reader, time.monotonic() + .2, action)
+    finally:
+        os.close(reader)
+        os.close(writer)
+    assert error.value.code == "invalid_request" and error.value.exit_code == 2
+
+
+def test_guide_bound_with_link_key():
+    """The guide that admits the link key still fits the website's 64 KiB bound."""
+    module = payload()
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, frame(update_record=None, link_claude=True))
+        assert module.request(reader, time.monotonic() + .2, "computer")["link_claude"] is True
+    finally:
+        os.close(reader)
+        os.close(writer)
+    assert SCRIPT.stat().st_size <= 65536
+
+
+def test_computer_with_the_link_key_takes_the_same_route_and_revision_check(installed, tmp_path):
+    """The link intent changes nothing in the script: the computer route, the active source's revision
+    (a later installed revision is admitted while the receipt keeps its first), and revision_differs."""
+    module, home, install, value, python = installed
+    current = advance_source(module, install, python, home)
+    named = dict(value, source_revision=current, update_record=["33333333-3333-4333-8333-333333333333", current],
+                 link_claude=True)
+    before = snapshot(home)
+    result = run_mode(module, tmp_path, home, python, "computer", named, "setup --stdio-computer")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout == b'{"type":"hello","fixture":true}\n{"retained":"following"}\n'
+    stale = dict(named, source_revision=value["source_revision"])  # the receipt's, no longer the active source
+    result = run_mode(module, tmp_path, home, python, "computer", stale, "-")
+    assert (result.returncode, result.stdout) == (4, refusal(module, "revision_differs"))
+    assert snapshot(home) == before
