@@ -19,3 +19,5 @@ The observer created a session when its socket had none. It atomically published
 | Start the unit again and issue an intentional stop | Within 0.056 s the new observer, server and worker PIDs were gone. Six seconds later the readiness record had not advanced and the socket served no session. The transient unit was unloaded (not-found, inactive/dead). |
 
 As in [proof A](launchd-session-lifetime-2026-11-22.md), readiness requires observing the serving worker. On Linux the updater must also recognize the retry interval as a distinct native state and prove quiet separately before acting. These timings are single observations. Phase 3 still owns real-agent assignment continuity, agent-only and server-only failures, and generation-safe identity checks.
+
+After SIGKILL, the server and worker continued running without the original observer. The intentional-stop row demonstrates cleanup by the observer’s handler. Manager-only cleanup was outside this experiment.

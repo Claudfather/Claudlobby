@@ -17,3 +17,5 @@ The source baseline was `c06c5693`. The temporary agent ran an independent Pytho
 Use application-owned readiness for the current launch generation. A caller should match the reported identities to the live server and worker before declaring local readiness. Production agent readiness additionally needs its existing native session confirmation. A launchd job becoming active alone cannot establish either condition.
 
 This single run demonstrates observer replacement with a surviving worker and deliberate teardown. The private prototype used PID equality over a short interval. Phase 3 still needs generation-safe identity, agent-only and server-only failure cases, and assignment continuity with a real agent. The measured durations describe this run and establish no timeout policy.
+
+After SIGKILL, the server and worker continued running without the original observer. The intentional-stop row demonstrates cleanup by the observer’s handler. Manager-only cleanup was outside this experiment.
