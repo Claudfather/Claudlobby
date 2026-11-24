@@ -66,7 +66,7 @@ test('default and synthetic transports do not mount session controls or probe ow
     const carrierURL = moduleURL((await readUI('connected-read-client.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)).replace('"./connected-actions.js"',JSON.stringify(actionsURL)));
     const adapterURL = moduleURL((await readUI('two-source-read.js')).replace('"./owner-api-client.js"', JSON.stringify(ownerURL)));
     const enrollmentURL = moduleURL(await readUI('workspace-enrollment.js'));
-    const setupURL = moduleURL(await readUI('guided-setup.js'));
+    const setupURL = moduleURL((await readUI('guided-setup.js')).replace('"./claude-signin.js"', JSON.stringify(new URL('../claudlobby/plane/ui/claude-signin.js', import.meta.url).href)));
     const workspaceURL = moduleURL((await readUI('connected-workspace.js'))
       .replace('"./guided-setup.js"', JSON.stringify(setupURL)).replace('"./workspace-parts.js"', JSON.stringify(moduleURL(await readUI('workspace-parts.js'))))
       .replace('"./workspace-enrollment.js"', JSON.stringify(enrollmentURL)).replace('"./connected-read-client.js"', JSON.stringify(carrierURL)).replace('"./two-source-read.js"', JSON.stringify(adapterURL)));

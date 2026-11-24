@@ -3878,3 +3878,66 @@ test('person-written text in the setup view is drawn as plain text: the goal abo
   assert.doesNotMatch(source,/innerHTML|outerHTML|insertAdjacentHTML|document\.write/,'the setup view writes no markup');
   m.h.api.dispose();
 });
+
+// The sign-in step on its own (claude-signin.js), driven the way a second road drives it: no page around it,
+// the four calls from a real client, and no storage.
+const {createClaudeSignin,NO_STORAGE}=await import(new URL('../claudlobby/plane/ui/claude-signin.js',import.meta.url));
+const linkApproval={generation:id(9),expires_at:1800003600,provider_signin:true};
+const linkHost=(extra={})=>({approval:()=>linkApproval,pending:()=>false,busy:()=>false,busyOperation:()=>null,active:()=>true,
+  disposed:()=>false,epoch:()=>0,changed:()=>{},run:async()=>true,...extra});
+test('link road writes nothing to storage',async()=>{
+  const touched=[],spy={getItem:key=>{touched.push(['get',key]);return null;},setItem:key=>{touched.push(['set',key]);}};
+  const restore=stubGlobal('localStorage',{value:spy});
+  try {
+    const answers=['waiting','waiting','connected'],seen=[];
+    const calls=async(action,input)=>{seen.push(action);return {generation:input.generation,attempt_id:input.attempt_id,state:answers.shift()??'connected',reason:null,
+      ...(action==='begin'?{url:authorizeURL}:{})};};
+    const signin=createClaudeSignin({calls,store:NO_STORAGE,host:linkHost(),now:()=>1800000000,copyText:async()=>{}});
+    signin.load();assert.equal(signin.attempt(),null,'nothing is read back');
+    assert.equal(await signin.operate('signin-begin',0),true);
+    assert.equal(signin.state(),'waiting');assert.ok(signin.attempt());
+    assert.equal(await signin.operate('signin-status',0),true);
+    assert.equal(await signin.operate('signin-status',0),true);assert.equal(signin.state(),'connected');
+    assert.deepEqual(seen,['begin','status','status']);
+    assert.deepEqual(touched,[],'no read and no write reached browser storage');
+    const again=createClaudeSignin({calls,store:NO_STORAGE,host:linkHost(),now:()=>1800000000,copyText:async()=>{}});
+    again.load();assert.equal(again.attempt(),null,'a second page remembers no attempt');
+    // A store that refuses writes cannot stop a road that keeps nothing; the same refusal stops a road that keeps an attempt.
+    const refusing={read:()=>null,write:()=>{throw new Error('full');}};
+    const keeps=createClaudeSignin({calls,store:refusing,host:linkHost(),now:()=>1800000000,copyText:async()=>{}});
+    await assert.rejects(keeps.operate('signin-begin',0),error=>error.code==='signin_not_started');
+    const source=await readFile(new URL('../claudlobby/plane/ui/claude-signin.js',import.meta.url),'utf8');
+    assert.doesNotMatch(source,/localStorage|sessionStorage|innerHTML|outerHTML|insertAdjacentHTML|document\.write/,'the step names no storage of its own and writes no markup');
+  } finally { restore(); }
+});
+test('no renewal during a link sign-in',async()=>{
+  const reference={reference_id:id(4),endpoint_origin:'https://a.example.test',revision:1};
+  const doc={issuer:'https://accounts.example.test',operational_origin:'https://plane.example.test',subject:id(1),workspace_id:id(2),context_generation:id(3)};
+  const binding={binding_revision:1,binding_generation:id(5)},HOST='host_'+'a'.repeat(32),TOKEN='B'.repeat(42)+'A',ROTATED='C'.repeat(42)+'A';
+  const ready=token=>({version:1,state:'ready',expires_in:900,read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:HOST},
+    session_context:{issuer:doc.issuer,subject:doc.subject,workspace_id:doc.workspace_id,operational_origin:doc.operational_origin,...binding},...(token?{token}:{})});
+  const seen=[];let time=0,state='waiting';
+  const fetch=async(url,init)=>{
+    const path=new URL(url).pathname.replace('/api/owner/connected/','');seen.push(path);
+    if(path==='challenge')return reply(202,{version:1,state:'awaiting_session_assertion',nonce:'A'.repeat(43),issuer:doc.issuer,host_uid:HOST,operational_origin:doc.operational_origin,...binding,expires_at:1800000120});
+    if(path==='issue')return reply(200,ready(TOKEN));
+    if(path==='renew')return reply(200,ready(ROTATED));
+    if(path==='status')return reply(200,ready());
+    if(path.startsWith('setup/signin-'))return reply(200,{generation:id(9),attempt_id:JSON.parse(init.body).attempt_id,state,reason:null,...(state==='waiting'?{url:authorizeURL}:{})});
+    return reply(404,{});
+  };
+  const client=createConnectedReadClient({reference,documentContext:doc,documentOrigin:doc.operational_origin,fetch,monotonicNow:()=>time,
+    currentContext:()=>context([reference]),setTimeout:(fn,ms)=>({fn,ms}),clearTimeout:()=>{},
+    obtainSessionAssertion:async()=>({version:1,assertion:'e30.e30.AAAA',expires_at:1800000120})});
+  const renewals=()=>seen.filter(path=>path==='renew').length;
+  assert.equal(await client.connect(),true);
+  const signin=createClaudeSignin({calls:(action,input)=>client.setupSignin(action,input),store:NO_STORAGE,host:linkHost(),now:()=>1800000000,copyText:async()=>{}});
+  assert.equal(await signin.operate('signin-begin',0),true);assert.equal(signin.state(),'waiting');
+  assert.equal(await client.renew(),false,'an explicit renewal waits for the sign-in');assert.equal(renewals(),0);
+  time=780000;client.activity({visible:true,userInput:true});await flush();
+  assert.equal(renewals(),0,'nor does the session renew by itself while the sign-in is live');
+  assert.equal(await signin.operate('signin-status',0),true);assert.equal(await client.renew(),false);assert.equal(renewals(),0,'a status that is not the end releases nothing');
+  state='connected';assert.equal(await signin.operate('signin-status',0),true);assert.equal(signin.state(),'connected');
+  assert.equal(await client.renew(),true);assert.equal(renewals(),1,'the end of the sign-in releases the renewal');
+  signin.dispose();client.dispose();
+});
