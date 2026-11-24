@@ -119,6 +119,31 @@ with the channel's own endings (`cancelled`, `disconnected`, `invalid_request`,
 `installed_internal_error` (any other failure). Without an install in this run
 the same endings keep their plain words.
 
+### The Claude part and the two run messages
+
+A started computer's parts view draws one Claude part in its provider row. It
+reads only the setup state's `provider` object (`link`, `signin`); a value it
+does not know makes the whole answer unusable. It never starts a run itself.
+Two messages cross between the view and the setup page that embeds it, each
+with exactly its keys, a closed set of values, and only between the view's
+parent window and the shell origin:
+
+- View to page, `{type: "claudfather.workspace.request-run", version: 1, run}`,
+  with `run` `link` or `update`, sent only from a click on the part's button.
+- Page to view, `{type: "claudfather.workspace.run-ended", version: 1, run,
+  outcome, reason}`. `outcome` is `approved`, `declined`, `timed_out`,
+  `refused` or `stopped`; `reason` is `null` except with `refused`, where it is
+  one of `revision_differs`, `installation_changed`, `not_started`,
+  `already_linked`, `signin_live`, `signin_unconfirmed`, `busy`,
+  `credential_present`, `environment_format`, `install_failed`,
+  `use_full_guide` or `other`. An `update` run ends only as `stopped` with no
+  reason or `refused` with `other`.
+
+Any other shape is ignored. On `approved` the view reads the parts once and
+begins the sign-in by itself when a sign-in is offered; on any other outcome it
+reads once and returns the part to its button. The sign-in step is the module
+`claude-signin.js`, with no storage.
+
 ## Setup, availability and current limits
 
 [Getting started](../getting-started.md) owns the installed-release path.

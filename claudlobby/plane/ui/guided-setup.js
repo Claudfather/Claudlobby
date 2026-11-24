@@ -214,6 +214,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else throw new Error();
     }
   } catch { incompatible = true; }
+  // unconfirmed: the request is only what this browser kept from an earlier visit. It still leads Check launch status
+  // and still blocks a second launch, but no step is drawn done for it until the computer says something about it in
+  // this visit (a read of the approval, a launch status, a Preview, or its parts read saying a Launch is unfinished).
+  // A computer that was reset otherwise shows a finished step it never had (40-02).
+  let unconfirmed = !!pending;
+  const drawn = () => !!pending && !unconfirmed;
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
   const legacyBlocked = () => incompatible || legacy.length > 0;
   function save(value) {
@@ -292,7 +298,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
-          pending = binding(value.request); save(pending);
+          pending = binding(value.request); save(pending); unconfirmed = false;
         }
         holdLaunch(value.launch_reserved);
         if (kept) {
@@ -322,7 +328,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (badPlan(value,selected) || value.expires_at <= now() || badGoal(value,selected)
             || value.goal !== undefined && value.goal !== authored) throw new Error();
         // With the mark, the goal shown above Launch is the one the computer read back.
-        pending = binding(value); plan = Object.freeze({...value}); planGoal = value.goal ?? authored;
+        pending = binding(value); unconfirmed = false; plan = Object.freeze({...value}); planGoal = value.goal ?? authored;
         save(pending); launchable = true;
         note = 'Preview ready. Review it below, then choose Launch team.';
       } else if (operation === 'launch') {
@@ -402,6 +408,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         || !value.health_errors || typeof value.health_errors !== 'object' || Array.isArray(value.health_errors)
         || value.managed_owner !== undefined && value.managed_owner !== true
         || 'plan_id' in value || 'release_id' in value || 'release_seal' in value) throw new Error();
+    unconfirmed = false;
     if (value.launch_reserved || value.state === 'unknown') launchable = false;
     holdLaunch(value.launch_reserved);
     const done = value.state === 'done' && value.config_committed && Object.keys(value.health_errors).length === 0;
@@ -432,11 +439,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const signinKnown = context?.provider_signin === true || holding && !context && signin.state() === 'connected'
       && signin.attempt()?.generation === pending.generation;
     // Sign-in is a step when this approval asks for it; until approval is known it is shown as upcoming.
-    const signinShown = pending ? signinKnown && signin.state() === 'connected' : signinKnown || !context;
+    const signinShown = drawn() ? signinKnown && signin.state() === 'connected' : signinKnown || !context;
     const signinDone = signinKnown && signin.ready();
     const states = {approve:approved ? 'done' : 'current',
       signin:!signinShown ? null : signinDone ? 'done' : approved ? 'current' : 'upcoming',
-      goal:pending ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
+      goal:drawn() ? 'done' : approved && (!signinKnown || signinDone) ? 'current' : 'upcoming',
       launch:pending ? 'current' : 'upcoming'};
     // With a Connect step, nothing after it is current until this computer is connected.
     const settling = holding && handoffChecking && ['checking','renewing'].includes(state.state);
@@ -457,7 +464,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // While the computer prepares the preview the goal step keeps Preview team's own line, so nothing changes between checks.
     if (!progress.goal && !pending && previewPolling()) progress.goal = PROGRESS.preview[1];
     for (const [name,step] of Object.entries(m.steps)) {
-      const state = states[name]; step.root.hidden = state === null;
+      const state = states[name]; step.root.hidden = state === null || connecting && name !== 'connect'; // before Connect, only Connect (40-02)
       if (state === null) continue;
       step.root.dataset.state = state;
       if (step.done) step.done.hidden = state !== 'done';
@@ -470,7 +477,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const {controls} = m;
     setText(m.approveDone,states.approve === 'done' ? 'Setup approved' : '');
     // Once a launch is held or finished, nothing waits on Launch team any more.
-    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched() || underway;
+    m.lede.hidden = standalone && !!pending && !!launchSeen && same(launchSeen,pending) || launched() || underway || connecting;
     // Once a preview exists for this approval the note says what is true; a new check cannot continue an ended approval.
     setText(m.approveHint,context && !approved && !previewWatch ? 'Setup approval expired. Check it again to continue.' : '');
     // Hidden until approved; never while launchable (re-checking would retire a fresh preview's launch).
@@ -588,7 +595,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (connectFocus === 'sent') connectFocus = null; // the entry refused it, so nothing will move focus
       });
       connectRow.done.append(make('span','','Connected'));
-      connectRow.body.append(make('p','setup-step-text','Connect so you can finish setup.'),row(button),hint);
+      connectRow.body.append(make('p','setup-step-text','Connect to see what is set up on this computer.'),row(button),hint);
       connectStep = {button,hint};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
@@ -634,6 +641,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       if (JSON.stringify(next) === JSON.stringify(connectView)) return;
       connectView = next; if (!disposed) render();
     },
-    showLaunchUnderway(value) { if (!!value === launchUnderway) return; launchUnderway = !!value; if (!disposed) render(); },
+    showLaunchUnderway(value) { if (value && pending) unconfirmed = false; if (!!value === launchUnderway) return; launchUnderway = !!value; if (!disposed) render(); },
+    // The computer's parts read says it has no team and no Launch under way: what this browser kept of a launch it
+    // saw before is not about this computer now, so its saw-launch note goes. Nothing this visit confirmed is touched,
+    // and the request itself stays kept (it still blocks a second launch and still leads Check launch status).
+    noTeam() { if (unconfirmed && launchSeen && !followed && !managedHandoff) { seeLaunch(null); if (!disposed) render(); } },
     dispose() { disposed = true; stopHandoff(); signin.stopPoll(); stopPreviewPoll(); epoch++; signin.dispose(); mount = null; }});
 }

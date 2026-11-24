@@ -1695,8 +1695,8 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   const reopened=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000,setTimeout:()=>0,clearTimeout:()=>{}});
   const ui=dom(),again=new ui.Element();reopened.mountPanel({document:ui.document,element:again});
   const shownAgain=stepsOf(again).filter(visible);
-  assert.deepEqual(shownAgain.map(n=>[n.dataset.step,n.dataset.state]),[['approve','current'],['goal','done'],['launch','current']]);
-  assert.deepEqual(shownAgain.map(filledIn),[[],[],['Check launch status']],'a reopened launch leads with its status check');
+  assert.deepEqual(shownAgain.map(n=>[n.dataset.step,n.dataset.state]),[['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','current']],'a kept request is not drawn done before the computer confirms it (40-02)');
+  assert.deepEqual(shownAgain.map(filledIn),[[],[],[],['Check launch status']],'a reopened launch leads with its status check');
   assert.equal(descendants(again).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again').hidden,true,'with approval not yet read, only the step\'s own check is offered');
   reopened.dispose();
 });
@@ -2517,12 +2517,12 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
   assert.equal(l.status().hidden,true,'no waiting line beside the panel');
   const panel=l.panel(),heading=panel.children.find(n=>n.tagName==='H2');
   assertPlain(l.shownText());
-  assert.equal(heading.textContent,'Finish setting up a.example.test');
-  assert.deepEqual(stepShape(panel),[['connect','current'],['approve','upcoming'],['signin','upcoming'],['goal','upcoming'],['launch','upcoming']]);assert.ok(unnumbered(panel));
-  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect'],[],[],[],[]],'Connect is the one filled action');
+  assert.equal(heading.textContent,'a.example.test','before Connect the panel names the computer and nothing of first-team setup (40-02)');
+  assert.deepEqual(stepShape(panel),[['connect','current']],'only Connect is shown before it');assert.ok(unnumbered(panel));
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect']],'Connect is the one filled action');
   const connect=stepsOf(panel)[0],button=descendants(connect).find(n=>n.tagName==='BUTTON');
   assert.equal(connect.children.find(n=>n.tagName==='H3').textContent,'Connect this computer');
-  assert.ok(descendants(connect).some(n=>n.textContent==='Connect so you can finish setup.'&&visible(n)));
+  assert.ok(descendants(connect).some(n=>n.textContent==='Connect to see what is set up on this computer.'&&visible(n)));
   assert.equal(button.textContent,'Connect');assert.equal(button.type,'button');assert.equal(button.disabled,false);
   assert.equal(stepPart(panel,'connect','setup-progress').attributes.role,'status');
   assert.equal(descendants(panel).find(n=>n.className==='setup-note').textContent,'','the step says what to do; no second Connect note');
@@ -2670,7 +2670,7 @@ test('an offer admitted after the account check collapses the list onto its comp
   const stream=l.workspace.createEventSource('/api/stream'),events=[];stream.onmessage=event=>events.push(JSON.parse(event.data));
   l.carrier.bind(landingRefs[1].reference_id);await flush();
   assert.deepEqual(l.shownCards(),['b.example.test · Not connected']);
-  assert.equal(l.status().hidden,true);assert.equal(l.panel().children.find(n=>n.tagName==='H2').textContent,'Finish setting up b.example.test');
+  assert.equal(l.status().hidden,true);assert.equal(l.panel().children.find(n=>n.tagName==='H2').textContent,'b.example.test');
   assert.equal(events.at(-1)?.coverage_changed,true,'the boards read again with the new presentation');
   assert.deepEqual(events.at(-1).overview.data.sources.map(s=>s.label),['b.example.test']);
   assert.deepEqual(l.mutations(),[]);stream.close();
@@ -3024,10 +3024,12 @@ test('a page whose Launch the computer said was reserved keeps that word in this
   l.h.api.dispose();
   const p=connectedPanel({saved:[...l.h.saved]});
   assert.equal(visible(reopenedLede(p)),false,'the page opened again knows a Launch was reserved before it connects');
-  assert.deepEqual(stepShape(p.panel),[['connect','current'],['approve','upcoming'],['goal','done'],['launch','upcoming']]);
+  assert.deepEqual(stepShape(p.panel),[['connect','current']],'a kept request is not drawn done before Connect (40-02)');
   p.h.api.dispose();
-  // A request kept from a Preview alone says nothing about a launch: the line shows, as before.
+  // A request kept from a Preview alone says nothing about a launch: once connected the line shows, as before.
   const preview=connectedPanel({saved:[keptLaunch()[0]]});
+  assert.equal(visible(reopenedLede(preview)),false,'before Connect there is no first-team line at all');
+  await preview.finish('ready');
   assert.equal(visible(reopenedLede(preview)),true);preview.h.api.dispose();
 });
 test('a page opened again after its Launch reads that launch\'s status once after Connect and lands on the true state, never launching',async()=>{
@@ -3075,7 +3077,7 @@ test('a stored word on a launch that this page cannot trust, or storage that fai
     ['a browser that refuses to read it',{saved:[...keptLaunch()],
       storage:saved=>({getItem:key=>{if(key==='test:launch')throw new Error('denied');return saved.get(key)??null;}})}]]){
     const p=connectedPanel(options);
-    assert.equal(visible(reopenedLede(p)),true,name);
+    assert.equal(visible(reopenedLede(p)),false,'before Connect, '+name);
     await p.finish('ready');await flush();
     assert.deepEqual(viewOf(p),before,name);p.h.api.dispose();
   }
@@ -3108,7 +3110,7 @@ test('a reopened page whose approval read says a launch is held hides the Launch
   const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]})]],
     context:{request:settingUp,launch_reserved:true}});
   const lede=descendants(p.panel).find(n=>n.className==='setup-lede');
-  assert.equal(visible(lede),true);
+  assert.equal(visible(lede),false,'before Connect there is no first-team line');
   await p.finish();assert.equal(p.reads(),1);
   assert.equal(visible(lede),false);
   assert.equal(p.h.calls.filter(c=>['launch','receipt'].includes(c[0])).length,0,'only the approval read');p.h.api.dispose();
@@ -3172,7 +3174,7 @@ test('browser carrier: one saved computer opens its panel; an account listing on
   // The document and account both list one computer: the ordinary single-computer setup.
   const one=landing(t,{references:[landingRefs[0]]});await one.workspace.checkAccount();await flush();
   assert.equal(one.workspace.snapshot().phase,'ready');
-  assert.equal(one.panel().children.find(n=>n.tagName==='H2').textContent,'Finish setting up a.example.test');
+  assert.equal(one.panel().children.find(n=>n.tagName==='H2').textContent,'a.example.test');
   assert.deepEqual(stepShape(one.panel())[0].slice(0,2),['connect','current']);assert.deepEqual(one.mutations(),[]);
   // The document saved three computers but the account lists only the bound one: the saved set changed, so nothing is admitted.
   const partial=landing(t,{metadata:context([landingRefs[0]])});await partial.workspace.checkAccount();await flush();
@@ -3260,7 +3262,7 @@ test('a started computer with no team shows its parts in order, with no working 
   assert.deepEqual(partRows(parts),[['computer','linked','a.example.test','Linked'],['provider','not_linked','Claude','Not linked'],['bots','none','Bots','None yet']],
     'no helper row: the embedding page did not name it');
   assert.equal(parts.attributes['aria-label'],'a.example.test');
-  const buttons=descendants(parts).filter(n=>n.tagName==='BUTTON');
+  const buttons=descendants(parts).filter(n=>n.tagName==='BUTTON'&&!/part-claude-button/.test(n.className));
   assert.deepEqual(buttons.map(b=>[b.textContent,b.disabled,b.attributes['aria-disabled'],visible(b)]),[['Create a bot',true,'true',true]],'one control, visibly not available');
   const reason=descendants(parts).find(n=>n.className==='part-reason');
   assert.equal(reason.textContent,'You can’t create bots here yet.');assert.equal(buttons[0].attributes['aria-describedby'],reason.id);
@@ -3940,4 +3942,228 @@ test('no renewal during a link sign-in',async()=>{
   state='connected';assert.equal(await signin.operate('signin-status',0),true);assert.equal(signin.state(),'connected');
   assert.equal(await client.renew(),true);assert.equal(renewals(),1,'the end of the sign-in releases the renewal');
   signin.dispose();client.dispose();
+});
+
+// The Claude part (C4): the parts view's provider row, driven on a bridged page with the setup page's answers.
+const SHELL=documentContext.shell_origin;
+const setupURL=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
+const signinPartOf=(changes={})=>({generation:id(30),phase:'approved',attempt_id:null,state:null,reason:null,code_sent:false,retryable:false,unconfirmed:false,...changes});
+const linkAnswer=(changes={},signin)=>partsAnswer({provider:{state:'not_linked',link:'available',...(signin?{signin}:{}),...changes}});
+const claudeBox=l=>descendants(partsOf(l.host)).find(n=>n.className==='part-claude');
+const claudeLine=l=>descendants(claudeBox(l)).find(n=>n.className==='part-claude-line');
+const claudeButtons=l=>descendants(claudeBox(l)).filter(n=>n.tagName==='BUTTON'&&visible(n)).map(n=>n.textContent);
+const claudeButton=(l,text)=>descendants(claudeBox(l)).find(n=>n.tagName==='BUTTON'&&visible(n)&&n.textContent===text);
+// The session's own long timers (renewal, expiry) are not what these tests are about; the short ones are.
+const fireShort=l=>{for(const timer of l.h.timers.filter(x=>x.active&&x.ms<=60000)){timer.active=false;timer.fn();}};
+const runRequests=l=>l.frame.posts.filter(([message])=>message.type==='claudfather.workspace.request-run');
+const runEnded=(changes={})=>({type:'claudfather.workspace.run-ended',version:1,run:'link',outcome:'approved',reason:null,...changes});
+const deliver=(l,data,over={})=>l.frame.view.listeners.get('message')({source:l.frame.view.parent,origin:SHELL,data,...over});
+// A bridged page whose parts read answers whatever `holder.answer` says when it is read.
+async function claudePage(t,answer) {
+  const holder={answer};
+  const w=await workingPage(t,{teams:0,answer:()=>reply(200,holder.answer)});
+  return {...w,holder,l:w.l};
+}
+const signinAnswerFor=holder=>init=>{const body=JSON.parse(init.body);
+  holder.answer=linkAnswer({},signinPartOf({phase:'waiting',attempt_id:body.attempt_id,state:'waiting'}));
+  return reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL});};
+const claudeSentences={elsewhere:'Linking Claude continues on the page where you added this computer.',
+  update:'Update this computer to link Claude.',waiting:'Waiting for your answer to the permission shown above.',saved:'A Claude sign-in is saved on this computer.'};
+
+test('no marker: N12 and "Go to the update", which sends only request-run update; no Link Claude',async t=>{
+  const {l}=await claudePage(t,partsAnswer());
+  assert.equal(claudeLine(l).textContent,claudeSentences.update);
+  assert.deepEqual(claudeButtons(l),['Go to the update']);
+  claudeButton(l,'Go to the update').click();await flush();
+  assert.deepEqual(runRequests(l).map(([message,origin])=>[message,origin]),[[{type:'claudfather.workspace.request-run',version:1,run:'update'},SHELL]]);
+  assert.equal(l.frame.posts.filter(([message])=>message.run==='link').length,0);
+  assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state'],'the view starts nothing on the computer');
+  // Off the setup page (a direct connection) nothing can be asked of a page: the sentence about where it continues, no button.
+  const direct=await partsWorkspace(t,{answer:partsAnswer()});
+  const box=descendants(partsOf(direct.host)).find(n=>n.className==='part-claude');
+  assert.equal(descendants(box).find(n=>n.className==='part-claude-line').textContent,claudeSentences.elsewhere);
+  assert.deepEqual(descendants(box).filter(n=>n.tagName==='BUTTON'&&visible(n)),[]);
+});
+test('a sign-in call the page refuses draws B10\'s second sentence, not an error',async t=>{
+  const refusing=await (async()=>{
+    const holder={answer:linkAnswer({},signinPartOf({phase:'waiting',attempt_id:id(31),state:'waiting'}))};
+    const l2=landing(t);await l2.workspace.checkAccount();await flush();
+    l2.h.overrides.set(setupURL+'state',()=>reply(200,holder.answer));
+    l2.h.overrides.set(setupURL+'signin-status',()=>reply(403,{state:'denied'}));
+    const connect=descendants(stepsOf(l2.panel())[0]).find(n=>n.tagName==='BUTTON');connect.click();await flush();
+    return l2;
+  })();
+  assert.equal(claudeLine(refusing).textContent,claudeSentences.elsewhere);
+  assert.deepEqual(claudeButtons(refusing),[],'no button');
+  assert.equal(refusing.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length,1,'asked once, never retried');
+  assert.ok(descendants(claudeBox(refusing)).every(n=>!visible(n)||!/could not reach|refused/i.test(n.textContent)),'no error text');
+  fireShort(refusing);await flush();
+  assert.equal(refusing.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length,1);
+});
+test('not_here: no button',async t=>{
+  const {l}=await claudePage(t,partsAnswer({provider:{state:'not_linked',link:'not_here'}}));
+  assert.deepEqual(partRows(partsOf(l.host))[1],['provider','not_linked','Claude','Not linked']);
+  assert.deepEqual(claudeButtons(l),[]);assert.equal(claudeBox(l).hidden,true);
+  assert.equal(runRequests(l).length,0);
+});
+test('request-run only from a click',async t=>{
+  const {l}=await claudePage(t,linkAnswer());
+  assert.deepEqual(claudeButtons(l),['Link Claude']);
+  // Reads, renders, focus, visibility, page show and timers never ask the page for anything.
+  l.frame.view.listeners.get('focus')();await flush();l.frame.view.listeners.get('pageshow')();await flush();
+  l.h.ui.document.visibilityState='hidden';l.h.ui.listeners.get('visibilitychange')();
+  l.h.ui.document.visibilityState='visible';l.h.ui.listeners.get('visibilitychange')();await flush();
+  fireShort(l);await flush();
+  assert.equal(l.frame.posts.filter(([message])=>/request-run/.test(message.type)).length,0);
+  claudeButton(l,'Link Claude').click();await flush();
+  assert.deepEqual(runRequests(l).map(([message,origin])=>[message,origin]),[[{type:'claudfather.workspace.request-run',version:1,run:'link'},SHELL]]);
+  assert.equal(claudeLine(l).textContent,claudeSentences.waiting);assert.deepEqual(claudeButtons(l),['Stop waiting']);
+  assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)).filter(x=>x!=='state'),[],'nothing but parts reads goes to the computer');
+});
+test('run-ended is taken only from the parent at the shell origin, with exactly its keys and a closed outcome',async t=>{
+  const w=await claudePage(t,linkAnswer()),{l}=w;
+  claudeButton(l,'Link Claude').click();await flush();
+  const reads=()=>stateCalls(l.h).length,before=reads();
+  for(const [name,data,over] of [['another window',runEnded(),{source:{}}],['another origin',runEnded(),{origin:'https://other.example.test'}],
+    ['an extra key',{...runEnded(),extra:1}],['a missing key',(({reason,...rest})=>rest)(runEnded())],['an unknown outcome',runEnded({outcome:'done'})],
+    ['a reason beside approved',runEnded({reason:'other'})],['a refusal with no reason',runEnded({outcome:'refused'})],
+    ['an unknown reason',runEnded({outcome:'refused',reason:'nope'})],['a wrong version',{...runEnded(),version:2}],
+    ['an update that is approved',runEnded({run:'update'})]]){
+    deliver(l,data,over);await flush();
+    assert.equal(reads(),before,name+' is ignored');assert.equal(claudeLine(l).textContent,claudeSentences.waiting,name);
+  }
+  deliver(l,runEnded({outcome:'refused',reason:'busy'}));await flush();
+  assert.equal(reads(),before+1,'one read');assert.deepEqual(claudeButtons(l),['Link Claude'],'any other outcome returns the part to Link Claude');
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,0);
+});
+test('run-ended approved begins once; after Stop waiting it does not',async t=>{
+  const w=await claudePage(t,linkAnswer()),{l,holder}=w;
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  const begins=()=>l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin'));
+  claudeButton(l,'Link Claude').click();await flush();
+  holder.answer=linkAnswer({},signinPartOf());
+  deliver(l,runEnded());await flush();
+  assert.equal(begins().length,1,'the sign-in begins by itself');
+  assert.equal(JSON.parse(begins()[0].init.body).generation,id(30));
+  assert.ok(claudeButtons(l).includes('Open Claude sign-in')||descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),'the lifted step shows the link');
+  assert.equal(descendants(claudeBox(l)).some(n=>n.textContent==='Code from Claude'),true);
+  deliver(l,runEnded());await flush();assert.equal(begins().length,1,'a second answer begins nothing');
+  // After Stop waiting: its own button, not a begin.
+  const s=await claudePage(t,linkAnswer());
+  s.l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(s.holder));
+  claudeButton(s.l,'Link Claude').click();await flush();
+  claudeButton(s.l,'Stop waiting').click();await flush();
+  assert.deepEqual(claudeButtons(s.l),['Link Claude'],'only the line went; a later answer still lands');
+  s.holder.answer=linkAnswer({},signinPartOf());
+  deliver(s.l,runEnded());await flush();
+  assert.equal(s.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,0);
+  assert.ok(claudeButtons(s.l).includes('Sign in to Claude'));
+  claudeButton(s.l,'Sign in to Claude').click();await flush();
+  assert.equal(s.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,1,'its own button begins it');
+});
+test('no parts read on a timer',async t=>{
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  claudeButton(l,'Link Claude').click();await flush();
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  const reads=stateCalls(l.h).length;
+  for(let round=0;round<3;round++){fireShort(l);await flush();}
+  assert.equal(stateCalls(l.h).length,reads,'timers (the sign-in\'s own status check among them) never read the parts');
+  assert.ok(l.h.calls.some(c=>c.url.endsWith('/setup/signin-status')),'the sign-in check itself still runs');
+});
+const endingRows=[
+  [{state:'needs_attention',reason:'timeout',retryable:true},'The sign-in ran out of time before a code was entered.','Try again'],
+  [{state:'needs_attention',reason:'timeout',retryable:false},'The sign-in ran out of time before a code was entered.','Link Claude'],
+  [{state:'cancelled',reason:'effect_uncertain',retryable:true},'The sign-in was cancelled.','Try again'],
+  [{state:'cancelled',reason:'effect_uncertain',retryable:true,code_sent:true},'The sign-in was cancelled.','Link Claude'],
+  [{state:'cancelled',reason:'service_stopped'},'The sign-in was interrupted when this computer\'s connection restarted.','Link Claude'],
+  [{state:'unknown',reason:'interrupted'},'The sign-in was interrupted when this computer\'s connection restarted.','Link Claude'],
+  [{state:'needs_attention',reason:'provider_failed',code_sent:true},'Claude did not accept the code.','Link Claude'],
+  [{state:'needs_attention',reason:'provider_failed'},'The sign-in did not finish on this computer.','Link Claude'],
+  [{state:'needs_attention',reason:'boundary_or_process_failure'},'The sign-in did not finish on this computer.','Link Claude'],
+  [{state:'needs_attention',reason:'something_new'},'The sign-in did not finish on this computer.','Link Claude'],
+  ...['unsupported_output','ambiguous_output','output_limit'].map(reason=>[{state:'needs_attention',reason},'Claude replied in a way this computer could not read. Try again later.','Link Claude']),
+  [{state:'needs_attention',reason:'unsupported_provider'},'The Claude app on this computer changed or is not a supported version.','Link Claude'],
+  [{state:'needs_attention',reason:'artifact_copy_failed'},'Claude could not be prepared on this computer.','Link Claude'],
+  [{state:'needs_attention',reason:'environment_changed'},'A settings file on this computer changed during sign-in.','Link Claude'],
+  [{state:'needs_attention',reason:'storage_uncertain'},'The sign-in may not have been saved on this computer.','Link Claude'],
+  ...['private_path_changed','file_binding_changed','profile_changed','scope_changed'].map(reason=>[{state:'needs_attention',reason},'Setup files on this computer changed during sign-in.','Link Claude']),
+  ...['credential_already_present','environment_format'].map(reason=>[{state:'needs_attention',reason},'A settings file on this computer needs fixing on the computer itself before Claude can be linked.','Check again']),
+  [{state:'unknown',reason:'child_quiet_unproven',unconfirmed:true},'This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.','Check again']];
+test('each ending draws its line and one button',async t=>{
+  for(const [ending,line,button] of endingRows){
+    const {l}=await claudePage(t,linkAnswer({},signinPartOf({phase:'ended',attempt_id:id(32),...ending})));
+    const name=JSON.stringify(ending);
+    assert.equal(claudeLine(l).textContent,line,name);assert.deepEqual(claudeButtons(l),[button],name);
+    assert.equal(descendants(claudeBox(l)).some(n=>n.textContent==='Code from Claude'&&visible(n)),false,'no sign-in step: '+name);
+  }
+  // "Check again" reads once and starts nothing; "Link Claude" asks the page; a Try again the page refuses falls back to Link Claude.
+  const checking=await claudePage(t,linkAnswer({},signinPartOf({phase:'ended',attempt_id:id(32),state:'needs_attention',reason:'environment_format'})));
+  const reads=stateCalls(checking.l.h).length;claudeButton(checking.l,'Check again').click();await flush();
+  assert.equal(stateCalls(checking.l.h).length,reads+1);assert.equal(runRequests(checking.l).length,0);
+  const again=await claudePage(t,linkAnswer({},signinPartOf({phase:'ended',attempt_id:id(32),state:'needs_attention',reason:'timeout',retryable:true})));
+  again.l.h.overrides.set(setupURL+'signin-begin',()=>reply(403,{state:'denied'}));
+  claudeButton(again.l,'Try again').click();await flush();
+  assert.equal(again.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,1);
+  assert.deepEqual(claudeButtons(again.l),['Link Claude'],'a Try again the page refuses falls back to Link Claude');
+  assert.equal(claudeLine(again.l).textContent,'The sign-in ran out of time before a code was entered.');
+  claudeButton(again.l,'Link Claude').click();await flush();
+  assert.deepEqual(runRequests(again.l).map(([message])=>message.run),['link']);
+});
+test('linked wins over an ended sign-in',async t=>{
+  const {l}=await claudePage(t,partsAnswer({provider:{state:'linked',link:'available',signin:signinPartOf({phase:'ended',attempt_id:id(32),state:'needs_attention',reason:'timeout',retryable:true})}}));
+  assert.deepEqual(partRows(partsOf(l.host))[1],['provider','linked','Claude','Linked']);
+  assert.equal(claudeLine(l).textContent,claudeSentences.saved);assert.deepEqual(claudeButtons(l),[]);
+  const live=await claudePage(t,partsAnswer({provider:{state:'linked',link:'available',signin:signinPartOf({phase:'waiting',attempt_id:id(32),state:'waiting'})}}));
+  assert.equal(claudeLine(live.l).textContent,claudeSentences.saved);assert.equal(live.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length,0,'no sign-in step for a linked computer');
+});
+test('before Connect no first-team heading',async t=>{
+  const l=landing(t);await l.workspace.checkAccount();await flush();
+  const panel=l.panel(),heading=panel.children.find(n=>n.tagName==='H2');
+  assert.equal(heading.textContent,'a.example.test');
+  const eyebrow=panel.children.find(n=>/setup-focus-eyebrow/.test(n.className));assert.equal(visible(eyebrow),false);
+  const texts=l.shownText();
+  assert.ok(texts.includes('Connect this computer')&&texts.includes('Connect to see what is set up on this computer.'));
+  assert.ok(texts.every(text=>!/first-team|finish setting up|launch/i.test(text)),texts.join(' | '));
+  // Connected into setup, the first-team panel returns with its heading.
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>reply(200,landingContext));
+  descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON').click();await flush();
+  assert.equal(heading.textContent,'Finish setting up a.example.test');assert.equal(visible(eyebrow),true);
+});
+test('a stored tick is not drawn before confirmation, and is cleared on no team',async()=>{
+  const kept=[['test',JSON.stringify({version:2,pending:landingBinding,conflicts:[],legacy:[]})],['test:launch',JSON.stringify(landingBinding)]];
+  const h=setupHarness({saved:kept}),ui=dom(),root=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:root,standalone:true});
+  const done=()=>stepsOf(root).filter(n=>n.dataset.state==='done').map(n=>n.dataset.step);
+  assert.deepEqual(done(),[],'nothing is drawn done from what this browser kept');
+  assert.deepEqual(stepButtons(root),['Check setup approval','Check launch status'].filter(x=>stepButtons(root).includes(x)),'the kept request still leads its status check');
+  assert.ok(stepButtons(root).includes('Check launch status'));
+  h.api.noTeam();
+  assert.equal(h.saved.get('test:launch'),'null','the kept word that a launch was seen is cleared when the computer reads no team');
+  assert.deepEqual(JSON.parse(h.saved.get('test')).pending,landingBinding,'the request itself stays kept: it still blocks a second launch');
+  // Once the computer says something about it in this visit, the tick is drawn.
+  h.context.request=h.pending;await h.api.run('context');
+  assert.ok(done().includes('goal'),'drawn once the computer confirms the request');
+  assert.equal(h.calls.filter(c=>['launch','preview'].includes(c[0])).length,0);
+  h.api.dispose();
+  // A tick the computer confirmed in this visit is never cleared by a no-team read.
+  const again=setupHarness({saved:kept}),ui2=dom(),root2=new ui2.Element();again.context.request=again.pending;
+  again.api.mountPanel({document:ui2.document,element:root2,standalone:true});await again.api.run('context');again.api.noTeam();
+  assert.equal(again.saved.get('test:launch'),JSON.stringify(landingBinding));again.api.dispose();
+});
+test('an older parts read draws as today',async t=>{
+  const w=await partsWorkspace(t,{answer:partsAnswer()}),parts=w.parts();
+  assert.deepEqual(partRows(parts),[['computer','linked','a.example.test','Linked'],['provider','not_linked','Claude','Not linked'],['bots','none','Bots','None yet']]);
+  // No Link Claude, no sign-in step and nothing but the sentence about where linking continues.
+  const box=descendants(parts).find(n=>n.className==='part-claude');
+  assert.deepEqual(descendants(box).filter(n=>n.tagName==='BUTTON'&&visible(n)),[]);
+  assert.equal(descendants(box).find(n=>n.className==='part-claude-line').textContent,claudeSentences.elsewhere);
+  // A marker or sign-in this view does not know makes the whole answer unusable, as every other unknown state does.
+  for(const provider of [{state:'not_linked',link:'sideways'},{state:'not_linked',signin:{phase:'ended'}}]){
+    const bad=await partsWorkspace(t,{answer:partsAnswer({provider})});
+    assert.equal(bad.parts(),undefined,JSON.stringify(provider));
+  }
 });

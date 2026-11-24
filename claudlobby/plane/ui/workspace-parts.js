@@ -1,6 +1,9 @@
 // The parts view: one row for each part of a started computer, from the parts read (setup-state).
-// It reads only, over a connection the person already made, and has no working control in this version.
-// Every sentence a person reads here is the owner's approved wording (2026-11-23).
+// It reads over a connection the person already made. Its one working control is the Claude part's: Link Claude
+// asks the setup page (never this view) to run the permission card, and the sign-in that follows is claude-signin.js.
+// Every sentence a person reads here is the owner's approved wording (2026-11-23), except the Claude part's
+// drafts (CLAUDE_TEXT and claude-signin.js's link endings), which wait for the owner's yes.
+import { createClaudeSignin, SIGNIN_PROGRESS, linkEnding, LINK_ENDING_BUTTONS, LINK_CLOSING } from "./claude-signin.js";
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...fields].sort().join();
 const has = (value, fields) => value && typeof value === 'object' && !Array.isArray(value) && fields.every(key => Object.hasOwn(value, key));
@@ -14,6 +17,14 @@ export const PART_TEXT = Object.freeze({
   asleep:'Asleep until Claude is linked', // A17
   later:'Coming soon',              // B17
   oneTeam:'1 team set up'});        // the owner's sentence for one team (2026-11-23)
+// The Claude part's own sentences (plan section 6; not approved yet): B10 (both), N12, N4, B11 and B15.
+export const CLAUDE_TEXT = Object.freeze({
+  link:'Link Claude',                     // B10
+  elsewhere:'Linking Claude continues on the page where you added this computer.', // B10
+  update:'Update this computer to link Claude.', goUpdate:'Go to the update', // N12
+  waiting:'Waiting for your answer to the permission shown above.', // N4
+  stop:'Stop waiting',                    // B11
+  saved:'A Claude sign-in is saved on this computer.'}); // B15
 // The count is the saved configuration's, also true mid-Launch, after a failed Launch and after a stop, so it says
 // "set up", never "running". Only one team has a sentence: with more the bots part says nothing (no plural is approved).
 // The embedding page may name the provider, bots and helper parts (part_names in the connected document), never a
@@ -33,16 +44,28 @@ export function partNames(value) {
   if (entries.some(([key, name]) => !NAMED.includes(key) || typeof name !== 'string' || name.length > 40 || !NAME.test(name) || saysStatus(name))) return null;
   return Object.freeze(Object.fromEntries(entries));
 }
+const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+const signinPart = value => has(value, ['generation','phase','attempt_id','state','reason','code_sent','retryable','unconfirmed'])
+  && uuid(value.generation) && ['approved','waiting','ended'].includes(value.phase) && (value.attempt_id === null || uuid(value.attempt_id))
+  && (value.state === null || typeof value.state === 'string') && (value.reason === null || typeof value.reason === 'string')
+  && [value.code_sent, value.retryable, value.unconfirmed].every(flag => typeof flag === 'boolean');
 // The parts read's answer (owner_setup.py SetupEngine.state). Later versions add keys inside a part, so only the
 // keys read here are required; a state this view does not know makes the whole answer unusable, never half drawn.
 function answer(value) {
   if (!has(value, ['version','computer','provider','team','teams','bots','helper']) || value.version !== 1
     || !['started','not_started'].includes(value.computer) || !Number.isSafeInteger(value.teams) || value.teams < 0
     || !has(value.provider, ['state']) || !['not_linked','linked'].includes(value.provider.state)
+    || has(value.provider, ['link']) && !['available','not_here'].includes(value.provider.link)
+    || has(value.provider, ['signin']) && !signinPart(value.provider.signin)
     || !has(value.team, ['state']) || typeof value.team.state !== 'string'
     || !Array.isArray(value.bots) || !has(value.helper, ['state']) || !['asleep','later'].includes(value.helper.state)) return null;
+  // link: the computer's marker ('available' or 'not_here'), null from a core that has none. signin: the link
+  // approval's sign-in, null when there is none (provider.signin, owner_setup.py), copied to the keys read here.
+  const signin = value.provider.signin;
   return Object.freeze({computer:value.computer, provider:value.provider.state, teams:value.teams, helper:value.helper.state,
-    team:value.team.state});
+    team:value.team.state, link:value.provider.link ?? null, signin:signin ? Object.freeze({generation:signin.generation,
+      phase:signin.phase, attempt_id:signin.attempt_id, state:signin.state, reason:signin.reason, code_sent:signin.code_sent,
+      retryable:signin.retryable, unconfirmed:signin.unconfirmed}) : null});
 }
 
 // One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
@@ -51,9 +74,21 @@ function answer(value) {
 // on a timer and never to retry. A read the hold kept back is sent once by release() when the hold ends. A refusal, a lost answer or a computer whose core has no parts read leaves
 // started() false, so the view shows exactly what it showed before this read existed; once an answer is shown for this
 // connection, such a refresh keeps it, so one failed read never takes the view away.
-export function createWorkspaceParts({client, name, names = null, key, hold = () => false, onChange = () => {}}) {
+// The Claude part (section "The Claude part" of the plan): onSetupPage is true on the setup page's own frame (the
+// browser carrier), the only place Link Claude can be asked. request(run) asks that page, with run 'link' or 'update',
+// and says whether it was sent; the view only ever calls it from a press. runEnded(message) takes the page's answer.
+export function createWorkspaceParts({client, name, names = null, key, hold = () => false, onChange = () => {},
+  onSetupPage = false, request = () => false, now = () => Date.now()/1000, visible = () => true,
+  setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
+  copyText = text => globalThis.navigator.clipboard.writeText(text)}) {
   let current = null, readFor = null, reading = null, again = false, disposed = false, mount = null, last = client.snapshot();
   let held = false; // a read for a ready connection was kept back by hold()
+  // The Claude part. waiting: this view pressed Link Claude and the page has not answered (Stop waiting only ends the
+  // line, a later answer still lands). sg: the lifted sign-in step for the current link approval (claude-signin.js),
+  // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (this
+  // page may not carry the sign-in), 'closing' (an earlier attempt is still closing) or 'fallback' (a Try again the
+  // page refused), each cleared when the read's sign-in changes.
+  let waiting = false, sg = null, busy = false, busyOp = null, epochs = 0, notice = null, noticeFor = null;
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
     const before = last; last = state;
@@ -64,7 +99,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     const renewal = before.state === 'ready' && passing(state.state)
       || passing(before.state) && state.state === 'ready' && (state.read_profile?.host_uid ?? null) === current?.host;
     if (current && renewal && current.epoch === before.epoch) { current = {...current, epoch:state.epoch}; readFor = state.epoch; }
-    else if (current && (current.epoch !== state.epoch || state.state !== 'ready')) current = null;
+    else if (current && (current.epoch !== state.epoch || state.state !== 'ready')) { current = null; dropSignin(); }
     if (state.state === 'ready' && readFor !== state.epoch) void read();
   }
   async function read() {
@@ -82,7 +117,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       if (disposed || !ready() || client.snapshot().epoch !== epoch) return false;
       // An unusable or lost refresh keeps an answer already shown for this connection.
       if (value) current = {...value, epoch, host:client.snapshot().read_profile?.host_uid ?? null};
-      else if (current?.epoch !== epoch) current = null;
+      else if (current?.epoch !== epoch) { current = null; dropSignin(); }
+      if (value) syncSignin();
       return !!value;
     })();
     try { return await reading; }
@@ -90,6 +126,104 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       reading = null;
       if (!disposed) { if (again) { again = false; void read(); } onChange(); }
     }
+  }
+  const signinKey = () => current?.signin ? `${current.signin.generation}/${current.signin.phase}/${current.signin.attempt_id}` : null;
+  function dropSignin() {
+    if (!sg) return;
+    const old = sg; sg = null; old.dead = true; old.module.stopPoll(); old.module.dispose();
+    mount?.claude.step.replaceChildren();
+  }
+  // Keeps the sign-in step in line with the read: one for a link approval that has not ended, resumed from the read's
+  // attempt (its url and time left come from setup-signin-status), none once it ended, Claude is linked or it is gone.
+  function syncSignin() {
+    const signin = current?.signin ?? null;
+    if (noticeFor !== signinKey()) { notice = null; noticeFor = signinKey(); }
+    if (!mount || !signin || current.provider === 'linked' || signin.phase === 'ended') { dropSignin(); return; }
+    const have = sg?.module.attempt()?.attempt_id ?? null;
+    if (sg && sg.generation === signin.generation && (signin.attempt_id === have || busy)) return;
+    dropSignin();
+    if (notice === 'refused') return; // this page may not carry it; nothing is asked of it again until the sign-in changes
+    startSignin(signin.generation, signin.attempt_id, 'resume');
+    if (signin.attempt_id !== null) void runOp('signin-status', true);
+  }
+  function startSignin(generation, attemptId, mode) {
+    dropSignin();
+    const g = {dead:false, epoch:++epochs, generation, mode, answered:false, reported:false, module:null};
+    g.module = createClaudeSignin({calls:(action, input) => client.setupSignin(action, input),
+      // No storage: the one kept attempt is the computer's, named by the parts read.
+      store:{read:() => attemptId === null ? null : JSON.stringify({generation, attempt_id:attemptId}), write:() => {}},
+      host:{approval:() => ({generation, expires_at:Number.MAX_SAFE_INTEGER, provider_signin:true}), pending:() => false,
+        busy:() => busy, busyOperation:() => busyOp, active:() => !disposed && !g.dead && ready(), disposed:() => disposed || g.dead,
+        epoch:() => g.epoch, changed:() => onChange(), run:(operation, options) => runOp(operation, options?.quiet === true)},
+      now, visible, setTimeout, clearTimeout, copyText});
+    g.module.load();
+    sg = g;
+    if (mount) {
+      const make = mount.make, row = (...nodes) => { const node = make('div','setup-actions'); node.append(...nodes); return node; };
+      const action = (label, className, operation) => { const node = make('button', className, label); node.type = 'button';
+        node.addEventListener('click', () => { if (!node.disabled) void runOp(operation); }); return node; };
+      mount.claude.step.replaceChildren();
+      g.module.mount({make, action, row, repaint:() => onChange(), step:before => {
+        const body = make('div','setup-step-body'); mount.claude.step.append(...before, body); return {body}; }});
+    }
+    return g;
+  }
+  // One sign-in call, as the page's own setup panel runs one (claude-signin.js operate/failed), with the link road's
+  // difference: a call this page refuses before any answer came is not an error, it is "continues on the page where
+  // you added this computer" (or, for Try again, Link Claude).
+  async function runOp(operation, quiet = false) {
+    const g = sg;
+    if (!g || g.dead || busy || disposed) return false;
+    busy = true; busyOp = quiet || !Object.hasOwn(SIGNIN_PROGRESS, operation) ? null : operation; onChange();
+    let ok = false;
+    try { ok = await g.module.operate(operation, g.epoch); if (ok) g.answered = true; }
+    catch (error) {
+      const restored = operation === 'signin-retry' ? g.module.restoreRetry(error) : '';
+      if (!disposed && !g.dead) {
+        if (g.answered || restored) g.module.failed(operation, error, restored, g.epoch);
+        else {
+          notice = error?.status === 409 && operation === 'signin-begin' && g.mode !== 'retry' ? 'closing'
+            : g.mode === 'retry' ? 'fallback' : 'refused';
+          noticeFor = signinKey(); dropSignin();
+        }
+      }
+    }
+    finally {
+      busy = false; busyOp = null;
+      if (!disposed && !g.dead) {
+        onChange(); g.module.schedule();
+        if (ok && operation === 'signin-begin') void read(); // the read now names this attempt
+        // An ending (or Claude linked) is drawn from the read, which is sent once, here, never on a timer.
+        if (['connected','needs_attention','cancelled','unknown'].includes(g.module.state()) && !g.reported) { g.reported = true; void read(); }
+      } else if (!disposed) onChange();
+    }
+    return ok;
+  }
+  function beginSignin(mode) {
+    const signin = current?.signin;
+    if (!mount || !signin || signin.phase !== 'ended') return false; // only Try again starts one by this road's own press
+    startSignin(signin.generation, null, mode);
+    void runOp('signin-begin');
+    return true;
+  }
+  // The page's answer to this view's request (the entry checked who sent it and its exact keys).
+  async function runEnded(message) {
+    if (disposed || !message) return false;
+    if (message.run !== 'link') return false; // an update answer needs nothing drawn: the page shows its own offer
+    const expecting = waiting; waiting = false; onChange();
+    const value = await read(); // once; it is also the only read this answer asks for
+    // Approved and still waiting: the sign-in begins by itself, once. After Stop waiting it waits for its own button.
+    if (message.outcome === 'approved' && expecting && value && !disposed && !busy && current?.signin?.phase === 'approved'
+      && current.signin.attempt_id === null) {
+      if (!sg) startSignin(current.signin.generation, null, 'begin');
+      void runOp('signin-begin');
+    }
+    return true;
+  }
+  function pressLink() {
+    if (!onSetupPage || busy) return;
+    notice = null;
+    if (request('link') === true) { waiting = true; onChange(); }
   }
   // An answer kept through a renewal or a session check stays shown while it lasts.
   const live = () => !!current && ['ready','renewing','checking'].includes(client.snapshot().state) && client.snapshot().epoch === current.epoch;
@@ -108,7 +242,22 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     control.type = 'button'; control.disabled = true; control.setAttribute('aria-disabled','true');
     reason.id = `parts-reason-${key}`; control.setAttribute('aria-describedby',reason.id);
     rows.bots.row.append(control,reason);
-    mount = {root,rows,control,reason};
+    // The Claude part, inside the provider row: one line, at most one button, and the lifted sign-in step.
+    const claudeBox = make('div','part-claude'), line = make('p','part-claude-line'), actions = make('div','setup-actions'),
+      button = make('button','pill setup-primary part-claude-button'), stop = make('button','pill ghost part-claude-button',CLAUDE_TEXT.stop),
+      step = make('div','part-claude-step');
+    line.setAttribute('role','status'); button.type = 'button'; stop.type = 'button'; actions.append(button,stop);
+    claudeBox.append(line,actions,step); rows.provider.row.append(claudeBox);
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      const operation = button.dataset.operation;
+      if (operation === 'link') pressLink();
+      else if (operation === 'update') request('update'); // only asks the page to show its own offer; the view never updates anything
+      else if (operation === 'try_again') { if (!busy && beginSignin('retry')) onChange(); }
+      else if (operation === 'check_again') void read();
+    });
+    stop.addEventListener('click', () => { waiting = false; onChange(); });
+    mount = {root,rows,control,reason,make,claude:{box:claudeBox,line,button,stop,step}};
     return root;
   }
   // visible: whether the entry shows the view at all (it keeps today's panel while that panel follows its own launch).
@@ -131,17 +280,61 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       current.teams === 1 ? PART_TEXT.oneTeam : current.teams ? '' : PART_TEXT.none);
     control.hidden = reason.hidden = current.teams > 0;
     root.dataset.teams = String(current.teams);
+    renderClaude();
     // The helper has no name in core: drawn only when the embedding page names it.
     rows.helper.row.hidden = !names?.helper;
     if (names?.helper) set('helper', names.helper, current.helper, current.helper === 'later' ? PART_TEXT.later : PART_TEXT.asleep);
   }
-  return Object.freeze({connectionChanged, refresh:read, started, render, mountView,
+  // What the Claude part shows for this read (the table in the plan's section on the Claude part): a line, at most one
+  // button, or the lifted sign-in step.
+  function claudeView() {
+    const c = current, signin = c.signin;
+    if (c.provider === 'linked') return {line:CLAUDE_TEXT.saved};       // linked wins over any sign-in
+    if (signin && signin.phase !== 'ended') {
+      if (waiting && signin.attempt_id === null) return {line:CLAUDE_TEXT.waiting, button:'stop'};
+      return notice === 'refused' ? {line:CLAUDE_TEXT.elsewhere} : {step:true};
+    }
+    if (notice === 'closing') return {line:LINK_CLOSING, button:'link'};
+    if (signin) {
+      const ending = linkEnding(signin), button = notice === 'fallback' && ending.button === 'try_again' ? 'link' : ending.button;
+      return {line:ending.line, button:button === 'link' && !onSetupPage ? null : button};
+    }
+    if (c.link === 'not_here') return {};                                // a nine-card computer links Claude in its own road
+    if (c.link === null) return onSetupPage ? {line:CLAUDE_TEXT.update, button:'update'} : {line:CLAUDE_TEXT.elsewhere};
+    if (!onSetupPage) return {line:CLAUDE_TEXT.elsewhere};
+    return waiting ? {line:CLAUDE_TEXT.waiting, button:'stop'} : {button:'link'};
+  }
+  function renderClaude() {
+    const {box,line,button,stop,step} = mount.claude, view = claudeView();
+    const text = view.line ?? '';
+    if (line.textContent !== text) line.textContent = text;
+    line.hidden = !text;
+    const main = view.button && view.button !== 'stop' ? view.button : null;
+    button.hidden = !main; stop.hidden = view.button !== 'stop';
+    if (main) {
+      button.dataset.operation = main;
+      const label = main === 'link' ? CLAUDE_TEXT.link : main === 'update' ? CLAUDE_TEXT.goUpdate : LINK_ENDING_BUTTONS[main];
+      if (button.textContent !== label) button.textContent = label;
+      button.disabled = busy || !ready();
+    }
+    step.hidden = !view.step;
+    box.hidden = !text && !main && view.button !== 'stop' && !view.step;
+    if (view.step && sg) {
+      const f = sg.module.flags();
+      const lead = f.typed ? 'code' : f.waitingLink ? 'link' : f.retryOffered ? 'retry'
+        : f.manualCheck && !f.ended && f.refusal !== 'attempt' ? 'status' : null;
+      sg.module.paint({live:ready(), busy, shown:true, flags:f, filled:(name, quiet) => lead === name ? 'pill setup-primary' : quiet});
+    }
+  }
+  return Object.freeze({connectionChanged, refresh:read, started, render, mountView, runEnded,
     // The entry's hold ended: a read it kept back is sent now, once; with none kept back nothing is sent.
     release:() => held ? read() : Promise.resolve(false),
     teams:() => started() ? current.teams : null,
+    // The computer's read says it has no team and no Launch under way (true of a reset computer too).
+    noTeam:() => live() && current.teams === 0 && current.team === 'none',
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
     // and the panel must not say "nothing runs yet" there either. It only hides that line and holds the panel.
     launchUnfinished:() => live() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
-    dispose() { disposed = true; current = null; mount = null; }});
+    dispose() { dropSignin(); disposed = true; current = null; mount = null; }});
 }
