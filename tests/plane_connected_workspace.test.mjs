@@ -3946,6 +3946,123 @@ test('in the working form the first-team panel is not offered, not even in the c
   assert.ok(l.panel(),'and its first-team panel');
   assert.deepEqual(formsPosted(l),['setup','working','setup']);
 });
+// 41-07: a page left idle after a healthy Launch. No input reaches the frame, so the renewal window passes without a
+// renewal and the 900-second session runs out. The working form stays, with its card's Connect as the way back.
+const idleUntilExpiry=async l=>{
+  l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}await flush();
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,0,'an idle page is not renewed');
+  l.h.time=900000;l.h.timer(900000);await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'unavailable','the session ran out');
+};
+test('a healthy launched team left idle until its session runs out keeps the working form, and Connect brings it back',async t=>{
+  const {l}=await bridgedLaunch(t,cleanDone),a=landingRefs[0].endpoint_origin,posts=l.frame.sizes().length;
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);
+  await idleUntilExpiry(l);
+  assert.equal(setupMarker(l),undefined,'the working form stays');assert.equal(l.panel(),undefined,'the finished panel does not come back');
+  assert.deepEqual(formsPosted(l),['setup','working']);assert.equal(l.frame.sizes().length,posts,'no new height');
+  const card=l.cards()[0],primary=card.children[1].children[0];
+  assert.ok(visible(card));assert.match(card.children[0].textContent,/Session expired$/);
+  assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
+  l.h.overrides.delete(a+'/api/owner/connected/issue'); // this time the computer issues a reading session
+  primary.click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(partsOf(l.host)?.hidden,false,'the new session\'s parts read answers');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');
+  assert.deepEqual(formsPosted(l),['setup','working'],'the form never changed, not even while connecting');
+  assert.equal(l.frame.sizes().length,posts);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,1,'never a second Launch');
+});
+test('after a lapse the next parts answer decides the form: a computer with no team goes back to the setup form',async t=>{
+  const w=await workingPage(t),{l}=w,a=landingRefs[0].endpoint_origin;
+  await idleUntilExpiry(l);
+  assert.equal(setupMarker(l),undefined);
+  l.h.overrides.set(a+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer({teams:0})));
+  await l.workspace.act(0,'connect');await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(setupMarker(l),'setup');assert.deepEqual(formsPosted(l),['setup','working','setup']);
+});
+test('on a bridged working page a renewal whose answer is lost keeps the working form and offers Check connection',async t=>{
+  const {l}=await workingPage(t),renew=landingRefs[0].endpoint_origin+'/api/owner/connected/renew',posts=l.frame.sizes().length;
+  l.h.overrides.set(renew,()=>Promise.reject(new Error('lost')));
+  assert.equal(await l.workspace.act(0,'renew'),false);await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'unavailable');
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);assert.equal(l.panel(),undefined);
+  assert.equal(l.frame.sizes().length,posts,'no new height');
+  const primary=l.cards()[0].children[1].children[0];
+  assert.equal(primary.textContent,'Check connection');assert.equal(primary.disabled,false);
+  primary.click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready','the session the renewal kept is still good');
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);
+});
+for(const [name,answer,offer] of [['a refusal',()=>reply(403,{state:'denied'}),'Connect'],['a lost answer',()=>Promise.reject(new Error('lost')),'Check connection']])
+  test(`after a clean Launch a session check ending in ${name} brings back the setup form with its Connect step offered again`,async t=>{
+    const {l,panel}=await bridgedLaunch(t,cleanDone);
+    l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/status',answer);
+    await l.workspace.act(0,'check');await flush();
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+    assert.equal(setupMarker(l),'setup','a session check that ends anywhere but ready still brings back the setup form');
+    assert.equal(l.panel(),panel);
+    assert.deepEqual(stepShape(panel)[0],['connect','current'],'the Connect step is not ticked while this computer is not connected');
+    assert.ok(offered(panel,offer),'a way back inside the frame');
+    assert.equal(descendants(panel).some(n=>n.textContent==='Connect so you can finish setup.'&&visible(n)),false,
+      'no setup is left to finish once the team is launched');
+    assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the Launch stays done');
+  });
+// An automatic renewal whose answer is lost keeps the working form, as Keep connected does: the transport reports
+// unavailable before the renewal's outcome is recorded, and the renewal under way holds the lapse until it is.
+for(const [how,answer] of [['rejected',()=>Promise.reject(new Error('lost'))],['answered 503',()=>reply(503,{state:'unavailable'})]])
+  test(`on a working page an automatic renewal ${how} keeps the working form and offers Check connection`,async t=>{
+    const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin,posts=l.frame.sizes().length;
+    l.h.overrides.set(a+'/api/owner/connected/renew',answer);
+    l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}
+    await flush();l.h.ui.listeners.get('pointerdown')({isTrusted:true});l.h.timer(0);await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,1,'one automatic renewal');
+    assert.equal(l.workspace.snapshot().computers[0].state,'unavailable');
+    assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working'],'no form change');
+    assert.equal(l.panel(),undefined);assert.equal(l.frame.sizes().length,posts,'no new height');
+    const primary=l.cards()[0].children[1].children[0];
+    assert.equal(primary.textContent,'Check connection');assert.equal(primary.disabled,false);
+  });
+// A renewal the computer refused is an answer, not a lapse: the setup form comes back whatever the follow-up check says.
+for(const [how,status] of [['refused',()=>reply(403,{state:'denied'})],['lost',()=>Promise.reject(new Error('lost'))]])
+  for(const automatic of [false,true])
+    test(`on a working page a ${automatic?'automatic':'Keep connected'} renewal refused, then a status check ${how}, brings back the setup form`,async t=>{
+      const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin;
+      l.h.overrides.set(a+'/api/owner/connected/renew',()=>reply(403,{state:'denied'}));
+      l.h.overrides.set(a+'/api/owner/connected/status',status);
+      if(automatic){
+        l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}
+        await flush();l.h.ui.listeners.get('pointerdown')({isTrusted:true});l.h.timer(0);
+      }else assert.equal(await l.workspace.act(0,'renew'),false);
+      await flush();
+      assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,1,'one renewal was asked for');
+      assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+      assert.equal(setupMarker(l),'setup','the refusal ends the team view');
+      assert.deepEqual(formsPosted(l),['setup','working','setup']);
+      assert.match(l.cards()[0].children[0].textContent,/Access denied$/);
+    });
+// A Connect from a lapsed page that reaches another computer or binding at the same address cannot bring the team back.
+for(const [name,change] of [['another computer',{host_uid:'host_'+'d'.repeat(32)}],['a new binding',{binding_generation:id(8)}]])
+  test(`a Connect from a lapsed working page whose challenge comes from ${name} brings back the setup form`,async t=>{
+    const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin,url=a+'/api/owner/connected/challenge';
+    await idleUntilExpiry(l);
+    assert.equal(setupMarker(l),undefined);
+    const issued=l.h.calls.filter(c=>c.url.endsWith('/issue')).length;
+    l.h.overrides.set(url,init=>{l.h.overrides.delete(url);return l.h.dependencies.fetch(url,init).then(r=>r.json()).then(c=>reply(202,{...c,...change}));});
+    await l.workspace.act(0,'connect');await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/issue')).length,issued,'no session is issued');
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+    assert.equal(setupMarker(l),'setup');assert.deepEqual(formsPosted(l),['setup','working','setup']);
+    // This page cannot reach that computer again, so nothing offers a Connect or check that would do nothing.
+    const panel=l.panel(),shown=text=>descendants(panel).some(n=>n.textContent===text&&visible(n));
+    assert.ok(panel,'the setup form shows its panel');
+    assert.equal(offered(panel,'Check connection')||offered(panel,'Connect'),false,'no way back that cannot work');
+    assert.ok(shown('Your account or saved computers changed. Reopen setup from your workspace.'),'what to do instead');
+    assert.equal(shown('The connection to this computer could not be confirmed. Choose Check connection to look again.'),false);
+    assert.equal(l.cards()[0].children[1].children[0].disabled,true,'nor in the card');
+    const calls=l.h.calls.length;
+    await l.workspace.act(0,'check');await l.workspace.act(0,'connect');await flush();
+    assert.equal(l.h.calls.length,calls,'and nothing is sent');
+  });
 
 // H: the frame tells the page which form it shows: once after ready, then only on a change; nothing else crosses.
 test('the framed view posts its form to the exact shell origin: setup at mount, working on entering, setup on leaving',async t=>{

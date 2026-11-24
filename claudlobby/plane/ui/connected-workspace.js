@@ -91,6 +91,9 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   // The Connect step's hint in the setup-only view: what happened and what to choose, without builder detail.
   function connectHint(status, connection, continuity, expired) {
     if (connection === 'not_connected' || ['ready','setup_only','checking','renewing','logout'].includes(status.state)) return '';
+    // Ended for this page: no Connect or check here can undo it, so the hint says what to do instead of either.
+    if (continuity?.ended) return continuity.changed ? 'Your account or saved computers changed. Reopen setup from your workspace.'
+      : status.remediation || '';
     if (expired) return 'Your connection to this computer expired. Choose Connect to continue.';
     if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect again.';
     if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect again.';
@@ -491,19 +494,31 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // while the computer says a Launch it dispatched has not finished cleanly, so a reloaded page keeps Check launch
       // status. A Preview nothing launched is not dispatched, so it never holds the panel.
       const {parts,setup} = clients[index], bridged = bound === reference.reference_id;
-      const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started()
-        && !(browserTransport && (setup.following() || parts.launchUnfinished()));
+      const held = browserTransport && (setup.following() || parts.launchUnfinished());
+      const partsShown = phase === 'ready' && !!mount.setupHost && !row.hidden && parts.started() && !held;
       // The working form: in the browser carrier the bound computer, started with a team and showing its parts, is
       // the connected view a direct connection gets, with its parts as a strip above its teams. The same facts as the
       // 'shared' layout below, so a renewal of its session (which keeps the parts shown) does not change the form.
       // With no team the parts stay the whole view, in the setup form.
-      controls.working = browserTransport && bridged && partsShown && parts.teams() !== 0;
+      // A computer that showed it in this page keeps it through a lapse of its session, when no parts answer is held:
+      // its session ran out (a page left idle is not renewed, and a check of it then ends unavailable), a renewal is
+      // under way or its answer was lost (automatic or Keep connected), a Connect or check from its card is under way or
+      // a Connect did not reach the computer, or a new session's parts read has not answered or failed. Its card then offers Connect or Check connection.
+      // A refusal or a sign-out ends the lapse, even one whose follow-up check was lost. Other ends bring back the
+      // setup form too: a check of a live session that does not end ready (its answer lost included), a Connect that
+      // finds another computer or binding, and a parts answer with no team.
+      const lapsed = pending.has(index) || !['denied','disconnected','signed_out'].includes(connection)
+        && (['renewing','checking'].includes(status.state)
+          || !!(continuity?.renewing || continuity?.reconnectRequired || continuity?.renewalUnknown || continuity?.connectRequired)
+          || status.state === 'ready' && !parts.answered());
+      controls.working = browserTransport && bridged && phase === 'ready' && !row.hidden && !held
+        && (partsShown ? parts.teams() !== 0 : controls.working && lapsed);
       // The working form offers no first-time setup in the card: its disclosure holds only the connection options.
       summary.textContent = controls.working ? 'Connection options' : 'Connection options and first-time setup';
       steps.hidden = controls.working;
       // What the computer says of a Launch is shown in the panel's steps; it sends nothing and resumes nothing.
       if (browserTransport) setup.showLaunchUnderway?.(parts.launchUnfinished());
-      const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown
+      const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown && !controls.working
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead
       for (let node = document.activeElement; node; node = node.parentNode) if (node === setupPanel) { panelFocus = true; break; }
@@ -560,7 +575,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         || ['connect','enroll'].includes(operation) && ['ready','setup_only'].includes(status.state)
         || operation === 'enroll' && ['awaiting_local_approval','unknown'].includes(approval.state)
         || operation === 'renew' && !['ready','setup_only'].includes(status.state)
-        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state);
+        || operation === 'logout' && !['ready','setup_only','unavailable'].includes(status.state)
+        || ['connect','check','renew','logout'].includes(operation) && !!continuity?.ended; // nothing left to do here
       primary.disabled = disabled(primaryOperation);
       for (const {button,operation} of buttons) {
         button.hidden = operation === primaryOperation
@@ -583,9 +599,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
       }
     });
-    // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished) is
-    // the connected view of that computer: no setup marker, and its parts sit above its teams (below). Otherwise the
-    // setup form: <html data-workspace-view="setup">, under which workspace.css shows only the setup host.
+    // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished, or the
+    // same computer through a lapse of its session) is the connected view of that computer: no setup marker, and its
+    // parts sit above its teams (below). Otherwise the setup form: <html data-workspace-view="setup">, under which
+    // workspace.css shows only the setup host.
     const working = controls.rows.some(row => row.working);
     if (browserTransport) {
       invoke(() => { const page = document.documentElement, form = working ? null : 'setup';
@@ -597,12 +614,13 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       const focusing = controls.rows.some(row => row.focused), rail = mount.setupHost.parentNode;
       const showing = focusing || controls.rows.some(row => row.partsShown);
       if (mount.setupStatus) {
-        // Browser carrier. In the working form the parts are a strip above the teams and the status line is hidden. In
-        // the setup form the host is the whole main area, with a plain line until the panel or the parts show.
+        // Browser carrier. In the working form the parts are a strip above the teams and the status line is hidden;
+        // through a lapse with no parts to show the host is hidden. In the setup form the host is the whole main area,
+        // with a plain line until the panel or the parts show.
         // Retirement keeps the line in its host; a closed view writes nothing more to it.
         if (working) {
           mount.setupStatus.hidden = true;
-          mount.setupHost.hidden = false; if (rail) rail.dataset.setupFocus = 'shared';
+          mount.setupHost.hidden = !showing; if (rail) rail.dataset.setupFocus = 'shared';
         } else {
           if (phase !== 'disposed') {
             const [text,waiting] = showing ? [''] : setupOnlyNote(); mount.setupStatus.hidden = showing;
@@ -703,7 +721,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   }
   // Browser carrier: the parent learns which form the view shows, 'setup' or 'working', so it can size the frame. Only
   // that word crosses, to the exact shell origin: once at mount and again only when the form changes. A failed parts
-  // refresh or a session check that ends ready on the same computer keeps the form, so it posts nothing.
+  // refresh, a session check that ends ready on the same computer or a lapse of the session keeps the form, so it
+  // posts nothing.
   function reportForm(view) {
     let posted = null;
     mount.onFormPost = () => {
