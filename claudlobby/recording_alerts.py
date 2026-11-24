@@ -20,7 +20,7 @@ import time
 from typing import Literal, Mapping
 from uuid import UUID
 
-from .config import manager_alert_target
+from .config import AlertSender, manager_alert_target
 from .context import Context
 from .message_transport import TransportDestination, _StartedFailure, _run
 from .resources import PackageResources
@@ -165,8 +165,17 @@ def _validate(context: Context, package: PackageResources, manager: TransportDes
         raise ValueError("selected package differs from active context")
 
 
+def _holds_token_file(state_dir: str) -> bool:
+    """Whether a channel state dir holds the .env tg-post reads its token from.
+
+    Asks only whether the file is there; its contents are never read here."""
+    return os.path.isfile(os.path.join(state_dir, ".env"))
+
+
 def _environment(context: Context, manager: TransportDestination,
-                 trusted_tiers: Mapping[str, str]) -> dict[str, str]:
+                 trusted_tiers: Mapping[str, str]) -> tuple[dict[str, str], AlertSender | None]:
+    """The native child's environment, and the sender ``manager_alert_target``
+    picked for it: None when a declared pair, or no pair at all, applies."""
     if not isinstance(trusted_tiers, Mapping) or any(
         key not in _ALERT_KEYS or not isinstance(value, str) or "\0" in value
         for key, value in trusted_tiers.items()
@@ -179,18 +188,22 @@ def _environment(context: Context, manager: TransportDestination,
     env.update(trusted_tiers)
     pulse = context.fleet.fleet_pulse.env() if context.fleet.fleet_pulse is not None else {}
     env.update({key: pulse[key] for key in _FLEET_PULSE_KEYS if key in pulse})
+    sender = None
     if not env.get("FLEET_PULSE_ESCALATION_CHAT_ID") and not (
             env.get("TELEGRAM_GROUP_CHAT_ID") and env.get("TELEGRAM_STATE_DIR")):
-        # No pair is declared, in fleet.yaml or the tiers: the manager's own chat
-        # and sender, from the active Context (#2654). The pair replaces a partial
-        # tier pair whole, and no tier token rides it, so tg-post reads the
-        # manager's own token and nothing splits the pair (#1771). A chat declared
-        # without its sender is still refused, as the pulse refuses it.
-        target = manager_alert_target(context.fleet)
+        # No pair is declared, in fleet.yaml or the tiers: the manager's own chat,
+        # from the active Context (#2654), sent as the manager when it can send
+        # there, else as the first other channel bot in it (#3127), the rule the
+        # shell resolver applies. The pair replaces a partial tier pair whole, and
+        # no tier token rides it, so tg-post reads the sender's own token and
+        # nothing splits the pair (#1771). A chat declared without its sender is
+        # still refused, as the pulse refuses it.
+        target = manager_alert_target(context.fleet, holds_token=_holds_token_file)
         if target is not None:
-            env["TELEGRAM_GROUP_CHAT_ID"], env["TELEGRAM_STATE_DIR"] = target
+            env["TELEGRAM_GROUP_CHAT_ID"], sender = target
+            env["TELEGRAM_STATE_DIR"] = sender.state_dir
             env.pop("TELEGRAM_BOT_TOKEN", None)
-    return env
+    return env, sender
 
 
 def _acquire_episode_lock(state, fleet: str, channel: str, deadline: float,
@@ -291,7 +304,12 @@ def _send_channels(context: Context, package: PackageResources,
                    timeout_per_channel: float, runner=None,
                    label: str = "fleet-notify") -> RecordingAlertOutcome:
     """One exact, independent manager/Telegram carrier path for fleet alerts."""
-    env = _environment(context, manager, trusted_tiers)
+    env, sender = _environment(context, manager, trusted_tiers)
+    if sender is not None and sender.manager_why:
+        # A fallback sender is never silent (#3127): this line says who sends and why.
+        print(f"{label}: root={context.paths.root} fleet={context.fleet.name} "
+              f"alert-sender: {sender.bot_id} sends this fleet alert, not the fleet "
+              f"manager: {sender.manager_why}", file=sys.stderr)
     raw_renotify = env.get("FLEET_PULSE_RENOTIFY_AFTER_S", "21600")
     raw_rearm = env.get("FLEET_PULSE_REARM_WINDOW_S", "1800")
     if any(not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > 2_147_483_647
@@ -390,7 +408,7 @@ def clear_recording_degraded(context: Context, package: PackageResources,
         disclose("telegram", "native_unavailable")
         return RecordingAlertClear(False, False)
     state = manager.root / "state/recording-alerts"
-    env = _environment(context, manager, {})
+    env, _sender = _environment(context, manager, {})
     cleared = []
     for channel in ("manager", "telegram"):
         deadline = time.monotonic() + timeout
