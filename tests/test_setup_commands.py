@@ -1006,7 +1006,7 @@ def test_local_template_declares_the_approved_folder_as_the_leads_project(tmp_pa
     _scope_links(ctx, None, "first-team", None, None)
     with pytest.raises(TaskQueryError, match="not declared"):
         _scope_links(ctx, None, "web-app", None, None)
-    with pytest.raises(TaskQueryError, match="does not belong to the declared project"):
+    with pytest.raises(TaskQueryError, match="^folder project first-team has no repositories; omit --repo$"):
         _scope_links(ctx, None, "first-team", None, "example-org/shop")
     assert fleet.projects_derived and set(fleet.projects) == {"first-team"}
     declared = fleet.projects["first-team"]
@@ -1018,12 +1018,19 @@ def test_local_template_declares_the_approved_folder_as_the_leads_project(tmp_pa
 
 def test_revenue_template_projects_are_unchanged_by_project_mounts():
     from claudlobby.config import derived_project_sources, load_fleet_snapshot
+    from claudlobby.task_operations import _scope_links
+    from claudlobby.task_queries import TaskQueryError
     content = setup._template_config("revenue-web-app", "shop", "example-org/shop", "Improve checkout tests")
     fleet, _ = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
     assert all(not bot.mounts for bot in fleet.bots.values())
     assert set(fleet.projects) == {"shop"}
     assert (fleet.projects["shop"].repos, fleet.projects["shop"].directory) == (["example-org/shop"], None)
     assert derived_project_sources(fleet.projects) == ["scope.repos"]
+    # A repo project still takes its own repository and refuses another, as before.
+    ctx = SimpleNamespace(context=SimpleNamespace(fleet=fleet))
+    _scope_links(ctx, None, "shop", None, "example-org/shop")
+    with pytest.raises(TaskQueryError, match="^repository does not belong to the declared project$"):
+        _scope_links(ctx, None, "shop", None, "example-org/other")
 
 
 def test_local_template_refuses_unsafe_or_mixed_scope(tmp_path, monkeypatch):

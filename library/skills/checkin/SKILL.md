@@ -40,9 +40,9 @@ the table. A derived tier is the framework's default, not the operator's
 declaration: dispatch against it normally, and when a project's real closure bar
 differs, say so in the rationale so someone writes it into `projects.yaml`. If no
 `## Projects` table is composed into your CLAUDE.md at all, this fleet has no
-`projects.yaml` **and no bot declares any repos or `project` mount**: `dispatch` is not available to
-you (it needs `--project`), and the check-in ends in `ask` or `nothing` — say so
-in the rationale.
+`projects.yaml` **and no bot declares any repos or `project` mount**: `dispatch`
+is not available to you (it needs `--project`), and the check-in ends in `ask`
+or `nothing` — say so in the rationale.
 
 ## Arguments
 
@@ -229,7 +229,8 @@ claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELI
 
 Use an already open canonical task ID instead of admitting duplicate intake.
 `--repo` is optional if no repository applies; `--project` is the project key
-chosen in the decision. Prepare and retain the UTF-8 delivery file before the
+chosen in the decision. A folder project (empty Repos column) takes no `--repo`:
+omit it. Prepare and retain the UTF-8 delivery file before the
 send; it names a backlog issue by its number and URL and never carries the
 issue's text, which the worker reads itself, as data. The assignment's `--checkin` is the join to the committed decision; it
 must not be added to `task admit`. A queued task, assignment, and delivered
