@@ -85,9 +85,9 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   let held = false; // a read for a ready connection was kept back by hold()
   // The Claude part. waiting: this view pressed Link Claude and the page has not answered (Stop waiting only ends the
   // line, a later answer still lands). sg: the lifted sign-in step for the current link approval (claude-signin.js),
-  // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (this
-  // page may not carry the sign-in), 'closing' (an earlier attempt is still closing) or 'fallback' (a Try again the
-  // page refused), each cleared when the read's sign-in changes.
+  // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (a status
+  // check refused on a view that did not run the link) or 'closing' (a begin refused on the setup page), each cleared
+  // when the read's sign-in changes.
   let waiting = false, sg = null, busy = false, busyOp = null, epochs = 0, notice = null, noticeFor = null;
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
@@ -148,7 +148,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   function startSignin(generation, attemptId, mode) {
     dropSignin();
-    const g = {dead:false, epoch:++epochs, generation, mode, answered:false, reported:false, module:null};
+    const g = {dead:false, epoch:++epochs, generation, mode, answered:false, module:null};
     g.module = createClaudeSignin({calls:(action, input) => client.setupSignin(action, input),
       // No storage: the one kept attempt is the computer's, named by the parts read.
       store:{read:() => attemptId === null ? null : JSON.stringify({generation, attempt_id:attemptId}), write:() => {}},
@@ -181,11 +181,12 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       const restored = operation === 'signin-retry' ? g.module.restoreRetry(error) : '';
       if (!disposed && !g.dead) {
         if (g.answered || restored) g.module.failed(operation, error, restored, g.epoch);
-        else {
-          notice = error?.status === 409 && operation === 'signin-begin' && g.mode !== 'retry' ? 'closing'
-            : g.mode === 'retry' ? 'fallback' : 'refused';
-          noticeFor = signinKey(); dropSignin();
-        }
+        else if (operation === 'signin-begin' && onSetupPage) {
+          // This page ran the link and began the sign-in itself, so a refusal is the begin's own: the plan's
+          // "begin refused" row (core answers its refusals with 403, so the status is not what tells it apart).
+          notice = 'closing'; noticeFor = signinKey(); dropSignin();
+        } else if (onSetupPage) g.module.failed(operation, error, restored, g.epoch); // a failed check on the page that ran it is an ordinary failure
+        else { notice = 'refused'; noticeFor = signinKey(); dropSignin(); } // a check this view never ran the link for: it continues on the setup page
       }
     }
     finally {
@@ -193,8 +194,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       if (!disposed && !g.dead) {
         onChange(); g.module.schedule();
         if (ok && operation === 'signin-begin') void read(); // the read now names this attempt
-        // An ending (or Claude linked) is drawn from the read, which is sent once, here, never on a timer.
-        if (['connected','needs_attention','cancelled','unknown'].includes(g.module.state()) && !g.reported) { g.reported = true; void read(); }
+        // An ending is drawn from the status answer itself (endedView); no timer reads the parts. The next
+        // event read (focus, visibility, pageshow, run-ended) refreshes.
       } else if (!disposed) onChange();
     }
     return ok;
@@ -287,16 +288,26 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   // What the Claude part shows for this read (the table in the plan's section on the Claude part): a line, at most one
   // button, or the lifted sign-in step.
+  // The ending a status check just reported, before any read has said it: the same line and button the read would give.
+  function endedView() {
+    const m = sg?.module, state = m?.state();
+    if (!['connected','needs_attention','cancelled','unknown'].includes(state)) return null;
+    if (state === 'connected') return {line:CLAUDE_TEXT.saved};
+    const ending = linkEnding({state, reason:m.reason(), code_sent:m.flags().sent, retryable:m.retryable(), unconfirmed:false});
+    return {line:ending.line, button:ending.button === 'link' && !onSetupPage ? null : ending.button};
+  }
   function claudeView() {
     const c = current, signin = c.signin;
     if (c.provider === 'linked') return {line:CLAUDE_TEXT.saved};       // linked wins over any sign-in
+    if (notice === 'closing') return {line:LINK_CLOSING, button:onSetupPage ? 'link' : null};
     if (signin && signin.phase !== 'ended') {
+      const done = endedView();
+      if (done) return done;
       if (waiting && signin.attempt_id === null) return {line:CLAUDE_TEXT.waiting, button:'stop'};
       return notice === 'refused' ? {line:CLAUDE_TEXT.elsewhere} : {step:true};
     }
-    if (notice === 'closing') return {line:LINK_CLOSING, button:'link'};
     if (signin) {
-      const ending = linkEnding(signin), button = notice === 'fallback' && ending.button === 'try_again' ? 'link' : ending.button;
+      const ending = linkEnding(signin), button = ending.button;
       return {line:ending.line, button:button === 'link' && !onSetupPage ? null : button};
     }
     if (c.link === 'not_here') return {};                                // a nine-card computer links Claude in its own road

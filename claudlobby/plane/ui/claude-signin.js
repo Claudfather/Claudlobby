@@ -344,7 +344,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     lost() { stopSigninPoll(); clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); },
     // The page is gone: no code, no link.
     dispose() { if (refs) refs.code.value=''; signinUrl=null; refs=null; },
-    ready:signinReady, polling:signinPolling, lineSending:signinLineSending, state:() => signinState, attempt:() => signinAttempt});
+    ready:signinReady, polling:signinPolling, lineSending:signinLineSending, state:() => signinState, reason:() => signinReason, retryable:() => signinRetryable, attempt:() => signinAttempt});
 }
 
 // The link road's ending lines (plan section 6, "Endings"): what a person reads, and the one button, for each way a
