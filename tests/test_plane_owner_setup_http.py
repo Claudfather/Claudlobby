@@ -501,7 +501,8 @@ def test_link_marker_does_not_depend_on_an_approval(link_signin,profile,monkeypa
         with_approval=post(client,'state',token)
         with link_signin.access._connection(write=True) as conn: conn.execute('DROP TABLE setup_link')
         without=post(client,'state',token)
-    assert with_approval.content==without.content and with_approval.json()['provider']['link']=='available'
+    shown=with_approval.json(); signin=shown['provider'].pop('signin')
+    assert signin['phase']=='approved' and shown==without.json() and shown['provider']['link']=='available'
 
 
 def _link_app(link,profile):

@@ -393,7 +393,20 @@ retained, `not_here` on every other computer (one today's nine-card guide set
 up, one not started, a Mac, or one whose team tables cannot be read). It depends
 on no approval and no attempt, so it reads the same for a computer read after
 read; a view that finds no `link` key is talking to an older core. Every other
-byte of the answer is as it was before the key existed. `team.state` is
+byte of the answer is as it was before the key existed. `provider.signin` is
+present only while the computer holds a link approval (below) that has not
+lapsed unused and Claude is not linked; once linked it is left out. It is
+`{"generation","phase":"approved"|"waiting"|"ended","attempt_id","state","reason","code_sent","retryable","unconfirmed"}`:
+`approved` before the approval's first attempt (the attempt fields `null`,
+the flags false), `waiting` while its current attempt is starting or waiting
+with the sign-in lease held, else `ended`. `state` and `reason` are that
+attempt's, except that a starting or waiting attempt whose lease is free reads
+`unknown`/`interrupted`, as the status call reads it. `code_sent` says a code
+was delivered; `retryable` that a begin would now admit a new attempt under
+the same approval; `unconfirmed` that the attempt ended
+`unknown`/`child_quiet_unproven` and its lease is still held. It never holds a
+url, a code or a token: the url stays in the status call. A view resumes from
+this key alone. `team.state` is
 `launch_unfinished` while a team preparation that a Launch dispatched has not
 finished cleanly (its update record is not `done`, or is `done` with health
 errors), and when the update record cannot be read; otherwise `none`. A Preview
@@ -467,11 +480,10 @@ workspace binding, read inside the write), `installation` and `source_revision`
 carries it), `created_at`, `unused_until` (`created_at` + 900) and `expires_at`
 (`created_at` + 1500). A row with any other key set, a non-UUID generation,
 other offsets, a time that is not a finite number or a scope of another shape
-does not read, and every door refuses it as unavailable. At this point the doors
-enforce `created_at` and `expires_at` only. The next step adds the rest of
-begin's checks: the unused window (a first sign-in must begin before
-`unused_until`), "spent" (an attempt row with the approval's generation), the
-attempt cap counted per approval, and the started check at begin.
+does not read, and every door refuses it as unavailable. The approval is
+**spent** once an attempt row has its generation: that row is inserted in
+begin's own transaction, so a refused begin spends nothing, and nothing in the
+record changes, so every later admission of the same approval still matches.
 
 **The writer** runs in one write transaction and writes nothing when it refuses.
 In order: the owner's grant and the active binding (their own refusals); the
@@ -491,7 +503,7 @@ connected session alone, the binding's issuer and origin, and the payload, then
 reads which approval the payload's `generation` names: with none of the team
 tables, the link approval; with some but not all, unavailable; with all three,
 the team approval when it is active and names that generation, and otherwise
-the link approval. The engine call follows,
+the link approval. The engine call follows (begin's own checks are below),
 then the principal again and the same approval's own admission with the
 approval it read. A link approval is admitted with the team approval's fences:
 the connected session, the row, the same binding, its time window, the exact
@@ -501,6 +513,26 @@ sign-in has. Admission reads only the database, never `start_state`: the
 worker re-admits about every 0.1 seconds. `setup-preview`, `-launch`,
 `-receipt` and `-context` never read a link approval, so they refuse its
 generation.
+
+**Begin under a link approval.** The same attempt ID again returns its status,
+as today. A new attempt, inside begin's write transaction and in this order:
+the approval is read again and must be the one admitted (a yes that landed
+since replaced it: `setup_denied`); while no attempt has its generation,
+`unused_until` must not have passed (`setup_denied`, as an expired approval);
+`start_state` is `started` (`not_started`; the writer and this are the only
+places a link sign-in reads it); then the current attempt. A current attempt
+that has ended while the sign-in lease is still held, or this process's own
+attempt that ended `unknown`/`child_quiet_unproven`, refuses
+`signin_unconfirmed`. Another approval's attempt that has not ended refuses
+`signin_live`; ended means a terminal row, or a starting or waiting row whose
+lease is free and whose worker is not this process's. Under the same approval
+today's retry rule holds (a retryable ending with no code sent, the attempt
+settled), and its cap counts only that approval's attempts (10); a new approval
+starts a new count, and the team approval still counts every attempt on the
+computer. Then today's window, scope and environment checks, and the lease. A
+link attempt that the service's own stop cancels ends `cancelled` with the
+reason `service_stopped`, not `effect_uncertain`; a team attempt still ends
+`effect_uncertain`.
 
 **The sign-in lease.** `state/provider-signin.lock`, one private file per
 computer (a regular file of this user, one link, mode 0600), never removed.

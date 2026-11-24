@@ -754,6 +754,8 @@ class SetupEngine:
         ``provider.link`` is ``available`` on a started Linux computer (phase 1's ``start_state``) with no team
         approval or Launch retained, where Claude is linked with a link approval; ``not_here`` on every other
         computer (a nine-card one, an unstarted one, a Mac). It is the same for a computer whatever its approvals.
+        ``provider.signin`` is present only while the computer holds a link approval that has not lapsed unused
+        and Claude is not linked (``_link_signin_part``); a computer with no link approval never has it.
         ``team.state`` is ``launch_unfinished`` while a team preparation that a Launch dispatched has not
         finished cleanly (its update record is not ``done``, or is ``done`` with health errors), or when the
         update record cannot be read; otherwise ``none``. A Preview nothing launched is never dispatched, so it
@@ -778,6 +780,7 @@ class SetupEngine:
             except (AccessDenied,AccessUnavailable): pass  # a team setup that cannot be read is not this road
         try: linked=environment_linked(self.root)
         except (SigninRefused,OSError): linked=False  # no environment file, or one the sign-in check refuses
+        signin=None if linked else self._link_signin_part()  # linked wins
         try:
             record=read_update(installation)
             unfinished=(record is not None and team_preparation(record) and record.get("job_dispatch") is not None
@@ -785,8 +788,46 @@ class SetupEngine:
         except FileNotFoundError: unfinished=False
         except (UpdateError,OSError,ValueError,KeyError,TypeError): unfinished=True  # the guide's own view stays
         return {"version":1,"computer":"started" if started else "not_started",
-            "provider":{"state":"linked" if linked else "not_linked","link":link},"team":{"state":"launch_unfinished" if unfinished else "none"},
+            "provider":{"state":"linked" if linked else "not_linked","link":link,**({"signin":signin} if signin is not None else {})},"team":{"state":"launch_unfinished" if unfinished else "none"},
             "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
+
+    def _link_signin_part(self):
+        """The parts read's ``provider.signin``: the link approval's sign-in, which a view resumes from alone.
+
+        None with no link approval, one that lapsed unused (no attempt has its generation and its
+        ``unused_until`` has passed), or one that cannot be read. Otherwise ``generation`` and ``phase``:
+        ``approved`` before its first attempt, ``waiting`` while its current attempt runs (a starting or
+        waiting row with the sign-in lease held), else ``ended``. Then that attempt's ``attempt_id``,
+        ``state`` and ``reason`` (null before one; a starting or waiting row whose lease is free reads
+        ``unknown``/``interrupted``, as status reads it), ``code_sent``, ``retryable`` (begin would admit a
+        new attempt ID under this approval) and ``unconfirmed`` (an ``unknown``/``child_quiet_unproven``
+        attempt whose lease is still held). Never a url, code or token: the url stays in status.
+        """
+        from .provider_signin import LinkStore, ProviderSignin, _TERMINAL, _names, signin_running
+        try:
+            with self.store.access._connection() as conn:
+                approval=LinkStore._read(conn)
+                if approval is None: return None
+                rows=0
+                current=None
+                if "setup_provider" in _names(conn):
+                    rows=ProviderSignin._attempts(conn,approval,None)
+                    current,_=ProviderSignin._current(conn)
+            part={"generation":approval.generation,"phase":"approved","attempt_id":None,"state":None,"reason":None,
+                  "code_sent":False,"retryable":False,"unconfirmed":False}
+            if not rows:
+                return None if self.store.access._now()>=approval.unused_until else part
+            part["phase"]="ended"
+            if current is None or current["generation"]!=approval.generation: return part
+            held=signin_running(self.root)
+            state,reason=current["state"],current["reason"]
+            if state not in _TERMINAL:
+                if held: part["phase"]="waiting"
+                else: state,reason="unknown","interrupted"
+            return {**part,"attempt_id":current["attempt_id"],"state":state,"reason":reason,"code_sent":current["code_delivered"]==1,
+                "retryable":part["phase"]=="ended" and not held and ProviderSignin._retryable(current,rows) and self.signin._room(approval),
+                "unconfirmed":(state,reason)==("unknown","child_quiet_unproven") and held}
+        except (AccessDenied,AccessUnavailable): return None  # the view offers Link Claude again; a new yes replaces the row
 
     def signin_link_held(self):
         """Does this computer hold a link approval? Without one, a sign-in call is today's team call, in today's order."""

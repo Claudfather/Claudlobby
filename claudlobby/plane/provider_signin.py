@@ -51,6 +51,8 @@ ENTER_DELAY = 0.25  # seconds between delivering the code and pressing Enter
 # removes a replaced attempt's copy that is still there (discard_binary), so no copy
 # normally outlives its attempt. Ten attempts per setup approval give a slow
 # sign-in room to finish, and bound the copies to about 3.5 GiB if every removal failed.
+# A link approval counts only its own attempts (a new approval starts a new count); the
+# team approval's count is every attempt on the computer, as it always was.
 MAX_ATTEMPTS = 10
 # The (state, reason) endings after which a new attempt may replace the current one,
 # and then only when the persisted record also says no code was delivered
@@ -625,7 +627,7 @@ def signin_running(root):
 # A link approval: one yes, on a started computer, to Claude sign-ins for a short time. It is its
 # own record (setup_link), never a team approval (setup_grant): any setup_grant row makes the
 # computer read as set up to the computer run, and an older core reads only the team tables.
-LINK_UNUSED_SECONDS = 900  # the window in which a first sign-in must begin
+LINK_UNUSED_SECONDS = 900  # the window in which a first sign-in must begin (begin's check; spent once a row has its generation)
 LINK_SECONDS = 1500  # the whole approval: a sign-in begun at the end of that window keeps its full time
 _LINK_FIELDS = frozenset({"generation", "binding_snapshot", "installation", "source_revision", "provider_signin",
                           "created_at", "unused_until", "expires_at"})
@@ -865,6 +867,13 @@ class ProviderSignin:
             conn.execute("UPDATE setup_provider SET code_delivered=1 WHERE attempt_id=?", (attempt,))
 
     @staticmethod
+    def _attempts(conn, grant, total):
+        """The attempts a retry counts: a link approval's own (rows with its generation), else ``total``, every row."""
+        if type(grant) is not LinkApproval:
+            return total
+        return conn.execute("SELECT COUNT(*) FROM setup_provider WHERE generation=?", (grant.generation,)).fetchone()[0]
+
+    @staticmethod
     def _retryable(row, attempts):
         """The record's half of a retry: a RETRYABLE ending, no code delivered, attempts left."""
         return (row['state'],row['reason']) in RETRYABLE and row['code_delivered'] == 0 and attempts < MAX_ATTEMPTS
@@ -938,13 +947,15 @@ class ProviderSignin:
                     self._row(conn,grant,attempt)  # Original identity is retained even after a restart.
                 else:
                     link = type(grant) is LinkApproval
-                    # A link write that landed after the admission above replaced this approval.
-                    if link and LinkStore._read(conn) != grant: raise AccessDenied("setup_denied")
+                    if link: attempts = self._link_begin(conn, grant, current)
                     if current is not None:
                         # Another ID replaces the current attempt only after a RETRYABLE ending
                         # with no worker of it still running here, and never reuses a retired ID.
                         # The persisted terminal row is the proof for a worker in another process.
-                        if (current['generation'] != grant.generation or not self._retryable(current,attempts)
+                        # A link approval also replaces another approval's attempt once it has ended
+                        # (_link_begin proved that, or refused).
+                        other = link and current['generation'] != grant.generation
+                        if (not other and (current['generation'] != grant.generation or not self._retryable(current,attempts))
                                 or not self._settled(current['attempt_id'])
                                 or conn.execute("SELECT 1 FROM setup_provider WHERE attempt_id=?", (attempt,)).fetchone()):
                             raise AccessDenied("signin_original_attempt_required")
@@ -969,6 +980,40 @@ class ProviderSignin:
             raise
         return started, replaces, current, lease
 
+    def _link_begin(self, conn, grant, current):
+        """Begin's link checks, on the path that inserts, inside its write transaction, in this order.
+
+        The approval read again (a link write after the admission replaced it: setup_denied); the
+        unused window, while no attempt has this generation (setup_denied, as an expired approval);
+        the computer is started (not_started; with the writer, the only start_state reads of a link
+        sign-in); then the current attempt. A held lease over an ended row is a child whose reap went
+        unproven, or a worker of this process not yet past its last close: signin_unconfirmed. So is
+        this process's own quiet child. Another approval's attempt that has not ended is signin_live:
+        ended is a terminal row, or a starting or waiting one whose lease is free and whose worker is
+        not this process's. Returns this approval's attempt count, which its cap counts.
+        """
+        from .owner_setup import managed_setup
+        from .owner_source import start_state
+        root = self.store.access.root
+        if LinkStore._read(conn) != grant:
+            raise AccessDenied("setup_denied")
+        attempts = self._attempts(conn, grant, None)
+        if not attempts and self.store.access._now() >= grant.unused_until:
+            raise AccessDenied("setup_denied")
+        if start_state(root, managed_setup(root, grant).installation) != "started":
+            raise AccessDenied("not_started")
+        if current is not None:
+            if current['state'] in _TERMINAL:
+                self._settled(current['attempt_id'])  # this process's worker, if it wrote the row, has closed its lease
+                quiet = (current['state'], current['reason']) == ("unknown", "child_quiet_unproven")
+                if signin_running(root) or quiet and current['attempt_id'] == self._attempt:
+                    raise AccessDenied("signin_unconfirmed")
+            elif current['generation'] != grant.generation:
+                mine = (current['attempt_id'] == self._attempt and self._thread is not None and self._thread.is_alive())
+                if mine or signin_running(root):
+                    raise AccessDenied("signin_live")
+        return attempts
+
     def status(self, reader, grant, attempt, *, native=True):
         self._admit(reader,grant,native=native)
         with self._lock, self.store.access._connection() as conn:
@@ -982,7 +1027,7 @@ class ProviderSignin:
                 # The deadline the worker enforces, so the browser shows the host's own time.
                 if self._expires_at is not None: result["expires_at"] = self._expires_at
             # Present only when begin would now admit a new attempt ID; begin re-checks it all.
-            if self._retryable(row,self._current(conn)[1]) and self._room(grant) and self._settled(attempt):
+            if self._retryable(row,self._attempts(conn,grant,self._current(conn)[1])) and self._room(grant) and self._settled(attempt):
                 result["retryable"] = True
             return result
 
@@ -1157,6 +1202,8 @@ class ProviderSignin:
             if staged is not None and state!="unknown": discard_binary(staging(self.store.access.root),attempt)
             try:
                 with self._lock:
+                    if type(grant) is LinkApproval and (state,reason)==("cancelled","effect_uncertain") and self._closed:
+                        reason="service_stopped"  # the service stopped it, not the person (a link attempt's word only)
                     self._code=self._url=self._expires_at=self._code_until=None
                     self._set(grant,attempt,state,reason,detail)
             finally:
