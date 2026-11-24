@@ -672,3 +672,401 @@ def test_computer_run_after_link_still_ready(tmp_path, monkeypatch):
         again = computer.run()
     assert again.data == {"state": "computer_ready", "origin": HOST}
     assert computer.channel.cards == [] and computer.channel.states == []
+
+
+# The computer run with the link intent (C2). A synthetic provider stands in for
+# Claude: its bytes are the only supported digest, and nothing runs it here.
+LINK_PROVIDER = b"#!/bin/sh\n# a synthetic provider; the link run never executes it\nexit 3\n"
+LINK_CARDS = {"install_provider", "link_provider"}
+
+
+class _Clock:
+    """provider_signin's ``time`` with a hook on ``sleep``: the lease's re-probe sleeps between probes."""
+
+    def __init__(self, hook):
+        import time
+        self.hook, self.time, self.sleeps = hook, time, 0
+
+    def __getattr__(self, name):
+        return getattr(self.time, name)
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+        self.hook(self.sleeps)
+        self.time.sleep(seconds)
+
+
+@contextmanager
+def _lease_elsewhere(root):
+    """The sign-in lease, held by another process, as a worker in the lasting service holds it.
+
+    Yields a function that makes that process close it (as its worker does after its last row)."""
+    import subprocess
+    import sys
+    from claudlobby.plane.provider_signin import _lease_path
+    holder = subprocess.Popen([sys.executable, "-c", "import fcntl,os,sys\n"
+        "fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);fcntl.flock(fd,fcntl.LOCK_EX)\n"
+        "print('held',flush=True);sys.stdin.readline()", str(_lease_path(root))],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def release():
+        if holder.poll() is None:
+            holder.stdin.write("go\n")
+            holder.stdin.flush()
+            holder.wait(timeout=30)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        yield release
+    finally:
+        release()
+        holder.stdin.close()
+        holder.stdout.close()
+
+
+def _attempt_row(access, state, reason=None):
+    """One current sign-in attempt of an earlier approval."""
+    from uuid import uuid4
+    from claudlobby.plane.provider_signin import ProviderSignin
+    with access._connection(write=True) as conn:
+        ProviderSignin.initialize(conn)
+        conn.execute("INSERT INTO setup_provider VALUES(?,?,?,?,0,0,NULL)", (str(uuid4()), str(uuid4()), state, reason))
+
+
+def _link_rows(access):
+    if not os.path.lexists(access.path):  # a fresh computer has no authority database yet
+        return []
+    with access._connection() as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        return [row[0] for row in conn.execute("SELECT snapshot FROM setup_link")] if "setup_link" in names else []
+
+
+class LinkComputer:
+    """A started computer (no team) whose run carries the link intent; Claude installed or missing."""
+
+    def __init__(self, tmp_path, monkeypatch, *, installed=True, started=True):
+        import hashlib
+        from claudlobby.commands import operator_context
+        from claudlobby.plane import owner_setup, provider_signin
+        self.computer = computer = Computer(tmp_path, monkeypatch)
+        if started:
+            computer.run()
+            computer.case.run_job()
+            assert start_state(computer.case.root, computer.case.installation) == "started"
+        computer.case.root.chmod(0o700)
+        monkeypatch.setattr(owner_setup, "_linux", lambda: True)  # the link is Linux's for now
+        monkeypatch.setattr(provider_signin, "SUPPORTED", {hashlib.sha256(LINK_PROVIDER).hexdigest(): "2.1.325"})
+        self.gates, self.writes = [], []
+        monkeypatch.setattr(operator_context, "require_operator_context", lambda root=None: self.gates.append(root))
+        write = provider_signin.LinkStore.write
+
+        def recorded(store, scope):
+            self.writes.append([event for event in computer.channel.events])
+            return write(store, scope)
+        monkeypatch.setattr(provider_signin.LinkStore, "write", recorded)
+        profile = computer.profile
+        if installed and started:
+            self._install()
+        profile.prepare_provider = self._prepare_provider
+
+    def _install(self):
+        provider = self.computer.profile.provider
+        provider.write_bytes(LINK_PROVIDER)
+        provider.chmod(0o700)
+
+    def _prepare_provider(self, consent, paths):
+        """FixedOwnerProfile.prepare_provider's shape: the install card only when Claude is missing."""
+        if self.computer.profile.provider.exists():
+            return
+        consent.approve("install_provider", {"version": "2.1.325", "platform": "linux-x64"})
+        consent.state("provider_installing", provider_version="2.1.325", platform="linux-x64")
+        self.computer.profile._provider_attempted = True
+        self._install()
+
+    def run(self, *, decline=(), update_record=None, expire=(), link_claude=True):
+        computer = self.computer
+        computer.channel = channel = Channel(computer.codes, decline=decline)
+        approve = channel.approve
+
+        def answered(action, scope, **kwargs):
+            if action in expire:
+                channel.cards.append(action)
+                raise StdioRefused("expired")
+            return approve(action, scope, **kwargs)
+        channel.approve = answered
+        return guide.run_computer(SimpleNamespace(update_record=update_record, link_claude=link_claude),
+                                  computer.paths(), computer.access, consent=StdioGuideConsent(channel),
+                                  profile=computer.profile)
+
+
+def test_computer_run_without_link_unchanged(tmp_path, monkeypatch):
+    """Without the intent (absent, false, or anything but True) the run is today's, to the byte."""
+    from claudlobby.commands.owner_stdio import _wire
+    computer = Computer(tmp_path, monkeypatch)
+    first = computer.run()
+    assert computer.channel.cards == CARDS and first.data["state"] == "computer_starting"
+    computer.case.run_job()
+    for args in ({}, {"link_claude": False}, {"link_claude": "true"}, {"link_claude": 1}):
+        computer.channel = Channel(computer.codes)
+        with lasting_service(computer):
+            result = guide.run_computer(SimpleNamespace(update_record=None, **args), computer.paths(), computer.access,
+                                        consent=StdioGuideConsent(computer.channel), profile=computer.profile)
+        assert _wire(result.data) == b'{"origin":"https://host.example.test","state":"computer_ready"}\n'
+        assert computer.channel.cards == [] and computer.channel.states == []
+    assert _link_rows(computer.access) == []
+
+
+@pytest.mark.parametrize("refusal", ["use_full_guide", "not_here", "not_started", "already_linked", "signin_live",
+                                     "signin_unconfirmed", "busy", "credential_present", "environment_format",
+                                     "environment_unreadable"])
+def test_link_refusals_before_any_card(tmp_path, monkeypatch, refusal):
+    """Each refusal is decided before any card and writes nothing; none answers a computer result."""
+    from claudlobby import installation
+    from claudlobby.plane import owner_setup
+    link = LinkComputer(tmp_path, monkeypatch, installed=False, started=refusal not in ("not_started", "use_full_guide"))
+    computer = link.computer
+    root = computer.case.root
+    env = root / ".env"
+    expected = {"environment_unreadable": "environment_format"}.get(refusal, refusal)
+    holding = None
+    if refusal == "use_full_guide":  # a computer today's guide has state on
+        (root / "state/config.json").write_text("{}")
+    elif refusal == "not_here":
+        monkeypatch.setattr(owner_setup, "_linux", lambda: False)
+    elif refusal == "already_linked":
+        env.write_text("CLAUDE_CODE_OAUTH_TOKEN=synthetic\n")
+    elif refusal in ("signin_live", "signin_unconfirmed"):
+        if refusal == "signin_unconfirmed":
+            _attempt_row(computer.access, "unknown", "child_quiet_unproven")
+        holding = _lease_elsewhere(root)
+        holding.__enter__()
+    elif refusal == "busy":
+        def maintenance(*_args, **_kwargs):
+            raise installation.InstallationError("maintenance is active")
+        monkeypatch.setattr(installation, "_check_maintenance", maintenance)
+    elif refusal == "credential_present":
+        env.write_text("CLAUDE_CODE_OAUTH_TOKEN=\n")
+    elif refusal == "environment_format":
+        env.write_text("not a settings line\n")
+    elif refusal == "environment_unreadable":
+        env.chmod(0o644)
+    before = _files(root)
+    try:
+        with pytest.raises(StdioRefused) as refused:
+            link.run()
+    finally:
+        if holding is not None:
+            holding.__exit__(None, None, None)
+    assert refused.value.code == expected and refused.value.data == {}
+    assert computer.channel.cards == [] and computer.channel.states == []
+    assert link.gates == [] and link.writes == [] and _link_rows(computer.access) == []
+    assert _files(root) == before
+    assert not computer.profile.provider.exists()
+
+
+def test_link_install_then_link_two_cards(tmp_path, monkeypatch):
+    from claudlobby.plane.provider_signin import LinkStore
+    link = LinkComputer(tmp_path, monkeypatch, installed=False)
+    computer = link.computer
+    result = link.run()
+    assert computer.channel.cards == ["install_provider", "link_provider"]
+    assert computer.channel.states == ["provider_installing"]
+    with computer.access._connection() as conn:
+        approval = LinkStore._read(conn)
+    assert result.data == {"state": "link_ready", "generation": approval.generation}
+    assert link.gates == [computer.case.root], "the started computer's own gate, before the first card"
+
+
+def test_link_one_card_when_installed(tmp_path, monkeypatch):
+    from claudlobby.plane.provider_signin import LinkStore
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    proposals = []
+    approve = Channel.approve
+    monkeypatch.setattr(Channel, "approve", lambda self, action, scope, **kw: (proposals.append(scope),
+                                                                                approve(self, action, scope, **kw))[1])
+    result = link.run()
+    assert computer.channel.cards == ["link_provider"] and computer.channel.states == []
+    with computer.access._connection() as conn:
+        approval = LinkStore._read(conn)
+    assert result.data == {"state": "link_ready", "generation": approval.generation}
+    # The card carries details only: the sign-in scope the approval holds, the active revision and its times.
+    assert proposals == [{"provider_signin": approval.provider_signin, "source_revision": approval.source_revision,
+                          "unused_seconds": 900, "seconds": 1500}]
+    assert approval.provider_signin["binary"] == str(computer.profile.provider)
+
+
+@pytest.mark.parametrize("card, answer", [("install_provider", "declined"), ("install_provider", "expired"),
+                                          ("link_provider", "declined"), ("link_provider", "expired")])
+def test_link_decline_writes_nothing(tmp_path, monkeypatch, card, answer):
+    """A no or no answer on the first card writes nothing: today's words, ``declined`` and ``expired``."""
+    link = LinkComputer(tmp_path, monkeypatch, installed=card == "link_provider")
+    computer = link.computer
+    with pytest.raises(StdioRefused) as refused:
+        link.run(**({"decline": {card}} if answer == "declined" else {"expire": {card}}))
+    assert refused.value.code == answer and computer.channel.cards == [card]
+    assert link.writes == [] and _link_rows(computer.access) == []
+    # Claude is there only when it was there before.
+    assert computer.profile.provider.exists() is (card == "link_provider")
+
+
+@pytest.mark.parametrize("answer", ["declined", "expired"])
+def test_link_install_yes_then_decline_keeps_install_only(tmp_path, monkeypatch, answer):
+    """After Claude was installed by this run, a no or no answer is told apart from "nothing was changed"."""
+    link = LinkComputer(tmp_path, monkeypatch, installed=False)
+    computer = link.computer
+    with pytest.raises(StdioRefused) as refused:
+        link.run(**({"decline": {"link_provider"}} if answer == "declined" else {"expire": {"link_provider"}}))
+    assert refused.value.code == "installed_" + answer and refused.value.data == {}
+    assert computer.channel.cards == ["install_provider", "link_provider"]
+    assert computer.channel.states == ["provider_installing"]
+    assert computer.profile.provider.read_bytes() == LINK_PROVIDER
+    assert link.writes == [] and _link_rows(computer.access) == []
+
+
+def test_link_cards_only_with_intent(tmp_path, monkeypatch):
+    """Without the key no Claude card can be asked, on a fresh computer or a started one."""
+    link = LinkComputer(tmp_path, monkeypatch, installed=False, started=False)
+    computer = link.computer
+
+    def plain(**args):
+        computer.channel = Channel(computer.codes)
+        return guide.run_computer(SimpleNamespace(update_record=None, **args), computer.paths(), computer.access,
+                                  consent=StdioGuideConsent(computer.channel), profile=computer.profile)
+    assert plain(link_claude=False).data["state"] == "computer_starting"
+    assert computer.channel.cards == CARDS
+    computer.case.run_job()
+    for args in ({}, {"link_claude": False}, {"link_claude": "true"}):
+        with lasting_service(computer):
+            assert plain(**args).data["state"] == "computer_ready"
+        assert computer.channel.cards == [] and computer.channel.states == []
+    assert not computer.profile.provider.exists() and _link_rows(computer.access) == []
+
+
+def test_link_approval_written_only_after_yes(tmp_path, monkeypatch):
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    seen = []
+    approve = Channel.approve
+
+    def card(self, action, scope, **kwargs):
+        seen.append((action, _link_rows(computer.access)))
+        return approve(self, action, scope, **kwargs)
+    monkeypatch.setattr(Channel, "approve", card)
+    result = link.run()
+    assert seen == [("link_provider", [])], "nothing was written while the card was open"
+    assert link.writes == [[("card", "link_provider")]], "written once, after the yes"
+    assert len(_link_rows(computer.access)) == 1 and result.data["state"] == "link_ready"
+
+
+def test_link_admitted_after_update(tmp_path, monkeypatch):
+    """Receipt at the first revision, active source at a later one: the run names its finished update and
+    gets the card; the approval holds the active revision, and nothing reads the receipt's for the link."""
+    from claudlobby.plane.provider_signin import LinkStore
+    link = LinkComputer(tmp_path, monkeypatch, started=False)
+    computer = link.computer
+    request_id, later = _moved(computer)
+    link._install()
+    assert computer.profile.receipt_revision == computer.case.target != later
+    with pytest.raises(StdioRefused, match="installation_changed"):
+        link.run(update_record=None)
+    assert computer.channel.cards == []
+    result = link.run(update_record=[request_id, later])
+    assert computer.channel.cards == ["link_provider"]
+    with computer.access._connection() as conn:
+        approval = LinkStore._read(conn)
+    assert result.data == {"state": "link_ready", "generation": approval.generation}
+    assert approval.source_revision == later
+
+
+def test_link_signin_live_from_guide_process(tmp_path, monkeypatch):
+    """Another process holds a live attempt's lease: this run, in its own process, refuses before any card."""
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    _attempt_row(computer.access, "waiting")
+    with _lease_elsewhere(computer.case.root):
+        before = _files(computer.case.root)
+        with pytest.raises(StdioRefused, match="^signin_live$"):
+            link.run()
+    assert computer.channel.cards == [] and _link_rows(computer.access) == [] and _files(computer.case.root) == before
+
+
+@pytest.mark.parametrize("released", [True, False])
+def test_link_lease_released_after_its_last_row_reads_ended(tmp_path, monkeypatch, released):
+    """A worker elsewhere between its last row and closing its lease: probed again before concluding."""
+    from claudlobby.plane import provider_signin
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    _attempt_row(computer.access, "needs_attention", "provider_failed")
+    with _lease_elsewhere(computer.case.root) as release:
+        clock = _Clock(lambda count: release() if released and count == 3 else None)
+        monkeypatch.setattr(provider_signin, "time", clock)
+        if released:
+            assert link.run().data["state"] == "link_ready"
+            assert computer.channel.cards == ["link_provider"] and clock.sleeps == 3
+        else:
+            with pytest.raises(StdioRefused, match="^signin_unconfirmed$"):
+                link.run()
+            assert computer.channel.cards == [] and clock.sleeps == 50
+
+
+def test_the_typed_channel_carries_the_link_runs_frames(tmp_path, monkeypatch):
+    """The frames the website's client admits in a link run, with exactly their keys: the hello, the two
+    cards, ``provider_installing`` and ``link_ready``; never a pairing, workspace or computer frame."""
+    import re
+    link = LinkComputer(tmp_path, monkeypatch, installed=False)
+    computer = link.computer
+    incoming, client = os.pipe()
+    observer, outgoing = os.pipe()
+    channel = OwnerStdio(incoming, outgoing)
+    frames = []
+
+    def drive():
+        seq = 0
+
+        def send(kind, **body):
+            nonlocal seq
+            seq += 1
+            os.write(client, (json.dumps({**body, "version": 1, "type": kind, "seq": seq,
+                "session_id": channel.session_id}, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        with os.fdopen(observer, "rb", buffering=0) as stream:
+            while True:
+                line = b""
+                while not line.endswith(b"\n"):
+                    part = stream.read(1)
+                    if not part:
+                        return
+                    line += part
+                frame = json.loads(line)
+                frames.append(frame)
+                if frame["type"] == "hello":
+                    send("start", profile="owner-setup-v1", expected_uid=501, source_revision="a" * 40,
+                         binding_sha256="b" * 64, finish_setup=None, update_record=None, link_claude=True)
+                elif frame["type"] == "proposal":
+                    send("decide", proposal_id=frame["proposal_id"], digest=frame["digest"], approve=True)
+                elif frame["type"] in {"result", "error"}:
+                    return
+    thread = threading.Thread(target=drive)
+    thread.start()
+    computer.channel = Channel({})
+    try:
+        channel.hello()
+        request = channel.start(computer=True)
+        assert request["link_claude"] is True
+        result = guide.run_computer(SimpleNamespace(update_record=None, link_claude=request["link_claude"] is True),
+                                    computer.paths(), computer.access, consent=StdioGuideConsent(channel),
+                                    profile=computer.profile)
+        channel.emit("result", **result.data)  # As owner_stdio.dispatch sends it.
+    finally:
+        thread.join(30)
+        for fd in (incoming, outgoing, client):
+            os.close(fd)
+    assert not thread.is_alive()
+    base = ["seq", "session_id", "type", "version"]
+    assert [sorted(frame) for frame in frames] == [
+        sorted(base + ["profile"]), sorted(base + ["proposal_id", "digest", "proposal"]),
+        sorted(base + ["state", "platform", "provider_version"]), sorted(base + ["proposal_id", "digest", "proposal"]),
+        sorted(base + ["state", "generation"])]
+    assert [frame["proposal"]["action"] for frame in frames if frame["type"] == "proposal"] == [
+        "install_provider", "link_provider"]
+    assert frames[2]["state"] == "provider_installing" and frames[-1]["state"] == "link_ready"
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", frames[-1]["generation"])

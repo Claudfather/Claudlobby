@@ -466,9 +466,11 @@ serves this pane.
 
 A started computer from the newer setup has no team approval and no team tables
 (`setup_metadata`, `setup_grant`, `setup_previews`). A **link approval** is one
-yes, on such a computer, to Claude sign-ins for a short time. Core records it;
-nothing in this core yet asks for it (the computer run's link intent comes
-later), and nothing a person sees changes.
+yes, on such a computer, to Claude sign-ins for a short time. Core records it
+only after a yes on the computer run's `link_provider` card, asked only with that
+run's link intent (`link_claude: true`, see the
+[website boundary](website-boundary.md#the-computer-runs-link-intent)); nothing
+a person sees changes until the website sends that intent.
 
 **The record.** One row in its own table, `setup_link(singleton, snapshot)`,
 never a `setup_grant` row: any team row makes the computer read as set up to the
@@ -491,8 +493,13 @@ installation and active revision (`setup_source_changed`); a retained team
 approval or Launch, by the computer run's own test (`use_full_guide`);
 `start_state` is `started` (`not_started`); the sign-in lease is free
 (`signin_live`, or `signin_unconfirmed` when the lease is held over an attempt
-that has ended). A `starting` or `waiting` attempt with the lease free has ended
-(its worker is gone) and is left as it is. A new yes replaces the row.
+that has ended). A worker in another process closes its lease a few
+milliseconds after its last row, so a lease held over an ended attempt other
+than `unknown`/`child_quiet_unproven` is probed again, up to 50 times 0.01
+seconds apart, and reads as free once released; the computer run's own check
+before its card and begin decide the same way. A `starting` or `waiting` attempt
+with the lease free has ended (its worker is gone) and is left as it is. A new
+yes replaces the row.
 
 **The doors.** The four sign-in calls (`setup-signin-begin`, `-status`,
 `-code`, `-cancel`) keep their names and keys. On a computer that holds no link
@@ -521,7 +528,8 @@ since replaced it: `setup_denied`); while no attempt has its generation,
 `unused_until` must not have passed (`setup_denied`, as an expired approval);
 `start_state` is `started` (`not_started`; the writer and this are the only
 places a link sign-in reads it); then the current attempt. A current attempt
-that has ended while the sign-in lease is still held, or this process's own
+that has ended while the sign-in lease is still held (after the same probes
+again as the writer's), or this process's own
 attempt that ended `unknown`/`child_quiet_unproven`, refuses
 `signin_unconfirmed`. Another approval's attempt that has not ended refuses
 `signin_live`; ended means a terminal row, or a starting or waiting row whose

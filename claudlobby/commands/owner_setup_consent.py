@@ -85,6 +85,7 @@ class FixedOwnerProfile:
         receipt's revision it is admitted as today's guide is; at a later
         installed revision only when its ``update_record`` names the finished
         update that moved the computer there (``admitted_update``)."""
+        self._computer = computer  # prepare_provider checks the profile again the same way
         try:
             uid = os.getuid()
             if (uid == 0 or uid != os.geteuid() or uid != request["expected_uid"]
@@ -217,7 +218,9 @@ class FixedOwnerProfile:
         consent.check_cancel()
         # The decision cannot authorize changed source/account/preparation or
         # filesystem state. A concurrent exact install needs no second write.
-        FixedOwnerProfile(paths, self.request)
+        # The computer run (its link intent) is checked as its own admission was;
+        # today's guide makes today's call.
+        FixedOwnerProfile(paths, self.request, **({"computer": True} if getattr(self, "_computer", False) else {}))
         current = provider_install.status(self.account_name, self.uid)
         if current.state == "ready":
             return current

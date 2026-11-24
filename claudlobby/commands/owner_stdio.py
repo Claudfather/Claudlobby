@@ -26,7 +26,7 @@ ADMISSION_SECONDS = 1800
 _ACTIONS = frozenset(("prepare_directories", "initialize_owner", "pair_owner",
     "initialize_workspace", "initialize_connected", "bind_workspace", "provider_signin",
     "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider",
-    "start_workspace", "initialize_link_storage"))
+    "start_workspace", "initialize_link_storage", "link_provider"))
 _BASE = {"version", "type", "seq", "session_id"}
 _FIELDS = {
     "start": {"profile", "expected_uid", "source_revision", "binding_sha256", "finish_setup"},
@@ -151,6 +151,8 @@ class OwnerStdio:
             fields = _BASE | _FIELDS.get(kind, set()) | self._extra.get(kind, set())
             if kind == "decide" and (self._pending == "actor_alias" or self._named):
                 fields |= {"actor_alias"}
+            if kind == "start" and "update_record" in self._extra.get("start", ()) and "link_claude" in value:
+                fields |= {"link_claude"}  # The computer run's link intent: sent only when true.
             if (kind not in _FIELDS or set(value) != fields or _wire(value) != raw + b"\n"
                     or type(value["version"]) is not int or value["version"] != 1
                     or type(value["seq"]) is not int or value["seq"] != self._input_seq + 1
@@ -175,7 +177,8 @@ class OwnerStdio:
 
     def start(self, *, computer=False):
         """``computer``: the computer run's start, which also carries ``update_record``:
-        null, or the request id and target of the update record the client read."""
+        null, or the request id and target of the update record the client read; and,
+        only with the link intent, ``link_claude``, which is only ever ``true``."""
         if computer:
             self._extra = {"start": {"update_record"}}
         value = self._read({"start"})
@@ -196,7 +199,7 @@ class OwnerStdio:
                 raise StdioRefused() from None
         if computer:
             known = value["update_record"]
-            if value["finish_setup"] is not None or known is not None and (
+            if value["finish_setup"] is not None or value.get("link_claude", True) is not True or known is not None and (
                     type(known) is not list or len(known) != 2 or not all(isinstance(v, str) for v in known)
                     or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
                                     known[0]) is None
@@ -407,6 +410,7 @@ def dispatch(args):
             consent = StdioGuideConsent(channel)
             if computer:
                 configured.update_record = request["update_record"]
+                configured.link_claude = request.get("link_claude") is True
                 result = run_computer(configured, paths, store, consent=consent, profile=profile,
                                       **({"ssh": ssh} if ssh is not None else {}))
             else:

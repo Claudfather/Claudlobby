@@ -4189,3 +4189,78 @@ def test_two_concurrent_begins_one_wins(link_signin):
         assert [row['attempt_id'] for row in _attempts(link.access)]==[attempts[won[0]]]
         assert engine.state(link.reader)['provider']['signin']['attempt_id']==attempts[won[0]], 'the loser follows it'
     finally: other.signin.shutdown()
+
+
+from contextlib import contextmanager  # noqa: E402  (the lease re-probe tests below)
+
+
+class _ProbeClock:
+    """provider_signin's ``time`` with a hook on ``sleep``: held_refusal sleeps between its probes."""
+    def __init__(self,hook):
+        import time
+        self.hook,self.time,self.sleeps=hook,time,0
+    def __getattr__(self,name): return getattr(self.time,name)
+    def sleep(self,seconds):
+        self.sleeps+=1
+        self.hook(self.sleeps)
+        self.time.sleep(seconds)
+
+
+@contextmanager
+def _held_elsewhere(root):
+    """The sign-in lease held by another process; yields how to make it close it, as a worker does after its last row."""
+    import subprocess,sys
+    from claudlobby.plane.provider_signin import _lease_path
+    holder=subprocess.Popen([sys.executable,'-c','import fcntl,os,sys\n'
+        'fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);fcntl.flock(fd,fcntl.LOCK_EX)\n'
+        'print("held",flush=True);sys.stdin.readline()',str(_lease_path(root))],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+    def release():
+        if holder.poll() is None:
+            holder.stdin.write('go\n'); holder.stdin.flush(); holder.wait(timeout=30)
+    try:
+        assert holder.stdout.readline().strip()=='held'
+        yield release
+    finally:
+        release(); holder.stdin.close(); holder.stdout.close()
+
+
+@pytest.mark.parametrize('released',[True,False])
+@pytest.mark.parametrize('door',['writer','begin'])
+def test_lease_released_after_the_last_row_reads_ended(link_signin,monkeypatch,door,released):
+    """A worker in another process between its last row and closing its lease: the writer (L6b) and begin probe
+    again, up to 50 times 0.01 s apart. Released in that time it has ended; still held, signin_unconfirmed.
+    A quiet child's row is never probed again: its worker keeps the lease."""
+    from claudlobby.plane import provider_signin
+    link=link_signin; engine=link.engine
+    _put_row(link.access,str(uuid4()),'needs_attention','provider_failed')
+    approval=_force_approval(link) if door=='begin' else None
+    rows=_attempts(link.access); record=_link_row(link.access)
+    with _held_elsewhere(link.access.root) as release:
+        clock=_ProbeClock(lambda count: release() if released and count==3 else None)
+        monkeypatch.setattr(provider_signin,'time',clock)
+        def act():
+            if door=='writer': return _second_process(link).write(link.scope)
+            return engine.signin_begin(link.reader,approval.generation,str(uuid4()))
+        if released:
+            answer=act()
+            assert clock.sleeps==3
+            if door=='writer': assert answer.generation!=link.approval.generation
+            else: assert len(_attempts(link.access))==len(rows)+1
+        else:
+            with pytest.raises(AccessDenied) as raised: act()
+            assert raised.value.code=='signin_unconfirmed' and clock.sleeps==50
+            assert _attempts(link.access)==rows and _link_row(link.access)==record
+
+
+def test_quiet_child_lease_is_not_probed_again(link_signin,monkeypatch):
+    from claudlobby.plane import provider_signin
+    from claudlobby.plane.provider_signin import held_refusal
+    link=link_signin
+    _put_row(link.access,str(uuid4()),'unknown','child_quiet_unproven')
+    with _held_elsewhere(link.access.root):
+        clock=_ProbeClock(lambda count: None)
+        monkeypatch.setattr(provider_signin,'time',clock)
+        with pytest.raises(AccessDenied,match='signin_unconfirmed'): _second_process(link).write(link.scope)
+        assert clock.sleeps==0
+        assert held_refusal(link.access.root,None)=='signin_live' and clock.sleeps==0

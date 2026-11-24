@@ -999,6 +999,83 @@ def _computer_ready(paths, installation, profile, ssh, carrier, consent):
                                              "request_id": record["request_id"] if record else None})
 
 
+def _link_claude(paths, store, package, state, *, consent, profile, ssh):
+    """The computer run with the link intent: one link approval for Claude sign-ins on a started computer.
+
+    Reached only when the start carries ``link_claude: true``, after the run's own admission (the
+    guide's ``revision_differs`` against the active source, ``admitted_update``, ``use_full_guide``).
+    It never answers ``computer_ready`` or ``computer_starting``, never refuses ``start_failed`` and
+    sends no pairing or workspace state. Every refusal here is decided before any card, in this order:
+    ``not_here`` (not Linux, or over SSH: Linux first; a Mac later through this same run),
+    ``not_started``, ``already_linked``, then the sign-in lease probed from this process, whose memory
+    proves nothing (``signin_live``, ``signin_unconfirmed``), ``busy`` (maintenance, or an update in
+    the way), ``credential_present`` (an empty sign-in line in ``.env``) and ``environment_format``
+    (a ``.env`` the sign-in cannot read). Then the started computer's own operator gate; the
+    ``install_provider`` card only when Claude is missing (its own refusals, ``provider_install_*``);
+    the sign-in scope (its own refusal); and the ``link_provider`` card, whose scope is details only.
+    A yes writes the approval (``LinkStore.write``, which checks again inside its transaction) and
+    answers ``link_ready`` with its generation. A no or no answer writes nothing: ``declined`` or
+    ``expired``; after this run installed Claude, ``installed_declined`` or ``installed_expired``.
+    """
+    from .operator_context import require_operator_context
+    from .owner_stdio import StdioRefused
+    from ..installation import InstallationError, _check_maintenance
+    from ..plane.owner_access import AccessDenied
+    from ..plane.owner_setup import _linux
+    from ..plane.provider_signin import (LINK_SECONDS, LINK_UNUSED_SECONDS, LinkStore, ProviderSignin,
+        SigninRefused, _names, approved_scope, check_scope, environment_linked, environment_ready,
+        held_refusal, signin_running)
+    root = paths.root
+    if ssh is not None or not _linux():
+        raise StdioRefused("not_here")
+    if state != "started":
+        raise StdioRefused("not_started")
+    try:
+        linked = environment_linked(root)
+    except (SigninRefused, OSError):
+        linked = False  # not linked; the .env checks below name what is wrong
+    if linked:
+        raise StdioRefused("already_linked")
+    if signin_running(root):
+        with store._connection() as conn:
+            current = ProviderSignin._current(conn)[0] if "setup_provider" in _names(conn) else None
+        refusal = held_refusal(root, current)
+        if refusal is not None:
+            raise StdioRefused(refusal)
+    try:
+        _check_maintenance(package.installation, native=True)  # as begin checks it
+    except InstallationError:
+        raise StdioRefused("busy") from None
+    try:
+        environment_ready(root)
+    except SigninRefused as exc:
+        raise StdioRefused("credential_present" if exc.code == "credential_already_present"
+                           else "environment_format") from None
+    except OSError:
+        raise StdioRefused("environment_format") from None
+    require_operator_context(root)  # the started computer's own gate, never a fresh computer's
+    profile.prepare_provider(consent, paths)
+    installed = getattr(profile, "_provider_attempted", False) is True  # this run installed Claude
+    try:
+        scope = approved_scope(profile.provider, root, str(profile.account))
+    except SigninRefused as exc:
+        raise StdioRefused(exc.code) from None
+    try:
+        consent.approve("link_provider", {"provider_signin": scope, "source_revision": package.source_revision,
+                                          "unused_seconds": LINK_UNUSED_SECONDS, "seconds": LINK_SECONDS})
+    except StdioRefused as exc:
+        if installed and exc.code in ("declined", "expired"):
+            raise StdioRefused("installed_" + exc.code) from None
+        raise
+    consent.check_cancel()
+    try:
+        check_scope(scope, root)  # the approved card names what is written
+        approval = LinkStore(store).write(scope)
+    except AccessDenied as exc:
+        raise StdioRefused(exc.code) from None
+    return CommandOutput({"state": "link_ready", "generation": approval.generation})
+
+
 def run_computer(args, paths, store, *, consent, profile, ssh=None):
     """The computer run: the cards that add a computer, then its start; and the way back into it.
 
@@ -1012,7 +1089,8 @@ def run_computer(args, paths, store, *, consent, profile, ssh=None):
     dispatches. It never waits for the updater and never continues a record:
     its exit is what lets the updater proceed, so it never answers
     ``computer_ready`` in the process that dispatched a start. No Claude and no
-    team card is asked. ``ssh`` is as for ``run``.
+    team card is asked without the link intent (``args.link_claude``, only ever
+    ``True``), which goes to ``_link_claude`` instead. ``ssh`` is as for ``run``.
     """
     from . import host_owner as console
     from .owner_setup_consent import admitted_update
@@ -1038,6 +1116,8 @@ def run_computer(args, paths, store, *, consent, profile, ssh=None):
     state = start_state(paths.root, installation)
     if state == "other":
         raise StdioRefused("use_full_guide")
+    if getattr(args, "link_claude", False) is True:
+        return _link_claude(paths, store, package, state, consent=consent, profile=profile, ssh=ssh)
     carrier = {}
     if ssh is not None:
         from ..plane.owner_ssh import TRANSPORT

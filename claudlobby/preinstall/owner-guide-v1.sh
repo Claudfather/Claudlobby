@@ -80,7 +80,8 @@ def request(fd, deadline, action="setup"):
         value = json.loads(raw, object_pairs_hook=unique,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         if (not isinstance(value, dict)
-                or set(value) != {"schema_version", "expected_uid", "source_revision", "binding_sha256", "finish_setup"} | ({"update_record"} if action == "computer" else set())
+                or set(value) - {"link_claude"} != {"schema_version", "expected_uid", "source_revision", "binding_sha256", "finish_setup"} | ({"update_record"} if action == "computer" else set())
+                or "link_claude" in value and (action != "computer" or value["link_claude"] is not True)
                 or type(value["schema_version"]) is not int or value["schema_version"] != 1
                 or type(value["expected_uid"]) is not int or not 0 < value["expected_uid"] < 2**32 - 1
                 or not isinstance(value["source_revision"], str) or not re.fullmatch(SHA, value["source_revision"])
@@ -93,7 +94,7 @@ def request(fd, deadline, action="setup"):
                 or not all(re.fullmatch(UUID, v) for v in finish[:2])
                 or not re.fullmatch(DIGEST, finish[2]) or not re.fullmatch(SHA + r"|[0-9a-f]{64}", finish[3])):
             raise ValueError()
-        known = value.get("update_record")  # The computer run's only extra key.
+        known = value.get("update_record")  # The computer run's record.
         if known is not None and (type(known) is not list or len(known) != 2
                 or not re.fullmatch(UUID, known[0]) or not re.fullmatch(SHA, known[1])):
             raise ValueError()
