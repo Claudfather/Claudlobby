@@ -633,6 +633,14 @@ def held_refusal(root, current):
     another process can sit a few milliseconds between its last row and closing the lease, so the lease is
     probed again, up to 50 times 0.01 seconds apart (as take_lease tries it); free, None; still held,
     ``signin_unconfirmed``. The writer, begin and the computer run's link checks all decide with this.
+
+    It sleeps where its caller stands, on purpose: the writer inside its ``BEGIN IMMEDIATE`` transaction,
+    begin inside ``self._lock`` and its ``BEGIN IMMEDIATE`` transaction. No new attempt can be committed
+    while they wait, which is what makes "released means ended" safe there. (The computer run reads the
+    row in its own short read and so reads it again afterwards.) The bound is 0.5 seconds; under begin's
+    lock about 2 seconds at worst, with ``_settled``'s 1-second join and ``take_lease``'s 0.5 seconds of
+    tries. It cannot deadlock: a worker closes its lease after leaving ``self._lock`` and after its last
+    row has committed, needing neither the lock nor a database write to do it.
     """
     if current is None or current["state"] not in _TERMINAL:
         return "signin_live"

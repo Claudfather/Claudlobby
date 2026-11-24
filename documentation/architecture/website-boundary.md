@@ -98,15 +98,26 @@ Before any card the run refuses, in this order: the prelude's own
 `not_started`, `already_linked`, `signin_live` or `signin_unconfirmed` (the
 sign-in lease, probed from the run's own process), `busy` (maintenance or an
 update in the way), `credential_present` (an empty sign-in line in `.env`) and
-`environment_format` (a `.env` the sign-in cannot read). Then the started
+`environment_format` (a `.env` the sign-in cannot read). When two hold at once
+the first in this order is the answer. Then the started
 computer's operator check, the install card and its own refusals
 (`provider_install_*`), and the sign-in scope's own refusal. A no or no answer
-on the first card is `declined` or `expired` and changes nothing; after the
-install card installed Claude, a no or no answer on the link card is
-`installed_declined` or `installed_expired`, so the page can say Claude is
-installed but not linked. A yes writes the approval, whose writer checks the
-computer again (its refusals end the run with nothing written), and answers
-`link_ready`.
+on the first card is `declined` or `expired` and changes nothing. A yes writes
+the approval, whose writer checks the computer again (its refusals end the run
+with nothing written), and answers `link_ready`.
+
+Every ending after the install card installed Claude in this run that writes no
+approval is that ending's word prefixed `installed_`, so the page can say Claude
+is installed but not linked: `installed_declined` and `installed_expired` (the
+link card), `installed_` with the scope's refusal (`unsupported_provider`,
+`profile_changed`, `file_binding_changed`, `private_path_changed`), with
+`scope_changed`, with a writer refusal (`setup_denied`, `use_full_guide`,
+`not_started`, `signin_live`, `signin_unconfirmed`, `setup_source_changed`),
+with the channel's own endings (`cancelled`, `disconnected`, `invalid_request`,
+`session_closed`, `output_unavailable`, `output_limit`), and
+`installed_cancelled` (a signal), `installed_unavailable` and
+`installed_internal_error` (any other failure). Without an install in this run
+the same endings keep their plain words.
 
 ## Setup, availability and current limits
 

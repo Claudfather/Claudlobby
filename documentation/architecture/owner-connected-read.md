@@ -497,7 +497,12 @@ that has ended). A worker in another process closes its lease a few
 milliseconds after its last row, so a lease held over an ended attempt other
 than `unknown`/`child_quiet_unproven` is probed again, up to 50 times 0.01
 seconds apart, and reads as free once released; the computer run's own check
-before its card and begin decide the same way. A `starting` or `waiting` attempt
+before its card and begin decide the same way. The writer waits inside its
+write transaction and begin inside its lock and write transaction, so no new
+attempt can be committed meanwhile (the computer run reads the attempt again
+after waiting); the wait is at most half a second, about two seconds under
+begin's lock at worst, and cannot deadlock, because a worker closes its lease
+outside that lock with no database write. A `starting` or `waiting` attempt
 with the lease free has ended (its worker is gone) and is left as it is. A new
 yes replaces the row.
 

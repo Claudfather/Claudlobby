@@ -1070,3 +1070,182 @@ def test_the_typed_channel_carries_the_link_runs_frames(tmp_path, monkeypatch):
         "install_provider", "link_provider"]
     assert frames[2]["state"] == "provider_installing" and frames[-1]["state"] == "link_ready"
     assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", frames[-1]["generation"])
+
+
+def _hold(link, monkeypatch, condition, stack):
+    """Make one pre-card refusal hold on a LinkComputer (as test_link_refusals_before_any_card does)."""
+    from claudlobby import installation
+    from claudlobby.plane import owner_setup
+    computer = link.computer
+    root = computer.case.root
+    if condition == "not_here":
+        monkeypatch.setattr(owner_setup, "_linux", lambda: False)
+    elif condition == "already_linked":
+        (root / ".env").write_text("CLAUDE_CODE_OAUTH_TOKEN=synthetic\n")
+    elif condition == "signin_live":
+        _attempt_row(computer.access, "waiting")
+        stack.enter_context(_lease_elsewhere(root))
+    elif condition == "busy":
+        def maintenance(*_args, **_kwargs):
+            raise installation.InstallationError("maintenance is active")
+        monkeypatch.setattr(installation, "_check_maintenance", maintenance)
+    elif condition == "credential_present":
+        (root / ".env").write_text("CLAUDE_CODE_OAUTH_TOKEN=\n")
+    elif condition != "not_started":
+        raise AssertionError(condition)
+
+
+@pytest.mark.parametrize("first, second", [("not_here", "not_started"), ("not_started", "busy"),
+                                           ("already_linked", "signin_live"), ("signin_live", "busy"),
+                                           ("busy", "credential_present")])
+def test_link_refusal_order_when_two_hold(tmp_path, monkeypatch, first, second):
+    """Two refusals at once: the earlier in the documented order is the answer, before any card."""
+    from contextlib import ExitStack
+    link = LinkComputer(tmp_path, monkeypatch, installed=False, started="not_started" not in (first, second))
+    computer = link.computer
+    with ExitStack() as stack:
+        _hold(link, monkeypatch, first, stack)
+        _hold(link, monkeypatch, second, stack)
+        with pytest.raises(StdioRefused) as refused:
+            link.run()
+    assert refused.value.code == first and refused.value.data == {}
+    assert computer.channel.cards == [] and link.gates == [] and _link_rows(computer.access) == []
+    assert not computer.profile.provider.exists()
+
+
+def test_link_not_here_over_ssh_and_admitted_on_linux(tmp_path, monkeypatch):
+    """Over SSH the link run is not here yet (Linux's website path first); the same computer without SSH links."""
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    computer.profile.runtime = SimpleNamespace()  # an SSH-controlled run's managed profile, so admission passes
+    computer.channel = channel = Channel(computer.codes)
+    with pytest.raises(StdioRefused, match="^not_here$"):
+        guide.run_computer(SimpleNamespace(update_record=None, link_claude=True), computer.paths(), computer.access,
+                           consent=StdioGuideConsent(channel), profile=computer.profile, ssh=SimpleNamespace())
+    assert channel.cards == [] and link.gates == [] and _link_rows(computer.access) == []
+    computer.profile.runtime = None
+    assert link.run().data["state"] == "link_ready"  # ssh None on Linux: the website's path, admitted
+    assert computer.channel.cards == ["link_provider"] and len(_link_rows(computer.access)) == 1
+
+
+def test_link_reread_after_reprobe_reads_a_new_attempt_as_live(tmp_path, monkeypatch):
+    """An ended attempt's lease still held, and a begin elsewhere commits a new attempt during the re-probe:
+    the run reads the row again and answers ``signin_live``, not ``signin_unconfirmed``."""
+    from uuid import uuid4
+    from claudlobby.plane import provider_signin
+    link = LinkComputer(tmp_path, monkeypatch)
+    computer = link.computer
+    _attempt_row(computer.access, "needs_attention", "provider_failed")
+
+    def begin(count):
+        if count == 3:  # the new attempt's worker holds the lease from here on
+            with computer.access._connection(write=True) as conn:
+                conn.execute("UPDATE setup_provider SET retired=1")
+                conn.execute("INSERT INTO setup_provider VALUES(?,?,?,NULL,0,0,NULL)",
+                             (str(uuid4()), str(uuid4()), "starting"))
+    clock = _Clock(begin)
+    monkeypatch.setattr(provider_signin, "time", clock)
+    with _lease_elsewhere(computer.case.root):
+        with pytest.raises(StdioRefused) as refused:
+            link.run()
+    assert refused.value.code == "signin_live" and clock.sleeps == 50
+    assert computer.channel.cards == [] and link.gates == [] and _link_rows(computer.access) == []
+
+
+def _real_install(link, monkeypatch):
+    """FixedOwnerProfile.prepare_provider itself on the computer's profile: only the download is a stand-in.
+
+    Returns the list of downloads (one per install)."""
+    import hashlib
+    from claudlobby import provider_install
+    from claudlobby.commands import owner_setup_consent
+    from claudlobby.provider_install import ProviderResult
+    profile = link.computer.profile
+    profile.account_name, profile.uid = "synthetic", 501
+    profile.request = {"source_revision": "a" * 40, "binding_sha256": "b" * 64}
+    digest = hashlib.sha256(LINK_PROVIDER).hexdigest()
+    missing = ProviderResult("missing", "synthetic_fixture", str(profile.provider), digest, "2.1.325", "linux-x64")
+    ready = ProviderResult("ready", "synthetic_fixture", str(profile.provider), digest, "2.1.325", "linux-x64")
+    downloads = []
+
+    def prepare(account, uid, *, cancel=None):
+        downloads.append(account)
+        link._install()
+        return ready
+    monkeypatch.setattr(provider_install, "status", lambda *_: ready if profile.provider.exists() else missing)
+    monkeypatch.setattr(provider_install, "prepare", prepare)
+    monkeypatch.setattr(owner_setup_consent, "FixedOwnerProfile", lambda *_a, **_k: None)  # the recheck
+    monkeypatch.setattr(Channel, "install_provider", lambda self, operation: operation(threading.Event()),
+                        raising=False)
+    profile.prepare_provider = lambda consent, paths: FixedOwnerProfile.prepare_provider(profile, consent, paths)
+    return downloads
+
+
+@pytest.mark.parametrize("ending", ["link_ready", "declined", "unsupported_provider", "not_started", "cancelled",
+                                    "internal_error"])
+def test_link_installed_endings_from_the_real_install(tmp_path, monkeypatch, ending):
+    """Claude installed by this run (prepare_provider's own decision) and then no approval: every ending is
+    ``installed_`` and its word; the scope's refusal after the install card, the writer's after the yes,
+    a signal and an unexpected failure on the link card included."""
+    from claudlobby.plane import owner_source, provider_signin
+    link = LinkComputer(tmp_path, monkeypatch, installed=False)
+    computer = link.computer
+    downloads = _real_install(link, monkeypatch)
+    if ending == "unsupported_provider":
+        monkeypatch.setattr(provider_signin, "SUPPORTED", {})
+    approve = Channel.approve
+
+    def card(self, action, scope, **kwargs):
+        answer = approve(self, action, scope, **kwargs)
+        if action == "link_provider":
+            if ending == "not_started":  # the writer, inside its transaction, finds the computer no longer started
+                monkeypatch.setattr(owner_source, "start_state", lambda *_a, **_k: "fresh")
+            elif ending == "cancelled":
+                raise KeyboardInterrupt  # what interrupted() makes of SIGTERM or SIGHUP
+            elif ending == "internal_error":
+                raise RuntimeError("a synthetic failure")
+        return answer
+    monkeypatch.setattr(Channel, "approve", card)
+    if ending == "link_ready":
+        result = link.run()
+        assert result.data["state"] == "link_ready" and len(_link_rows(computer.access)) == 1
+    else:
+        with pytest.raises(StdioRefused) as refused:
+            link.run(**({"decline": {"link_provider"}} if ending == "declined" else {}))
+        assert refused.value.code == "installed_" + ending and refused.value.data == {}
+        assert _link_rows(computer.access) == []
+        assert len(link.writes) == (1 if ending == "not_started" else 0)
+    assert computer.channel.cards == (["install_provider"] if ending == "unsupported_provider"
+                                      else ["install_provider", "link_provider"])
+    assert computer.channel.states == ["provider_installing"]
+    assert downloads == ["synthetic"] and computer.profile.provider.read_bytes() == LINK_PROVIDER
+
+
+def test_link_endings_without_this_runs_install_stay_plain(tmp_path, monkeypatch):
+    """Claude was already there: the same writer refusal after the yes is the plain word."""
+    from claudlobby.plane import owner_source
+    link = LinkComputer(tmp_path, monkeypatch)
+    _real_install(link, monkeypatch)
+    approve = Channel.approve
+
+    def card(self, action, scope, **kwargs):
+        monkeypatch.setattr(owner_source, "start_state", lambda *_a, **_k: "fresh")
+        return approve(self, action, scope, **kwargs)
+    monkeypatch.setattr(Channel, "approve", card)
+    with pytest.raises(StdioRefused, match="^not_started$"):
+        link.run()
+    assert link.computer.channel.cards == ["link_provider"] and _link_rows(link.computer.access) == []
+
+
+def test_installed_ending_maps_as_dispatch_does():
+    from claudlobby.plane.owner_access import AccessDenied, AccessUnavailable
+    ending = guide._installed_ending
+    assert ending(StdioRefused("scope_changed")) == "installed_scope_changed"
+    assert ending(StdioRefused("start_failed", data={"line": "x"})) == "installed_internal_error"
+    assert ending(CommandFailure("invalid_argument", "synthetic")) == "installed_invalid_argument"
+    for exc in (AccessDenied("setup_denied"), AccessUnavailable(), OSError(), ValueError(), TimeoutError()):
+        assert ending(exc) == "installed_unavailable"
+    assert ending(EOFError()) == ending(KeyboardInterrupt()) == "installed_cancelled"
+    assert ending(RuntimeError()) == "installed_internal_error"
+    assert ending(StdioRefused("a" * 86)) == "installed_" + "a" * 86  # 96 characters, the client's bound
+    assert ending(StdioRefused("a" * 87)) == ending(StdioRefused("Bad")) == "installed_internal_error"

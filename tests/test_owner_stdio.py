@@ -1539,3 +1539,54 @@ def test_the_install_card_rechecks_the_profile_as_it_was_admitted(fixed_profile,
     consent = SimpleNamespace(approve=lambda *_a, **_k: None, check_cancel=lambda: None)
     assert profile.prepare_provider(consent, paths).state == "ready"
     assert checks == [{"computer": True} if computer else {}]
+
+
+@pytest.mark.parametrize("refusal", ["installed_declined", "installed_expired", "installed_cancelled",
+                                     "installed_internal_error", "installed_unavailable", "installed_not_started",
+                                     "installed_unsupported_provider", "installed_scope_changed",
+                                     "installed_setup_denied", "installed_disconnected"])
+def test_link_installed_endings_on_the_wire_keep_todays_error_keys(fixed_profile, monkeypatch, refusal):
+    """After this run installed Claude, its endings are error frames with exactly today's keys: no next."""
+    import re
+    from claudlobby.commands import owner_stdio
+    request = dict(fixed_profile[1], update_record=None, link_claude=True)
+
+    def run_computer(*_args, **_kwargs):
+        raise owner_stdio.StdioRefused(refusal)
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    assert code == 4 and frames[-1]["type"] == "error" and frames[-1]["code"] == refusal
+    assert sorted(frames[-1]) == ["code", "retry", "seq", "session_id", "state", "type", "version"]
+    assert frames[-1]["state"] == "stopped" and frames[-1]["retry"] is False
+    assert re.fullmatch(r"[a-z0-9_]{1,96}", refusal)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("failure", ["signal", "exception"])
+def test_link_signal_or_failure_on_the_wire(fixed_profile, monkeypatch, failure, installed):
+    """A real SIGTERM (dispatch's interrupted()) or an unexpected exception during a link run: one error
+    frame the website's client admits, exactly code, state and retry; ``installed_`` when this run installed
+    Claude (as _link_claude maps it)."""
+    import signal
+    from claudlobby.commands import host_owner_setup, owner_stdio
+    request = dict(fixed_profile[1], update_record=None, link_claude=True)
+
+    def fail():
+        if failure == "signal":
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+            pytest.fail("the signal was not delivered")
+        raise RuntimeError("a synthetic failure")
+
+    def run_computer(*_args, **_kwargs):
+        if not installed:
+            fail()
+        try:
+            fail()
+        except BaseException as exc:
+            raise owner_stdio.StdioRefused(host_owner_setup._installed_ending(exc)) from exc
+    code, frames = _dispatch_computer(fixed_profile, monkeypatch, request, run_computer)
+    word = "cancelled" if failure == "signal" else "internal_error"
+    assert code == 4 and [frame["type"] for frame in frames].count("error") == 1
+    assert frames[-1]["code"] == ("installed_" if installed else "") + word
+    assert sorted(frames[-1]) == ["code", "retry", "seq", "session_id", "state", "type", "version"]
+    assert frames[-1]["state"] == "stopped" and frames[-1]["retry"] is False
