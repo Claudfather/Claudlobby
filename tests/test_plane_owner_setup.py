@@ -3517,13 +3517,21 @@ def test_link_signin_refused_without_link_approval(setup_authority,monkeypatch,t
     finally:engine.signin.shutdown()
 
 
-def test_link_approval_cannot_preview_or_launch(link_signin):
+@pytest.mark.parametrize('team_tables',[False,True])
+def test_link_approval_cannot_preview_or_launch(link_signin,team_tables):
+    from claudlobby.plane.owner_setup import _SCHEMA
     link=link_signin; engine=link.engine; generation=link.approval.generation
+    if team_tables:  # the team tables, with no team approval in them: the link approval still admits
+        with link.access._connection(write=True) as conn:
+            for statement in _SCHEMA: conn.execute(statement)
+        assert engine.signin.link.authorize(link.reader)==link.approval
     before=link.access.path.read_bytes()
     request={'generation':generation,'request_id':str(uuid4()),'config_fingerprint':'c'*64,'source_revision':link.approval.source_revision}
     for call in (lambda:engine.preview(link.reader,generation,'Improve checkout tests'),lambda:engine.launch(link.reader,**request),
                  lambda:engine.receipt(link.reader,**request),lambda:engine.context(link.reader)):
-        with pytest.raises((AccessDenied,AccessUnavailable)): call()
+        with pytest.raises((AccessDenied,AccessUnavailable)) as raised: call()
+        # No team tables: the team admission cannot read them. With them: it finds no team approval.
+        assert (raised.value.code=='setup_not_allowed' if team_tables else raised.type is AccessUnavailable),raised.value
     assert link.access.path.read_bytes()==before and not link.args.dispatches and not (link.access.root/'local').exists()
 
 
@@ -3574,7 +3582,8 @@ def test_second_link_request_during_live_signin_resumes_and_replaces_nothing_acr
     engine.signin.link.authorize(link.reader,expected=link.approval)  # process 1's next expected= check
     resumed=engine.signin_status(link.reader,link.approval.generation,attempt)
     assert resumed['state']=='waiting' and resumed['url'], 'the view resumes the same live attempt'
-    assert engine.state(link.reader)['provider']=={'state':'not_linked','link':'available'}
+    part=engine.state(link.reader)['provider']
+    assert (part['state'],part['link'],part['signin']['phase'],part['signin']['attempt_id'])==('not_linked','available','waiting',attempt)
     assert [row['attempt_id'] for row in _attempts(link.access)]==[attempt]
 
 
@@ -3623,6 +3632,8 @@ def test_quiet_child_keeps_lease_until_process_exit(link_signin,monkeypatch):
         before=_link_row(link.access)
         with pytest.raises(AccessDenied) as raised: _second_process(link).write(link.scope)
         assert raised.value.code=='signin_unconfirmed' and _link_row(link.access)==before  # not a live sign-in to resume
+        with pytest.raises(AccessDenied) as raised: engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+        assert raised.value.code=='signin_unconfirmed' and len(_attempts(link.access))==1  # and begin, before its retry rule
         for fd in engine.signin._kept: os.close(fd)  # process 1 exits: the system closes its files
         engine.signin._kept.clear()
         assert _lease(link.access) is False
@@ -3690,8 +3701,8 @@ def test_lease_file_not_private_refuses(link_signin,monkeypatch,kind):
 
 
 def test_link_worker_loop_reads_no_start_state(link_signin,monkeypatch):
-    # "Started" is checked when the approval is written and when a sign-in begins (begin's check comes
-    # with the next step, C1b), never by authorize, which the worker's loop calls about every 0.1 s.
+    # "Started" is checked when the approval is written and when a sign-in begins, never by authorize,
+    # which the worker's loop calls about every 0.1 s.
     from claudlobby.plane import owner_source
     link=link_signin; engine=link.engine; attempt=str(uuid4())
     def start_state(root,installation): raise AssertionError('start_state read on the sign-in path')
@@ -3913,3 +3924,268 @@ def test_link_try_again_after_timeout_same_approval(link_signin,monkeypatch):
     rows={row['attempt_id']:row for row in _attempts(link.access)}
     assert (rows[first]['retired'],rows[second]['retired'])==(1,0) and rows[second]['generation']==link.approval.generation
     assert _lease(link.access) is True and _link_row(link.access)==provider_snapshot(link.approval), 'the same approval, unchanged'
+
+
+
+# Begin under a link approval (C1b): spent, the unused window, started, the ended rule, the cap per
+# approval, the service's own stop and the parts read's provider.signin.
+
+def _age(link,seconds):
+    """The stored approval, made ``seconds`` earlier (its session stays live): returns the new record."""
+    from claudlobby.plane.provider_signin import link_approval
+    aged=json.loads(_link_row(link.access))
+    for key in ('created_at','unused_until','expires_at'): aged[key]-=seconds
+    with link.access._connection(write=True) as conn: conn.execute('UPDATE setup_link SET snapshot=?',(json.dumps(aged),))
+    return link_approval(_link_row(link.access))
+
+
+def _force_approval(link):
+    """A new link approval written as the writer would, but whatever the lease (to test begin alone)."""
+    from dataclasses import replace
+    from claudlobby.plane.provider_signin import link_snapshot
+    now=link.access._now()
+    approval=replace(link.approval,generation=str(uuid4()),created_at=now,unused_until=now+900,expires_at=now+1500)
+    with link.access._connection(write=True) as conn:
+        conn.execute('UPDATE setup_link SET snapshot=? WHERE singleton=1',(link_snapshot(approval),))
+    return approval
+
+
+def _put_row(access,generation,state,reason=None,code=0,retired=0,attempt=None):
+    from claudlobby.plane.provider_signin import ProviderSignin
+    attempt=attempt or str(uuid4())
+    with access._connection(write=True) as conn:
+        ProviderSignin.initialize(conn)
+        if not retired: conn.execute('UPDATE setup_provider SET retired=1')
+        conn.execute('INSERT INTO setup_provider VALUES(?,?,?,?,?,?,NULL)',(attempt,generation,state,reason,code,retired))
+    return attempt
+
+
+def _second_engine(link):
+    return SetupEngine(OwnerAccess(link.access.root,clock=link.access._clock))
+
+
+def test_link_spent_when_row_exists(link_signin):
+    link=link_signin; engine=link.engine; first=str(uuid4()); second=str(uuid4())
+    record=_link_row(link.access)
+    engine.signin_begin(link.reader,link.approval.generation,first)
+    assert [row['generation'] for row in _attempts(link.access)]==[link.approval.generation], 'spent: a row has its generation'
+    assert _link_row(link.access)==record, 'nothing in the record changes'
+    _signin_until(engine,link.approval,link.reader,first,'waiting')
+    assert engine.signin_cancel(link.reader,link.approval.generation,first)['retryable'] is True
+    _age(link,901)  # past its unused window: a spent approval is no longer held to it
+    assert engine.signin_begin(link.reader,link.approval.generation,second)['attempt_id']==second
+
+
+def test_link_refused_begin_does_not_spend(link_signin,monkeypatch):
+    from claudlobby.plane import owner_source
+    link=link_signin; engine=link.engine
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'fresh')
+    with pytest.raises(AccessDenied,match='not_started'): engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert _attempts(link.access)==[] and engine.signin._thread is None and _lease(link.access) is False
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    attempt=str(uuid4())
+    assert engine.signin_begin(link.reader,link.approval.generation,attempt)['attempt_id']==attempt
+
+
+def test_link_begin_idempotent_same_attempt(link_signin):
+    link=link_signin; engine=link.engine; attempt=str(uuid4())
+    engine.signin_begin(link.reader,link.approval.generation,attempt)
+    thread=engine.signin._thread
+    _signin_until(engine,link.approval,link.reader,attempt,'waiting')
+    again=engine.signin_begin(link.reader,link.approval.generation,attempt)  # a begin resent after a timeout
+    assert again['attempt_id']==attempt and again['state']=='waiting' and engine.signin._thread is thread
+    assert [row['attempt_id'] for row in _attempts(link.access)]==[attempt]
+
+
+@pytest.mark.parametrize('kind',['terminal','starting with the lease free','quiet child of an earlier process','live elsewhere'])
+def test_link_new_approval_after_each_kind_of_ending(link_signin,kind):
+    import os
+    from claudlobby.plane.provider_signin import take_lease
+    link=link_signin; engine=link.engine; held=None
+    state,reason={'terminal':('needs_attention','provider_failed'),'starting with the lease free':('starting',None),
+                  'quiet child of an earlier process':('unknown','child_quiet_unproven'),'live elsewhere':('waiting',None)}[kind]
+    old=_put_row(link.access,link.approval.generation,state,reason)
+    try:
+        if kind=='live elsewhere':
+            held=take_lease(link.access.root,old)  # its worker, in another process
+            approval=_force_approval(link)
+        else:
+            approval=LinkStore_write(link)  # the writer finds it ended
+        rows=_attempts(link.access); attempt=str(uuid4())
+        if kind=='live elsewhere':
+            with pytest.raises(AccessDenied,match='signin_live'): engine.signin_begin(link.reader,approval.generation,attempt)
+            assert _attempts(link.access)==rows and engine.signin._thread is None
+            return
+        assert engine.signin_begin(link.reader,approval.generation,attempt)['attempt_id']==attempt
+        retired={row['attempt_id']:row['retired'] for row in _attempts(link.access)}
+        assert retired=={old:1,attempt:0}
+    finally:
+        if held is not None: os.close(held)
+
+
+def LinkStore_write(link):
+    from claudlobby.plane.provider_signin import LinkStore
+    return LinkStore(link.access).write(link.scope)
+
+
+def test_link_child_quiet_unproven_same_process_refused(link_signin,monkeypatch):
+    import os,signal,subprocess
+    from claudlobby.plane import provider_signin
+    link=link_signin; engine=link.engine; other=_second_engine(link)
+    monkeypatch.setattr(provider_signin,'SECONDS',0.5)
+    children=[];original_popen=subprocess.Popen;original_getpgid=os.getpgid
+    def observed_popen(argv,*args,**kwargs):
+        child=original_popen(argv,*args,**kwargs)
+        if argv[1:]==['setup-token']:children.append(child)
+        return child
+    def getpgid(pid):  # only a sign-in child's reap goes unproven
+        if any(child.pid==pid for child in children): raise OSError('reap not proven')
+        return original_getpgid(pid)
+    monkeypatch.setattr(provider_signin.subprocess,'Popen',observed_popen)
+    monkeypatch.setattr(provider_signin.os,'getpgid',getpgid)
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(link.reader,link.approval.generation,attempt)
+        assert _signin_ended(engine,link.approval,link.reader,attempt)['reason']=='child_quiet_unproven'
+        part=engine.state(link.reader)['provider']['signin']
+        assert (part['phase'],part['unconfirmed'],part['retryable'])==('ended',True,False)
+        rows=_attempts(link.access)
+        with pytest.raises(AccessDenied) as raised: engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+        assert raised.value.code=='signin_unconfirmed'  # Try again under the same approval
+        approval=_force_approval(link)
+        for begin in (engine.signin_begin,other.signin_begin):  # a new approval: the lasting service, then a second process
+            with pytest.raises(AccessDenied) as raised: begin(link.reader,approval.generation,str(uuid4()))
+            assert raised.value.code=='signin_unconfirmed'
+        assert _attempts(link.access)==rows
+        for fd in engine.signin._kept: os.close(fd)  # as if process 1 exited
+        engine.signin._kept.clear()
+        assert engine.state(link.reader)['provider']['signin']['unconfirmed'] is False
+        with pytest.raises(AccessDenied,match='signin_unconfirmed'):  # process 1's own quiet child, whatever the lease
+            engine.signin_begin(link.reader,approval.generation,str(uuid4()))
+        fresh=str(uuid4())
+        assert other.signin_begin(link.reader,approval.generation,fresh)['attempt_id']==fresh  # an earlier process's row
+    finally:
+        other.signin.shutdown()
+        for fd in other.signin._kept: os.close(fd)
+        for child in children:
+            try: os.killpg(child.pid,signal.SIGKILL)
+            except (ProcessLookupError,PermissionError): pass
+            child.wait(timeout=5)
+
+
+def test_link_begin_rechecks_approval_inside_transaction(link_signin,monkeypatch):
+    link=link_signin; engine=link.engine
+    admit=engine.signin._admit; landed=[]
+    def admit_then_write(reader,grant,**kwargs):
+        admit(reader,grant,**kwargs)
+        if not landed: landed.append(LinkStore_write(link))  # a new yes after begin's admission
+    monkeypatch.setattr(engine.signin,'_admit',admit_then_write)
+    with pytest.raises(AccessDenied,match='setup_denied'): engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert landed and _attempts(link.access)==[] and engine.signin._thread is None and _lease(link.access) is False
+
+
+def test_link_begin_refused_when_not_started(link_signin,monkeypatch):
+    from claudlobby.plane import owner_source
+    link=link_signin; engine=link.engine; read=[]
+    def start_state(root,installation): read.append(str(installation.directory)); return 'starting'
+    monkeypatch.setattr(owner_source,'start_state',start_state)
+    with pytest.raises(AccessDenied,match='not_started'): engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert read==[link.approval.installation], 'begin reads it, once, for the approval\'s installation'
+    assert _attempts(link.access)==[] and _lease(link.access) is False
+
+
+def test_link_begin_refused_after_unused_window(link_signin,monkeypatch):
+    from claudlobby.plane import owner_source
+    link=link_signin; engine=link.engine
+    _age(link,900)  # its unused window ends now
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:pytest.fail('read after the window'))
+    with pytest.raises(AccessDenied) as raised: engine.signin_begin(link.reader,link.approval.generation,str(uuid4()))
+    assert raised.value.code=='setup_denied' and _attempts(link.access)==[], 'the same word as an expired approval'
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    assert 'signin' not in engine.state(link.reader)['provider'], 'a lapsed approval leaves the parts read'
+    _age(link,-1)  # one second inside it
+    attempt=str(uuid4())
+    assert engine.signin_begin(link.reader,link.approval.generation,attempt)['attempt_id']==attempt
+
+
+def test_link_cap_per_generation(link_signin):
+    from claudlobby.plane.provider_signin import MAX_ATTEMPTS
+    link=link_signin; engine=link.engine; gen=link.approval.generation
+    for _ in range(MAX_ATTEMPTS+2): _put_row(link.access,str(uuid4()),'needs_attention','timeout',retired=1)  # other approvals'
+    current=_put_row(link.access,gen,'needs_attention','timeout')
+    assert engine.signin_status(link.reader,gen,current).get('retryable') is True, 'only its own attempts count'
+    second=str(uuid4())
+    assert engine.signin_begin(link.reader,gen,second)['attempt_id']==second
+    _signin_until(engine,link.approval,link.reader,second,'waiting')
+    assert engine.signin_cancel(link.reader,gen,second)['retryable'] is True
+    for _ in range(MAX_ATTEMPTS-2): _put_row(link.access,gen,'needs_attention','timeout',retired=1)  # ten of its own
+    assert 'retryable' not in engine.signin_status(link.reader,gen,second)
+    rows=_attempts(link.access)
+    with pytest.raises(AccessDenied,match='signin_original_attempt_required'): engine.signin_begin(link.reader,gen,str(uuid4()))
+    assert _attempts(link.access)==rows
+    approval=LinkStore_write(link)  # a new approval starts a new count
+    third=str(uuid4())
+    assert engine.signin_begin(link.reader,approval.generation,third)['attempt_id']==third
+
+
+def test_shutdown_reads_service_stopped(link_signin):
+    link=link_signin; engine=link.engine; attempt=str(uuid4())
+    engine.signin_begin(link.reader,link.approval.generation,attempt)
+    _signin_until(engine,link.approval,link.reader,attempt,'waiting')
+    engine.signin.shutdown()
+    row=[row for row in _attempts(link.access) if row['attempt_id']==attempt][0]
+    assert (row['state'],row['reason'])==('cancelled','service_stopped')
+    assert _lease(link.access) is False
+
+
+def test_shutdown_team_signin_still_effect_uncertain(synthetic_signin):
+    engine,grant,reader,*_=synthetic_signin
+    attempt=str(uuid4())
+    try:
+        engine.signin_begin(reader,grant.generation,attempt)
+        _signin_until(engine,grant,reader,attempt,'waiting')
+        engine.signin.shutdown()
+        assert (lambda row:(row['state'],row['reason']))(_signin_row(engine,attempt))==('cancelled','effect_uncertain')
+    finally: engine.signin.shutdown()
+
+
+def test_parts_read_signin_key_shape_and_linked_wins(link_signin):
+    link=link_signin; engine=link.engine; gen=link.approval.generation; first=str(uuid4()); second=str(uuid4())
+    keys={'generation','phase','attempt_id','state','reason','code_sent','retryable','unconfirmed'}
+    def part(): return engine.state(link.reader)['provider'].get('signin')
+    assert part()=={'generation':gen,'phase':'approved','attempt_id':None,'state':None,'reason':None,
+                    'code_sent':False,'retryable':False,'unconfirmed':False}
+    engine.signin_begin(link.reader,gen,first)
+    _signin_until(engine,link.approval,link.reader,first,'waiting')
+    waiting=part()
+    assert set(waiting)==keys and (waiting['phase'],waiting['attempt_id'],waiting['state'])==('waiting',first,'waiting')
+    assert 'url' not in json.dumps(engine.state(link.reader)) and 'claude.com' not in json.dumps(engine.state(link.reader))
+    engine.signin_cancel(link.reader,gen,first)
+    ended=part()
+    assert (ended['phase'],ended['state'],ended['reason'],ended['code_sent'],ended['retryable'])==('ended','cancelled','effect_uncertain',False,True)
+    engine.signin_begin(link.reader,gen,second)
+    _signin_until(engine,link.approval,link.reader,second,'waiting')
+    engine.signin_code(link.reader,gen,second,'accepted#'+'b'*32)
+    _signin_until(engine,link.approval,link.reader,second,'connected')
+    provider=engine.state(link.reader)['provider']
+    assert provider['state']=='linked' and 'signin' not in provider, 'linked wins'
+
+
+def test_two_concurrent_begins_one_wins(link_signin):
+    import threading
+    link=link_signin; engine=link.engine; other=_second_engine(link)
+    barrier=threading.Barrier(2); results={}
+    def begin(name,target,attempt):
+        barrier.wait()
+        try: results[name]=target.signin_begin(link.reader,link.approval.generation,attempt)['attempt_id']
+        except AccessDenied as exc: results[name]=exc.code
+    attempts={'here':str(uuid4()),'there':str(uuid4())}
+    threads=[threading.Thread(target=begin,args=(name,target,attempts[name])) for name,target in (('here',engine),('there',other))]
+    try:
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=30)
+        won=[name for name in results if results[name]==attempts[name]]
+        assert len(won)==1 and sorted(results.values())==sorted([attempts[won[0]],'signin_original_attempt_required'])
+        assert [row['attempt_id'] for row in _attempts(link.access)]==[attempts[won[0]]]
+        assert engine.state(link.reader)['provider']['signin']['attempt_id']==attempts[won[0]], 'the loser follows it'
+    finally: other.signin.shutdown()
