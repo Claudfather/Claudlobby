@@ -1149,9 +1149,10 @@ secure session-cookie boundaries. JSON is size/time bounded; duplicate and
 unknown fields are refused. They never register identities or author grants.
 
 Context version 1 names the selected fleet alias in `room` and `scope.fleet`,
-returns declared bot UIDs as recipients, `simulation: false`, and only the
-`message` action. The server recomputes frozen host/fleet/actor bindings and the
-current local message grant for every request. Opaque workspace/viewer hashes
+returns declared bot UIDs as recipients, marks the configured manager's with
+`lead: true`, `simulation: false`, and only the `message` action. The server
+recomputes frozen host/fleet/actor bindings and the current local message grant
+for every request. Opaque workspace/viewer hashes
 are comparison fences, not secret capabilities; viewer binds principal, owner
 revision, frozen fleet UID, human actor and durable message-grant generation,
 and survives session-cookie rotation. Revoke/reallow creates a new viewer scope
@@ -1219,8 +1220,9 @@ only the explicit local nudge grant, advertises one configured manager recipient
 with `lead: true`, `actions: ["nudge"]`, and the validated current `release_id`.
 Its viewer hash has a fixed `task.nudge` namespace and binds the principal,
 owner revision, fleet, registered human actor and nudge-grant generation.
-Ordinary-message version-1 requests, responses and viewer-hash inputs are
-unchanged. Revoking either action grant does not change the other capability.
+Ordinary-message version-1 requests and viewer-hash inputs are unchanged; its
+response marks the same manager as lead. Revoking either action grant does not
+change the other capability.
 A read session alone grants neither action; no HTTP path registers an actor or
 authors a grant. Feedback has its own capability below; replies and permission
 decisions remain unsupported.

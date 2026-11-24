@@ -1057,6 +1057,19 @@ test(`a new message goes to the team's lead by default: ${order}`,async()=>{
   assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
+// A computer that marks its lead on the message context needs no task grant: the lead is the default from the first paint.
+test('a message-only grant whose context marks the lead addresses a new message to the lead at once',async()=>{
+  const lead=ownerNudge.recipients[0].id,message=deferred();
+  const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label:'manager',lead:true},{id:'reviewer',label:'reviewer'}]};
+  const h=harness({interactionContext:()=>message.promise});
+  h.loop.setRoom('web');await settle();
+  message.resolve(marked);await settle();
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-recipient').value,lead,'the first value shown is the lead');
+  assert.match(h.get('work-recipient').innerHTML,/>manager · lead</);
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
 test('a bot the person chose, or a message already written, is not moved when the lead becomes known',async()=>{
   for(const touch of ['chosen','written']){
     const nudge=deferred(),h=harness({interactionContext:()=>unmarkedMessage,nudgeContext:()=>nudge.promise});

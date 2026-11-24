@@ -53,6 +53,11 @@ def test_context_and_send_receipt_renewal(browser_actions, monkeypatch):
     assert first["room"] == first["scope"]["fleet"] == "example"
     assert first["simulation"] is False and first["actions"] == ["message"]
     assert {r["id"] for r in first["recipients"]} == {a.uid for a in ctx.bots.values()}
+    # Exactly one recipient is marked: the team's configured manager, the lead its task contexts name.
+    manager = ctx.context.fleet.manager
+    assert [r for r in first["recipients"] if "lead" in r] == [
+        {"id": ctx.bots[manager].uid, "label": manager, "lead": True}]
+    assert all(set(r) == {"id", "label"} for r in first["recipients"] if r["label"] != manager)
     assert str(adapter.root) not in json.dumps(first)
     assert _post(client, "renew").status_code == 200
     assert context(client) == first

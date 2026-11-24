@@ -591,8 +591,11 @@ The entry routes an exact team from the admitted source roster. One transport
 boundary projects canonical raw host/actor/task/assignment IDs into the selected
 source's qualified UI IDs and team name, and reverses only that exact qualifier
 before the fixed connected action POST. Mixed sources, another host, changed
-scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
-metadata remain canonical and raw; the shared ActionState saves the corresponding
+scope or undeclared recipients refuse without a send. The v1 message context lists
+every declared bot and marks the team's configured manager, the lead the nudge and
+feedback contexts name, with `lead: true`; a view addresses a new message to that
+lead by default. HTTP v1 message and v2 task metadata remain canonical and raw;
+the shared ActionState saves the corresponding
 qualified metadata, original UUID and digest, never the body. Source qualifiers
 are `c-` plus the complete reference UUID interpreted as a base36 integer,
 without truncation. Display labels remain ordinal; removing/reordering another
