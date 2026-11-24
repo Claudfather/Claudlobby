@@ -1218,12 +1218,34 @@ test('canonical request wins two-tab storage conflict, preserving both original 
   assert.equal(await reloaded.run('launch'),false);
   restored.dispose();reloaded.dispose();h.api.dispose();
 });
-test('null context or a new grant never clears the original request or permits another preview',async()=>{
+test('a null request under the same approval never clears the original request or permits another preview',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
   await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
-  h.context.generation=id(12);await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.match(h.api.snapshot().note,/^Setup was already submitted from this browser\./);
   assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+// The computer cannot hold a new approval while it keeps a request (OwnerSetup.allow refuses it), so a new approval
+// holding no request means it no longer has the original: it is set aside with the conflicting ones, never launched.
+test('a new approval holding no request sets the original request aside and never launches it again',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(h.api.following(),true);
+  h.context.generation=id(12);await h.api.run('context');
+  assert.equal(h.api.snapshot().pending,null);assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
+  assert.deepEqual(JSON.parse(h.saved.get('test')),{version:2,pending:null,conflicts:[h.pending],legacy:[]});
+  assert.equal(h.api.following(),false,'the request set aside is no longer followed');
+  assert.equal(await h.api.run('launch'),false);
+  const next={...h.pending,generation:id(12),request_id:id(13)};
+  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,...next};};
+  h.client.setupLaunch=async input=>{h.calls.push(['launch',input]);throw new Error('lost');};
+  assert.equal(await h.api.run('preview'),true);
+  assert.deepEqual(h.calls.filter(c=>c[0]==='preview').at(-1)[1],{generation:id(12),goal:'Improve tests'});
+  assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.calls.filter(c=>c[0]==='launch').map(c=>c[1]),[h.pending,next],'each request is launched once');
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().pending,next);assert.deepEqual(reloaded.snapshot().conflicts,[h.pending]);
+  reloaded.dispose();h.api.dispose();
 });
 test('historical sealed identifiers remain visible and block a replacement Git request',async()=>{
   const h=setupHarness(),legacy={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
@@ -3126,6 +3148,62 @@ test('a held launch keeps no Claude sign-in from another approval',async()=>{
   assert.deepEqual(stepShape(panel).map(row=>row[0]),['connect','approve','goal','launch'],'no Sign in to Claude step is shown done');
   assert.deepEqual(stepShape(panel)[1],['approve','done']);
   h.api.dispose();
+});
+// 41-01: a computer set up again from the same browser after a reset. This browser still keeps its earlier
+// installation's request, the computer's word that that Launch was reserved, and its Claude sign-in.
+const earlierInstallation=()=>[...keptLaunch(),['test:claude',JSON.stringify({generation:settingUp.generation,attempt_id:id(11)})]];
+test('records kept from a computer\'s earlier installation do not block Sign in, Preview or Launch on its new one',async()=>{
+  for(const [name,saved] of [['request, launch and sign-in kept',earlierInstallation()],['sign-in kept',earlierInstallation().slice(-1)]]){
+    const next={generation:id(20),request_id:id(21),config_fingerprint:'c'.repeat(64),source_revision:settingUp.source_revision};
+    const p=connectedPanel({saved,context:{generation:next.generation,provider_signin:true,signin_attempt:null,preview_state:'none'},
+      client:{async setupSignin(action,input){p.h.calls.push(['signin-'+action,input]);return {...input,state:'connected',reason:null};},
+        async setupPreview(input){p.h.calls.push(['preview',input]);return {...p.h.preview,...next};},
+        async setupLaunch(input){p.h.calls.push(['launch',input]);
+          return {...input,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}};},
+        async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+    await p.finish();await flush();
+    assert.equal(p.reads(),1,name);
+    assert.equal(p.h.api.snapshot().note,'',name);
+    assert.equal(p.h.api.snapshot().pending,null,name);
+    assert.deepEqual(p.h.api.snapshot().conflicts,saved.length>1?[settingUp]:[],'the earlier request stays under Details: '+name);
+    assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']],name);
+    assert.equal(p.focused()?.textContent,'Sign in to Claude',name);
+    buttonOf(p.panel,'Sign in to Claude').click();await flush();
+    const begun=p.h.calls.filter(c=>c[0]==='signin-begin');
+    assert.equal(begun.length,1,name);assert.equal(begun[0][1].generation,next.generation,name);
+    assert.deepEqual(JSON.parse(p.h.saved.get('test:claude')),begun[0][1],'the new sign-in replaces the kept one: '+name);
+    p.h.api.setGoal('Improve tests');assert.equal(offered(p.panel,'Preview team'),true,name);
+    buttonOf(p.panel,'Preview team').click();await flush();
+    assert.deepEqual(p.h.calls.filter(c=>c[0]==='preview').map(c=>c[1]),[{generation:next.generation,goal:'Improve tests'}],name);
+    assert.equal(offered(p.panel,'Launch team'),true,name);
+    buttonOf(p.panel,'Launch team').click();await flush();
+    assert.deepEqual(p.h.calls.filter(c=>c[0]==='launch').map(c=>c[1]),[next],name);
+    assert.equal(p.h.calls.filter(c=>c[0]==='receipt').length,0,'the earlier request\'s status is never read: '+name);
+    assert.ok(p.h.calls.every(([,input])=>input?.request_id!==settingUp.request_id),name);
+    assert.deepEqual(JSON.parse(p.h.saved.get('test')),{version:2,pending:next,conflicts:saved.length>1?[settingUp]:[],legacy:[]},name);
+    const reloaded=createGuidedSetup({client:p.h.client,storage:p.h.storage,storageKey:'test',now:()=>1800000000});
+    assert.deepEqual(reloaded.snapshot().pending,next,name);assert.equal(await reloaded.run('launch'),false,name);
+    assert.equal(p.h.calls.filter(c=>c[0]==='launch').length,1,name);
+    reloaded.dispose();p.h.api.dispose();
+  }
+});
+test('on the same installation, a kept request still blocks Sign in, Preview and a second Launch, as before',async()=>{
+  const saved=earlierInstallation(),before=new Map(saved);
+  const p=connectedPanel({saved,context:{provider_signin:true,signin_attempt:null,preview_state:'none'},
+    client:{async setupSignin(action,input){p.h.calls.push(['signin-'+action,input]);throw new Error('lost');},
+      async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+  await p.finish();await flush();
+  assert.equal(p.reads(),1);
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);assert.deepEqual(p.h.api.snapshot().conflicts,[]);
+  assert.equal(p.h.api.snapshot().note,'Setup was already submitted from this browser. Use this installation’s stable CLI with host update continue. Reconnecting never launches again.');
+  assert.deepEqual(stepButtons(p.panel),['Check launch status']);
+  buttonOf(p.panel,'Check launch status').click();await flush();
+  assert.match(p.h.api.snapshot().note,/^The launch could not be confirmed\. .*Do not launch again\.$/);
+  for(const operation of ['signin-begin','preview','launch'])assert.equal(await p.h.api.run(operation),false,operation);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])||c[0].startsWith('signin-')).length,0);
+  assert.deepEqual(p.h.calls.filter(c=>c[0]==='receipt').map(c=>c[1]),[settingUp,settingUp],'only the kept request\'s status is read');
+  assert.deepEqual(new Map(p.h.saved),before,'nothing this browser kept is changed');
+  p.h.api.dispose();
 });
 test('the Launch team reassurance goes once the launch is held and stays gone after it finished',async()=>{
   const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});l.h.context.managed_owner=undefined;

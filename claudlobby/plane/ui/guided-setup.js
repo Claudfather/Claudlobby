@@ -223,6 +223,13 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     } catch { throw Object.assign(new Error('This browser could not save the setup identifiers, so nothing was launched. Allow site storage for this page, then try again.'), {code:'setup_storage_unavailable'}); }
   }
   function changed() { render(); onChange(); }
+  // The kept request belongs to another approval, which the computer no longer holds (see the approval read in run):
+  // it joins the conflicting ones, still shown under Details, and this page stops following it. Saved first, so a
+  // browser that cannot save keeps it as before.
+  function setAside() {
+    retain(pending,conflicts); save(null); pending = null;
+    stopHandoff(); followed = false; handoffUntil = 0; handoffReads = 0; connectionChecked = false;
+  }
   const RENEWAL_STATES=['renewing','ready','setup_only'];
   function connectionChanged(next) {
     // The client's own pre-begin renewal of a still-valid session rotates the epoch but is not
@@ -289,6 +296,14 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         previewState = said ?? null;
         if (said !== undefined && said !== 'none') previewWatch = true;
         if (said !== 'preparing') { previewUntil = 0; previewStopped = false; }
+        // An approval that holds no request, under another generation than a request or sign-in this browser kept: the
+        // computer holds neither, as after it was set up again from nothing. It cannot get here while it keeps that
+        // request: a new approval is refused while any Preview or Launch is retained (OwnerSetup.allow), and this read is
+        // refused while its sign-in attempt belongs to another approval (provider_signin.py _row). Never launched; see setAside.
+        if (value.request === null) {
+          if (pending && pending.generation !== value.generation) setAside();
+          if (value.provider_signin === true) signin.setAside(value.generation);
+        }
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
@@ -302,7 +317,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
         const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
-        // A null request or new grant is never proof that an original request vanished.
+        // A null request under the same approval is never proof that an original request vanished.
         note = value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
           : shown === 'ready' ? PREVIEW_NOTES.ready
           : shown === 'expired' ? PREVIEW_NOTES.expired(value)

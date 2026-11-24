@@ -261,6 +261,15 @@ the view as it was and shows nothing, and nothing retries it. The same word
 hides "Nothing runs on this computer until you choose Launch team." from the
 first paint. A request kept from a Preview alone, a word stored for another
 request, or a word this browser cannot read gets no launch status read.
+A computer set up again from nothing answers the approval read with a new
+approval that holds no request. A computer cannot hold a new approval while it
+keeps any Preview or Launch (`allow` refuses it with
+`setup_original_request_retained`), so the page then sets the request it kept
+under the earlier approval aside with the conflicting identifiers (still listed
+under Details, never launched or followed), and stops following a Claude
+sign-in it kept under the earlier approval. The new approval's sign-in, preview
+and launch are offered as on a fresh page. A null request under the same
+approval changes nothing.
 Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
 enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is

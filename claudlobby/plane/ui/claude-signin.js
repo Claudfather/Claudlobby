@@ -136,6 +136,16 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     }
     } catch { signinBlocked=true; }
   }
+  // The computer's approval read named approval `generation` and holds no request there. An attempt this browser kept
+  // under another approval is one no call can follow under this one (each names its approval), and the computer holds
+  // none of it: it refuses that read while its current attempt belongs to another approval (provider_signin.py _row). So
+  // it is no longer followed, and this approval's own sign-in is offered. Its record stays until the next sign-in replaces it.
+  function setAside(generation) {
+    if (!signinAttempt || signinAttempt.generation===generation) return;
+    stopSigninPoll(); signinAttempt=signinPredecessor=signinSuccessor=null;
+    signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
+    signinRetryable=signinHalted=false; signinNotice=''; if (refs) refs.code.value='';
+  }
   // One sign-in operation of the page's run: begin, retry, status, code or cancel. Returns what run returns for it.
   async function operate(operation, ticket) {
     const context=host.approval();
@@ -338,7 +348,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     return refs = {signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},steps:{signin}};
   }
-  return Object.freeze({load,operate,failed,restoreRetry,receipt:signinReceipt,flags,paint,mount,
+  return Object.freeze({load,setAside,operate,failed,restoreRetry,receipt:signinReceipt,flags,paint,mount,
     schedule:scheduleSigninPoll,stopPoll:stopSigninPoll,
     // The connection or approval changed: nothing of a live link carries over.
     lost() { stopSigninPoll(); clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); },
