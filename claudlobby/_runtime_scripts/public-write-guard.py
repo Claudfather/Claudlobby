@@ -60,9 +60,11 @@ Failure directions, each chosen on purpose:
     not UTF-8 text; a line that does not compile, too large a repeat count or
     groups nested too deep among them; lines that do not compile together; or a
     line that can match an empty string, so every write would be a hit): REFUSE
-    every guarded write, naming a bad line by its number and column, never by
-    its text. Someone meant to protect this host, and a broken list must not
-    read as none.
+    every guarded write, naming the cause, never a line's text: a bad line by
+    its number, with its column where the compile error gives a position or
+    the exception's name for too large a repeat count or groups nested too
+    deep, and lines that fail only together by none. Someone meant to protect
+    this host, and a broken list must not read as none.
   - a payload that is not JSON: ALLOW, loudly (exit 3: the hook leaves a
     breadcrumb). A hook that cannot read the harness's own payload must not
     wedge every call.
@@ -266,9 +268,10 @@ def load_terms(path: Path) -> tuple[re.Pattern | None, str]:
     """(compiled list, state): state is ``ok``, ``absent`` or ``broken: <why>``.
 
     A list that does not load is broken, whatever stops it at the read or at
-    either compile, and never reads as absent. A broken list is named by line
-    and column, never by the line's text: the reason reaches the bot, and the
-    list is what must not travel."""
+    either compile, and never reads as absent. A bad line is named by its
+    number (with its column where the compile error gives a position), never
+    by its text: the reason reaches the bot, and the list is what must not
+    travel."""
     try:
         # a named pipe would wait for a writer, and a device need never end
         mode = path.stat().st_mode
