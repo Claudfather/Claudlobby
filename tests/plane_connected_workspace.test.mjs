@@ -3859,7 +3859,40 @@ for(const [name,answer,offer] of [['a refusal',()=>reply(403,{state:'denied'}),'
     assert.equal(l.panel(),panel);
     assert.deepEqual(stepShape(panel)[0],['connect','current'],'the Connect step is not ticked while this computer is not connected');
     assert.ok(offered(panel,offer),'a way back inside the frame');
+    assert.equal(descendants(panel).some(n=>n.textContent==='Connect so you can finish setup.'&&visible(n)),false,
+      'no setup is left to finish once the team is launched');
     assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the Launch stays done');
+  });
+// A renewal the computer refused is an answer, not a lapse: the setup form comes back whatever the follow-up check says.
+for(const [how,status] of [['refused',()=>reply(403,{state:'denied'})],['lost',()=>Promise.reject(new Error('lost'))]])
+  for(const automatic of [false,true])
+    test(`on a working page a ${automatic?'automatic':'Keep connected'} renewal refused, then a status check ${how}, brings back the setup form`,async t=>{
+      const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin;
+      l.h.overrides.set(a+'/api/owner/connected/renew',()=>reply(403,{state:'denied'}));
+      l.h.overrides.set(a+'/api/owner/connected/status',status);
+      if(automatic){
+        l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}
+        await flush();l.h.ui.listeners.get('pointerdown')({isTrusted:true});l.h.timer(0);
+      }else assert.equal(await l.workspace.act(0,'renew'),false);
+      await flush();
+      assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,1,'one renewal was asked for');
+      assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+      assert.equal(setupMarker(l),'setup','the refusal ends the team view');
+      assert.deepEqual(formsPosted(l),['setup','working','setup']);
+      assert.match(l.cards()[0].children[0].textContent,/Access denied$/);
+    });
+// A Connect from a lapsed page that reaches another computer or binding at the same address cannot bring the team back.
+for(const [name,change] of [['another computer',{host_uid:'host_'+'d'.repeat(32)}],['a new binding',{binding_generation:id(8)}]])
+  test(`a Connect from a lapsed working page whose challenge comes from ${name} brings back the setup form`,async t=>{
+    const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin,url=a+'/api/owner/connected/challenge';
+    await idleUntilExpiry(l);
+    assert.equal(setupMarker(l),undefined);
+    const issued=l.h.calls.filter(c=>c.url.endsWith('/issue')).length;
+    l.h.overrides.set(url,init=>{l.h.overrides.delete(url);return l.h.dependencies.fetch(url,init).then(r=>r.json()).then(c=>reply(202,{...c,...change}));});
+    await l.workspace.act(0,'connect');await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/issue')).length,issued,'no session is issued');
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+    assert.equal(setupMarker(l),'setup');assert.deepEqual(formsPosted(l),['setup','working','setup']);
   });
 
 // H: the frame tells the page which form it shows: once after ready, then only on a change; nothing else crosses.

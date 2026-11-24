@@ -530,7 +530,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       || operation === 'receipt' && !pending;
     m.recheck.disabled = controls.context.disabled;
     if (m.connect) {
-      const {button,hint} = m.connect;
+      const {button,hint,text} = m.connect;
+      text.hidden = finished; // once the team is launched there is no setup left to finish; the button stays
       setText(button,connectView?.operation === 'check' ? 'Check connection' : 'Connect');
       button.className = filled('connect','pill ghost');
       button.disabled = !connectView || !!connectView.disabled || !!connectView.busy;
@@ -590,8 +591,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (connectFocus === 'sent') connectFocus = null; // the entry refused it, so nothing will move focus
       });
       connectRow.done.append(make('span','','Connected'));
-      connectRow.body.append(make('p','setup-step-text','Connect so you can finish setup.'),row(button),hint);
-      connectStep = {button,hint};
+      const text = make('p','setup-step-text','Connect so you can finish setup.');
+      connectRow.body.append(text,row(button),hint);
+      connectStep = {button,hint,text};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
     const recheck = action('Check setup approval again','pill ghost','context'), approveHint = make('p','setup-hint');

@@ -498,13 +498,16 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       // 'shared' layout below, so a renewal of its session (which keeps the parts shown) does not change the form.
       // With no team the parts stay the whole view, in the setup form.
       // A computer that showed it in this page keeps it through a lapse of its session, when no parts answer is held:
-      // its session ran out (a page left idle is not renewed), a renewal's answer was lost, a Connect or check from its
-      // card is under way or a Connect did not reach the computer, or a new session's parts read has not answered yet.
-      // Its card then offers Connect or Check connection. Any other end of the session (a refusal, a sign-out, a
-      // session check that ends anywhere but ready) brings back the setup form, as does a parts answer with no team.
-      const lapsed = pending.has(index) || ['renewing','checking'].includes(status.state)
-        || !!(continuity?.reconnectRequired || continuity?.renewalUnknown || continuity?.connectRequired)
-        || status.state === 'ready' && !parts.answered();
+      // its session ran out (a page left idle is not renewed, and a check of it then ends unavailable), a renewal's
+      // answer was lost, a Connect or check from its card is under way or a Connect did not reach the computer, or a
+      // new session's parts read has not answered or failed. Its card then offers Connect or Check connection.
+      // A refusal or a sign-out ends the lapse, even one whose follow-up check was lost. Other ends bring back the
+      // setup form too: a check of a live session that does not end ready (its answer lost included), a Connect that
+      // finds another computer or binding, and a parts answer with no team.
+      const lapsed = pending.has(index) || !['denied','disconnected','signed_out'].includes(connection)
+        && (['renewing','checking'].includes(status.state)
+          || !!(continuity?.reconnectRequired || continuity?.renewalUnknown || continuity?.connectRequired)
+          || status.state === 'ready' && !parts.answered());
       controls.working = browserTransport && bridged && phase === 'ready' && !row.hidden && !held
         && (partsShown ? parts.teams() !== 0 : controls.working && lapsed);
       // The working form offers no first-time setup in the card: its disclosure holds only the connection options.
