@@ -54,8 +54,10 @@ SKIP_CEILINGS = {
     # which the Ubuntu runner image does not install; the macOS lane runs it.
     "supported (ubuntu-latest, py3.10)": 18,
     # 145 from #2930: three tests in tests/test_stand_in_fixtures.py read a
-    # running stand-in's Linux /proc name, and macOS keeps copies.
-    "supported (macos-latest, py3.11)": 145,
+    # running stand-in's Linux /proc name, and macOS keeps copies. 146 from
+    # #3112: its test of a list read that runs out of memory needs an
+    # address-space limit (RLIMIT_AS), which macOS does not enforce.
+    "supported (macos-latest, py3.11)": 146,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests
