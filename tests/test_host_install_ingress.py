@@ -55,7 +55,7 @@ SERVE = {
     "tcp_forward": ({**EXACT, "TCP": {"443": {"TCPForward": "localhost:22"}}}, "differs"),
     "plain_http": ({**EXACT, "TCP": {"443": {"HTTP": True}}}, "differs"),
     "another_account": ({**EXACT, "Web": {TARGET: {"Handlers": {"/": {
-        "Proxy": "unix:/home/other-user/.local/share/claudlobby-browser/data/state/owner/owner.sock"}}}}}, "differs"),
+        "Proxy": "unix:/home/alice/.local/share/claudlobby-browser/data/state/owner/owner.sock"}}}}}, "differs"),
     "another_proxy": ({**EXACT, "Web": {TARGET: {"Handlers": {"/": {"Proxy": "http://localhost:8080"}}}}}, "differs"),
     "https_only": ({"TCP": EXACT["TCP"]}, "differs"),
     "route_only": ({"Web": EXACT["Web"]}, "differs"),
@@ -202,7 +202,7 @@ def test_the_route_is_this_accounts_own():
     predicate = host._serve_predicate()
     assert predicate["ingress_after"](EXACT, DNS, HOME) == EXACT
     with pytest.raises(predicate["Refusal"]):
-        predicate["ingress_after"](EXACT, DNS, "/home/other-user")
+        predicate["ingress_after"](EXACT, DNS, "/home/alice")
 
 
 def _good():
