@@ -984,6 +984,46 @@ def test_local_template_is_repo_free_scoped_and_idle(tmp_path, monkeypatch):
     assert b"github" not in content.lower()
 
 
+def test_local_template_declares_the_approved_folder_as_the_leads_project(tmp_path, monkeypatch):
+    """A first team set up from the website can admit work in its folder (41-05).
+
+    The person approved one folder. Nobody using only the website can write
+    projects.yaml, so the project comes from the template's own `project`
+    mount, and the authored fleet.yaml carries no new block.
+    """
+    import yaml
+    from claudlobby.config import load_fleet_snapshot
+    from claudlobby.task_operations import _scope_links
+    from claudlobby.task_queries import TaskQueryError
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "claudfather-projects" / "first-team"; project.mkdir(parents=True)
+    content = setup._template_config("local-project", "web-app", None, "Build a one-page hello website",
+                                     project_directory=str(project))
+    assert set(yaml.safe_load(content)) == {"fleet"} and "projects" not in yaml.safe_load(content)["fleet"]
+    fleet, _ = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    # The admission door the lead uses accepts the folder's key and nothing else.
+    ctx = SimpleNamespace(context=SimpleNamespace(fleet=fleet))
+    _scope_links(ctx, None, "first-team", None, None)
+    with pytest.raises(TaskQueryError, match="not declared"):
+        _scope_links(ctx, None, "web-app", None, None)
+    assert fleet.projects_derived and set(fleet.projects) == {"first-team"}
+    declared = fleet.projects["first-team"]
+    assert (declared.directory, declared.title, declared.repos, declared.validation.tier) == (
+        str(project), str(project), [], "review")
+    from claudlobby.config import derived_project_sources
+    assert derived_project_sources(fleet.projects) == ["mounts.project"]
+
+
+def test_revenue_template_projects_are_unchanged_by_project_mounts():
+    from claudlobby.config import derived_project_sources, load_fleet_snapshot
+    content = setup._template_config("revenue-web-app", "shop", "example-org/shop", "Improve checkout tests")
+    fleet, _ = load_fleet_snapshot(Path("/unused/fleet.yaml"), content, None)
+    assert all(not bot.mounts for bot in fleet.bots.values())
+    assert set(fleet.projects) == {"shop"}
+    assert (fleet.projects["shop"].repos, fleet.projects["shop"].directory) == (["example-org/shop"], None)
+    assert derived_project_sources(fleet.projects) == ["scope.repos"]
+
+
 def test_local_template_refuses_unsafe_or_mixed_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     project = tmp_path / "project"; project.mkdir()

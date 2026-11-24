@@ -759,3 +759,81 @@ def test_a_repo_name_of_pure_punctuation_still_gets_a_usable_key(fleet_dir):
     (key,) = fleet.projects
     assert _PROJECT_KEY_RE.match(key), key
     assert fleet.projects[key].repos == ["acme/---"]
+
+
+# --- a bot's `project` mount (the local-project team's approved folder) --------
+
+
+def _with_mount(text: str, bot: str, name: str, folder: Path) -> str:
+    """Insert a `mounts:` block under one bot, at the manifest's own indentation."""
+    m = re.search(rf"^(\s+){re.escape(bot)}:\n(\s+)expertise:.*\n", text, re.M)
+    assert m, f"bot {bot!r} not found in the fixture manifest"
+    inner = m.group(2)
+    block = f"{inner}mounts:\n{inner}  {name}: {folder}\n"
+    return text[: m.end()] + block + text[m.end() :]
+
+
+def _mounted_fleet(fleet_dir: Path, name: str = "project", text: str = MINIMAL_FLEET_YAML) -> Path:
+    folder = fleet_dir.parent / "claudfather-projects" / "first-team"
+    folder.mkdir(parents=True)
+    _write_fleet(fleet_dir, _with_mount(_with_mount(text, "lead", name, folder), "worker-1", name, folder))
+    return folder
+
+
+def test_a_project_mount_derives_one_repo_free_project_named_after_its_folder(fleet_dir):
+    folder = _mounted_fleet(fleet_dir)
+    fleet = _load(fleet_dir)
+    assert fleet.projects_derived is True
+    assert set(fleet.projects) == {"first-team"}, "two bots mounting one folder are one project"
+    p = fleet.projects["first-team"]
+    assert (p.title, p.repos, p.directory, p.validation.tier) == (str(folder), [], str(folder), "review")
+    report = validate(fleet, _paths(fleet_dir))
+    assert not [e for e in report.errors if "project" in e], report.errors
+
+
+def test_a_project_mount_composes_into_the_leads_table_and_every_bot_conf(fleet_dir):
+    install_real_template(fleet_dir)
+    folder = _mounted_fleet(fleet_dir)
+    fleet = _load(fleet_dir)
+    md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert f"| first-team | {folder} |  | review |" in md
+    assert "Derived from each bot's `mounts.project` at tier `review`" in md
+    assert "(derived from mounts.project)" in md
+    assert "scope.repos" not in md
+    for bot_id in ("lead", "worker-1"):
+        conf = compose_bot_conf(fleet.bots[bot_id], fleet, _paths(fleet_dir))
+        assert "# Projects (derived from mounts.project)" in conf
+        assert "export PROJECT_TIER_FIRST_TEAM=review" in conf
+
+
+def test_repo_keys_are_claimed_before_a_project_mount(fleet_dir):
+    install_real_template(fleet_dir)
+    folder = _mounted_fleet(fleet_dir, text=_with_scope(MINIMAL_FLEET_YAML, "lead", "acme", ["first-team"]))
+    fleet = _load(fleet_dir)
+    assert fleet.projects["first-team"].repos == ["acme/first-team"]
+    assert fleet.projects["first-team-2"].directory == str(folder)
+    md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert "Derived from each bot's `scope.repos` and `mounts.project`" in md
+    conf = compose_bot_conf(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    assert "# Projects (derived from scope.repos and mounts.project)" in conf
+
+
+def test_only_a_mount_named_project_derives_a_project(fleet_dir):
+    _mounted_fleet(fleet_dir, name="data")
+    assert _load(fleet_dir).projects == {}
+
+
+def test_a_declared_projects_yaml_replaces_the_mount_derivation_too(fleet_dir):
+    _mounted_fleet(fleet_dir)
+    _write_projects(fleet_dir)
+    fleet = _load(fleet_dir)
+    assert fleet.projects_derived is False
+    assert "first-team" not in fleet.projects
+    assert all(p.directory is None for p in fleet.projects.values())
+
+
+def test_a_declared_project_without_repos_still_errors_beside_a_mount(fleet_dir):
+    _mounted_fleet(fleet_dir)
+    _write_projects(fleet_dir, "projects:\n  first-team:\n    title: First team\n")
+    report = validate(_load(fleet_dir), _paths(fleet_dir))
+    assert any("repos is empty" in e for e in report.errors), report.errors

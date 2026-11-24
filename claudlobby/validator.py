@@ -1885,7 +1885,8 @@ def _validate_projects(
                 f"{hint(project.validation.tier, VALID_TIERS)}"
             )
 
-        if not project.repos:
+        # A project derived from a `project` mount is joined by its folder.
+        if not project.repos and project.directory is None:
             report.errors.append(
                 f"{label}: repos is empty — repos is the join key that maps "
                 f"work to this project's closure bar"

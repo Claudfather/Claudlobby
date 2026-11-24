@@ -325,6 +325,10 @@ class ProjectConfig:
     # Unrecognized top-level keys, preserved verbatim so the validator can
     # warn on them (metrics: lives here — reserved for the metrics plan).
     raw: dict[str, Any] = field(default_factory=dict)
+    # The local folder of a project derived from a bot's `project` mount
+    # (derive_projects). Never read from projects.yaml. Such a project has no
+    # repos: the folder, not a repo, is what work in it touches.
+    directory: str | None = None
 
     @property
     def env_slug(self) -> str:
@@ -456,7 +460,8 @@ def _qualified_repo(repo: str, org: str | None) -> str:
 
 
 def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
-    """One project per repo any bot declares in `scope.repos`, tier `review`.
+    """One project per repo any bot declares in `scope.repos`, and one per
+    folder any bot mounts as `project`, all at tier `review`.
 
     The fallback when a fleet ships no projects.yaml. A declared projects.yaml
     REPLACES this wholesale — never a merge: a half-declared registry is a
@@ -506,15 +511,53 @@ def derive_projects(bots: dict[str, "BotConfig"]) -> dict[str, ProjectConfig]:
             key = f"{base}-{n}"
         claims[key] = repo
 
-    return {
+    projects = {
         slug: ProjectConfig(
             key=slug,
             title=repo,
             repos=[repo],
             validation=ProjectValidationConfig(tier="review"),
         )
-        for slug, repo in sorted(claims.items())
+        for slug, repo in claims.items()
     }
+
+    # A bot's `project` mount is the folder a person approved for local work
+    # (the local-project team template writes it for every bot). Without a
+    # project for it, the lead has nothing declared to admit work against, and
+    # someone using only the website cannot write projects.yaml. Repo keys are
+    # claimed first, so a fleet that mounts no `project` keeps exactly the
+    # keys it had; a folder whose name is taken gets the next free number.
+    folders = {
+        os.path.normpath(target)
+        for bot in bots.values()
+        for name, target in bot.mounts.items()
+        if name == "project" and isinstance(target, str) and target.strip()
+    }
+    for folder in sorted(folders):
+        base = _slugify_repo_part(os.path.basename(folder)) or "project"
+        key, n = base, 2
+        while key in projects:
+            key, n = f"{base}-{n}", n + 1
+        projects[key] = ProjectConfig(
+            key=key,
+            # The title renders into the lead's Projects table, which refuses
+            # a newline or a pipe; such a folder is named by its key instead.
+            title=key if "\n" in folder or "|" in folder else folder,
+            directory=folder,
+            validation=ProjectValidationConfig(tier="review"),
+        )
+    return dict(sorted(projects.items()))
+
+
+def derived_project_sources(projects: dict[str, ProjectConfig]) -> list[str]:
+    """The bot fields a derived registry came from, as its composed labels name them.
+
+    A registry derived from repos alone keeps the `scope.repos` label it has
+    always had, so an unchanged fleet composes unchanged text.
+    """
+    folders = any(p.directory is not None for p in projects.values())
+    repos = any(p.directory is None for p in projects.values())
+    return (["scope.repos"] if repos or not folders else []) + (["mounts.project"] if folders else [])
 
 
 def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:

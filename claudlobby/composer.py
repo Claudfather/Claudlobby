@@ -44,6 +44,7 @@ from .config import (
     DEFAULT_SESSION_RESUME_COMMAND,
     BotConfig,
     FleetConfig,
+    derived_project_sources,
     load_fleet,
     load_host_boot,
     load_host_jobs,
@@ -1274,7 +1275,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths,
     if fleet.projects:
         lines.append("")
         source = (
-            "derived from scope.repos"
+            "derived from " + " and ".join(derived_project_sources(fleet.projects))
             if fleet.projects_derived
             else "projects.yaml"
         )
@@ -2349,6 +2350,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         teams=teams,
         projects=projects,
         projects_derived=fleet.projects_derived,
+        projects_sources=derived_project_sources(fleet.projects),
         fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         privilege_runners=privilege_runners,

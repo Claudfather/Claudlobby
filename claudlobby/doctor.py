@@ -28,7 +28,7 @@ from .claudron_compat import (
     PROBE_API,
     PROBE_VERB_PREFIX,
 )
-from .config import FleetConfig
+from .config import FleetConfig, derived_project_sources
 from .context import native_environment
 from .paths import Paths, tmux_socket_for_bot, vault_api_available
 from .validator import validate, warning_summary
@@ -1423,7 +1423,8 @@ def check_goal_binding(
         report.add("goal-binding", "warn", detail)
         return
 
-    source = "derived from scope.repos" if fleet.projects_derived else "projects.yaml"
+    source = ("derived from " + " and ".join(derived_project_sources(fleet.projects))
+              if fleet.projects_derived else "projects.yaml")
     report.add(
         "goal-binding",
         "pass",
