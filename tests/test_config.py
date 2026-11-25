@@ -450,14 +450,14 @@ class TestCoerceBot:
         assert bot.permissions == []
 
     def test_bot_id_defaults_to_key(self):
-        bot = _coerce_bot("greg", {"expertise": ["eng"]}, {})
-        assert bot.bot_id == "greg"
-        assert bot.name == "greg"
+        bot = _coerce_bot("worker-2", {"expertise": ["eng"]}, {})
+        assert bot.bot_id == "worker-2"
+        assert bot.name == "worker-2"
 
     def test_bot_id_with_custom_name(self):
-        bot = _coerce_bot("greg", {"expertise": ["eng"], "name": "Greg"}, {})
-        assert bot.bot_id == "greg"
-        assert bot.name == "Greg"
+        bot = _coerce_bot("worker-2", {"expertise": ["eng"], "name": "Worker-2"}, {})
+        assert bot.bot_id == "worker-2"
+        assert bot.name == "Worker-2"
 
     def test_reports_to(self):
         bot = _coerce_bot("worker", {"expertise": ["eng"], "reports_to": "lead"}, {})
@@ -567,7 +567,7 @@ class TestCoerceBotSecretFiles:
 
     def test_secret_files_parsed_from_raw(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "secret_files": {"GA4_SA_KEY_PATH": ".secrets/ga4.json"},
@@ -577,12 +577,12 @@ class TestCoerceBotSecretFiles:
         assert bot.secret_files == {"GA4_SA_KEY_PATH": ".secrets/ga4.json"}
 
     def test_secret_files_default_empty(self):
-        bot = _coerce_bot("kev", {"expertise": ["eng"]}, {})
+        bot = _coerce_bot("worker", {"expertise": ["eng"]}, {})
         assert bot.secret_files == {}
 
     def test_secret_files_merges_defaults(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "secret_files": {"GSC_SA_KEY_PATH": ".secrets/gsc.json"},
@@ -603,7 +603,7 @@ class TestCoerceBotExternalPaths:
 
     def test_external_paths_parsed_from_raw(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "external_paths": [
@@ -617,12 +617,12 @@ class TestCoerceBotExternalPaths:
         ]
 
     def test_external_paths_default_empty(self):
-        bot = _coerce_bot("kev", {"expertise": ["eng"]}, {})
+        bot = _coerce_bot("worker", {"expertise": ["eng"]}, {})
         assert bot.external_paths == []
 
     def test_external_paths_merges_defaults(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "external_paths": [{"path": "/opt/tool/bin", "purpose": "bot tool"}],
@@ -642,7 +642,7 @@ class TestCoerceBotExternalPaths:
     def test_external_paths_relative_rejected_at_coerce(self):
         with pytest.raises(ValueError, match="absolute"):
             _coerce_bot(
-                "kev",
+                "worker",
                 {
                     "expertise": ["eng"],
                     "external_paths": [{"path": "relative/x", "purpose": "p"}],
@@ -653,7 +653,7 @@ class TestCoerceBotExternalPaths:
     def test_external_paths_missing_purpose_rejected_at_coerce(self):
         with pytest.raises(ValueError, match="purpose"):
             _coerce_bot(
-                "kev",
+                "worker",
                 {
                     "expertise": ["eng"],
                     "external_paths": [{"path": "/var/lib/printify/data"}],

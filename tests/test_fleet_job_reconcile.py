@@ -52,9 +52,9 @@ _FLEET = """\
     fleet:
       name: test-fleet
       service_prefix: com.test
-      manager: kev
+      manager: worker
       bots:
-        kev:
+        worker:
           expertise: [eng]
           manages: [mason]
           briefing:
@@ -99,13 +99,13 @@ class TestFleetJobReconcile:
         _seed(
             tmp_path,
             "com.test.plane-shadow",
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
         )
         pruned = _reconcile_fleet_job_units(tmp_path, "com.test", set(), 0)
         assert pruned == ["com.test.plane-shadow"]
-        assert (tmp_path / "com.test.briefing-kev-morning.timer").exists()
-        assert (tmp_path / "com.test.briefing-kev-evening.plist").exists()
+        assert (tmp_path / "com.test.briefing-worker-morning.timer").exists()
+        assert (tmp_path / "com.test.briefing-worker-evening.plist").exists()
 
     def test_zero_declared_is_a_full_removal(self, tmp_path):
         _seed(tmp_path, "com.test.keepalive", "com.test.fleet-pulse")
@@ -164,7 +164,7 @@ class TestGenerateShedsUndeclaredJobs:
         _seed(timers, "com.test.plane-shadow")
         compose_fleet_timers(fleet, paths, md)
         assert not (timers / "com.test.plane-shadow.timer").exists()
-        assert (timers / "com.test.briefing-kev-morning.timer").exists()
+        assert (timers / "com.test.briefing-worker-morning.timer").exists()
 
     def test_early_return_path_still_sheds(self, tmp_path):
         # system_defaults off, no sweep, no briefing: compose_fleet_timers
@@ -582,7 +582,7 @@ class TestOwnershipAndDeclaredCount:
         # other fleet's units, its briefing family included, as this fleet's
         # retired jobs. Every job name this composer writes is ONE dotless
         # segment after the prefix.
-        foreign = ("com.test.child.keepalive", "com.test.child.briefing-kev-morning")
+        foreign = ("com.test.child.keepalive", "com.test.child.briefing-worker-morning")
         _seed(tmp_path, "com.test.plane-shadow", *foreign)
         pruned = _reconcile_fleet_job_units(tmp_path, "com.test", set(), 0)
         assert pruned == ["com.test.plane-shadow"]

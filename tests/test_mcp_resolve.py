@@ -106,7 +106,7 @@ class TestResolvePlaceholders:
         from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
 
         entry = McpEntry(name="printify")
-        args = ["${FLEET_ROOT}/runtime/bots/kev/data/printify-mcp/dist/index.js"]
+        args = ["${FLEET_ROOT}/runtime/bots/worker/data/printify-mcp/dist/index.js"]
         assert resolve_placeholders(args, {}, entry, "default") == args
         for anchor in COMPOSER_PROVIDED_PATH_ANCHORS:
             token = "${" + anchor + "}"

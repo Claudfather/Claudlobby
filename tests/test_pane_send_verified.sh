@@ -294,7 +294,7 @@ stuck_then_gone() { printf '%s\n' "$HINT" "$1" "$1" "$FIXTURES/input-clean-submi
 r=$(run_send_rc '/claudna:session resume --auto' $(stuck_then_gone "$FIXTURES/input-stuck-literal.txt"))
 assert_eq "literal text stuck at the input line -> Enter resent, then submitted" "3 0" "$r"
 
-# craig's failure: a large payload renders as a collapsed placeholder, so the
+# worker-2's failure: a large payload renders as a collapsed placeholder, so the
 # literal text is nowhere in the pane and no text probe can match it.
 big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
 r=$(printf '%s\n' "$(cat "$FIXTURES/input-stuck-collapsed-paste.txt")" | grep -cF "${big:0:60}" || true)

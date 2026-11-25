@@ -511,7 +511,7 @@ class TestEnvLeaks:
         "ANTHROPIC_API_KEY=sk-ant-xxxx",     # spend
         "CLAUDE_CODE_USE_BEDROCK=1",         # routes around the dead base URL
         "CLAUDE_CODE_USE_VERTEX=1",
-        "BOT_DIR=/opt/fleet/runtime/bots/kev",   # the #846 vector
+        "BOT_DIR=/opt/fleet/runtime/bots/worker",   # the #846 vector
         "CLAUDLOBBY_ROOT=/opt/fleet",
         "FLEET_NAME=production",
     ])
