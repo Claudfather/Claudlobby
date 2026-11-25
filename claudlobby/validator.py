@@ -2396,20 +2396,22 @@ def _validate_alert_sender(fleet: FleetConfig, report: ValidationReport) -> None
 
     The sender is ``fleet_alert_sender``'s. The timers alert the fleet chat;
     `fleet notify`, a failed job and a failed message write alert the manager's
-    own chat. A declared ``fleet_pulse`` pair sends them all, so it is not warned.
+    own chat. A declared ``fleet_pulse`` pair sends those three, and fleet-pulse's
+    alerts: the one timer unit it is composed into. The other timers still alert
+    the fleet chat as this sender, so they are still warned.
     This reads the configuration only: at send time the runtime also passes over
     a manager whose channel state dir holds no token file, and logs that line."""
     fp = fleet.fleet_pulse
-    if fp is not None and fp.escalation_chat_id:
-        return
+    declared_pair = fp is not None and bool(fp.escalation_chat_id)
     uses: dict[str, tuple[AlertSender, list[str]]] = {}
     chat = fleet.telegram_group_chat_id
     if chat and _fleet_timers_emitted(fleet):
         sender = fleet_alert_sender(fleet, str(chat))
         if sender is not None and sender.bot_id != fleet.manager:
             uses.setdefault(sender.bot_id, (sender, []))[1].append(
-                "the fleet-timer alerts to the fleet chat")
-    target = manager_alert_target(fleet)
+                "the fleet-timer alerts to the fleet chat"
+                + (" other than fleet-pulse's" if declared_pair else ""))
+    target = None if declared_pair else manager_alert_target(fleet)
     if target is not None and target[1].bot_id != fleet.manager:
         uses.setdefault(target[1].bot_id, (target[1], []))[1].append(
             "`fleet notify`, a failed job and a failed message write")
@@ -2418,8 +2420,7 @@ def _validate_alert_sender(fleet: FleetConfig, report: ValidationReport) -> None
             "alert-sender",
             f"{' and '.join(what)} are sent as '{bot_id}', not the fleet manager "
             f"'{fleet.manager}': {sender.manager_why}. To send them as the manager, make "
-            "it a Telegram channel bot whose own chat is that chat, or declare "
-            "fleet_pulse.escalation_chat_id and escalation_state_dir (#3127)"
+            "it a Telegram channel bot whose own chat is that chat (#3127)"
         )
 
 

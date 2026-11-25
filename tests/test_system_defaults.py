@@ -635,14 +635,18 @@ class TestComposeFleetTimers:
         ("-1008888888888", True, False, "aide", ("fleet-timer",),
          "lead is not in this alert chat"),
         (None, True, False, None, (), ""),
-        (None, False, True, None, (), ""),
+        # The pair is composed into the fleet-pulse unit alone: the other timers
+        # still alert the fleet chat as aide.
+        (None, False, True, "aide", ("fleet-timer alerts to the fleet chat other than fleet-pulse's",),
+         "lead is not a Telegram channel bot"),
     ], ids=["manager-without-telegram", "manager-in-another-chat", "manager-in-the-chat",
             "declared-pair"])
     def test_a_fleet_alert_sent_as_a_bot_other_than_the_manager_is_a_validator_warning(
             self, lead_chat, lead_channel, pulse, sent_as, paths, why):
         """#3127: config validate, and doctor's fleet-yaml rung with it, names the
         bot the runtime sends a fleet alert as when it is not the fleet manager.
-        `aide` is a channel bot in the fleet chat and sorts first."""
+        `aide` is a channel bot in the fleet chat and sorts first. A declared
+        fleet_pulse pair moves only fleet-pulse's alerts and `fleet notify`'s."""
         from claudlobby.config import FleetPulseConfig
         from claudlobby.validator import ValidationReport, _validate_alert_sender
 
@@ -664,8 +668,9 @@ class TestComposeFleetTimers:
         assert f"are sent as '{sent_as}', not the fleet manager 'lead': {why}" in found[0], found
         for path in paths:
             assert path in found[0], found
+        assert ("other than fleet-pulse's" in found[0]) == pulse, found
         if "`fleet notify`" not in paths:
-            # The manager's own chat is its own: it sends `fleet notify` there itself.
+            # The manager sends `fleet notify` in its own chat itself, or the pair does.
             assert "`fleet notify`" not in found[0], found
 
     @staticmethod
