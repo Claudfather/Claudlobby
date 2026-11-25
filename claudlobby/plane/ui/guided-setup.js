@@ -458,12 +458,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   let detailsFor = null; // the plan, pending and identifier counts the Technical details JSON was last built from
   const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Technical details.';
   function render() {
+    // One clock reading per repaint, so the notes below and the expired line under Launch team agree.
+    const time = now();
     // Check preview needs a live approval: once this page's clock says it ended, a note offering it says so instead.
-    if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
-    // Nor does it say the team is ready once the Preview has run out, where Launch says the preview expired.
-    if (note === PREVIEW_NOTES.ready && plan && plan.expires_at <= now()) note = '';
+    if (previewWatch && context && context.expires_at <= time && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
+    // Nor does it say the team is ready once the Preview has run out, where Launch says the preview expired, or once
+    // this page no longer holds it (a connection change drops it). The banner is only ever set beside a plan.
+    if (note === PREVIEW_NOTES.ready && (!plan || plan.expires_at <= time)) note = '';
     if (!mount) return;
-    const m = mount, live = active(), time = now();
+    const m = mount, live = active();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
     const holding = launchHolding(), underway = standalone && launchUnderway;
     const approved = approvalKnown(time);

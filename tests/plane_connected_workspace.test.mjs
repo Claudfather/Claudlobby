@@ -1197,7 +1197,7 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   const authority=descendants(panel).find(e=>e.textContent.includes('This approval covers'));
-  assert.ok(descendants(detail).includes(authority),'approval scope lives under Details');
+  assert.ok(descendants(detail).includes(authority),'approval scope lives under Technical details');
   assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
   assert.match(authority.textContent,/for app version \S+ only\./);
   assert.match(authority.textContent,/starts the team and the app’s background services on this computer and may use the provider accounts you set up/);
@@ -1282,6 +1282,36 @@ test('the ready banner goes once the Preview runs out, where Launch team says it
   assert.equal(l.api.snapshot().note,READY_BANNER);
   late.t=l.preview.expires_at+60;assert.equal(await l.api.run('launch'),false);
   assert.equal(l.api.snapshot().note,'');assert.equal(l.calls.filter(c=>c[0]==='launch').length,0);l.api.dispose();
+});
+test('the ready banner goes once the page no longer holds the Preview: a connection change, one during Launch, and its end with no read',async()=>{
+  const ready=async options=>{const h=setupHarness(options),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+    const status=panel.children.find(n=>n.className==='setup-note');assert.equal(status.textContent,READY_BANNER);return {h,panel,status};};
+  // A connection change drops the plan and with it Launch team; the banner goes too.
+  for(const next of [{epoch:2},{epoch:2,state:'unavailable'}]){
+    const name=JSON.stringify(next),{h,panel,status}=await ready();
+    h.change(next);
+    assert.equal(h.api.snapshot().plan,null,name);assert.equal(offered(panel,'Launch team'),false,name);
+    assert.equal(h.api.snapshot().note,'',name);assert.doesNotMatch(status.textContent,/ready/i,name);
+    if(next.state)assert.equal(status.textContent,'Connect this computer to continue setup.','the connection line stands alone');
+    h.api.dispose();
+  }
+  // The same while the one Launch request is in flight; its late answer is not used and nothing is sent again.
+  const held=deferred(),f=await ready({client:{async setupLaunch(input){f.h.calls.push(['launch',input]);return held.promise;}}});
+  const sending=f.h.api.run('launch');await flush();
+  assert.deepEqual(f.h.calls.filter(c=>c[0]==='launch'),[['launch',f.h.pending]]);assert.equal(f.status.textContent,READY_BANNER);
+  f.h.change({epoch:2});
+  assert.equal(f.h.api.snapshot().note,'');assert.doesNotMatch(f.status.textContent,/ready/i);
+  held.resolve({...f.h.pending,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}});
+  assert.equal(await sending,false,'an answer for the earlier connection is not used');
+  assert.doesNotMatch(f.status.textContent,/ready/i);assert.equal(f.h.calls.filter(c=>c[0]==='launch').length,1);
+  f.h.api.dispose();
+  // Past the Preview's end, a repaint with no read takes it away.
+  const clock={t:1800000000},e=await ready({setupOptions:{now:()=>clock.t}}),reads=e.h.calls.filter(c=>c[0]==='context').length;
+  clock.t=e.h.preview.expires_at+1;e.h.change({});
+  assert.equal(e.h.api.snapshot().note,'');assert.doesNotMatch(e.status.textContent,/ready/i);
+  assert.equal(e.h.calls.filter(c=>c[0]==='context').length,reads,'with no read');
+  e.h.api.dispose();
 });
 test('canonical request wins two-tab storage conflict, preserving both original bindings through reload',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
@@ -1746,7 +1776,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.ok(says('Setup approved'));
   const underDetails=new Set(descendants(panel.children.find(n=>n.tagName==='DETAILS')));
   assert.deepEqual(descendants(panel).filter(n=>visible(n)&&!underDetails.has(n)&&!n.children.length&&/\bteam shop\b/i.test(n.textContent)),[],
-    'the team\'s internal name stays under Details');
+    'the team\'s internal name stays under Technical details');
   assert.deepEqual(filled(),{approve:[],signin:['Sign in to Claude'],goal:[],launch:[]});
   await h.api.run('signin-begin');
   assert.deepEqual(filled().signin,[],'while starting, progress is checked automatically');
@@ -1778,7 +1808,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.equal(descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(area)).children[0].textContent,'What should your team work on first?');
   const recheck=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again');
   assert.equal(recheck.hidden,false);
-  assert.ok(descendants(panel.children.find(n=>n.tagName==='DETAILS')).includes(recheck),'re-checking a held approval sits under Details');
+  assert.ok(descendants(panel.children.find(n=>n.tagName==='DETAILS')).includes(recheck),'re-checking a held approval sits under Technical details');
   assert.ok(!descendants(panel).some(n=>n.className==='setup-step-done'&&descendants(n).some(c=>c.tagName==='BUTTON')),'"Setup approved" stands alone');
   h.api.setGoal('Ship the signup form');await h.api.run('preview');
   assert.equal(recheck.hidden,true,'re-checking approval would retire a fresh preview, so it is not offered while launchable');
@@ -2994,7 +3024,7 @@ test('a hand-over that stops short of a finished launch lets go of the held step
   assert.equal(descendants(stepsOf(l.panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)),false);
   assert.ok(stepButtons(l.panel).includes('Check setup approval'),'the approval can be checked again');
   l.h.api.dispose();
-  // A refused hand-over read leaves the approval context: Check setup approval again is offered under Details.
+  // A refused hand-over read leaves the approval context: Check setup approval again is offered under Technical details.
   const refused=managedLaunch({receipts:[Object.assign(new Error('refused'),{status:403})]});
   await refused.start();await refused.next();
   assert.equal(offered(refused.panel,'Check setup approval again'),true);
@@ -3248,7 +3278,7 @@ test('records kept from a computer\'s earlier installation do not block Sign in,
     assert.equal(p.reads(),1,name);
     assert.equal(p.h.api.snapshot().note,'',name);
     assert.equal(p.h.api.snapshot().pending,null,name);
-    assert.deepEqual(p.h.api.snapshot().conflicts,saved.length>1?[settingUp]:[],'the earlier request stays under Details: '+name);
+    assert.deepEqual(p.h.api.snapshot().conflicts,saved.length>1?[settingUp]:[],'the earlier request stays under Technical details: '+name);
     assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']],name);
     assert.equal(p.focused()?.textContent,'Sign in to Claude',name);
     buttonOf(p.panel,'Sign in to Claude').click();await flush();
@@ -3300,7 +3330,7 @@ test('a full list of conflicting identifiers drops its oldest when a computer se
   assert.deepEqual(JSON.parse(p.h.saved.get('test')),{version:2,pending:null,conflicts:kept,legacy:[]});
   assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['goal','current'],['launch','upcoming']]);
   const details=descendants(p.panel).find(n=>n.tagName==='PRE').textContent;
-  assert.ok(details.includes(settingUp.request_id),'the request set aside is listed under Details');
+  assert.ok(details.includes(settingUp.request_id),'the request set aside is listed under Technical details');
   assert.ok(!details.includes(older[0].request_id));
   const reloaded=createGuidedSetup({client:p.h.client,storage:p.h.storage,storageKey:'test',now:()=>1800000000});
   assert.deepEqual(reloaded.snapshot().conflicts,kept);assert.equal(reloaded.snapshot().pending,null);
