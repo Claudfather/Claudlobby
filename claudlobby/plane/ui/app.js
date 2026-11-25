@@ -1642,26 +1642,41 @@ function channelUrl() {
 }
 
 // One team on one computer: workspace.css folds the teams list and the computer's parts to one line each under
-// main[data-teams="1"][data-computers="1"]. This marks the teams the list shows (connected-workspace.js marks the
-// computers it lists), and looks after the Computers & status drawer: it opens itself when its computer asks for
-// attention (onConnectionAttention below); in the fold it closes again once that computer is connected, unless
-// keyboard focus is in it. A drawer the person opened, or reopened, stays as they left it.
-let computersOpenedForAttention = false;
+// main[data-teams="1"][data-computers="1"]. markTeams marks how many teams the view has, hidden ones included
+// (connected-workspace.js marks the computers it lists, and clears both marks when it lists none).
+// The Computers & status drawer opens itself when its computer asks for attention (onConnectionAttention below).
+// In the fold, a drawer the page opened that way closes again once connected-workspace.js says that attention
+// cleared (onConnectionAttentionCleared below), or, if the fold is not showing yet then, as soon as it is. It stays
+// open once the person has used it: a pointer press or keyboard focus in it, or a close of their own. A drawer the
+// person opened is never closed for them, and outside the fold nothing closes it.
+let computersAttention = null;   // null, or "raised"/"cleared" for a drawer the page opened for attention
 function openComputersForAttention() {
   const details = $("computers-details");
-  if (details && !details.open) { details.open = true; computersOpenedForAttention = true; }
+  if (details && !details.open) { details.open = true; computersAttention = "raised"; }
+  else if (computersAttention === "cleared") computersAttention = "raised";
 }
-// Closed by anyone, the drawer is no longer one opened for attention.
-function computersToggled(event) { if (!event.target.open) computersOpenedForAttention = false; }
+// The person used the drawer, so it is theirs. toggle also fires after the page's own opening: only a close counts.
+function keepComputersOpen() { computersAttention = null; }
+function computersToggled(event) { if (!event.target.open) computersAttention = null; }
+function closeComputersAfterAttention() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  const details = $("computers-details"), teams = Number(main?.dataset?.teams || 0);
+  if (computersAttention !== "cleared") return;
+  // More computers or teams keep today's layout, where the drawer stays as it is; with no team yet, wait for the fold.
+  if (!details?.open || main?.dataset?.computers !== "1" || teams > 1) { computersAttention = null; return; }
+  if (teams !== 1) return;
+  computersAttention = null;
+  if (!details.contains(document.activeElement)) details.open = false;
+}
+function attentionCleared() {
+  if (computersAttention === "raised") computersAttention = "cleared";
+  closeComputersAfterAttention();
+}
 function markTeams() {
   const main = typeof document === "undefined" ? null : document.querySelector?.("main");
   if (!main?.dataset) return;
   main.dataset.teams = String(fleets.length);
-  const details = $("computers-details");
-  if (!computersOpenedForAttention || !details?.open || main.dataset.computers !== "1"
-      || fleets.length !== 1 || fleets[0].connection_state !== "ready") return;
-  computersOpenedForAttention = false;
-  if (!details.contains(document.activeElement)) details.open = false;
+  closeComputersAfterAttention();
 }
 
 function renderFleetTabs() {
@@ -2275,6 +2290,7 @@ function activeRoom() {
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
       onConnectionAttention: openComputersForAttention,
+      onConnectionAttentionCleared: attentionCleared,
       onPause() {
         sessionPaused = true;
         if (typeof resetConversationFocus === "function") resetConversationFocus();
@@ -2298,7 +2314,8 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
       onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
-$("computers-details")?.addEventListener("toggle", computersToggled);
+for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", keepComputersOpen], ["focusin", keepComputersOpen]])
+  $("computers-details")?.addEventListener(type, handler);
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {

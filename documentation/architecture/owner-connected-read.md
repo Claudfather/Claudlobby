@@ -330,22 +330,31 @@ permission decisions cannot be sent over this connection: their preparation is
 refused locally. The form adds no request names, grants or server routes.
 
 **One team on one computer.** A connected view marks on `main` the computers it
-lists (`data-computers`, from `connected-workspace.js`; none before its account
-check or once it retires) and `app.js` marks the teams its list shows
-(`data-teams`). Only when both are 1 does `workspace.css` fold the teams list and
-the parts strip to one line each, so the room takes the rest of the height. The
-teams line keeps the team's choice and the Bots in this team and Computers &
-status drawers. It leaves out All, Hide and the hidden-teams toggle, which change
-nothing with one team; on a phone it also leaves out the heading and the team's
-choice, since the team's name heads the room just below. A drawer opened on the
-line drops below it. The parts strip keeps each part's name, status in words and
-mark, and stops scrolling on its own. Computers & status opens itself when its
-computer asks for attention; in the fold it closes again once that computer is
-ready, unless keyboard focus is in it, and a drawer the person opened or reopened
-stays as they left it. The fold sets no fixed or viewport height, so the Message
-team composer behaves above an on-screen keyboard as before. Any other count,
-and any view that is not a connected one (nothing marks its computers), keeps
-today's layout.
+lists (`data-computers`, from `connected-workspace.js`), and `app.js` marks how
+many teams the view has, hidden ones included (`data-teams`). A view that lists
+no computers, before its account check or once it retires, clears both marks.
+Only when both are 1 does `workspace.css` fold the teams list and the parts strip
+to one line each, so the room takes the rest of the height. The teams line keeps
+the team's choice, with its status words, and the Bots in this team and
+Computers & status drawers. It leaves out All, Hide and the hidden-teams toggle,
+which change nothing with one team, and on a phone the Teams heading. A drawer
+opened on the line drops below it. On a wide screen the line, with an open
+drawer, takes at most a quarter of the column (15% while the composer is open)
+and scrolls inside itself, so the room keeps its heading, the conversation's
+floor and the Message team row at the website's smallest frame. The parts strip
+keeps each part's name, status in words and mark, and stops scrolling on its own.
+
+Computers & status opens itself when its computer asks for attention
+(`onConnectionAttention`). In the fold, a drawer the page opened that way closes
+again when `connected-workspace.js` says that attention cleared
+(`onConnectionAttentionCleared`, once the computer that asked is `ready`), or, if
+the team is not known yet then, as soon as the fold shows. It stays open once the
+person has used it: a pointer press in it, focus in it, or a close of their own.
+A drawer the person opened is never closed for them, and with more teams or
+computers nothing closes it. The fold sets no fixed or viewport height, so the
+Message team composer behaves above an on-screen keyboard as before. Any other
+count, and any view that is not a connected one (nothing marks its computers),
+keeps today's layout.
 
 After its ready message, the framed document observes its root element with
 `ResizeObserver`. Browsers deliver at most one notification per rendering

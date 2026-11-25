@@ -478,6 +478,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         } }}); } element.append(row);
       controls.rows.push({row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
     });
+    const attentionCleared = [];
     controls.rows.forEach((controls,index) => {
       const {row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading} = controls;
       const {reference,client,enrollment} = clients[index], status = client.snapshot();
@@ -591,18 +592,23 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           busy:pending.get(index) || (status.state === 'checking' ? 'check' : null),
           hint:connectHint(status, connection, continuity, expired)});
       }
-      // A computer that is not listed does not ask for attention.
-      if (!row.hidden && connection === 'ready') controls.attentionState = null;
-      else if (!row.hidden && ['setup_only','not_connected','denied','unavailable'].includes(connection)
+      // A computer that is not listed does not ask for attention. One that asked and is now ready says it cleared
+      // (below, once the computers are marked).
+      if (!row.hidden && connection === 'ready') {
+        if (controls.attentionState) attentionCleared.push({source:clients[index].key,state:connection});
+        controls.attentionState = null;
+      } else if (!row.hidden && ['setup_only','not_connected','denied','unavailable'].includes(connection)
           && controls.attentionState !== connection) {
         controls.attentionState = connection;
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
       }
     });
-    // The computers this view lists, for workspace.css: with one team (app.js marks the teams) on one listed computer,
-    // the teams list and that computer's parts fold to one line each. A view that lists none, or has retired, marks nothing.
+    // The computers this view lists, for workspace.css: with one team (app.js marks how many the view has) on one listed
+    // computer, the teams list and that computer's parts fold to one line each. A view that lists none (before its
+    // account check, or once it has retired) clears both marks.
     invoke(() => { const main = document.querySelector('main'), listed = controls.rows.filter(({row}) => !row.hidden).length;
-      if (main) { if (listed) main.dataset.computers = String(listed); else delete main.dataset.computers; } });
+      if (main) { if (listed) main.dataset.computers = String(listed); else { delete main.dataset.computers; delete main.dataset.teams; } } });
+    for (const event of attentionCleared) invoke(mount.onConnectionAttentionCleared, event);
     // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished, or the
     // same computer through a lapse of its session) is the connected view of that computer: no setup marker, and its
     // parts sit above its teams (below). Otherwise the setup form: <html data-workspace-view="setup">, under which
@@ -644,7 +650,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       }
     }
   }
-  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}}) {
+  function mountSessionControls({document, element, onPause = () => {}, onResume = () => {}, onActionPause = () => {}, onActionSourceChange = () => {}, onConnectionAttention = () => {}, onConnectionAttentionCleared = () => {}}) {
     // While a computer is setup-only, its first-team panel takes the main area instead of the sidebar card.
     const rail = document.getElementById('rail-channel'), setupHost = rail ? document.createElement('section') : null;
     if (setupHost) { setupHost.id = 'setup-focus'; setupHost.className = 'setup-focus'; setupHost.hidden = true; rail.prepend(setupHost); }
@@ -655,7 +661,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       if (setupHost) { setupStatus = document.createElement('p'); setupStatus.className = 'setup-only-status';
         setupStatus.setAttribute('role','status'); setupStatus.setAttribute('aria-live','polite'); setupHost.prepend(setupStatus); }
     }
-    mount = {document,element,setupHost,setupStatus,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention}; paused = true; invoke(onPause); changed();
+    mount = {document,element,setupHost,setupStatus,onPause,onResume,onActionPause,onActionSourceChange,onConnectionAttention,onConnectionAttentionCleared}; paused = true; invoke(onPause); changed();
     const unavailable = 'Unavailable in this connected read view. Activity and task records remain available.';
     const tools = document.getElementById('view-nav')?.querySelector?.('details');
     if (tools) {
