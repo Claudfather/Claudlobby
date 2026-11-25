@@ -343,9 +343,9 @@ opened on the line drops below it. On a wide screen the line, with an open
 drawer, takes at most a quarter of the column (15% while the composer is open)
 and scrolls inside itself, so the room keeps its heading, the conversation's
 floor and the Message team row at the website's smallest frame. With the composer
-and a drawer both open, the composer has as much room as without the fold from a
-640px frame up, and about 17px less at 560px, where it scrolls inside itself as
-it does today. When Computers & status opens there, by attention or by the
+and a drawer both open, the composer's room depends on what the room shows: at
+the smallest frames it can have less than without the fold, and then it scrolls
+inside itself as it does today. When Computers & status opens there, by attention or by the
 person, the line scrolls itself (never the page around the frame) to show the
 computer's card, from its name to its Connect, Check connection or Disconnect;
 when the line cannot show all of that, the buttons win. The parts strip keeps
