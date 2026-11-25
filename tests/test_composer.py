@@ -3049,6 +3049,31 @@ class TestDeclaredManagerRecognition:
         ]
 
 
+@pytest.fixture
+def no_default_plugins_fleet(tmp_path):
+    """fleet.yaml text whose `plugins:` stanza sets `include_defaults: false`,
+    parsed by `load_fleet`. `lead` keeps the default Telegram channel, which
+    pins one plugin; `worker` declares `channels: []` and pins none."""
+    root = tmp_path / "claudlobby"
+    root.mkdir()
+    (root / "fleet.yaml").write_text(dedent("""\
+        fleet:
+          name: test-fleet
+          manager: lead
+          service_prefix: com.test
+          plugins:
+            include_defaults: false
+          bots:
+            lead:
+              expertise: [eng]
+            worker:
+              expertise: [eng]
+              channels: []
+    """))
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    return fleet, _make_paths(root)
+
+
 class TestPluginsBotConf:
     """compose_bot_conf emits CLAUDE_CODE_SYNC_PLUGIN_INSTALL when fleet has plugins."""
 
@@ -3092,8 +3117,9 @@ class TestPluginsBotConf:
         assert "export FLEET_PLUGINS_REQUIRED=claudna@Claudfather" in conf
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
 
-    def test_bot_conf_no_sync_without_plugins(self, tmp_path):
-        conf = self._compose(tmp_path)
+    def test_bot_conf_no_sync_without_plugins(self, no_default_plugins_fleet):
+        fleet, paths = no_default_plugins_fleet
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, paths)
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
 
     def test_bot_conf_emits_fleet_plugins_required(self, tmp_path):
@@ -3108,8 +3134,11 @@ class TestPluginsBotConf:
             in conf
         )
 
-    def test_bot_conf_no_fleet_plugins_required_without_plugins(self, tmp_path):
-        conf = self._compose(tmp_path)
+    def test_bot_conf_no_fleet_plugins_required_without_plugins(
+        self, no_default_plugins_fleet
+    ):
+        fleet, paths = no_default_plugins_fleet
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, paths)
         assert "FLEET_PLUGINS_REQUIRED" not in conf
 
     def test_bot_conf_emits_fleet_plugins_marketplaces(self, tmp_path):
@@ -3240,17 +3269,11 @@ class TestPluginsSettingsLocal:
             }
         }
 
-    def test_settings_local_no_marketplaces_without_decl(self, tmp_path):
-        from claudlobby.config import PluginsConfig
-
-        paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        plugins = PluginsConfig(required=["telegram@claude-plugins-official"])
-        fleet = FleetConfig(
-            manager="worker",
-            name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
-        )
-        result = compose_settings_local(bot, fleet, paths)
+    def test_settings_local_no_marketplaces_without_decl(
+        self, no_default_plugins_fleet
+    ):
+        fleet, paths = no_default_plugins_fleet
+        result = compose_settings_local(fleet.bots["lead"], fleet, paths)
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
 
