@@ -266,7 +266,7 @@ approval that holds no request. A computer cannot hold a new approval while it
 keeps any Preview or Launch (`allow` refuses it with
 `setup_original_request_retained`), so the page then sets the request it kept
 under the earlier approval aside with the conflicting identifiers (still listed
-under Details, never launched or followed), and stops following a Claude
+under Technical details, never launched or followed), and stops following a Claude
 sign-in it kept under the earlier approval. When that list already holds 16,
 its oldest entry goes, since conflicting identifiers gate nothing. The earlier
 request's `:launch` word stays in storage but has no effect, because it only
@@ -686,6 +686,11 @@ or project declarations; the whole-host plan must contain exactly the approved
 first fleet. The canonical plan identity, sealed release and input/output
 freshness checks remain unchanged. The preview expires after ten minutes, never
 later than its approval. No browser field selects the install directory.
+Launch restarts every bot its plan names in `effects.restart_bots`
+(`<fleet>/<bot>`), so the view's "Bots already running here restart briefly."
+shows above Launch team only when that list names a bot outside the approved
+fleet, or is not a list of names. Under the boundary above a first-team Preview
+names none, so the line does not show today.
 
 The browser saves the original UUID before one launch request. The authority
 store reserves that UUID/plan before canonical activation begins. Lost responses
