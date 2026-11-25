@@ -3994,6 +3994,194 @@ test('the parts view\'s styles use the existing colour names and no colour value
   assert.ok(rules.some(([selectors])=>/data-state/.test(selectors)),'each state has its mark');
 });
 
+// One team on one computer (approved 2026-11-24): app.js marks on main how many teams the view has (hidden ones
+// included) and connected-workspace.js the computers it lists; workspace.css folds the teams list and the computer's
+// parts strip to one line each only when both say 1. cssRules: every workspace.css rule, one per selector, with its
+// @media condition and its declarations.
+function cssRules(text) {
+  const css=text.replace(/\/\*[\s\S]*?\*\//g,''),rules=[];
+  const block=(part,media)=>{for(const [,selectors,body] of part.matchAll(/([^{}]+)\{([^{}]*)\}/g))for(const selector of selectors.split(','))
+    rules.push({media,selector:selector.trim().replace(/\s+/g,' '),decls:Object.fromEntries(body.split(';').filter(d=>d.includes(':'))
+      .map(d=>[d.slice(0,d.indexOf(':')).trim(),d.slice(d.indexOf(':')+1).trim()]))});};
+  for(let i=0;i<css.length;){
+    const at=css.indexOf('@media',i);if(at<0){block(css.slice(i),null);break;}
+    block(css.slice(i,at),null);const open=css.indexOf('{',at);let depth=1,j=open+1;
+    while(depth){depth+={'{':1,'}':-1}[css[j]]||0;j++;}
+    block(css.slice(open+1,j-1),css.slice(at+6,open).trim());i=j;
+  }
+  return rules;
+}
+const FOLD='main[data-teams="1"][data-computers="1"]',STRIP=' > #rail-channel[data-setup-focus="shared"] > .setup-focus';
+const foldRules=async()=>cssRules(await read('workspace.css')).filter(rule=>/data-teams|data-computers/.test(rule.selector));
+// The fold rules a view's main selects: each names both markers, so it applies only when main carries exactly those values.
+const foldedFor=(rules,main)=>rules.filter(rule=>{const [,teams,computers]=rule.selector.match(/main\[data-teams="(\d+)"\]\[data-computers="(\d+)"\]/)||[];
+  return main.dataset.teams===teams&&main.dataset.computers===computers;});
+// A fold rule's declaration, by the selector's part after the markers and its @media condition (null: none).
+const foldDecl=(rules,rest,property,media=null)=>rules.find(rule=>rule.selector===`.plane-workspace ${FOLD}${rest}`&&rule.media===media
+  &&Object.hasOwn(rule.decls,property))?.decls[property];
+// app.js's teams marker and its Computers & status drawer, run against a view's document; fleets: the teams the view has.
+const appText=await read('app.js'),{runInNewContext}=await import('node:vm');
+const drawerText=appText.slice(appText.indexOf('let computersAttention'),appText.indexOf('function renderFleetTabs()'));
+function teamsList(ui,fleets,details) {
+  const context={document:ui.document,$:id=>id==='computers-details'?details:ui.get(id),fleets};
+  runInNewContext(drawerText,context);
+  return context;
+}
+test('the view marks on main the computers it lists; listing none, before its account check or once retired, it clears both marks',async t=>{
+  for(const count of [1,2]){
+    const h=harness({count}),main=h.ui.get('main');main.dataset.teams='1';h.mount();
+    assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined],'nothing is listed while the account is checked');
+    await h.api.checkAccount();await flush();
+    assert.equal(main.dataset.computers,String(count),'a direct view lists every saved computer');
+    main.dataset.teams='1';h.metadataStatus=403;await h.api.checkAccount();await flush();
+    assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined],'a retired view marks neither');
+    h.api.dispose();
+  }
+  const l=landing(t);await l.workspace.checkAccount();await flush();const main=l.h.ui.get('main');
+  assert.equal(main.dataset.computers,'1','a bridged page lists only its bound computer of three');
+  main.dataset.teams='1';l.workspace.dispose();assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined]);
+});
+test('app.js marks how many teams the view has, hidden ones included, from its own renderer, and wires the drawer',()=>{
+  const ui=dom(),main=ui.get('main');main.dataset.computers='1';
+  for(const fleets of [[],[{alias:'one'}],[{alias:'one'},{alias:'two'}]]){teamsList(ui,fleets).markTeams();assert.equal(main.dataset.teams,String(fleets.length));}
+  delete main.dataset.computers;teamsList(ui,[{alias:'one'}]).markTeams();
+  assert.equal(main.dataset.teams,undefined,'while no computer is listed (before the account check, or retired) the teams stay unmarked');
+  const render=appText.slice(appText.indexOf('function renderFleetTabs()'));
+  assert.ok(render.indexOf('markTeams()')<render.indexOf('if (!fleets.length)'),'marked before an empty list returns');
+  assert.match(render,/hidden = hiddenTeams\(\)/,'the list itself leaves hidden teams out; the mark counts them');
+  assert.match(appText,/onConnectionAttention: openComputersForAttention,\n\s+onConnectionAttentionCleared: attentionCleared,/);
+  assert.match(appText,/for \(const \[type, handler\] of \[\["toggle", computersToggled\], \["pointerdown", keepComputersOpen\], \["wheel", keepComputersOpen\],\n\s+\["focusin", keepComputersOpen\]\]\) \$\("computers-details"\)\?\.addEventListener\(type, handler, \{ passive: true \}\);/);
+  assert.doesNotMatch(drawerText,/connection_state/,'attention clearing comes from the connected view, never a team snapshot');
+  assert.doesNotMatch(drawerText.replace(/\/\/.*$/gm,''),/scrollIntoView|scrollTo\(|scrollBy\(/,'only the line scrolls, by its own scrollTop');
+});
+test('opened in the fold, Computers & status brings its computer\'s card and buttons into view by scrolling the line itself',()=>{
+  const ui=dom(),main=ui.get('main'),one=[{alias:'c / team'}],rect=(top,height)=>({top,bottom:top+height,height});
+  // A wide screen's line: `view` px visible at 82px, scrolling; the card starts `cardAt` px into its content and its
+  // buttons end `end` px in.
+  const opened=({cardAt=140,end=190,view=117,scrollHeight=400,scrollTop=0,hidden=false,fleets=one,computers='1'}={})=>{
+    const line={clientTop:0,clientHeight:view,scrollHeight,scrollTop,getBoundingClientRect:()=>rect(82,view)},origin=()=>82-line.scrollTop;
+    const actions={getBoundingClientRect:()=>rect(origin()+end-29,29)};
+    const card={hidden,querySelector:s=>s==='.connection-actions'?actions:null,getBoundingClientRect:()=>rect(origin()+cardAt,end-cardAt+30)};
+    const details={open:true,contains:()=>false,querySelectorAll:s=>s==='.connection-card'?[card]:[]};
+    main.dataset.computers=computers;
+    const list=teamsList({...ui,get:id=>id==='rail-fleet'?line:ui.get(id)},fleets,details);list.markTeams();
+    list.computersToggled({target:details});return {line,details,list};
+  };
+  assert.equal(opened().line.scrollTop,81,'buttons below the visible part: the line scrolls just far enough, with a little room');
+  assert.equal(opened({cardAt:20,end:70}).line.scrollTop,0,'already in view: nothing moves');
+  assert.equal(opened({cardAt:20,end:200}).line.scrollTop,83,'a card taller than the line: its buttons win');
+  assert.equal(opened({scrollTop:250}).line.scrollTop,140,'scrolled past it: back to the card\'s top');
+  assert.equal(opened({scrollHeight:117}).line.scrollTop,0,'a line that does not scroll (a phone): nothing moves');
+  assert.equal(opened({fleets:[...one,{alias:'c / docs'}]}).line.scrollTop,0,'two teams: not folded');
+  assert.equal(opened({computers:'2'}).line.scrollTop,0,'two computers: not folded');
+  assert.equal(opened({hidden:true}).line.scrollTop,0,'only a listed computer\'s card');
+  const closing=opened({scrollTop:0,end:70,cardAt:20});closing.details.open=false;closing.line.scrollTop=5;
+  closing.list.computersToggled({target:closing.details});assert.equal(closing.line.scrollTop,5,'closing moves nothing');
+});
+test('a computer that asked for attention says when it cleared, once, after the computers are marked',async()=>{
+  const h=harness({count:1}),main=h.ui.get('main'),a=refs[0].endpoint_origin,attention=[],cleared=[];
+  h.mount({onConnectionAttention:event=>attention.push(event),onConnectionAttentionCleared:event=>cleared.push({...event,computers:main.dataset.computers})});
+  await h.api.checkAccount();await flush();
+  assert.deepEqual(attention,[{source:sourceA,state:'not_connected'}]);assert.deepEqual(cleared,[]);
+  await h.api.act(0,'connect');
+  assert.deepEqual(cleared,[{source:sourceA,state:'ready',computers:'1'}],'connected: the attention cleared, with the computers already marked');
+  await h.api.checkAccount();assert.equal(cleared.length,1,'a ready computer that asked nothing clears nothing');
+  h.overrides.set(a+'/api/owner/connected/status',()=>reply(503,{}));await h.api.act(0,'check');
+  assert.deepEqual(attention.at(-1),{source:sourceA,state:'unavailable'});assert.equal(cleared.length,1);
+  h.overrides.delete(a+'/api/owner/connected/status');await h.api.act(0,'check');
+  assert.deepEqual(cleared.at(-1),{source:sourceA,state:'ready',computers:'1'});assert.equal(cleared.length,2);
+  h.api.dispose();
+});
+test('one team on one computer folds the teams list and the computer\'s parts strip to one line each',async t=>{
+  const w=await workingPage(t),{l}=w,main=l.h.ui.get('main'),rules=await foldRules();
+  teamsList(l.h.ui,[{alias:sourceA+' / shop',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([main.dataset.teams,main.dataset.computers],['1','1']);
+  assert.ok(rules.length>=10&&rules.every(rule=>rule.selector.includes(FOLD)),'every fold rule needs both markers at 1');
+  assert.equal(foldedFor(rules,main).length,rules.length,'and here every one applies');
+  // The teams list is one wrapping row; on a wide screen it sits above the room and, with a drawer open on it, takes at
+  // most a quarter of the column (15% while the composer is open) and scrolls inside itself, so the room keeps the rest.
+  assert.equal(foldDecl(rules,' > #rail-fleet','display'),'flex');assert.equal(foldDecl(rules,' > #rail-fleet','flex-flow'),'row wrap');
+  assert.equal(foldDecl(rules,' #fleet-tabs','flex-direction'),'row');
+  const wide='(min-width:761px)';
+  assert.equal(foldDecl(rules,'','flex-direction',wide),'column');
+  assert.deepEqual(['max-height','overflow','min-height'].map(p=>foldDecl(rules,' > #rail-fleet',p,wide)),['25%','auto','0']);
+  assert.equal(rules.find(rule=>rule.media===wide&&rule.selector===`.plane-workspace ${FOLD}:has(> #rail-channel > #work-loop > #work-composer[open]) > #rail-fleet`)
+    ?.decls['max-height'],'15%');
+  assert.deepEqual(['flex','min-height'].map(p=>foldDecl(rules,' > #rail-channel',p,wide)),['1 1 0','0']);
+  // A drawer opens below the line, across it.
+  assert.equal(foldDecl(rules,' > #rail-fleet > details[open]','flex'),'1 1 100%');
+  // The parts strip above the room is one wrapping row and no longer scrolls on its own.
+  assert.equal(l.rail.dataset.setupFocus,'shared');
+  assert.equal(foldDecl(rules,STRIP,'overflow'),'visible');
+  assert.equal(foldDecl(rules,STRIP+' .parts-list','display'),'flex');assert.equal(foldDecl(rules,STRIP+' .part','display'),'flex');
+  // Folded, each part keeps its name, its status in words and its state (the mark).
+  assert.deepEqual(partRows(w.parts()),[['computer','linked','a.example.test','Linked'],['provider','not_linked','Claude','Not linked'],
+    ['bots','teams','Bots','1 team set up']]);
+});
+test('with two teams, or two computers, nothing folds',async t=>{
+  const rules=await foldRules(),w=await workingPage(t),main=w.l.h.ui.get('main');
+  teamsList(w.l.h.ui,[{alias:sourceA+' / shop',connection_state:'ready'},{alias:sourceA+' / docs',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([main.dataset.teams,main.dataset.computers],['2','1']);assert.deepEqual(foldedFor(rules,main),[]);
+  const h=harness({count:2});h.mount();await h.api.checkAccount();await flush();
+  teamsList(h.ui,[{alias:sourceA+' / shop',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([h.ui.get('main').dataset.teams,h.ui.get('main').dataset.computers],['1','2']);assert.deepEqual(foldedFor(rules,h.ui.get('main')),[]);
+  h.api.dispose();
+});
+test('folded or not, the conversation and message box stay; the fold leaves out only All and Hide, and on a phone the heading',async()=>{
+  const rules=await foldRules(),html=await read('index.html'),css=(await read('workspace.css')).replace(/\/\*[\s\S]*?\*\//g,'');
+  // Both are in the page whatever its markers, and not folded no fold rule applies (above), so they show as today.
+  for(const id of ['channel','work-loop'])assert.ok(html.indexOf(`id="${id}"`)>html.indexOf('id="rail-channel"'),id);
+  // Folded, the only rules that hide anything: All and Hide (neither changes anything with one team), the sidebar in the
+  // All agents view as today, and on a phone the Teams heading. The team's choice, with its status words, stays everywhere.
+  assert.deepEqual(rules.filter(rule=>rule.decls.display==='none').map(rule=>[rule.media,rule.selector.replace(`.plane-workspace ${FOLD}`,'')]),[
+    [null,'.plane-workspace.agent-directory-view '+FOLD+' > #rail-fleet'],
+    [null,' .fleet-tab-choice:has(> [data-fleet="all"])'],[null,' .fleet-tab-choice > .fleet-hide'],[null,' .fleet-visibility'],[null,' .fleet-visibility-note'],
+    ['(max-width:650px)',' > #rail-fleet > h2']]);
+  // A browser without :has() drops a whole rule, so each fold rule that uses it stands alone.
+  const hasRules=[...css.matchAll(/([^{}]+)\{[^{}]*\}/g)].map(([,selectors])=>selectors.trim()).filter(s=>s.includes(FOLD)&&s.includes(':has('));
+  assert.equal(hasRules.length,2);for(const selectors of hasRules)assert.ok(!selectors.includes(','),selectors);
+  // No fixed or viewport heights and no new scroller on a phone, so the message box rides above the on-screen keyboard as
+  // today; only a wide screen's teams line scrolls, and only while a drawer opened on it outgrows the space.
+  for(const rule of rules){
+    assert.doesNotMatch(Object.values(rule.decls).join(';'),/\d(?:d|s|l)?v[hw]\b|position:|#[0-9a-f]{3,8}\b|rgba?\(|transition|animation/i,rule.selector);
+    if(rule.media!=='(min-width:761px)')for(const property of ['height','max-height','overflow','overflow-y'])
+      assert.ok(!Object.hasOwn(rule.decls,property)||rule.decls[property]==='visible',`${rule.selector} ${property}`);
+  }
+});
+test('Computers & status, opened for attention, closes in the fold when that attention clears, unless the person used it',()=>{
+  const ui=dom(),main=ui.get('main'),inside={},details={open:false,contains:node=>node===inside};
+  const one=[{alias:'c / team',connection_state:'ready'}],two=[...one,{alias:'c / docs',connection_state:'ready'}];
+  // A fresh page with teams marked; attention opens the drawer.
+  const page=(fleets,computers='1')=>{details.open=false;ui.document.activeElement=null;main.dataset.computers=computers;
+    const list=teamsList(ui,fleets,details);list.markTeams();list.openComputersForAttention();assert.equal(details.open,true,'attention opens it');return list;};
+  let list=page(one);list.markTeams();
+  assert.equal(details.open,true,'a team snapshot never clears attention, however ready it looks');
+  list.attentionCleared();assert.equal(details.open,false,'folded: the connected view says the attention cleared, and it closes');
+  // Cleared before the teams are known: it waits for the fold, and closes when one team arrives.
+  list=page([]);list.attentionCleared();assert.equal(details.open,true,'no team yet');
+  list.fleets=one;list.markTeams();assert.equal(details.open,false,'then the fold shows, and it closes');
+  // Attention raised again before then: it stays until that attention clears too.
+  list=page([]);list.attentionCleared();list.openComputersForAttention();list.fleets=one;list.markTeams();
+  assert.equal(details.open,true,'asked again, still open');list.attentionCleared();assert.equal(details.open,false);
+  // More teams or computers keep today's layout, where nothing closes it, even if the fold comes later.
+  list=page(two);list.attentionCleared();assert.equal(details.open,true,'two teams');
+  list.fleets=one;list.markTeams();assert.equal(details.open,true,'and it stays after a team goes');
+  list=page(one,'2');list.attentionCleared();assert.equal(details.open,true,'two computers');
+  // Any use by the person cancels it: a pointer press (Safari does not focus a pressed button), a wheel or trackpad
+  // scroll (which presses nothing), focus in it, or a close.
+  list=page(one);list.keepComputersOpen({type:'pointerdown'});list.attentionCleared();assert.equal(details.open,true,'a pointer press keeps it');
+  list=page(one);list.keepComputersOpen({type:'wheel'});list.attentionCleared();assert.equal(details.open,true,'a wheel or trackpad scroll keeps it');
+  list=page(one);list.keepComputersOpen({type:'focusin'});list.attentionCleared();assert.equal(details.open,true,'focus coming into it keeps it');
+  list=page(one);ui.document.activeElement=inside;list.attentionCleared();assert.equal(details.open,true,'focus already in it keeps it');
+  ui.document.activeElement=null;list.markTeams();list.attentionCleared();assert.equal(details.open,true,'and it stays theirs after focus leaves');
+  list=page(one);list.computersToggled({target:details});assert.equal(details.open,true,'its own opening is not the person\'s');
+  details.open=false;list.computersToggled({target:details});details.open=true;list.computersToggled({target:details});
+  list.attentionCleared();assert.equal(details.open,true,'closed and opened again by the person, it stays');
+  // A drawer the person opened is never closed for them.
+  details.open=true;main.dataset.computers='1';list=teamsList(ui,one,details);list.markTeams();list.openComputersForAttention();list.attentionCleared();
+  assert.equal(details.open,true,'a drawer the person opened stays open');
+});
+
 // Gate review of document 03, A: one failed refresh of the parts read never takes the working form away.
 test('on a bridged working page a refresh that is lost, refused or unusable keeps the working form and the room',async t=>{
   const url=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state';
