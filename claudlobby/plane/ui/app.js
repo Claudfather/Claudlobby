@@ -1641,8 +1641,32 @@ function channelUrl() {
   return `/api/channel?limit=120${fleetQuery("&")}`;
 }
 
+// One team on one computer: workspace.css folds the teams list and the computer's parts to one line each under
+// main[data-teams="1"][data-computers="1"]. This marks the teams the list shows (connected-workspace.js marks the
+// computers it lists), and looks after the Computers & status drawer: it opens itself when its computer asks for
+// attention (onConnectionAttention below); in the fold it closes again once that computer is connected, unless
+// keyboard focus is in it. A drawer the person opened, or reopened, stays as they left it.
+let computersOpenedForAttention = false;
+function openComputersForAttention() {
+  const details = $("computers-details");
+  if (details && !details.open) { details.open = true; computersOpenedForAttention = true; }
+}
+// Closed by anyone, the drawer is no longer one opened for attention.
+function computersToggled(event) { if (!event.target.open) computersOpenedForAttention = false; }
+function markTeams() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  if (!main?.dataset) return;
+  main.dataset.teams = String(fleets.length);
+  const details = $("computers-details");
+  if (!computersOpenedForAttention || !details?.open || main.dataset.computers !== "1"
+      || fleets.length !== 1 || fleets[0].connection_state !== "ready") return;
+  computersOpenedForAttention = false;
+  if (!details.contains(document.activeElement)) details.open = false;
+}
+
 function renderFleetTabs() {
   if (typeof updateRoomHeading === "function") updateRoomHeading();
+  if (typeof markTeams === "function") markTeams();
   const el = $("fleet-tabs");
   if (!fleets.length) { el.innerHTML = ""; return; }
   const hidden = hiddenTeams(), hiddenCount = fleets.filter(f => hidden.has(f.uid)).length;
@@ -2250,7 +2274,7 @@ function activeRoom() {
 }
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
-      onConnectionAttention() { const details = $("computers-details"); if (details) details.open = true; },
+      onConnectionAttention: openComputersForAttention,
       onPause() {
         sessionPaused = true;
         if (typeof resetConversationFocus === "function") resetConversationFocus();
@@ -2274,6 +2298,7 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
       onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
+$("computers-details")?.addEventListener("toggle", computersToggled);
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {

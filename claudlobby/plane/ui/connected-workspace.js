@@ -599,6 +599,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         invoke(mount.onConnectionAttention,{source:clients[index].key,state:connection});
       }
     });
+    // The computers this view lists, for workspace.css: with one team (app.js marks the teams) on one listed computer,
+    // the teams list and that computer's parts fold to one line each. A view that lists none, or has retired, marks nothing.
+    invoke(() => { const main = document.querySelector('main'), listed = controls.rows.filter(({row}) => !row.hidden).length;
+      if (main) { if (listed) main.dataset.computers = String(listed); else delete main.dataset.computers; } });
     // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished, or the
     // same computer through a lapse of its session) is the connected view of that computer: no setup marker, and its
     // parts sit above its teams (below). Otherwise the setup form: <html data-workspace-view="setup">, under which

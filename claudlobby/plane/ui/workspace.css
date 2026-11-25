@@ -818,6 +818,50 @@ body.plane-workspace { padding:0 24px 24px; }
   #room-focus small { font-size:10px; }
 }
 
+/* One team on one computer: main[data-teams="1"][data-computers="1"] (app.js counts the teams its list shows,
+   connected-workspace.js the computers it lists). The teams list and the computer's parts strip above the room
+   fold to one line each, and the conversation gets the room; more teams or computers keep the layout above.
+   Nothing a person acts on leaves the view. The line keeps the team's own choice, with its name and status, and
+   Bots in this team and Computers & status as drawers that open below it (Computers & status still opens itself
+   when the computer needs attention). All and Hide are left out: with one team All comes back to that team and a
+   hidden team stays shown, so neither changes anything; both return with a second team. The parts keep each name,
+   its status in words and its mark, and wrap rather than cut a word. No new words, colours or motion. */
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet { display:flex; flex-flow:row wrap; align-items:center; gap:6px 18px; }
+.plane-workspace.agent-directory-view main[data-teams="1"][data-computers="1"] > #rail-fleet { display:none; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet > h2 { padding:0; }
+.plane-workspace main[data-teams="1"][data-computers="1"] #fleet-tabs { flex-direction:row; margin:0; }
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-tab-choice,
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-tab-choice > [data-fleet] { flex:0 1 auto; }
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-tab-choice > [data-fleet] { padding:5px 10px; }
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-tab-choice:has(> [data-fleet="all"]),
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-tab-choice > .fleet-hide,
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-visibility,
+.plane-workspace main[data-teams="1"][data-computers="1"] .fleet-visibility-note { display:none; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet > details { margin:0; padding:0; border-top:0; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet > details[open] { flex:1 1 100%; padding-top:8px; border-top:1px solid var(--edge); }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus { flex:none; overflow:visible; margin-bottom:10px; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .workspace-parts { padding:8px 14px; border-radius:10px; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .parts-list { display:flex; flex-wrap:wrap; align-items:center; gap:4px 20px; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part { display:flex; align-items:center; gap:7px; padding:0; border-top:0; }
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part-name,
+.plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part-status { font-size:13px; text-align:left; }
+/* Wide screens: one column, the teams line above the room. A drawer opened on the line takes what the room leaves
+   (the room keeps at least 60%) and scrolls inside itself after that. */
+@media(min-width:761px) {
+  .plane-workspace main[data-teams="1"][data-computers="1"] { display:flex; flex-direction:column; align-items:stretch; gap:12px; }
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet { flex:0 1 auto; height:auto; min-height:0; overflow:auto; }
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel { flex:1 1 0; min-height:60%; }
+}
+/* Phones: the line keeps the two drawers; the team's name is the room's heading just below it. */
+@media(max-width:650px) {
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet > h2,
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet > #fleet-tabs { display:none; }
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .parts-list { column-gap:14px; }
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part { gap:5px; }
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part-name,
+  .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-channel[data-setup-focus="shared"] > .setup-focus .part-status { font-size:12px; }
+}
+
 .room-bot-inspector { flex-shrink:0; max-height:30dvh; overflow:auto; padding:12px 14px; margin-bottom:10px;
   border:1px solid var(--edge); border-radius:8px; background:var(--panel); }
 .room-bot-inspector .ed-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
