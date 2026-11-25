@@ -582,16 +582,18 @@ class TestComposeFleetTimers:
 
     @pytest.mark.parametrize(("fleet_chat", "lead", "aide", "pulse", "warns"), [
         (None, "telegram", "none", None, "has no Telegram chat"),
-        ("-1009999999999", "none", "telegram", None, "is not a Telegram channel bot"),
+        ("-1009999999999", "none", "none", None, "is not a Telegram channel bot"),
+        # #3127: aide, a channel bot in the chat, sends; alert-sender names it.
+        ("-1009999999999", "none", "telegram", None, None),
         ("-1009999999999", "telegram", "none", None, None),
         (None, "telegram-own-chat", "none", None, None),
         ("-1009999999999", "none", "telegram", ("-1007777777777", "/srv/escalation"), None),
         ("-1009999999999", "none", "telegram", ("-1007777777777", None), None),
         (None, "none", "none", None, None),
         (None, "default", "default", None, None),
-    ], ids=["telegram-manager-without-a-chat", "manager-without-telegram", "fleet-chat",
-            "own-chat", "declared-pair", "chat-without-its-sender", "no-telegram",
-            "telegram-channel-by-default-only"])
+    ], ids=["telegram-manager-without-a-chat", "no-channel-bot-in-the-chat",
+            "manager-without-telegram", "fleet-chat", "own-chat", "declared-pair",
+            "chat-without-its-sender", "no-telegram", "telegram-channel-by-default-only"])
     def test_a_fleet_whose_alerts_reach_only_the_managers_pane_is_a_validator_warning(
             self, fleet_chat, lead, aide, pulse, warns):
         """#2654: with neither a declared pair nor the manager's own chat, `fleet
@@ -626,6 +628,50 @@ class TestComposeFleetTimers:
         else:
             assert len(found) == 1 and warns in found[0], found
             assert found[0].startswith("fleet manager 'lead' ")
+
+    @pytest.mark.parametrize(("lead_chat", "lead_channel", "pulse", "sent_as", "paths", "why"), [
+        (None, False, False, "aide", ("fleet-timer", "`fleet notify`"),
+         "lead is not a Telegram channel bot"),
+        ("-1008888888888", True, False, "aide", ("fleet-timer",),
+         "lead is not in this alert chat"),
+        (None, True, False, None, (), ""),
+        # The pair is composed into the fleet-pulse unit alone: the other timers
+        # still alert the fleet chat as aide.
+        (None, False, True, "aide", ("fleet-timer alerts to the fleet chat other than fleet-pulse's",),
+         "lead is not a Telegram channel bot"),
+    ], ids=["manager-without-telegram", "manager-in-another-chat", "manager-in-the-chat",
+            "declared-pair"])
+    def test_a_fleet_alert_sent_as_a_bot_other_than_the_manager_is_a_validator_warning(
+            self, lead_chat, lead_channel, pulse, sent_as, paths, why):
+        """#3127: config validate, and doctor's fleet-yaml rung with it, names the
+        bot the runtime sends a fleet alert as when it is not the fleet manager.
+        `aide` is a channel bot in the fleet chat and sorts first. A declared
+        fleet_pulse pair moves only fleet-pulse's alerts and `fleet notify`'s."""
+        from claudlobby.config import FleetPulseConfig
+        from claudlobby.validator import ValidationReport, _validate_alert_sender
+
+        lead = (self._channel_bot("lead", chat=lead_chat) if lead_channel else
+                BotConfig(bot_id="lead", name="lead", expertise=["eng"], channels=[]))
+        fleet = FleetConfig(manager="lead", name="test-fleet", service_prefix="com.test",
+                            telegram_group_chat_id="-1009999999999",
+                            bots={"lead": lead, "aide": self._channel_bot("aide")},
+                            fleet_pulse=FleetPulseConfig(
+                                escalation_chat_id="-1007777777777",
+                                escalation_state_dir="/srv/escalation") if pulse else None)
+        report = ValidationReport()
+        _validate_alert_sender(fleet, report)
+        found = [message for kind, message in report.categorized() if kind == "alert-sender"]
+        if sent_as is None:
+            assert found == []
+            return
+        assert len(found) == 1, found
+        assert f"are sent as '{sent_as}', not the fleet manager 'lead': {why}" in found[0], found
+        for path in paths:
+            assert path in found[0], found
+        assert ("other than fleet-pulse's" in found[0]) == pulse, found
+        if "`fleet notify`" not in paths:
+            # The manager sends `fleet notify` in its own chat itself, or the pair does.
+            assert "`fleet notify`" not in found[0], found
 
     @staticmethod
     def _paths(tmp_path):

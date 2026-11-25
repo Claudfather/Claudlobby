@@ -1086,24 +1086,24 @@ class TestComposeBotConfFleetRoot:
 
     def _bot(self):
         return BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
         )
 
     def _fleet(self):
         return FleetConfig(
-            manager="kev", bots={"kev": self._bot()},
-            name="tl",
-            service_prefix="com.crog.tl",
+            manager="worker", bots={"worker": self._bot()},
+            name="test-fleet",
+            service_prefix="com.test",
             telegram_group_chat_id="-100999",
         )
 
     def test_root_mode_fleet_root_equals_install_root(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1113,20 +1113,20 @@ class TestComposeBotConfFleetRoot:
     def test_nested_overlay_fleet_root_is_anchor_relative(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Nested overlay — anchored under the install root, so a re-nest of the
         # fleet only moves FLEET_ROOT; every derived path follows.
-        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/tl"' in conf
+        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/test-fleet"' in conf
 
     def test_vault_mode_fleet_root_is_absolute(self, tmp_path):
 
         root = tmp_path / "install"
-        vault_fleet = tmp_path / "vault" / "tl"
-        (vault_fleet / "runtime" / "bots" / "kev").mkdir(parents=True)
+        vault_fleet = tmp_path / "vault" / "test-fleet"
+        (vault_fleet / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=vault_fleet, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1136,7 +1136,7 @@ class TestComposeBotConfFleetRoot:
     def test_fleet_root_always_emitted(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1151,23 +1151,23 @@ class TestComposeBotConfSecretFiles:
 
     def _fleet(self):
         return FleetConfig(
-            manager="kev", bots={"kev": self._bot()},
-            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+            manager="worker", bots={"worker": self._bot()},
+            name="test-fleet", service_prefix="com.test", telegram_group_chat_id="-100999"
         )
 
     def _paths(self, tmp_path):
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         return Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
 
     def _bot(self, **kw):
         return BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
             **kw,
         )
 
@@ -1212,7 +1212,7 @@ class TestComposeBotConfSecretFiles:
         from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
-            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/tl/.secrets/ga4.json"}
+            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/test-fleet/.secrets/ga4.json"}
         )
         with pytest.raises(ValueError, match="fleet-relative"):
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
@@ -1254,18 +1254,18 @@ class TestComposerProvidedPathAnchorsExported:
         from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
 
         bot = BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
         )
         fleet = FleetConfig(
             manager=bot.bot_id, bots={bot.bot_id: bot},
-            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+            name="test-fleet", service_prefix="com.test", telegram_group_chat_id="-100999"
         )
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
@@ -1278,13 +1278,13 @@ class TestBotConfExportsTheRuntime:
     a door with no value reads `claude`, so an un-regenerated bot behaves the same."""
 
     def _conf(self, tmp_path, **bot_fields):
-        bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"],
-                        telegram=TelegramConfig(handle="kev_bot"), **bot_fields)
-        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl",
-                            service_prefix="com.crog.tl", telegram_group_chat_id="-100999")
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
+                        telegram=TelegramConfig(handle="worker_bot"), **bot_fields)
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test-fleet",
+                            service_prefix="com.test", telegram_group_chat_id="-100999")
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=git_package(root)))
 
@@ -3049,6 +3049,31 @@ class TestDeclaredManagerRecognition:
         ]
 
 
+@pytest.fixture
+def no_default_plugins_fleet(tmp_path):
+    """fleet.yaml text whose `plugins:` stanza sets `include_defaults: false`,
+    parsed by `load_fleet`. `lead` keeps the default Telegram channel, which
+    pins one plugin; `worker` declares `channels: []` and pins none."""
+    root = tmp_path / "claudlobby"
+    root.mkdir()
+    (root / "fleet.yaml").write_text(dedent("""\
+        fleet:
+          name: test-fleet
+          manager: lead
+          service_prefix: com.test
+          plugins:
+            include_defaults: false
+          bots:
+            lead:
+              expertise: [eng]
+            worker:
+              expertise: [eng]
+              channels: []
+    """))
+    fleet, _md = load_fleet(root / "fleet.yaml")
+    return fleet, _make_paths(root)
+
+
 class TestPluginsBotConf:
     """compose_bot_conf emits CLAUDE_CODE_SYNC_PLUGIN_INSTALL when fleet has plugins."""
 
@@ -3092,8 +3117,9 @@ class TestPluginsBotConf:
         assert "export FLEET_PLUGINS_REQUIRED=claudna@Claudfather" in conf
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
 
-    def test_bot_conf_no_sync_without_plugins(self, tmp_path):
-        conf = self._compose(tmp_path)
+    def test_bot_conf_no_sync_without_plugins(self, no_default_plugins_fleet):
+        fleet, paths = no_default_plugins_fleet
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, paths)
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
 
     def test_bot_conf_emits_fleet_plugins_required(self, tmp_path):
@@ -3108,8 +3134,11 @@ class TestPluginsBotConf:
             in conf
         )
 
-    def test_bot_conf_no_fleet_plugins_required_without_plugins(self, tmp_path):
-        conf = self._compose(tmp_path)
+    def test_bot_conf_no_fleet_plugins_required_without_plugins(
+        self, no_default_plugins_fleet
+    ):
+        fleet, paths = no_default_plugins_fleet
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, paths)
         assert "FLEET_PLUGINS_REQUIRED" not in conf
 
     def test_bot_conf_emits_fleet_plugins_marketplaces(self, tmp_path):
@@ -3240,17 +3269,11 @@ class TestPluginsSettingsLocal:
             }
         }
 
-    def test_settings_local_no_marketplaces_without_decl(self, tmp_path):
-        from claudlobby.config import PluginsConfig
-
-        paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
-        plugins = PluginsConfig(required=["telegram@claude-plugins-official"])
-        fleet = FleetConfig(
-            manager="worker",
-            name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
-        )
-        result = compose_settings_local(bot, fleet, paths)
+    def test_settings_local_no_marketplaces_without_decl(
+        self, no_default_plugins_fleet
+    ):
+        fleet, paths = no_default_plugins_fleet
+        result = compose_settings_local(fleet.bots["lead"], fleet, paths)
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
 
@@ -3418,20 +3441,27 @@ class TestComposeBotConfObservability:
         return compose_bot_conf(bot, fleet, paths)
 
     def test_default_observability_values(self, tmp_path):
-        # After system defaults merge, fields are populated.
-        # Simulate by passing explicit values matching system.yaml defaults.
-        from claudlobby.config import ObservabilityConfig
-
-        obs = ObservabilityConfig(
-            pulse_interval=300,
-            activity_stuck_threshold=1800,
-            dispatch_deadline=1800,
-        )
-        conf = self._compose(tmp_path, observability=obs)
+        """A fleet.yaml with no `observability:` stanza composes
+        `claudlobby/system.yaml`'s observability tier into bot.conf."""
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "fleet.yaml").write_text(dedent("""\
+            fleet:
+              name: test-fleet
+              manager: worker
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        conf = compose_bot_conf(fleet.bots["worker"], fleet, _make_paths(root))
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
         assert "OBSERVABILITY_REAP_DAYS" not in conf          # the knob is retired (F18 closure): never composed
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
-        assert "export OBSERVABILITY_DISPATCH_DEADLINE=1800" in conf
+        assert "export OBSERVABILITY_DISPATCH_DEADLINE=86400" in conf
 
     def test_custom_observability_values(self, tmp_path):
         from claudlobby.config import ObservabilityConfig
@@ -4857,10 +4887,10 @@ class TestTimerUnitPath:
 def _git_cred_bot(creds=None):
     """A bot declaring per-org git credentials (default: one org)."""
     return BotConfig(
-        bot_id="kev",
-        name="kev",
+        bot_id="worker",
+        name="worker",
         expertise=["eng"],
-        telegram=TelegramConfig(handle="kev_bot"),
+        telegram=TelegramConfig(handle="worker_bot"),
         git_credentials={"OrgA": "ORG_A_PAT"} if creds is None else creds,
     )
 
@@ -4880,7 +4910,7 @@ class TestPerOrgGitCredentialRouting:
     Spec: documentation/plans/2026-07-27-per-org-git-credential-routing.md
     """
 
-    def _render(self, tmp_path, monkeypatch, creds=None):
+    def _render(self, tmp_path, monkeypatch, creds=None, bot=None):
         """Both host seams stubbed so the assertions are host-independent — and
         so a test can never invoke the real gh helper (which would answer with
         the operator's actual token and print it into pytest output)."""
@@ -4890,7 +4920,9 @@ class TestPerOrgGitCredentialRouting:
         monkeypatch.setattr(
             comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig"
         )
-        return comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path))
+        if bot is None:
+            bot = _git_cred_bot(creds)
+        return comp.compose_bot_gitconfig(bot, _make_paths(tmp_path))
 
     # --- the three load-bearing ordering properties -----------------------
 
@@ -4946,22 +4978,42 @@ class TestPerOrgGitCredentialRouting:
         assert '[credential "https://github.com/OrgB"]' in out
         assert "password=$A_PAT" in out and "password=$B_PAT" in out
 
-    def test_no_credentials_declared_composes_nothing(self, tmp_path, monkeypatch):
-        """Fleets declaring none must compose byte-identically to before."""
-        assert self._render(tmp_path, monkeypatch, {}) is None
-
-    def test_bot_conf_exports_git_config_global_only_when_declared(self, tmp_path):
+    @pytest.fixture
+    def parsed_fleet(self, tmp_path):
+        """`lead` declares one org's credentials in fleet.yaml text and `worker`
+        declares none; `load_fleet` parses both."""
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
-        (root / "lib").mkdir()
-        paths = _make_paths(root)
-        bot = _git_cred_bot()
-        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl", service_prefix="com.crog.tl")
+        root.mkdir()
+        (root / "fleet.yaml").write_text(dedent("""\
+            fleet:
+              name: test-fleet
+              manager: lead
+              service_prefix: com.test
+              bots:
+                lead:
+                  expertise: [eng]
+                  git_credentials:
+                    OrgA: ORG_A_PAT
+                worker:
+                  expertise: [eng]
+        """))
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        return fleet, _make_paths(root)
+
+    def test_no_credentials_declared_composes_nothing(
+        self, tmp_path, monkeypatch, parsed_fleet
+    ):
+        """Fleets declaring none must compose byte-identically to before."""
+        fleet, _paths = parsed_fleet
+        assert self._render(tmp_path, monkeypatch, bot=fleet.bots["worker"]) is None
+
+    def test_bot_conf_exports_git_config_global_only_when_declared(self, parsed_fleet):
+        fleet, paths = parsed_fleet
         assert 'export GIT_CONFIG_GLOBAL="$BOT_DIR/.gitconfig"' in compose_bot_conf(
-            bot, fleet, paths
+            fleet.bots["lead"], fleet, paths
         )
         assert "GIT_CONFIG_GLOBAL" not in compose_bot_conf(
-            _git_cred_bot({}), fleet, paths
+            fleet.bots["worker"], fleet, paths
         )
 
 
@@ -5698,10 +5750,10 @@ class TestTaskRecheckTimer:
     _FLEET = """\
         fleet:
           name: rc-fleet
-          manager: kev
+          manager: worker
           service_prefix: com.test
           bots:
-            kev:
+            worker:
               expertise: [eng]
     """
 

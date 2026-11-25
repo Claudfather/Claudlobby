@@ -82,10 +82,10 @@ def _run(
     bots_dir = tmp_path / "bots"
     bots_dir.mkdir(exist_ok=True)
     if bot_dir:
-        (bots_dir / "kev").mkdir(exist_ok=True)
+        (bots_dir / "worker").mkdir(exist_ok=True)
         if skill:
             # The link generate composes for bots.<bot>.skills: [briefing].
-            (bots_dir / "kev" / ".claude" / "skills" / "briefing").mkdir(
+            (bots_dir / "worker" / ".claude" / "skills" / "briefing").mkdir(
                 parents=True, exist_ok=True
             )
 
@@ -99,7 +99,7 @@ def _run(
         **env_extra,
     }
     proc = subprocess.run(
-        ["bash", str(libdir / "briefing-trigger.sh"), "test-fleet", "kev", "morning"],
+        ["bash", str(libdir / "briefing-trigger.sh"), "test-fleet", "worker", "morning"],
         env=env,
         capture_output=True,
         text=True,
@@ -122,7 +122,7 @@ def _notices(tmp_path: Path) -> list[list[str]]:
 def _assert_one_missed_notice(tmp_path: Path, reason: str) -> None:
     # The fleet's bots dir is what routes the notice to the fleet's manager.
     assert _notices(tmp_path) == [
-        [str(tmp_path / "bots"), "briefing_missed", f"kev morning ({reason})"]
+        [str(tmp_path / "bots"), "briefing_missed", f"worker morning ({reason})"]
     ]
 
 
@@ -137,7 +137,7 @@ def test_dispatches_slash_briefing_when_idle(tmp_path):
     )
     assert rc == 0, err
     session, message = _dispatched(tmp_path).split("\t")
-    assert session == "kev"
+    assert session == "worker"
     assert message == "/briefing morning"  # bare slash — dispatch.sh keeps it bare
     assert _events(tmp_path) == ["briefing_dispatched"]
     assert _notices(tmp_path) == []
@@ -155,7 +155,7 @@ def test_a_deferred_slot_is_sent_at_the_bots_next_idle_check(tmp_path):
         },
     )
     assert rc == 0, err
-    assert _dispatched(tmp_path) == "kev\t/briefing morning"
+    assert _dispatched(tmp_path) == "worker\t/briefing morning"
     assert _events(tmp_path) == ["briefing_deferred", "briefing_dispatched"]
     assert _notices(tmp_path) == []
 

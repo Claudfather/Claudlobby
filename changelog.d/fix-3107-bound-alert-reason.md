@@ -1,0 +1,3 @@
+### Fixed — a failed update's alert reason keeps the first 300 bytes of its detail, cleaned as the manager's pane shows it (#3107)
+
+A `reload_failed` or `plugin_update_failed` alert for a failed plugin update ends with the last line the update printed, or for exit 127 with the command and the `PATH` it was not found on. That detail now keeps its first 300 bytes, never part of a character, so one failed update's reason stays far below the 4,096 characters a Telegram message holds, and it is cleaned as a send to the manager's pane cleans text, so the pane and the chat show the same reason. The observability guide's `plugin_update_failed` row says what the reason holds, and the script reference's `start-bot.sh` row names the alert.

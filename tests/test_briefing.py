@@ -47,7 +47,7 @@ def _env_val(conf: str, key: str) -> str | None:
     return None
 
 
-# A fleet equipping bot "kev" with two briefing slots, per-slot sections, and
+# A fleet equipping bot "worker" with two briefing slots, per-slot sections, and
 # sources, plus an mcp source so the coverage validator stays quiet.
 _BRIEFING_FLEET = """\
     fleet:
@@ -56,7 +56,7 @@ _BRIEFING_FLEET = """\
       service_prefix: com.test
       system_defaults: false
       bots:
-        kev:
+        worker:
           expertise: [eng]
           mcp: [github]
           briefing:
@@ -76,12 +76,12 @@ _BRIEFING_FLEET = """\
 # ---------------------------------------------------------------------------
 class TestBriefingConfigCoercion:
     def test_none_when_absent(self):
-        bot = _coerce_bot("kev", {"expertise": ["eng"]}, {})
+        bot = _coerce_bot("worker", {"expertise": ["eng"]}, {})
         assert bot.briefing is None
 
     def test_slots_parsed(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "briefing": {"slots": {"morning": "*-*-* 08:30:00"}},
@@ -93,7 +93,7 @@ class TestBriefingConfigCoercion:
 
     def test_sections_and_sources_parsed(self):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {
                 "expertise": ["eng"],
                 "briefing": {
@@ -109,12 +109,12 @@ class TestBriefingConfigCoercion:
 
     def test_empty_slots_rejected(self):
         with pytest.raises(ValueError, match="slots"):
-            _coerce_bot("kev", {"expertise": ["eng"], "briefing": {"slots": {}}}, {})
+            _coerce_bot("worker", {"expertise": ["eng"], "briefing": {"slots": {}}}, {})
 
     def test_slots_not_a_map_rejected(self):
         with pytest.raises(ValueError):
             _coerce_bot(
-                "kev",
+                "worker",
                 {"expertise": ["eng"], "briefing": {"slots": ["morning"]}},
                 {},
             )
@@ -125,7 +125,7 @@ class TestBriefingConfigCoercion:
         # break bot.conf sourcing, so it must be rejected at parse time.
         with pytest.raises(ValueError, match="slot"):
             _coerce_bot(
-                "kev",
+                "worker",
                 {
                     "expertise": ["eng"],
                     "briefing": {"slots": {bad_slot: "*-*-* 08:30:00"}},
@@ -138,7 +138,7 @@ class TestBriefingConfigCoercion:
         # The timer chain speaks systemd OnCalendar, not 5-field cron.
         with pytest.raises(ValueError, match="[Cc]ron|OnCalendar"):
             _coerce_bot(
-                "kev",
+                "worker",
                 {"expertise": ["eng"], "briefing": {"slots": {"morning": cron}}},
                 {},
             )
@@ -148,7 +148,7 @@ class TestBriefingConfigCoercion:
     )
     def test_oncalendar_values_accepted(self, cal):
         bot = _coerce_bot(
-            "kev",
+            "worker",
             {"expertise": ["eng"], "briefing": {"slots": {"morning": cal}}},
             {},
         )
@@ -156,8 +156,8 @@ class TestBriefingConfigCoercion:
 
     def test_load_fleet_parses_briefing(self, tmp_path):
         fleet, _md = load_fleet(_write(tmp_path / "f", _BRIEFING_FLEET))
-        assert fleet.bots["kev"].briefing is not None
-        assert set(fleet.bots["kev"].briefing.slots) == {"morning", "evening"}
+        assert fleet.bots["worker"].briefing is not None
+        assert set(fleet.bots["worker"].briefing.slots) == {"morning", "evening"}
         assert fleet.bots["mason"].briefing is None
 
     def test_briefing_enabled_true_when_equipped(self, tmp_path):
@@ -190,23 +190,23 @@ class TestBriefingEnvEmission:
         return compose_bot_conf(fleet.bots[bot_id], fleet, _make_paths(tmp_path / "f"))
 
     def test_equipped_bot_gets_slots(self, tmp_path):
-        conf = self._conf(tmp_path, "kev")
+        conf = self._conf(tmp_path, "worker")
         slots = (_env_val(conf, "BRIEFING_SLOTS") or "").split()
         assert set(slots) == {"morning", "evening"}
 
     def test_equipped_bot_gets_sources(self, tmp_path):
-        conf = self._conf(tmp_path, "kev")
+        conf = self._conf(tmp_path, "worker")
         assert _env_val(conf, "BRIEFING_SOURCES") == "github gmail"
 
     def test_per_slot_sections_uppercased(self, tmp_path):
         # Env-var convention: BRIEFING_SECTIONS_<SLOT> with SLOT upper-cased.
-        conf = self._conf(tmp_path, "kev")
+        conf = self._conf(tmp_path, "worker")
         assert (
             _env_val(conf, "BRIEFING_SECTIONS_MORNING") == "overnight calendar overdue"
         )
 
     def test_slot_without_sections_has_no_section_var(self, tmp_path):
-        conf = self._conf(tmp_path, "kev")
+        conf = self._conf(tmp_path, "worker")
         assert "BRIEFING_SECTIONS_EVENING" not in conf
 
     def test_non_briefing_bot_has_no_env(self, tmp_path):
@@ -228,27 +228,27 @@ class TestBriefingTimerComposition:
         timers = self._compose(tmp_path)
         for slot in ("morning", "evening"):
             for ext in ("service", "timer", "plist"):
-                unit = timers / f"com.test.briefing-kev-{slot}.{ext}"
+                unit = timers / f"com.test.briefing-worker-{slot}.{ext}"
                 assert unit.exists(), f"missing {unit.name}"
 
     def test_timer_carries_oncalendar(self, tmp_path):
         timers = self._compose(tmp_path)
-        body = (timers / "com.test.briefing-kev-morning.timer").read_text()
+        body = (timers / "com.test.briefing-worker-morning.timer").read_text()
         assert "OnCalendar=*-*-* 08:30:00" in body
 
     def test_execstart_passes_fleet_bot_slot(self, tmp_path):
         timers = self._compose(tmp_path)
-        svc = (timers / "com.test.briefing-kev-morning.service").read_text()
+        svc = (timers / "com.test.briefing-worker-morning.service").read_text()
         assert "claudlobby/_runtime_scripts/briefing-trigger.sh" in svc
         command = shlex.split(next(line.removeprefix("ExecStart=") for line in svc.splitlines()
                                    if line.startswith("ExecStart=")))
-        assert command[-3:] == ["test-fleet", "kev", "morning"]
+        assert command[-3:] == ["test-fleet", "worker", "morning"]
 
     def test_plist_passes_fleet_bot_slot(self, tmp_path):
         timers = self._compose(tmp_path)
-        plist = (timers / "com.test.briefing-kev-evening.plist").read_text()
+        plist = (timers / "com.test.briefing-worker-evening.plist").read_text()
         # launchd ProgramArguments carry each arg as its own <string>.
-        for arg in ("test-fleet", "kev", "evening"):
+        for arg in ("test-fleet", "worker", "evening"):
             assert f"<string>{arg}</string>" in plist
 
     def test_non_briefing_bot_gets_no_units(self, tmp_path):
@@ -285,19 +285,19 @@ class TestBriefingReconcile:
     def test_prunes_stale_keeps_composed(self, tmp_path):
         self._seed(
             tmp_path,
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-noon",  # renamed-away slot
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-noon",  # renamed-away slot
         )
-        composed = {"com.test.briefing-kev-morning"}
+        composed = {"com.test.briefing-worker-morning"}
         pruned = _reconcile_briefing_units(tmp_path, "com.test", composed, 1)
-        assert pruned == ["com.test.briefing-kev-noon"]
-        assert (tmp_path / "com.test.briefing-kev-morning.timer").exists()
-        assert not (tmp_path / "com.test.briefing-kev-noon.timer").exists()
+        assert pruned == ["com.test.briefing-worker-noon"]
+        assert (tmp_path / "com.test.briefing-worker-morning.timer").exists()
+        assert not (tmp_path / "com.test.briefing-worker-noon.timer").exists()
 
     def test_glob_bounded_never_touches_other_units(self, tmp_path):
         self._seed(
             tmp_path,
-            "com.test.briefing-kev-noon",  # stale briefing
+            "com.test.briefing-worker-noon",  # stale briefing
             "com.test.code-audit-sweep",  # unrelated fleet job
             "com.test.fleet-pulse",
         )
@@ -309,13 +309,13 @@ class TestBriefingReconcile:
     def test_full_removal_prunes_all_briefing(self, tmp_path):
         self._seed(
             tmp_path,
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
         )
         pruned = _reconcile_briefing_units(tmp_path, "com.test", set(), 0)
         assert set(pruned) == {
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
         }
         assert not list(tmp_path.glob("com.test.briefing-*"))
 
@@ -324,14 +324,14 @@ class TestBriefingReconcile:
         # empty (a composition bug) — the reconciler must NOT prune the live units.
         self._seed(
             tmp_path,
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
         )
         with caplog.at_level("WARNING"):
             pruned = _reconcile_briefing_units(tmp_path, "com.test", set(), 2)
         assert pruned == []
-        assert (tmp_path / "com.test.briefing-kev-morning.timer").exists()
-        assert (tmp_path / "com.test.briefing-kev-evening.timer").exists()
+        assert (tmp_path / "com.test.briefing-worker-morning.timer").exists()
+        assert (tmp_path / "com.test.briefing-worker-evening.timer").exists()
         assert any(
             "degenerate" in r.message.lower() or "skipping" in r.message.lower()
             for r in caplog.records
@@ -345,14 +345,14 @@ class TestBriefingReconcile:
         # the same composition-bug signal, so the guard is quantitative.
         self._seed(
             tmp_path,
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
             "com.test.briefing-ari-morning",
             "com.test.briefing-ari-evening",  # live 4th — absent from composed
         )
         composed = {
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
             "com.test.briefing-ari-morning",
         }
         with caplog.at_level("WARNING"):
@@ -370,10 +370,10 @@ class TestBriefingReconcile:
         fleet, md = load_fleet(_write(tmp_path / "f", _BRIEFING_FLEET))
         paths = _make_paths(tmp_path / "f")
         timers = paths.runtime_fleet / "timers"
-        self._seed(timers, "com.test.briefing-kev-midday")  # since-removed slot
+        self._seed(timers, "com.test.briefing-worker-midday")  # since-removed slot
         compose_fleet_timers(fleet, paths, md)
-        assert not (timers / "com.test.briefing-kev-midday.timer").exists()
-        assert (timers / "com.test.briefing-kev-morning.timer").exists()
+        assert not (timers / "com.test.briefing-worker-midday.timer").exists()
+        assert (timers / "com.test.briefing-worker-morning.timer").exists()
 
     def test_generate_writes_briefing_expected_manifest(self, tmp_path):
         # generate emits a config-truth BRIEFING_EXPECTED manifest (DORMANT
@@ -389,8 +389,8 @@ class TestBriefingReconcile:
             if ln.startswith("com.test.briefing-")
         }
         assert listed == {
-            "com.test.briefing-kev-morning",
-            "com.test.briefing-kev-evening",
+            "com.test.briefing-worker-morning",
+            "com.test.briefing-worker-evening",
         }
 
     def test_briefing_manifest_removed_when_stanza_gone(self, tmp_path):
@@ -402,19 +402,19 @@ class TestBriefingReconcile:
                 tmp_path / "f",
                 """\
                 fleet:
-                  manager: kev
+                  manager: worker
                   name: t
                   service_prefix: com.test
                   system_defaults: false
                   bots:
-                    kev:
+                    worker:
                       expertise: [eng]
                 """,
             )
         )
         paths = _make_paths(tmp_path / "f")
         timers = paths.runtime_fleet / "timers"
-        self._seed(timers, "com.test.briefing-kev-morning")  # leftover from before
+        self._seed(timers, "com.test.briefing-worker-morning")  # leftover from before
         compose_fleet_timers(fleet, paths, md)
         manifest = timers / "BRIEFING_EXPECTED"
         assert manifest.exists()
@@ -439,10 +439,10 @@ class TestBriefingDiff:
         compose_fleet_timers(fleet, paths, md)  # runtime now has briefing units
         # Introduce drift: a composed unit goes missing from runtime.
         (
-            paths.runtime_fleet / "timers" / "com.test.briefing-kev-morning.timer"
+            paths.runtime_fleet / "timers" / "com.test.briefing-worker-morning.timer"
         ).unlink()
         out = diff_fleet_timers(fleet, paths, md)
-        assert "briefing-kev-morning" in out, f"drift not detected: {out!r}"
+        assert "briefing-worker-morning" in out, f"drift not detected: {out!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -452,12 +452,12 @@ class TestBriefingValidator:
     def test_briefing_without_source_warns(self, tmp_path):
         body = """\
             fleet:
-              manager: kev
+              manager: worker
               name: t
               service_prefix: com.test
               system_defaults: false
               bots:
-                kev:
+                worker:
                   expertise: [eng]
                   briefing:
                     slots:

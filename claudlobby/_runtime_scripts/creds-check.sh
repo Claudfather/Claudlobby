@@ -1073,14 +1073,17 @@ else
 fi
 
 # resolve_delivery_token sets _delivery_token / _delivery_state_dir /
-# _delivery_bot to the first declared channel bot IN the resolved chat (its own
-# TELEGRAM_GROUP_CHAT_ID is that chat) whose token getMe confirms live, the token
+# _delivery_bot to the first bot the resolver could pair with the resolved chat
+# (_alert_sender_unfit: declared, a channel bot, its own TELEGRAM_GROUP_CHAT_ID
+# that chat, a channel state dir) whose token getMe confirms live, the token
 # resolved through the token SSOT (resolve_bot_telegram_token, which reaches the
-# fleet's real tokens). That is #542's skip of a dead sender, kept INSIDE the
-# pair: a live token of a bot outside the chat is the split that silenced one
-# fleet's alerts for two months while getMe called it healthy (#1771). All empty
-# when no bot in the chat has a live token -- tg-post then reads the pair's own
-# state dir, and check_alert_pair reports what is wrong.
+# fleet's real tokens), taken in alert_sender_order: the fleet manager first,
+# then by name, the order the resolver picks a sender in (#3127). That is #542's
+# skip of a dead sender, kept INSIDE the pair: a live token of a bot outside the
+# chat is the split that silenced one fleet's alerts for two months while getMe
+# called it healthy (#1771). All empty when no bot in the chat has a live token
+# -- tg-post then reads the pair's own state dir, and check_alert_pair reports
+# what is wrong.
 resolve_delivery_token() {
     _delivery_token=""
     _delivery_state_dir=""
@@ -1091,11 +1094,11 @@ resolve_delivery_token() {
     [ -d "$_dir" ] || return 0
     _fdir="$(check_fleet_dir)" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
     _declared="${SELECTED_BOTS:-$(parse_fleet_bots "$_fdir/fleet.yaml")}"
-    for _d in "$_dir"/*/; do
-        [ -f "$_d/bot.conf" ] || continue
-        bot_in_fleet "$(basename "$_d")" "$_declared" || continue
-        [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
-        [ "$(bot_conf_get "$_d" TELEGRAM_GROUP_CHAT_ID "")" = "$_alert_chat_id" ] || continue
+    # The list rides fd 3, so a probe in the loop body that reads stdin cannot
+    # swallow the rest of it.
+    while IFS= read -r _d <&3; do
+        [ -n "$_d" ] || continue
+        [ -z "$(_alert_sender_unfit "$_d" "$_alert_chat_id" "$_declared")" ] || continue
         _tok="$(resolve_bot_telegram_token "$_d")" || true
         [ -n "$_tok" ] || continue
         if [ "$(_telegram_api "$_tok" getMe | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
@@ -1104,7 +1107,9 @@ resolve_delivery_token() {
             _delivery_bot="$(basename "$_d")"
             return 0
         fi
-    done
+    done 3<<EOF
+$(alert_sender_order "$_dir")
+EOF
 }
 
 # The sender's token, exported with ITS state dir so record_and_alert's tg-post

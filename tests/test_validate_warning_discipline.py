@@ -498,3 +498,24 @@ def test_validate_warns_when_fleet_alerts_reach_only_the_managers_pane(fleet_dir
     path.write_text(text.replace('  telegram_group_chat_id: "-100999"\n', ""))
     found = _of(_validate(fleet_dir), "alert-pane-only")
     assert len(found) == 1 and found[0].startswith("fleet manager 'lead' has no Telegram chat"), found
+
+
+def test_doctor_names_a_fleet_alert_sent_as_a_bot_that_is_not_the_manager(fleet_dir, monkeypatch):
+    """#3127: doctor's fleet-yaml rung names `alert-sender` when the bot a fleet
+    alert is sent as is not the fleet manager. Here the manager's own chat is
+    another one, so worker-1, a channel bot in the fleet chat, sends the fleet
+    timers' alerts there."""
+    _env(monkeypatch)
+    assert _of(_validate(fleet_dir), "alert-sender") == []
+    path = fleet_dir / "fleet.yaml"
+    text = path.read_text()
+    anchor = "        handle: lead_bot\n"
+    assert text.count(anchor) == 1, "the fixture's manager stanza moved"
+    path.write_text(text.replace(anchor, anchor + '        chat_id: "-100888"\n'))
+    found = _of(_validate(fleet_dir), "alert-sender")
+    assert len(found) == 1 and "are sent as 'worker-1', not the fleet manager 'lead'" in found[0], found
+    fleet, _md = load_fleet(path)
+    report = DoctorReport()
+    check_fleet_validation(fleet, _paths(fleet_dir), report)
+    rung = next(c for c in report.checks if c.name == "fleet-yaml")
+    assert rung.status == "warn" and "alert-sender" in rung.detail, rung.detail

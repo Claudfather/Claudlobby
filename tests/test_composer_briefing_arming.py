@@ -23,12 +23,12 @@ from claudlobby.paths import Paths
 
 _FLEET = """\
     fleet:
-      manager: kev
+      manager: worker
       name: arm-fleet
       service_prefix: com.test
       system_defaults: false
       bots:
-        kev:
+        worker:
           expertise: [eng]
           mcp: [github]
           briefing:
@@ -60,8 +60,8 @@ def _compose(tmp_path: Path, monkeypatch, armed: str):
 
 def test_armed_fleet_composes_the_env_on_both_platforms(tmp_path, monkeypatch):
     timers = _compose(tmp_path, monkeypatch, armed="1")
-    service = (timers / "com.test.briefing-kev-morning.service").read_text()
-    plist = (timers / "com.test.briefing-kev-morning.plist").read_text()
+    service = (timers / "com.test.briefing-worker-morning.service").read_text()
+    plist = (timers / "com.test.briefing-worker-morning.plist").read_text()
     assert "Environment=PLANE_EMIT_ENABLED=1" in service
     assert "<key>PLANE_EMIT_ENABLED</key>" in plist
     assert "<string>1</string>" in plist
@@ -69,8 +69,8 @@ def test_armed_fleet_composes_the_env_on_both_platforms(tmp_path, monkeypatch):
 
 def test_unarmed_fleet_composes_no_plane_env(tmp_path, monkeypatch):
     timers = _compose(tmp_path, monkeypatch, armed="0")
-    service = (timers / "com.test.briefing-kev-morning.service").read_text()
-    plist = (timers / "com.test.briefing-kev-morning.plist").read_text()
+    service = (timers / "com.test.briefing-worker-morning.service").read_text()
+    plist = (timers / "com.test.briefing-worker-morning.plist").read_text()
     assert "PLANE_EMIT_ENABLED" not in service
     assert "PLANE_EMIT_ENABLED" not in plist
 
@@ -87,7 +87,7 @@ def test_resolver_unavailable_composes_unarmed_not_crashed(tmp_path, monkeypatch
     (root / "fleet.yaml").write_text(dedent(_FLEET))
     fleet, md = load_fleet(root / "fleet.yaml")
     timers = compose_fleet_timers(fleet, Paths(root=root, fleet_dir=root, package=git_package(root)), md)
-    service = (timers / "com.test.briefing-kev-morning.service").read_text()
+    service = (timers / "com.test.briefing-worker-morning.service").read_text()
     assert "PLANE_EMIT_ENABLED" not in service
 
 

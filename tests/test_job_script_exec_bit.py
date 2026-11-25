@@ -57,12 +57,12 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 # The briefing slot exercises composer.py:2990; the bot itself, composer.py:1075.
 _FLEET = """\
     fleet:
-      manager: kev
+      manager: worker
       name: test-fleet
       service_prefix: com.test
       system_defaults: true
       bots:
-        kev:
+        worker:
           expertise: [eng]
           briefing:
             slots:
