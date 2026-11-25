@@ -849,8 +849,9 @@ body.plane-workspace { padding:0 24px 24px; }
 /* Wide screens: one column, the teams line above the room. The line, with a drawer opened on it, takes at most a
    quarter of the column and scrolls inside itself after that, so the room keeps the rest whatever is open: its
    heading, the conversation's floor and the Message team row fit in it at the smallest frame the website uses.
-   While the composer is open the line takes at most 15%, so the composer keeps at least the room it has without
-   the fold (a browser without :has() keeps the quarter). */
+   While the composer is open the line takes at most 15%. With a drawer open too, the composer then has as much room as
+   without the fold from a 640px frame up, and about 17px less at the smallest (560px), where it scrolls inside itself
+   as it does today (a browser without :has() keeps the quarter). */
 @media(min-width:761px) {
   .plane-workspace main[data-teams="1"][data-computers="1"] { display:flex; flex-direction:column; align-items:stretch; gap:12px; }
   .plane-workspace main[data-teams="1"][data-computers="1"] > #rail-fleet { flex:0 1 auto; height:auto; min-height:0; max-height:25%; overflow:auto; }

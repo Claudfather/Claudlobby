@@ -4042,14 +4042,41 @@ test('the view marks on main the computers it lists; listing none, before its ac
   main.dataset.teams='1';l.workspace.dispose();assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined]);
 });
 test('app.js marks how many teams the view has, hidden ones included, from its own renderer, and wires the drawer',()=>{
-  const ui=dom(),main=ui.get('main');
+  const ui=dom(),main=ui.get('main');main.dataset.computers='1';
   for(const fleets of [[],[{alias:'one'}],[{alias:'one'},{alias:'two'}]]){teamsList(ui,fleets).markTeams();assert.equal(main.dataset.teams,String(fleets.length));}
+  delete main.dataset.computers;teamsList(ui,[{alias:'one'}]).markTeams();
+  assert.equal(main.dataset.teams,undefined,'while no computer is listed (before the account check, or retired) the teams stay unmarked');
   const render=appText.slice(appText.indexOf('function renderFleetTabs()'));
   assert.ok(render.indexOf('markTeams()')<render.indexOf('if (!fleets.length)'),'marked before an empty list returns');
   assert.match(render,/hidden = hiddenTeams\(\)/,'the list itself leaves hidden teams out; the mark counts them');
   assert.match(appText,/onConnectionAttention: openComputersForAttention,\n\s+onConnectionAttentionCleared: attentionCleared,/);
-  assert.match(appText,/for \(const \[type, handler\] of \[\["toggle", computersToggled\], \["pointerdown", keepComputersOpen\], \["focusin", keepComputersOpen\]\]\)\n\s+\$\("computers-details"\)\?\.addEventListener\(type, handler\);/);
+  assert.match(appText,/for \(const \[type, handler\] of \[\["toggle", computersToggled\], \["pointerdown", keepComputersOpen\], \["wheel", keepComputersOpen\],\n\s+\["focusin", keepComputersOpen\]\]\) \$\("computers-details"\)\?\.addEventListener\(type, handler, \{ passive: true \}\);/);
   assert.doesNotMatch(drawerText,/connection_state/,'attention clearing comes from the connected view, never a team snapshot');
+  assert.doesNotMatch(drawerText.replace(/\/\/.*$/gm,''),/scrollIntoView|scrollTo\(|scrollBy\(/,'only the line scrolls, by its own scrollTop');
+});
+test('opened in the fold, Computers & status brings its computer\'s card and buttons into view by scrolling the line itself',()=>{
+  const ui=dom(),main=ui.get('main'),one=[{alias:'c / team'}],rect=(top,height)=>({top,bottom:top+height,height});
+  // A wide screen's line: `view` px visible at 82px, scrolling; the card starts `cardAt` px into its content and its
+  // buttons end `end` px in.
+  const opened=({cardAt=140,end=190,view=117,scrollHeight=400,scrollTop=0,hidden=false,fleets=one,computers='1'}={})=>{
+    const line={clientTop:0,clientHeight:view,scrollHeight,scrollTop,getBoundingClientRect:()=>rect(82,view)},origin=()=>82-line.scrollTop;
+    const actions={getBoundingClientRect:()=>rect(origin()+end-29,29)};
+    const card={hidden,querySelector:s=>s==='.connection-actions'?actions:null,getBoundingClientRect:()=>rect(origin()+cardAt,end-cardAt+30)};
+    const details={open:true,contains:()=>false,querySelectorAll:s=>s==='.connection-card'?[card]:[]};
+    main.dataset.computers=computers;
+    const list=teamsList({...ui,get:id=>id==='rail-fleet'?line:ui.get(id)},fleets,details);list.markTeams();
+    list.computersToggled({target:details});return {line,details,list};
+  };
+  assert.equal(opened().line.scrollTop,81,'buttons below the visible part: the line scrolls just far enough, with a little room');
+  assert.equal(opened({cardAt:20,end:70}).line.scrollTop,0,'already in view: nothing moves');
+  assert.equal(opened({cardAt:20,end:200}).line.scrollTop,83,'a card taller than the line: its buttons win');
+  assert.equal(opened({scrollTop:250}).line.scrollTop,140,'scrolled past it: back to the card\'s top');
+  assert.equal(opened({scrollHeight:117}).line.scrollTop,0,'a line that does not scroll (a phone): nothing moves');
+  assert.equal(opened({fleets:[...one,{alias:'c / docs'}]}).line.scrollTop,0,'two teams: not folded');
+  assert.equal(opened({computers:'2'}).line.scrollTop,0,'two computers: not folded');
+  assert.equal(opened({hidden:true}).line.scrollTop,0,'only a listed computer\'s card');
+  const closing=opened({scrollTop:0,end:70,cardAt:20});closing.details.open=false;closing.line.scrollTop=5;
+  closing.list.computersToggled({target:closing.details});assert.equal(closing.line.scrollTop,5,'closing moves nothing');
 });
 test('a computer that asked for attention says when it cleared, once, after the computers are marked',async()=>{
   const h=harness({count:1}),main=h.ui.get('main'),a=refs[0].endpoint_origin,attention=[],cleared=[];
@@ -4140,8 +4167,10 @@ test('Computers & status, opened for attention, closes in the fold when that att
   list=page(two);list.attentionCleared();assert.equal(details.open,true,'two teams');
   list.fleets=one;list.markTeams();assert.equal(details.open,true,'and it stays after a team goes');
   list=page(one,'2');list.attentionCleared();assert.equal(details.open,true,'two computers');
-  // Any use by the person cancels it: a pointer press (Safari does not focus a pressed button), focus in it, or a close.
+  // Any use by the person cancels it: a pointer press (Safari does not focus a pressed button), a wheel or trackpad
+  // scroll (which presses nothing), focus in it, or a close.
   list=page(one);list.keepComputersOpen({type:'pointerdown'});list.attentionCleared();assert.equal(details.open,true,'a pointer press keeps it');
+  list=page(one);list.keepComputersOpen({type:'wheel'});list.attentionCleared();assert.equal(details.open,true,'a wheel or trackpad scroll keeps it');
   list=page(one);list.keepComputersOpen({type:'focusin'});list.attentionCleared();assert.equal(details.open,true,'focus coming into it keeps it');
   list=page(one);ui.document.activeElement=inside;list.attentionCleared();assert.equal(details.open,true,'focus already in it keeps it');
   ui.document.activeElement=null;list.markTeams();list.attentionCleared();assert.equal(details.open,true,'and it stays theirs after focus leaves');

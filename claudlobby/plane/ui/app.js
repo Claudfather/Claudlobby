@@ -1642,13 +1642,14 @@ function channelUrl() {
 }
 
 // One team on one computer: workspace.css folds the teams list and the computer's parts to one line each under
-// main[data-teams="1"][data-computers="1"]. markTeams marks how many teams the view has, hidden ones included
-// (connected-workspace.js marks the computers it lists, and clears both marks when it lists none).
+// main[data-teams="1"][data-computers="1"]. markTeams marks how many teams the view has, hidden ones included, while
+// connected-workspace.js marks the computers it lists; a view that lists none (before its account check, or once it
+// has retired) has neither mark.
 // The Computers & status drawer opens itself when its computer asks for attention (onConnectionAttention below).
 // In the fold, a drawer the page opened that way closes again once connected-workspace.js says that attention
 // cleared (onConnectionAttentionCleared below), or, if the fold is not showing yet then, as soon as it is. It stays
-// open once the person has used it: a pointer press or keyboard focus in it, or a close of their own. A drawer the
-// person opened is never closed for them, and outside the fold nothing closes it.
+// open once the person has used it: a pointer press, a wheel or trackpad scroll or keyboard focus in it, or a close of
+// their own. A drawer the person opened is never closed for them, and outside the fold nothing closes it.
 let computersAttention = null;   // null, or "raised"/"cleared" for a drawer the page opened for attention
 function openComputersForAttention() {
   const details = $("computers-details");
@@ -1657,7 +1658,25 @@ function openComputersForAttention() {
 }
 // The person used the drawer, so it is theirs. toggle also fires after the page's own opening: only a close counts.
 function keepComputersOpen() { computersAttention = null; }
-function computersToggled(event) { if (!event.target.open) computersAttention = null; }
+function computersToggled(event) { if (!event.target.open) computersAttention = null; else showComputerCard(); }
+// In the fold on a wide screen the line scrolls inside itself, and an opened Computers & status drops below it: bring
+// its computer's card, from its name to its Connect, Check connection or Disconnect, into view by scrolling the line
+// itself (never scrollIntoView, which can move the page around the frame). When the line cannot show all of that, the
+// buttons win. A phone's line does not scroll, so nothing moves there.
+function showComputerCard() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  const line = $("rail-fleet"), details = $("computers-details");
+  if (main?.dataset?.teams !== "1" || main?.dataset?.computers !== "1" || !line || !details?.open) return;
+  if (!(line.scrollHeight > line.clientHeight)) return;
+  const card = [...(details.querySelectorAll?.(".connection-card") || [])].find(node => !node.hidden);
+  if (!card) return;
+  const origin = line.getBoundingClientRect().top + (line.clientTop || 0) - line.scrollTop;
+  const top = card.getBoundingClientRect().top - origin, view = line.clientHeight;
+  const end = (card.querySelector?.(".connection-actions") || card).getBoundingClientRect().bottom - origin;
+  if (end - top > view) line.scrollTop = end - view;
+  else if (end > line.scrollTop + view) line.scrollTop = Math.min(top, end - view + 8);
+  else if (top < line.scrollTop) line.scrollTop = top;
+}
 function closeComputersAfterAttention() {
   const main = typeof document === "undefined" ? null : document.querySelector?.("main");
   const details = $("computers-details"), teams = Number(main?.dataset?.teams || 0);
@@ -1675,7 +1694,8 @@ function attentionCleared() {
 function markTeams() {
   const main = typeof document === "undefined" ? null : document.querySelector?.("main");
   if (!main?.dataset) return;
-  main.dataset.teams = String(fleets.length);
+  if (main.dataset.computers === undefined) delete main.dataset.teams;
+  else main.dataset.teams = String(fleets.length);
   closeComputersAfterAttention();
 }
 
@@ -2314,8 +2334,8 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
       onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
-for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", keepComputersOpen], ["focusin", keepComputersOpen]])
-  $("computers-details")?.addEventListener(type, handler);
+for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", keepComputersOpen], ["wheel", keepComputersOpen],
+  ["focusin", keepComputersOpen]]) $("computers-details")?.addEventListener(type, handler, { passive: true });
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {
