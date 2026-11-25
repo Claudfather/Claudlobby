@@ -269,10 +269,10 @@ class TestMatchExternal:
 
 def _bot(**overrides):
     base = dict(
-        bot_id="kev",
-        name="kev",
+        bot_id="worker",
+        name="worker",
         expertise=["eng"],
-        telegram=TelegramConfig(handle="kev_bot"),
+        telegram=TelegramConfig(handle="worker_bot"),
     )
     base.update(overrides)
     return BotConfig(**base)
@@ -280,7 +280,7 @@ def _bot(**overrides):
 
 def _fleet():
     return FleetConfig(
-        name="tl", service_prefix="com.crog.tl", manager="kev", bots={"kev": _bot()}
+        name="test-fleet", service_prefix="com.test", manager="worker", bots={"worker": _bot()}
     )
 
 
@@ -492,7 +492,7 @@ class TestAuditBotSourcesFragments:
     def test_fragment_anchored_arg_is_clean(self):
         frag = {
             "mcpServers": {
-                "printify": {"args": ["${FLEET_ROOT}/runtime/bots/kev/data/x.js"]}
+                "printify": {"args": ["${FLEET_ROOT}/runtime/bots/worker/data/x.js"]}
             }
         }
         assert audit_bot_sources(_bot(), _fleet(), fragments={"printify": frag}) == []

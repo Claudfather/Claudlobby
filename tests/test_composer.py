@@ -1086,24 +1086,24 @@ class TestComposeBotConfFleetRoot:
 
     def _bot(self):
         return BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
         )
 
     def _fleet(self):
         return FleetConfig(
-            manager="kev", bots={"kev": self._bot()},
-            name="tl",
-            service_prefix="com.crog.tl",
+            manager="worker", bots={"worker": self._bot()},
+            name="test-fleet",
+            service_prefix="com.test",
             telegram_group_chat_id="-100999",
         )
 
     def test_root_mode_fleet_root_equals_install_root(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1113,20 +1113,20 @@ class TestComposeBotConfFleetRoot:
     def test_nested_overlay_fleet_root_is_anchor_relative(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
         # Nested overlay — anchored under the install root, so a re-nest of the
         # fleet only moves FLEET_ROOT; every derived path follows.
-        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/tl"' in conf
+        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/test-fleet"' in conf
 
     def test_vault_mode_fleet_root_is_absolute(self, tmp_path):
 
         root = tmp_path / "install"
-        vault_fleet = tmp_path / "vault" / "tl"
-        (vault_fleet / "runtime" / "bots" / "kev").mkdir(parents=True)
+        vault_fleet = tmp_path / "vault" / "test-fleet"
+        (vault_fleet / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=vault_fleet, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1136,7 +1136,7 @@ class TestComposeBotConfFleetRoot:
     def test_fleet_root_always_emitted(self, tmp_path):
 
         root = tmp_path / "claudlobby"
-        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root, package=git_package(root))
         conf = compose_bot_conf(self._bot(), self._fleet(), paths)
@@ -1151,23 +1151,23 @@ class TestComposeBotConfSecretFiles:
 
     def _fleet(self):
         return FleetConfig(
-            manager="kev", bots={"kev": self._bot()},
-            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+            manager="worker", bots={"worker": self._bot()},
+            name="test-fleet", service_prefix="com.test", telegram_group_chat_id="-100999"
         )
 
     def _paths(self, tmp_path):
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         return Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
 
     def _bot(self, **kw):
         return BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
             **kw,
         )
 
@@ -1212,7 +1212,7 @@ class TestComposeBotConfSecretFiles:
         from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
-            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/tl/.secrets/ga4.json"}
+            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/test-fleet/.secrets/ga4.json"}
         )
         with pytest.raises(ValueError, match="fleet-relative"):
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
@@ -1254,18 +1254,18 @@ class TestComposerProvidedPathAnchorsExported:
         from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
 
         bot = BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="kev_bot"),
+            telegram=TelegramConfig(handle="worker_bot"),
         )
         fleet = FleetConfig(
             manager=bot.bot_id, bots={bot.bot_id: bot},
-            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+            name="test-fleet", service_prefix="com.test", telegram_group_chat_id="-100999"
         )
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         paths = Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
         conf = compose_bot_conf(bot, fleet, paths)
@@ -1278,13 +1278,13 @@ class TestBotConfExportsTheRuntime:
     a door with no value reads `claude`, so an un-regenerated bot behaves the same."""
 
     def _conf(self, tmp_path, **bot_fields):
-        bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"],
-                        telegram=TelegramConfig(handle="kev_bot"), **bot_fields)
-        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="tl",
-                            service_prefix="com.crog.tl", telegram_group_chat_id="-100999")
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"],
+                        telegram=TelegramConfig(handle="worker_bot"), **bot_fields)
+        fleet = FleetConfig(manager=bot.bot_id, bots={bot.bot_id: bot}, name="test-fleet",
+                            service_prefix="com.test", telegram_group_chat_id="-100999")
         root = tmp_path / "claudlobby"
-        fleet_dir = root / "local" / "home" / "tl"
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = root / "local" / "home" / "test-fleet"
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
         return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=fleet_dir, package=git_package(root)))
 
@@ -4887,10 +4887,10 @@ class TestTimerUnitPath:
 def _git_cred_bot(creds=None):
     """A bot declaring per-org git credentials (default: one org)."""
     return BotConfig(
-        bot_id="kev",
-        name="kev",
+        bot_id="worker",
+        name="worker",
         expertise=["eng"],
-        telegram=TelegramConfig(handle="kev_bot"),
+        telegram=TelegramConfig(handle="worker_bot"),
         git_credentials={"OrgA": "ORG_A_PAT"} if creds is None else creds,
     )
 
@@ -5750,10 +5750,10 @@ class TestTaskRecheckTimer:
     _FLEET = """\
         fleet:
           name: rc-fleet
-          manager: kev
+          manager: worker
           service_prefix: com.test
           bots:
-            kev:
+            worker:
               expertise: [eng]
     """
 

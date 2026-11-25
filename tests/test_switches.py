@@ -28,11 +28,11 @@ REPO = Path(__file__).resolve().parent.parent
 
 _FLEET = """\
     fleet:
-      manager: kev
+      manager: worker
       name: sw-fleet
       service_prefix: com.sw
       bots:
-        kev:
+        worker:
           expertise: [software-engineering]
 """
 
@@ -842,7 +842,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     root = _root(tmp_path, "PLANE_EMIT_DISABLED=1\n")
     fleet, merged = load_fleet(root / "fleet.yaml")
     paths = Paths(root=root, fleet_dir=root, package=git_package(root))
-    conf = compose_bot_conf(fleet.bots["kev"], fleet, paths)
+    conf = compose_bot_conf(fleet.bots["worker"], fleet, paths)
     assert [ln for ln in conf.splitlines()
             if ln.startswith("export PLANE_EMIT_DISABLED=")
             and ln.rstrip().endswith("1")], conf
@@ -855,7 +855,7 @@ def test_the_silencer_reaches_the_bot_conf_AND_the_timer_units(tmp_path):
     qfleet, qmerged = load_fleet(quiet / "fleet.yaml")
     qpaths = Paths(root=quiet, fleet_dir=quiet, package=git_package(quiet))
     assert "PLANE_EMIT_DISABLED" not in compose_bot_conf(
-        qfleet.bots["kev"], qfleet, qpaths)
+        qfleet.bots["worker"], qfleet, qpaths)
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1085,7 @@ def test_claudna_switch_carriers_and_export_enrollment(tmp_path):
     p = root / "fleet.yaml"
     text = p.read_text()
     text = (
-        text.replace("    kev:", "    kev:\n      claudna: {harvest: true}")
+        text.replace("    worker:", "    worker:\n      claudna: {harvest: true}")
         + "    helper:\n      expertise: [software-engineering]\n"
     )
     p.write_text(text)

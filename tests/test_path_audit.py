@@ -27,18 +27,18 @@ from claudlobby.paths import Paths
 
 def _paths(tmp_path):
     root = tmp_path / "claudlobby"
-    fleet_dir = root / "local" / "home" / "tl"
-    (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+    fleet_dir = root / "local" / "home" / "test-fleet"
+    (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
     (root / "lib").mkdir(parents=True)
     return Paths(root=root, fleet_dir=fleet_dir, package=git_package(root))
 
 
 def _bot(**overrides):
     base = dict(
-        bot_id="kev",
-        name="kev",
+        bot_id="worker",
+        name="worker",
         expertise=["eng"],
-        telegram=TelegramConfig(handle="kev_bot"),
+        telegram=TelegramConfig(handle="worker_bot"),
     )
     base.update(overrides)
     return BotConfig(**base)
@@ -46,7 +46,7 @@ def _bot(**overrides):
 
 def _fleet():
     return FleetConfig(
-        name="tl", service_prefix="com.crog.tl", manager="kev", bots={"kev": _bot()}
+        name="test-fleet", service_prefix="com.test", manager="worker", bots={"worker": _bot()}
     )
 
 
@@ -57,38 +57,38 @@ def test_session_provider_commands_are_tui_input_not_filesystem_paths():
                     "SESSION_RESUME_COMMAND": "/claudna:session resume --auto",
                     "OTHER_PATH": "/foreign/file"})
     findings = audit_bot_sources(bot, _fleet())
-    assert [finding.source for finding in findings] == ["bots.kev.env.OTHER_PATH"]
+    assert [finding.source for finding in findings] == ["bots.worker.env.OTHER_PATH"]
 
 
 class TestImproperFleetPaths:
     def test_flat_husk_is_flagged(self, tmp_path):
         paths = _paths(tmp_path)
-        flat = f"{paths.root}/local/tl/.secrets/ga4.json"  # local/tl not local/home/tl
+        flat = f"{paths.root}/local/test-fleet/.secrets/ga4.json"  # local/test-fleet not local/home/test-fleet
         bad = improper_fleet_paths(f'"{flat}"', _bot(), paths)
         assert [p for p, _ in bad] == [flat]
 
     def test_nested_correct_absolute_is_ok(self, tmp_path):
         paths = _paths(tmp_path / "host data with spaces")
-        good = str(paths.bot_runtime("kev"))
+        good = str(paths.bot_runtime("worker"))
         # The same absolute crosses shell, JSON permission, systemd and XML
         # boundaries. Whitespace in its configured root is part of the path.
         for text in (
             f'BOT_DIR="{good}"',
             json.dumps({"allow": [f"Read(/{good}/memory/**)"]}),
             f"WorkingDirectory={good}\nEnvironmentFile={good}/.tmux-env",
-            f"<string>{good}/logs/kev.out.log</string>",
+            f"<string>{good}/logs/worker.out.log</string>",
             "${BOT_DIR}/data",
         ):
             assert improper_fleet_paths(text, _bot(), paths) == [], text
 
     def test_fleet_root_token_is_ok(self, tmp_path):
         paths = _paths(tmp_path)
-        txt = "${FLEET_ROOT}/runtime/bots/kev/data/printify-mcp/dist/index.js"
+        txt = "${FLEET_ROOT}/runtime/bots/worker/data/printify-mcp/dist/index.js"
         assert improper_fleet_paths(txt, _bot(), paths) == []
 
     def test_claudlobby_root_anchored_bot_dir_is_ok(self, tmp_path):
         paths = _paths(tmp_path)
-        txt = 'BOT_DIR="$CLAUDLOBBY_ROOT/local/home/tl/runtime/bots/kev"'
+        txt = 'BOT_DIR="$CLAUDLOBBY_ROOT/local/home/test-fleet/runtime/bots/worker"'
         assert improper_fleet_paths(txt, _bot(), paths) == []
 
     def test_bot_dir_token_is_ok(self, tmp_path):
@@ -104,7 +104,7 @@ class TestImproperFleetPaths:
     def test_cross_fleet_path_flagged(self, tmp_path):
         paths = _paths(tmp_path / "host data with spaces")
         other = f"{paths.root}/local/home/other-fleet/runtime/bots/z/x.js"
-        bad = improper_fleet_paths(f'"{paths.bot_runtime("kev")}" "{other}"', _bot(), paths)
+        bad = improper_fleet_paths(f'"{paths.bot_runtime("worker")}" "{other}"', _bot(), paths)
         assert [p for p, _ in bad] == [other]
 
     def test_fleet_state_path_style_root_anchor_is_ok(self, tmp_path):
@@ -120,7 +120,7 @@ class TestImproperFleetPaths:
         # system path. This is the seam-1 gap (PR #690 review).
         paths = _paths(tmp_path)
         foreign = (
-            "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
+            "/Users/olduser/old-mac-mini-install/claudlobby/local/test-fleet/.secrets/ga4.json"
         )
         bad = improper_fleet_paths(f'"{foreign}"', _bot(), paths)
         assert [p for p, _ in bad] == [foreign]
@@ -129,7 +129,7 @@ class TestImproperFleetPaths:
         # Same, but the stale path carries the nested overlay layout at a foreign root.
         paths = _paths(tmp_path)
         foreign = (
-            "/Users/olduser/old-install/claudlobby/local/home/tl/.secrets/ga4.json"
+            "/Users/olduser/old-install/claudlobby/local/home/test-fleet/.secrets/ga4.json"
         )
         bad = improper_fleet_paths(foreign, _bot(), paths)
         assert [p for p, _ in bad] == [foreign]
@@ -138,7 +138,7 @@ class TestImproperFleetPaths:
         # A bot-runtime tree (runtime/bots/…) anchored at a foreign root is a
         # transplanted fleet path — recognized by the runtime-tree layout marker.
         paths = _paths(tmp_path)
-        foreign = "/mnt/old/claudlobby/local/home/tl/runtime/bots/kev/data/x.js"
+        foreign = "/mnt/old/claudlobby/local/home/test-fleet/runtime/bots/worker/data/x.js"
         bad = improper_fleet_paths(foreign, _bot(), paths)
         assert [p for p, _ in bad] == [foreign]
 
@@ -176,7 +176,7 @@ class TestImproperFleetPaths:
 
 class TestAuditBotPaths:
     def _seed_bot_dir(self, paths):
-        bot_dir = paths.bot_runtime("kev")
+        bot_dir = paths.bot_runtime("worker")
         (bot_dir / ".claude").mkdir(parents=True, exist_ok=True)
         return bot_dir
 
@@ -184,8 +184,8 @@ class TestAuditBotPaths:
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
         (bot_dir / "bot.conf").write_text(
-            'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/tl"\n'
-            f"export FLEET_MISSION_FILE={paths.root}/local/home/tl/missions/f.md\n"
+            'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/test-fleet"\n'
+            f"export FLEET_MISSION_FILE={paths.root}/local/home/test-fleet/missions/f.md\n"
         )
         (bot_dir / ".mcp.json").write_text(
             json.dumps(
@@ -193,7 +193,7 @@ class TestAuditBotPaths:
                     "mcpServers": {
                         "printify": {
                             "args": [
-                                "${FLEET_ROOT}/runtime/bots/kev/data/printify-mcp/dist/index.js"
+                                "${FLEET_ROOT}/runtime/bots/worker/data/printify-mcp/dist/index.js"
                             ]
                         }
                     }
@@ -206,7 +206,7 @@ class TestAuditBotPaths:
     def test_flat_path_in_mcp_json_is_a_finding_and_raises(self, tmp_path):
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
-        flat = f"{paths.root}/local/tl/runtime/bots/kev/dist/index.js"  # flat husk
+        flat = f"{paths.root}/local/test-fleet/runtime/bots/worker/dist/index.js"  # flat husk
         (bot_dir / ".mcp.json").write_text(
             json.dumps({"mcpServers": {"printify": {"args": [flat]}}})
         )
@@ -230,7 +230,7 @@ class TestAuditBotPaths:
         """
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
-        flat = f"{paths.root}/local/tl/gitconfig-include"  # flat husk
+        flat = f"{paths.root}/local/test-fleet/gitconfig-include"  # flat husk
         (bot_dir / ".gitconfig").write_text(f"[include]\n\tpath = {flat}\n")
         findings = audit_bot_paths(_bot(), _fleet(), paths)
         assert [f.file for f in findings] == [".gitconfig"]
@@ -252,7 +252,7 @@ class TestAuditBotPaths:
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
         (bot_dir / "bot.conf").write_text(
-            f"export GA4_SA_KEY_PATH={paths.root}/local/tl/.secrets/ga4.json\n"
+            f"export GA4_SA_KEY_PATH={paths.root}/local/test-fleet/.secrets/ga4.json\n"
         )
         findings = audit_bot_paths(_bot(), _fleet(), paths)
         assert [f.file for f in findings] == ["bot.conf"]
@@ -276,25 +276,25 @@ def test_anchor_ssot_covers_data_and_selected_package_paths():
 
 
 def _write_nested_fleet(root, env_path_value):
-    """A nested-overlay fleet (local/home/tl) reusing the fleet_dir fixture's
+    """A nested-overlay fleet (local/home/test-fleet) reusing the fleet_dir fixture's
     root-level library, with one bot carrying a hand-typed env path."""
-    fleet_dir = root / "local" / "home" / "tl"
+    fleet_dir = root / "local" / "home" / "test-fleet"
     fleet_dir.mkdir(parents=True)
     (fleet_dir / "fleet.yaml").write_text(
         "fleet:\n"
-        "  name: tl\n"
-        "  service_prefix: com.crog.tl\n"
-        "  manager: kev\n"
+        "  name: test-fleet\n"
+        "  service_prefix: com.test\n"
+        "  manager: worker\n"
         '  telegram_group_chat_id: "-100999"\n'
         "  accounts:\n"
         "    default: ~/.claude\n"
         "  bots:\n"
-        "    kev:\n"
+        "    worker:\n"
         "      expertise: [software-engineering]\n"
         "      env:\n"
         f'        DANGLING_PATH: "{env_path_value}"\n'
         "      telegram:\n"
-        "        handle: kev_bot\n"
+        "        handle: worker_bot\n"
         "        token_env: T\n"
     )
     return fleet_dir
@@ -316,13 +316,13 @@ class TestComposeBotFiresPathGuard:
         from claudlobby.config import load_fleet
 
         root = fleet_dir
-        flat = f"{root}/local/tl/data/x"  # flat husk: local/tl not local/home/tl
+        flat = f"{root}/local/test-fleet/data/x"  # flat husk: local/test-fleet not local/home/test-fleet
         nested = _write_nested_fleet(root, flat)
         paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         # L1 denies the unanchored absolute at the source, before emission.
         with pytest.raises(ValueError, match="absolute path"):
-            compose_bot(fleet.bots["kev"], fleet, paths)
+            compose_bot(fleet.bots["worker"], fleet, paths)
 
     def test_anchored_env_path_composes_clean(self, fleet_dir):
         from claudlobby.composer import compose_bot
@@ -335,7 +335,7 @@ class TestComposeBotFiresPathGuard:
         nested = _write_nested_fleet(root, good)
         paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
-        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        bot_dir = compose_bot(fleet.bots["worker"], fleet, paths)
         assert bot_dir.is_dir()
 
     def test_foreign_host_env_path_makes_compose_bot_raise(self, fleet_dir):
@@ -347,13 +347,13 @@ class TestComposeBotFiresPathGuard:
 
         root = fleet_dir
         foreign = (
-            "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
+            "/Users/olduser/old-mac-mini-install/claudlobby/local/test-fleet/.secrets/ga4.json"
         )
         nested = _write_nested_fleet(root, foreign)
         paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
         with pytest.raises(ValueError, match="absolute path"):
-            compose_bot(fleet.bots["kev"], fleet, paths)
+            compose_bot(fleet.bots["worker"], fleet, paths)
 
     @pytest.mark.parametrize("bridged", [True, False], ids=["bridge", "bridge-less"])
     def test_vault_wired_bot_composes_clean(self, fleet_dir, bridged):
@@ -369,29 +369,29 @@ class TestComposeBotFiresPathGuard:
 
         root = fleet_dir
         vault_root = root / "local"  # the install's local/ overlay IS the vault root
-        nested = root / "local" / "home" / "tl"
+        nested = root / "local" / "home" / "test-fleet"
         nested.mkdir(parents=True)
         (nested / "fleet.yaml").write_text(
             "fleet:\n"
-            "  name: tl\n"
-            "  service_prefix: com.crog.tl\n"
-            "  manager: kev\n"
+            "  name: test-fleet\n"
+            "  service_prefix: com.test\n"
+            "  manager: worker\n"
             '  telegram_group_chat_id: "-100999"\n'
             "  accounts:\n"
             "    default: ~/.claude\n"
             "  bots:\n"
-            "    kev:\n"
+            "    worker:\n"
             "      expertise: [software-engineering]\n"
             f"      claudron_vault_path: {vault_root}\n"
             "      telegram:\n"
-            "        handle: kev_bot\n"
+            "        handle: worker_bot\n"
             "        token_env: T\n"
         )
         paths = Paths(
             root=root, fleet_dir=nested, vault_root=vault_root if bridged else None, package=git_package(root)
         )
         fleet, _ = load_fleet(nested / "fleet.yaml")
-        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        bot_dir = compose_bot(fleet.bots["worker"], fleet, paths)
         assert bot_dir.is_dir()
         assert "CLAUDRON_VAULT_PATH=" in (bot_dir / "bot.conf").read_text()
 
@@ -405,27 +405,27 @@ class TestComposeBotFiresPathGuard:
 
         root = fleet_dir
         monkeypatch.setenv("HOME", str(root))
-        nested = root / "local" / "home" / "tl"
+        nested = root / "local" / "home" / "test-fleet"
         nested.mkdir(parents=True)
         (nested / "fleet.yaml").write_text(
             "fleet:\n"
-            "  name: tl\n"
-            "  service_prefix: com.crog.tl\n"
-            "  manager: kev\n"
+            "  name: test-fleet\n"
+            "  service_prefix: com.test\n"
+            "  manager: worker\n"
             '  telegram_group_chat_id: "-100999"\n'
             "  accounts:\n"
             "    default: ~/.claude\n"
             "  bots:\n"
-            "    kev:\n"
+            "    worker:\n"
             "      expertise: [software-engineering]\n"
             "      claudron_vault_path: ~/local\n"
             "      telegram:\n"
-            "        handle: kev_bot\n"
+            "        handle: worker_bot\n"
             "        token_env: T\n"
         )
         paths = Paths(root=root, fleet_dir=nested, package=git_package(root))
         fleet, _ = load_fleet(nested / "fleet.yaml")
-        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        bot_dir = compose_bot(fleet.bots["worker"], fleet, paths)
         settings = (bot_dir / ".claude" / "settings.local.json").read_text()
         assert f"--vault {root / 'local'} hook session-start" in settings
 
@@ -439,11 +439,11 @@ class TestVaultModePathAudit:
     def _vault_paths(self, tmp_path):
         root = tmp_path / "claudlobby"
         vault = tmp_path / "vault"
-        fleet_dir = vault / "tl"  # fleet lives in the vault, not under local/
-        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        fleet_dir = vault / "test-fleet"  # fleet lives in the vault, not under local/
+        (fleet_dir / "runtime" / "bots" / "worker").mkdir(parents=True)
         (fleet_dir / "fleet.yaml").write_text(
-            "fleet:\n  name: tl\n  manager: kev\n  bots:\n"
-            "    kev:\n      expertise: [eng]\n"
+            "fleet:\n  name: test-fleet\n  manager: worker\n  bots:\n"
+            "    worker:\n      expertise: [eng]\n"
         )
         (root / "library").mkdir(parents=True)
         (root / "lib").mkdir(parents=True)
@@ -451,7 +451,7 @@ class TestVaultModePathAudit:
 
     def test_own_vault_fleet_path_is_ok(self, tmp_path):
         paths = self._vault_paths(tmp_path)
-        good = f"{paths.vault_root}/tl/.secrets/ga4.json"
+        good = f"{paths.vault_root}/test-fleet/.secrets/ga4.json"
         assert improper_fleet_paths(good, _bot(), paths) == []
 
     def test_cross_fleet_leak_in_vault_is_flagged(self, tmp_path):
@@ -525,8 +525,8 @@ class TestClassifiedSourcePaths:
         from claudlobby.path_audit import classified_source_paths
 
         bot = BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
             env={"A": "/opt/x", "OK": "${FLEET_ROOT}/y", "TOKEN": "${GH}"},
         )
@@ -535,12 +535,12 @@ class TestClassifiedSourcePaths:
         assert "/opt/x" in by_path  # raw absolute classified
         assert "${FLEET_ROOT}/y" not in by_path  # anchored value is not a path
         assert not any(p.startswith("${GH}") for p in by_path)  # plain ${VAR} passes
-        assert by_path["/opt/x"] == "bots.kev.env.A"
+        assert by_path["/opt/x"] == "bots.worker.env.A"
 
     def test_includes_mcp_fragment_paths(self):
         from claudlobby.path_audit import classified_source_paths
 
-        bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
         frags = {"printify": {"command": "node", "args": ["/opt/printify/index.js"]}}
         pairs = classified_source_paths(bot, frags)
         assert any(p == "/opt/printify/index.js" for _prov, p in pairs)
@@ -551,8 +551,8 @@ class TestClassifiedSourcePaths:
         # mounts are EXEMPT (host targets, resolve/escape-gated elsewhere) — the walk
         # skips them, so they never appear as classified source paths.
         bot = BotConfig(
-            bot_id="kev",
-            name="kev",
+            bot_id="worker",
+            name="worker",
             expertise=["eng"],
             mounts={"data": "/mnt/host/data"},
         )
@@ -565,14 +565,14 @@ class TestRenderedToolsPathScan:
     surfaces in freshbox, by the SAME shape predicate the wiring files use."""
 
     def _seed_bot_dir(self, paths):
-        bot_dir = paths.bot_runtime("kev")
+        bot_dir = paths.bot_runtime("worker")
         (bot_dir / "tools").mkdir(parents=True, exist_ok=True)
         return bot_dir
 
     def test_flat_path_in_rendered_tool_is_flagged_and_raises(self, tmp_path):
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
-        flat = f"{paths.root}/local/tl/dist/deploy.sh"  # flat husk
+        flat = f"{paths.root}/local/test-fleet/dist/deploy.sh"  # flat husk
         (bot_dir / "tools" / "deploy.sh").write_text(f"#!/bin/sh\nexec {flat}\n")
 
         findings = audit_bot_paths(_bot(), _fleet(), paths)

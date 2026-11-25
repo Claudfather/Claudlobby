@@ -204,10 +204,10 @@ seed_all_checkouts "$2"
 
 
 def test_home_allowlist_echoes_composed_value_verbatim(tmp_path):
-    home = _write_home_settings(tmp_path / "bot", ["github", "gws-kev", "notion"])
+    home = _write_home_settings(tmp_path / "bot", ["github", "gws-worker", "notion"])
     r = _run_lib_fn("_home_mcp_allowlist", str(home))
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == ["github", "gws-kev", "notion"]
+    assert json.loads(r.stdout) == ["github", "gws-worker", "notion"]
 
 
 def test_home_allowlist_fails_closed_when_nothing_to_trust(tmp_path):

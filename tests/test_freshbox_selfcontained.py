@@ -403,7 +403,7 @@ def test_sourced_grants_mirrors_every_composer_grant_resolver():
 # ── Scope 4: path + orphan-unit assertions folded into the audit ──────────────
 
 
-def _seed_bot_dir(paths: Paths, bot_id: str = "kev") -> Path:
+def _seed_bot_dir(paths: Paths, bot_id: str = "worker") -> Path:
     bot_dir = paths.bot_runtime(bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     return bot_dir
@@ -412,17 +412,17 @@ def _seed_bot_dir(paths: Paths, bot_id: str = "kev") -> Path:
 def test_orphan_short_form_plist_is_flagged_warn(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
-    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = _fleet({"worker": bot}, manager="worker")
     paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot_dir = _seed_bot_dir(paths)
-    (bot_dir / "p.kev.plist").write_text("<plist/>")  # composed long-form — kept
-    (bot_dir / "p.kev.service").write_text("[Unit]\n")  # composed long-form — kept
-    (bot_dir / "kev.plist").write_text("<plist/>")  # pre-naming orphan — flagged
+    (bot_dir / "p.worker.plist").write_text("<plist/>")  # composed long-form — kept
+    (bot_dir / "p.worker.service").write_text("[Unit]\n")  # composed long-form — kept
+    (bot_dir / "worker.plist").write_text("<plist/>")  # pre-naming orphan — flagged
 
     orphans = [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_unit"]
     assert [f.severity for f in orphans] == ["warn"]
-    assert "kev.plist" in orphans[0].detail
+    assert "worker.plist" in orphans[0].detail
 
 
 def test_reap_removes_orphan_keeps_long_form(tmp_path):
@@ -430,12 +430,12 @@ def test_reap_removes_orphan_keeps_long_form(tmp_path):
 
     root = tmp_path / "cl"
     _build_library(root)
-    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = _fleet({"worker": bot}, manager="worker")
     paths = Paths(root=root, fleet_dir=root, package=source_package())
     bot_dir = _seed_bot_dir(paths)
-    long_form = bot_dir / "p.kev.plist"
-    orphan = bot_dir / "kev.plist"
+    long_form = bot_dir / "p.worker.plist"
+    orphan = bot_dir / "worker.plist"
     long_form.write_text("<plist/>")
     orphan.write_text("<plist/>")
 
@@ -515,13 +515,13 @@ def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
 
     root = tmp_path / "cl"
     _build_library(root)  # root-level shared library
-    fleet_dir = root / "local" / "home" / "tl"  # nested overlay
+    fleet_dir = root / "local" / "home" / "test-fleet"  # nested overlay
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
-    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+    fleet = _fleet({"worker": bot}, manager="worker")
     paths = Paths(root=root, fleet_dir=fleet_dir, package=source_package())
     bot_dir = _seed_bot_dir(paths)
-    flat = f"{root}/local/tl/dist/index.js"  # flat husk: local/tl not local/home/tl
+    flat = f"{root}/local/test-fleet/dist/index.js"  # flat husk: local/test-fleet not local/home/test-fleet
     (bot_dir / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"x": {"args": [flat]}}})
     )
@@ -581,13 +581,13 @@ def _nested_paths(root: Path) -> Paths:
     """Overlay layout so the fleet-tier .env (fleet_config_dir/.env) and the
     install-tier .env (root/.env) are distinct files — needed to tell F5's FAIL
     tier from its WARN tier (they collapse to one file when fleet_dir == root)."""
-    fleet_dir = root / "local" / "home" / "tl"
+    fleet_dir = root / "local" / "home" / "test-fleet"
     (fleet_dir / "runtime" / "bots").mkdir(parents=True)
     return Paths(root=root, fleet_dir=fleet_dir, package=source_package())
 
 
-def _kev(**kw) -> BotConfig:
-    return BotConfig(bot_id="kev", name="kev", expertise=["eng"], **kw)
+def _worker(**kw) -> BotConfig:
+    return BotConfig(bot_id="worker", name="worker", expertise=["eng"], **kw)
 
 
 # ── F5: the .env rung — fleet-tier FAIL, host-tier WARN, value masked ──────────
@@ -602,9 +602,9 @@ def test_env_bot_tier_path_value_is_masked_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     bot_dir.mkdir(parents=True)
     secret = "/Users/x/very-secret-service-account.json"
     (bot_dir / ".env").write_text(f"GA4_SA_KEY_PATH={secret}\n")
@@ -624,8 +624,8 @@ def test_env_fleet_overlay_path_value_is_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
     (paths.fleet_config_dir / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -642,8 +642,8 @@ def test_env_install_tier_root_env_is_warn(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
     (paths.root / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -661,8 +661,8 @@ def test_env_home_tier_scanned_only_when_home_injected(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".env").write_text("KEY=/opt/foreign/x.json\n")
@@ -686,11 +686,11 @@ def test_env_declared_value_is_not_flagged(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(
+    bot = _worker(
         external_paths=[ExternalDecl(path="/opt/printify/**", purpose="printify tree")]
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    fleet = _fleet({"worker": bot}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     bot_dir.mkdir(parents=True)
     (bot_dir / ".env").write_text("PRINTIFY=/opt/printify/data/x\n")
 
@@ -703,9 +703,9 @@ def test_env_anchored_and_plain_var_values_are_not_flagged(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     bot_dir.mkdir(parents=True)
     (bot_dir / ".env").write_text(
         "ANCHORED=${FLEET_ROOT}/mcp/x.py\nTOKEN=${GITHUB_PAT}\nPLAIN=not-a-path\n"
@@ -719,8 +719,8 @@ def test_env_missing_files_no_findings_no_crash(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
     assert _env_file_findings(bot, fleet, paths) == []
 
 
@@ -732,8 +732,8 @@ def test_env_root_mode_dedups_to_single_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = Paths(root=root, fleet_dir=root, package=source_package())  # fleet_config_dir == root
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
     (root / ".env").write_text("KEY=/opt/foreign/x.json\n")
 
     env = [
@@ -752,11 +752,11 @@ def test_external_declared_and_used_is_info_not_unused(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(
+    bot = _worker(
         external_paths=[ExternalDecl(path="/opt/printify/bin", purpose="printify cli")],
         env={"PRINTIFY_BIN": "/opt/printify/bin"},
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
+    fleet = _fleet({"worker": bot}, manager="worker")
 
     findings = _externals_report(bot, fleet, paths)
     refs = [f for f in findings if f.kind == "external_ref"]
@@ -772,10 +772,10 @@ def test_external_declared_unused_is_warn(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(
+    bot = _worker(
         external_paths=[ExternalDecl(path="/opt/ghost/bin", purpose="nothing uses me")]
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
+    fleet = _fleet({"worker": bot}, manager="worker")
 
     unused = [
         f
@@ -792,8 +792,8 @@ def test_external_mount_and_vault_are_info(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(mounts={"data": "/mnt/host/data"}, claudron_vault_path="/mnt/vault")
-    fleet = _fleet({"kev": bot}, manager="kev")
+    bot = _worker(mounts={"data": "/mnt/host/data"}, claudron_vault_path="/mnt/vault")
+    fleet = _fleet({"worker": bot}, manager="worker")
 
     refs = [f for f in _externals_report(bot, fleet, paths) if f.kind == "external_ref"]
     details = " ".join(f.detail for f in refs)
@@ -811,8 +811,8 @@ def test_external_default_account_emits_nothing(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")  # accounts defaults to {"default": "~/.claude"}
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")  # accounts defaults to {"default": "~/.claude"}
     assert _externals_report(bot, fleet, paths) == []
 
 
@@ -826,11 +826,11 @@ def test_external_overbroad_declaration_shows_both_use_sites(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(
+    bot = _worker(
         external_paths=[ExternalDecl(path="/opt/vendor/**", purpose="vendor tree")],
         env={"A": "/opt/vendor/tool-a", "B": "/opt/vendor/deep/tool-b"},
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
+    fleet = _fleet({"worker": bot}, manager="worker")
 
     refs = [f for f in _externals_report(bot, fleet, paths) if f.kind == "external_ref"]
     ref = next(f for f in refs if "/opt/vendor/**" in f.detail)
@@ -868,12 +868,12 @@ def test_clean_bot_with_used_external_has_no_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev(
+    bot = _worker(
         external_paths=[ExternalDecl(path="/opt/printify/bin", purpose="cli")],
         env={"PRINTIFY_BIN": "/opt/printify/bin"},
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
-    paths.bot_runtime("kev").mkdir(parents=True)
+    fleet = _fleet({"worker": bot}, manager="worker")
+    paths.bot_runtime("worker").mkdir(parents=True)
 
     findings = audit_bot(bot, fleet, paths)
     assert [f for f in findings if f.severity == "fail"] == []
@@ -889,11 +889,11 @@ def test_flat_path_in_rendered_tool_is_improper_path_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     (bot_dir / "tools").mkdir(parents=True)
-    flat = f"{root}/local/tl/dist/deploy.sh"  # flat husk: local/tl not local/home/tl
+    flat = f"{root}/local/test-fleet/dist/deploy.sh"  # flat husk: local/test-fleet not local/home/test-fleet
     (bot_dir / "tools" / "deploy.sh").write_text(f"#!/bin/sh\nexec {flat}\n")
 
     improper = [f for f in audit_bot(bot, fleet, paths) if f.kind == "improper_path"]
@@ -907,9 +907,9 @@ def test_legit_rendered_tool_paths_pass(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    bot = _kev()
-    fleet = _fleet({"kev": bot}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    bot = _worker()
+    fleet = _fleet({"worker": bot}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     (bot_dir / "tools").mkdir(parents=True)
     (bot_dir / "tools" / "ok.sh").write_text(
         "#!/usr/bin/env bash\ncat /dev/null > /tmp/x\n"
@@ -945,10 +945,10 @@ def test_bot_secret_in_deprecated_root_env_is_fail(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
+    fleet = _fleet({"worker": _token_bot("worker", "TELEGRAM_TOKEN_WORKER")}, manager="worker")
     secret = "8888888:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     (root / ".env").write_text(
-        f"TELEGRAM_TOKEN_KEV={secret}\nSOME_SHARED_SETTING=value\n"
+        f"TELEGRAM_TOKEN_WORKER={secret}\nSOME_SHARED_SETTING=value\n"
     )
 
     leaks = [
@@ -957,7 +957,7 @@ def test_bot_secret_in_deprecated_root_env_is_fail(tmp_path):
         if f.kind == "env_bot_secret_leaked"
     ]
     assert [f.severity for f in leaks] == ["fail"]
-    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+    assert "TELEGRAM_TOKEN_WORKER" in leaks[0].detail
     assert "SOME_SHARED_SETTING" not in leaks[0].detail  # only the bot-tier key
     assert secret not in leaks[0].detail  # R4: value masked
 
@@ -970,10 +970,10 @@ def test_bot_secret_in_global_home_env_flagged_only_when_home_injected(tmp_path)
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
+    fleet = _fleet({"worker": _token_bot("worker", "TELEGRAM_TOKEN_WORKER")}, manager="worker")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    (fake_home / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+    (fake_home / ".env").write_text("TELEGRAM_TOKEN_WORKER=8888888:AAAA\n")
 
     assert _env_secret_leak_findings(fleet, paths, home=None) == []
     leaks = [
@@ -982,7 +982,7 @@ def test_bot_secret_in_global_home_env_flagged_only_when_home_injected(tmp_path)
         if f.kind == "env_bot_secret_leaked"
     ]
     assert [f.severity for f in leaks] == ["fail"]
-    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+    assert "TELEGRAM_TOKEN_WORKER" in leaks[0].detail
 
 
 def test_bot_secret_in_bots_own_env_is_not_a_leak(tmp_path):
@@ -992,10 +992,10 @@ def test_bot_secret_in_bots_own_env_is_not_a_leak(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")}, manager="kev")
-    bot_dir = paths.bot_runtime("kev")
+    fleet = _fleet({"worker": _token_bot("worker", "TELEGRAM_TOKEN_WORKER")}, manager="worker")
+    bot_dir = paths.bot_runtime("worker")
     bot_dir.mkdir(parents=True)
-    (bot_dir / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+    (bot_dir / ".env").write_text("TELEGRAM_TOKEN_WORKER=8888888:AAAA\n")
 
     assert _env_secret_leak_findings(fleet, paths, home=None) == []
 
@@ -1007,12 +1007,12 @@ def test_leak_surfaces_once_through_audit_fleet(tmp_path):
     paths = _nested_paths(root)
     fleet = _fleet(
         {
-            "kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV"),
+            "worker": _token_bot("worker", "TELEGRAM_TOKEN_WORKER"),
             "moe": _token_bot("moe", "TELEGRAM_TOKEN_MOE"),
         },
         manager="moe",
     )
-    (root / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+    (root / ".env").write_text("TELEGRAM_TOKEN_WORKER=8888888:AAAA\n")
 
     leaks = [
         f
@@ -1020,7 +1020,7 @@ def test_leak_surfaces_once_through_audit_fleet(tmp_path):
         if f.kind == "env_bot_secret_leaked"
     ]
     assert len(leaks) == 1
-    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+    assert "TELEGRAM_TOKEN_WORKER" in leaks[0].detail
 
 
 def test_self_referential_telegram_token_in_shared_tier_is_flagged(tmp_path):
@@ -1033,7 +1033,7 @@ def test_self_referential_telegram_token_in_shared_tier_is_flagged(tmp_path):
     root = tmp_path / "cl"
     _build_library(root)
     paths = _nested_paths(root)
-    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_BOT_TOKEN")}, manager="kev")
+    fleet = _fleet({"worker": _token_bot("worker", "TELEGRAM_BOT_TOKEN")}, manager="worker")
     (root / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAA\n")
 
     leaks = [
@@ -1060,12 +1060,12 @@ def _git_cred_fleet(tmp_path, monkeypatch, *, operator_exists=True, gh="/usr/bin
     monkeypatch.setattr(comp, "_operator_gitconfig", lambda: operator)
     monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: gh)
     bot = BotConfig(
-        bot_id="kev",
-        name="kev",
+        bot_id="worker",
+        name="worker",
         expertise=["eng"],
         git_credentials={"OrgA": "ORG_A_PAT"},
     )
-    fleet = _fleet({"kev": bot}, manager="kev")
+    fleet = _fleet({"worker": bot}, manager="worker")
     paths = Paths(root=root, fleet_dir=root, package=source_package())
     _seed_bot_dir(paths)
     return bot, fleet, paths, operator
