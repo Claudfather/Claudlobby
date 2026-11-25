@@ -447,7 +447,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : sendsGoal || plan?.sends_goal === true ? 'Team launched. Once its bots show as running, you can message the lead here.'
       : 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
-      ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Details.'
+      ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Technical details.'
       : value.state === 'quiesce' && !value.launch_reserved
       ? `Prepared but not launched. ${localContinue(value)} This page never resends it after reconnecting.`
       : value.state === 'quiesce' && value.launch_reserved
@@ -456,7 +456,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : 'Still in progress. Checking status never repeats or resumes setup.';
   }
   let detailsFor = null; // the plan, pending and identifier counts the Technical details JSON was last built from
-  const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Details.';
+  const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Technical details.';
   function render() {
     // Check preview needs a live approval: once this page's clock says it ended, a note offering it says so instead.
     if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;

@@ -1333,6 +1333,7 @@ test('historical sealed identifiers remain visible and block a replacement Git r
   assert.deepEqual(restored.snapshot().legacy,[legacy]);assert.equal(restored.snapshot().pending,null);
   await restored.run('context');restored.setGoal('Improve tests');assert.equal(await restored.run('preview'),false);
   assert.ok(descendants(panel).some(e=>/identifiers from an older setup, so it cannot launch/.test(e.textContent)));
+  assert.ok(descendants(panel).some(e=>/they are listed under Technical details\./.test(e.textContent)),'it names the drawer by its label');
   assert.equal(h.saved.get('test'),JSON.stringify(legacy));assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
   restored.dispose();h.api.dispose();
 });
@@ -1367,6 +1368,7 @@ test('prepared receipt shows exact server continuation and never launches or tre
   h.client.setupReceipt=async input=>({...input,version:2,state:'done',launch_reserved:true,
     config_committed:true,health_errors:{'example.service':'unknown start'}});
   assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/needs attention/);
+  assert.match(h.api.snapshot().note,/using the identifiers under Technical details\.$/,'it names the drawer by its label');
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
 test('expired or revoked receipt preserves original identifiers and local inspection guidance',async()=>{
