@@ -45,12 +45,12 @@ BETA = """\
 fleet:
   name: beta
   service_prefix: com.beta
-  manager: craig
+  manager: worker-2
   bots:
     clog:
       expertise: [eng]
       telegram: {handle: clog_bot}
-    craig:
+    worker-2:
       expertise: [eng]
       channels: []
 """

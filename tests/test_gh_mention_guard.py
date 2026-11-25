@@ -41,8 +41,8 @@ def _handles(tmp_path: Path) -> list[str]:
 
 def test_covers_every_fleet_on_the_host_not_just_one(tmp_path):
     """The requirement that makes this useful: cross-fleet mentions dominate."""
-    _host(tmp_path, {"alpha": ["ravi", "dara"], "beta": ["lead", "saul"]})
-    assert _handles(tmp_path) == ["dara", "lead", "ravi", "saul"]
+    _host(tmp_path, {"alpha": ["ravi", "dara"], "beta": ["lead", "worker-2"]})
+    assert _handles(tmp_path) == ["dara", "lead", "ravi", "worker-2"]
 
 
 def test_a_new_bot_is_covered_with_no_code_change(tmp_path):

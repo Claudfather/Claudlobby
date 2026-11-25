@@ -450,14 +450,14 @@ class TestCoerceBot:
         assert bot.permissions == []
 
     def test_bot_id_defaults_to_key(self):
-        bot = _coerce_bot("greg", {"expertise": ["eng"]}, {})
-        assert bot.bot_id == "greg"
-        assert bot.name == "greg"
+        bot = _coerce_bot("worker-2", {"expertise": ["eng"]}, {})
+        assert bot.bot_id == "worker-2"
+        assert bot.name == "worker-2"
 
     def test_bot_id_with_custom_name(self):
-        bot = _coerce_bot("greg", {"expertise": ["eng"], "name": "Greg"}, {})
-        assert bot.bot_id == "greg"
-        assert bot.name == "Greg"
+        bot = _coerce_bot("worker-2", {"expertise": ["eng"], "name": "Worker-2"}, {})
+        assert bot.bot_id == "worker-2"
+        assert bot.name == "Worker-2"
 
     def test_reports_to(self):
         bot = _coerce_bot("worker", {"expertise": ["eng"], "reports_to": "lead"}, {})

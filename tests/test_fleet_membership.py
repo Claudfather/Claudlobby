@@ -93,11 +93,11 @@ class TestBotInFleet:
         assert rc == 0
 
     def test_non_member(self):
-        _, rc = _run('bot_in_fleet "$2" "$3"', "craig", "alex\nari")
+        _, rc = _run('bot_in_fleet "$2" "$3"', "worker-2", "alex\nari")
         assert rc == 1
 
     def test_empty_list_is_declared(self):
-        _, rc = _run('bot_in_fleet "$2" "$3"', "craig", "")
+        _, rc = _run('bot_in_fleet "$2" "$3"', "worker-2", "")
         assert rc == 0
 
     def test_exact_line_match_not_substring(self):
@@ -142,16 +142,16 @@ class TestGitPullAllFleetGuard:
         )
 
     def test_departed_bot_dir_not_resurrected(self, tmp_path):
-        # fleet declares 'alex'; 'craig' departed (no runtime dir) but its git-pull
+        # fleet declares 'alex'; 'worker-2' departed (no runtime dir) but its git-pull
         # cron entry persists. The guard must exit before the log-dir mkdir.
         _make_fleet(tmp_path, "demo", declared=["alex"], present=[])
-        craig_projects = (
-            tmp_path / "local" / "demo" / "runtime" / "bots" / "craig" / "projects"
+        worker_2_projects = (
+            tmp_path / "local" / "demo" / "runtime" / "bots" / "worker-2" / "projects"
         )
-        assert not craig_projects.parent.exists()
-        proc = self._run_script(tmp_path, craig_projects)
+        assert not worker_2_projects.parent.exists()
+        proc = self._run_script(tmp_path, worker_2_projects)
         assert proc.returncode == 0
-        assert not craig_projects.parent.exists(), (
+        assert not worker_2_projects.parent.exists(), (
             "git-pull-all resurrected a departed bot's runtime dir"
         )
 
