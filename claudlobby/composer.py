@@ -699,29 +699,6 @@ def _account_enabled_plugins(bot: BotConfig, fleet: FleetConfig, paths: Paths) -
     return set(enabled)
 
 
-def fleet_alert_sender_state_dir(fleet: FleetConfig) -> str | None:
-    """The channel state dir that SENDS a fleet timer's alerts, or None (#1771).
-
-    A fleet timer's alert goes to the fleet chat, so its sender must be a bot IN
-    that chat: a declared channel bot whose own chat (its ``telegram.chat_id``,
-    else the fleet chat) is the fleet chat. The runtime picks the sender itself
-    when it sends (``_bot_with_own_chat``, lib-common.sh); the validator calls
-    this at generate time, because None — no such bot — means those alerts will
-    be refused.
-    """
-    chat = fleet.telegram_group_chat_id
-    if not chat:
-        return None
-    for bot_id in sorted(fleet.bots):
-        bot = fleet.bots[bot_id]
-        handle = telegram_handle(bot)
-        if handle is None:
-            continue
-        if str(bot.telegram.chat_id or chat) == str(chat):
-            return str(Path.home() / telegram_channel_rel(handle))
-    return None
-
-
 GITCONFIG_FILENAME = ".gitconfig"
 # The bot's own clauDNA root, relative to BOT_DIR (#2145 F14). Readers that need a bot's
 # store build it from bot_runtime(b) / CLAUDNA_STATE_SUBDIR, never from bot.conf's

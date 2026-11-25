@@ -17,6 +17,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import (
     _write_exec,
     constructed_env,
@@ -63,7 +65,9 @@ def _resolve(tmp_path: Path, bots_dir: Path, scope: str = "fleet", **env) -> dic
         timeout=60,
     )
     assert r.returncode == 0, r.stderr
-    return dict(line.split("=", 1) for line in r.stdout.splitlines())
+    got = dict(line.split("=", 1) for line in r.stdout.splitlines())
+    got["log"] = r.stderr
+    return got
 
 
 def _home_state(tmp_path: Path, bot: str) -> str:
@@ -220,3 +224,86 @@ def test_a_scanned_pair_never_rides_an_ambient_token(tmp_path):
     # The pair came from bot alpha: the token must be alpha's (tg-post reads it
     # from alpha's state dir), never the session's own.
     assert _token_seen(tmp_path) == "<empty>"
+
+
+# --- the sender is the fleet manager (#3127) ----------------------------------------
+
+
+def _member(tmp_path: Path, bots_dir: Path, name: str, chat: str, *, manager: str,
+            handle: bool = True, token: bool = True) -> None:
+    """A bot.conf of the composed shape: every bot's MANAGER_TMUX names the fleet
+    manager, so bot_is_manager is true for that bot only. ``token``: its channel
+    state dir holds the .env tg-post reads its token from."""
+    d = bots_dir / name
+    d.mkdir(parents=True)
+    lines = [f'export BOT_ID="{name}"', f'export MANAGER_TMUX="{manager}"']
+    if handle:
+        lines.append(f'export TELEGRAM_BOT_HANDLE="{name}"')
+    lines += [f'export TELEGRAM_GROUP_CHAT_ID="{chat}"',
+              f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{name}"']
+    (d / "bot.conf").write_text("\n".join(lines) + "\n")
+    if token:
+        channel = Path(_home_state(tmp_path, name))
+        channel.mkdir(parents=True)
+        (channel / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n")
+
+
+def test_workers_that_sort_before_the_manager_still_alert_from_it(tmp_path):
+    bots = tmp_path / "root" / "runtime" / "bots"
+    for name in ("zulu", "alpha", "beta"):
+        _member(tmp_path, bots, name, CHAT_A, manager="zulu")
+    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
+    assert (got["chat"], got["state"]) == (CHAT_A, _home_state(tmp_path, "zulu")), got
+    assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+manager:zulu"
+    assert "alert-sender" not in got["log"], got["log"]
+
+
+def test_with_no_env_chat_the_scanned_chat_is_sent_from_the_manager_too(tmp_path):
+    bots = tmp_path / "root" / "runtime" / "bots"
+    _member(tmp_path, bots, "alpha", CHAT_A, manager="zulu")
+    _member(tmp_path, bots, "zulu", CHAT_A, manager="zulu")
+    got = _resolve(tmp_path, bots)
+    assert (got["chat"], got["state"]) == (CHAT_A, _home_state(tmp_path, "zulu")), got
+    assert got["src"] == "scan:manager:zulu"
+
+
+@pytest.mark.parametrize(("env", "src", "state"), [
+    ({"FLEET_PULSE_ESCALATION_CHAT_ID": CHAT_ESC, "FLEET_PULSE_ESCALATION_STATE_DIR": "/declared/sender"},
+     "env:FLEET_PULSE_ESCALATION_CHAT_ID+FLEET_PULSE_ESCALATION_STATE_DIR", "/declared/sender"),
+    ({"TELEGRAM_STATE_DIR": "/own/sender"}, "env:TELEGRAM_GROUP_CHAT_ID+TELEGRAM_STATE_DIR",
+     "/own/sender"),
+], ids=["escalation-override", "pair-set-in-the-environment"])
+def test_a_declared_pair_still_wins_over_the_manager(tmp_path, env, src, state):
+    bots = tmp_path / "root" / "runtime" / "bots"
+    _member(tmp_path, bots, "zulu", CHAT_A, manager="zulu")
+    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A, **env)
+    assert (got["src"], got["state"]) == (src, state), got
+
+
+@pytest.mark.parametrize(("manager", "why"), [
+    ({"handle": False}, "zulu is not a Telegram channel bot"),
+    ({"chat": CHAT_B}, "zulu is not in this alert chat"),
+    ({"token": False}, "the channel state dir of zulu holds no .env"),
+], ids=["not-a-channel-bot", "in-another-chat", "no-token-file"])
+def test_a_manager_that_cannot_send_leaves_the_alert_to_the_first_bot_by_name_and_says_why(
+        tmp_path, manager, why):
+    bots = tmp_path / "root" / "runtime" / "bots"
+    _member(tmp_path, bots, "zulu", manager.get("chat", CHAT_A), manager="zulu",
+            handle=manager.get("handle", True), token=manager.get("token", True))
+    _member(tmp_path, bots, "beta", CHAT_A, manager="zulu")
+    _member(tmp_path, bots, "alpha", CHAT_A, manager="zulu")
+    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
+    assert (got["chat"], got["state"]) == (CHAT_A, _home_state(tmp_path, "alpha")), got
+    assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+bot:alpha"
+    assert ("alert-sender: alpha sends this fleet alert, not the fleet manager: " + why
+            in got["log"]), got["log"]
+    assert CHAT_A not in got["log"] and CHAT_B not in got["log"], "a log line names no chat id"
+
+
+def test_with_no_token_file_anywhere_the_manager_still_sends(tmp_path):
+    # Its send then fails at tg-post, naming the missing token, as any did before.
+    bots = tmp_path / "root" / "runtime" / "bots"
+    _member(tmp_path, bots, "alpha", CHAT_A, manager="zulu", token=False)
+    _member(tmp_path, bots, "zulu", CHAT_A, manager="zulu", token=False)
+    got = _resolve(tmp_path, bots, TELEGRAM_GROUP_CHAT_ID=CHAT_A)
+    assert got["src"] == "env:TELEGRAM_GROUP_CHAT_ID+manager:zulu", got

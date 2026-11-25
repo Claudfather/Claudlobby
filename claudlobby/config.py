@@ -1044,8 +1044,8 @@ def telegram_channel_rel(handle: str) -> str:
     definition behind its consumers (#1786), which need it in two forms.
     ``bot.conf`` exports it as ``$HOME/<this>`` for the shell to expand, and that
     exact KEY=VALUE is a contract lib-common's poller-ownership check greps for
-    (#976); ``access.json``, ``fleet_alert_sender_state_dir`` and
-    ``manager_alert_target`` take it absolute, as ``Path.home() / <this>``."""
+    (#976); ``access.json`` and ``fleet_alert_sender`` take it absolute, as
+    ``Path.home() / <this>``."""
     return f".claude/channels/telegram-{handle}"
 
 
@@ -1076,25 +1076,82 @@ def telegram_handle(bot: BotConfig) -> str | None:
     return None
 
 
-def manager_alert_target(fleet: FleetConfig) -> tuple[str, str] | None:
-    """The fleet manager's own Telegram chat and sender, or None (#2654).
+@dataclass(frozen=True)
+class AlertSender:
+    """The bot a fleet alert to one chat is sent as, and its channel state dir (#3127)."""
 
-    Where a fleet alert goes when the fleet declares no ``fleet_pulse``
-    escalation pair: the chat the manager is composed with (its
-    ``telegram.chat_id``, else ``telegram_group_chat_id``, as
-    ``_bot_template_context`` writes it into its ``bot.conf``) and the manager's
-    own channel state dir. A bot's own chat is one it is in, as
-    ``_bot_with_own_chat`` takes it, so the two are one pair from one source
-    (#1771). Nothing here reads a token: tg-post reads the manager's from that
-    dir, as for a declared pair. None when the manager is not a channel bot or
-    has no chat.
+    bot_id: str
+    state_dir: str
+    #: Empty when the fleet manager sends; else why it does not, for the line saying so.
+    manager_why: str = ""
+
+
+def _own_chat(fleet: FleetConfig, bot: BotConfig) -> str:
+    """The chat a bot is composed with: its ``telegram.chat_id``, else the fleet chat."""
+    return str(bot.telegram.chat_id or fleet.telegram_group_chat_id or "")
+
+
+#: The file in a channel state dir that tg-post reads the bot's token from
+#: (lib-common's ``channel_state_token``).
+CHANNEL_TOKEN_FILE = ".env"
+
+
+def fleet_alert_sender(fleet: FleetConfig, chat: str, *,
+                       require_token_file: bool = False) -> AlertSender | None:
+    """The bot that sends this fleet's alerts to ``chat``, or None when none can (#3127).
+
+    The rule lib-common's ``_bot_with_own_chat`` applies when it sends, read from
+    the configuration: a bot can be paired with the chat when it is a channel bot
+    whose own chat (``_own_chat``) is ``chat``, since a bot's own chat is one it is
+    in (#1771). Of those, the fleet manager first and then the others by bot id,
+    the sender is the first whose channel state dir holds ``CHANNEL_TOKEN_FILE``
+    (looked for only with ``require_token_file``, never read), else the first.
+    Without it, as at generate time, where no channel dir is there to look at,
+    the manager sends whenever it can be paired.
     """
-    bot = fleet.bots[fleet.manager]
-    handle = telegram_handle(bot)
-    chat = bot.telegram.chat_id or fleet.telegram_group_chat_id
-    if handle is None or not chat:
+    if not chat:
         return None
-    return str(chat), str(Path.home() / telegram_channel_rel(handle))
+    manager = fleet.manager
+    fit: list[tuple[str, str]] = []
+    manager_why = ""
+    for bot_id in [manager, *sorted(b for b in fleet.bots if b != manager)]:
+        bot = fleet.bots[bot_id]
+        handle = telegram_handle(bot)
+        if handle is None:
+            why = "is not a Telegram channel bot"
+        elif _own_chat(fleet, bot) != str(chat):
+            why = "is not in this alert chat: its own chat is another, or none"
+        else:
+            fit.append((bot_id, str(Path.home() / telegram_channel_rel(handle))))
+            continue
+        if bot_id == manager:
+            manager_why = f"{manager} {why}"
+    if not fit:
+        return None
+    bot_id, state_dir = next(
+        (pair for pair in fit if not require_token_file
+         or os.path.isfile(os.path.join(pair[1], CHANNEL_TOKEN_FILE))), fit[0])
+    why = "" if bot_id == manager else manager_why or (
+        f"the channel state dir of {manager} holds no {CHANNEL_TOKEN_FILE}, "
+        "where tg-post reads the token")
+    return AlertSender(bot_id, state_dir, why)
+
+
+def manager_alert_target(fleet: FleetConfig, *, require_token_file: bool = False,
+                         ) -> tuple[str, AlertSender] | None:
+    """Where a fleet alert goes with no ``fleet_pulse`` pair, and who sends it, or None.
+
+    The chat the manager is composed with (``_own_chat``: its ``telegram.chat_id``,
+    else ``telegram_group_chat_id``, as ``_bot_template_context`` writes it into
+    its ``bot.conf``, #2654), sent as ``fleet_alert_sender`` picks: the manager's
+    own bot when it can send there, else the first other channel bot in that chat
+    (#3127). Chat and sender are one pair from one source (#1771). Nothing here
+    reads a token: tg-post reads the sender's from its dir, as for a declared
+    pair. None when the manager has no chat, or no channel bot is in it.
+    """
+    chat = _own_chat(fleet, fleet.bots[fleet.manager])
+    sender = fleet_alert_sender(fleet, chat, require_token_file=require_token_file)
+    return None if sender is None else (chat, sender)
 
 
 # ----------------------------------------------------------------------

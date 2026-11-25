@@ -28,7 +28,9 @@ from .config import (
     _PROJECT_VALIDATION_KEYS,
     _qualified_repo,
     GITHUB_APP_ENV_VARS,
+    AlertSender,
     FleetConfig,
+    fleet_alert_sender,
     is_pos_int,
     load_projects,
     manager_alert_target,
@@ -221,6 +223,7 @@ WARNING_CATEGORIES: dict[str, str] = {
     "job-inert": "manager-checkin is armed on a fleet with no leaf manager, so nothing composes",
     "alert-unpaired": "an alert chat has no sender that can post to it",
     "alert-pane-only": "fleet alerts have no Telegram target, so they reach the manager's pane only",
+    "alert-sender": "fleet alerts are sent as a bot that is not the fleet manager",
     "ignition-unarmed": "no ignition door is armed, so nothing gives an idle bot a turn",
     # goal binding
     "projects-missing": "a check-in-equipped leaf manager has no Projects table to dispatch against",
@@ -2360,12 +2363,10 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
     sender it cannot name, so both gaps are loud there — this says so before
     the first alert rather than at it. Gated like ``_validate_timers``: only a
     fleet whose timers are emitted has a fleet-timer alert to deliver."""
-    sd = fleet.system_defaults
-    if not (sd.enabled and sd.timers):
+    if not _fleet_timers_emitted(fleet):
         return
-    from .composer import fleet_alert_sender_state_dir
-
-    if fleet.telegram_group_chat_id and fleet_alert_sender_state_dir(fleet) is None:
+    chat = fleet.telegram_group_chat_id
+    if chat and fleet_alert_sender(fleet, str(chat)) is None:
         report.warn(
             "alert-unpaired",
             "telegram_group_chat_id: no declared channel bot is in the fleet chat "
@@ -2384,18 +2385,58 @@ def _validate_alert_pair(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _fleet_timers_emitted(fleet: FleetConfig) -> bool:
+    """Whether this fleet's timers are composed, so it has fleet-timer alerts to send."""
+    sd = fleet.system_defaults
+    return bool(sd.enabled and sd.timers)
+
+
+def _validate_alert_sender(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Warn where a fleet alert is sent as a bot that is not the fleet manager (#3127).
+
+    The sender is ``fleet_alert_sender``'s. The timers alert the fleet chat;
+    `fleet notify`, a failed job and a failed message write alert the manager's
+    own chat. A declared ``fleet_pulse`` pair sends those three, and fleet-pulse's
+    alerts: the one timer unit it is composed into. The other timers still alert
+    the fleet chat as this sender, so they are still warned.
+    This reads the configuration only: at send time the runtime also passes over
+    a manager whose channel state dir holds no token file, and logs that line."""
+    fp = fleet.fleet_pulse
+    declared_pair = fp is not None and bool(fp.escalation_chat_id)
+    uses: dict[str, tuple[AlertSender, list[str]]] = {}
+    chat = fleet.telegram_group_chat_id
+    if chat and _fleet_timers_emitted(fleet):
+        sender = fleet_alert_sender(fleet, str(chat))
+        if sender is not None and sender.bot_id != fleet.manager:
+            uses.setdefault(sender.bot_id, (sender, []))[1].append(
+                "the fleet-timer alerts to the fleet chat"
+                + (" other than fleet-pulse's" if declared_pair else ""))
+    target = None if declared_pair else manager_alert_target(fleet)
+    if target is not None and target[1].bot_id != fleet.manager:
+        uses.setdefault(target[1].bot_id, (target[1], []))[1].append(
+            "`fleet notify`, a failed job and a failed message write")
+    for bot_id, (sender, what) in uses.items():
+        report.warn(
+            "alert-sender",
+            f"{' and '.join(what)} are sent as '{bot_id}', not the fleet manager "
+            f"'{fleet.manager}': {sender.manager_why}. To send them as the manager, make "
+            "it a Telegram channel bot whose own chat is that chat (#3127)"
+        )
+
+
 def _validate_alert_target(fleet: FleetConfig, report: ValidationReport) -> None:
     """Warn where a fleet that uses Telegram leaves its alerts no Telegram target (#2654).
 
     `fleet notify`, a failed job's alert and a failed message write's alert go to
-    the declared ``fleet_pulse`` pair, else to the manager's own chat as the
-    manager's own bot (``manager_alert_target``). With neither they reach the
-    manager's pane only, which nobody reads when the manager's session is what is
-    down (#997). A chat declared without its sender is ``alert-unpaired``'s. A
-    fleet that configures no Telegram (no fleet chat, and no bot declares a
-    handle, a chat or a token) is not warned: its bots take the Telegram channel
-    by default, so the channel alone says nothing about whether Telegram is set
-    up, and a warning on every minimal manifest would be noise."""
+    the declared ``fleet_pulse`` pair, else to the manager's own chat, sent as
+    the manager's own bot or, when the manager cannot send there, the first other
+    channel bot in it (``manager_alert_target``, #3127). With neither they reach
+    the manager's pane only, which nobody reads when the manager's session is
+    what is down (#997). A chat declared without its sender is
+    ``alert-unpaired``'s. A fleet that configures no Telegram (no fleet chat, and
+    no bot declares a handle, a chat or a token) is not warned: its bots take the
+    Telegram channel by default, so the channel alone says nothing about whether
+    Telegram is set up, and a warning on every minimal manifest would be noise."""
     fp = fleet.fleet_pulse
     if (fp is not None and fp.escalation_chat_id) or manager_alert_target(fleet) is not None:
         return
@@ -2404,7 +2445,7 @@ def _validate_alert_target(fleet: FleetConfig, report: ValidationReport) -> None
             for bot in fleet.bots.values()):
         return
     if telegram_handle(fleet.bots[fleet.manager]) is None:
-        why, fix = "is not a Telegram channel bot", ""
+        why, fix = "is not a Telegram channel bot, nor is any other bot in its chat,", ""
     else:
         why = "has no Telegram chat (its telegram.chat_id or the fleet's telegram_group_chat_id)"
         fix = "set one of those, or "
@@ -2819,6 +2860,7 @@ def validate(
     _validate_timers(fleet, report)
     _validate_alert_pair(fleet, report)
     _validate_alert_target(fleet, report)
+    _validate_alert_sender(fleet, report)
     _validate_fleet_pulse_cap(fleet, report)
     # Resolved once for both rungs that ask (#1680) — the cascade shells out.
     # Gated on a leaf manager because neither rung can reach a doors-consuming

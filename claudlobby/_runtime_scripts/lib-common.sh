@@ -6784,29 +6784,38 @@ EOF
 #      nobody's own chat, so its only partner is the one declared beside it,
 #      FLEET_PULSE_ESCALATION_STATE_DIR. Missing: REFUSED, naming it.
 #   2. TELEGRAM_GROUP_CHAT_ID from the env (a fleet timer's composed chat):
-#      paired with TELEGRAM_STATE_DIR when that is set beside it, else with a bot
-#      in <bots_dir> -- the caller's own fleet, never a cross-fleet scan -- whose
-#      OWN chat it is, among the bots <roster> names (one per line; the
-#      fleet.yaml beside <bots_dir> when it is empty). None: REFUSED.
-#   3. No env chat: the first bot the scan finds supplies both. scan_scope "any"
-#      (default) is cross-fleet for host jobs, which run fleet-less; "fleet"
-#      restricts it to <bots_dir>.
+#      paired with TELEGRAM_STATE_DIR when that is set beside it, else with the
+#      bot _bot_with_own_chat picks in <bots_dir> -- the caller's own fleet, never
+#      a cross-fleet scan -- among the bots <roster> names (one per line; the
+#      fleet.yaml beside <bots_dir> when it is empty): the fleet manager when it
+#      can send to that chat, else the first bot by name that can (#3127). None:
+#      REFUSED.
+#   3. No env chat: the first bot the scan finds supplies the chat, and the bot
+#      _bot_with_own_chat picks for that chat in its bots dir sends to it; when
+#      it picks none, that first bot sends. scan_scope "any" (default) is
+#      cross-fleet for host jobs, which run fleet-less; "fleet" restricts it to
+#      <bots_dir>.
+# A scanned pair whose sender is not the fleet manager is logged on stderr with
+# the reason the manager does not send (#3127): a fallback is never silent.
 # Sets _alert_chat_id and _alert_state_dir (both empty on a refusal),
-# _alert_target_src (where the pair came from: a label, never a value),
-# _alert_refusal (empty unless refused: the reason and the fix, no ids) and
-# _alert_token, the token that rides the pair: a bot session's own ambient
-# TELEGRAM_BOT_TOKEN only when the env supplied that session's own pair, else
-# empty, so tg-post reads the sender's and a session's token never re-splits a
-# pair taken from a bot (#1771). Every caller treats an empty chat as
-# undeliverable, so a refusal is never a send.
+# _alert_target_src (where the pair came from: a label, never a value; a scanned
+# sender reads manager:<bot> or bot:<bot>), _alert_refusal (empty unless
+# refused: the reason and the fix, no ids) and _alert_token, the token that
+# rides the pair: a bot session's own ambient TELEGRAM_BOT_TOKEN only when the
+# env supplied that session's own pair, else empty, so tg-post reads the
+# sender's and a session's token never re-splits a pair taken from a bot
+# (#1771). Every caller treats an empty chat as undeliverable, so a refusal is
+# never a send.
 # Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
 resolve_alert_target() {
-    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot
+    local bots_dir="${1:-}" scan_scope="${2:-any}" roster="${3:-}" _bot _scan_roster
     _alert_chat_id=""
     _alert_state_dir=""
     _alert_target_src=""
     _alert_refusal=""
     _alert_token=""
+    _alert_sender=""
+    _alert_manager_why=""
     if [ -n "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ]; then
         if [ -n "${FLEET_PULSE_ESCALATION_STATE_DIR:-}" ]; then
             _alert_chat_id="$FLEET_PULSE_ESCALATION_CHAT_ID"
@@ -6826,11 +6835,10 @@ resolve_alert_target() {
             _alert_token="${TELEGRAM_BOT_TOKEN:-}"
             return 0
         fi
-        _bot=$(_bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" "$roster" || true)
-        if [ -n "$_bot" ]; then
+        if _bot_with_own_chat "$bots_dir" "$TELEGRAM_GROUP_CHAT_ID" "$roster"; then
             _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
-            _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
-            _alert_target_src="env:TELEGRAM_GROUP_CHAT_ID+bot:$(basename "$_bot")"
+            _alert_state_dir=$(bot_conf_get_path "$_alert_sender" TELEGRAM_STATE_DIR "")
+            _alert_sender_source "env:TELEGRAM_GROUP_CHAT_ID+" "$_alert_sender"
         else
             _alert_target_src="refused"
             _alert_refusal="TELEGRAM_GROUP_CHAT_ID from the environment has no sender: no bot in this fleet has it as its own chat, and no TELEGRAM_STATE_DIR was set beside it -- a scanned bot's token is not guessed for it"
@@ -6844,34 +6852,141 @@ resolve_alert_target() {
     fi
     if [ -n "$_bot" ]; then
         _alert_chat_id=$(bot_conf_get "$_bot" TELEGRAM_GROUP_CHAT_ID "")
+        # <roster> names the caller's own fleet; another fleet's bots dir is
+        # read against its own fleet.yaml.
+        _scan_roster=""
+        [ "$(dirname "$_bot")" != "${bots_dir%/}" ] || _scan_roster="$roster"
+        if _bot_with_own_chat "$(dirname "$_bot")" "$_alert_chat_id" "$_scan_roster"; then
+            _bot="$_alert_sender"
+        fi
         _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
-        _alert_target_src="scan:bot:$(basename "$_bot")"
+        _alert_sender_source "scan:" "$_bot"
+    fi
+}
+
+# _bot_dirs_by_name <bots_dir>
+# The bot dirs of <bots_dir> that hold a bot.conf, one per line with no trailing
+# slash, by name in byte order whatever the caller locale, so a timer (the C
+# locale) and a bot session walk them alike. Sorted without the slash, so a name
+# comes before the longer names it starts, as Python sorts them.
+_bot_dirs_by_name() {
+    local bots_dir="${1:-}" d
+    [ -n "$bots_dir" ] && [ -d "$bots_dir" ] || return 0
+    for d in "$bots_dir"/*/; do
+        d="${d%/}"
+        if [ -f "$d/bot.conf" ]; then printf '%s\n' "$d"; fi
+    done | LC_ALL=C sort
+}
+
+# fleet_manager_dir <bots_dir>
+# The bot dir of <bots_dir> that is the fleet manager (bot_is_manager), the first
+# by name should a hand edit make two; prints nothing when none is.
+fleet_manager_dir() {
+    local d
+    while IFS= read -r d; do
+        if [ -n "$d" ] && bot_is_manager "$d"; then
+            printf '%s' "$d"
+            break
+        fi
+    done <<EOF
+$(_bot_dirs_by_name "${1:-}")
+EOF
+}
+
+# alert_sender_order <bots_dir> [manager_dir]
+# The bot dirs of <bots_dir> that hold a bot.conf, one per line, in the order a
+# fleet alert sender is chosen from: the fleet manager first (<manager_dir> when
+# given, empty for none; else fleet_manager_dir), then the others by name.
+alert_sender_order() {
+    local bots_dir="${1:-}" mgr="${2-}" d
+    [ "$#" -ge 2 ] || mgr=$(fleet_manager_dir "$bots_dir")
+    if [ -n "$mgr" ]; then printf '%s\n' "$mgr"; fi
+    _bot_dirs_by_name "$bots_dir" | while IFS= read -r d; do
+        if [ "$d" != "$mgr" ]; then printf '%s\n' "$d"; fi
+    done
+}
+
+# _alert_sender_unfit <bot_dir> <chat_id> <roster>
+# Empty when <bot_dir> can be paired with <chat_id> as its sender: <roster> names
+# it (one per line; every bot when it is empty), it is a channel bot
+# (TELEGRAM_BOT_HANDLE: every bot.conf carries a state dir, a channel-less one
+# too), its OWN TELEGRAM_GROUP_CHAT_ID is <chat_id> and it declares a channel
+# state dir. Otherwise prints why not, for the fallback log line.
+_alert_sender_unfit() {
+    local d="$1" chat="$2" declared="$3"
+    if ! bot_in_fleet "$(basename "$d")" "$declared"; then
+        printf 'is not declared in this fleet'
+    elif [ -z "$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" ]; then
+        printf 'is not a Telegram channel bot'
+    elif [ "$(bot_conf_get "$d" TELEGRAM_GROUP_CHAT_ID "")" != "$chat" ]; then
+        printf 'is not in this alert chat: its own chat is another, or none'
+    elif [ -z "$(bot_conf_get "$d" TELEGRAM_STATE_DIR "")" ]; then
+        printf 'declares no channel state dir'
     fi
 }
 
 # _bot_with_own_chat <bots_dir> <chat_id> [roster]
-# The first bot dir in <bots_dir> (lexical) that <roster> names, or else its
-# fleet.yaml declares (every dir when both are empty), whose OWN
-# TELEGRAM_GROUP_CHAT_ID is <chat_id>, that is a channel bot
-# (TELEGRAM_BOT_HANDLE: every bot.conf carries a state dir, a channel-less one
-# too) and that declares a channel state dir; prints it, or returns 1. Both
-# filters are creds-check's: move-bot leaves a moved bot's old dir behind by
-# default. The validator warns at generate time when no declared bot qualifies
-# (composer.fleet_alert_sender_state_dir).
+# The bot that sends this fleet's alerts to <chat_id> (#3127). Of the bots in
+# <bots_dir> that can be paired with the chat (_alert_sender_unfit, over the bots
+# <roster> names, else its fleet.yaml declares, every dir when both are empty),
+# taken in alert_sender_order, the fleet manager first: the first whose channel
+# state dir holds the .env tg-post reads its token from, else the first, whose
+# send then fails naming the missing token, as it did before. The roster filter
+# is creds-check's: move-bot leaves a moved bot's old dir behind by default.
+# config.fleet_alert_sender is the same rule at generate time.
+# Sets _alert_sender (the bot dir; empty, returning 1, when none qualifies) and
+# _alert_manager_why: empty when the sender is the fleet manager, else why the
+# manager does not send. Call it in the caller's shell, never in a command
+# substitution, so both reach the caller.
 _bot_with_own_chat() {
-    local bots_dir="$1" chat="$2" declared="${3:-}" d
-    [ -d "$bots_dir" ] || return 1
-    [ -n "$declared" ] || declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
-    for d in "$bots_dir"/*/; do
-        [ -f "$d/bot.conf" ] || continue
-        bot_in_fleet "$(basename "$d")" "$declared" || continue
-        [ -n "$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" ] || continue
-        [ "$(bot_conf_get "$d" TELEGRAM_GROUP_CHAT_ID "")" = "$chat" ] || continue
-        [ -n "$(bot_conf_get "$d" TELEGRAM_STATE_DIR "")" ] || continue
-        printf '%s' "${d%/}"
+    local bots_dir="$1" chat="$2" declared="${3:-}" d why first="" mgr="" mgr_why=""
+    _alert_sender=""
+    _alert_manager_why=""
+    if [ -d "$bots_dir" ]; then
+        [ -n "$declared" ] || declared=$(parse_fleet_bots "${bots_dir%/runtime/bots}/fleet.yaml")
+        mgr=$(fleet_manager_dir "$bots_dir")
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            why=$(_alert_sender_unfit "$d" "$chat" "$declared")
+            [ "$d" != "$mgr" ] || mgr_why="$why"
+            [ -z "$why" ] || continue
+            [ -n "$first" ] || first="$d"
+            if [ -f "$(bot_conf_get_path "$d" TELEGRAM_STATE_DIR "")/.env" ]; then
+                _alert_sender="$d"
+                break
+            fi
+        done <<EOF
+$(alert_sender_order "$bots_dir" "$mgr")
+EOF
+        [ -n "$_alert_sender" ] || _alert_sender="$first"
+    fi
+    if [ -z "$mgr" ]; then
+        _alert_manager_why="no bot.conf here is the fleet manager's (MANAGER_TMUX equal to its BOT_ID)"
+    elif [ -n "$mgr_why" ]; then
+        _alert_manager_why="$(basename "$mgr") $mgr_why"
+    elif [ "$_alert_sender" != "$mgr" ]; then
+        _alert_manager_why="the channel state dir of $(basename "$mgr") holds no .env, where tg-post reads the token"
+    fi
+    [ -n "$_alert_sender" ]
+}
+
+# _alert_sender_source <label prefix> <bot_dir>
+# Sets _alert_target_src for a pair sent as <bot_dir>: <prefix>manager:<bot> when
+# it is the fleet manager, else <prefix>bot:<bot>, and then prints one stderr
+# line saying why the fleet manager does not send it (_alert_manager_why), so a
+# fallback is never silent (#3127). Names bots, never a chat id or a token. Call
+# it in the caller's shell, so the label reaches the caller and the line prints
+# once.
+_alert_sender_source() {
+    local name
+    name=$(basename "$2")
+    if bot_is_manager "$2"; then
+        _alert_target_src="${1}manager:$name"
         return 0
-    done
-    return 1
+    fi
+    _alert_target_src="${1}bot:$name"
+    printf '%s alert-sender: %s sends this fleet alert, not the fleet manager: %s\n' \
+        "$(ts_iso)" "$name" "${_alert_manager_why:-it was not found}" >&2
 }
 
 # bot_is_manager <bot_dir>
