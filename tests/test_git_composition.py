@@ -54,11 +54,17 @@ def test_candidate_render_uses_final_installation_paths(candidate):
     assert "CLAUDLOBBY_RELEASE_ID" not in env
     assert paths.lib == paths.package.native  # Candidate tools still read from candidate.
     texts = [compose_bot_conf(bot, fleet, paths), compose_systemd_unit(bot, fleet, paths),
-             compose_launchd_plist(bot, fleet, paths),
-             json.dumps(compose_settings_local(bot, fleet, paths))]
+             compose_launchd_plist(bot, fleet, paths)]
+    settings = compose_settings_local(bot, fleet, paths)
+    texts.append(json.dumps(settings))
     timers = compose_fleet_timers(fleet, paths, defaults)
     texts.extend(path.read_text() for path in timers.iterdir() if path.is_file())
-    assert any(str(installation.cli) in text and "brief" in text for text in texts)
+    # The fixture's fleet.yaml arms brief:, so the boot-brief hook itself must
+    # be composed and run the installation's CLI.
+    boot = [hook["command"] for group in settings["hooks"]["SessionStart"]
+            for hook in group["hooks"] if "--boot" in hook["command"]]
+    assert boot and all(command.startswith(f"{installation.cli} brief --bot lead --boot")
+                        for command in boot)
     for text in texts:
         assert str(paths.package.native) not in text
         assert str(paths.package.library) not in text
