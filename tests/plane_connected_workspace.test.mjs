@@ -4566,8 +4566,8 @@ async function claudePage(t,answer) {
 const signinAnswerFor=holder=>init=>{const body=JSON.parse(init.body);
   holder.answer=linkAnswer({},signinPartOf({phase:'waiting',attempt_id:body.attempt_id,state:'waiting'}));
   return reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL});};
-const claudeSentences={elsewhere:'Linking Claude continues on the page where you added this computer.',
-  update:'Update this computer to link Claude.',waiting:'Waiting for your answer to the permission shown above.',saved:'A Claude sign-in is saved on this computer.'};
+const claudeSentences={elsewhere:'Link Claude from the page where you added this computer.',
+  update:'Update this computer to link Claude.',waiting:'Linking Claude continues above.',saved:'A Claude sign-in is saved on this computer.'};
 
 test('no marker: N12 and "Go to the update", which sends only request-run update; no Link Claude',async t=>{
   const {l}=await claudePage(t,partsAnswer());
@@ -4582,6 +4582,17 @@ test('no marker: N12 and "Go to the update", which sends only request-run update
   const box=descendants(partsOf(direct.host)).find(n=>n.className==='part-claude');
   assert.equal(descendants(box).find(n=>n.className==='part-claude-line').textContent,claudeSentences.elsewhere);
   assert.deepEqual(descendants(box).filter(n=>n.tagName==='BUTTON'&&visible(n)),[]);
+});
+test('"Go to the update": a stopped answer keeps the button, a refused (other) answer hides it and keeps N12\'s line',async t=>{
+  const {l}=await claudePage(t,partsAnswer());
+  claudeButton(l,'Go to the update').click();await flush();
+  deliver(l,runEnded({run:'update',outcome:'stopped'}));await flush();
+  assert.deepEqual(claudeButtons(l),['Go to the update'],'the page showed its offer');
+  assert.equal(claudeLine(l).textContent,claudeSentences.update);
+  deliver(l,runEnded({run:'update',outcome:'refused',reason:'other'}));await flush();
+  assert.deepEqual(claudeButtons(l),[],'no offer to show');
+  assert.equal(claudeLine(l).textContent,claudeSentences.update);
+  assert.equal(runRequests(l).length,1,'nothing more is asked');
 });
 test('a status check refused off the setup page draws B10\'s second sentence, not an error',async t=>{
   const refusing=await partsWorkspace(t,{answer:linkAnswer({},signinPartOf({phase:'waiting',attempt_id:id(31),state:'waiting'})),
@@ -4600,7 +4611,7 @@ test('a begin refused on the setup page draws the closing line and Link Claude, 
     claudeButton(l,'Link Claude').click();await flush();
     holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
     assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,1,'begun once');
-    assert.equal(claudeLine(l).textContent,'An earlier sign-in is still closing on this computer. Try again in a moment.');
+    assert.equal(claudeLine(l).textContent,'The sign-in could not start yet. Wait a moment, then choose Link Claude.');
     assert.deepEqual(claudeButtons(l),['Link Claude']);
     assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&n.textContent===claudeSentences.elsewhere));
     fireShort(l);await flush();
@@ -4683,7 +4694,7 @@ test('no parts read on a timer',async t=>{
   l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'needs_attention',reason:'timeout',retryable:true}));
   for(let round=0;round<3;round++){fireShort(l);await flush();}
   assert.equal(stateCalls(l.h).length,reads,'the ending is drawn without a parts read');
-  assert.equal(claudeLine(l).textContent,'The sign-in ran out of time before a code was entered.');
+  assert.equal(claudeLine(l).textContent,'The sign-in took too long.');
   assert.deepEqual(claudeButtons(l),['Try again']);
 });
 // A poll that sees the attempt end offers Try again, and pressing it begins a new attempt although no read has said it ended.
@@ -4718,12 +4729,12 @@ test('the provider row says Linked when the sign-in step\'s own answer is connec
   assert.equal(claudeLine(l).textContent,claudeSentences.saved);
 });
 const endingRows=[
-  [{state:'needs_attention',reason:'timeout',retryable:true},'The sign-in ran out of time before a code was entered.','Try again'],
-  [{state:'needs_attention',reason:'timeout',retryable:false},'The sign-in ran out of time before a code was entered.','Link Claude'],
+  [{state:'needs_attention',reason:'timeout',retryable:true},'The sign-in took too long.','Try again'],
+  [{state:'needs_attention',reason:'timeout',retryable:false},'The sign-in took too long.','Link Claude'],
   [{state:'cancelled',reason:'effect_uncertain',retryable:true},'The sign-in was cancelled.','Try again'],
   [{state:'cancelled',reason:'effect_uncertain',retryable:true,code_sent:true},'The sign-in was cancelled.','Link Claude'],
-  [{state:'cancelled',reason:'service_stopped'},'The sign-in was interrupted when this computer\'s connection restarted.','Link Claude'],
-  [{state:'unknown',reason:'interrupted'},'The sign-in was interrupted when this computer\'s connection restarted.','Link Claude'],
+  [{state:'cancelled',reason:'service_stopped'},'The sign-in was interrupted on this computer.','Link Claude'],
+  [{state:'unknown',reason:'interrupted'},'The sign-in was interrupted on this computer.','Link Claude'],
   [{state:'needs_attention',reason:'provider_failed',code_sent:true},'Claude did not accept the code.','Link Claude'],
   [{state:'needs_attention',reason:'provider_failed'},'The sign-in did not finish on this computer.','Link Claude'],
   [{state:'needs_attention',reason:'boundary_or_process_failure'},'The sign-in did not finish on this computer.','Link Claude'],
@@ -4752,7 +4763,7 @@ test('each ending draws its line and one button',async t=>{
   claudeButton(again.l,'Try again').click();await flush();
   assert.equal(again.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,1);
   assert.deepEqual(claudeButtons(again.l),['Link Claude'],'a Try again the host refuses draws the closing line and Link Claude');
-  assert.equal(claudeLine(again.l).textContent,'An earlier sign-in is still closing on this computer. Try again in a moment.');
+  assert.equal(claudeLine(again.l).textContent,'The sign-in could not start yet. Wait a moment, then choose Link Claude.');
   claudeButton(again.l,'Link Claude').click();await flush();
   assert.deepEqual(runRequests(again.l).map(([message])=>message.run),['link']);
 });

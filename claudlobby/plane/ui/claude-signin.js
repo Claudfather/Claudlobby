@@ -368,15 +368,15 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
 // reason, code_sent, retryable, unconfirmed). Buttons: 'try_again' (a new attempt under the same approval),
 // 'link' (Link Claude: ask the card again) and 'check_again' (read once; it never starts anything).
 const LINK_ENDING_LINES = Object.freeze({
-  timeout:'The sign-in ran out of time before a code was entered.', // B12
+  timeout:'The sign-in took too long.', // B12
   cancelled:'The sign-in was cancelled.', // B12
-  interrupted:'The sign-in was interrupted when this computer\'s connection restarted.', // B12
+  interrupted:'The sign-in was interrupted on this computer.', // B12
   notAccepted:'Claude did not accept the code.', // B12
   unfinished:'The sign-in did not finish on this computer.', // B12
   unreadable:'Claude replied in a way this computer could not read. Try again later.', // N10
   settings:'A settings file on this computer needs fixing on the computer itself before Claude can be linked.', // N9
   unconfirmed:'This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.', // N8
-  closing:'An earlier sign-in is still closing on this computer. Try again in a moment.'}); // B12
+  closing:'The sign-in could not start yet. Wait a moment, then choose Link Claude.'}); // B12
 export const LINK_ENDING_BUTTONS = Object.freeze({try_again:'Try again', link:'Link Claude', check_again:'Check again'});
 export const LINK_CLOSING = LINK_ENDING_LINES.closing;
 export function linkEnding({state, reason, code_sent:sent, retryable, unconfirmed}) {

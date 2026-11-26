@@ -147,7 +147,8 @@ parent window and the shell origin:
   `already_linked`, `signin_live`, `signin_unconfirmed`, `busy`,
   `credential_present`, `environment_format`, `install_failed`,
   `use_full_guide` or `other`. An `update` run ends only as `stopped` with no
-  reason or `refused` with `other`.
+  reason or `refused` with `other`. On `refused` the view hides
+  "Go to the update", since the page has no update offer to show.
 
 Any other shape is ignored. On `approved` the view reads the parts once and
 begins the sign-in by itself when a sign-in is offered; on any other outcome it

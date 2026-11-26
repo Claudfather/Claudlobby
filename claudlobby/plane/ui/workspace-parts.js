@@ -20,9 +20,9 @@ export const PART_TEXT = Object.freeze({
 // The Claude part's own sentences (plan section 6; not approved yet): B10 (both), N12, N4, B11 and B15.
 export const CLAUDE_TEXT = Object.freeze({
   link:'Link Claude',                     // B10
-  elsewhere:'Linking Claude continues on the page where you added this computer.', // B10
+  elsewhere:'Link Claude from the page where you added this computer.', // B10
   update:'Update this computer to link Claude.', goUpdate:'Go to the update', // N12
-  waiting:'Waiting for your answer to the permission shown above.', // N4
+  waiting:'Linking Claude continues above.', // N4
   stop:'Stop waiting',                    // B11
   saved:'A Claude sign-in is saved on this computer.'}); // B15
 // The count is the saved configuration's, also true mid-Launch, after a failed Launch and after a stop, so it says
@@ -88,7 +88,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (a status
   // check refused on a view that did not run the link) or 'closing' (a begin refused on the setup page), each cleared
   // when the read's sign-in changes.
-  let waiting = false, sg = null, busy = false, busyOp = null, epochs = 0, notice = null, noticeFor = null;
+  let noOffer = false, waiting = false, sg = null, busy = false, busyOp = null, epochs = 0, notice = null, noticeFor = null;
   const ready = () => client.snapshot().state === 'ready';
   function connectionChanged(state) {
     const before = last; last = state;
@@ -118,7 +118,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       // An unusable or lost refresh keeps an answer already shown for this connection.
       if (value) current = {...value, epoch, host:client.snapshot().read_profile?.host_uid ?? null};
       else if (current?.epoch !== epoch) { current = null; dropSignin(); }
-      if (value) syncSignin();
+      if (value) { syncSignin(); if (value.link !== null) noOffer = false; }
       return !!value;
     })();
     try { return await reading; }
@@ -169,8 +169,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     return g;
   }
   // One sign-in call, as the page's own setup panel runs one (claude-signin.js operate/failed), with the link road's
-  // difference: a call this page refuses before any answer came is not an error, it is "continues on the page where
-  // you added this computer" (or, for Try again, Link Claude).
+  // difference: a call this page refuses before any answer came is not an error, it is the line that sends the person
+  // to the page where they added this computer (or, for Try again, Link Claude).
   async function runOp(operation, quiet = false) {
     const g = sg;
     if (!g || g.dead || busy || disposed) return false;
@@ -213,7 +213,12 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   // The page's answer to this view's request (the entry checked who sent it and its exact keys).
   async function runEnded(message) {
     if (disposed || !message) return false;
-    if (message.run !== 'link') return false; // an update answer needs nothing drawn: the page shows its own offer
+    if (message.run !== 'link') {
+      // An update answer: stopped means the page showed its offer; refused (other) means it has none to show, so the
+      // button that asked for it goes (N12's line stays).
+      if (message.outcome !== 'refused') return false;
+      noOffer = true; onChange(); return true;
+    }
     const expecting = waiting; waiting = false; onChange();
     const value = await read(); // once; it is also the only read this answer asks for
     // Approved and still waiting: the sign-in begins by itself, once. After Stop waiting it waits for its own button.
@@ -315,7 +320,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       return {line:ending.line, button:button === 'link' && !onSetupPage ? null : button};
     }
     if (c.link === 'not_here') return {};                                // a nine-card computer links Claude in its own road
-    if (c.link === null) return onSetupPage ? {line:CLAUDE_TEXT.update, button:'update'} : {line:CLAUDE_TEXT.elsewhere};
+    if (c.link === null) return onSetupPage ? (noOffer ? {line:CLAUDE_TEXT.update} : {line:CLAUDE_TEXT.update, button:'update'}) : {line:CLAUDE_TEXT.elsewhere};
     if (!onSetupPage) return {line:CLAUDE_TEXT.elsewhere};
     return waiting ? {line:CLAUDE_TEXT.waiting, button:'stop'} : {button:'link'};
   }
