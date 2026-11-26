@@ -112,12 +112,22 @@ is installed but not linked: `installed_declined` and `installed_expired` (the
 link card), `installed_` with the scope's refusal (`unsupported_provider`,
 `profile_changed`, `file_binding_changed`, `private_path_changed`), with
 `scope_changed`, with a writer refusal (`setup_denied`, `use_full_guide`,
-`not_started`, `signin_live`, `signin_unconfirmed`, `setup_source_changed`),
+`not_started`, `signin_live`, `signin_unconfirmed`, `setup_source_changed`,
+`workspace_binding_required`, `workspace_native_owner_required`),
 with the channel's own endings (`cancelled`, `disconnected`, `invalid_request`,
 `session_closed`, `output_unavailable`, `output_limit`), and
 `installed_cancelled` (a signal), `installed_unavailable` and
 `installed_internal_error` (any other failure). Without an install in this run
 the same endings keep their plain words.
+
+Two writer refusals are rare races, decided inside the write after the person's
+yes: `workspace_binding_required` (the computer's workspace link was removed or
+changed after the run read it, so no active binding remains) and
+`workspace_native_owner_required` (the owner's access grant is not a native
+owner's). Each ends the run with nothing written, as an error frame with
+`retry: false`: final for this run, and a new run starts again. After an
+install they end as `installed_workspace_binding_required` and
+`installed_workspace_native_owner_required`.
 
 ## Setup, availability and current limits
 

@@ -1,0 +1,3 @@
+### Changed — the Claude link run's endings list now names `workspace_binding_required` and `workspace_native_owner_required`
+
+The link run's writer can refuse with `workspace_binding_required` (no active workspace binding when the write reads it) and `workspace_native_owner_required` (the owner is not a native owner), and after an install the same endings are prefixed `installed_`. The website-boundary and owner-connected-read documents did not list them, so a client built from them had no word for these rare races. Both are final for the run (`retry: false`); a new run starts again. Documentation only: no code and no text a person reads changes.
