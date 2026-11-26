@@ -517,8 +517,9 @@ class TestComposeFleetTimers:
         svc_text = svc.read_text()
         assert "Type=oneshot" in svc_text
         assert '"--fleet" "test-fleet" "fleet" "pulse"' in svc_text
-        # The unit's own limit: the 240 s ceiling plus the stop, the reap and the
-        # summary, then 1 s per systemd kill phase (#2347). Only the pulse has one.
+        # The unit's own limit: the 233 s ceiling plus the stop's budget (the grace,
+        # the reap and the CLI's exit), then 1 s per systemd kill phase (#2347).
+        # Only the pulse has one.
         assert "TimeoutStartSec=254" in svc_text and "TimeoutStopSec=1" in svc_text
         keepalive = (timers_dir / "com.test.keepalive.service").read_text()
         assert "TimeoutStartSec" not in keepalive
@@ -542,7 +543,8 @@ class TestComposeFleetTimers:
         )
         timers_dir = compose_fleet_timers(fleet, self._paths(tmp_path), _default_merged())
         svc_text = (timers_dir / "com.test.fleet-pulse.service").read_text()
-        assert "TimeoutStartSec=614" in svc_text
+        # The configured cap plus the stop's budget: the grace, the reap and the CLI's exit.
+        assert "TimeoutStartSec=621" in svc_text
 
     def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
         """Fleet timers carry the fleet Telegram group, so a scheduled job's

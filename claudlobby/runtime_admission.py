@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from .installation import Installation
 
 RESIDENT_UNIT_PHASES = {"plane-daemon": "ingest"}
-UNIT_STARTED_ENV = "CLAUDLOBBY_UNIT_STARTED"
 
 
 def wrap_unit_argv(environment: dict[str, str], *, unit: str, phase: str,
