@@ -1680,7 +1680,8 @@ function showComputerCard() {
   else if (top < line.scrollTop) line.scrollTop = top;
 }
 // Opening Message team narrows the line's cap (25% to 15%): show the opened drawer's card again, so its buttons stay reachable.
-function composerToggled(event) { if (event.target?.id === "work-composer") showComputerCard(); }
+// Only on open: closing it moves nothing. work-loop.js's own opens of it (the Tasks view) re-show the card too, which is acceptable.
+function composerToggled(event) { if (event.target?.id === "work-composer" && event.target.open) showComputerCard(); }
 function closeComputersAfterAttention() {
   const main = typeof document === "undefined" ? null : document.querySelector?.("main");
   const details = $("computers-details"), teams = Number(main?.dataset?.teams || 0);
@@ -2342,7 +2343,7 @@ for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", kee
   ["focusin", keepComputersOpen]]) $("computers-details")?.addEventListener(type, handler, { passive: true });
 for (const type of ["pointerdown", "wheel"]) $("rail-fleet")?.addEventListener(type, keepComputersOpenOnLine, { passive: true });
 // toggle does not bubble, so the page listens while it travels down to Message team's own drawer.
-document.addEventListener("toggle", composerToggled, { capture: true, passive: true });
+document.addEventListener("toggle", composerToggled, { capture: true });
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {

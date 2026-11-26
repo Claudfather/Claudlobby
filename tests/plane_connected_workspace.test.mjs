@@ -2156,6 +2156,20 @@ test('a Try again whose storage write fails sends nothing, stays on the ended at
   assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{generation:original.generation,attempt_id:calls[0][1].attempt_id,replaces:original.attempt_id});
   h.api.dispose();
 });
+test('a cancel the person pressed on this page is a neutral note; a new attempt clears that',async()=>{
+  const h=setupHarness({client:{async setupSignin(action,body){
+    return action==='cancel'?{...body,state:'cancelled',reason:'effect_uncertain',retryable:true}:{...body,state:'waiting',reason:null,url:'https://claude.ai/login',expires_at:1800000600};}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,state:'waiting',reason:null};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status');
+  await h.api.run('signin-cancel');await flush();
+  assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
+  assert.equal(status.dataset.tone,undefined,'a cancel the person chose is an ordinary note, not a fault');
+  assert.equal(status.attributes.role,'status','still announced politely');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again stays the one filled action');
+  h.api.dispose();
+});
 test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{
   const calls=[];
   const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);return {...body,state:'starting',reason:null};}}});
@@ -2164,9 +2178,8 @@ test('a cancel before any code is offered Try again; only the host\'s exact retr
   await h.api.run('context');
   const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
   assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
-  assert.equal(status.dataset.tone,undefined,'a cancel the person chose is an ordinary note, not a fault');
-  assert.equal(status.attributes.role,'status','still announced politely');
-  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again stays the one filled action');
+  assert.equal(status.dataset.tone,'attention','a cancel this page did not press (the host drained or shut down) stays a fault note');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again is the one filled action');
   assert.equal(visible(retry),true);assert.deepEqual(calls,[]);
   retry.click();await flush();
   assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
@@ -4060,7 +4073,7 @@ test('app.js marks how many teams the view has, hidden ones included, from its o
      main.dataset.computers='1';const d={open:false,contains:()=>false},l2=teamsList(ui,[{alias:'one'}],d);l2.markTeams();l2.openComputersForAttention();
      l2.keepComputersOpenOnLine(event);l2.attentionCleared();
      assert.equal(d.open,kept,`${event.type} on ${event.target===line?'the line itself':'a child'}: ${kept?'counts as use':'does not'}`);}}
-  assert.match(appText,/document\.addEventListener\("toggle", composerToggled, \{ capture: true, passive: true \}\);/,'Message team\'s drawer is heard though toggle does not bubble');
+  assert.match(appText,/document\.addEventListener\("toggle", composerToggled, \{ capture: true \}\);/,'Message team\'s drawer is heard though toggle does not bubble');
   assert.doesNotMatch(drawerText,/connection_state/,'attention clearing comes from the connected view, never a team snapshot');
   assert.doesNotMatch(drawerText.replace(/\/\/.*$/gm,''),/scrollIntoView|scrollTo\(|scrollBy\(/,'only the line scrolls, by its own scrollTop');
 });
@@ -4087,12 +4100,14 @@ test('opened in the fold, Computers & status brings its computer\'s card and but
   assert.equal(opened({hidden:true}).line.scrollTop,0,'only a listed computer\'s card');
   // Message team opened after Computers & status: its narrower cap shrinks the line, so the card is shown again.
   const narrowed=opened({cardAt:20,end:70,view:117});narrowed.line.clientHeight=40;
-  narrowed.list.composerToggled({target:{id:'work-composer'}});
+  narrowed.list.composerToggled({target:{id:'work-composer',open:true}});
   assert.equal(narrowed.line.scrollTop,30,'the buttons stay reachable after the cap shrinks');
+  const closed=opened({cardAt:20,end:70,view:117});closed.line.clientHeight=40;
+  closed.list.composerToggled({target:{id:'work-composer',open:false}});assert.equal(closed.line.scrollTop,0,'closing Message team moves nothing');
   const other=opened({cardAt:20,end:70,view:40});other.line.scrollTop=0;
-  other.list.composerToggled({target:{id:'something-else'}});assert.equal(other.line.scrollTop,0,'only Message team\'s drawer counts');
+  other.list.composerToggled({target:{id:'something-else',open:true}});assert.equal(other.line.scrollTop,0,'only Message team\'s drawer counts');
   const shut=opened({cardAt:20,end:70,view:40});shut.line.scrollTop=0;shut.details.open=false;
-  shut.list.composerToggled({target:{id:'work-composer'}});assert.equal(shut.line.scrollTop,0,'with Computers & status closed nothing moves');
+  shut.list.composerToggled({target:{id:'work-composer',open:true}});assert.equal(shut.line.scrollTop,0,'with Computers & status closed nothing moves');
   const closing=opened({scrollTop:0,end:70,cardAt:20});closing.details.open=false;closing.line.scrollTop=5;
   closing.list.computersToggled({target:closing.details});assert.equal(closing.line.scrollTop,5,'closing moves nothing');
 });
