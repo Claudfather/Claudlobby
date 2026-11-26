@@ -1242,6 +1242,35 @@ def test_routes_on_other_ports_and_local_account_sources_are_admitted(computer):
     assert computer.inspect()["proposal"]["login"]["state"] == "create"
 
 
+UBUNTU_NSSWITCH = ("passwd:         files systemd\ngroup:          files systemd\nshadow:         files systemd\n"
+                   "gshadow:        files systemd\n\nhosts:          files mdns4_minimal [NOTFOUND=return] dns\n"
+                   "networks:       files\n\nprotocols:      db files\nservices:       db files\nethers:         db files\n"
+                   "rpc:            db files\n\nnetgroup:       nis\n")
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_ubuntu_s_own_nsswitch_is_admitted(computer, present):
+    if present:
+        computer.add_team(1500)
+    computer.extra["nsswitch"] = UBUNTU_NSSWITCH
+    computer.write()
+    assert computer.inspect(uid=1500 if present else 1002)["proposal"]["login"]["state"] == (
+        "present" if present else "create")
+
+
+@pytest.mark.parametrize("kind", ["link", "folder"])
+def test_a_link_or_folder_in_sudoers_d_refuses_before_any_effect(computer, kind):
+    # Stricter than sudo, which follows a link and skips a folder. A link is
+    # never opened (main answers its OSError as inspection_unavailable).
+    computer.write()
+    entry = computer.files / "sudoers.d" / "team"
+    entry.symlink_to(computer.files / "sudoers") if kind == "link" else entry.mkdir()
+    with pytest.raises((computer.module.Refusal, OSError)) as error:
+        computer.inspect()
+    assert kind == "link" and isinstance(error.value, OSError) or error.value.code == "unsafe_file"
+    assert not computer.module.receipt_path(RID).exists() and computer.effects == []
+
+
 def test_the_uid_is_the_next_one_by_the_rule_over_the_raw_files(computer):
     # A line NSS does not answer for still counts, as in the probe.
     computer.passwd_tail = "#old:x:2500:2500\n"
@@ -1309,6 +1338,10 @@ PLAN_REFUSALS = {
     "gshadow-left": ("team_leftovers", _set("gshadow", claudlobby="claudlobby:!::")),
     "sudo-rule-left": ("team_leftovers", _set("sudoers_d", team="claudlobby ALL=(ALL) NOPASSWD:ALL\n")),
     "sudo-include-elsewhere": ("team_leftovers", _set("extra", sudoers=UBUNTU_SUDOERS + "@include /etc/sudoers.local\n")),
+    # To sudo, # before digits is a uid, not a comment.
+    "sudo-uid-then-name": ("team_leftovers", _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) NOPASSWD: ALL\n")),
+    "gshadow-oversize": ("team_leftovers", _set("gshadow", big="big:!::" + "x" * 262144)),
+    "initgroups-ldap": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n")),
     "443-served": ("occupied_443", lambda c: setattr(c.daemon, "serve", {"TCP": {"443": {"HTTPS": True}}})),
     "443-routed": ("occupied_443", lambda c: setattr(c.daemon, "serve", {"Web": {
         "other.example.ts.net:443": {"Handlers": {"/": {"Proxy": "unix:/home/alice/owner.sock"}}}}})),
@@ -1359,7 +1392,7 @@ def test_a_group_with_no_gshadow_line_or_a_locked_one_conforms(computer, gshadow
 
 
 SUDO_ADMITTED = {
-    "commented-out": "# claudlobby ALL=(ALL) ALL\n#claudlobby ALL=(ALL) ALL\nalice ALL=(ALL) ALL # not claudlobby\n",
+    "commented-out": "# rules for the team live elsewhere\n#alice ALL=(ALL) ALL\n",
     "another-word": "claudlobby_old ALL=(ALL) ALL\n",
     "include-here": "#includedir /etc/sudoers.d\n@includedir   /etc/sudoers.d  \n#includes no other file\n",
 }
@@ -1449,6 +1482,22 @@ POLICY_REFUSALS = {
     "sudo-too-many-files": ("team_account_sudo", 1500, _then(_team(), lambda c: c.sudoers_d.update(
         {f"rule{n:02d}": "# none\n" for n in range(63)}))),
     "sudo-file-oversize": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", big="#" * 65536 + "\n"))),
+    # sudo reads no comment here, but a line that names the team refuses whatever follows a #.
+    "sudo-rule-commented": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="# claudlobby ALL=(ALL) ALL\n"))),
+    "sudo-uid-then-name": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) ALL\n"))),
+    "sudo-alias-after-uid": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team=(
+        "User_Alias BOTS = #1001, claudlobby\nBOTS ALL=(ALL) NOPASSWD: ALL\n")))),
+    "sudo-escaped": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="claud\\lobby ALL=(ALL) ALL\n"))),
+    "sudo-hex-escaped": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="\\x63laudlobby ALL=(ALL) ALL\n"))),
+    "sudo-other-case": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="ClaudLobby ALL=(ALL) ALL\n"))),
+    "shadow-ldap": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nshadow: ldap files\n"))),
+    "gshadow-sss": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\ngshadow: files sss\n"))),
+    "initgroups-ldap": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n"))),
+    "sudoers-sss": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nsudoers: files sss\n"))),
 }
 
 
@@ -1499,8 +1548,9 @@ def test_an_account_someone_else_makes_with_another_uid_refuses_apply_without_di
     # nothing is dispatched and useradd never runs.
     record = computer.inspect()
     computer.add_team(1500)
-    with pytest.raises(computer.module.Refusal):
+    with pytest.raises(computer.module.Refusal) as error:
         computer.apply(record)
+    assert error.value.code == "account_changed"
     kept = computer.module.load(RID)
     assert kept["state"] == "planned" and "dispatch" not in kept and computer.effects == []
 

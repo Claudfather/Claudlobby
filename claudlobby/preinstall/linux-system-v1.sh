@@ -666,20 +666,22 @@ def next_uid(passwd, group):
 
 
 def directory_service():
-    # Accounts come from local files only. Read as glibc does: # starts a
-    # comment and a name ends at a colon or a space. Every passwd or group
-    # line must parse and list only files or systemd, with no [action]; a
-    # later line replaces an earlier one, so this holds whichever wins.
+    # Accounts, passwords, groups and sudo rules come from local files only.
+    # Read as glibc does: # starts a comment and a name ends at a colon or a
+    # space. Every line for these must parse and list only files or systemd,
+    # with no [action]; a later line replaces an earlier one, so this holds
+    # whichever wins.
     raw = read_root("nsswitch")
     require(raw is not None and len(raw) <= 65536, "team_directory_service")
-    seen = set()
+    seen, names = set(), (b"passwd", b"group", b"shadow", b"gshadow", b"initgroups", b"sudoers")
     for line in raw.split(b"\n"):
         text = line.split(b"#", 1)[0].strip()
-        if text.startswith((b"passwd", b"group")):
-            entry = re.fullmatch(rb"(passwd|group)[\s:]+(.*)", text)
-            require(entry and entry[2] and set(entry[2].split()) <= {b"files", b"systemd"}, "team_directory_service")
+        if text.startswith(names):
+            entry = re.fullmatch(rb"([a-z]+)[\s:]+(.*)", text)
+            require(entry and entry[1] in names and entry[2] and set(entry[2].split()) <= {b"files", b"systemd"},
+                    "team_directory_service")
             seen.add(entry[1])
-    require(seen == {b"group", b"passwd"}, "team_directory_service")
+    require(seen >= {b"group", b"passwd"}, "team_directory_service")
 
 
 def subordinate(uid):
@@ -725,9 +727,10 @@ def team_lines(name):
 
 
 def sudo_rules(code):
-    # A heuristic: no line sudo reads names the team as a whole word. Aliases,
-    # groups or #uid forms can hide a name, so the live run also checks sudo -l
-    # -U claudlobby. # starts a comment but #include and #includedir do not.
+    # A heuristic: no line sudo reads names the team as a word, in any case,
+    # comments included (to sudo, # before digits is a uid), once its \xHH and
+    # \ escapes are undone. Aliases, groups, #uid forms or sudo.conf can still
+    # hide it, so the live run also checks sudo -l -U claudlobby.
     # Every include must be /etc/sudoers.d, whose files are read as sudo picks
     # them (no name ending in ~ or holding a dot), at most 64 of 64 KiB.
     try:
@@ -740,8 +743,8 @@ def sudo_rules(code):
         require(raw is None or len(raw) <= 65536, code)
         for line in (raw or b"").split(b"\n"):
             include = re.fullmatch(rb"\s*[#@]include(?:dir)?\s+(.*?)\s*", line)
-            require(include[1] == b"/etc/sudoers.d" if include else
-                    not re.search(rb"\bclaudlobby\b", line.split(b"#", 1)[0]), code)
+            word = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]), line).replace(b"\\", b"")
+            require(include[1] == b"/etc/sudoers.d" if include else not re.search(rb"\bclaudlobby\b", word, re.I), code)
 
 
 def team_policy():
