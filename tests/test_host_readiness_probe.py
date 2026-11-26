@@ -1,12 +1,17 @@
 """Preinstall inventory is bounded data; prerequisites are never executed."""
 
+import ast
+import builtins
 import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
+import symtable
+import sys
 import time
 import types
 
@@ -17,15 +22,27 @@ from tests.conftest import constructed_env
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "claudlobby/preinstall/host-readiness-probe.sh"
 LEAF = ROOT / "claudlobby/preinstall/linux-system-v1.sh"
+# Read once: the leaf fixtures below patch pathlib reads while they run.
+PROBE_SOURCE = PROBE.read_text()
+LEAF_SOURCE = LEAF.read_text()
 TOOLS = ("python3", "git", "tailscale", "claude", "tmux", "jq", "systemctl", "launchctl")
 # The shipped probe runs these tools and reads these root files by fixed
 # absolute path. Fixtures run a copy with each one rewritten into the test's
 # own directory; the shipped bytes honour no override.
 TOOL_PATHS = {"/usr/bin/uname": "uname", "/usr/bin/id": "id", "/bin/dd": "dd", "/usr/bin/tr": "tr"}
+# The interpreter for the team account check. Fixtures point it at a stand-in,
+# or at nothing (the default: no Python, so the check reads unknown).
+PYTHON = "/usr/bin/python3"
 ROOT_PATHS = {"/etc/passwd": "passwd", "/etc/group": "group",
               "/var/lib/claudlobby-browser-system/v1": "lib/claudlobby-browser-system/v1"}
 STORE = ROOT_PATHS["/var/lib/claudlobby-browser-system/v1"]
 LOGIN_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+# The codes the leaf refuses a present team account with: the only policy
+# words besides conforms and unknown the website admits.
+TEAM_CODES = ("team_directory_service", "team_account_uid", "team_account_group", "team_account_shell",
+              "team_account_home", "team_account_password", "team_account_expiry", "team_account_ids",
+              "team_account_sudo")
+POLICIES = ("conforms", "unknown") + TEAM_CODES
 
 
 def whole(value, low, high):
@@ -33,15 +50,21 @@ def whole(value, low, high):
 
 
 def website_accepts(logins):
-    """A Python copy of the website's logins rule (lib/host-readiness.ts on
-    its main branch). An answer it refuses makes the whole check unusable."""
+    """The website's logins rule (lib/host-readiness.ts), with the two keys
+    this probe adds: team.policy and uncertain. The website's decoder today
+    admits exactly {team, next_uid, prepared} and team {uid}, so it must adopt
+    these before it pins this probe. An answer it refuses makes the whole
+    check unusable."""
     if logins is None:
         return True
-    if type(logins) is not dict or set(logins) != {"team", "next_uid", "prepared"}:
+    if type(logins) is not dict or set(logins) != {"team", "next_uid", "prepared", "uncertain"}:
         return False
     team, next_uid, prepared = logins["team"], logins["next_uid"], logins["prepared"]
-    if team is not None and not (type(team) is dict and set(team) == {"uid"}
-                                 and whole(team["uid"], 0, 9999999999)):
+    if logins["uncertain"] not in (True, False, None):
+        return False
+    if team is not None and not (type(team) is dict and set(team) == {"uid", "policy"}
+                                 and whole(team["uid"], 0, 9999999999)
+                                 and team["policy"] in POLICIES):
         return False
     if next_uid is not None and not whole(next_uid, 1000, 59999):
         return False
@@ -56,14 +79,16 @@ def website_accepts(logins):
             and len({entry["uid"] for entry in prepared}) == len(prepared))
 
 
-def rewritten_probe(path, stubs, files=None):
-    source = PROBE.read_text()
+def rewritten_probe(path, stubs, files=None, python=None):
+    source = PROBE_SOURCE
     for real, name in TOOL_PATHS.items():
         assert real + " " in source
         source = source.replace(real + " ", str(stubs / name) + " ")
     for real, name in ROOT_PATHS.items():
         if files is not None:
             source = source.replace(real, str(files / name))
+    assert source.count(PYTHON + " ") == 3  # the header, the -x test and the one run
+    source = source.replace(PYTHON, str(python or path.parent / "no-python3"))
     assert not any(real + " " in source for real in TOOL_PATHS)
     assert files is None or not any(real in source for real in ROOT_PATHS)
     path.write_text(source)
@@ -85,7 +110,7 @@ def inventory(tmp_path):
 
     def run(*, system="Linux", architecture=b"aarch64\n", uid=b"1001\n",
             user=b"example-user\n", present=TOOLS, args=(), failed=None, reader=None,
-            root_paths=True, env=()):
+            root_paths=True, env=(), python=None):
         if reader:
             name, mode = reader
             path = stubs / name
@@ -114,10 +139,11 @@ def inventory(tmp_path):
             if name in present:
                 path.write_text("#!/bin/sh\nprintf invoked > '" + str(marker) + "'\nexit 99\n")
                 path.chmod(0o755)
-        probe = rewritten_probe(tmp_path / "probe.sh", stubs, files if root_paths else None)
+        probe = rewritten_probe(tmp_path / "probe.sh", stubs, files if root_paths else None, python)
         result = subprocess.run(["/bin/sh", str(probe), *args], cwd=work,
             env=constructed_env(PATH=stubs, USER="forged", LOGNAME="forged", **dict(env)),
-            input=b"ignored input", capture_output=True, timeout=10)
+            input=b"ignored input", capture_output=True, timeout=30)
+        run.last = result
         assert result.stderr == b""
         assert len(result.stdout) <= 8192
         assert result.stdout.endswith(b"\n") and result.stdout.count(b"\n") == 1
@@ -128,7 +154,7 @@ def inventory(tmp_path):
             assert website_accepts(data["logins"]), data["logins"]
         return result, data
 
-    run.files = files
+    run.files, run.stubs, run.last = files, stubs, None
     return run
 
 
@@ -223,15 +249,28 @@ def test_account_name_length_limit(inventory, length, expected_status):
 
 
 def test_shipped_probe_runs_fixed_tools_and_reads_fixed_files():
-    source = PROBE.read_text()
-    code = [line for line in source.splitlines()[1:] if not line.lstrip().startswith("#")]
+    source = PROBE_SOURCE
+    block = team_check_block()
+    assert source.count(block) == 1
+    shell = source.replace(block, "")
+    code = [line for line in shell.splitlines()[1:] if not line.lstrip().startswith("#")]
     text = "\n".join(code)
-    # Every executable it names is one of four tools, by absolute path, and
-    # those paths hold the real tools on macOS and Ubuntu alike.
-    assert set(re.findall(r"/(?:usr/)?s?bin/[\w.-]+", text)) == set(TOOL_PATHS)
+    # Every executable the shell names is one of four tools or the Python
+    # interpreter, by absolute path, and those four hold the real tools on
+    # macOS and Ubuntu alike (Python runs only as root on Linux).
+    assert set(re.findall(r"/(?:usr/)?s?bin/[\w.-]+", text)) == set(TOOL_PATHS) | {PYTHON}
     for path in TOOL_PATHS:
         assert re.search(r"(?<![\w/.-])" + re.escape(path) + " ", text)
         assert os.access(path, os.X_OK)
+    # Python runs once, isolated, on the fixed block and nothing else.
+    assert re.findall(r"(?<![\w/.-])" + re.escape(PYTHON) + r"\b.*", text) == [
+        PYTHON + ' -I -S -B -c "$team_check" </dev/null ;;', PYTHON + " ] || return 0"]
+    # In the block, /bin/bash is only the shell the account must have. It
+    # starts no process, opens no socket and opens files only to read them.
+    assert re.findall(r"/(?:usr/)?s?bin/[\w.-]+", block) == ["/bin/bash"]
+    assert not re.search(r"subprocess|socket|\bexec|system\(|popen|spawn|fork|write|unlink|mkdir|rename|chmod|chown",
+                         block)
+    assert block.count("open(") == block.count("os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)") == 1
     # command is only ever a lookup, never a way to run a tool by name.
     assert re.findall(r"\bcommand\b(?! -v )", text) == []
     # The files are fixed assignments. No ${name-default} form exists, so the
@@ -240,7 +279,7 @@ def test_shipped_probe_runs_fixed_tools_and_reads_fixed_files():
                  "store=/var/lib/claudlobby-browser-system/v1"):
         assert code.count(line) == 1
     assert re.findall(r"\$\{\w+:?[-=?+]", text) == []
-    assert 'STORE = Path("/var/lib/claudlobby-browser-system/v1")' in LEAF.read_text()
+    assert 'STORE = Path("/var/lib/claudlobby-browser-system/v1")' in LEAF_SOURCE
 
 
 # Root mode. Fixtures write passwd, group and setup's store; the copy reads them.
@@ -331,7 +370,7 @@ def host(inventory):
         assert result.returncode == 0
         return data["logins"]
 
-    run.files, run.store = files, store
+    run.files, run.store, run.inventory = files, store, inventory
     return run
 
 
@@ -342,14 +381,16 @@ DEMO = {"name": "demo", "uid": 1000}
                          ids=["linux-non-root", "mac-root", "mac-non-root"])
 def test_logins_are_read_only_by_root_on_linux(host, system, uid):
     accounts = {"passwd": [user("demo", 1000), user("claudlobby", 1001)], "receipts": [receipt()]}
-    assert host(**accounts) == {"team": {"uid": 1001}, "next_uid": 1002, "prepared": [DEMO]}
+    assert host(**accounts) == {"team": {"uid": 1001, "policy": "unknown"}, "next_uid": 1002,
+                                "prepared": [DEMO], "uncertain": False}
     assert host(**accounts, system=system, uid=uid) is None
 
 
 def test_an_untouched_computer_offers_the_first_free_id(host):
-    assert host() == {"team": None, "next_uid": 1000, "prepared": []}
+    # No team line: team stays null, with no policy, and Python never runs.
+    assert host() == {"team": None, "next_uid": 1000, "prepared": [], "uncertain": False}
     host.store.mkdir(mode=0o700)
-    assert host() == {"team": None, "next_uid": 1000, "prepared": []}
+    assert host() == {"team": None, "next_uid": 1000, "prepared": [], "uncertain": False}
 
 
 @pytest.mark.parametrize("ids,expected", [((), 1000), ((999,), 1000), ((1000,), 1001), ((59998,), 59999),
@@ -458,9 +499,10 @@ def test_ids_over_ten_digits_read_as_unknown_before_any_numeric_test(host, name,
 def test_the_claudlobby_account_is_the_team_and_never_a_prepared_account(host):
     logins = host(passwd=[user("demo", 1000), user("claudlobby", 1001), user("claudlobby", 1500)],
                   receipts=[receipt("claudlobby", 1001), receipt("demo", 1000)])
-    assert logins == {"team": {"uid": 1001}, "next_uid": 1501, "prepared": [DEMO]}
+    assert logins == {"team": {"uid": 1001, "policy": "unknown"}, "next_uid": 1501, "prepared": [DEMO],
+                      "uncertain": False}
     # An id setup cannot use is still reported; the website refuses it.
-    assert host(passwd=[f"claudlobby:x:0:0::{HOME}:/bin/bash"])["team"] == {"uid": 0}
+    assert host(passwd=[f"claudlobby:x:0:0::{HOME}:/bin/bash"])["team"] == {"uid": 0, "policy": "unknown"}
 
 
 @pytest.mark.parametrize("line", [f"claudlobby:x:abc:1001::{HOME}:/bin/bash", "claudlobby:x",
@@ -511,12 +553,22 @@ def test_a_selection_longer_than_any_the_leaf_writes_is_not_read(host):
     assert host(passwd=[user("demo", 1000)], receipts=receipts)["prepared"] == []
 
 
-def test_scanning_stops_at_the_second_distinct_account(host):
+def test_prepared_stops_at_the_second_distinct_account_and_uncertain_reads_on(host):
     accounts = [user("demo", 1000), user("alice", 1001), user("bob", 1002)]
     oversize = sized(98305, account="bob", uid=1002)
     logins = host(passwd=accounts, receipts=[receipt(), receipt(), receipt("alice", 1001), oversize])
-    assert logins["prepared"] == [DEMO, {"name": "alice", "uid": 1001}]
-    assert host(passwd=accounts, receipts=[receipt(), oversize, receipt("alice", 1001)])["prepared"] is None
+    # The oversize receipt no longer unsets prepared, but it is doubt.
+    assert logins["prepared"] == [DEMO, {"name": "alice", "uid": 1001}] and logins["uncertain"] is None
+    logins = host(passwd=accounts, receipts=[receipt(), oversize, receipt("alice", 1001)])
+    assert logins["prepared"] is None and logins["uncertain"] is None
+    running = receipt("bob", 1002, state="running")
+    logins = host(passwd=accounts, receipts=[receipt(), receipt("alice", 1001), running, oversize])
+    assert logins["prepared"] == [DEMO, {"name": "alice", "uid": 1001}] and logins["uncertain"] is True
+    # A receipt that cannot be read before two accounts are found still unsets
+    # prepared; uncertain reads on.
+    for receipts in ([running, oversize, receipt()], [oversize, receipt(), running]):
+        logins = host(passwd=accounts, receipts=receipts)
+        assert logins["prepared"] is None and logins["uncertain"] is True
 
 
 def test_two_accounts_sharing_a_uid_are_reported_once(host):
@@ -530,12 +582,14 @@ def test_two_accounts_sharing_a_uid_are_reported_once(host):
 @pytest.mark.parametrize("count,expected", [(128, [DEMO]), (129, None)])
 def test_more_than_128_receipt_names_read_as_unknown(host, count, expected):
     receipts = [receipt(state="planned")] * (count - 1) + [receipt()]
-    assert host(passwd=[user("demo", 1000)], receipts=receipts)["prepared"] == expected
+    logins = host(passwd=[user("demo", 1000)], receipts=receipts)
+    assert logins["prepared"] == expected and logins["uncertain"] is (False if expected else None)
 
 
 @pytest.mark.parametrize("size,expected", [(98304, [DEMO]), (98305, None)])
 def test_a_receipt_over_96_kib_reads_as_unknown(host, size, expected):
-    assert host(passwd=[user("demo", 1000)], receipts=[sized(size)])["prepared"] == expected
+    logins = host(passwd=[user("demo", 1000)], receipts=[sized(size)])
+    assert logins["prepared"] == expected and logins["uncertain"] is (False if expected else None)
 
 
 def test_symlinks_and_non_files_in_the_store_are_skipped(host, tmp_path):
@@ -545,7 +599,8 @@ def test_symlinks_and_non_files_in_the_store_are_skipped(host, tmp_path):
     (host.store / "11111111-1111-4111-8111-111111111111.json").symlink_to(outside)
     (host.store / "22222222-2222-4222-8222-222222222222.json").symlink_to(tmp_path / "dangling")
     (host.store / "33333333-3333-4333-8333-333333333333.json").mkdir()
-    assert host(passwd=[user("demo", 1000)])["prepared"] == []
+    # Skipped for prepared; the leaf would refuse to read each, so doubt.
+    assert host(passwd=[user("demo", 1000)]) == {"team": None, "next_uid": 1001, "prepared": [], "uncertain": None}
 
 
 @pytest.mark.parametrize("damage", ["store-link", "parent-link", "store-file", "parent-file"])
@@ -563,7 +618,8 @@ def test_a_redirected_store_reads_as_unknown(host, tmp_path, damage):
     else:
         host.store.parent.rmdir()
         host.store.parent.write_bytes(receipt())
-    assert host(passwd=[user("demo", 1000)])["prepared"] is None
+    logins = host(passwd=[user("demo", 1000)])
+    assert logins["prepared"] is None and logins["uncertain"] is None
 
 
 def test_nothing_read_is_executed(host):
@@ -573,7 +629,9 @@ def test_nothing_read_is_executed(host):
     group = [f"{evil}:x:1002:{evil}"]
     host.store.mkdir(mode=0o700)
     (host.store / (evil + ".json")).write_bytes(receipt(hooks=[evil]))
-    assert host(passwd=passwd, group=group) == {"team": None, "next_uid": 1003, "prepared": [DEMO]}
+    # The evil name is no receipt name, so whether an operation is pending is doubt.
+    assert host(passwd=passwd, group=group) == {"team": None, "next_uid": 1003, "prepared": [DEMO],
+                                                "uncertain": None}
 
 
 def test_the_environment_cannot_move_the_files_it_reads(inventory, tmp_path):
@@ -596,10 +654,11 @@ def test_the_environment_cannot_move_the_files_it_reads(inventory, tmp_path):
         assert {"name": "decoy", "uid": 54321} not in (logins["prepared"] or [])
 
 
-def test_the_worst_case_stays_small_and_fast(host):
+def test_the_worst_case_stays_small_and_fast(host, tmp_path):
     # 512-line, 64 KiB account files; 128 receipts of 96 KiB, each shaped like
     # the leaf's with its full 16,000 characters of brace-heavy hook text. Every
-    # receipt is read: the two that count come last.
+    # receipt is read: the two that count come last. The team check answers
+    # its longest word at once; its own worst case is timed further down.
     longest = {"a" * 31 + "b": 59998, "a" * 31 + "c": 59997}
     passwd = [f"claudlobby:x:9999999999:1::{HOME}:/bin/bash",
               *(user(name, uid) for name, uid in longest.items())]
@@ -613,14 +672,21 @@ def test_the_worst_case_stays_small_and_fast(host):
         data = receipt(name, uid, hooks=[*hooks, "x" * (98304 - base)])
         assert len(data) == 98304
         (host.store / f"{n:08d}-0000-4000-8000-000000000000.json").write_bytes(data)
+    longest_word = max(TEAM_CODES, key=len)
+    python = stand_in(tmp_path, "printf '%s\\n'", longest_word)
     started = time.monotonic()
-    logins = host(passwd=None, group=None, architecture=b"a" * 32 + b"\n", user=b"r" * 64 + b"\n")
+    logins = host(passwd=None, group=None, architecture=b"a" * 32 + b"\n", user=b"r" * 64 + b"\n",
+                  python=python)
     elapsed = time.monotonic() - started
+    # The longest answer: well inside the 8 KiB promised (16 KiB the cap).
+    output = host.inventory.last.stdout
+    assert len(output) < 2048, len(output)
     for name in ("passwd", "group"):
         text = (host.files / name).read_bytes()
         assert len(text) <= 65536 and text.count(b"\n") == 512
-    assert logins == {"team": {"uid": 9999999999}, "next_uid": 59999,
-                      "prepared": [{"name": name, "uid": uid} for name, uid in longest.items()]}
+    assert logins == {"team": {"uid": 9999999999, "policy": longest_word}, "next_uid": 59999,
+                      "prepared": [{"name": name, "uid": uid} for name, uid in longest.items()],
+                      "uncertain": False}
     # Root mode runs under dash on Ubuntu: 3 seconds. bash 3.2, /bin/sh on a
     # Mac (where root mode never runs), splits braces more slowly, and a shared
     # macOS runner took 6.2 seconds: 15 there, which still catches a run whose
@@ -632,8 +698,8 @@ def test_the_worst_case_stays_small_and_fast(host):
 
 
 def leaf_module():
-    body = LEAF.read_text().split("# BEGIN EMBEDDED PYTHON\n", 1)[1].split("# END EMBEDDED PYTHON\n", 1)[0]
     module = types.ModuleType("linux_system_leaf")
+    body = leaf_body()
     exec(compile(body, str(LEAF), "exec"), module.__dict__)
     return module
 
@@ -698,10 +764,557 @@ def test_a_receipt_the_leaf_writes_is_one_the_probe_reads(host, tmp_path, monkey
     approval = {**{k: v for k, v in request.items() if k != "kind"}, "selection": record["selection"],
                 "digest": record["digest"], "decision": "approve"}
     assert leaf.execute("apply", approval, source, None)["submission"] == "exec_acknowledged"
+    dispatched = (store / (request_id + ".json")).read_bytes()
     leaf.private_worker(request_id, leaf.artifact_path(sha), None)
     completed = (store / (request_id + ".json")).read_bytes()
     assert json.loads(completed)["state"] == "completed" and len(effects) == 2
     assert b"Post-Invoke {" in completed and b'\\"state\\":\\"completed\\"' in completed
     accounts = [user("demo", 1000)]
-    assert host(passwd=accounts, receipts=[planned])["prepared"] == []
-    assert host(passwd=accounts, receipts=[completed])["prepared"] == [DEMO]
+    assert host(passwd=accounts, receipts=[planned]) == {"team": None, "next_uid": 1001, "prepared": [],
+                                                         "uncertain": False}
+    assert host(passwd=accounts, receipts=[completed]) == {"team": None, "next_uid": 1001, "prepared": [DEMO],
+                                                           "uncertain": False}
+    # Dispatched and not yet finished: an operation with no recorded end.
+    assert json.loads(dispatched)["state"] == "dispatched"
+    assert host(passwd=accounts, receipts=[dispatched])["uncertain"] is True
+
+
+# The team account check: as root on Linux, after a claudlobby line, the probe
+# runs Python on a copy of the leaf's own team_policy and reports one word.
+
+from tests.test_linux_system_preinstall import (  # noqa: E402
+    POLICY_REFUSALS, TEAM_HOME, UBUNTU_NSSWITCH, UBUNTU_SUDOERS, Computer, _set, _team, _then, directory_node, node,
+    payload)
+
+# What the copy holds, each byte for byte the leaf's, beside its own main.
+COPIED = ("OWNER", "LIMIT", "TEAM", "TEAM_HOME", "PATHS", "Refusal", "require", "trusted_parents", "lookup",
+          "lstat", "read_root", "directory_service", "subordinate", "team_lines", "sudo_rules", "team_policy")
+IMPORTS = ["import os", "import re", "import signal", "import stat", "import pwd", "import grp",
+           "from pathlib import Path"]
+
+
+def leaf_body():
+    return LEAF_SOURCE.split("# BEGIN EMBEDDED PYTHON\n", 1)[1].split("# END EMBEDDED PYTHON\n", 1)[0]
+
+
+def team_check_block():
+    return PROBE_SOURCE.split("# BEGIN TEAM POLICY COPY\n", 1)[1].split("# END TEAM POLICY COPY\n", 1)[0]
+
+
+def top_level(source):
+    """Each top-level definition or single-name assignment, by its source text."""
+    named = {}
+    for item in ast.parse(source).body:
+        if isinstance(item, (ast.FunctionDef, ast.ClassDef)):
+            named[item.name] = ast.get_source_segment(source, item)
+        elif isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+            named[item.targets[0].id] = ast.get_source_segment(source, item)
+    return named
+
+
+def refusal_codes(source):
+    """Every code the source can refuse with: require(..., "code"),
+    Refusal("code") and sudo_rules("code")."""
+    codes = set()
+    for item in ast.walk(ast.parse(source)):
+        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name):
+            position = {"require": 1, "Refusal": 0, "sudo_rules": 0}.get(item.func.id)
+            if position is not None and len(item.args) > position and isinstance(item.args[position], ast.Constant):
+                codes.add(item.args[position].value)
+    return codes
+
+
+def stand_in(tmp_path, body, *words):
+    """An interpreter in Python's place: a shell script that ignores its
+    arguments and runs body, then each word quoted."""
+    path = tmp_path / "interpreter" / "python3"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("#!/bin/sh\n" + body + "".join(" '" + word + "'" for word in words) + "\n")
+    path.chmod(0o755)
+    return path
+
+
+# Python's place for the copy itself: the real interpreter, isolated as the
+# probe runs it, on the very block the probe passes, with the account lookup
+# and file metadata of a fixture Computer from the leaf's own tests. The copy's
+# definitions run unchanged; only the fixture's paths, owner and lstat replace
+# its globals, as the leaf tests replace the leaf's, and then main runs.
+FAKE_SYSTEM = '''
+import json
+import os
+import sys
+import time
+import types
+
+spec = json.loads(open(sys.argv[1], "rb").read())
+code = sys.argv[2]
+users, groups, nodes = spec["users"], spec["groups"], spec["nodes"]
+
+
+def fault():
+    if spec["fault"] == "hang":
+        time.sleep(60)
+    if spec["fault"] == "raise":
+        raise RuntimeError("fixture")
+
+
+def user(name):
+    fault()
+    return types.SimpleNamespace(**{"pw_name": name, "pw_shell": "/bin/bash", "pw_passwd": "x", **users[name]})
+
+
+def group(name):
+    entry = groups[name]
+    return types.SimpleNamespace(gr_name=name, gr_gid=entry["gid"], gr_mem=list(entry["mem"]),
+                                 gr_passwd=entry.get("passwd", "x"))
+
+
+def by_uid(uid):
+    for name, entry in users.items():
+        if entry["pw_uid"] == uid:
+            return user(name)
+    if uid in spec["nss_uids"]:
+        return types.SimpleNamespace(pw_name="dynamic", pw_uid=uid, pw_gid=uid, pw_dir="/", pw_shell="/bin/false")
+    raise KeyError(uid)
+
+
+def by_gid(gid):
+    for name, entry in groups.items():
+        if entry["gid"] == gid:
+            return group(name)
+    if gid in spec["nss_gids"]:
+        return types.SimpleNamespace(gr_name="dynamic", gr_gid=gid, gr_mem=[], gr_passwd="x")
+    raise KeyError(gid)
+
+
+pwd = types.ModuleType("pwd")
+pwd.getpwnam, pwd.getpwuid, pwd.getpwall = user, by_uid, lambda: [user(name) for name in users]
+grp = types.ModuleType("grp")
+grp.getgrnam, grp.getgrgid, grp.getgrall = group, by_gid, lambda: [group(name) for name in groups]
+sys.modules.update(pwd=pwd, grp=grp)
+os.getgrouplist = lambda name, gid: [gid] + [entry["gid"] for entry in groups.values() if name in entry["mem"]]
+if spec["root"]:
+    os.geteuid = lambda: 0
+if spec["alarm"]:
+    code = code.replace("signal.alarm(4)", "signal.alarm(%d)" % spec["alarm"])
+namespace = {"__name__": "team_check_fixture"}
+exec(compile(code, "<team check>", "exec"), namespace)
+namespace.update(OWNER=spec["owner"], PATHS=spec["paths"], trusted_parents=lambda path: None,
+                 lstat=lambda path: types.SimpleNamespace(**nodes[str(path)]) if str(path) in nodes else None)
+namespace["main"]()
+'''
+
+
+def fake_python(tmp_path, computer, fault=None, root=True, alarm=None):
+    """Writes the interpreter for one run of the copy against computer."""
+    folder = tmp_path / "fake-python"
+    folder.mkdir(exist_ok=True)
+    spec = {"users": computer.users, "groups": computer.groups, "nss_uids": sorted(computer.nss_uids),
+            "nss_gids": sorted(computer.nss_gids), "owner": computer.module.OWNER, "paths": computer.module.PATHS,
+            "nodes": {path: vars(entry) for path, entry in computer.nodes.items()},
+            "fault": fault, "root": root, "alarm": alarm}
+    (folder / "spec.json").write_text(json.dumps(spec))
+    (folder / "system.py").write_text(FAKE_SYSTEM)
+    interpreter = folder / "python3"
+    interpreter.write_text("#!/bin/sh\n"
+                           '[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = "-I -S -B -c" ] || exit 97\n'
+                           f"exec '{sys.executable}' -I -S -B '{folder / 'system.py'}' '{folder / 'spec.json'}' \"$5\"\n")
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def raw_leaf_verdict(module):
+    try:
+        module.team_policy()
+    except module.Refusal as error:
+        return error.code
+    except Exception as error:  # KeyError from NSS, OSError from a file
+        return type(error).__name__
+    return "conforms"
+
+
+def as_reported(code):
+    """The word the probe reports for a leaf answer."""
+    return code if code in ("conforms",) + TEAM_CODES else "unknown"
+
+
+def judge_both(computer, inventory, tmp_path, after=None, **spec):
+    """The leaf's own team_policy, then the probe end to end, on one computer."""
+    computer.write()
+    if after:
+        after(computer)
+    leaf = raw_leaf_verdict(computer.module)
+    python = fake_python(tmp_path, computer, **spec)
+    computer.monkeypatch.undo()  # the leaf fixture patches pathlib and os
+    started = time.monotonic()
+    _result, data = inventory(uid=b"0\n", user=b"root\n", python=python)
+    return leaf, data["logins"], time.monotonic() - started
+
+
+def sudo_never_read(c):
+    # sudo skips these names in sudoers.d, and reads none of these as a rule.
+    c.sudoers_d.update({"team~": "claudlobby ALL=(ALL) NOPASSWD:ALL\n", "team.disabled": "claudlobby ALL=(ALL) ALL\n",
+                        "90-team.dpkg-old": "claudlobby ALL=(ALL) ALL\n", "another": "claudlobby_old ALL=(ALL) ALL\n",
+                        "includes": "#includedir /etc/sudoers.d\n@includedir   /etc/sudoers.d  \n#includes no other\n"})
+
+
+def writable(name):
+    return lambda c: (c.files / "sudoers.d" / name).chmod(0o666)
+
+
+def linked(name):
+    return lambda c: (c.files / "sudoers.d" / name).symlink_to(c.files / "sudoers")
+
+
+def lines_up_to(limit, line):
+    """Whole lines from line(n), as many as fit in limit bytes."""
+    text, n = "", 0
+    while len(text) + len(line(n)) <= limit:
+        text, n = text + line(n), n + 1
+    return text
+
+
+# The shared table: every case the leaf tests refuse a present team account
+# with, and these, each (what the probe reports, change, after writing).
+TEAM_CASES = {
+    **{name: (code, change, None) for name, (code, _uid, change) in POLICY_REFUSALS.items()},
+    "conforms": ("conforms", _team(), None),
+    "conforms-star-no-ageing": ("conforms", _then(_team(), _set(
+        "shadow", claudlobby="claudlobby:*:20000:0:-1:7:-1:-1:")), None),
+    "conforms-no-last-change": ("conforms", _then(_team(), _set("shadow", claudlobby="claudlobby:!::0::7:::")), None),
+    "conforms-padded-last-change": ("conforms", _then(_team(), _set(
+        "shadow", claudlobby="claudlobby:!:010:0::7:::")), None),
+    "conforms-empty-mail-spool": ("conforms", _then(_team(), lambda c: c.nodes.update(
+        {"/var/mail/claudlobby": node(0o100000, 0o660, 1500)})), None),
+    "conforms-no-gshadow-line": ("conforms", _then(_team(), lambda c: c.gshadow.pop("claudlobby")), None),
+    "conforms-gshadow-star": ("conforms", _then(_team(), _set("gshadow", claudlobby="claudlobby:*::")), None),
+    "conforms-sudo-never-read": ("conforms", _then(_team(), sudo_never_read), None),
+    "conforms-ubuntu-nsswitch": ("conforms", _then(_team(), _set("extra", nsswitch=UBUNTU_NSSWITCH)), None),
+    "home-0755": ("team_account_home", _then(_team(), lambda c: c.nodes.update(
+        {TEAM_HOME: directory_node(0o755, 1500)})), None),
+    "home-a-file": ("team_account_home", _then(_team(), lambda c: c.nodes.update(
+        {TEAM_HOME: node(0o100000, 0o700, 1500)})), None),
+    "subuid-range": ("team_account_ids", _then(_team(), _set("extra", subuid="fixture:1000:1000\n")), None),
+    "subuid-its-id": ("team_account_ids", _then(_team(), _set("extra", subuid="1500:165536:65536\n")), None),
+    "subgid-its-name": ("team_account_ids", _then(_team(), _set("extra", subgid="claudlobby:165536:65536\n")), None),
+    "shadow-over-limit": ("team_account_password", _then(_team(), _set("shadow", big="big:!:" + "x" * 262144)), None),
+    "gshadow-over-limit": ("team_account_group", _then(_team(), _set("gshadow", big="big:!::" + "x" * 262144)), None),
+    "nsswitch-over-64-kib": ("team_directory_service", _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\n" + "#" * 65536 + "\n")), None),
+    "sudoers-over-64-kib": ("team_account_sudo", _then(_team(), _set(
+        "extra", sudoers=UBUNTU_SUDOERS + "#" * 65536 + "\n")), None),
+    "sudo-hex-escaped-capital": ("team_account_sudo", _then(_team(), _set(
+        "sudoers_d", team="\\x43laudlobby ALL=(ALL) ALL\n")), None),
+    "sudo-continued-then-escaped": ("team_account_sudo", _then(_team(), _set(
+        "sudoers_d", team="claud\\\n\\x6cobby ALL=(ALL) ALL\n")), None),
+    "sudo-include-one-file": ("team_account_sudo", _then(_team(), _set(
+        "sudoers_d", team="@include /etc/sudoers.d/team\n")), None),
+    "sudoers-a-last-backslash": ("team_account_sudo", _then(_team(), _set("sudoers_d", team="# done \\\n")), None),
+    # What the leaf refuses with a code the website does not take, or raises:
+    # the probe reports unknown.
+    "sudoers-d-writable": ("unknown", _team(), writable("README")),
+    "sudoers-d-link": ("unknown", _team(), linked("teamlink")),
+    "nss-misses-the-line": ("unknown", lambda c: setattr(
+        c, "passwd_tail", f"claudlobby:x:1500:1500::{TEAM_HOME}:/bin/bash\n"), None),
+}
+RAW = {"sudoers-d-writable": "unsafe_file", "sudoers-d-link": "OSError", "nss-misses-the-line": "KeyError"}
+
+
+def test_the_team_check_is_the_leafs_own_byte_for_byte():
+    block = team_check_block()
+    copied, original = top_level(block), top_level(leaf_body())
+    assert set(copied) == set(COPIED) | {"main"}
+    for name in COPIED:
+        assert copied[name] == original[name], name
+    # Nothing else runs: its imports, those definitions, main and its guard.
+    rest = [ast.unparse(item) for item in ast.parse(block).body
+            if not isinstance(item, (ast.FunctionDef, ast.ClassDef, ast.Assign))]
+    assert rest == IMPORTS + ["if __name__ == '__main__':\n    main()"]
+    # Nothing is missing either: every global a definition reads is in the
+    # copy, imported by it, or a builtin.
+    known = set(copied) | {"os", "re", "signal", "stat", "pwd", "grp", "Path"} | set(dir(builtins))
+
+    def read_globals(table):
+        names = set(table.get_globals()) if isinstance(table, symtable.Function) else set()
+        for child in table.get_children():
+            names |= read_globals(child)
+        return names
+    assert read_globals(symtable.symtable(block, "team check", "exec")) <= known
+    # The shell hands Python exactly this block, between its marker lines.
+    assert PROBE_SOURCE.count("team_check='") == 1
+    value = PROBE_SOURCE.split("\nteam_check='", 1)[1].split("'", 1)[0]
+    assert value == "\n# BEGIN TEAM POLICY COPY\n" + block + "# END TEAM POLICY COPY\n"
+    assert block.count("signal.alarm(4)") == 1
+    # The leaf is unchanged by this copy and still under its limit.
+    assert len(LEAF_SOURCE.encode()) <= 61440
+
+
+def test_the_table_covers_every_code_and_the_probe_takes_only_the_team_codes():
+    copied = "\n\n".join(top_level(team_check_block())[name] for name in COPIED)
+    codes = refusal_codes(copied)
+    # The nine team codes, and two file checks reported as unknown.
+    assert codes == set(TEAM_CODES) | {"unsafe_parent", "unsafe_file"}
+    assert {expected for expected, _change, _after in TEAM_CASES.values()} == set(POLICIES)
+    # The shell admits exactly those nine and conforms.
+    admitted = re.search(r"case \"\$word\" in\n(.*?)\n        \*\) return 0", PROBE_SOURCE, re.S)[1]
+    assert set(re.findall(r"[a-z_]+", admitted.replace(";;", " "))) == {"conforms", *TEAM_CODES}
+
+
+@pytest.mark.parametrize("name", sorted(TEAM_CASES))
+def test_the_probe_and_the_leaf_judge_the_team_account_alike(name, inventory, tmp_path, monkeypatch):
+    expected, change, after = TEAM_CASES[name]
+    computer = Computer(payload(), monkeypatch, tmp_path)
+    change(computer)
+    uid = computer.users.get("claudlobby", {"pw_uid": 1500})["pw_uid"]
+    leaf, logins, _elapsed = judge_both(computer, inventory, tmp_path, after)
+    assert leaf == RAW.get(name, expected)
+    assert logins["team"] == {"uid": uid, "policy": as_reported(leaf)}
+    assert as_reported(leaf) == expected
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("printf '%s\\n'", "conforms"), ("printf '%s\\n' team_account_shell; :", "team_account_shell"),
+    ("printf '%s\\n' conforms; exit 1", "unknown"), ("exit 0", "unknown"), ("printf '%s'", "unknown"),
+    ("printf '%s\\n%s\\n' conforms", "unknown"), ("printf '%s\\n' conforming; :", "unknown"),
+    ("printf '%s\\n' unsafe_file; :", "unknown"), ("printf '%s\\n' unsafe_parent; :", "unknown"),
+    ("printf '%s\\n' unknown; :", "unknown"), ("printf '%s\\n' Conforms; :", "unknown"),
+    ("printf '%s\\n' team_account_; :", "unknown"), ("printf '%0300d\\n' 0; :", "unknown"),
+    ("printf '%s\\n' team_account_uid; printf '%0300d' 0; :", "unknown"),
+    ("printf '%s\\n' conforms >&2; :", "unknown"), ("kill -ALRM $$; printf '%s\\n'", "unknown"),
+], ids=["conforms", "a-code", "then-fails", "silent", "no-newline", "two-lines", "another-word", "unsafe-file",
+        "unsafe-parent", "unknown-itself", "capital", "a-prefix", "oversize", "then-oversize", "stderr-only",
+        "stopped"])
+def test_only_one_admitted_word_and_a_clean_exit_is_an_answer(host, tmp_path, body, expected):
+    python = stand_in(tmp_path, body, "conforms")
+    logins = host(passwd=[user("claudlobby", 1500)], python=python)
+    assert logins["team"] == {"uid": 1500, "policy": expected}
+
+
+@pytest.mark.parametrize("damage", ["missing", "not-executable", "a-folder"])
+def test_no_runnable_python_is_unknown_and_nothing_runs(host, tmp_path, damage):
+    marker = tmp_path / "ran"
+    python = stand_in(tmp_path, f"printf x >'{marker}'; printf '%s\\n'", "conforms")
+    if damage == "missing":
+        python.unlink()
+    elif damage == "not-executable":
+        python.chmod(0o644)
+    else:
+        python.unlink()
+        python.mkdir()
+    assert host(passwd=[user("claudlobby", 1500)], python=python)["team"] == {"uid": 1500, "policy": "unknown"}
+    assert not marker.exists()
+
+
+def test_without_a_team_line_python_never_runs_and_uncertain_is_still_reported(host, tmp_path):
+    marker = tmp_path / "ran"
+    python = stand_in(tmp_path, f"printf x >'{marker}'; printf '%s\\n'", "conforms")
+    logins = host(passwd=[user("demo", 1000)], receipts=[receipt(state="running")], python=python)
+    assert logins == {"team": None, "next_uid": 1001, "prepared": [], "uncertain": True}
+    assert not marker.exists()
+    # Off Linux or not root, no logins at all, and no Python.
+    for changes in ({"system": "Darwin"}, {"uid": b"1001\n"}):
+        result, data = host.inventory(user=b"root\n", python=python, **{"uid": b"0\n", **changes})
+        assert data["logins"] is None and not marker.exists()
+
+
+@pytest.mark.parametrize("fault,root,expected", [(None, True, "conforms"), ("raise", True, "unknown"),
+                                                 ("hang", True, "unknown"), (None, False, "unknown")],
+                         ids=["answers", "raises", "hangs", "not-root"])
+def test_the_copy_fails_closed(inventory, tmp_path, monkeypatch, fault, root, expected):
+    if not root and os.geteuid() == 0:
+        pytest.skip("the suite runs as root, so the copy cannot run as another account")
+    computer = Computer(payload(), monkeypatch, tmp_path)
+    computer.add_team(1500)
+    # The shipped alarm is 4 seconds; here 1, so the hang ends quickly.
+    leaf, logins, elapsed = judge_both(computer, inventory, tmp_path, fault=fault, root=root, alarm=1)
+    assert leaf == "conforms" and logins["team"] == {"uid": 1500, "policy": expected}
+    assert elapsed < 10
+    if fault == "hang":
+        assert elapsed >= 1
+
+
+def test_the_real_interpreter_runs_the_block_isolated(host, tmp_path):
+    """The real interpreter on the shipped block, as the probe runs it. Not root
+    here, so the block answers nothing; whatever the environment says, Python
+    imports nothing from it and runs no startup file."""
+    marker = tmp_path / "injected"
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    for name in ("pwd", "grp", "stat", "signal", "sitecustomize", "usercustomize"):
+        (evil / f"{name}.py").write_text(f"open({str(marker)!r}, 'a').write({name!r})\n")
+    (evil / "startup.py").write_text(f"open({str(marker)!r}, 'a').write('startup')\n")
+    env = {"PYTHONPATH": evil, "PYTHONSTARTUP": evil / "startup.py", "PYTHONINSPECT": "1", "PYTHONUSERBASE": evil}
+    host(passwd=[user("claudlobby", 1500)])  # writes the account files
+    result, data = host.inventory(uid=b"0\n", user=b"root\n", python=Path(sys.executable), env=env.items())
+    assert result.returncode == 0 and not marker.exists()
+    if os.geteuid() != 0:
+        assert data["logins"]["team"] == {"uid": 1500, "policy": "unknown"}
+        # It compiled, imported its modules and stopped at its root check.
+        ran = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", team_check_block()], cwd=tmp_path,
+                             env=constructed_env(**{k: str(v) for k, v in env.items()}), stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=30)
+        assert (ran.returncode, ran.stdout, ran.stderr, marker.exists()) == (3, b"", b"", False)
+
+
+def test_the_team_checks_worst_case_is_fast(inventory, tmp_path, monkeypatch):
+    """Every file the copy reads at its bound, each shaped to cost the most:
+    sudoers files of escapes and continued lines, 64 of them, 512 accounts."""
+    computer = Computer(payload(), monkeypatch, tmp_path)
+    computer.add_team(1500)
+    for n in range(500):
+        computer.users[f"u{n}"] = {"pw_uid": 2000 + n, "pw_gid": 2000 + n, "pw_dir": "/home/user"}
+        computer.groups[f"u{n}"] = {"gid": 2000 + n, "mem": [f"u{m}" for m in range(n % 8)]}
+    tail = "# end\n"
+    unit = "\\x41\\\n"
+    computer.sudoers_d = {f"r{n:02d}": unit * ((65536 - len(tail)) // len(unit)) + tail for n in range(64)}
+    padding = "# " + "\\x41" * ((65536 - len(UBUNTU_SUDOERS) - 3) // 4) + "\n"
+    computer.extra["sudoers"] = padding + UBUNTU_SUDOERS
+    lines = "passwd: files systemd\ngroup: files systemd\n"
+    computer.extra["nsswitch"] = lines * (65536 // len(lines))
+    computer.extra["subuid"] = computer.extra["subgid"] = lines_up_to(
+        65536, lambda n: f"r{n}:{100000 + n * 65536}:65536\n")
+    computer.shadow["filler"] = lines_up_to(262144 - 4096, lambda n: f"x{n}:!:20000:0:99999:7:::\n")[:-1]
+    computer.gshadow["filler"] = lines_up_to(262144 - 4096, lambda n: f"g{n}:!::x{n}\n")[:-1]
+    computer.write()
+    sizes = {name: (computer.files / name).stat().st_size for name in ("sudoers", "nsswitch", "subuid", "shadow",
+                                                                     "gshadow", "passwd")}
+    assert sizes["sudoers"] <= 65536 and sizes["nsswitch"] <= 65536 and sizes["subuid"] <= 65536
+    assert sizes["shadow"] <= 262144 and sizes["gshadow"] <= 262144 and sizes["passwd"] <= 65536
+    assert all((computer.files / "sudoers.d" / name).stat().st_size <= 65536 for name in computer.sudoers_d)
+    leaf, logins, elapsed = judge_both(computer, inventory, tmp_path)
+    assert leaf == "conforms" and logins["team"] == {"uid": 1500, "policy": "conforms"}
+    # The copy ends itself at 4 seconds; this case, the whole probe with its
+    # interpreter start, took about a second on a laptop.
+    assert elapsed < 3.5, f"the team check's worst case took {elapsed:.2f}s"
+
+
+# Whether setup's root store holds an uncertain operation, as the leaf's
+# no_pending judges each receipt: (kind, state, dispatch record, uncertain).
+SHAPES = {
+    "system-planned": ("system", "planned", False, False),
+    "system-completed": ("system", "completed", True, False),
+    "system-failed": ("system", "failed_partial", True, False),
+    "system-conflict": ("system", "conflict", True, False),
+    "system-dispatched": ("system", "dispatched", True, True),
+    "system-running": ("system", "running", True, True),
+    "system-unknown": ("system", "unknown", True, True),
+    "system-completed-undispatched": ("system", "completed", False, True),
+    "system-running-undispatched": ("system", "running", False, True),
+    "refresh-planned": ("index-refresh", "planned", False, False),
+    "refresh-completed": ("index-refresh", "completed", True, False),
+    "refresh-running": ("index-refresh", "running", True, True),
+    "refresh-failed-undispatched": ("index-refresh", "failed_partial", False, True),
+    "ingress-planned": ("ingress", "planned", False, False),
+    "ingress-no-op": ("ingress", "completed", False, False),
+    "ingress-completed": ("ingress", "completed", True, False),
+    "ingress-conflict": ("ingress", "conflict", True, False),
+    "ingress-failed": ("ingress", "failed_partial", True, False),
+    "ingress-dispatched": ("ingress", "dispatched", True, True),
+    "ingress-unknown": ("ingress", "unknown", True, True),
+    "ingress-unknown-undispatched": ("ingress", "unknown", False, True),
+}
+BOOT = "22222222-2222-4222-8222-222222222222"
+# The native unit as no_pending may find it: at rest, collected, or running.
+UNITS = {"quiet": {"LoadState": "loaded", "ActiveState": "inactive", "MainPID": "0"},
+         "collected": {"LoadState": "not-found", "ActiveState": "inactive", "MainPID": "0"},
+         "busy": {"LoadState": "loaded", "ActiveState": "active", "MainPID": "4242"}}
+
+
+def leaf_receipt(leaf, kind, state, dispatched, request_id):
+    """A receipt the leaf itself loads: its request id and its digest."""
+    record = json.loads(receipt(kind=kind, state=state))
+    if not dispatched:
+        record.pop("dispatch", None)
+        record.pop("submission", None)
+    record.update(request_id=request_id, digest=leaf.digest(record["proposal"]))
+    if kind == "ingress" and state == "completed" and not dispatched:
+        record["effect"] = "none_existing_exact_route"
+    return leaf.canonical(record)
+
+
+def leaf_no_pending(leaf, folder, monkeypatch, data, request_id, unit):
+    """The leaf's own no_pending over a store holding only data, with the unit
+    as given and nothing live observable (no route, no binding)."""
+    folder.mkdir(mode=0o700)
+    path = folder / (request_id + ".json")
+    path.write_bytes(data)
+    path.chmod(0o600)
+
+    def unobservable(*_args):
+        raise leaf.Refusal("native_unavailable")
+    for name, value in (("STORE", folder), ("OWNER", os.geteuid()), ("trusted_parents", lambda p: None),
+                        ("boot_id", lambda: BOOT), ("package_health", lambda: {}),
+                        ("unit_state", lambda name: dict(UNITS[unit])), ("binding", unobservable),
+                        ("api_get", unobservable)):
+        monkeypatch.setattr(leaf, name, value)
+    try:
+        leaf.no_pending(None)
+    except leaf.Refusal as error:
+        return error.code
+    return "admitted"
+
+
+@pytest.mark.parametrize("name", sorted(SHAPES))
+def test_uncertain_mirrors_how_the_leaf_judges_each_receipt(name, host, tmp_path, monkeypatch):
+    kind, state, dispatched, expected = SHAPES[name]
+    leaf = leaf_module()
+    request_id = "44444444-4444-4444-8444-444444444444"
+    data = leaf_receipt(leaf, kind, state, dispatched, request_id)
+    verdicts = {unit: leaf_no_pending(leaf, tmp_path / ("leaf-" + unit), monkeypatch, data, request_id, unit)
+                for unit in UNITS}
+    assert host(passwd=[user("demo", 1000)], receipts=[data])["uncertain"] is expected
+    if expected:
+        # Some native state makes the leaf refuse it as unfinished.
+        assert verdicts["busy"] in ("prior_operation_uncertain", "prior_operation_not_inactive"), verdicts
+    else:
+        # Finished and at rest, or collected: the leaf admits a new operation.
+        assert verdicts["quiet"] == verdicts["collected"] == "admitted", verdicts
+    # Wherever the leaf calls it uncertain with nothing observable live, so
+    # does the probe. (The other way, a dispatched system operation whose unit
+    # is at rest, the leaf admits and the probe still says true.)
+    if "prior_operation_uncertain" in verdicts.values():
+        assert expected
+
+
+DOUBT = {
+    "a-link": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").symlink_to(
+        tmp_path / "outside.json"),
+    "a-folder": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").mkdir(),
+    "another-name": lambda store, tmp_path: (store / "notes.json").write_bytes(receipt()),
+    "capital-name": lambda store, tmp_path: (store / "AAAAAAAA-1111-4111-8111-111111111111.json").write_bytes(
+        receipt()),
+    "not-json": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(b"x"),
+    "another-shape": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(
+        receipt(extra={"shadow": selection("evil", 1001)})),
+    "two-kinds": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(
+        receipt(extra={"note": {"a": 1, "kind": "ingress"}})),
+    "no-kind": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(
+        receipt().replace(b',"kind":"system"', b"")),
+    "a-state-not-a-word": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(
+        receipt(state="Completed")),
+    "oversize": lambda store, tmp_path: (store / "11111111-1111-4111-8111-111111111111.json").write_bytes(
+        sized(98305)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DOUBT))
+def test_doubt_reads_null_unless_an_operation_is_uncertain(host, tmp_path, name):
+    (tmp_path / "outside.json").write_bytes(receipt())
+    host.store.mkdir(mode=0o700)
+    DOUBT[name](host.store, tmp_path)
+    assert host(passwd=[user("demo", 1000)])["uncertain"] is None
+    # One uncertain receipt beside it, read before or after: true, whatever
+    # else is doubt.
+    for name in ("00000000-0000-4000-8000-000000000000", "ffffffff-ffff-4fff-8fff-ffffffffffff"):
+        (host.store / (name + ".json")).write_bytes(receipt(state="running"))
+        assert host(passwd=[user("demo", 1000)])["uncertain"] is True
+        (host.store / (name + ".json")).unlink()
+
+
+@pytest.mark.parametrize("receipts,expected", [
+    (None, False), ([], False), ([receipt(state="planned")] * 3, False),
+    ([receipt(), receipt(kind="ingress"), receipt(kind="index-refresh", state="failed_partial")], False),
+    ([receipt(), receipt(state="paused")], True), ([receipt(kind="ingress", state="unknown"), receipt()], True),
+], ids=["no-store", "empty-store", "only-planned", "only-finished", "a-state-never-written", "ingress-unknown"])
+def test_uncertain_over_the_whole_store(host, receipts, expected):
+    assert host(passwd=[user("demo", 1000)], receipts=receipts)["uncertain"] is expected
