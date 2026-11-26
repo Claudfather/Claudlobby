@@ -306,13 +306,14 @@ class TestNoWildcardGrant:
 
 # A home path names the operator's OS account, and this repo is public. #1306
 # cleaned the tree but added no gate, and four later PRs put the path back.
+# claudlobby is the team account setup creates, the product's own name.
 # An ALLOWLIST of placeholders, never a denylist: a denylist must carry the very
 # value it bans, and it cannot see a name nobody thought to list. A new
 # placeholder costs a line here; a missed real name is PII in a public repo.
 PLACEHOLDER_HOMES = frozenset(
     {
-        "alice", "botuser", "example", "olduser", "operator", "pi",
-        "runner", "ubuntu", "user", "x", "you",
+        "alice", "botuser", "claudlobby", "example", "olduser", "operator",
+        "pi", "runner", "ubuntu", "user", "x", "you",
     }
 )
 

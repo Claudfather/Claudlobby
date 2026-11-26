@@ -62,6 +62,7 @@ PLACEHOLDERS = [
     "Co-Authored-By: Claude <" + "noreply" + "@anthropic.com>",
     "mail " + "someone" + "@mailhost.com",
     "ls " + "/Users/x/Library /Users" + "/Shared/data /home/user./x /Users" + "/YOUR_USERNAME/.claude /home/alice",
+    "team " + "/home" + "/claudlobby/.config and /home" + "/claudlobby.",
     "dns " + "8.8.8.8",
     "sa " + "reporter" + "@your-project.iam.gserviceaccount.com",
     "fixture " + "5f0c2d1e" + "-0000-4000-8000-" + "000000000001",
