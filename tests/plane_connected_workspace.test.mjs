@@ -4777,6 +4777,26 @@ test('an answer this view never waited for, or one that is not an approval, neve
     assert.deepEqual(claudeButtons(l),['Link Claude'],name);
   }
 });
+// A begin the computer answered holds the session until it ends. A read that says it ended before the step's own check
+// does (the step then goes, and nothing checks it again) ends that hold, so Try again is sent.
+test('a read that shows an answered sign-in ended frees the session: Try again is sent, once',async t=>{
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+  claudeButton(l,'Link Claude').click();await flush();
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  const first=JSON.parse(beginCalls(l)[0].init.body).attempt_id;
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)));
+  holder.answer=linkAnswer({},signinPartOf({phase:'ended',attempt_id:first,state:'needs_attention',reason:'timeout',retryable:true}));
+  await focusPage(l);
+  assert.equal(claudeLine(l).textContent,'The sign-in took too long.');assert.deepEqual(claudeButtons(l),['Try again']);
+  claudeButton(l,'Try again').click();await flush();
+  assert.equal(beginCalls(l).length,2,'the Try again reached the computer');
+  assert.notEqual(JSON.parse(beginCalls(l)[1].init.body).attempt_id,first);
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),'its link shows');
+  assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&n.textContent===LINK_CLOSING_LINE));
+  fireShort(l);await flush();assert.equal(beginCalls(l).length,2,'once');
+});
 test('the view\'s Stop waiting timer ends with the view',async t=>{
   const {l}=await claudePage(t,linkAnswer());
   claudeButton(l,'Link Claude').click();await flush();

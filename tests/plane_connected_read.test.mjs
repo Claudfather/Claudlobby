@@ -941,6 +941,36 @@ test('a begin asked while a lost begin holds the session first checks that attem
   }
 });
 
+// The parts read names this approval's current attempt (provider.signin). Only one naming the held attempt, under its
+// approval, as ended (terminal, or its lease free: no worker runs it) releases the hold.
+const partsRead = (signin = {}) => ({ version: 1, computer: 'started', team: { state: 'none' }, teams: 0, bots: [], helper: { state: 'asleep' },
+  provider: { state: 'not_linked', link: 'available', signin: { ...attemptInput, phase: 'ended', state: 'needs_attention', reason: 'timeout',
+    code_sent: false, retryable: true, unconfirmed: false, ...signin } } });
+test('a parts read showing the held sign-in still live keeps the hold; one showing it ended releases it', async () => {
+  const h = signinHarness(); await h.api.connect();
+  assert.equal((await h.api.setupSignin('begin', attemptInput)).state, 'waiting');
+  const read = async signin => { h.overrides.set('setup/state', () => reply(200, partsRead(signin))); await h.api.setupState(); };
+  for (const [name, signin] of [['live', { phase: 'waiting', state: 'waiting', reason: null, retryable: false }],
+    ['starting', { phase: 'waiting', state: 'starting', reason: null, retryable: false }],
+    ['another attempt ended', { attempt_id: uuid(13) }], ['another approval ended', { generation: uuid(10) }],
+    ['ended, naming no attempt', { attempt_id: null }]]) {
+    await read(signin);
+    assert.equal(await h.api.renew(), false, name + ': still held'); assert.equal(renewals(h), 0, name);
+    await assert.rejects(h.api.setupSignin('begin', { ...attemptInput, attempt_id: uuid(14) }), error => error.code === 'signin_not_started', name);
+  }
+  assert.equal(signinCalls(h, 'begin').length, 1, 'never a second begin while it is live');
+  // A read sent before that attempt's own begin never releases it.
+  const early = signinHarness(); await early.api.connect();
+  const gate = deferred(); early.overrides.set('setup/state', () => gate.promise);
+  const reading = early.api.setupState(); await flush();
+  await early.api.setupSignin('begin', attemptInput);
+  gate.resolve(reply(200, partsRead())); await reading;
+  assert.equal(await early.api.renew(), false, 'a read sent before the begin releases nothing'); early.api.dispose();
+  await read({});
+  assert.equal(await h.api.renew(), true, 'ended: released'); assert.equal(renewals(h), 1);
+  h.api.dispose();
+});
+
 test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
   const h = signinHarness(); await h.api.connect();
   h.time = 600000; // 300 seconds left: not enough for a 630-second conversation

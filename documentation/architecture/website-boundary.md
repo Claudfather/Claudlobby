@@ -161,7 +161,9 @@ may have started, so its attempt is kept and Check sign-in progress offered.
 When core then refuses that check (it holds no such attempt), the begin never
 reached it: the closing line, and the browser releases the session hold it kept
 for that begin. A later begin first checks that attempt once, so two begins are
-never in flight. "Stop waiting" appears only after ten
+never in flight. A parts read naming the held attempt, under its approval, as
+ended (terminal, or its sign-in lease free) also releases the hold; a read
+naming no attempt or another one releases nothing. "Stop waiting" appears only after ten
 seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
 storage.
 

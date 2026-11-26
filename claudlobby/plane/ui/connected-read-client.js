@@ -94,9 +94,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   // While a sign-in conversation is admitted or live, no renewal may rotate the begin-time
   // bearer. ``renewalRun`` lets begin wait for a renewal already in flight.
   let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null, signinRenewing = false;
-  // signinLost: the begin {generation, attempt_id} that holds the session although its answer was lost, until the
-  // computer answers for that attempt or the hold ends.
-  let signinLost = null;
+  // signinHold: the begin {generation, attempt_id} that holds the session, when known; signinLost: that same begin
+  // while its answer is lost, until the computer answers for that attempt or the hold ends.
+  let signinHold = null, signinLost = null;
   const signinHeld = () => signinAdmitting || signinLive;
   const trackRenewal = run => {
     const clear = () => { if (renewalRun === run) renewalRun = null; };
@@ -122,7 +122,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   function wipe() {
     token = null; pending = null; expires = 0; renewalUnknown = false; setupOnly = false; setupSignedOut = false;
-    signinLive = false; signinLost = null; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
+    signinLive = false; signinHold = signinLost = null; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
     clearTimeout(expiryTimer); expiryTimer = null;
     clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
@@ -603,7 +603,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   const notStarted = message => Object.assign(new Error(message), {code: 'signin_not_started'});
   // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
   const refused = error => [400, 401, 403, 409].includes(error?.status);
-  const releaseSignin = () => { signinLive = false; signinLost = null; scheduleContinuity(); };
+  const releaseSignin = () => { signinLive = false; signinHold = signinLost = null; scheduleContinuity(); };
   async function signinBegin(input) {
     if (signinAdmitting || signinLive && !signinLost || disposed || ended) throw notStarted('A Claude sign-in is already open.');
     signinAdmitting = true; // from here no renewal path can start
@@ -627,13 +627,14 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           throw notStarted('Sign-in was not started. The session could not be renewed first.');
       }
       signinLive = true; // live from the moment begin is sent; an unknown outcome keeps it held
+      signinHold = uuid(input?.generation) && uuid(input?.attempt_id)
+        ? Object.freeze({generation: input.generation, attempt_id: input.attempt_id}) : null;
       const epochAtBegin = epoch;
       try { return settleSignin(await setupRequest('signin-begin', input)); }
       catch (error) {
         // A completed refusal means no attempt was admitted. A lost or unknown answer keeps the hold, and its attempt.
         if (epochAtBegin === epoch && refused(error)) releaseSignin();
-        else if (epochAtBegin === epoch && signinLive && uuid(input?.generation) && uuid(input?.attempt_id))
-          signinLost = Object.freeze({generation: input.generation, attempt_id: input.attempt_id});
+        else if (epochAtBegin === epoch && signinLive) signinLost = signinHold;
         throw error;
       }
     } finally { signinAdmitting = false; }
@@ -655,6 +656,19 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       throw error;
     });
   }
+  // The parts read. One that names the attempt holding the session as ended releases the hold, as a status naming its
+  // ending does: core names this approval's current attempt (provider.signin, owner_setup.py) and reads it ended only
+  // once it is terminal or its sign-in lease is free, so no worker runs it. Matched by attempt and approval, for the
+  // hold this read was sent under, in the same epoch; a read naming no attempt, or another, releases nothing.
+  function setupState() {
+    const hold = signinHold, at = epoch;
+    return setupRequest('state', {}).then(value => {
+      const signin = value?.version === 1 ? value.provider?.signin : null;
+      if (signinLive && hold && hold === signinHold && at === epoch && signin && typeof signin === 'object'
+        && signin.phase === 'ended' && signin.attempt_id === hold.attempt_id && signin.generation === hold.generation) releaseSignin();
+      return value;
+    });
+  }
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
     // Preview waits 95 s: the listener gives it 90 (owner_setup_http.py), and this side must never give up first.
@@ -672,7 +686,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   return Object.freeze({ connect, start: () => setupOnly ? lifecycle('status') : handle.start(), check, activity, continuity,
     renew, logout,
-    setupContext: () => setupRequest('context',{}), setupState: () => setupRequest('state',{}), setupPreview: input => setupRequest('preview',input),
+    setupContext: () => setupRequest('context',{}), setupState, setupPreview: input => setupRequest('preview',input),
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     setupSignin: (operation,input) => {
       if (!['begin','status','code','cancel'].includes(operation)) throw new Error('Unsupported sign-in action');
