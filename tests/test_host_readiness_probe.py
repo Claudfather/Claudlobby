@@ -622,10 +622,12 @@ def test_the_worst_case_stays_small_and_fast(host):
     assert logins == {"team": {"uid": 9999999999}, "next_uid": 59999,
                       "prepared": [{"name": name, "uid": uid} for name, uid in longest.items()]}
     # Root mode runs under dash on Ubuntu: 3 seconds. bash 3.2, /bin/sh on a
-    # Mac (where root mode never runs), splits braces more slowly: 6 seconds.
+    # Mac (where root mode never runs), splits braces more slowly, and a shared
+    # macOS runner took 6.2 seconds: 15 there, which still catches a run whose
+    # time grows with the square of the input (minutes at this size).
     bash = subprocess.run(["/bin/sh", "-c", 'printf %s "${BASH_VERSION-}"'],
                           capture_output=True, timeout=5).stdout
-    budget = 6 if bash else 3
+    budget = 15 if bash else 3
     assert elapsed < budget, f"worst case took {elapsed:.2f}s under {'bash' if bash else 'dash'}"
 
 
