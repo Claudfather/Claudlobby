@@ -234,4 +234,12 @@ def test_fixed_root_exception_does_not_grow_into_bot_supervision():
     source = path.read_text()
     # Occurrence ratchet, deliberately including comments like the bot ratchet.
     current = {name: source.count(f'"/usr/bin/{name}"') for name in ("systemctl", "systemd-run", "loginctl", "launchctl")}
-    assert current == {"systemctl": 2, "systemd-run": 1, "loginctl": 1, "launchctl": 0}
+    # The team account (16-02 C2): one fixed useradd, and no other account tool.
+    current["/usr/sbin/useradd"] = source.count('"/usr/sbin/useradd"')
+    assert current == {"systemctl": 2, "systemd-run": 1, "loginctl": 1, "launchctl": 0, "/usr/sbin/useradd": 1}
+    tools = ("useradd", "usermod", "userdel", "groupadd", "groupmod", "groupdel", "gpasswd", "chage", "passwd",
+             "chpasswd", "adduser", "deluser", "newusers")
+    assert re.findall(r'"/usr/s?bin/(' + "|".join(tools) + r')"', source) == ["useradd"]
+    others = [path.name for path in (REPO_DIR / "claudlobby/preinstall").glob("*.sh")
+              if path != REPO_DIR / "claudlobby/preinstall/linux-system-v1.sh" and "useradd" in path.read_text()]
+    assert not others, f"an account tool outside the fixed root bundle: {others}"

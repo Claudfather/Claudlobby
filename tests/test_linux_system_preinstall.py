@@ -899,3 +899,833 @@ def test_collected_terminal_worker_can_advance_but_uncertain_active_or_dirty_can
         with pytest.raises(module.Refusal) as error:module.execute("inspect",new,source,None)
         assert error.value.code==("package_intervention_required" if dirty else "prior_operation_not_inactive")
     assert module.receipt_path(value["request_id"]).read_bytes()==original
+
+
+# The team account, claudlobby (16-02 C2). Fixtures stand in for native root
+# facts only: account databases, root files, units, apt and the daemon.
+
+NODE_KEY = "nodekey:" + "a" * 64
+DNS = "fixture.example.ts.net"
+
+
+class Daemon:
+    """The system tailscaled's local API, read-only, as the leaf sees it."""
+    identity = {"pid": 812, "start": "4242", "binary_sha256": "f" * 64,
+                "binary": [64768, 131, 1700000000000000000, 30000000], "socket": [25, 1020, 1]}
+
+    def __init__(self, version, serve=None):
+        self.version, self.serve, self.reads = version, serve, []
+
+    def __call__(self, method, endpoint, body=None, etag=None):
+        assert method == "GET", "inspection never writes Serve"
+        self.reads.append(endpoint)
+        if endpoint == "status":
+            return 200, None, {"Version": self.version, "BackendState": "Running", "TUN": True,
+                               "Self": {"PublicKey": NODE_KEY, "DNSName": DNS + "."}, "CertDomains": [DNS]}
+        if endpoint == "profiles/current":
+            return 200, None, {"ID": "p001", "Name": "fixture"}
+        assert endpoint == "serve-config"
+        return 200, "fixture-etag", copy.deepcopy(self.serve)
+
+
+NATIVE = {
+    ("/usr/bin/systemctl", "--version"): "systemd 255 (255.4-1ubuntu8)\n",
+    ("/usr/bin/apt-get", "--version"): "apt 2.8.3 (amd64)\n",
+    ("/usr/bin/apt-config", "dump"): 'APT::Architecture "amd64";\nDPkg::Post-Invoke:: "/usr/bin/fixture-hook";\n',
+    ("/usr/bin/dpkg", "--audit"): "",
+    ("/usr/bin/dpkg", "--print-architecture"): "amd64\n",
+    ("/usr/bin/dpkg", "--print-foreign-architectures"): "",
+    ("/usr/bin/apt-mark", "showhold"): "",
+}
+INSTALLED = ("ii  git 1:2.43.0-1ubuntu7 amd64\nii  python3-venv 3.12.3-0ubuntu1 amd64\n"
+             "ii  ca-certificates 20240203 all\nii  tmux 3.4-1build1 amd64\n")
+SIMULATED = ("Inst libjq1 (1.7.1-3build1 Ubuntu:24.04/noble [amd64])\n"
+             "Inst jq (1.7.1-3build1 Ubuntu:24.04/noble [amd64])\n")
+
+
+def native_root(module, monkeypatch, accounts=None, units=None, effects=None):
+    """The real binding, manager, package and proposal code, as root on a
+    fixture Ubuntu 24.04. accounts maps a name to its pwd fields; absent names
+    raise KeyError as NSS does. units overrides unit states by name. effects,
+    when given, answers every effect and systemd-run. Returns every argv."""
+    import stat
+    from types import SimpleNamespace
+    accounts = {"fixture": {"pw_uid": 1001, "pw_gid": 1001, "pw_dir": "/home/user"}} if accounts is None else accounts
+
+    def entry(name):
+        fields = {"pw_name": name, "pw_shell": "/bin/bash", "pw_passwd": "x", **accounts[name]}
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(module.pwd, "getpwnam", entry)
+    monkeypatch.setattr(module, "trusted_parents", lambda path: None)
+    monkeypatch.setattr(module.Path, "read_text", lambda path: 'ID=ubuntu\nVERSION_ID="24.04"\n'
+                        if str(path) == "/etc/os-release" else pytest.fail(f"unexpected read {path}"))
+    monkeypatch.setattr(module.Path, "read_bytes", lambda path: b"synthetic-machine"
+                        if str(path) == "/etc/machine-id" else pytest.fail(f"unexpected read {path}"))
+    is_dir, lstat = module.Path.is_dir, module.Path.lstat
+    monkeypatch.setattr(module.Path, "is_dir", lambda path: str(path) == "/run/systemd/system" or is_dir(path))
+    monkeypatch.setattr(module.Path, "lstat", lambda path: SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_nlink=1)
+                        if str(path).startswith("/usr/lib/systemd/system/") else lstat(path))
+    states = {} if units is None else units
+
+    def unit_state(name):
+        template = name.split("@", 1)[0] + "@.service"
+        return {"LoadState": "loaded", "FragmentPath": "/usr/lib/systemd/system/" + template, "DropInPaths": "",
+                "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", **states.get(name, {})}
+    monkeypatch.setattr(module, "unit_state", unit_state)
+    calls = []
+
+    def native(argv, effect=False):
+        calls.append(argv)
+        if effect or argv[0] == "/usr/bin/systemd-run":
+            assert effects, f"unexpected effect {argv}"
+            return effects(argv)
+        if tuple(argv) in NATIVE:
+            return NATIVE[tuple(argv)]
+        if argv[0] == "/usr/bin/dpkg-query":
+            return INSTALLED
+        assert argv[:3] == ["/usr/bin/apt-get", "--no-install-recommends", "--no-remove"]
+        assert argv[-4:] == ["--simulate", "install", "--", "jq"]
+        return SIMULATED
+    monkeypatch.setattr(module, "native", native)
+    return calls
+
+
+GOLDEN = json.loads((ROOT / "tests/fixtures/linux-system-other-account-golden.json").read_text())
+
+
+@pytest.mark.parametrize("kind", ["system", "index-refresh", "ingress"])
+def test_other_accounts_proposals_match_the_golden_copy(monkeypatch, kind):
+    """Byte for byte what the leaf proposed for them before the team account."""
+    module = payload()
+    native_root(module, monkeypatch)
+    api = Daemon(module.NATIVE_VERSION)
+    derived = module.derive_selection(minimal_selection(), api)
+    assert module.canonical(derived).decode() == GOLDEN["selection"]
+    assert module.canonical(module.inspect_plan(kind, derived, api)).decode() == GOLDEN["proposals"][kind]
+    assert api.reads.count("serve-config") == (kind == "ingress")
+
+
+RID = "11111111-1111-4111-8111-111111111111"
+LATER = "55555555-5555-4555-8555-555555555555"
+TEAM_HOME = "/home/claudlobby"
+USERADD = ["/usr/sbin/useradd", "--uid", "1002", "--user-group", "--create-home", "--home-dir", TEAM_HOME,
+           "--shell", "/bin/bash", "--comment", "Claudlobby team", "--expiredate", "", "--inactive", "-1",
+           "--key", "HOME_MODE=0700", "--key", "SUB_UID_COUNT=0", "--key", "SUB_GID_COUNT=0",
+           "--key", "PASS_MAX_DAYS=-1", "--", "claudlobby"]
+# The record keys the website's decoder admits (lib/linux-system-transport.ts).
+RECORD_KEYS = {"schema_version", "request_id", "selection", "artifact_sha256", "proposal", "digest", "created_at",
+               "expires_at", "state", "effect", "dispatch", "submission", "response_code", "after_etag", "after_digest",
+               "post_attempted", "invocation_id", "hook_verified", "manager_observation", "native_returncode", "code"}
+ROOT_FILES = ("passwd", "group", "shadow", "gshadow", "subuid", "subgid", "nsswitch", "sudoers")
+# Ubuntu 24.04's own /etc/sudoers, cut to the lines that matter here.
+UBUNTU_SUDOERS = ("#\n# This file MUST be edited with the visudo command as root.\n#\nDefaults\tenv_reset\n"
+                  "Defaults\tuse_pty\n# (#1011624)\n#Defaults:%sudo env_keep += \"EDITOR\"\n"
+                  "root\tALL=(ALL:ALL) ALL\n%admin ALL=(ALL) ALL\n%sudo\tALL=(ALL:ALL) ALL\n\n"
+                  "# See sudoers(5) for more information on \"@include\" directives:\n\n@includedir /etc/sudoers.d\n")
+
+
+def node(kind, mode, uid, size=0):
+    from types import SimpleNamespace
+    return SimpleNamespace(st_mode=kind | mode, st_uid=uid, st_size=size, st_nlink=1)
+
+
+def directory_node(mode=0o700, uid=1002):
+    import stat
+    return node(stat.S_IFDIR, mode, uid)
+
+
+class Computer:
+    """A fixture Ubuntu computer for the team account. NSS answers from the
+    same entries its /etc files are written from; the useradd model adds the
+    team as Ubuntu does with the leaf's fixed arguments."""
+
+    def __init__(self, module, monkeypatch, tmp_path):
+        import hashlib
+        from types import SimpleNamespace
+        self.module, self.monkeypatch = module, monkeypatch
+        self.users = {"root": {"pw_uid": 0, "pw_gid": 0, "pw_dir": "/root"},
+                      "fixture": {"pw_uid": 1001, "pw_gid": 1001, "pw_dir": "/home/user"},
+                      "nobody": {"pw_uid": 65534, "pw_gid": 65534, "pw_dir": "/nonexistent",
+                                 "pw_shell": "/usr/sbin/nologin"}}
+        self.groups = {"root": {"gid": 0, "mem": []}, "sudo": {"gid": 27, "mem": ["fixture"]},
+                       "fixture": {"gid": 1001, "mem": []}, "nogroup": {"gid": 65534, "mem": []}}
+        self.shadow = {"root": "root:*:20000:0:99999:7:::", "fixture": "fixture:$6$salt$hash:20000:0:99999:7:::"}
+        self.gshadow = {"root": "root:*::", "sudo": "sudo:*::fixture", "fixture": "fixture:!::"}
+        self.extra = {"nsswitch": "passwd:         files systemd\ngroup:          files systemd\nshadow:         files\n",
+                      "subuid": "fixture:100000:65536\n", "subgid": "fixture:100000:65536\n",
+                      "sudoers": UBUNTU_SUDOERS}
+        self.sudoers_d = {"README": "# Files here are read unless a name ends in ~ or holds a dot.\n",
+                          "90-cloud-init-users": "# User rules for fixture\nfixture ALL=(ALL) NOPASSWD:ALL\n"}
+        self.passwd_tail = ""           # raw lines NSS does not answer for
+        self.nss_uids, self.nss_gids = set(), set()  # ids NSS answers for beyond the files
+        self.nodes, self.units, self.effects = {}, {}, []
+        self.useradd_rc, self.apt_rc, self.made_shell = 0, 0, "/bin/bash"
+        self.daemon = Daemon(module.NATIVE_VERSION)
+        # The store and staged source first: native_root fences pathlib reads.
+        store = tmp_path / "store"
+        store.mkdir(mode=0o700)
+        monkeypatch.setattr(module, "STORE", store)
+        self.source = tmp_path / "incoming.sh"
+        self.source.write_bytes(SCRIPT.read_bytes())
+        self.source.chmod(0o500)
+        self.sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        self.files = tmp_path / "root"
+        (self.files / "proc").mkdir(parents=True)
+        self.process(1, uid=0)
+        self.process(4242, uid=1001)
+        paths = {name: str(self.files / name) for name in ROOT_FILES + ("sudoers.d",)}
+        monkeypatch.setattr(module, "PATHS", {**module.PATHS, **paths, "proc": str(self.files / "proc")})
+        monkeypatch.setattr(module, "OWNER", os.geteuid())
+        native_root(module, monkeypatch, accounts=self.users, units=self.units, effects=self.effect)
+
+        def user(name):
+            return SimpleNamespace(**{"pw_name": name, "pw_shell": "/bin/bash", "pw_passwd": "x", **self.users[name]})
+
+        def group(name):
+            entry = self.groups[name]
+            return SimpleNamespace(gr_name=name, gr_gid=entry["gid"], gr_mem=list(entry["mem"]),
+                                   gr_passwd=entry.get("passwd", "x"))
+
+        def by_uid(uid):
+            for name, entry in self.users.items():
+                if entry["pw_uid"] == uid:
+                    return user(name)
+            if uid in self.nss_uids:
+                return SimpleNamespace(pw_name="dynamic", pw_uid=uid, pw_gid=uid, pw_dir="/", pw_shell="/bin/false")
+            raise KeyError(uid)
+
+        def by_gid(gid):
+            for name, entry in self.groups.items():
+                if entry["gid"] == gid:
+                    return group(name)
+            if gid in self.nss_gids:
+                return SimpleNamespace(gr_name="dynamic", gr_gid=gid, gr_mem=[], gr_passwd="x")
+            raise KeyError(gid)
+        monkeypatch.setattr(module.pwd, "getpwnam", user)
+        monkeypatch.setattr(module.pwd, "getpwuid", by_uid)
+        monkeypatch.setattr(module.pwd, "getpwall", lambda: [user(name) for name in self.users])
+        monkeypatch.setattr(module.grp, "getgrnam", group)
+        monkeypatch.setattr(module.grp, "getgrgid", by_gid)
+        monkeypatch.setattr(module.grp, "getgrall", lambda: [group(name) for name in self.groups])
+        monkeypatch.setattr(module.os, "getgrouplist", lambda name, gid: [gid] + [
+            entry["gid"] for entry in self.groups.values() if name in entry["mem"]])
+        monkeypatch.setattr(module, "lstat", lambda path: self.nodes.get(str(path)))
+        monkeypatch.setattr(module, "boot_id", lambda: "22222222-2222-4222-8222-222222222222")
+        # The manager wait has its own tests; here lingering is an effect seen.
+        monkeypatch.setattr(module, "wait_manager", lambda selected, expected: {
+            "configuration": expected, "runtime": {}, "ordinary_user_bus": "unproved"})
+        self.write()
+
+    def write(self):
+        passwd = "".join(f"{name}:{entry.get('pw_passwd', 'x')}:{entry['pw_uid']}:{entry['pw_gid']}::"
+                         f"{entry['pw_dir']}:{entry.get('pw_shell', '/bin/bash')}\n" for name, entry in self.users.items())
+        group = "".join(f"{name}:{entry.get('passwd', 'x')}:{entry['gid']}:{','.join(entry['mem'])}\n"
+                        for name, entry in self.groups.items())
+        contents = {"passwd": passwd + self.passwd_tail, "group": group,
+                    "shadow": "".join(line + "\n" for line in self.shadow.values()),
+                    "gshadow": "".join(line + "\n" for line in self.gshadow.values()), **self.extra}
+        for name in ROOT_FILES:
+            path = self.files / name
+            if name in contents:
+                path.write_text(contents[name])
+            elif path.exists():
+                path.unlink()
+        folder = self.files / "sudoers.d"
+        folder.mkdir(exist_ok=True)
+        for path in folder.iterdir():
+            path.unlink()
+        for name, text in self.sudoers_d.items():
+            (folder / name).write_text(text)
+
+    def process(self, pid, uid=None, gid=None):
+        uid, gid = (uid, uid if gid is None else gid) if uid is not None else (0, gid)
+        (self.files / "proc" / str(pid)).mkdir(exist_ok=True)
+        (self.files / "proc" / str(pid) / "status").write_bytes(
+            b"Name:\tfixture\nUid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\n" % ((uid,) * 4 + (gid,) * 4))
+
+    def add_team(self, uid, shell="/bin/bash"):
+        """What useradd makes with the leaf's arguments on Ubuntu 24.04."""
+        self.users["claudlobby"] = {"pw_uid": uid, "pw_gid": uid, "pw_dir": TEAM_HOME, "pw_shell": shell}
+        self.groups["claudlobby"] = {"gid": uid, "mem": []}
+        self.shadow["claudlobby"] = "claudlobby:!:20000:0::7:::"
+        self.gshadow["claudlobby"] = "claudlobby:!::"
+        self.nodes[TEAM_HOME] = directory_node(uid=uid)
+        self.write()
+
+    def effect(self, argv):
+        self.effects.append(argv)
+        if argv[0] == "/usr/bin/systemd-run":
+            return ""
+        if argv[0] == "/usr/sbin/useradd":
+            if self.useradd_rc == 0:
+                self.add_team(int(argv[argv.index("--uid") + 1]), self.made_shell)
+            return self.useradd_rc
+        if argv[:1] == ["/usr/bin/apt-get"] and argv[-1] != "update":
+            request_id = next(a for a in argv if a.startswith("DPkg::Pre-Install-Pkgs::=")).rsplit(" ", 1)[1]
+            current = self.module.load(request_id)
+            actions = current["proposal"]["packages"]["actions"]
+            current["hook_verified"] = {"invocation_id": current["invocation_id"], "actions_digest": self.module.digest(actions),
+                                        "counts": {"unpack": len(actions), "configure": len(actions)}}
+            self.module.save(current)
+            return self.apt_rc
+        assert argv[0] in ("/usr/bin/apt-get", "/usr/bin/loginctl"), argv
+        return 0
+
+    def done(self):
+        """The effects that change the computer, in order."""
+        return [argv for argv in self.effects if argv[0] != "/usr/bin/systemd-run"]
+
+    def inspect(self, kind="system", uid=1002, request_id=RID, account="claudlobby"):
+        value = {"schema_version": 1, "request_id": request_id, "artifact_sha256": self.sha, "kind": kind,
+                 "selection": {"account": account, "uid": uid, "node_key": NODE_KEY}}
+        return self.module.execute("inspect", value, self.source, self.daemon)
+
+    def apply(self, record):
+        value = {"schema_version": 1, "request_id": record["request_id"], "artifact_sha256": self.sha,
+                 "selection": record["selection"], "digest": record["digest"], "decision": "approve"}
+        return self.module.execute("apply", value, self.source, self.daemon)
+
+    def work(self, request_id=RID):
+        invocation = "6" * 32
+        self.monkeypatch.setenv("INVOCATION_ID", invocation)
+        unit = self.module.unit_name(request_id)
+        self.units[unit] = {"InvocationID": invocation, "MainPID": str(os.getpid()), "ActiveState": "active"}
+        self.module.private_worker(request_id, self.module.artifact_path(self.sha), self.daemon)
+        self.units[unit] = {"InvocationID": "", "MainPID": "0", "ActiveState": "inactive"}
+        return self.module.load(request_id)
+
+    def run(self, request_id=RID, uid=1002):
+        record = self.inspect(uid=uid, request_id=request_id)
+        assert self.apply(record)["submission"] == "exec_acknowledged"
+        return self.work(request_id)
+
+
+@pytest.fixture
+def computer(tmp_path, monkeypatch):
+    return Computer(payload(), monkeypatch, tmp_path)
+
+
+def test_an_absent_team_account_gets_a_create_proposal(computer):
+    module = computer.module
+    assert module.team_state() == "absent"
+    record = computer.inspect()
+    team = {"account": "claudlobby", "uid": 1002, "gid": 1002, "home": TEAM_HOME, "node_key": NODE_KEY, "profile_id": "p001"}
+    assert record["selection"] == team and record["proposal"]["binding"]["selection"] == team
+    proposal = record["proposal"]
+    assert set(proposal) == {"kind", "binding", "packages", "manager", "disclosure", "login"}
+    assert list(proposal["login"]) == ["account", "uid", "gid", "home", "shell", "state"]
+    assert proposal["login"] == {"account": "claudlobby", "uid": 1002, "gid": 1002, "home": TEAM_HOME,
+                                 "shell": "/bin/bash", "state": "create"}
+    assert proposal["disclosure"] == module.DISCLOSURE + " " + module.TEAM_DISCLOSURE
+    assert "Setup never removes this account." in proposal["disclosure"]
+    assert "serve-config" in computer.daemon.reads and computer.effects == []
+    # Only the team's system proposal carries the block.
+    refresh = computer.inspect(kind="index-refresh", request_id=LATER)["proposal"]
+    assert "login" not in refresh and refresh["binding"]["selection"] == team
+    with pytest.raises(module.Refusal) as error:
+        computer.inspect(kind="ingress", request_id="66666666-6666-4666-8666-666666666666")
+    assert error.value.code == "account_changed"
+
+
+def test_routes_on_other_ports_and_local_account_sources_are_admitted(computer):
+    computer.daemon.serve = {"TCP": {"8443": {"HTTPS": True}},
+                             "Web": {"other.example.ts.net:8443": {"Handlers": {"/": {"Text": "other"}}}}}
+    # glibc: a name ends at a colon or a space, a line starting with # names
+    # no database, and a later line replaces an earlier one; an action on
+    # another database does not touch accounts.
+    computer.extra["nsswitch"] = ("# local\npasswd: files\ngroup:files\n\tgroup files systemd\n"
+                                  "hosts: files mdns4_minimal [NOTFOUND=return] dns\n")
+    computer.extra["subuid"] = "fixture:100000:65536\nmalformed\n"
+    computer.write()
+    assert computer.inspect()["proposal"]["login"]["state"] == "create"
+
+
+UBUNTU_NSSWITCH = ("passwd:         files systemd\ngroup:          files systemd\nshadow:         files systemd\n"
+                   "gshadow:        files systemd\n\nhosts:          files mdns4_minimal [NOTFOUND=return] dns\n"
+                   "networks:       files\n\nprotocols:      db files\nservices:       db files\nethers:         db files\n"
+                   "rpc:            db files\n\nnetgroup:       nis\n")
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_ubuntu_s_own_nsswitch_is_admitted(computer, present):
+    if present:
+        computer.add_team(1500)
+    computer.extra["nsswitch"] = UBUNTU_NSSWITCH
+    computer.write()
+    assert computer.inspect(uid=1500 if present else 1002)["proposal"]["login"]["state"] == (
+        "present" if present else "create")
+
+
+@pytest.mark.parametrize("kind", ["link", "folder"])
+def test_a_link_or_folder_in_sudoers_d_refuses_before_any_effect(computer, kind):
+    # Stricter than sudo, which follows a link and skips a folder. A link is
+    # never opened (main answers its OSError as inspection_unavailable).
+    computer.write()
+    entry = computer.files / "sudoers.d" / "team"
+    entry.symlink_to(computer.files / "sudoers") if kind == "link" else entry.mkdir()
+    with pytest.raises((computer.module.Refusal, OSError)) as error:
+        computer.inspect()
+    assert kind == "link" and isinstance(error.value, OSError) or error.value.code == "unsafe_file"
+    assert not computer.module.receipt_path(RID).exists() and computer.effects == []
+
+
+def test_the_uid_is_the_next_one_by_the_rule_over_the_raw_files(computer):
+    # A line NSS does not answer for still counts, as in the probe.
+    computer.passwd_tail = "#old:x:2500:2500\n"
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.inspect()
+    assert error.value.code == "team_uid_changed"
+    assert computer.inspect(uid=2501)["proposal"]["login"]["uid"] == 2501
+
+
+RULE = json.loads((ROOT / "tests/fixtures/next-uid-rule.json").read_text())
+
+
+@pytest.mark.parametrize("case", RULE["cases"], ids=[case["case"] for case in RULE["cases"]])
+def test_the_leaf_computes_the_probes_next_uid_rule(case):
+    """The table tests/test_host_readiness_probe.py runs against the probe."""
+    module = payload()
+    passwd, group = (b"".join(text.encode("latin-1") * count for text, count in case[name]) for name in ("passwd", "group"))
+    if case["logins_null"]:
+        with pytest.raises(module.Refusal) as error:
+            module.next_uid(passwd, group)
+        assert error.value.code == "team_uid_changed"
+    else:
+        assert module.next_uid(passwd, group) == case["next_uid"]
+
+
+def _set(target, **values):
+    return lambda c: getattr(c, target).update(values)
+
+
+PLAN_REFUSALS = {
+    "group-left": ("team_leftovers", lambda c: c.groups.update(claudlobby={"gid": 900, "mem": []})),
+    "home-left": ("team_home_exists", lambda c: c.nodes.update({TEAM_HOME: directory_node(0o755, 0)})),
+    "home-link": ("team_home_exists", lambda c: c.nodes.update({TEAM_HOME: node(0o120000, 0o777, 0)})),
+    "uid-taken-in-files": ("team_uid_changed", lambda c: c.users.update(
+        late={"pw_uid": 1002, "pw_gid": 1001, "pw_dir": "/home/alice"})),
+    "uid-taken-outside-files": ("team_uid_changed", lambda c: c.nss_uids.add(1002)),
+    "gid-taken-outside-files": ("team_uid_changed", lambda c: c.nss_gids.add(1002)),
+    "no-free-uid": ("team_uid_changed", lambda c: c.groups.update(top={"gid": 59999, "mem": []})),
+    "files-over-512-lines": ("team_uid_changed", lambda c: setattr(c, "passwd_tail", "\n" * 600)),
+    "subuid-names-it": ("team_leftovers", lambda c: c.extra.update(subuid="claudlobby:165536:65536\n")),
+    "subgid-names-its-id": ("team_leftovers", lambda c: c.extra.update(subgid="1002:165536:65536\n")),
+    "subuid-range-holds-it": ("team_leftovers", lambda c: c.extra.update(subuid="fixture:1000:5000\n")),
+    "mail-spool-left": ("team_leftovers", lambda c: c.nodes.update({"/var/mail/claudlobby": node(0o100000, 0o660, 0)})),
+    "process-uid": ("team_uid_unavailable", lambda c: c.process(5555, uid=1002, gid=1001)),
+    "process-gid": ("team_uid_unavailable", lambda c: c.process(5555, uid=1001, gid=1002)),
+    "user-manager-active": ("team_uid_unavailable", lambda c: c.units.update({"user@1002.service": {"ActiveState": "active"}})),
+    "user-manager-failed": ("team_uid_unavailable", lambda c: c.units.update({"user@1002.service": {"ActiveState": "failed"}})),
+    "runtime-dir": ("team_uid_unavailable", lambda c: c.nodes.update({"/run/user/1002": directory_node()})),
+    "sss": ("team_directory_service", _set("extra", nsswitch="passwd: files sss\ngroup: files systemd\n")),
+    "ldap-group": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files ldap\n")),
+    "compat": ("team_directory_service", _set("extra", nsswitch="passwd: compat\ngroup: compat\n")),
+    "action": ("team_directory_service", _set("extra", nsswitch="passwd: files [NOTFOUND=return]\ngroup: files\n")),
+    "passwd-twice": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\npasswd: winbind\n")),
+    "no-group-line": ("team_directory_service", _set("extra", nsswitch="passwd: files\n")),
+    "no-nsswitch": ("team_directory_service", lambda c: c.extra.pop("nsswitch")),
+    # Read as glibc reads it: these once passed as files only.
+    "no-colon": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\npasswd sss\n")),
+    "later-line-wins": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\n  group:ldap\n")),
+    "bare-name": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\ngroup\n")),
+    "no-sources": ("team_directory_service", _set("extra", nsswitch="passwd:\npasswd: files\ngroup: files\n")),
+    "other-name": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\npasswd_compat: nis\n")),
+    "overridden-action": ("team_directory_service", _set("extra", nsswitch=(
+        "passwd: files\ngroup: files [!UNAVAIL=return]\ngroup: files\n"))),
+    "gshadow-left": ("team_leftovers", _set("gshadow", claudlobby="claudlobby:!::")),
+    "sudo-rule-left": ("team_leftovers", _set("sudoers_d", team="claudlobby ALL=(ALL) NOPASSWD:ALL\n")),
+    "sudo-include-elsewhere": ("team_leftovers", _set("extra", sudoers=UBUNTU_SUDOERS + "@include /etc/sudoers.local\n")),
+    # To sudo, # before digits is a uid, not a comment.
+    "sudo-uid-then-name": ("team_leftovers", _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) NOPASSWD: ALL\n")),
+    # sudo joins a quoted word across a continued line: the user is claudlobby.
+    "sudo-quoted-continued": ("team_leftovers", _set("sudoers_d", team='"claud\\\n  lobby" ALL=(ALL) NOPASSWD: ALL\n')),
+    # glibc 2.39 has no inline comment: this line tries a module "#", then sss.
+    "inline-hash-source": ("team_directory_service", _set("extra", nsswitch="passwd: files # sss\ngroup: files\n")),
+    # sudo carries a continuation from one file into the next.
+    "sudo-continued-across-files": ("team_leftovers", _set("sudoers_d", a='"claud\\\n', b='lobby" ALL=(ALL) NOPASSWD: ALL\n')),
+    "sudo-quoted-continued-crlf": ("team_leftovers", _set("sudoers_d", team='"claud\\ \t\r\n\tlobby" ALL=(ALL) ALL\r\n')),
+    "gshadow-oversize": ("team_leftovers", _set("gshadow", big="big:!::" + "x" * 262144)),
+    "initgroups-ldap": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n")),
+    "443-served": ("occupied_443", lambda c: setattr(c.daemon, "serve", {"TCP": {"443": {"HTTPS": True}}})),
+    "443-routed": ("occupied_443", lambda c: setattr(c.daemon, "serve", {"Web": {
+        "other.example.ts.net:443": {"Handlers": {"/": {"Proxy": "unix:/home/alice/owner.sock"}}}}})),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PLAN_REFUSALS))
+def test_each_team_plan_condition_refuses_on_its_own(computer, name):
+    code, change = PLAN_REFUSALS[name]
+    change(computer)
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.inspect()
+    assert error.value.code == code
+    assert not computer.module.receipt_path(RID).exists() and computer.effects == []
+
+
+@pytest.mark.parametrize("shadow", ["claudlobby:!:20000:0::7:::", "claudlobby:*:20000:0:-1:7:-1:-1:",
+                                    "claudlobby:!*:20000:0::7:::", "claudlobby:!::0::7:::", "claudlobby:!:010:0::7:::"])
+def test_a_conforming_account_is_adopted_without_useradd(computer, shadow):
+    computer.add_team(1500)
+    computer.shadow["claudlobby"] = shadow
+    computer.nodes["/var/mail/claudlobby"] = node(0o100000, 0o660, 1500)
+    computer.write()
+    assert computer.module.team_state() == "conforming"
+    record = computer.inspect(uid=1500)
+    assert record["proposal"]["login"] == {"account": "claudlobby", "uid": 1500, "gid": 1500, "home": TEAM_HOME,
+                                           "shell": "/bin/bash", "state": "present"}
+    assert record["selection"]["gid"] == 1500 and record["selection"]["home"] == TEAM_HOME
+    assert computer.apply(record)["submission"] == "exec_acknowledged"
+    final = computer.work()
+    assert final["state"] == "completed" and set(final) <= RECORD_KEYS
+    assert [argv[0] for argv in computer.done()] == ["/usr/bin/apt-get", "/usr/bin/loginctl"]
+
+
+@pytest.mark.parametrize("gshadow", [None, "claudlobby:::", "claudlobby:*::"])
+def test_a_group_with_no_gshadow_line_or_a_locked_one_conforms(computer, gshadow):
+    # No line: newgrp falls back to the /etc/group field, x here, which no
+    # password matches; an empty field admits no one who is not a member.
+    computer.add_team(1500)
+    if gshadow is None:
+        computer.gshadow.pop("claudlobby")
+    else:
+        computer.gshadow["claudlobby"] = gshadow
+    computer.write()
+    assert computer.module.team_state() == "conforming"
+    assert computer.inspect(uid=1500)["proposal"]["login"]["state"] == "present"
+
+
+SUDO_ADMITTED = {
+    "commented-out": "# rules for the team live elsewhere\n#alice ALL=(ALL) ALL\n",
+    "another-word": "claudlobby_old ALL=(ALL) ALL\n",
+    "include-here": "#includedir /etc/sudoers.d\n@includedir   /etc/sudoers.d  \n#includes no other file\n",
+}
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_sudo_rules_that_sudo_never_reads_for_the_team_are_admitted(computer, present):
+    for name, text in SUDO_ADMITTED.items():
+        computer.sudoers_d[name.replace("-", "")] = text
+    # sudo skips these names in sudoers.d, so a rule in them grants nothing.
+    for name in ("team~", "team.disabled", "90-team.dpkg-old"):
+        computer.sudoers_d[name] = "claudlobby ALL=(ALL) NOPASSWD:ALL\n@include /tmp/elsewhere\n"
+    computer.sudoers_d.update({f"rule{n:02d}": "# none\n" for n in range(59)})  # 64 read, the bound
+    if present:
+        computer.add_team(1500)
+    computer.write()
+    assert computer.module.team_state() == ("conforming" if present else "absent")
+    login = computer.inspect(uid=1500 if present else 1002)["proposal"]["login"]
+    assert login["state"] == ("present" if present else "create")
+
+
+def _team(uid=1500, **fields):
+    def change(c):
+        c.add_team(uid)
+        c.users["claudlobby"].update(fields)
+    return change
+
+
+def _then(first, second):
+    return lambda c: (first(c), second(c))
+
+
+POLICY_REFUSALS = {
+    "uid-below-1000": ("team_account_uid", 999, _team(999)),
+    "uid-above-59999": ("team_account_uid", 60001, _team(60001)),
+    "uid-shared": ("team_account_uid", 1500, _then(_team(), _set(
+        "users", alias={"pw_uid": 1500, "pw_gid": 1001, "pw_dir": "/home/example"}))),
+    "gid-differs": ("team_account_group", 1500, _team(pw_gid=1001)),
+    "group-member": ("team_account_group", 1500, _then(_team(), lambda c: c.groups["claudlobby"]["mem"].append("fixture"))),
+    "other-group": ("team_account_group", 1500, _then(_team(), lambda c: c.groups["sudo"]["mem"].append("claudlobby"))),
+    "shared-primary-group": ("team_account_group", 1500, _then(_team(), _set(
+        "users", mate={"pw_uid": 1600, "pw_gid": 1500, "pw_dir": "/home/olduser"}))),
+    "group-renamed": ("team_account_group", 1500, _then(_team(), lambda c: c.groups.update(
+        renamed=c.groups.pop("claudlobby")))),
+    "shell": ("team_account_shell", 1500, _team(pw_shell="/bin/sh")),
+    "home-elsewhere": ("team_account_home", 1500, _team(pw_dir="/home/example")),
+    "home-group-open": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.update({TEAM_HOME: directory_node(0o750, 1500)}))),
+    "home-foreign": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.update({TEAM_HOME: directory_node(0o700, 1001)}))),
+    "home-link": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.update({TEAM_HOME: node(0o120000, 0o777, 1500)}))),
+    "home-missing": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.pop(TEAM_HOME))),
+    "mail-not-empty": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.update(
+        {"/var/mail/claudlobby": node(0o100000, 0o660, 1500, size=12)}))),
+    "mail-foreign": ("team_account_home", 1500, _then(_team(), lambda c: c.nodes.update(
+        {"/var/mail/claudlobby": node(0o100000, 0o660, 1001)}))),
+    "password-hash": ("team_account_password", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:$6$s$h:20000:0::7:::"))),
+    "locked-hash": ("team_account_password", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!$6$s$h:20000:0::7:::"))),
+    "no-password": ("team_account_password", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby::20000:0::7:::"))),
+    "passwd-field": ("team_account_password", 1500, _team(pw_passwd="")),
+    "no-shadow-line": ("team_account_password", 1500, _then(_team(), lambda c: c.shadow.pop("claudlobby"))),
+    "maximum-age": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:20000:0:99999:7:::"))),
+    "inactivity": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:20000:0::7:30::"))),
+    "expires": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:20000:0::7::20500:"))),
+    "must-change": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:0:0::7:::"))),
+    "subuid": ("team_account_ids", 1500, _then(_team(), _set("extra", subuid="claudlobby:165536:65536\n"))),
+    "subgid-range": ("team_account_ids", 1500, _then(_team(), _set("extra", subgid="fixture:1000:1000\n"))),
+    "directory-service": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files sss\ngroup: files\n"))),
+    "directory-service-no-colon": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\ngroup sss\n"))),
+    "must-change-00": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:00:0::7:::"))),
+    "must-change-signed": ("team_account_expiry", 1500, _then(_team(), _set("shadow", claudlobby="claudlobby:!:-0:0::7:::"))),
+    "gshadow-administrator": ("team_account_group", 1500, _then(_team(), _set("gshadow", claudlobby="claudlobby:!:fixture:"))),
+    "gshadow-member": ("team_account_group", 1500, _then(_team(), _set("gshadow", claudlobby="claudlobby:!::fixture"))),
+    "gshadow-hash": ("team_account_group", 1500, _then(_team(), _set("gshadow", claudlobby="claudlobby:$6$s$h::"))),
+    "gshadow-locked-hash": ("team_account_group", 1500, _then(_team(), _set("gshadow", claudlobby="claudlobby:!$6$s$h::"))),
+    "gshadow-short": ("team_account_group", 1500, _then(_team(), _set("gshadow", claudlobby="claudlobby:!:"))),
+    "gshadow-twice": ("team_account_group", 1500, _then(_team(), _set("gshadow", again="claudlobby:!::"))),
+    "group-file-hash": ("team_account_group", 1500, _then(_team(), lambda c: (
+        c.gshadow.pop("claudlobby"), c.groups["claudlobby"].update(passwd="$6$s$h")))),
+    "sudo-rule": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="claudlobby ALL=(ALL) NOPASSWD:ALL\n"))),
+    "sudo-group-rule": ("team_account_sudo", 1500, _then(_team(), _set(
+        "extra", sudoers=UBUNTU_SUDOERS.replace("%admin", "%claudlobby")))),
+    "sudo-include-elsewhere": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", local="#include /etc/sudoers.local\n"))),
+    "sudo-includedir-elsewhere": ("team_account_sudo", 1500, _then(_team(), _set(
+        "extra", sudoers=UBUNTU_SUDOERS.replace("@includedir /etc/sudoers.d", "@includedir /etc/sudoers.d/../local")))),
+    "sudo-too-many-files": ("team_account_sudo", 1500, _then(_team(), lambda c: c.sudoers_d.update(
+        {f"rule{n:02d}": "# none\n" for n in range(63)}))),
+    "sudo-file-oversize": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", big="#" * 65536 + "\n"))),
+    # sudo reads no comment here, but a line that names the team refuses whatever follows a #.
+    "sudo-rule-commented": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="# claudlobby ALL=(ALL) ALL\n"))),
+    "sudo-uid-then-name": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) ALL\n"))),
+    "sudo-quoted-continued": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team='"claud\\\n\tlobby" ALL=(ALL) NOPASSWD: ALL\n'))),
+    "inline-hash-source": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files # sss\n"))),
+    "sudo-continued-across-files": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", a='"claud\\\n', b='lobby" ALL=(ALL) NOPASSWD: ALL\n'))),
+    # sudo ends a line at a NUL, so \ then NUL continues it.
+    "sudo-nul-continuation": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team='"claud\\\0\n\tlobby" ALL=(ALL) ALL\n'))),
+    # Include forms sudo reads that a plain "@include <path>" pattern misses.
+    "sudo-include-quoted": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team='@include"/etc/sudoers.local"\n'))),
+    "sudo-include-hash": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="@include#local\n"))),
+    "sudo-include-continued": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team="@include\\\n/etc/sudoers.local\n"))),
+    "sudo-include-after-bangs": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team="!!@include /etc/sudoers.local\n"))),
+    "sudo-quoted-continued-crlf": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team='"claud\\\r\nlobby" ALL=(ALL) NOPASSWD: ALL\r\n'))),
+    "sudo-alias-after-uid": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team=(
+        "User_Alias BOTS = #1001, claudlobby\nBOTS ALL=(ALL) NOPASSWD: ALL\n")))),
+    "sudo-escaped": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="claud\\lobby ALL=(ALL) ALL\n"))),
+    "sudo-hex-escaped": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="\\x63laudlobby ALL=(ALL) ALL\n"))),
+    "sudo-other-case": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="ClaudLobby ALL=(ALL) ALL\n"))),
+    "shadow-ldap": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nshadow: ldap files\n"))),
+    "gshadow-sss": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\ngshadow: files sss\n"))),
+    "initgroups-ldap": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n"))),
+    "sudoers-sss": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nsudoers: files sss\n"))),
+    # sudo reads its own nsswitch line in any case; glibc reads names exactly,
+    # so FILES is a module of that name and Passwd: is no passwd line at all.
+    "files-upper-case": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: FILES\ngroup: files\n"))),
+    "passwd-name-upper-case": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="Passwd: files\ngroup: files\n"))),
+    "sudoers-sss-mixed-case": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nSudoers: files sss\n"))),
+}
+
+
+@pytest.mark.parametrize("name", sorted(POLICY_REFUSALS))
+def test_each_team_account_mismatch_has_its_own_code(computer, name):
+    code, uid, change = POLICY_REFUSALS[name]
+    change(computer)
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.inspect(uid=uid)
+    assert error.value.code == code
+    assert computer.effects == [] and computer.module.team_state() == "unexpected"
+
+
+DRIFT = {
+    "process": lambda c: c.process(5555, uid=1002),
+    "group-made": lambda c: c.groups.update(claudlobby={"gid": 900, "mem": []}),
+    "uid-taken": lambda c: c.users.update(late={"pw_uid": 1002, "pw_gid": 1001, "pw_dir": "/home/alice"}),
+    "port-taken": lambda c: setattr(c.daemon, "serve", {"TCP": {"443": {"HTTPS": True}}}),
+    "account-made": lambda c: c.add_team(1002),
+    "directory-service": lambda c: c.extra.update(nsswitch="passwd: files sss\ngroup: files\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DRIFT))
+def test_drift_between_inspect_and_apply_is_proposal_changed_before_dispatch(computer, name):
+    record = computer.inspect()
+    DRIFT[name](computer)
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.apply(record)
+    assert error.value.code == "proposal_changed"
+    assert computer.module.load(RID)["state"] == "planned" and computer.effects == []
+
+
+def test_a_present_account_that_changes_before_apply_is_proposal_changed(computer):
+    computer.add_team(1500)
+    record = computer.inspect(uid=1500)
+    computer.shadow["claudlobby"] = "claudlobby:$6$s$h:20000:0::7:::"
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.apply(record)
+    assert error.value.code == "proposal_changed" and computer.effects == []
+
+
+def test_an_account_someone_else_makes_with_another_uid_refuses_apply_without_dispatch(computer):
+    # Not a team refusal, so it keeps its own code; whatever that code is,
+    # nothing is dispatched and useradd never runs.
+    record = computer.inspect()
+    computer.add_team(1500)
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.apply(record)
+    assert error.value.code == "account_changed"
+    kept = computer.module.load(RID)
+    assert kept["state"] == "planned" and "dispatch" not in kept and computer.effects == []
+
+
+def test_other_accounts_keep_their_own_apply_refusals(computer):
+    record = computer.inspect(kind="ingress", uid=1001, account="fixture")
+    computer.daemon.serve = {"TCP": {"443": {"TCPForward": "localhost:22"}}}
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.apply(record)
+    assert error.value.code == "occupied_443"
+
+
+def test_the_exact_useradd_runs_once_before_apt_and_lingering(computer):
+    final = computer.run()
+    done = computer.done()
+    assert done[0] == USERADD
+    assert [argv[0] for argv in done] == ["/usr/sbin/useradd", "/usr/bin/apt-get", "/usr/bin/loginctl"]
+    assert done[1][-1] == "jq=1.7.1-3build1" and done[2] == ["/usr/bin/loginctl", "enable-linger", "claudlobby"]
+    assert final["state"] == "completed" and final["native_returncode"] == 0 and set(final) <= RECORD_KEYS
+    # The record says what was approved; status reads the account as made.
+    again = computer.apply(final)
+    assert again["observation"]["team_account"] == "conforming" and again["observation"]["state"] == "completed"
+    assert computer.done() == done
+
+
+@pytest.mark.parametrize("failure,code,returncode", [("exit", "useradd_failed", 9), ("policy", "team_account_shell", 0)])
+def test_a_useradd_or_policy_failure_is_failed_partial_without_apt_or_lingering(computer, failure, code, returncode):
+    if failure == "exit":
+        computer.useradd_rc = 9
+    else:
+        computer.made_shell = "/bin/sh"  # an operator default useradd honoured
+    final = computer.run()
+    assert (final["state"], final["code"], final["native_returncode"]) == ("failed_partial", code, returncode)
+    assert computer.done() == [USERADD] and set(final) <= RECORD_KEYS
+
+
+@pytest.mark.parametrize("name,code", [("process", "team_uid_unavailable"), ("account-made", "proposal_changed"),
+                                       ("port-taken", "occupied_443")])
+def test_the_worker_rechecks_the_account_before_useradd(computer, name, code):
+    record = computer.inspect()
+    assert computer.apply(record)["submission"] == "exec_acknowledged"
+    DRIFT[name](computer)
+    computer.write()
+    final = computer.work()
+    assert (final["state"], final["code"]) == ("failed_partial", code) and computer.done() == []
+
+
+def test_a_retry_adopts_the_account_now_present(computer):
+    computer.apt_rc = 100
+    first = computer.run()
+    assert (first["state"], first["code"]) == ("failed_partial", "package_effect_failed")
+    computer.apt_rc = 0
+    record = computer.inspect(request_id=LATER)
+    assert record["proposal"]["login"]["state"] == "present"
+    assert computer.apply(record)["submission"] == "exec_acknowledged"
+    assert computer.work(LATER)["state"] == "completed"
+    assert [argv[0] for argv in computer.done()].count("/usr/sbin/useradd") == 1
+
+
+def test_package_lists_refresh_before_the_team_account_exists(computer):
+    record = computer.inspect(kind="index-refresh")
+    assert computer.apply(record)["submission"] == "exec_acknowledged"
+    assert computer.work()["state"] == "completed"
+    assert computer.done() == [computer.module.apt_base() + ["update"]]
+
+
+def test_the_team_route_needs_a_conforming_account(computer):
+    computer.add_team(1500)
+    proposal = computer.inspect(kind="ingress", uid=1500)["proposal"]
+    assert "login" not in proposal and proposal["after"]["Web"][DNS + ":443"]["Handlers"]["/"]["Proxy"] == (
+        "unix:" + TEAM_HOME + "/.local/share/claudlobby-browser/data/state/owner/owner.sock")
+    computer.users["claudlobby"]["pw_shell"] = "/bin/sh"
+    computer.write()
+    with pytest.raises(computer.module.Refusal) as error:
+        computer.inspect(kind="ingress", uid=1500, request_id=LATER)
+    assert error.value.code == "team_account_shell"
+
+
+def test_a_new_record_removes_only_expired_planned_receipts(tmp_path, monkeypatch):
+    module = payload(); source, value, plan = root_fixture(module, tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "unit_state", lambda name: {"LoadState": "loaded", "ActiveState": "inactive", "MainPID": "0"})
+    ids = {name: f"{n}{n}{n}{n}{n}{n}{n}{n}-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{n * 12}" for n, name in
+           zip("23456", ("expired", "fresh", "completed", "failed", "conflict"))}
+    for name, request_id in ids.items():
+        record = module.execute("inspect", {**value, "request_id": request_id}, source, None)
+        if name != "fresh":
+            record["expires_at"] = 1
+        if name in ("completed", "failed", "conflict"):
+            record.update(state={"failed": "failed_partial"}.get(name, name), dispatch={"boot_id": module.boot_id()})
+        module.save(record)
+    module.execute("inspect", value, source, None)
+    kept = {path.name for path in module.STORE.glob("*.json")}
+    assert kept == {ids[name] + ".json" for name in ("fresh", "completed", "failed", "conflict")} | {value["request_id"] + ".json"}
+    assert (module.STORE / "transition.lock").exists() and module.artifact_path(value["artifact_sha256"]).exists()
+
+
+def test_a_cleared_id_answers_absent_and_an_old_approval_cannot_dispatch_a_new_plan(tmp_path, monkeypatch):
+    module = payload(); source, value, plan = root_fixture(module, tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "native", lambda *a, **k: pytest.fail("no effect from an old approval"))
+    old = module.execute("inspect", value, source, None)
+    old["expires_at"] = 1
+    module.save(old)
+    module.execute("inspect", {**value, "request_id": LATER}, source, None)  # clears the expired one
+    status = {key: item for key, item in value.items() if key != "kind"}
+    for verb, request in (("apply", approval(value, old)), ("status", status)):
+        with pytest.raises(module.Refusal) as error:
+            module.execute(verb, request, source, None)
+        assert error.value.code == "original_receipt_absent"
+    # The id may be inspected again; the old digest binds only the same bytes.
+    plan["binding"]["dns"] = "moved.example.ts.net"
+    fresh = module.execute("inspect", value, source, None)
+    assert fresh["state"] == "planned" and fresh["digest"] != old["digest"]
+    with pytest.raises(module.Refusal) as error:
+        module.execute("apply", approval(value, old), source, None)
+    assert error.value.code == "proposal_conflict"
+    assert module.load(value["request_id"])["state"] == "planned"
+
+
+def test_receipt_hygiene_never_follows_a_link(tmp_path, monkeypatch):
+    module = payload(); source, value, plan = root_fixture(module, tmp_path, monkeypatch)
+    expired = module.execute("inspect", {**value, "request_id": "77777777-7777-4777-8777-777777777777"}, source, None)
+    expired["expires_at"] = 1
+    module.save(expired)
+    outside = tmp_path / "outside.json"
+    (module.STORE / "77777777-7777-4777-8777-777777777777.json").rename(outside)
+    link = module.STORE / "77777777-7777-4777-8777-777777777777.json"
+    link.symlink_to(outside)
+    monkeypatch.setattr(module, "no_pending", lambda api=None: None)  # reach the hygiene pass itself
+    with pytest.raises((module.Refusal, OSError)):
+        module.execute("inspect", value, source, None)
+    assert link.is_symlink() and outside.exists() and not module.receipt_path(value["request_id"]).exists()
+
+
+def test_the_leaf_and_its_root_command_stay_within_their_bounds():
+    import base64
+    leaf = SCRIPT.read_bytes()
+    entry = (ROOT / "claudlobby/preinstall/linux-system-entry-v1.sh").read_text()
+    assert len(leaf) <= 61440
+    # The website's carrier sends one command, a single argument to the
+    # login shell: sh -c '<entry>' linux-system <verb> <base64 leaf>.
+    for verb in ("inspect", "apply", "status"):
+        command = ("sh -c '" + entry.replace("'", "'\\''") + "' linux-system " + verb + " "
+                   + base64.b64encode(leaf).decode("ascii"))
+        assert len(command.encode()) < 131072

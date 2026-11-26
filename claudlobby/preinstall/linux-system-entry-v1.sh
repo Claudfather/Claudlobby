@@ -32,7 +32,7 @@ import uuid
 
 # Separate leaf pin only: leaf -> digest -> entry -> core revision -> carrier.
 # Provisional candidate; refresh after the concurrent leaf correction freezes.
-LEAF_SHA256 = "13898f9d83c175c47f7e1d0c1f2a944224bf77c76deffbc1b85e05ac03715d67"
+LEAF_SHA256 = "0c91c99f088abb32857072f10ae691f7ad78b3f90808bdb87dd2fc7309f159d9"
 STORE = Path("/var/lib/claudlobby-browser-system/v1")
 OWNER = 0
 PAYLOAD_LIMIT = 65536
