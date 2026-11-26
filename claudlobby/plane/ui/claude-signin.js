@@ -270,7 +270,9 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
       // Too little approval left for the host to start another sign-in; a new approval keeps this retained attempt.
       const ending = !retry && retryableEnding(signinState,signinReason) && !!context && context.expires_at-now() < SIGNIN_APPROVAL_ROOM;
       const why = !ending ? '' : context.expires_at <= now() ? 'Setup approval expired. ' : 'Setup approval ends too soon for a new sign-in. ';
-      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
+      // A cancel the person pressed is their own choice, not a fault: an ordinary note, with Try again the one filled action.
+      const chosen = retry && signinState === 'cancelled';
+      return [`${chosen ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,chosen ? '' : 'attention'];
     }
     if (!signinAttempt) return ['Connect your Claude account.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',signinWorking() ? 'working' : ''];

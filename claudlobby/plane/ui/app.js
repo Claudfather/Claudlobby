@@ -1658,6 +1658,8 @@ function openComputersForAttention() {
 }
 // The person used the drawer, so it is theirs. toggle also fires after the page's own opening: only a close counts.
 function keepComputersOpen() { computersAttention = null; }
+// In the fold the line scrolls to show the drawer's card: a wheel there, or a press on the line itself (its scrollbar), is use too.
+function keepComputersOpenOnLine(event) { if (event.type === "wheel" || event.target === event.currentTarget) keepComputersOpen(); }
 function computersToggled(event) { if (!event.target.open) computersAttention = null; else showComputerCard(); }
 // In the fold on a wide screen the line scrolls inside itself, and an opened Computers & status drops below it: bring
 // its computer's card, from its name to its Connect, Check connection or Disconnect, into view by scrolling the line
@@ -1677,6 +1679,8 @@ function showComputerCard() {
   else if (end > line.scrollTop + view) line.scrollTop = Math.min(top, end - view + 8);
   else if (top < line.scrollTop) line.scrollTop = top;
 }
+// Opening Message team narrows the line's cap (25% to 15%): show the opened drawer's card again, so its buttons stay reachable.
+function composerToggled(event) { if (event.target?.id === "work-composer") showComputerCard(); }
 function closeComputersAfterAttention() {
   const main = typeof document === "undefined" ? null : document.querySelector?.("main");
   const details = $("computers-details"), teams = Number(main?.dataset?.teams || 0);
@@ -2336,6 +2340,9 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
     }) : null;
 for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", keepComputersOpen], ["wheel", keepComputersOpen],
   ["focusin", keepComputersOpen]]) $("computers-details")?.addEventListener(type, handler, { passive: true });
+for (const type of ["pointerdown", "wheel"]) $("rail-fleet")?.addEventListener(type, keepComputersOpenOnLine, { passive: true });
+// toggle does not bubble, so the page listens while it travels down to Message team's own drawer.
+document.addEventListener("toggle", composerToggled, { capture: true, passive: true });
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {

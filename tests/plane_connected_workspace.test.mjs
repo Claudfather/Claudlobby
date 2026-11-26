@@ -2164,6 +2164,9 @@ test('a cancel before any code is offered Try again; only the host\'s exact retr
   await h.api.run('context');
   const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
   assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
+  assert.equal(status.dataset.tone,undefined,'a cancel the person chose is an ordinary note, not a fault');
+  assert.equal(status.attributes.role,'status','still announced politely');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again stays the one filled action');
   assert.equal(visible(retry),true);assert.deepEqual(calls,[]);
   retry.click();await flush();
   assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
@@ -4051,6 +4054,13 @@ test('app.js marks how many teams the view has, hidden ones included, from its o
   assert.match(render,/hidden = hiddenTeams\(\)/,'the list itself leaves hidden teams out; the mark counts them');
   assert.match(appText,/onConnectionAttention: openComputersForAttention,\n\s+onConnectionAttentionCleared: attentionCleared,/);
   assert.match(appText,/for \(const \[type, handler\] of \[\["toggle", computersToggled\], \["pointerdown", keepComputersOpen\], \["wheel", keepComputersOpen\],\n\s+\["focusin", keepComputersOpen\]\]\) \$\("computers-details"\)\?\.addEventListener\(type, handler, \{ passive: true \}\);/);
+  assert.match(appText,/for \(const type of \["pointerdown", "wheel"\]\) \$\("rail-fleet"\)\?\.addEventListener\(type, keepComputersOpenOnLine, \{ passive: true \}\);/);
+  {const line={};
+   for(const [event,kept] of [[{type:'wheel',target:{},currentTarget:line},true],[{type:'pointerdown',target:line,currentTarget:line},true],[{type:'pointerdown',target:{},currentTarget:line},false]]){
+     main.dataset.computers='1';const d={open:false,contains:()=>false},l2=teamsList(ui,[{alias:'one'}],d);l2.markTeams();l2.openComputersForAttention();
+     l2.keepComputersOpenOnLine(event);l2.attentionCleared();
+     assert.equal(d.open,kept,`${event.type} on ${event.target===line?'the line itself':'a child'}: ${kept?'counts as use':'does not'}`);}}
+  assert.match(appText,/document\.addEventListener\("toggle", composerToggled, \{ capture: true, passive: true \}\);/,'Message team\'s drawer is heard though toggle does not bubble');
   assert.doesNotMatch(drawerText,/connection_state/,'attention clearing comes from the connected view, never a team snapshot');
   assert.doesNotMatch(drawerText.replace(/\/\/.*$/gm,''),/scrollIntoView|scrollTo\(|scrollBy\(/,'only the line scrolls, by its own scrollTop');
 });
@@ -4075,6 +4085,14 @@ test('opened in the fold, Computers & status brings its computer\'s card and but
   assert.equal(opened({fleets:[...one,{alias:'c / docs'}]}).line.scrollTop,0,'two teams: not folded');
   assert.equal(opened({computers:'2'}).line.scrollTop,0,'two computers: not folded');
   assert.equal(opened({hidden:true}).line.scrollTop,0,'only a listed computer\'s card');
+  // Message team opened after Computers & status: its narrower cap shrinks the line, so the card is shown again.
+  const narrowed=opened({cardAt:20,end:70,view:117});narrowed.line.clientHeight=40;
+  narrowed.list.composerToggled({target:{id:'work-composer'}});
+  assert.equal(narrowed.line.scrollTop,30,'the buttons stay reachable after the cap shrinks');
+  const other=opened({cardAt:20,end:70,view:40});other.line.scrollTop=0;
+  other.list.composerToggled({target:{id:'something-else'}});assert.equal(other.line.scrollTop,0,'only Message team\'s drawer counts');
+  const shut=opened({cardAt:20,end:70,view:40});shut.line.scrollTop=0;shut.details.open=false;
+  shut.list.composerToggled({target:{id:'work-composer'}});assert.equal(shut.line.scrollTop,0,'with Computers & status closed nothing moves');
   const closing=opened({scrollTop:0,end:70,cardAt:20});closing.details.open=false;closing.line.scrollTop=5;
   closing.list.computersToggled({target:closing.details});assert.equal(closing.line.scrollTop,5,'closing moves nothing');
 });
