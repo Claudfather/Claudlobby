@@ -217,10 +217,12 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
         // A lost or failed answer on the page that ran the link (a begin that may in fact have started, or a check) is
         // an ordinary failure: the step keeps its attempt and offers Check sign-in progress.
         else if (onSetupPage) { if (operation === 'signin-begin') g.lost = true; g.module.failed(operation, error, restored, g.epoch); }
-        // Off the setup page, only the computer's refusal of a check this view never ran the link for sends the person
-        // back to the setup page. A lost or failed answer proves nothing: the step keeps its attempt and offers Check
-        // sign-in progress, as it does once any call has been answered.
-        else if (refusal(error)) { notice = 'refused'; noticeFor = signinKey(); dropSignin(); }
+        // Off the setup page, the computer's refusal of a call this view never ran the link for, or a Try again this
+        // browser never sent, sends the person back to the setup page: nothing started here. A lost or failed answer
+        // proves nothing: the step keeps its attempt and offers Check sign-in progress, as once any call has been answered.
+        else if (refusal(error) || operation === 'signin-begin' && error?.code === 'signin_not_started') {
+          notice = 'refused'; noticeFor = signinKey(); dropSignin();
+        }
         else g.module.failed(operation, error, restored, g.epoch);
       }
     }

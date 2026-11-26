@@ -4627,6 +4627,46 @@ test(`${name} to a status check off the setup page keeps the attempt and offers 
   assert.doesNotMatch(claudeStatus(w)?.textContent??'',lostNote);
   assert.equal(beginCalls(w).length,0,'no sign-in is started');
 });
+// Off the setup page the view begins only from Try again (a read naming an ended, retryable attempt). Its begin is
+// treated as on the setup page: a lost answer keeps the new attempt, and one never sent leaves nothing to check.
+const tryAgainOffPage=async t=>{
+  const handlers=new Map(),view={addEventListener:(n,fn)=>handlers.set(n,fn),removeEventListener:n=>handlers.delete(n)};view.parent=view;
+  const ended=attempt=>linkAnswer({},signinPartOf({phase:'ended',attempt_id:attempt,state:'needs_attention',reason:'timeout',retryable:true}));
+  const holder={answer:ended(id(32))};
+  const w=await partsWorkspace(t,{answer:()=>reply(200,holder.answer),view,overrides:[['signin-begin',()=>Promise.reject(new Error('lost'))]]});
+  const statusAsks=()=>w.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length;
+  return {w,holder,ended,statusAsks,focus:async()=>{handlers.get('focus')();await flush();}};
+};
+test('off the setup page, a Try again whose begin answer is lost keeps the new attempt and offers Check sign-in progress',async t=>{
+  const {w,statusAsks}=await tryAgainOffPage(t);
+  assert.equal(claudeLine(w).textContent,'The sign-in took too long.');assert.deepEqual(claudeButtons(w),['Try again']);
+  claudeButton(w,'Try again').click();await flush();
+  assert.equal(beginCalls(w).length,1);
+  assert.match(claudeStatus(w)?.textContent??'',lostNote,'the begin may have started: its attempt is kept');
+  assert.ok(claudeButtons(w).includes('Check sign-in progress'),JSON.stringify(claudeButtons(w)));
+  assert.equal(claudeButtons(w).includes('Try again'),false,'no second new attempt over one that may have started');
+  assert.ok(descendants(claudeBox(w)).every(n=>!visible(n)||n.textContent!==claudeSentences.elsewhere),'never the elsewhere sentence');
+  fireShort(w);await flush();
+  assert.equal(beginCalls(w).length,1,'nothing begins by itself');assert.equal(statusAsks(),0,'nothing checks by itself');
+});
+test('off the setup page, a Try again that is never sent draws no step and sends no second begin',async t=>{
+  const {w,holder,ended,statusAsks,focus}=await tryAgainOffPage(t);
+  claudeButton(w,'Try again').click();await flush();
+  assert.equal(beginCalls(w).length,1,'the first begin\'s answer is lost: the session stays held');
+  // A later read names an ended, retryable attempt again, so Try again is back while the hold stands.
+  holder.answer=ended(id(33));await focus();
+  assert.deepEqual(claudeButtons(w),['Try again']);
+  // The hold's one check gets no answer, so the hold stands and this Try again is never sent.
+  w.h.overrides.set(refs[0].endpoint_origin+'/api/owner/connected/setup/signin-status',()=>Promise.reject(new Error('lost')));
+  claudeButton(w,'Try again').click();await flush();
+  assert.equal(statusAsks(),1,'only the hold check was sent');assert.equal(beginCalls(w).length,1,'no second begin');
+  assert.equal(claudeButtons(w).includes('Check sign-in progress'),false,JSON.stringify(claudeButtons(w)));
+  assert.equal(claudeButtons(w).includes('Cancel sign-in'),false,'nothing to cancel: the computer never saw it');
+  assert.doesNotMatch(claudeStatus(w)?.textContent??'',lostNote);
+  assert.equal(claudeLine(w).textContent,'The sign-in took too long.','the read\'s own ending, with its Try again');
+  assert.deepEqual(claudeButtons(w),['Try again']);
+  fireShort(w);await flush();assert.equal(beginCalls(w).length,1);assert.equal(statusAsks(),1,'nothing retries by itself');
+});
 test('a begin refused on the setup page draws the closing line and Link Claude, never the elsewhere sentence',async t=>{
   // Core's setup door refuses with 403; the other completed refusals the sign-in step knows are taken the same way.
   for(const status of [400,401,403,409]){
