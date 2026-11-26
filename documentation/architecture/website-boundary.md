@@ -158,13 +158,18 @@ read already in flight was sent before the answer, so one new read follows it.
 Only a refused begin (core refuses with 403), or a begin that never reached the
 computer, ends at "could not start yet"; a begin whose answer is lost or fails
 may have started, so its attempt is kept and Check sign-in progress offered.
-When core then refuses that check (it holds no such attempt), the begin never
-reached it: the closing line, and the browser releases the session hold it kept
-for that begin. A later begin first checks that attempt once, so two begins are
-never in flight. A parts read naming the held attempt, under its approval, as
-ended (terminal, or its sign-in lease free) also releases the hold; a read
-naming no attempt or another one releases nothing. "Stop waiting" appears only after ten
-seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
+When core then refuses that check, which also stops that attempt in this
+browser, the step ends at the closing line and the browser releases the session
+hold it kept for that begin. A hold never refuses a begin without asking
+core once: a begin asked while any earlier begin holds the session first checks
+the held attempt, with its own ID and approval. An ending (unknown included) or
+a refused check releases the hold and the begin is sent; a live answer
+(starting or waiting), or none, keeps it, so two begins are never in flight for
+a live attempt. A parts read naming the held attempt, under its approval, as
+ended (terminal, or its sign-in lease free) also releases the hold, and so does
+one sent after the begin was answered that shows Claude linked; a read naming
+no attempt or another one, or sent under an earlier hold, releases nothing.
+"Stop waiting" appears only after ten seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
 storage.
 
 ## Setup, availability and current limits

@@ -210,7 +210,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
           || g.lost && refusal(error))) {
           // This page ran the link and began the sign-in itself, and that begin never reached the computer: the computer
           // refused it, this browser never sent it, or the computer refused a later call for the attempt of a begin whose
-          // answer was lost (it holds no such attempt). The plan's "begin refused" row. Nothing started, so the attempt is dropped.
+          // answer was lost (core refused that check, which also stops that attempt here). The plan's "begin refused" row.
+          // Nothing started, so the attempt is dropped.
           notice = 'closing'; noticeFor = signinKey(); dropSignin();
         }
         // A lost or failed answer on the page that ran the link (a begin that may in fact have started, or a check) is

@@ -4672,7 +4672,7 @@ async function lostBegin(t) {
   return {l,holder,attempt:JSON.parse(beginCalls(l)[0].init.body).attempt_id};
 }
 const signinCallsOf=(l,name)=>l.h.calls.filter(c=>c.url.endsWith('/setup/signin-'+name));
-// That begin never reached the computer when the computer then refuses its check or cancel (core: no such attempt), so
+// When the computer then refuses its check or cancel, it refused the check, which also stops that attempt here, so
 // the step ends as a refused begin does, never with "refused this browser's sign-in" and recovery on the computer.
 test('a lost begin whose check or cancel the computer refuses ends in the closing line and Link Claude',async t=>{
   for(const [press,name] of [['Check sign-in progress','status'],['Cancel sign-in','cancel']]){
@@ -4775,6 +4775,39 @@ test('an answer this view never waited for, or one that is not an approval, neve
     assert.deepEqual(claudeButtons(l),['Link Claude'],name+': while its read is in flight');
     gate.resolve();await flush();
     assert.deepEqual(claudeButtons(l),['Link Claude'],name);
+  }
+});
+// A begin the computer answered holds the session. The computer restarts, so that attempt reads interrupted, and the
+// person links Claude again. The automatic begin asks the computer about the held attempt first, so it is sent, once,
+// instead of the closing line over and over. Core refuses that check (the approval was replaced); answered
+// interrupted instead, the hold ends the same way.
+test('after an answered sign-in is interrupted, Link Claude and an approval send exactly one new begin',async t=>{
+  for(const check of ['refused','interrupted']){
+    const {l,holder}=await claudePage(t,linkAnswer());
+    l.h.overrides.set(setupURL+'signin-begin',init=>{const body=JSON.parse(init.body);
+      holder.answer=linkAnswer({},signinPartOf({generation:body.generation,phase:'waiting',attempt_id:body.attempt_id,state:'waiting'}));
+      return reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL});});
+    l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+    claudeButton(l,'Link Claude').click();await flush();
+    holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+    assert.equal(beginCalls(l).length,1);
+    const first=JSON.parse(beginCalls(l)[0].init.body).attempt_id;
+    // The computer restarted: its next check says the attempt was interrupted.
+    let replaced=false;
+    l.h.overrides.set(setupURL+'signin-status',init=>{const body=JSON.parse(init.body);
+      if(body.attempt_id!==first)return reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL});
+      return replaced&&check==='refused'?reply(403,{state:'denied'}):reply(200,{generation:body.generation,attempt_id:first,state:'unknown',reason:'interrupted'});});
+    fireShort(l);await flush();
+    assert.equal(claudeLine(l).textContent,'The sign-in was interrupted on this computer.',check);assert.deepEqual(claudeButtons(l),['Link Claude'],check);
+    claudeButton(l,'Link Claude').click();await flush();
+    replaced=true; // the new approval
+    holder.answer=linkAnswer({},signinPartOf({generation:id(31)}));deliver(l,runEnded());await flush();
+    assert.equal(JSON.parse(beginCalls(l).at(-1).init.body).generation,id(31),check);
+    assert.equal(beginCalls(l).length,2,check+': exactly one new begin');
+    assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),check+': its link shows');
+    assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&n.textContent===LINK_CLOSING_LINE),check);
+    fireShort(l);await flush();
+    assert.equal(beginCalls(l).length,2,check+': and no more');
   }
 });
 // A begin the computer answered holds the session until it ends. A read that says it ended before the step's own check

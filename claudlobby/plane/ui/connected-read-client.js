@@ -94,9 +94,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   // While a sign-in conversation is admitted or live, no renewal may rotate the begin-time
   // bearer. ``renewalRun`` lets begin wait for a renewal already in flight.
   let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null, signinRenewing = false;
-  // signinHold: the begin {generation, attempt_id} that holds the session, when known; signinLost: that same begin
-  // while its answer is lost, until the computer answers for that attempt or the hold ends.
-  let signinHold = null, signinLost = null;
+  // signinHold: the begin {generation, attempt_id} that holds the session, when known; signinAnswered: the computer has
+  // answered for that attempt; signinLost: that same begin while its answer is lost, until the computer answers for it.
+  let signinHold = null, signinAnswered = false, signinLost = null;
   const signinHeld = () => signinAdmitting || signinLive;
   const trackRenewal = run => {
     const clear = () => { if (renewalRun === run) renewalRun = null; };
@@ -122,7 +122,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   function wipe() {
     token = null; pending = null; expires = 0; renewalUnknown = false; setupOnly = false; setupSignedOut = false;
-    signinLive = false; signinHold = signinLost = null; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
+    signinLive = signinAnswered = false; signinHold = signinLost = null; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
     clearTimeout(expiryTimer); expiryTimer = null;
     clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
@@ -598,21 +598,26 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch { stop('Connection outcome unknown. Check again explicitly.'); return false; }
     finally { busy = false; }
   }
-  // A begin refused before it was sent (at most a check of a lost begin's attempt went first): the caller may keep
+  // A begin refused before it was sent (at most a check of the held attempt went first): the caller may keep
   // following the attempt it had.
   const notStarted = message => Object.assign(new Error(message), {code: 'signin_not_started'});
   // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
   const refused = error => [400, 401, 403, 409].includes(error?.status);
-  const releaseSignin = () => { signinLive = false; signinHold = signinLost = null; scheduleContinuity(); };
+  // The endings a status can name (core's _TERMINAL, provider_signin.py); starting and waiting are live.
+  const SIGNIN_ENDED = ['connected', 'needs_attention', 'cancelled', 'unknown'];
+  const releaseSignin = () => { signinLive = signinAnswered = false; signinHold = signinLost = null; scheduleContinuity(); };
+  // `hold` still holds the session, in the epoch `at`; and whether an answer names that attempt under its approval.
+  const holding = (hold, at) => signinLive && !!hold && hold === signinHold && at === epoch;
+  const names = (value, hold) => !!hold && !!value && typeof value === 'object'
+    && value.attempt_id === hold.attempt_id && value.generation === hold.generation;
   async function signinBegin(input) {
-    if (signinAdmitting || signinLive && !signinLost || disposed || ended) throw notStarted('A Claude sign-in is already open.');
+    if (signinAdmitting || signinLive && !signinHold || disposed || ended) throw notStarted('A Claude sign-in is already open.');
     signinAdmitting = true; // from here no renewal path can start
     try {
-      // A begin whose answer was lost holds the session, since it may have started. Before another, ask the computer
-      // once about that begin's attempt: a refusal (it never reached the computer) or an ending releases the hold;
-      // anything else keeps it, so two begins are never in flight.
+      // A hold never refuses a begin without asking the computer once about the held attempt (checkHold), so two
+      // begins are never in flight for a live attempt and no hold outlives its attempt.
       if (signinLive) {
-        await signinCall('status', signinLost).catch(() => {});
+        await checkHold();
         if (signinLive) throw notStarted('A Claude sign-in is already open.');
       }
       if (renewalRun) await renewalRun.catch(() => {});
@@ -629,6 +634,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       signinLive = true; // live from the moment begin is sent; an unknown outcome keeps it held
       signinHold = uuid(input?.generation) && uuid(input?.attempt_id)
         ? Object.freeze({generation: input.generation, attempt_id: input.attempt_id}) : null;
+      signinAnswered = false; signinLost = null;
       const epochAtBegin = epoch;
       try { return settleSignin(await setupRequest('signin-begin', input)); }
       catch (error) {
@@ -639,33 +645,50 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       }
     } finally { signinAdmitting = false; }
   }
+  // The one check a begin makes while a hold stands: a status of the held attempt, with its own attempt and approval.
+  // An ending (unknown too: interrupted by a restart), or a refused check, frees the hold; a live answer (starting or
+  // waiting), an answer for something else, or no answer keeps it.
+  async function checkHold() {
+    const hold = signinHold, at = epoch;
+    let result;
+    try { result = await setupRequest('signin-status', hold); }
+    catch (error) { if (refused(error) && holding(hold, at)) releaseSignin(); return; }
+    if (!holding(hold, at) || !names(result, hold)) return;
+    if (SIGNIN_ENDED.includes(result.state)) releaseSignin();
+    else { signinAnswered = true; signinLost = null; }
+  }
   function settleSignin(result) {
     // Only a delivered body naming a terminal state releases the hold; the transport
     // releases that body only after its own drain. Anything else leaves it held.
     if (signinLive && result && typeof result === 'object' && SIGNIN_TERMINAL.includes(result.state)) releaseSignin();
-    else if (signinLost && result?.attempt_id === signinLost.attempt_id) signinLost = null; // that begin did reach the computer
+    else if (signinLive && names(result, signinHold)) { signinAnswered = true; signinLost = null; } // that begin reached the computer
     return result;
   }
-  // Status, code or cancel. A check or cancel the computer refuses for the attempt of a begin whose answer was lost
-  // says it holds no such attempt: that begin never reached it, so nothing is left to hold the session for.
+  // Status, code or cancel. The computer refusing a check or cancel of the attempt of a begin whose answer was lost
+  // refused that check, which also stops this browser following that attempt: nothing is left to hold the session for.
   function signinCall(operation, input) {
     const lost = signinLost, at = epoch;
     return setupRequest('signin-' + operation, input).then(settleSignin, error => {
       if (lost && lost === signinLost && at === epoch && ['status', 'cancel'].includes(operation) && refused(error)
-        && input?.attempt_id === lost.attempt_id && input?.generation === lost.generation) releaseSignin();
+        && names(input, lost)) releaseSignin();
       throw error;
     });
   }
-  // The parts read. One that names the attempt holding the session as ended releases the hold, as a status naming its
-  // ending does: core names this approval's current attempt (provider.signin, owner_setup.py) and reads it ended only
-  // once it is terminal or its sign-in lease is free, so no worker runs it. Matched by attempt and approval, for the
-  // hold this read was sent under, in the same epoch; a read naming no attempt, or another, releases nothing.
+  // A parts read sent while `hold` held the session (answered: its begin had been answered by then) frees that hold
+  // when it names the attempt, under its approval, as ended: core names this approval's current attempt
+  // (provider.signin, owner_setup.py) and reads it ended only once it is terminal or its sign-in lease is free, so no
+  // worker runs it. Or, after an answered begin, when Claude is linked: core then leaves provider.signin out, and
+  // refuses any begin while a credential is saved. A read naming no attempt, or another, frees nothing.
+  function readFrees(value, hold, answered) {
+    const provider = value?.version === 1 ? value.provider : null;
+    if (!provider || typeof provider !== 'object') return false;
+    return provider.signin?.phase === 'ended' && names(provider.signin, hold) || answered && provider.state === 'linked';
+  }
+  // The parts read.
   function setupState() {
-    const hold = signinHold, at = epoch;
+    const hold = signinHold, answered = signinAnswered, at = epoch;
     return setupRequest('state', {}).then(value => {
-      const signin = value?.version === 1 ? value.provider?.signin : null;
-      if (signinLive && hold && hold === signinHold && at === epoch && signin && typeof signin === 'object'
-        && signin.phase === 'ended' && signin.attempt_id === hold.attempt_id && signin.generation === hold.generation) releaseSignin();
+      if (holding(hold, at) && readFrees(value, hold, answered)) releaseSignin();
       return value;
     });
   }
