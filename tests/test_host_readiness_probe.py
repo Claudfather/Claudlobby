@@ -249,14 +249,16 @@ BASE_PASSWD = ["root:x:0:0:root:/root:/bin/bash", "daemon:x:1:1:daemon:/usr/sbin
                "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin"]
 BASE_GROUP = ["root:x:0:", "sudo:x:27:", "nogroup:x:65534:"]
 NODE_KEY = "nodekey:" + "a" * 64
+# The probe never reads home, so every account here shares one placeholder.
+HOME = "/home/user"
 
 
 def user(name, uid, gid=None):
-    return f"{name}:x:{uid}:{uid if gid is None else gid}:{name}:/home/{name}:/bin/bash"
+    return f"{name}:x:{uid}:{uid if gid is None else gid}:{name}:{HOME}:/bin/bash"
 
 
 def selection(account, uid):
-    return {"account": account, "gid": uid, "home": "/home/" + account, "node_key": NODE_KEY,
+    return {"account": account, "gid": uid, "home": HOME, "node_key": NODE_KEY,
             "profile_id": "p001", "uid": uid}
 
 
@@ -458,10 +460,10 @@ def test_the_claudlobby_account_is_the_team_and_never_a_prepared_account(host):
                   receipts=[receipt("claudlobby", 1001), receipt("demo", 1000)])
     assert logins == {"team": {"uid": 1001}, "next_uid": 1501, "prepared": [DEMO]}
     # An id setup cannot use is still reported; the website refuses it.
-    assert host(passwd=["claudlobby:x:0:0::/home/claudlobby:/bin/bash"])["team"] == {"uid": 0}
+    assert host(passwd=[f"claudlobby:x:0:0::{HOME}:/bin/bash"])["team"] == {"uid": 0}
 
 
-@pytest.mark.parametrize("line", ["claudlobby:x:abc:1001::/home/claudlobby:/bin/bash", "claudlobby:x",
+@pytest.mark.parametrize("line", [f"claudlobby:x:abc:1001::{HOME}:/bin/bash", "claudlobby:x",
                                   "claudlobby", "claudlobby:x::1001::/:/bin/sh"])
 def test_a_claudlobby_line_without_a_numeric_uid_reads_as_unknown(host, line):
     assert host(passwd=[line]) is None
@@ -486,7 +488,7 @@ def test_receipts_for_removed_changed_or_ineligible_accounts_are_ignored(host, p
 
 
 def test_text_inside_a_receipt_cannot_forge_a_completed_one(host):
-    forged = ('{"account":"evil","gid":1001,"home":"/home/evil","node_key":"' + NODE_KEY
+    forged = ('{"account":"evil","gid":1001,"home":"' + HOME + '","node_key":"' + NODE_KEY
               + '","profile_id":"p001","uid":1001},"state":"completed"}')
     planned = receipt(state="planned", hooks=[',"kind":"system","schema_version":1,"selection":' + forged])
     assert b'\\"state\\":\\"completed\\"' in planned
@@ -505,7 +507,7 @@ def test_text_inside_a_receipt_cannot_forge_a_completed_one(host):
 def test_a_selection_longer_than_any_the_leaf_writes_is_not_read(host):
     # The leaf caps home under 180 characters; a longer selection is skipped
     # unparsed, so no prefix scan ever runs over a long string.
-    receipts = [receipt(home="/home/" + "d" * 1000), receipt(home="/" + "d" * 40000)]
+    receipts = [receipt(home=HOME + "/" + "d" * 1000), receipt(home="/" + "d" * 40000)]
     assert host(passwd=[user("demo", 1000)], receipts=receipts)["prepared"] == []
 
 
@@ -567,7 +569,7 @@ def test_a_redirected_store_reads_as_unknown(host, tmp_path, damage):
 def test_nothing_read_is_executed(host):
     # The fixture runs the probe in an empty directory and asserts it stays empty.
     evil = "$(printf x >ran1)`printf y >ran2`;printf z >ran3;*"
-    passwd = [f"demo:x:1000:1000:{evil}:/home/demo:/bin/bash", f"{evil}:x:1001:1001::/:/bin/sh"]
+    passwd = [f"demo:x:1000:1000:{evil}:{HOME}:/bin/bash", f"{evil}:x:1001:1001::/:/bin/sh"]
     group = [f"{evil}:x:1002:{evil}"]
     host.store.mkdir(mode=0o700)
     (host.store / (evil + ".json")).write_bytes(receipt(hooks=[evil]))
@@ -599,7 +601,7 @@ def test_the_worst_case_stays_small_and_fast(host):
     # the leaf's with its full 16,000 characters of brace-heavy hook text. Every
     # receipt is read: the two that count come last.
     longest = {"a" * 31 + "b": 59998, "a" * 31 + "c": 59997}
-    passwd = ["claudlobby:x:9999999999:1::/home/claudlobby:/bin/bash",
+    passwd = [f"claudlobby:x:9999999999:1::{HOME}:/bin/bash",
               *(user(name, uid) for name, uid in longest.items())]
     passwd += [f"u{n}:x:{1000 + n}:{1000 + n}:" + "g" * 100 for n in range(512 - len(BASE_PASSWD) - len(passwd))]
     group = [f"g{n}:x:{1000 + n}:" + "m" * 100 for n in range(512 - len(BASE_GROUP))]
@@ -648,7 +650,7 @@ def test_a_receipt_the_leaf_writes_is_one_the_probe_reads(host, tmp_path, monkey
     source.chmod(0o500)
     sha = hashlib.sha256(source.read_bytes()).hexdigest()
     request_id = "44444444-4444-4444-8444-444444444444"
-    chosen = {"account": "demo", "uid": 1000, "gid": 1000, "home": "/home/demo",
+    chosen = {"account": "demo", "uid": 1000, "gid": 1000, "home": HOME,
               "node_key": NODE_KEY, "profile_id": "p001"}
     bound = {"selection": chosen, "dns": "box.example.ts.net", "version": leaf.NATIVE_VERSION,
              "profile_digest": "e" * 64, "machine": "9" * 64,
