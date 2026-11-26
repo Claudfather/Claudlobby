@@ -25,6 +25,35 @@ TOOL_PATHS = {"/usr/bin/uname": "uname", "/usr/bin/id": "id", "/bin/dd": "dd", "
 ROOT_PATHS = {"/etc/passwd": "passwd", "/etc/group": "group",
               "/var/lib/claudlobby-browser-system/v1": "lib/claudlobby-browser-system/v1"}
 STORE = ROOT_PATHS["/var/lib/claudlobby-browser-system/v1"]
+LOGIN_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+
+
+def whole(value, low, high):
+    return type(value) is int and low <= value <= high
+
+
+def website_accepts(logins):
+    """A Python copy of the website's logins rule (lib/host-readiness.ts on
+    its main branch). An answer it refuses makes the whole check unusable."""
+    if logins is None:
+        return True
+    if type(logins) is not dict or set(logins) != {"team", "next_uid", "prepared"}:
+        return False
+    team, next_uid, prepared = logins["team"], logins["next_uid"], logins["prepared"]
+    if team is not None and not (type(team) is dict and set(team) == {"uid"}
+                                 and whole(team["uid"], 0, 9999999999)):
+        return False
+    if next_uid is not None and not whole(next_uid, 1000, 59999):
+        return False
+    if prepared is None:
+        return True
+    return (type(prepared) is list and len(prepared) <= 2
+            and all(type(entry) is dict and set(entry) == {"name", "uid"}
+                    and type(entry["name"]) is str and LOGIN_NAME.fullmatch(entry["name"])
+                    and entry["name"] != "claudlobby" and whole(entry["uid"], 1000, 59999)
+                    for entry in prepared)
+            and len({entry["name"] for entry in prepared}) == len(prepared)
+            and len({entry["uid"] for entry in prepared}) == len(prepared))
 
 
 def rewritten_probe(path, stubs, files=None):
@@ -94,7 +123,10 @@ def inventory(tmp_path):
         assert result.stdout.endswith(b"\n") and result.stdout.count(b"\n") == 1
         assert not marker.exists(), "inventory executed a prerequisite or native-manager CLI"
         assert not any(work.iterdir()), "inventory executed something it read"
-        return result, json.loads(result.stdout)
+        data = json.loads(result.stdout)
+        if "logins" in data:
+            assert website_accepts(data["logins"]), data["logins"]
+        return result, data
 
     run.files = files
     return run
@@ -325,6 +357,45 @@ def test_next_uid_is_one_past_the_highest_id_from_1000_to_59999(host, ids, expec
     assert host(passwd=[user(f"u{n}", n) for n in ids])["next_uid"] == expected
 
 
+RULE = json.loads((ROOT / "tests/fixtures/next-uid-rule.json").read_text())
+
+
+def rule_bytes(parts):
+    return b"".join(text.encode("latin-1") * count for text, count in parts)
+
+
+def next_uid_rule(passwd, group):
+    """The probe's next-uid rule in Python, as the leaf must compute it.
+    Returns (readable, next_uid); readable False is logins:null."""
+    highest = 999
+    for data, indexes in ((passwd, (2, 3)), (group, (2,))):
+        lines = data.split(b"\n")
+        if lines[-1] == b"":
+            lines.pop()
+        if len(data) > 65536 or len(lines) > 512:
+            return False, None
+        for line in lines:
+            fields = line.split(b":")
+            for index in indexes:
+                if index < len(fields) and re.fullmatch(rb"[0-9]+", fields[index]):
+                    if len(fields[index]) > 10:
+                        return False, None
+                    if 1000 <= int(fields[index]) <= 59999:
+                        highest = max(highest, int(fields[index]))
+    return True, (highest + 1 if highest < 59999 else None)
+
+
+@pytest.mark.parametrize("case", RULE["cases"], ids=[case["case"] for case in RULE["cases"]])
+def test_the_shared_next_uid_rule_table(host, case):
+    passwd, group = rule_bytes(case["passwd"]), rule_bytes(case["group"])
+    expected = (not case["logins_null"], case["next_uid"])
+    assert next_uid_rule(passwd, group) == expected
+    (host.files / "passwd").write_bytes(passwd)
+    (host.files / "group").write_bytes(group)
+    logins = host(passwd=None, group=None)
+    assert (logins is not None, logins and logins["next_uid"]) == expected
+
+
 @pytest.mark.parametrize("passwd,group,expected", [
     ([], ["staff:x:3000:"], 3001),
     (["svc:x:100:4000::/:/bin/false"], [], 4001),
@@ -446,6 +517,14 @@ def test_scanning_stops_at_the_second_distinct_account(host):
     assert host(passwd=accounts, receipts=[receipt(), oversize, receipt("alice", 1001)])["prepared"] is None
 
 
+def test_two_accounts_sharing_a_uid_are_reported_once(host):
+    # Two passwd names can share a uid; the website refuses prepared entries
+    # that do, so the second is skipped and scanning goes on.
+    accounts = [user("demo", 1000), user("twin", 1000), user("alice", 1001)]
+    receipts = [receipt(), receipt("twin", 1000), receipt("alice", 1001)]
+    assert host(passwd=accounts, receipts=receipts)["prepared"] == [DEMO, {"name": "alice", "uid": 1001}]
+
+
 @pytest.mark.parametrize("count,expected", [(128, [DEMO]), (129, None)])
 def test_more_than_128_receipt_names_read_as_unknown(host, count, expected):
     receipts = [receipt(state="planned")] * (count - 1) + [receipt()]
@@ -467,7 +546,7 @@ def test_symlinks_and_non_files_in_the_store_are_skipped(host, tmp_path):
     assert host(passwd=[user("demo", 1000)])["prepared"] == []
 
 
-@pytest.mark.parametrize("damage", ["store-link", "parent-link", "store-file"])
+@pytest.mark.parametrize("damage", ["store-link", "parent-link", "store-file", "parent-file"])
 def test_a_redirected_store_reads_as_unknown(host, tmp_path, damage):
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "v1").mkdir(parents=True)
@@ -477,8 +556,11 @@ def test_a_redirected_store_reads_as_unknown(host, tmp_path, damage):
     elif damage == "parent-link":
         host.store.parent.rmdir()
         host.store.parent.symlink_to(elsewhere)
-    else:
+    elif damage == "store-file":
         host.store.write_bytes(receipt())
+    else:
+        host.store.parent.rmdir()
+        host.store.parent.write_bytes(receipt())
     assert host(passwd=[user("demo", 1000)])["prepared"] is None
 
 
@@ -516,15 +598,15 @@ def test_the_worst_case_stays_small_and_fast(host):
     # 512-line, 64 KiB account files; 128 receipts of 96 KiB, each shaped like
     # the leaf's with its full 16,000 characters of brace-heavy hook text. Every
     # receipt is read: the two that count come last.
-    longest = ["a" * 31 + c for c in "bc"]
+    longest = {"a" * 31 + "b": 59998, "a" * 31 + "c": 59997}
     passwd = ["claudlobby:x:9999999999:1::/home/claudlobby:/bin/bash",
-              *(user(name, 59998) for name in longest)]
+              *(user(name, uid) for name, uid in longest.items())]
     passwd += [f"u{n}:x:{1000 + n}:{1000 + n}:" + "g" * 100 for n in range(512 - len(BASE_PASSWD) - len(passwd))]
     group = [f"g{n}:x:{1000 + n}:" + "m" * 100 for n in range(512 - len(BASE_GROUP))]
     hooks = ["{}" * 8000]
     host(passwd=passwd, group=group, receipts=[])
     for n in range(128):
-        name, uid = (longest[n - 126], 59998) if n >= 126 else (f"gone{n}", 2000 + n)
+        name, uid = list(longest.items())[n - 126] if n >= 126 else (f"gone{n}", 2000 + n)
         base = len(receipt(name, uid, hooks=[*hooks, ""]))
         data = receipt(name, uid, hooks=[*hooks, "x" * (98304 - base)])
         assert len(data) == 98304
@@ -536,8 +618,13 @@ def test_the_worst_case_stays_small_and_fast(host):
         text = (host.files / name).read_bytes()
         assert len(text) <= 65536 and text.count(b"\n") == 512
     assert logins == {"team": {"uid": 9999999999}, "next_uid": 59999,
-                      "prepared": [{"name": name, "uid": 59998} for name in longest]}
-    assert elapsed < 3, f"worst case took {elapsed:.2f}s"
+                      "prepared": [{"name": name, "uid": uid} for name, uid in longest.items()]}
+    # Root mode runs under dash on Ubuntu: 3 seconds. bash 3.2, /bin/sh on a
+    # Mac (where root mode never runs), splits braces more slowly: 6 seconds.
+    bash = subprocess.run(["/bin/sh", "-c", 'printf %s "${BASH_VERSION-}"'],
+                          capture_output=True, timeout=5).stdout
+    budget = 6 if bash else 3
+    assert elapsed < budget, f"worst case took {elapsed:.2f}s under {'bash' if bash else 'dash'}"
 
 
 def leaf_module():

@@ -148,8 +148,19 @@ valid_name() {
     [ "${#1}" -le 32 ]
 }
 
-# passwd and group: at most 64 KiB and 512 lines each. next_uid is 1 + the
-# highest id from 1000 to 59999 (passwd uid and gid, group gid), at least 1000.
+# The next-uid rule. linux-system-v1.sh must compute the same answer, and
+# tests/fixtures/next-uid-rule.json holds the cases both are tested against:
+# - passwd and group are each at most 65,536 bytes and 512 lines, or logins
+#   is null. Lines are split on newline only; a last line needs no newline.
+# - Fields are split on ":". A passwd line counts its field 3 when it has at
+#   least 3 fields and its field 4 when it has at least 4; a group line counts
+#   its field 3. The name and the other fields do not matter.
+# - A field of 1 to 10 ASCII digits, matched in full, is a number; leading
+#   zeros are dropped. All digits but more than 10, even zero-padded, makes
+#   logins null. Anything else (a space, tab, "+", "-", CR, NUL) is no number;
+#   the leaf still rechecks the chosen id through NSS.
+# - next_uid is 1 + the highest number from 1000 to 59999, at least 1000, and
+#   null when that passes 59999.
 # The first claudlobby line is the team account. $users keeps each well-named
 # account's first line as RS name:uid, with - for a uid that is not a number.
 read_accounts() {
@@ -193,6 +204,8 @@ read_accounts() {
 # file and only the state and submission strings follow it. Sets
 # $receipt_name and $receipt_uid from that selection.
 receipt_account() {
+    # Anywhere in the file is safe today: serve config, apt hooks and package
+    # rows have fixed shapes, so only the proposal's own kind is such a pair.
     case "$content" in *',"kind":"system"'[,}]*) ;; *) return 1 ;; esac
     case "$content" in *'},"state":"completed"'*) ;; *) return 1 ;; esac
     IFS='{'
@@ -220,10 +233,12 @@ receipt_account() {
 # Setup's store: at most 128 *.json names, each read at most 96 KiB. Symlinks
 # and non-files are skipped. A receipt counts only when its account is a live
 # passwd account with the same uid, from 1000 to 59999, and not claudlobby.
+# No two entries share a name or a uid: two passwd names may share a uid.
 # Scanning stops at the second distinct account.
 read_receipts() {
     prepared=; seen=; found=0
     if [ -h "${store%/*}" ] || [ -h "$store" ]; then return 1; fi
+    if [ -e "${store%/*}" ] && [ ! -d "${store%/*}" ]; then return 1; fi
     [ -e "$store" ] || return 0
     [ -d "$store" ] || return 1
     set +f
@@ -238,8 +253,8 @@ read_receipts() {
         [ "$receipt_name" != claudlobby ] || continue
         if [ "$receipt_uid" -lt 1000 ] || [ "$receipt_uid" -gt 59999 ]; then continue; fi
         case "$users$rs" in *"$rs$receipt_name:$receipt_uid$rs"*) ;; *) continue ;; esac
-        case "$seen$rs" in *"$rs$receipt_name$rs"*) continue ;; esac
-        seen=$seen$rs$receipt_name
+        case "$seen$rs" in *"$rs$receipt_name$rs"*|*"$rs$receipt_uid$rs"*) continue ;; esac
+        seen=$seen$rs$receipt_name$rs$receipt_uid
         if [ "$found" -gt 0 ]; then prepared=$prepared,; fi
         prepared=$prepared'{"name":"'$receipt_name'","uid":'$receipt_uid'}'
         found=$((found + 1))
