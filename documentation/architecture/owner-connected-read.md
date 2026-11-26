@@ -543,7 +543,9 @@ begin's own transaction, so a refused begin spends nothing, and nothing in the
 record changes, so every later admission of the same approval still matches.
 
 **The writer** runs in one write transaction and writes nothing when it refuses.
-In order: the owner's grant and the active binding (their own refusals); the
+In order: the owner's grant (`setup_denied`) and the active binding
+(`workspace_binding_required`, or `workspace_native_owner_required` when the
+owner is not a native one; both final for the run, a new run starts again); the
 installation and active revision (`setup_source_changed`); a retained team
 approval or Launch, by the computer run's own test (`use_full_guide`);
 `start_state` is `started` (`not_started`); the sign-in lease is free
