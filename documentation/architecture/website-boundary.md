@@ -120,11 +120,11 @@ with the channel's own endings (`cancelled`, `disconnected`, `invalid_request`,
 `installed_internal_error` (any other failure). Without an install in this run
 the same endings keep their plain words.
 
-Two writer refusals are rare races, decided inside the write after the person's
-yes: `workspace_binding_required` (the computer's workspace link was removed or
-changed after the run read it, so no active binding remains) and
-`workspace_native_owner_required` (the owner's access grant is not a native
-owner's). Each ends the run with nothing written, as an error frame with
+Two writer refusals are decided inside the write, after the person's yes:
+`workspace_binding_required` (no active workspace link remains, for example it
+was removed or changed after the run read it: a rare race) and
+`workspace_native_owner_required` (the caller is not one of the computer's own
+local accounts; not expected from the setup page, which always runs as one). Each ends the run with nothing written, as an error frame with
 `retry: false`: final for this run, and a new run starts again. After an
 install they end as `installed_workspace_binding_required` and
 `installed_workspace_native_owner_required`.
