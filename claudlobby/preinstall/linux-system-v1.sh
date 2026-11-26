@@ -6,7 +6,10 @@
 # full retained {account,uid,gid,home,node_key,profile_id} only for a new inspect.
 # apply: exact original full selection, digest and decision=approve; no edited plan.
 # status: original minimal selection, UUID and artifact pin; never derives context.
-# UUIDs are permanently one-shot, including unknowns.
+# A UUID past planned is permanently one-shot, unknowns included. A planned
+# record past expiry may be removed: its id then answers original_receipt_absent
+# and a new inspect proposes afresh, so an old approval binds only an identical
+# digest (else proposal_conflict) and no effect can replay.
 # The team account claudlobby is adopted when it conforms, or, absent, a system
 # proposal plans one fixed useradd that the worker runs once, before apt. Its
 # id must be the next id this leaf computes. Other accounts are unchanged.
@@ -70,7 +73,8 @@ TEAM_DISCLOSURE = ("Creates or uses the local account claudlobby: its own group 
     "claudlobby. Setup never removes this account.")
 # Fixed root paths the team account checks read; nothing on the wire moves them.
 PATHS = {"passwd": "/etc/passwd", "group": "/etc/group", "shadow": "/etc/shadow", "subuid": "/etc/subuid",
-         "subgid": "/etc/subgid", "nsswitch": "/etc/nsswitch.conf", "home": TEAM_HOME,
+         "subgid": "/etc/subgid", "nsswitch": "/etc/nsswitch.conf", "home": TEAM_HOME, "gshadow": "/etc/gshadow",
+         "sudoers": "/etc/sudoers", "sudoers.d": "/etc/sudoers.d",
          "mail": "/var/mail/" + TEAM, "proc": "/proc", "run": "/run/user"}
 
 
@@ -613,10 +617,11 @@ def lstat(path):
         return None
 
 
-def read_root(name, limit=65536):
-    # One fixed root file, at most limit + 1 bytes so callers see oversize;
-    # None when it is absent. Never follows a link.
-    path = Path(PATHS[name])
+def read_root(name, limit=65536, child=""):
+    # One fixed root file, or a child listed in a fixed root folder, at most
+    # limit + 1 bytes so callers see oversize; None when it is absent. Never
+    # follows a link.
+    path = Path(PATHS[name], child)
     trusted_parents(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -661,17 +666,20 @@ def next_uid(passwd, group):
 
 
 def directory_service():
-    # Accounts come from local files only: passwd and group each appear once
-    # in nsswitch.conf and list nothing but files and systemd.
+    # Accounts come from local files only. Read as glibc does: # starts a
+    # comment and a name ends at a colon or a space. Every passwd or group
+    # line must parse and list only files or systemd, with no [action]; a
+    # later line replaces an earlier one, so this holds whichever wins.
     raw = read_root("nsswitch")
     require(raw is not None and len(raw) <= 65536, "team_directory_service")
-    seen = []
+    seen = set()
     for line in raw.split(b"\n"):
-        name, colon, sources = line.split(b"#", 1)[0].partition(b":")
-        if name.strip() in (b"passwd", b"group"):
-            seen.append(name.strip())
-            require(colon and sources.split() and set(sources.split()) <= {b"files", b"systemd"}, "team_directory_service")
-    require(sorted(seen) == [b"group", b"passwd"], "team_directory_service")
+        text = line.split(b"#", 1)[0].strip()
+        if text.startswith((b"passwd", b"group")):
+            entry = re.fullmatch(rb"(passwd|group)[\s:]+(.*)", text)
+            require(entry and entry[2] and set(entry[2].split()) <= {b"files", b"systemd"}, "team_directory_service")
+            seen.add(entry[1])
+    require(seen == {b"group", b"passwd"}, "team_directory_service")
 
 
 def subordinate(uid):
@@ -708,6 +716,34 @@ def running(uid):
     return False
 
 
+def team_lines(name):
+    # The lines of a shadow file whose first field is the team, split on
+    # colons; [] when the file is absent, None past LIMIT.
+    raw = read_root(name, LIMIT)
+    if raw is None or len(raw) <= LIMIT:
+        return [f for f in (line.split(b":") for line in (raw or b"").split(b"\n")) if f[0] == TEAM.encode()]
+
+
+def sudo_rules(code):
+    # A heuristic: no line sudo reads names the team as a whole word. Aliases,
+    # groups or #uid forms can hide a name, so the live run also checks sudo -l
+    # -U claudlobby. # starts a comment but #include and #includedir do not.
+    # Every include must be /etc/sudoers.d, whose files are read as sudo picks
+    # them (no name ending in ~ or holding a dot), at most 64 of 64 KiB.
+    try:
+        names = sorted(n for n in os.listdir(PATHS["sudoers.d"]) if not n.endswith("~") and "." not in n)
+    except FileNotFoundError:
+        names = []
+    require(len(names) <= 64, code)
+    for name, child in [("sudoers", "")] + [("sudoers.d", n) for n in names]:
+        raw = read_root(name, child=child)
+        require(raw is None or len(raw) <= 65536, code)
+        for line in (raw or b"").split(b"\n"):
+            include = re.fullmatch(rb"\s*[#@]include(?:dir)?\s+(.*?)\s*", line)
+            require(include[1] == b"/etc/sudoers.d" if include else
+                    not re.search(rb"\bclaudlobby\b", line.split(b"#", 1)[0]), code)
+
+
 def team_policy():
     # A present team account is used only as useradd below makes it.
     directory_service()
@@ -720,31 +756,39 @@ def team_policy():
             and [p.pw_name for p in users if p.pw_gid == gid] == [TEAM]
             and [g.gr_name for g in grp.getgrall() if g.gr_gid == gid or g.gr_name == TEAM] == [TEAM]
             and set(os.getgrouplist(TEAM, gid)) == {gid}, "team_account_group")
+    # Its gshadow line names no administrator or member and holds no hash. A
+    # missing line conforms: newgrp then uses the /etc/group field, held here
+    # to x, empty or a lock, none of which any password matches.
+    lines = team_lines("gshadow")
+    require(lines is not None and len(lines) <= 1 and re.fullmatch(r"x|[!*]*", group.gr_passwd)
+            and all(len(f) == 4 and re.fullmatch(rb"[!*]*", f[1]) and f[2] == f[3] == b"" for f in lines), "team_account_group")
     require(account.pw_shell == "/bin/bash", "team_account_shell")
     trusted_parents(Path(PATHS["home"]))
     home, mail = lstat(PATHS["home"]), lstat(PATHS["mail"])
     require(account.pw_dir == TEAM_HOME and home is not None and stat.S_ISDIR(home.st_mode) and home.st_uid == uid
             and not home.st_mode & 0o077 and (mail is None or stat.S_ISREG(mail.st_mode) and mail.st_uid == uid
             and mail.st_size == 0 and mail.st_nlink == 1), "team_account_home")
-    raw = read_root("shadow", LIMIT)
-    lines = [line.split(b":") for line in (raw or b"").split(b"\n") if line.split(b":")[0] == TEAM.encode()]
-    require(raw is not None and len(raw) <= LIMIT and len(lines) == 1 and len(lines[0]) == 9
+    lines = team_lines("shadow")
+    require(lines and len(lines) == 1 and len(lines[0]) == 9
             and account.pw_passwd == "x" and re.fullmatch(rb"[!*]+", lines[0][1]), "team_account_password")
-    # No forced change, no maximum age, no inactivity limit, no expiry.
-    require(lines[0][2] != b"0" and all(lines[0][i] in (b"", b"-1") for i in (4, 6, 7)), "team_account_expiry")
+    # No forced change (a last change of 0 by value: only empty or digits
+    # above 0 pass), no maximum age, no inactivity limit, no expiry.
+    require(re.fullmatch(rb"(0*[1-9][0-9]*)?", lines[0][2]) and all(lines[0][i] in (b"", b"-1") for i in (4, 6, 7)), "team_account_expiry")
     require(not subordinate(uid), "team_account_ids")
+    sudo_rules("team_account_sudo")
 
 
 def team_plan(uid, api):
     # The team account is absent: plan it with the id the check offered,
     # which must be the next id this leaf computes, and free everywhere.
     directory_service()
-    require(lookup(grp.getgrnam, TEAM) is None, "team_leftovers")
+    require(lookup(grp.getgrnam, TEAM) is None and team_lines("gshadow") == [], "team_leftovers")
     trusted_parents(Path(PATHS["home"]))
     require(lstat(PATHS["home"]) is None, "team_home_exists")
     require(uid == next_uid(read_root("passwd"), read_root("group"))
             and lookup(pwd.getpwuid, uid) is None and lookup(grp.getgrgid, uid) is None, "team_uid_changed")
     require(not subordinate(uid) and lstat(PATHS["mail"]) is None, "team_leftovers")
+    sudo_rules("team_leftovers")
     require(not running(uid) and unit_state("user@" + str(uid) + ".service").get("ActiveState") == "inactive"
             and lstat(os.path.join(PATHS["run"], str(uid))) is None, "team_uid_unavailable")
     # Never made beside another setup that already holds port 443.
