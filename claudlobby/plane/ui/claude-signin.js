@@ -381,7 +381,9 @@ export const LINK_ENDING_BUTTONS = Object.freeze({try_again:'Try again', link:'L
 export const LINK_CLOSING = LINK_ENDING_LINES.closing;
 export function linkEnding({state, reason, code_sent:sent, retryable, unconfirmed}) {
   const end = (line, button) => ({line, button});
-  if (unconfirmed || state === 'unknown' && reason === 'child_quiet_unproven') return end(LINK_ENDING_LINES.unconfirmed,'check_again');
+  // Check again only while the computer still holds that sign-in (unconfirmed); once it no longer does (after the
+  // restart, say) checking would read the same ending forever, so Link Claude starts a new one.
+  if (unconfirmed || state === 'unknown' && reason === 'child_quiet_unproven') return end(LINK_ENDING_LINES.unconfirmed,unconfirmed ? 'check_again' : 'link');
   if (['credential_already_present','environment_format'].includes(reason)) return end(LINK_ENDING_LINES.settings,'check_again');
   if (state === 'needs_attention' && reason === 'timeout') return end(LINK_ENDING_LINES.timeout,retryable ? 'try_again' : 'link');
   if (state === 'cancelled' && reason === 'effect_uncertain') return end(LINK_ENDING_LINES.cancelled,!sent && retryable ? 'try_again' : 'link');

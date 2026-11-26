@@ -340,7 +340,10 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     const m = sg?.module, state = m?.state();
     if (!['connected','needs_attention','cancelled','unknown'].includes(state)) return null;
     if (state === 'connected') return {line:CLAUDE_TEXT.saved};
-    const ending = linkEnding({state, reason:m.reason(), code_sent:m.flags().sent, retryable:m.retryable(), unconfirmed:false});
+    // A status cannot say whether the computer still holds an unconfirmed sign-in, so that ending keeps Check again,
+    // whose read says.
+    const unconfirmed = state === 'unknown' && m.reason() === 'child_quiet_unproven';
+    const ending = linkEnding({state, reason:m.reason(), code_sent:m.flags().sent, retryable:m.retryable(), unconfirmed});
     return {line:ending.line, button:ending.button === 'link' && !onSetupPage ? null : ending.button};
   }
   function claudeView() {
