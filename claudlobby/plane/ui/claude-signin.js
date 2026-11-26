@@ -206,7 +206,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     signinRetryable=false; // only a later host answer can offer Try again again
     signinRefusal = refused ? 'attempt' : signinRefusal === 'attempt' ? null : signinRefusal;
     clearSignin(refused ? `This computer refused this browser’s Claude sign-in. ${NO_RETRY}`
-      : 'Could not reach this computer to check sign-in. Choose Check sign-in progress to look again; it never starts a second sign-in.');
+      : 'Could not check sign-in on this computer. Choose Check sign-in progress to look again; it never starts a second sign-in.');
     return false;
   }
   // A refused Try again rolled the host back and an unsent one reached nothing: the ended attempt is still

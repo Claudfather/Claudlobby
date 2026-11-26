@@ -170,6 +170,10 @@ ended (terminal, or its sign-in lease free) also releases the hold, and so does
 one that shows Claude linked (core then refuses every begin), as does a status
 naming the held attempt unknown, as after a restart; a read naming
 no attempt or another one, or sent under an earlier hold, releases nothing.
+Off the setup page, a lost or failed sign-in call keeps the attempt and offers Check
+sign-in progress, as on the setup page. Only core's refusal of a call that view did not
+start sends the person to the page where they added the computer, and a Try again the
+browser never sent leaves no step to check.
 "Stop waiting" appears only after ten seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
 storage.
 
