@@ -1,4 +1,4 @@
-### Added — as root, the readiness probe rechecks the team account and says whether setup left an operation unfinished
+### Added — as root, the readiness probe rechecks the team account and says whether setup left an operation unfinished (#3148)
 
 `logins.team` becomes `{"uid": N, "policy": P}` when `/etc/passwd` has a `claudlobby` line, and `logins` gains a fourth key, `uncertain`, beside `team`, `next_uid` and `prepared`. With no `claudlobby` line, `team` stays null with no `policy`, and `uncertain` is still reported. Until now a return visit rechecked the account only through the private connection's approval, which the website will soon skip when the route is already exact; this keeps that check in the read-only step every visit already runs.
 
