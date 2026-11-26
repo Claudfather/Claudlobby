@@ -878,6 +878,69 @@ test('an unknown begin result keeps the hold; only a completed refusal, disconne
   refused.api.dispose();
 });
 
+// A begin whose answer was lost may have started, so it holds the session; the computer refusing a check or cancel of
+// that begin's own attempt says it holds no such attempt (core's signin_original_attempt_required): it never reached it.
+test('a lost begin holds the session until the computer refuses a check or cancel of its own attempt', async () => {
+  for (const action of ['status', 'cancel']) {
+    const h = signinHarness(); await h.api.connect();
+    h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
+    await assert.rejects(h.api.setupSignin('begin', attemptInput));
+    // Another attempt's or approval's refusal, a refused code, a lost answer and a failure each prove nothing about it.
+    h.overrides.set('setup/signin-' + action, () => reply(403, { state: 'denied' }));
+    await assert.rejects(h.api.setupSignin(action, { ...attemptInput, attempt_id: uuid(13) }));
+    await assert.rejects(h.api.setupSignin(action, { ...attemptInput, generation: uuid(10) }));
+    h.overrides.set('setup/signin-code', () => reply(403, { state: 'denied' }));
+    await assert.rejects(h.api.setupSignin('code', { ...attemptInput, code: 'a#b' }));
+    h.overrides.set('setup/signin-' + action, () => { throw new Error('lost'); });
+    await assert.rejects(h.api.setupSignin(action, attemptInput));
+    h.overrides.set('setup/signin-' + action, () => reply(500, { state: 'unavailable' }));
+    await assert.rejects(h.api.setupSignin(action, attemptInput));
+    assert.equal(await h.api.renew(), false, action + ': still held'); assert.equal(renewals(h), 0);
+    h.overrides.set('setup/signin-' + action, () => reply(403, { state: 'denied' }));
+    await assert.rejects(h.api.setupSignin(action, attemptInput), error => error.status === 403);
+    assert.equal(await h.api.renew(), true, action + ': released'); assert.equal(renewals(h), 1);
+    h.api.dispose();
+  }
+  // A begin the computer answered is followed by its own answers: a refused check releases nothing, as before.
+  const answered = signinHarness(); await answered.api.connect();
+  await answered.api.setupSignin('begin', attemptInput);
+  answered.overrides.set('setup/signin-status', () => reply(403, { state: 'denied' }));
+  await assert.rejects(answered.api.setupSignin('status', attemptInput));
+  assert.equal(await answered.api.renew(), false); assert.equal(renewals(answered), 0);
+  answered.api.dispose();
+});
+
+test('a begin asked while a lost begin holds the session first checks that attempt, and never sends two', async () => {
+  const next = { ...attemptInput, attempt_id: uuid(14) }, sent = h => h.calls.map(c => c.url.split('/').pop()).filter(x => x.startsWith('signin-'));
+  // Refused (it never reached the computer) or ended: the hold ends with that answer and the new begin is sent.
+  for (const [name, answer] of [['refused', () => reply(403, { state: 'denied' })],
+    ['ended', () => reply(200, signinBody('cancelled', { reason: 'effect_uncertain' }))]]) {
+    const h = signinHarness(); await h.api.connect();
+    h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
+    await assert.rejects(h.api.setupSignin('begin', attemptInput));
+    h.overrides.set('setup/signin-begin', init => reply(200, { ...JSON.parse(init.body), state: 'waiting', reason: null }));
+    h.overrides.set('setup/signin-status', answer);
+    assert.equal((await h.api.setupSignin('begin', next)).attempt_id, next.attempt_id, name);
+    assert.deepEqual(sent(h), ['signin-begin', 'signin-status', 'signin-begin'], name);
+    assert.deepEqual(JSON.parse(signinCalls(h, 'status')[0].init.body), attemptInput, name + ': the lost begin\'s own attempt and approval');
+    h.api.dispose();
+  }
+  // Live, or no answer: still held, so the new begin is refused before anything is sent. Once the computer answered
+  // for that attempt it is an ordinary live sign-in, refused at once with no check.
+  for (const [name, answer, checks] of [['live', () => reply(200, signinBody('waiting')), 1], ['lost', () => { throw new Error('lost'); }, 2]]) {
+    const h = signinHarness(); await h.api.connect();
+    h.overrides.set('setup/signin-begin', () => { throw new Error('lost'); });
+    await assert.rejects(h.api.setupSignin('begin', attemptInput));
+    h.overrides.set('setup/signin-status', answer);
+    await assert.rejects(h.api.setupSignin('begin', next), error => error.code === 'signin_not_started', name);
+    await assert.rejects(h.api.setupSignin('begin', next), error => error.code === 'signin_not_started', name);
+    assert.equal(signinCalls(h, 'begin').length, 1, name + ': never a second begin');
+    assert.equal(signinCalls(h, 'status').length, checks, name);
+    assert.equal(await h.api.renew(), false, name + ': still held');
+    h.api.dispose();
+  }
+});
+
 test('begin renews first unless the session covers a ten-minute attempt\'s conversation, and refuses if that fails', async () => {
   const h = signinHarness(); await h.api.connect();
   h.time = 600000; // 300 seconds left: not enough for a 630-second conversation

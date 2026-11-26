@@ -93,12 +93,12 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   let held = false; // a read for a ready connection was kept back by hold()
   // The Claude part. waiting: this view pressed Link Claude and the page has not answered (Stop waiting only ends the
   // line, a later answer still lands); stopShown: the wait has lasted STOP_AFTER_MS, so Stop waiting is offered (its
-  // timer, stopTimer); settling: answers from the page whose read has not answered yet. sg: the lifted sign-in
+  // timer, stopTimer); settling: approvals this view waited for whose read has not answered yet. sg: the lifted sign-in
   // step for the current link approval (claude-signin.js),
   // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (a status
-  // check refused on a view that did not run the link) or 'closing' (a begin refused on the setup page), each cleared
-  // when the read's sign-in changes. noOffer: the page answered "Go to the update" with no offer to show; cleared by a
-  // read with a link marker and by a new connection.
+  // check refused on a view that did not run the link) or 'closing' (a begin on the setup page that never reached the
+  // computer), each cleared when the read's sign-in changes. noOffer: the page answered "Go to the update" with no
+  // offer to show; cleared by a read with a link marker and by a new connection.
   let noOffer = false, waiting = false, stopShown = false, stopTimer = null, settling = 0, sg = null, busy = false, busyOp = null,
     epochs = 0, notice = null, noticeFor = null;
   const ready = () => client.snapshot().state === 'ready';
@@ -158,6 +158,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   function syncSignin() {
     const signin = current?.signin ?? null;
     if (noticeFor !== signinKey()) { notice = null; noticeFor = signinKey(); }
+    // A read sent before a Try again can say the sign-in ended while that begin is in flight: the step waits for its answer.
+    if (mount && signin?.phase === 'ended' && current.provider !== 'linked' && sg?.beginning && sg.generation === signin.generation) return;
     if (!mount || !signin || current.provider === 'linked' || signin.phase === 'ended') { dropSignin(); return; }
     const have = sg?.module.attempt()?.attempt_id ?? null;
     if (sg && sg.generation === signin.generation && (signin.attempt_id === have || busy)) return;
@@ -168,7 +170,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   function startSignin(generation, attemptId, mode) {
     dropSignin();
-    const g = {dead:false, epoch:++epochs, generation, mode, answered:false, module:null};
+    // beginning: its begin is in flight; lost: its begin failed with no refusal, so may or may not have reached the computer.
+    const g = {dead:false, epoch:++epochs, generation, mode, answered:false, beginning:false, lost:false, module:null};
     g.module = createClaudeSignin({calls:(action, input) => client.setupSignin(action, input),
       // No storage: the one kept attempt is the computer's, named by the parts read.
       store:{read:() => attemptId === null ? null : JSON.stringify({generation, attempt_id:attemptId}), write:() => {}},
@@ -194,26 +197,30 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   async function runOp(operation, quiet = false) {
     const g = sg;
     if (!g || g.dead || busy || disposed) return false;
-    busy = true; busyOp = quiet || !Object.hasOwn(SIGNIN_PROGRESS, operation) ? null : operation; onChange();
+    busy = true; busyOp = quiet || !Object.hasOwn(SIGNIN_PROGRESS, operation) ? null : operation;
+    if (operation === 'signin-begin') g.beginning = true;
+    onChange();
     let ok = false;
     try { ok = await g.module.operate(operation, g.epoch); if (ok) g.answered = true; }
     catch (error) {
       const restored = operation === 'signin-retry' ? g.module.restoreRetry(error) : '';
       if (!disposed && !g.dead) {
         if (g.answered || restored) g.module.failed(operation, error, restored, g.epoch);
-        else if (operation === 'signin-begin' && onSetupPage && (refusal(error) || error?.code === 'signin_not_started')) {
-          // This page ran the link and began the sign-in itself, and the computer refused that begin (or this browser
-          // never sent it): the plan's "begin refused" row. Nothing started, so the attempt is dropped.
+        else if (onSetupPage && (operation === 'signin-begin' && (refusal(error) || error?.code === 'signin_not_started')
+          || g.lost && refusal(error))) {
+          // This page ran the link and began the sign-in itself, and that begin never reached the computer: the computer
+          // refused it, this browser never sent it, or the computer refused a later call for the attempt of a begin whose
+          // answer was lost (it holds no such attempt). The plan's "begin refused" row. Nothing started, so the attempt is dropped.
           notice = 'closing'; noticeFor = signinKey(); dropSignin();
         }
         // A lost or failed answer on the page that ran the link (a begin that may in fact have started, or a check) is
         // an ordinary failure: the step keeps its attempt and offers Check sign-in progress.
-        else if (onSetupPage) g.module.failed(operation, error, restored, g.epoch);
+        else if (onSetupPage) { if (operation === 'signin-begin') g.lost = true; g.module.failed(operation, error, restored, g.epoch); }
         else { notice = 'refused'; noticeFor = signinKey(); dropSignin(); } // a check this view never ran the link for: it continues on the setup page
       }
     }
     finally {
-      busy = false; busyOp = null;
+      busy = false; busyOp = null; g.beginning = false;
       if (!disposed && !g.dead) {
         onChange(); g.module.schedule();
         if (ok && operation === 'signin-begin') void read(); // the read now names this attempt
@@ -242,12 +249,14 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       if (message.outcome !== 'refused') return false;
       noOffer = true; onChange(); return true;
     }
-    // Until that read answers the part keeps its waiting line with no button, so Link Claude never flashes back between
-    // an approval and its begin.
-    const expecting = waiting; wait(false); settling++; onChange();
+    // An approval this view waited for keeps its waiting line with no button until that read answers, so Link Claude never
+    // flashes back between an approval and its begin. Any other answer, or one this view never waited for, settles nothing.
+    const expecting = waiting, settle = expecting && message.outcome === 'approved';
+    wait(false); if (settle) settling++;
+    onChange();
     let value = false;
     try { value = await read(); } // once, fresh (never one sent before this answer); the only read this answer asks for
-    finally { settling--; }
+    finally { if (settle) settling--; }
     if (!disposed) onChange();
     // Approved and still waiting: the sign-in begins by itself, once. After Stop waiting it waits for its own button.
     if (message.outcome === 'approved' && expecting && value && !disposed && !busy && current?.signin?.phase === 'approved'

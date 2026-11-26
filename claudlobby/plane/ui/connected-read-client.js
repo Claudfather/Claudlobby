@@ -94,6 +94,9 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   // While a sign-in conversation is admitted or live, no renewal may rotate the begin-time
   // bearer. ``renewalRun`` lets begin wait for a renewal already in flight.
   let signinAdmitting = false, signinLive = false, renewalPermit = false, renewalRun = null, signinRenewing = false;
+  // signinLost: the begin {generation, attempt_id} that holds the session although its answer was lost, until the
+  // computer answers for that attempt or the hold ends.
+  let signinLost = null;
   const signinHeld = () => signinAdmitting || signinLive;
   const trackRenewal = run => {
     const clear = () => { if (renewalRun === run) renewalRun = null; };
@@ -119,7 +122,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   }
   function wipe() {
     token = null; pending = null; expires = 0; renewalUnknown = false; setupOnly = false; setupSignedOut = false;
-    signinLive = false; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
+    signinLive = false; signinLost = null; // expiry, disconnect, loss and disposal end the hold; the host attempt is retained
     clearTimeout(expiryTimer); expiryTimer = null;
     clearTimeout(continuityTimer); continuityTimer = null;
     for (const request of requests) request.abort();
@@ -595,12 +598,23 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     } catch { stop('Connection outcome unknown. Check again explicitly.'); return false; }
     finally { busy = false; }
   }
-  // A begin refused before anything was sent: the caller may keep following the attempt it had.
+  // A begin refused before it was sent (at most a check of a lost begin's attempt went first): the caller may keep
+  // following the attempt it had.
   const notStarted = message => Object.assign(new Error(message), {code: 'signin_not_started'});
+  // A completed refusal is the computer's answer; a lost or unknown answer proves nothing.
+  const refused = error => [400, 401, 403, 409].includes(error?.status);
+  const releaseSignin = () => { signinLive = false; signinLost = null; scheduleContinuity(); };
   async function signinBegin(input) {
-    if (signinHeld() || disposed || ended) throw notStarted('A Claude sign-in is already open.');
+    if (signinAdmitting || signinLive && !signinLost || disposed || ended) throw notStarted('A Claude sign-in is already open.');
     signinAdmitting = true; // from here no renewal path can start
     try {
+      // A begin whose answer was lost holds the session, since it may have started. Before another, ask the computer
+      // once about that begin's attempt: a refusal (it never reached the computer) or an ending releases the hold;
+      // anything else keeps it, so two begins are never in flight.
+      if (signinLive) {
+        await signinCall('status', signinLost).catch(() => {});
+        if (signinLive) throw notStarted('A Claude sign-in is already open.');
+      }
       if (renewalRun) await renewalRun.catch(() => {});
       if (!valid(true)) throw notStarted('Sign-in was not started. Connect again first.');
       if (expires - now() < SIGNIN_LIFETIME) {
@@ -616,8 +630,10 @@ export function createConnectedReadClient({ reference, documentContext, currentC
       const epochAtBegin = epoch;
       try { return settleSignin(await setupRequest('signin-begin', input)); }
       catch (error) {
-        // A completed refusal means no attempt was admitted; a lost or unknown answer proves nothing.
-        if ([400, 401, 403, 409].includes(error?.status) && epochAtBegin === epoch) { signinLive = false; scheduleContinuity(); }
+        // A completed refusal means no attempt was admitted. A lost or unknown answer keeps the hold, and its attempt.
+        if (epochAtBegin === epoch && refused(error)) releaseSignin();
+        else if (epochAtBegin === epoch && signinLive && uuid(input?.generation) && uuid(input?.attempt_id))
+          signinLost = Object.freeze({generation: input.generation, attempt_id: input.attempt_id});
         throw error;
       }
     } finally { signinAdmitting = false; }
@@ -625,10 +641,19 @@ export function createConnectedReadClient({ reference, documentContext, currentC
   function settleSignin(result) {
     // Only a delivered body naming a terminal state releases the hold; the transport
     // releases that body only after its own drain. Anything else leaves it held.
-    if (signinLive && result && typeof result === 'object' && SIGNIN_TERMINAL.includes(result.state)) {
-      signinLive = false; scheduleContinuity();
-    }
+    if (signinLive && result && typeof result === 'object' && SIGNIN_TERMINAL.includes(result.state)) releaseSignin();
+    else if (signinLost && result?.attempt_id === signinLost.attempt_id) signinLost = null; // that begin did reach the computer
     return result;
+  }
+  // Status, code or cancel. A check or cancel the computer refuses for the attempt of a begin whose answer was lost
+  // says it holds no such attempt: that begin never reached it, so nothing is left to hold the session for.
+  function signinCall(operation, input) {
+    const lost = signinLost, at = epoch;
+    return setupRequest('signin-' + operation, input).then(settleSignin, error => {
+      if (lost && lost === signinLost && at === epoch && ['status', 'cancel'].includes(operation) && refused(error)
+        && input?.attempt_id === lost.attempt_id && input?.generation === lost.generation) releaseSignin();
+      throw error;
+    });
   }
   async function setupRequest(operation, input) {
     if (!valid(true)) throw new Error('Setup outcome unknown. Check the original update receipt.');
@@ -651,8 +676,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
     setupLaunch: input => setupRequest('launch',input), setupReceipt: input => setupRequest('receipt',input),
     setupSignin: (operation,input) => {
       if (!['begin','status','code','cancel'].includes(operation)) throw new Error('Unsupported sign-in action');
-      return operation === 'begin' ? signinBegin(input)
-        : setupRequest('signin-'+operation,input).then(settleSignin);
+      return operation === 'begin' ? signinBegin(input) : signinCall(operation,input);
     },
     createActions({key,onPause,onSourceChange = () => {}} = {}) {
       if (disposed || actions) throw new Error('The selected source action interface is unavailable.');

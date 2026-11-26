@@ -4662,6 +4662,129 @@ test('a begin on the setup page that fails without a refusal keeps its attempt a
   await focusPage(again.l);
   assert.deepEqual(claudeButtons(again.l),['Try again']);assert.equal(claudeLine(again.l).textContent,'The sign-in took too long.');
 });
+// A begin whose answer is lost, on the setup page: the step keeps its attempt and offers Check sign-in progress.
+async function lostBegin(t) {
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',()=>Promise.reject(new Error('lost')));
+  claudeButton(l,'Link Claude').click();await flush();
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  assert.equal(beginCalls(l).length,1);assert.match(claudeStatus(l).textContent,lostNote);
+  return {l,holder,attempt:JSON.parse(beginCalls(l)[0].init.body).attempt_id};
+}
+const signinCallsOf=(l,name)=>l.h.calls.filter(c=>c.url.endsWith('/setup/signin-'+name));
+// That begin never reached the computer when the computer then refuses its check or cancel (core: no such attempt), so
+// the step ends as a refused begin does, never with "refused this browser's sign-in" and recovery on the computer.
+test('a lost begin whose check or cancel the computer refuses ends in the closing line and Link Claude',async t=>{
+  for(const [press,name] of [['Check sign-in progress','status'],['Cancel sign-in','cancel']]){
+    const {l,attempt}=await lostBegin(t);
+    l.h.overrides.set(setupURL+'signin-'+name,()=>reply(403,{state:'denied'}));
+    claudeButton(l,press).click();await flush();
+    assert.equal(JSON.parse(signinCallsOf(l,name)[0].init.body).attempt_id,attempt,press+': names the lost begin\'s attempt');
+    assert.equal(claudeLine(l).textContent,LINK_CLOSING_LINE,press);
+    assert.deepEqual(claudeButtons(l),['Link Claude'],press);
+    assert.ok(descendants(claudeBox(l)).every(n=>!visible(n)||!/refused this browser|recovered on the computer/.test(n.textContent)),press+': no attempt refusal');
+    fireShort(l);await flush();
+    assert.equal(beginCalls(l).length,1,press+': never begun again by itself');
+  }
+  // A refused check after the computer answered for that attempt is the attempt's own refusal, as before.
+  const {l}=await lostBegin(t);
+  l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'starting',reason:null}));
+  claudeButton(l,'Check sign-in progress').click();await flush();
+  l.h.overrides.set(setupURL+'signin-status',()=>reply(403,{state:'denied'}));
+  fireShort(l);await flush();
+  assert.match(claudeStatus(l).textContent,/^This computer refused this browser’s Claude sign-in\./);
+});
+// The session's hold, kept for that lost begin, ends with that refusal: Link Claude's sign-in is sent at once.
+test('the refused check of a lost begin frees the session for the next begin, with no second check',async t=>{
+  const {l,holder}=await lostBegin(t);
+  l.h.overrides.set(setupURL+'signin-status',()=>reply(403,{state:'denied'}));
+  claudeButton(l,'Check sign-in progress').click();await flush();
+  const checks=signinCallsOf(l,'status').length;
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  claudeButton(l,'Link Claude').click();await flush();
+  deliver(l,runEnded());await flush();
+  assert.equal(beginCalls(l).length,2,'the new begin reached the computer');
+  assert.equal(signinCallsOf(l,'status').length,checks,'freed by the refused check itself');
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)));
+});
+// A read that names no attempt replaces the lost step with a fresh one. Its Sign in to Claude first checks the lost
+// begin's attempt, once: refused, that begin never reached the computer, and the new one is sent.
+test('after a lost begin, Sign in to Claude checks that attempt first and, refused, begins',async t=>{
+  const {l,holder,attempt}=await lostBegin(t);
+  await focusPage(l);
+  assert.ok(claudeButtons(l).includes('Sign in to Claude'));
+  l.h.overrides.set(setupURL+'signin-status',()=>reply(403,{state:'denied'}));
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  claudeButton(l,'Sign in to Claude').click();await flush();
+  assert.deepEqual(signinCallsOf(l,'status').map(c=>JSON.parse(c.init.body).attempt_id),[attempt],'one check, of the lost begin\'s attempt');
+  assert.equal(beginCalls(l).length,2);assert.notEqual(JSON.parse(beginCalls(l)[1].init.body).attempt_id,attempt);
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)));
+  assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&n.textContent===LINK_CLOSING_LINE));
+});
+// A begin this browser never sent (here: its renewal first left too little session) is the closing line, never a lost begin.
+test('a begin this browser never sent draws the closing line and Link Claude, not Check sign-in progress',async t=>{
+  const {l,holder}=await claudePage(t,linkAnswer());
+  const renewals=[];
+  l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/renew',()=>{renewals.push(1);
+    return reply(200,{version:1,state:'ready',expires_in:300,token:'R'.repeat(42)+'A',read_profile:{version:1,profile:'direct-owner-read-v1',host_uid:'host_'+'a'.repeat(32)},
+      session_context:{issuer:documentContext.shell_origin,subject:documentContext.user_id,workspace_id:documentContext.workspace_id,
+        operational_origin:documentContext.operational_origin,binding_revision:1,binding_generation:id(6)}});});
+  claudeButton(l,'Link Claude').click();await flush();
+  l.h.time=600000; // 300 seconds left of 900: begin renews first, and that renewal leaves too little for a sign-in
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  assert.equal(renewals.length,1,'the begin renewed first');
+  assert.equal(beginCalls(l).length,0,'nothing was sent');
+  assert.equal(claudeLine(l).textContent,LINK_CLOSING_LINE);
+  assert.deepEqual(claudeButtons(l),['Link Claude']);
+  assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&lostNote.test(n.textContent)));
+});
+// A read sent before a Try again can land while that begin is in flight, still saying the sign-in ended: the step is
+// kept for the begin's answer, and the read that follows that answer names the new attempt.
+test('a read sent before a Try again that lands during its begin keeps the step for the begin\'s answer',async t=>{
+  const ended=signinPartOf({phase:'ended',attempt_id:id(32),state:'needs_attention',reason:'timeout',retryable:true});
+  const {l,holder}=await claudePage(t,linkAnswer({},ended));
+  const gate=deferred(),answer=deferred();
+  l.h.overrides.set(setupURL+'state',()=>{l.h.overrides.set(setupURL+'state',()=>reply(200,holder.answer));
+    return gate.promise.then(()=>reply(200,linkAnswer({},ended)));});
+  await focusPage(l); // a read, held in flight, of the ended sign-in
+  const reads=stateCalls(l.h).length;
+  l.h.overrides.set(setupURL+'signin-begin',init=>{const body=JSON.parse(init.body);
+    holder.answer=linkAnswer({},signinPartOf({phase:'waiting',attempt_id:body.attempt_id,state:'waiting'}));
+    return answer.promise.then(()=>reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL}));});
+  claudeButton(l,'Try again').click();await flush();
+  assert.equal(beginCalls(l).length,1);
+  gate.resolve();await flush(); // the earlier read lands, still saying ended
+  answer.resolve();await flush();
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),'the begin\'s answer is followed');
+  assert.equal(stateCalls(l.h).length,reads+1,'and one read follows it');
+  assert.equal(claudeButtons(l).includes('Try again'),false);assert.equal(beginCalls(l).length,1);
+});
+// Only an approval this view waited for keeps the waiting line until its read answers. Any other answer, or one this
+// view never waited for, shows the part as it is meanwhile: linking neither continues nor began.
+test('an answer this view never waited for, or one that is not an approval, never draws the waiting line',async t=>{
+  for(const [name,press,outcome] of [['unasked, approved',false,{}],['unasked, stopped',false,{outcome:'stopped'}],
+    ['asked, stopped',true,{outcome:'stopped'}],['asked, refused',true,{outcome:'refused',reason:'busy'}]]){
+    const {l,holder}=await claudePage(t,linkAnswer());
+    if(press){claudeButton(l,'Link Claude').click();await flush();}
+    const gate=deferred(),reads=stateCalls(l.h).length;
+    l.h.overrides.set(setupURL+'state',()=>{l.h.overrides.set(setupURL+'state',()=>reply(200,holder.answer));
+      return gate.promise.then(()=>reply(200,linkAnswer()));});
+    deliver(l,runEnded(outcome));await flush();
+    assert.equal(stateCalls(l.h).length,reads+1,name+': the answer was taken');
+    assert.notEqual(claudeLine(l).textContent,claudeSentences.waiting,name);
+    assert.deepEqual(claudeButtons(l),['Link Claude'],name+': while its read is in flight');
+    gate.resolve();await flush();
+    assert.deepEqual(claudeButtons(l),['Link Claude'],name);
+  }
+});
+test('the view\'s Stop waiting timer ends with the view',async t=>{
+  const {l}=await claudePage(t,linkAnswer());
+  claudeButton(l,'Link Claude').click();await flush();
+  const armed=()=>l.h.timers.filter(x=>x.active&&x.ms===STOP_AFTER_MS);
+  assert.equal(armed().length,1);
+  l.workspace.dispose();
+  assert.equal(armed().length,0,'no timer outlives the view');
+});
 // A parts read sent before the page's approval still says no sign-in. The answer's read is a fresh one, sent once that
 // read settles and shared by every request made meanwhile, so the sign-in begins, once.
 test('an approval that lands while a parts read is in flight still begins the sign-in, exactly once',async t=>{

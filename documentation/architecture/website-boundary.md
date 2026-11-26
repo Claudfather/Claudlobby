@@ -155,9 +155,13 @@ Any other shape is ignored. On `approved` the view reads the parts once and
 begins the sign-in by itself when a sign-in is offered; on any other outcome it
 reads once and returns the part to its button. That read is a fresh one: a
 read already in flight was sent before the answer, so one new read follows it.
-Only a refused begin (core refuses with 403) ends at "could not start yet"; a
-begin whose answer is lost or fails may have started, so its attempt is kept
-and Check sign-in progress offered. "Stop waiting" appears only after ten
+Only a refused begin (core refuses with 403), or a begin that never reached the
+computer, ends at "could not start yet"; a begin whose answer is lost or fails
+may have started, so its attempt is kept and Check sign-in progress offered.
+When core then refuses that check (it holds no such attempt), the begin never
+reached it: the closing line, and the browser releases the session hold it kept
+for that begin. A later begin first checks that attempt once, so two begins are
+never in flight. "Stop waiting" appears only after ten
 seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
 storage.
 
