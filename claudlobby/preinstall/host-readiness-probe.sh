@@ -260,13 +260,14 @@ keep_receipt() {
     found=$((found + 1))
 }
 
-# What the leaf's no_pending makes of one receipt from its bytes alone. It
-# never runs a planned receipt, and a finished one (completed, failed_partial
-# or conflict) is settled, though a system or index-refresh receipt past
-# planned must also hold its dispatch record. Any other state is an operation
-# with no recorded end, which the leaf admits only after a live root check
-# this probe cannot make (the route it set, or its native unit): uncertain.
-# A receipt naming no kind, or more than one, is doubt.
+# Whether one receipt records an unfinished operation, from its bytes alone,
+# by the rules the leaf's no_pending uses for that part of its check. A
+# planned receipt never ran, and a finished one (completed, failed_partial or
+# conflict) is settled, though a system or index-refresh receipt past planned
+# must also hold its dispatch record. Any other state is an operation with no
+# recorded end, which the leaf admits only after a live root check this probe
+# cannot make (the route it set, or its native unit): uncertain. A receipt
+# naming no kind, or more than one, is doubt.
 receipt_uncertain() {
     kinds=
     case "$content" in *',"kind":"system"'[,}]*) kinds=$kinds.system ;; esac
@@ -294,9 +295,11 @@ receipt_file=$hx$hx$hx$hx$hx$hx$hx$hx-$hx$hx$hx$hx-$hx$hx$hx$hx-$hx$hx$hx$hx-$hx
 # uncertain (receipt_uncertain), else null on any doubt (a link, a non-file,
 # a name that is no receipt name, a receipt over 96 KiB or of another shape),
 # else false. Reading stops early only once it is true and $prepared is
-# settled. It judges only operations: the leaf's own file, digest and
-# store-content checks, the native units and package state stay with the
-# root step.
+# settled. It reports unfinished operations only. It does not check whether
+# a finished system receipt's native unit is still active, package health
+# after failed_partial, stray files in the store, or a receipt's mode, links
+# or digest: the leaf's root step checks those, and on a visit that skips
+# that step nothing checks them.
 read_receipts() {
     prepared=; seen=; found=0; uncertain=false; doubt=false; unread=false
     if [ -h "${store%/*}" ] || [ -h "$store" ]; then return 1; fi

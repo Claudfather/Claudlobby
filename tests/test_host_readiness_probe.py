@@ -248,6 +248,78 @@ def test_account_name_length_limit(inventory, length, expected_status):
         assert data["error"] == "inventory_unavailable"
 
 
+# What the team check block uses, all of it read-only: each module's members,
+# the methods it calls on values (str, bytes, set and Path.lstat), and the
+# builtins it names.
+BLOCK_MODULES = {
+    "os": {"open", "O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "fstat", "read", "close", "lstat", "listdir",
+           "getgrouplist", "geteuid"},
+    "re": {"I", "fullmatch", "match", "search", "sub"},
+    "signal": {"signal", "SIGALRM", "SIG_DFL", "pthread_sigmask", "SIG_UNBLOCK", "alarm"},
+    "stat": {"S_ISDIR", "S_ISREG"},
+    "pwd": {"getpwall", "getpwnam"},
+    "grp": {"getgrall", "getgrgid"},
+}
+BLOCK_METHODS = {"add", "encode", "endswith", "lower", "lstat", "replace", "split", "startswith", "strip"}
+BLOCK_BUILTINS = {"Exception", "FileNotFoundError", "KeyError", "SystemExit", "__name__", "all", "bytes", "int", "len",
+                  "print", "reversed", "set", "sorted", "str"}
+# Every name it calls: its own definitions, lookup's function argument, Path
+# and those builtins.
+BLOCK_CALLS = {"Refusal", "require", "trusted_parents", "lookup", "lstat", "read_root", "directory_service",
+               "subordinate", "team_lines", "sudo_rules", "team_policy", "main", "function", "Path", "SystemExit", "all",
+               "bytes", "int", "len", "print", "reversed", "set", "sorted", "str"}
+
+
+def read_only_problems(block):
+    """Why block may do more than read; empty when it cannot. The module
+    members it uses, the methods it calls, the names it calls and the
+    builtins it names are exactly those above, and it opens a file once,
+    read-only. Any other (os.remove, os.truncate, os.utime, os.link,
+    os.symlink, os.kill, Path.write_text, getattr, open, ...) is refused
+    until it is shown to only read."""
+    tree = ast.parse(block)
+    members = {f"{node.value.id}.{node.attr}" for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+               and isinstance(node.value, ast.Name) and node.value.id in BLOCK_MODULES}
+    found = {
+        "module members": (members, {f"{module}.{name}" for module, names in BLOCK_MODULES.items() for name in names}),
+        "methods": ({node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and root_name(node.func) not in BLOCK_MODULES},
+                    BLOCK_METHODS),
+        "calls": ({node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name)}, BLOCK_CALLS),
+        "builtins": ({node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & set(dir(builtins)),
+                     BLOCK_BUILTINS),
+        "opens": ((block.count("open("), block.count("os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)")),
+                  (1, 1)),
+    }
+    return [f"{kind}: {sorted(used - allowed)} added, {sorted(allowed - used)} gone" if isinstance(used, set)
+            else f"{kind}: {used}, not {allowed}" for kind, (used, allowed) in found.items() if used != allowed]
+
+
+@pytest.mark.parametrize("call", ["os.remove(path)", "os.truncate(path, 0)", "os.utime(path)", "os.link(path, path)",
+                                  "os.symlink(path, path)", "os.kill(0, 9)", "Path(path).write_text('')",
+                                  "getattr(os, 'remove')(path)", "open(path, 'w')", "os.path.exists(path)",
+                                  "os.chmod(path, 0o777)", "os.open(path, os.O_WRONLY)", "__import__('os')"])
+def test_the_read_only_check_refuses_anything_else(call):
+    block = team_check_block()
+    old = "def lstat(path):\n"
+    assert block.count(old) == 1
+    drifted = block.replace(old, old + "    " + call + "\n")
+    ast.parse(drifted)
+    assert read_only_problems(drifted) != []
+
+
+def test_the_probe_as_sent_stays_within_its_bounds():
+    # The website's carrier sends the probe as one argument to the login
+    # shell: sh -c '<probe>'. Linux takes at most 131,072 bytes in one
+    # argument (MAX_ARG_STRLEN). The probe is 25,912 bytes as sent, so a
+    # 32 KiB budget leaves about 6.8 KB for growth, and the budget itself is
+    # a quarter of the hard limit.
+    command = b"sh -c '" + PROBE.read_bytes().replace(b"'", b"'\\''") + b"'"
+    assert len(command) <= 32768
+    assert len(command) < 131072
+
+
 def test_shipped_probe_runs_fixed_tools_and_reads_fixed_files():
     source = PROBE_SOURCE
     block = team_check_block()
@@ -265,12 +337,10 @@ def test_shipped_probe_runs_fixed_tools_and_reads_fixed_files():
     # Python runs once, isolated, on the fixed block and nothing else.
     assert re.findall(r"(?<![\w/.-])" + re.escape(PYTHON) + r"\b.*", text) == [
         PYTHON + ' -I -S -B -c "$team_check" </dev/null ;;', PYTHON + " ] || return 0"]
-    # In the block, /bin/bash is only the shell the account must have. It
-    # starts no process, opens no socket and opens files only to read them.
+    # In the block, /bin/bash is only the shell the account must have.
     assert re.findall(r"/(?:usr/)?s?bin/[\w.-]+", block) == ["/bin/bash"]
-    assert not re.search(r"subprocess|socket|\bexec|system\(|popen|spawn|fork|write|unlink|mkdir|rename|chmod|chown",
-                         block)
-    assert block.count("open(") == block.count("os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)") == 1
+    # It only reads (read_only_problems).
+    assert read_only_problems(block) == []
     # command is only ever a lookup, never a way to run a tool by name.
     assert re.findall(r"\bcommand\b(?! -v )", text) == []
     # The files are fixed assignments. No ${name-default} form exists, so the
@@ -812,6 +882,105 @@ def top_level(source):
     return named
 
 
+# The copy's own lines, beside the leaf's definitions: its imports, its main
+# (by source text) and the guard that runs it, last.
+MAIN = '''def main():
+    # How the probe runs this copy: as root, with an alarm whose default
+    # action ends the process after 4 seconds, whatever it waits on, and one
+    # word on stdout. Any other exception exits nonzero, which reads unknown.
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+    signal.alarm(4)
+    if os.geteuid() != 0:
+        raise SystemExit(3)
+    try:
+        team_policy()
+        code = "conforms"
+    except Refusal as exc:
+        code = exc.code
+    print(code)'''
+GUARD = "if __name__ == '__main__':\n    main()"
+DICT_CHANGES = {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "__delitem__"}
+
+
+def bound(item):
+    """Every name a top-level statement binds, in any form."""
+    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [item.name]
+    if isinstance(item, (ast.Import, ast.ImportFrom)):
+        return [(alias.asname or alias.name).split(".")[0] for alias in item.names]
+    return [node.id for node in ast.walk(item) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))]
+
+
+def root_name(node):
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def definition(item):
+    """The name a definition binds: a def, a class, or an assignment of
+    exactly one plain name. None for any other statement."""
+    if isinstance(item, (ast.FunctionDef, ast.ClassDef)):
+        return item.name
+    if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+        return item.targets[0].id
+    return None
+
+
+def copy_problems(block, leaf):
+    """Why block is not the leaf's team check plus the probe's own lines;
+    empty when it is. Each top-level statement is one of IMPORTS, a
+    definition, or GUARD as the last; no name is bound twice; the definitions
+    are COPIED, each the leaf's text, and MAIN; and the leaf binds each copied
+    name once and never changes one after."""
+    problems = []
+    body = ast.parse(block).body
+    names, defined, imports = [], {}, []
+    for index, item in enumerate(body):
+        names += bound(item)
+        if isinstance(item, (ast.Import, ast.ImportFrom)):
+            imports.append(ast.unparse(item))
+        elif definition(item):
+            defined[definition(item)] = ast.get_source_segment(block, item)
+        elif not (index == len(body) - 1 and ast.unparse(item) == GUARD):
+            problems.append(f"line {item.lineno}, not a statement the copy holds: {ast.unparse(item).splitlines()[0]}")
+    if imports != IMPORTS:
+        problems.append(f"imports {imports}")
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        problems.append(f"bound more than once: {twice}")
+    if set(defined) != set(COPIED) | {"main"}:
+        problems.append(f"defines {sorted(defined)}")
+    if defined.get("main") != MAIN:
+        problems.append("main is not the probe's own")
+    if not body or ast.unparse(body[-1]) != GUARD:
+        problems.append("the guard is not the last statement")
+    tree = ast.parse(leaf)
+    original = {definition(item): ast.get_source_segment(leaf, item) for item in tree.body if definition(item)}
+    leaf_names = [name for item in tree.body for name in bound(item)]
+    for name in COPIED:
+        if defined.get(name) != original.get(name):
+            problems.append(f"{name} is not the leaf's, byte for byte")
+        if leaf_names.count(name) != 1:
+            problems.append(f"the leaf binds {name} {leaf_names.count(name)} times")
+    for node in ast.walk(tree):
+        changed = set()
+        if isinstance(node, ast.Global):
+            changed = set(node.names)
+        elif isinstance(node, (ast.Subscript, ast.Attribute)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            changed = {root_name(node)}
+        elif isinstance(node, ast.AugAssign):
+            changed = {root_name(node.target)}
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in DICT_CHANGES:
+            changed = {root_name(node.func.value)}
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr"):
+            changed = {root_name(node.args[0])} if node.args else set()
+        if changed & set(COPIED):
+            problems.append(f"the leaf changes {sorted(changed & set(COPIED))} at line {node.lineno}")
+    return problems
+
+
 def refusal_codes(source):
     """Every code the source can refuse with: require(..., "code"),
     Refusal("code") and sudo_rules("code")."""
@@ -1022,16 +1191,12 @@ RAW = {"sudoers-d-writable": "unsafe_file", "sudoers-d-link": "OSError", "nss-mi
 
 def test_the_team_check_is_the_leafs_own_byte_for_byte():
     block = team_check_block()
-    copied, original = top_level(block), top_level(leaf_body())
-    assert set(copied) == set(COPIED) | {"main"}
-    for name in COPIED:
-        assert copied[name] == original[name], name
-    # Nothing else runs: its imports, those definitions, main and its guard.
-    rest = [ast.unparse(item) for item in ast.parse(block).body
-            if not isinstance(item, (ast.FunctionDef, ast.ClassDef, ast.Assign))]
-    assert rest == IMPORTS + ["if __name__ == '__main__':\n    main()"]
+    # Nothing else runs: its imports, the leaf's definitions, main and its
+    # guard, each name bound once, and the leaf never changes one later.
+    assert copy_problems(block, leaf_body()) == []
     # Nothing is missing either: every global a definition reads is in the
     # copy, imported by it, or a builtin.
+    copied = top_level(block)
     known = set(copied) | {"os", "re", "signal", "stat", "pwd", "grp", "Path"} | set(dir(builtins))
 
     def read_globals(table):
@@ -1047,6 +1212,126 @@ def test_the_team_check_is_the_leafs_own_byte_for_byte():
     assert block.count("signal.alarm(4)") == 1
     # The leaf is unchanged by this copy and still under its limit.
     assert len(LEAF_SOURCE.encode()) <= 61440
+
+
+# Edits that would change what the copy checks while every definition still
+# matched the leaf: each must fail the parity check above. Block lines go in
+# before main; leaf lines go at the end of the leaf's Python.
+BLOCK_DRIFTS = {
+    "a path moved": 'PATHS["sudoers.d"] = "/nonexistent"\n',
+    "a chained rebinding": "trusted_parents = _unused = lambda path: None\n",
+    "an augmented assignment": "LIMIT += 1\n",
+    "an annotated assignment": "OWNER: int = 1000\n",
+    "a tuple rebinding": '(TEAM, _spare) = ("someone", 0)\n',
+    "a call at top level": 'PATHS.update(shadow="/dev/null")\n',
+    "an attribute set": 'Refusal.code = "conforms"\n',
+    "a definition repeated": "def lstat(path):\n    return None\n",
+    "an import rebinding": "import os as stat\n",
+    "a loop": "for _name in ():\n    pass\n",
+}
+LEAF_DRIFTS = {
+    "the leaf moves a path later": 'PATHS["sudoers.d"] = "/nonexistent"\n',
+    "the leaf adds a path later": 'PATHS.update(shadow="/dev/null")\n',
+    "the leaf rebinds a copied name in a function": "def later():\n    global LIMIT\n    LIMIT = 0\n",
+    "the leaf defines one twice": "def lstat(path):\n    return None\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(BLOCK_DRIFTS))
+def test_the_parity_check_refuses_a_copy_that_drifts(name):
+    block, leaf = team_check_block(), leaf_body()
+    assert block.count("\ndef main():\n") == 1
+    drifted = block.replace("\ndef main():\n", "\n" + BLOCK_DRIFTS[name] + "\n\ndef main():\n")
+    ast.parse(drifted)
+    assert copy_problems(drifted, leaf) != []
+
+
+@pytest.mark.parametrize("name", sorted(LEAF_DRIFTS))
+def test_the_parity_check_refuses_a_leaf_that_changes_a_copied_name(name):
+    leaf = leaf_body() + "\n\n" + LEAF_DRIFTS[name]
+    ast.parse(leaf)
+    assert copy_problems(team_check_block(), leaf) != []
+
+
+@pytest.mark.parametrize("old,new", [
+    ("    signal.alarm(4)\n", "    signal.alarm(400)\n"),
+    ("        team_policy()\n        code", "        code"),
+    ("\nif __name__ == \"__main__\":\n    main()\n", "\nif __name__ == \"__main__\":\n    main()\nTEAM = \"x\"\n"),
+    ("\nif __name__ == \"__main__\":\n    main()\n", "\nif __name__ == \"__main__\":\n    main()\n    main()\n"),
+], ids=["main-alarm", "main-skips-the-check", "after-the-guard", "guard-runs-twice"])
+def test_the_parity_check_refuses_a_changed_main_or_guard(old, new):
+    block = team_check_block()
+    assert block.count(old) == 1
+    assert copy_problems(block.replace(old, new), leaf_body()) != []
+
+
+# Where the leaf meets a present team account before using it. On a visit
+# that skips the leaf's root step, the probe's copy of team_policy is the
+# only check of that account, so a check added to either place must be added
+# to team_policy, and so to the copy and its case table, in the same change.
+PRESENT_TEAM = ("the leaf now checks a present team account outside team_policy: move the check into "
+                "team_policy, so the probe's copy ($team_check in host-readiness-probe.sh) and the case table "
+                "here carry it, in the same change")
+
+
+def test_a_present_team_account_meets_only_team_policy_in_the_leaf():
+    """What the leaf checks on a present team account today, and nothing else:
+    - team_block, when the account is present: team_policy(). Its other
+      branch, for an account it will create, is free.
+    - derive_selection, for any account not being created: team_policy()
+      when it is the team account, then the account_changed comparison every
+      account meets, of the passwd entry with the selection (its name and
+      uid, a uid above 0, a login shell). The website makes the selection
+      from logins.team.uid, and team_policy already requires /bin/bash.
+      binding() repeats that comparison for every account."""
+    leaf = leaf_body()
+    functions = {item.name: item for item in ast.parse(leaf).body if isinstance(item, ast.FunctionDef)}
+
+    def text(items):
+        return [ast.get_source_segment(leaf, item) for item in items]
+    team = functions["team_block"].body
+    assert [type(item).__name__ for item in team] == ["Assign", "If", "Return"], PRESENT_TEAM
+    assert text([team[0], team[1].test]) == ["present = lookup(pwd.getpwnam, TEAM) is not None", "present"], \
+        PRESENT_TEAM
+    assert text(team[1].body) == ["team_policy()"], PRESENT_TEAM
+    assert text(team[2:]) == ['return {"account": TEAM, "uid": selection["uid"], "gid": selection["gid"], '
+                              '"home": TEAM_HOME,\n            "shell": "/bin/bash", '
+                              '"state": "present" if present else "create"}'], PRESENT_TEAM
+    derive = functions["derive_selection"].body
+    planned = [item for item in derive if isinstance(item, ast.Assign) and definition(item) == "planned"]
+    branch = [item for item in derive if isinstance(item, ast.If) and text([item.test]) == ["planned"]]
+    assert len(planned) == len(branch) == 1, PRESENT_TEAM
+    assert text(planned) == ['planned = selected["account"] == TEAM and lookup(pwd.getpwnam, TEAM) is None'], \
+        PRESENT_TEAM
+    assert text(branch[0].orelse) == [
+        'if selected["account"] == TEAM:\n            team_policy()',
+        'account = pwd.getpwnam(selected["account"])',
+        'require(account.pw_name == selected["account"] and account.pw_uid == selected["uid"]\n'
+        '                and account.pw_uid > 0 and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", '
+        '"/usr/bin/zsh", "/bin/zsh"), "account_changed")',
+        "gid, home = account.pw_gid, account.pw_dir"], PRESENT_TEAM
+    # derive_selection names the team account nowhere else.
+    pinned = {id(node) for item in planned + branch[0].orelse for node in ast.walk(item)}
+    assert [node.lineno for item in derive for node in ast.walk(item)
+            if isinstance(node, ast.Name) and node.id == "TEAM" and id(node) not in pinned] == [], PRESENT_TEAM
+
+
+def test_a_present_team_check_added_in_the_leaf_fails_the_pin(monkeypatch):
+    # The check the review added, in team_block's present branch.
+    old = "    if present:\n        team_policy()\n"
+    assert LEAF_SOURCE.count(old) == 1
+    drifted = LEAF_SOURCE.replace(old, old + '        require(not running(selection["uid"]), "team_busy")\n')
+    monkeypatch.setitem(globals(), "LEAF_SOURCE", drifted)
+    with pytest.raises(AssertionError, match="outside team_policy"):
+        test_a_present_team_account_meets_only_team_policy_in_the_leaf()
+    # And one beside derive_selection's branch, for the team account alone.
+    old = "        gid, home = account.pw_gid, account.pw_dir\n    _, profile = api_get(api, \"profiles/current\")\n"
+    assert LEAF_SOURCE.count(old) == 1
+    drifted = LEAF_SOURCE.replace(old, old.replace(
+        "    _, profile", '    require(selected["account"] != TEAM or quiet(), "team_busy")\n    _, profile'))
+    monkeypatch.setitem(globals(), "LEAF_SOURCE", drifted)
+    with pytest.raises(AssertionError, match="outside team_policy"):
+        test_a_present_team_account_meets_only_team_policy_in_the_leaf()
 
 
 def test_the_table_covers_every_code_and_the_probe_takes_only_the_team_codes():
