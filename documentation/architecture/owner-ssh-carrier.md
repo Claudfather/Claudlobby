@@ -359,7 +359,10 @@ they do not to the card. `exact` means only that the card could not change
 Serve, not that the card would succeed or that a root ingress receipt exists,
 because the card also checks what this read does not or cannot: the daemon's
 executable, the current profile, the configuration's ETag, operations pending in
-the root store, and the account's shell and the shape of its home. It is
+the root store, and the account's shell and the shape of its home. For the
+team account `claudlobby` the card also needs that account to exist and still
+conform: its own ids and group only, `/home/claudlobby` private to it, a locked
+password, no expiry and no subordinate ids. It is
 `differs` when a fact read is otherwise or the card would refuse what Serve
 holds (Funnel on the route, another mount or another target on port 443, a TCP
 forward on 443, another account's socket). It is `unknown` when anything could
