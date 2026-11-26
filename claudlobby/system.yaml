@@ -30,7 +30,9 @@
 # counted from its last start (OnUnitActiveSec=); only that first run gets a
 # slot. Without a `startup_delay` a job uses its interval, at most 900 s.
 # launchd keeps StartInterval with no slot: its first run is one interval
-# after load.
+# after load. A calendar job that declares `slot: true` takes its slot as
+# well: the first fleet's copy keeps the declared time and each later fleet's
+# runs one minute after the one before it, on launchd too.
 #
 # DEFAULTS RULE (ruled 2026-09-07). A job or door is ON by default unless it
 # DELETES DATA, SPENDS MONEY, MUTATES OPERATOR SOURCE, or SENDS OUTBOUND TO
@@ -537,10 +539,13 @@ defaults:
       randomized_delay: 600
       type: oneshot
     # Refresh selected-fleet plugins and mark live bots for an idle reload.
-    # Configuration and enrollment change only through host activate.
+    # Configuration and enrollment change only through host activate. Each
+    # fleet's copy runs a minute after the previous fleet's (`slot`), so a
+    # shared host never starts every fleet's reload in the same second.
     reload-fleet:
       script: "$CLAUDLOBBY_NATIVE_DIR/reload-fleet.sh"
       schedule: "*-*-* 03:30:00"
+      slot: true
       type: oneshot
     # Composed-but-dormant: bouncing workers onto the staged binary is
     # disruptive, so enrollment is a per-fleet opt-in (enroll: true in

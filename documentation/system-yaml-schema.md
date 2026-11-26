@@ -33,6 +33,7 @@ host:                          # host-global singletons -- one instance per host
       type: oneshot                                # systemd Type= (default: oneshot)
       persistent: true | false                     # systemd Persistent= (default: false)
       randomized_delay: <seconds>                  # systemd RandomizedDelaySec= (default: 0)
+      slot: true | false                           # calendar jobs: a minute later per fleet (default: false)
       enroll: true | false                         # dormancy -- semantics differ by shape, see below
       unit: service                                # marks a RESIDENT service instead of a timer
 
@@ -85,6 +86,7 @@ built by one emitter (`_write_timer_units` in `composer.py`) for both:
 | `type` | string | both | `"oneshot"` | Passed through verbatim as the systemd `[Service] Type=`. Not validated against a known set — every shipped job uses `oneshot`. |
 | `persistent` | bool | both | `false` | systemd `Persistent=true` — catches up a missed calendar run after downtime. An anchored interval job never emits it: at an activation it would run every missed job at once (#2059). No launchd equivalent; plists silently ignore it. |
 | `randomized_delay` | int (seconds) | both | `0` | systemd `RandomizedDelaySec=` — start jitter, used to desync calendar jobs across multi-fleet hosts hitting one shared resource (e.g. `creds-check` against the Telegram API). Not for interval jobs: on an anchored one it delays each run and can move it into another unit's second; on one that keeps `OnUnitActiveSec=` each tick counts from the last start, so it lengthens the cadence, and with `FixedRandomDelay=` each unit gets a period of its own. The slots (see `startup_delay`) are what spread interval jobs. No launchd equivalent. |
+| `slot` | bool | both | `false` | Calendar jobs: runs this copy in its owner's slot, in the order `startup_delay` describes. The first slot keeps the declared time, each later one runs a minute after the one before it, and the host's jobs take the slot after the last fleet's, so each copy is due in its own minute and, at the default `AccuracySec=60`, starts within it. launchd's copies move too. Only one plain time of day (`HH:MM` or `HH:MM:SS`) moves, and only within its day: any other expression, or a copy that would pass midnight, keeps its declared form. Inert on an interval job. Today only `reload-fleet` declares it. |
 | `enroll` | bool | both | shape-dependent | Dormancy control. **The enforcement mechanism, and even the default polarity, differ by scope and shape** — see [Dormancy](#dormancy-enroll-semantics-differ-by-scope). Do not assume it behaves the same everywhere in this file. |
 | `unit` | string | `host.jobs` only | — | The only recognized value is `"service"` — see below. Declaring it under `defaults.jobs` has no effect; `compose_fleet_timers` never reads it. |
 
@@ -419,7 +421,7 @@ units — one set per fleet, not one per host. Current roster:
 | `keepalive` | `interval: 60` | *(absent — enrolled)* |
 | `log-rotation` | `interval: 86400` | *(absent — enrolled)* |
 | `creds-check` | `*-*-* 06:00:00` (+600s jitter) | *(absent — enrolled)* |
-| `reload-fleet` | `*-*-* 03:30:00` | *(absent — enrolled)* |
+| `reload-fleet` | `*-*-* 03:30:00`, one minute later for each fleet before this one on the host (`slot: true`) | *(absent — enrolled)* |
 | `weekly-worker-restart` | `Sun *-*-* 05:00:00` | `false` (enforced — see [Dormancy](#dormancy-enroll-semantics-differ-by-scope)) |
 | `data-sweep` | `Sat *-*-* 07:00:00` (script carries `--purge`) | *(absent — enrolled)* |
 | `task-recheck` | `interval: 21600` (6h) | *(absent — enrolled);* the private timer entrypoint skips on `TASK_RECHECK_ENABLED=0` |

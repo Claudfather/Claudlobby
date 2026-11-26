@@ -57,7 +57,9 @@ SKIP_CEILINGS = {
     # running stand-in's Linux /proc name, and macOS keeps copies. 146 from
     # #3112: its test of a list read that runs out of memory needs an
     # address-space limit (RLIMIT_AS), which macOS does not enforce.
-    "supported (macos-latest, py3.11)": 146,
+    # 147 from #3038: tests/test_timer_phase.py reads the reload's copies with
+    # systemd-analyze, which macOS does not have.
+    "supported (macos-latest, py3.11)": 147,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests

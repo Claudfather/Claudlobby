@@ -4333,6 +4333,33 @@ def _interval_phase_s(interval_s: int, slot: tuple[int, int]) -> int:
     return index * (min(interval_s, _INTERVAL_SPREAD_S) // slots)
 
 
+# A plain time of day in an OnCalendar= expression: HH:MM or HH:MM:SS.
+_CALENDAR_TIME = re.compile(r"(\d{1,2}):([0-5]\d)(:\d{2})?")
+
+
+def _calendar_in_slot(expression: str, index: int) -> str:
+    """*expression* one minute later for each slot before *index*.
+
+    A calendar job that declares ``slot: true`` takes its owner's slot
+    (``_host_timer_slot``) as an anchored interval job does, so the copies
+    every fleet composes are each due in their own minute. Slot 0 keeps the
+    declared expression. Only one plain time of day moves, and only within its
+    day: any other expression, or a copy that would pass midnight, keeps its
+    declared form.
+    """
+    tokens = expression.split()
+    found = [(at, match) for at, token in enumerate(tokens)
+             if (match := _CALENDAR_TIME.fullmatch(token))]
+    if not index or len(found) != 1:
+        return expression
+    ((at, match),) = found
+    moved = int(match[1]) * 60 + int(match[2]) + index
+    if moved >= 24 * 60:
+        return expression
+    tokens[at] = f"{moved // 60:02d}:{moved % 60:02d}{match[3] or ''}"
+    return " ".join(tokens)
+
+
 def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
                             slot: tuple[int, int] | None = None, second: int | None = None) -> dict:
     """Resolve timer scheduling from config.
@@ -4353,10 +4380,15 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict,
     ``phase`` for its slot (``_interval_phase_s``). A past OnBootSec= or
     OnStartupSec= point fires a timer at once (systemd.timer(5)). An activation
     counts every OnActiveSec= from its last daemon-reload, and every
-    daemon-reload re-arms OnActiveSec= for a waiting timer.
+    daemon-reload re-arms OnActiveSec= for a waiting timer. A calendar job that
+    declares ``slot`` moves one minute later for each slot before its own
+    (``_calendar_in_slot``).
     """
     if "schedule" in timer_cfg:
-        return {"type": "calendar", "expression": timer_cfg["schedule"]}
+        expression = timer_cfg["schedule"]
+        if slot is not None and timer_cfg.get("slot"):
+            expression = _calendar_in_slot(expression, slot[0])
+        return {"type": "calendar", "expression": expression}
     seconds = int(timer_cfg.get("interval", 300))
     if "interval_from" in timer_cfg:
         ref = timer_cfg["interval_from"]
