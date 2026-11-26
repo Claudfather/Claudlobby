@@ -983,17 +983,36 @@ test('a parts read showing the held sign-in still live keeps the hold; one showi
 // Core leaves provider.signin out once Claude is linked, and refuses any begin while a credential is saved.
 const linkedRead = { version: 1, computer: 'started', team: { state: 'none' }, teams: 0, bots: [], helper: { state: 'later' },
   provider: { state: 'linked', link: 'available' } };
-test('a parts read sent after the held begin was answered frees the hold once Claude is linked', async () => {
-  const h = signinHarness(); await h.api.connect();
-  const gate = deferred(); h.overrides.set('setup/signin-begin', () => gate.promise);
-  const beginning = h.api.setupSignin('begin', attemptInput); await flush();
-  h.overrides.set('setup/state', () => reply(200, linkedRead));
-  await h.api.setupState(); // sent while the begin was in flight
-  gate.resolve(reply(200, signinBody('waiting'))); await beginning;
-  assert.equal(await h.api.renew(), false, 'a read sent before the begin was answered frees nothing'); assert.equal(renewals(h), 0);
-  await h.api.setupState();
-  assert.equal(await h.api.renew(), true, 'linked, read after the answer: released'); assert.equal(renewals(h), 1);
-  h.api.dispose();
+// Once Claude is linked core refuses every begin, and the worker that saved the credential never admits another, so
+// a read showing linked frees the hold, whether it was sent before or after the begin was answered.
+test('a parts read showing Claude linked frees the hold', async () => {
+  for (const when of ['after the begin was answered', 'while the begin was in flight']) {
+    const h = signinHarness(); await h.api.connect();
+    h.overrides.set('setup/state', () => reply(200, linkedRead));
+    if (when === 'after the begin was answered') { await h.api.setupSignin('begin', attemptInput); await h.api.setupState(); }
+    else {
+      const gate = deferred(); h.overrides.set('setup/signin-begin', () => gate.promise);
+      const beginning = h.api.setupSignin('begin', attemptInput); await flush();
+      await h.api.setupState();
+      gate.resolve(reply(200, signinBody('waiting'))); await beginning;
+    }
+    assert.equal(await h.api.renew(), true, when + ': released'); assert.equal(renewals(h), 1, when);
+    h.api.dispose();
+  }
+});
+
+// Core counts unknown among its endings (an attempt interrupted by a restart mid-sign-in): a status naming it frees the
+// hold, so the session renews again.
+test('a status that says the held sign-in is unknown frees the hold', async () => {
+  for (const reason of ['interrupted', 'child_quiet_unproven']) {
+    const h = signinHarness(); await h.api.connect();
+    await h.api.setupSignin('begin', attemptInput);
+    assert.equal(await h.api.renew(), false, reason + ': held while it waits');
+    h.overrides.set('setup/signin-status', () => reply(200, signinBody('unknown', { reason })));
+    assert.equal((await h.api.setupSignin('status', attemptInput)).state, 'unknown');
+    assert.equal(await h.api.renew(), true, reason + ': released'); assert.equal(renewals(h), 1, reason);
+    h.api.dispose();
+  }
 });
 
 // A read carries the hold it was sent under: one sent while an earlier attempt held the session, answered after a

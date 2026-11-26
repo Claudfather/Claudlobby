@@ -167,7 +167,8 @@ a refused check releases the hold and the begin is sent; a live answer
 (starting or waiting), or none, keeps it, so two begins are never in flight for
 a live attempt. A parts read naming the held attempt, under its approval, as
 ended (terminal, or its sign-in lease free) also releases the hold, and so does
-one sent after the begin was answered that shows Claude linked; a read naming
+one that shows Claude linked (core then refuses every begin), as does a status
+naming the held attempt unknown, as after a restart; a read naming
 no attempt or another one, or sent under an earlier hold, releases nothing.
 "Stop waiting" appears only after ten seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
 storage.

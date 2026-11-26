@@ -5043,8 +5043,8 @@ const endingRows=[
   ...['private_path_changed','file_binding_changed','profile_changed','scope_changed'].map(reason=>[{state:'needs_attention',reason},'Setup files on this computer changed during sign-in.','Link Claude']),
   ...['credential_already_present','environment_format'].map(reason=>[{state:'needs_attention',reason},'A settings file on this computer needs fixing on the computer itself before Claude can be linked.','Check again']),
   [{state:'unknown',reason:'child_quiet_unproven',unconfirmed:true},'This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.','Check again'],
-  // The computer no longer holds it (after the restart): Check again would read this same ending forever.
-  [{state:'unknown',reason:'child_quiet_unproven',unconfirmed:false},'This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.','Link Claude']];
+  // The computer no longer holds it (the person restarted it): the sign-in did not finish, never "Restart" again.
+  [{state:'unknown',reason:'child_quiet_unproven',unconfirmed:false},'The sign-in did not finish on this computer.','Link Claude']];
 test('each ending draws its line and one button',async t=>{
   for(const [ending,line,button] of endingRows){
     const {l}=await claudePage(t,linkAnswer({},signinPartOf({phase:'ended',attempt_id:id(32),...ending})));
@@ -5066,9 +5066,11 @@ test('each ending draws its line and one button',async t=>{
   assert.deepEqual(runRequests(again.l).map(([message])=>message.run),['link']);
 });
 // A status cannot say whether the computer still holds a sign-in it could not confirm stopped, so the step's own check
-// offers Check again, and the read it sends decides: still held, Check again; no longer held (after the restart), Link Claude.
+// offers Check again, and the read it sends decides: still held, Check again; no longer held (after the restart), the
+// sign-in did not finish, with Link Claude.
 test('an unconfirmed ending seen by the status check offers Check again, and the read decides between it and Link Claude',async t=>{
-  for(const [held,button] of [[true,'Check again'],[false,'Link Claude']]){
+  const restart='This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.';
+  for(const [held,line,button] of [[true,restart,'Check again'],[false,'The sign-in did not finish on this computer.','Link Claude']]){
     const {l,holder}=await claudePage(t,linkAnswer());
     l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
     claudeButton(l,'Link Claude').click();await flush();
@@ -5076,8 +5078,7 @@ test('an unconfirmed ending seen by the status check offers Check again, and the
     const first=JSON.parse(beginCalls(l)[0].init.body).attempt_id;
     l.h.overrides.set(setupURL+'signin-status',()=>reply(200,{generation:id(30),attempt_id:first,state:'unknown',reason:'child_quiet_unproven'}));
     fireShort(l);await flush();
-    const line='This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.';
-    assert.equal(claudeLine(l).textContent,line);assert.deepEqual(claudeButtons(l),['Check again'],'the status cannot tell');
+    assert.equal(claudeLine(l).textContent,restart);assert.deepEqual(claudeButtons(l),['Check again'],'the status cannot tell');
     holder.answer=linkAnswer({},signinPartOf({phase:'ended',attempt_id:first,state:'unknown',reason:'child_quiet_unproven',unconfirmed:held}));
     claudeButton(l,'Check again').click();await flush();
     assert.equal(claudeLine(l).textContent,line,String(held));assert.deepEqual(claudeButtons(l),[button],String(held));
