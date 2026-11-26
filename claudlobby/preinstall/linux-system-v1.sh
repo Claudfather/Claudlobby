@@ -675,7 +675,7 @@ def directory_service():
     require(raw is not None and len(raw) <= 65536, "team_directory_service")
     seen, names = set(), (b"passwd", b"group", b"shadow", b"gshadow", b"initgroups", b"sudoers")
     for line in raw.split(b"\n"):
-        text = line.split(b"#", 1)[0].strip()
+        text = line.split(b"#", 1)[0].strip().lower()
         if text.startswith(names):
             entry = re.fullmatch(rb"([a-z]+)[\s:]+(.*)", text)
             require(entry and entry[1] in names and entry[2] and set(entry[2].split()) <= {b"files", b"systemd"},
@@ -728,9 +728,10 @@ def team_lines(name):
 
 def sudo_rules(code):
     # A heuristic: no line sudo reads names the team as a word, in any case,
-    # comments included (to sudo, # before digits is a uid), once its \xHH and
-    # \ escapes are undone. Aliases, groups, #uid forms or sudo.conf can still
-    # hide it, so the live run also checks sudo -l -U claudlobby.
+    # comments included (to sudo, # before digits is a uid), with continued
+    # lines joined, once its \xHH and \ escapes are undone. Aliases, groups,
+    # #uid forms or sudo.conf can still hide it, so the live run also checks
+    # sudo -l -U claudlobby.
     # Every include must be /etc/sudoers.d, whose files are read as sudo picks
     # them (no name ending in ~ or holding a dot), at most 64 of 64 KiB.
     try:
@@ -739,12 +740,14 @@ def sudo_rules(code):
         names = []
     require(len(names) <= 64, code)
     for name, child in [("sudoers", "")] + [("sudoers.d", n) for n in names]:
-        raw = read_root(name, child=child)
-        require(raw is None or len(raw) <= 65536, code)
-        for line in (raw or b"").split(b"\n"):
+        raw = read_root(name, child=child) or b""
+        require(len(raw) <= 65536, code)
+        for line in raw.split(b"\n"):
             include = re.fullmatch(rb"\s*[#@]include(?:dir)?\s+(.*?)\s*", line)
-            word = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]), line).replace(b"\\", b"")
-            require(include[1] == b"/etc/sudoers.d" if include else not re.search(rb"\bclaudlobby\b", word, re.I), code)
+            require(not include or include[1] == b"/etc/sudoers.d", code)
+        text = raw + b"\n" + re.sub(rb"\\[ \t]*\n[ \t]*", b"", raw)
+        text = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]), text).replace(b"\\", b"")
+        require(not re.search(rb"\bclaudlobby\b", text, re.I), code)
 
 
 def team_policy():

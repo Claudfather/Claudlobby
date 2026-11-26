@@ -1340,6 +1340,8 @@ PLAN_REFUSALS = {
     "sudo-include-elsewhere": ("team_leftovers", _set("extra", sudoers=UBUNTU_SUDOERS + "@include /etc/sudoers.local\n")),
     # To sudo, # before digits is a uid, not a comment.
     "sudo-uid-then-name": ("team_leftovers", _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) NOPASSWD: ALL\n")),
+    # sudo joins a quoted word across a continued line: the user is claudlobby.
+    "sudo-quoted-continued": ("team_leftovers", _set("sudoers_d", team='"claud\\\n  lobby" ALL=(ALL) NOPASSWD: ALL\n')),
     "gshadow-oversize": ("team_leftovers", _set("gshadow", big="big:!::" + "x" * 262144)),
     "initgroups-ldap": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n")),
     "443-served": ("occupied_443", lambda c: setattr(c.daemon, "serve", {"TCP": {"443": {"HTTPS": True}}})),
@@ -1485,6 +1487,8 @@ POLICY_REFUSALS = {
     # sudo reads no comment here, but a line that names the team refuses whatever follows a #.
     "sudo-rule-commented": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="# claudlobby ALL=(ALL) ALL\n"))),
     "sudo-uid-then-name": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) ALL\n"))),
+    "sudo-quoted-continued": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team='"claud\\\n\tlobby" ALL=(ALL) NOPASSWD: ALL\n'))),
     "sudo-alias-after-uid": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team=(
         "User_Alias BOTS = #1001, claudlobby\nBOTS ALL=(ALL) NOPASSWD: ALL\n")))),
     "sudo-escaped": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="claud\\lobby ALL=(ALL) ALL\n"))),
@@ -1498,6 +1502,9 @@ POLICY_REFUSALS = {
         "extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n"))),
     "sudoers-sss": ("team_directory_service", 1500, _then(_team(), _set(
         "extra", nsswitch="passwd: files\ngroup: files\nsudoers: files sss\n"))),
+    # sudo reads its own nsswitch line in any case.
+    "sudoers-sss-mixed-case": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files\nSudoers: files sss\n"))),
 }
 
 
