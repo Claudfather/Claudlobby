@@ -1,8 +1,8 @@
 // The parts view: one row for each part of a started computer, from the parts read (setup-state).
 // It reads over a connection the person already made. Its one working control is the Claude part's: Link Claude
 // asks the setup page (never this view) to run the permission card, and the sign-in that follows is claude-signin.js.
-// Every sentence a person reads here is the owner's approved wording (2026-11-23), except the Claude part's
-// drafts (CLAUDE_TEXT and claude-signin.js's link endings), which wait for the owner's yes.
+// Every sentence a person reads here is the owner's approved wording (2026-11-23). The Claude part's own sentences
+// (CLAUDE_TEXT and claude-signin.js's link endings) are final as of 2026-11-26: the owner delegated their words.
 import { createClaudeSignin, SIGNIN_PROGRESS, linkEnding, LINK_ENDING_BUTTONS, LINK_CLOSING } from "./claude-signin.js";
 const keys = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...fields].sort().join();
@@ -17,7 +17,7 @@ export const PART_TEXT = Object.freeze({
   asleep:'Asleep until Claude is linked', // A17
   later:'Coming soon',              // B17
   oneTeam:'1 team set up'});        // the owner's sentence for one team (2026-11-23)
-// The Claude part's own sentences (plan section 6; not approved yet): B10 (both), N12, N4, B11 and B15.
+// The Claude part's own sentences (plan section 6; final as of 2026-11-26): B10 (both), N12, N4, B11 and B15.
 export const CLAUDE_TEXT = Object.freeze({
   link:'Link Claude',                     // B10
   elsewhere:'Link Claude from the page where you added this computer.', // B10
@@ -25,6 +25,11 @@ export const CLAUDE_TEXT = Object.freeze({
   waiting:'Linking Claude continues above.', // N4
   stop:'Stop waiting',                    // B11
   saved:'A Claude sign-in is saved on this computer.'}); // B15
+// Stop waiting (B11) is offered only once a wait has lasted this long. The setup page answers every request, so it is
+// rarely needed, and until then nothing takes Link Claude's place: a double-click cannot press it.
+export const STOP_AFTER_MS = 10000;
+// A completed refusal is the computer's answer (core's setup door refuses with 403); a lost or unknown answer proves nothing.
+const refusal = error => [400,401,403,409].includes(error?.status);
 // The count is the saved configuration's, also true mid-Launch, after a failed Launch and after a stop, so it says
 // "set up", never "running". Only one team has a sentence: with more the bots part says nothing (no plural is approved).
 // The embedding page may name the provider, bots and helper parts (part_names in the connected document), never a
@@ -71,7 +76,9 @@ function answer(value) {
 // One computer's parts. client: its connected read client; name(): its saved name; names: partNames() or null;
 // hold(): true while the entry keeps today's panel for a launch this page sent or follows, when nothing is read.
 // The parts read is sent once for each new ready connection and on refresh() (the window regained focus), never
-// on a timer and never to retry. A read the hold kept back is sent once by release() when the hold ends. A refusal, a lost answer or a computer whose core has no parts read leaves
+// on a timer and never to retry. A read the hold kept back is sent once by release() when the hold ends. A read asked
+// for while one is in flight is never answered by it (that read was sent before whatever asks now): one fresh read
+// follows it, shared by every request made meanwhile. A refusal, a lost answer or a computer whose core has no parts read leaves
 // started() false, so the view shows exactly what it showed before this read existed; once an answer is shown for this
 // connection, such a refresh keeps it, so one failed read never takes the view away.
 // The Claude part (section "The Claude part" of the plan): onSetupPage is true on the setup page's own frame (the
@@ -81,15 +88,24 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   onSetupPage = false, request = () => false, now = () => Date.now()/1000, visible = () => true,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
   copyText = text => globalThis.navigator.clipboard.writeText(text)}) {
-  let current = null, readFor = null, reading = null, again = false, disposed = false, mount = null, last = client.snapshot();
+  let current = null, readFor = null, reading = null, disposed = false, mount = null, last = client.snapshot();
+  let queued = null, wake = null; // the one fresh read promised to requests made while a read is in flight, and its resolver
   let held = false; // a read for a ready connection was kept back by hold()
   // The Claude part. waiting: this view pressed Link Claude and the page has not answered (Stop waiting only ends the
-  // line, a later answer still lands). sg: the lifted sign-in step for the current link approval (claude-signin.js),
+  // line, a later answer still lands); stopShown: the wait has lasted STOP_AFTER_MS, so Stop waiting is offered (its
+  // timer, stopTimer); settling: answers from the page whose read has not answered yet. sg: the lifted sign-in
+  // step for the current link approval (claude-signin.js),
   // with no storage: the parts read is its memory. busy/busyOp: one sign-in call at a time. notice: 'refused' (a status
   // check refused on a view that did not run the link) or 'closing' (a begin refused on the setup page), each cleared
-  // when the read's sign-in changes.
-  let noOffer = false, waiting = false, sg = null, busy = false, busyOp = null, epochs = 0, notice = null, noticeFor = null;
+  // when the read's sign-in changes. noOffer: the page answered "Go to the update" with no offer to show; cleared by a
+  // read with a link marker and by a new connection.
+  let noOffer = false, waiting = false, stopShown = false, stopTimer = null, settling = 0, sg = null, busy = false, busyOp = null,
+    epochs = 0, notice = null, noticeFor = null;
   const ready = () => client.snapshot().state === 'ready';
+  function wait(on) {
+    clearTimeout(stopTimer); stopTimer = null; stopShown = false; waiting = on;
+    if (on) stopTimer = setTimeout(() => { stopTimer = null; if (!disposed && waiting) { stopShown = true; onChange(); } }, STOP_AFTER_MS);
+  }
   function connectionChanged(state) {
     const before = last; last = state;
     // Renewing or checking the same session (ready, renewing or checking, ready again) moves the epoch once and keeps
@@ -99,17 +115,20 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     const renewal = before.state === 'ready' && passing(state.state)
       || passing(before.state) && state.state === 'ready' && (state.read_profile?.host_uid ?? null) === current?.host;
     if (current && renewal && current.epoch === before.epoch) { current = {...current, epoch:state.epoch}; readFor = state.epoch; }
-    else if (current && (current.epoch !== state.epoch || state.state !== 'ready')) { current = null; dropSignin(); }
+    else {
+      if (state.epoch !== before.epoch) noOffer = false; // a new connection: the page is asked again
+      if (current && (current.epoch !== state.epoch || state.state !== 'ready')) { current = null; dropSignin(); }
+    }
     if (state.state === 'ready' && readFor !== state.epoch) void read();
   }
   async function read() {
     if (disposed || !ready() || typeof client.setupState !== 'function') return false;
     if (hold()) { held = true; return false; }
     held = false;
+    // A read in flight was sent before whatever asks now (an approval, a begin, a new connection, a press), so its
+    // answer never stands in for this one: once it settles one fresh read is sent, and every request meanwhile shares it.
+    if (reading) return queued ??= new Promise(resolve => { wake = resolve; });
     const epoch = client.snapshot().epoch;
-    // A read already sent for this connection answers this one too; one sent for an earlier connection is
-    // followed by one more for this connection when it ends, so a change that lands mid-read is never lost.
-    if (reading) { if (readFor !== epoch) again = true; return reading; }
     readFor = epoch;
     reading = (async () => {
       let value = null;
@@ -124,7 +143,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     try { return await reading; }
     finally {
       reading = null;
-      if (!disposed) { if (again) { again = false; void read(); } onChange(); }
+      if (queued) { const resolve = wake; queued = wake = null; resolve(disposed ? false : read()); }
+      if (!disposed) onChange();
     }
   }
   const signinKey = () => current?.signin ? `${current.signin.generation}/${current.signin.phase}/${current.signin.attempt_id}` : null;
@@ -181,11 +201,14 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       const restored = operation === 'signin-retry' ? g.module.restoreRetry(error) : '';
       if (!disposed && !g.dead) {
         if (g.answered || restored) g.module.failed(operation, error, restored, g.epoch);
-        else if (operation === 'signin-begin' && onSetupPage) {
-          // This page ran the link and began the sign-in itself, so a refusal is the begin's own: the plan's
-          // "begin refused" row (core answers its refusals with 403, so the status is not what tells it apart).
+        else if (operation === 'signin-begin' && onSetupPage && (refusal(error) || error?.code === 'signin_not_started')) {
+          // This page ran the link and began the sign-in itself, and the computer refused that begin (or this browser
+          // never sent it): the plan's "begin refused" row. Nothing started, so the attempt is dropped.
           notice = 'closing'; noticeFor = signinKey(); dropSignin();
-        } else if (onSetupPage) g.module.failed(operation, error, restored, g.epoch); // a failed check on the page that ran it is an ordinary failure
+        }
+        // A lost or failed answer on the page that ran the link (a begin that may in fact have started, or a check) is
+        // an ordinary failure: the step keeps its attempt and offers Check sign-in progress.
+        else if (onSetupPage) g.module.failed(operation, error, restored, g.epoch);
         else { notice = 'refused'; noticeFor = signinKey(); dropSignin(); } // a check this view never ran the link for: it continues on the setup page
       }
     }
@@ -219,8 +242,13 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       if (message.outcome !== 'refused') return false;
       noOffer = true; onChange(); return true;
     }
-    const expecting = waiting; waiting = false; onChange();
-    const value = await read(); // once; it is also the only read this answer asks for
+    // Until that read answers the part keeps its waiting line with no button, so Link Claude never flashes back between
+    // an approval and its begin.
+    const expecting = waiting; wait(false); settling++; onChange();
+    let value = false;
+    try { value = await read(); } // once, fresh (never one sent before this answer); the only read this answer asks for
+    finally { settling--; }
+    if (!disposed) onChange();
     // Approved and still waiting: the sign-in begins by itself, once. After Stop waiting it waits for its own button.
     if (message.outcome === 'approved' && expecting && value && !disposed && !busy && current?.signin?.phase === 'approved'
       && current.signin.attempt_id === null) {
@@ -230,9 +258,9 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     return true;
   }
   function pressLink() {
-    if (!onSetupPage || busy) return;
+    if (!onSetupPage || busy || waiting || settling) return; // a second press of a double-click asks nothing more
     notice = null;
-    if (request('link') === true) { waiting = true; onChange(); }
+    if (request('link') === true) { wait(true); onChange(); }
   }
   // An answer kept through a renewal or a session check stays shown while it lasts.
   const live = () => !!current && ['ready','renewing','checking'].includes(client.snapshot().state) && client.snapshot().epoch === current.epoch;
@@ -265,7 +293,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
       else if (operation === 'try_again') { if (!busy && beginSignin('retry')) onChange(); }
       else if (operation === 'check_again') void read();
     });
-    stop.addEventListener('click', () => { waiting = false; onChange(); });
+    stop.addEventListener('click', () => { wait(false); onChange(); });
     mount = {root,rows,control,reason,make,claude:{box:claudeBox,line,button,stop,step}};
     return root;
   }
@@ -307,14 +335,20 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
   }
   function claudeView() {
     const c = current, signin = c.signin;
+    // Waiting for the page's answer: the line, and Stop waiting only once the wait has lasted (never where Link Claude was before then).
+    const waitingView = {line:CLAUDE_TEXT.waiting, button:stopShown ? 'stop' : null};
     if (c.provider === 'linked' || sg?.module.state() === 'connected') return {line:CLAUDE_TEXT.saved};       // linked wins over any sign-in
     if (notice === 'closing') return {line:LINK_CLOSING, button:onSetupPage ? 'link' : null};
     if (signin && signin.phase !== 'ended') {
       const done = endedView();
       if (done) return done;
-      if (waiting && signin.attempt_id === null) return {line:CLAUDE_TEXT.waiting, button:'stop'};
+      if ((waiting || settling) && signin.attempt_id === null) return waitingView;
       return notice === 'refused' ? {line:CLAUDE_TEXT.elsewhere} : {step:true};
     }
+    // A Try again answered after this read: the step follows the new attempt (also one whose begin lost its answer, which
+    // may have started, so it keeps it and offers Check sign-in progress) until a read names the current attempt.
+    if (signin && !busy && sg?.generation === signin.generation && (sg.module.attempt()?.attempt_id ?? signin.attempt_id) !== signin.attempt_id)
+      return endedView() ?? {step:true};
     if (signin) {
       const ending = linkEnding(signin), button = ending.button;
       return {line:ending.line, button:button === 'link' && !onSetupPage ? null : button};
@@ -322,7 +356,7 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     if (c.link === 'not_here') return {};                                // a nine-card computer links Claude in its own road
     if (c.link === null) return onSetupPage ? (noOffer ? {line:CLAUDE_TEXT.update} : {line:CLAUDE_TEXT.update, button:'update'}) : {line:CLAUDE_TEXT.elsewhere};
     if (!onSetupPage) return {line:CLAUDE_TEXT.elsewhere};
-    return waiting ? {line:CLAUDE_TEXT.waiting, button:'stop'} : {button:'link'};
+    return waiting || settling ? waitingView : {button:'link'};
   }
   function renderClaude() {
     const {box,line,button,stop,step} = mount.claude, view = claudeView();
@@ -358,5 +392,5 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
     // and the panel must not say "nothing runs yet" there either. It only hides that line and holds the panel.
     launchUnfinished:() => live() && current.team === 'launch_unfinished', get root() { return mount?.root ?? null; },
-    dispose() { dropSignin(); disposed = true; current = null; mount = null; }});
+    dispose() { dropSignin(); clearTimeout(stopTimer); stopTimer = null; disposed = true; current = null; mount = null; }});
 }

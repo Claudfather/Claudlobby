@@ -4568,6 +4568,12 @@ const signinAnswerFor=holder=>init=>{const body=JSON.parse(init.body);
   return reply(200,{generation:body.generation,attempt_id:body.attempt_id,state:'waiting',reason:null,url:authorizeURL});};
 const claudeSentences={elsewhere:'Link Claude from the page where you added this computer.',
   update:'Update this computer to link Claude.',waiting:'Linking Claude continues above.',saved:'A Claude sign-in is saved on this computer.'};
+const {STOP_AFTER_MS}=await import(partsURL);
+const focusPage=async l=>{l.frame.view.listeners.get('focus')();await flush();};
+const lostNote=/^Could not reach this computer to check sign-in\. Choose Check sign-in progress/;
+const claudeStatus=l=>descendants(claudeBox(l)).find(n=>n.className==='setup-signin-status');
+const beginCalls=l=>l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin'));
+const LINK_CLOSING_LINE='The sign-in could not start yet. Wait a moment, then choose Link Claude.';
 
 test('no marker: N12 and "Go to the update", which sends only request-run update; no Link Claude',async t=>{
   const {l}=await claudePage(t,partsAnswer());
@@ -4605,7 +4611,8 @@ test('a status check refused off the setup page draws B10\'s second sentence, no
   fireShort(refusing);await flush();assert.equal(asks(),1);
 });
 test('a begin refused on the setup page draws the closing line and Link Claude, never the elsewhere sentence',async t=>{
-  for(const status of [403,409]){
+  // Core's setup door refuses with 403; the other completed refusals the sign-in step knows are taken the same way.
+  for(const status of [400,401,403,409]){
     const {l,holder}=await claudePage(t,linkAnswer());
     l.h.overrides.set(setupURL+'signin-begin',()=>reply(status,{state:'denied'}));
     claudeButton(l,'Link Claude').click();await flush();
@@ -4617,6 +4624,87 @@ test('a begin refused on the setup page draws the closing line and Link Claude, 
     fireShort(l);await flush();
     assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/signin-begin')).length,1,'never retried by itself');
   }
+});
+// A begin with no answer, or one that failed without a refusal, may in fact have started: the step keeps its attempt
+// and offers Check sign-in progress, which follows that same attempt. Only a refusal is the closing line.
+test('a begin on the setup page that fails without a refusal keeps its attempt and offers Check sign-in progress',async t=>{
+  for(const [name,fail] of [['a 500',()=>reply(500,{state:'unavailable'})],['a 503',()=>reply(503,{state:'unavailable'})],
+    ['a lost answer',()=>Promise.reject(new Error('lost'))]]){
+    const {l,holder}=await claudePage(t,linkAnswer());
+    l.h.overrides.set(setupURL+'signin-begin',fail);
+    claudeButton(l,'Link Claude').click();await flush();
+    holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+    assert.equal(beginCalls(l).length,1,name+': begun once');
+    const attempt=JSON.parse(beginCalls(l)[0].init.body).attempt_id;
+    assert.match(claudeStatus(l).textContent,lostNote,name);
+    assert.ok(claudeButtons(l).includes('Check sign-in progress'),name);
+    assert.equal(claudeButtons(l).includes('Link Claude'),false,name+': the attempt is not dropped');
+    assert.ok(!descendants(claudeBox(l)).some(n=>visible(n)&&n.textContent===LINK_CLOSING_LINE),name+': not the closing line');
+    fireShort(l);await flush();
+    assert.equal(beginCalls(l).length,1,name+': never retried by itself');
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length,0,name+': nor checked by itself');
+    l.h.overrides.set(setupURL+'signin-status',init=>reply(200,{generation:id(30),attempt_id:JSON.parse(init.body).attempt_id,state:'waiting',reason:null,url:authorizeURL}));
+    claudeButton(l,'Check sign-in progress').click();await flush();
+    const checks=l.h.calls.filter(c=>c.url.endsWith('/setup/signin-status'));
+    assert.equal(checks.length,1);assert.equal(JSON.parse(checks[0].init.body).attempt_id,attempt,name+': the check follows the same attempt');
+    assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),name+': the begin had started; its link shows');
+    assert.equal(beginCalls(l).length,1,name+': never a second begin');
+  }
+  // A Try again whose answer is lost keeps its new attempt too, rather than the ended line and another Try again over it.
+  const again=await claudePage(t,linkAnswer({},signinPartOf({phase:'ended',attempt_id:id(32),state:'needs_attention',reason:'timeout',retryable:true})));
+  again.l.h.overrides.set(setupURL+'signin-begin',()=>Promise.reject(new Error('lost')));
+  claudeButton(again.l,'Try again').click();await flush();
+  assert.equal(beginCalls(again.l).length,1);
+  assert.match(claudeStatus(again.l).textContent,lostNote);
+  assert.ok(claudeButtons(again.l).includes('Check sign-in progress'));
+  assert.equal(claudeButtons(again.l).includes('Try again'),false,'no second new attempt over one that may have started');
+  // A read that still names the ended attempt (nothing started) brings its ending back.
+  await focusPage(again.l);
+  assert.deepEqual(claudeButtons(again.l),['Try again']);assert.equal(claudeLine(again.l).textContent,'The sign-in took too long.');
+});
+// A parts read sent before the page's approval still says no sign-in. The answer's read is a fresh one, sent once that
+// read settles and shared by every request made meanwhile, so the sign-in begins, once.
+test('an approval that lands while a parts read is in flight still begins the sign-in, exactly once',async t=>{
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  claudeButton(l,'Link Claude').click();await flush();
+  const gate=deferred(),before=stateCalls(l.h).length;
+  l.h.overrides.set(setupURL+'state',()=>{l.h.overrides.set(setupURL+'state',()=>reply(200,holder.answer));
+    return gate.promise.then(()=>reply(200,linkAnswer()));});
+  await focusPage(l); // the window regained focus: a read, held in flight, of the computer before the approval
+  assert.equal(stateCalls(l.h).length,before+1);
+  const mark=l.h.calls.length;
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  await focusPage(l);await focusPage(l);
+  assert.equal(stateCalls(l.h).length,before+1,'nothing more is sent while that read is in flight');
+  assert.equal(beginCalls(l).length,0);
+  assert.equal(claudeLine(l).textContent,claudeSentences.waiting);assert.deepEqual(claudeButtons(l),[],'Link Claude does not come back meanwhile');
+  gate.resolve();await flush();
+  assert.deepEqual(l.h.calls.slice(mark).filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)),['state','signin-begin','state'],
+    'one fresh read for the answer and the focuses, then the begin, then the read that names its attempt');
+  assert.equal(JSON.parse(beginCalls(l)[0].init.body).generation,id(30));
+  assert.ok(descendants(claudeBox(l)).some(n=>n.textContent==='Open Claude sign-in'&&visible(n)),'the lifted step shows the link');
+  deliver(l,runEnded());await flush();await focusPage(l);
+  assert.equal(beginCalls(l).length,1,'begun exactly once');
+});
+// noOffer hides "Go to the update" after the page said it has no update to show, for this connection only.
+test('"Go to the update" comes back after a read with a link marker or a new connection, not after a renewal',async t=>{
+  const {l,holder}=await claudePage(t,partsAnswer());
+  const refuse=async()=>{claudeButton(l,'Go to the update').click();await flush();
+    deliver(l,runEnded({run:'update',outcome:'refused',reason:'other'}));await flush();assert.deepEqual(claudeButtons(l),[]);};
+  await refuse();
+  await focusPage(l);assert.deepEqual(claudeButtons(l),[],'a read still with no marker keeps it hidden');
+  holder.answer=linkAnswer();await focusPage(l);assert.deepEqual(claudeButtons(l),['Link Claude']);
+  holder.answer=partsAnswer();await focusPage(l);
+  assert.deepEqual(claudeButtons(l),['Go to the update'],'the read with a link marker cleared it');
+  assert.equal(claudeLine(l).textContent,claudeSentences.update);
+  await refuse();
+  assert.equal(await l.workspace.act(0,'renew'),true);await flush();
+  assert.deepEqual(claudeButtons(l),[],'a renewal keeps the connection, and the page\'s answer with it');
+  await l.workspace.act(0,'logout');await flush();
+  assert.equal(await l.workspace.act(0,'connect'),true);await flush();
+  assert.deepEqual(claudeButtons(l),['Go to the update'],'a new connection asks the page again');
+  assert.equal(claudeLine(l).textContent,claudeSentences.update);
 });
 test('not_here: no button',async t=>{
   const {l}=await claudePage(t,partsAnswer({provider:{state:'not_linked',link:'not_here'}}));
@@ -4635,8 +4723,39 @@ test('request-run only from a click',async t=>{
   assert.equal(l.frame.posts.filter(([message])=>/request-run/.test(message.type)).length,0);
   claudeButton(l,'Link Claude').click();await flush();
   assert.deepEqual(runRequests(l).map(([message,origin])=>[message,origin]),[[{type:'claudfather.workspace.request-run',version:1,run:'link'},SHELL]]);
-  assert.equal(claudeLine(l).textContent,claudeSentences.waiting);assert.deepEqual(claudeButtons(l),['Stop waiting']);
+  assert.equal(claudeLine(l).textContent,claudeSentences.waiting);assert.deepEqual(claudeButtons(l),[],'Stop waiting comes only once the wait has lasted');
+  l.h.timer(10000);await flush();assert.deepEqual(claudeButtons(l),['Stop waiting']);
   assert.deepEqual(l.h.calls.filter(c=>c.url.includes('/connected/setup/')).map(c=>c.url.split('/').at(-1)).filter(x=>x!=='state'),[],'nothing but parts reads goes to the computer');
+});
+// B11 after ten seconds (2026-11-26): the setup page answers every request, so Stop waiting is rarely needed, and until
+// then nothing takes Link Claude's place, so a double-click cannot press it and lose the automatic begin.
+test('Stop waiting shows only after ten seconds, never where Link Claude was before then, so a double-click keeps the automatic begin',async t=>{
+  assert.equal(STOP_AFTER_MS,10000);
+  const {l,holder}=await claudePage(t,linkAnswer());
+  l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(holder));
+  const link=claudeButton(l,'Link Claude'),actions=link.parentNode,stop=actions.children.find(n=>n!==link);
+  const shownActions=()=>actions.children.filter(visible);
+  link.click();link.click();await flush(); // a double-click: the second lands where Link Claude was
+  assert.equal(runRequests(l).length,1,'the page is asked once');
+  assert.deepEqual(shownActions(),[],'nothing in that spot within the ten seconds');assert.equal(visible(stop),false);
+  assert.equal(claudeLine(l).textContent,claudeSentences.waiting);
+  const armed=()=>l.h.timers.filter(x=>x.active&&x.ms===10000);
+  assert.equal(armed().length,1,'one timer, for ten seconds');
+  holder.answer=linkAnswer({},signinPartOf());deliver(l,runEnded());await flush();
+  assert.equal(beginCalls(l).length,1,'the sign-in still begins by itself, once');
+  assert.equal(armed().length,0,'the answer ends the wait and its timer');
+  assert.equal(claudeButtons(l).includes('Stop waiting'),false);
+  // A wait that lasts: Stop waiting appears at ten seconds, ends only the line, and a later approval waits for its own button.
+  const s=await claudePage(t,linkAnswer());
+  claudeButton(s.l,'Link Claude').click();await flush();
+  assert.deepEqual(claudeButtons(s.l),[]);
+  s.l.h.timer(10000);await flush();
+  assert.deepEqual(claudeButtons(s.l),['Stop waiting']);assert.equal(claudeLine(s.l).textContent,claudeSentences.waiting);
+  claudeButton(s.l,'Stop waiting').click();await flush();
+  assert.deepEqual(claudeButtons(s.l),['Link Claude']);
+  claudeButton(s.l,'Link Claude').click();await flush();
+  assert.deepEqual(claudeButtons(s.l),[],'a new wait starts its own ten seconds');assert.equal(runRequests(s.l).length,2);
+  assert.equal(s.l.h.timers.filter(x=>x.active&&x.ms===10000).length,1);
 });
 test('run-ended is taken only from the parent at the shell origin, with exactly its keys and a closed outcome',async t=>{
   const w=await claudePage(t,linkAnswer()),{l}=w;
@@ -4671,6 +4790,7 @@ test('run-ended approved begins once; after Stop waiting it does not',async t=>{
   const s=await claudePage(t,linkAnswer());
   s.l.h.overrides.set(setupURL+'signin-begin',signinAnswerFor(s.holder));
   claudeButton(s.l,'Link Claude').click();await flush();
+  s.l.h.timer(10000);await flush();
   claudeButton(s.l,'Stop waiting').click();await flush();
   assert.deepEqual(claudeButtons(s.l),['Link Claude'],'only the line went; a later answer still lands');
   s.holder.answer=linkAnswer({},signinPartOf());

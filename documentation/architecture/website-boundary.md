@@ -148,12 +148,18 @@ parent window and the shell origin:
   `credential_present`, `environment_format`, `install_failed`,
   `use_full_guide` or `other`. An `update` run ends only as `stopped` with no
   reason or `refused` with `other`. On `refused` the view hides
-  "Go to the update", since the page has no update offer to show.
+  "Go to the update", since the page has no update offer to show, until a
+  read with a link marker or a new connection.
 
 Any other shape is ignored. On `approved` the view reads the parts once and
 begins the sign-in by itself when a sign-in is offered; on any other outcome it
-reads once and returns the part to its button. The sign-in step is the module
-`claude-signin.js`, with no storage.
+reads once and returns the part to its button. That read is a fresh one: a
+read already in flight was sent before the answer, so one new read follows it.
+Only a refused begin (core refuses with 403) ends at "could not start yet"; a
+begin whose answer is lost or fails may have started, so its attempt is kept
+and Check sign-in progress offered. "Stop waiting" appears only after ten
+seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
+storage.
 
 ## Setup, availability and current limits
 
