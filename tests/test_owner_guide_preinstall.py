@@ -640,7 +640,7 @@ def test_shell_computer_mode_is_one_exact_word(arguments):
 
 
 # The website sends the guide as one command argument (`sh -c '<guide>'`), and Linux allows 128 KiB
-# (MAX_ARG_STRLEN) per argument; the installer already runs over the same path at about 115 KiB. 96 KiB
+# (MAX_ARG_STRLEN) per argument, the escaped command included; the installer already runs over the same path at about 115 KiB. 96 KiB
 # keeps a wide margin under that ceiling and room to change the guide. The website's build keeps its
 # own guard; raise it there before a pin carries a guide over 64 KiB.
 GUIDE_BYTE_BOUND = 98304
