@@ -129,6 +129,50 @@ local accounts; not expected from the setup page, which always runs as one). Eac
 install they end as `installed_workspace_binding_required` and
 `installed_workspace_native_owner_required`.
 
+### The Claude part and the two run messages
+
+A started computer's parts view draws one Claude part in its provider row. It
+reads only the setup state's `provider` object (`link`, `signin`); a value it
+does not know makes the whole answer unusable. It never starts a run itself.
+Two messages cross between the view and the setup page that embeds it, each
+with exactly its keys, a closed set of values, and only between the view's
+parent window and the shell origin:
+
+- View to page, `{type: "claudfather.workspace.request-run", version: 1, run}`,
+  with `run` `link` or `update`, sent only from a click on the part's button.
+- Page to view, `{type: "claudfather.workspace.run-ended", version: 1, run,
+  outcome, reason}`. `outcome` is `approved`, `declined`, `timed_out`,
+  `refused` or `stopped`; `reason` is `null` except with `refused`, where it is
+  one of `revision_differs`, `installation_changed`, `not_started`,
+  `already_linked`, `signin_live`, `signin_unconfirmed`, `busy`,
+  `credential_present`, `environment_format`, `install_failed`,
+  `use_full_guide` or `other`. An `update` run ends only as `stopped` with no
+  reason or `refused` with `other`. On `refused` the view hides
+  "Go to the update", since the page has no update offer to show, until a
+  read with a link marker or a new connection.
+
+Any other shape is ignored. On `approved` the view reads the parts once and
+begins the sign-in by itself when a sign-in is offered; on any other outcome it
+reads once and returns the part to its button. That read is a fresh one: a
+read already in flight was sent before the answer, so one new read follows it.
+Only a refused begin (core refuses with 403), or a begin that never reached the
+computer, ends at "could not start yet"; a begin whose answer is lost or fails
+may have started, so its attempt is kept and Check sign-in progress offered.
+When core then refuses that check, which also stops that attempt in this
+browser, the step ends at the closing line and the browser releases the session
+hold it kept for that begin. A hold never refuses a begin without asking
+core once: a begin asked while any earlier begin holds the session first checks
+the held attempt, with its own ID and approval. An ending (unknown included) or
+a refused check releases the hold and the begin is sent; a live answer
+(starting or waiting), or none, keeps it, so two begins are never in flight for
+a live attempt. A parts read naming the held attempt, under its approval, as
+ended (terminal, or its sign-in lease free) also releases the hold, and so does
+one that shows Claude linked (core then refuses every begin), as does a status
+naming the held attempt unknown, as after a restart; a read naming
+no attempt or another one, or sent under an earlier hold, releases nothing.
+"Stop waiting" appears only after ten seconds of waiting. The sign-in step is the module `claude-signin.js`, with no
+storage.
+
 ## Setup, availability and current limits
 
 [Getting started](../getting-started.md) owns the installed-release path.

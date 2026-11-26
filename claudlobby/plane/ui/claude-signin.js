@@ -360,5 +360,38 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     lost() { stopSigninPoll(); clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); },
     // The page is gone: no code, no link.
     dispose() { if (refs) refs.code.value=''; signinUrl=null; refs=null; },
-    ready:signinReady, polling:signinPolling, lineSending:signinLineSending, state:() => signinState, attempt:() => signinAttempt});
+    ready:signinReady, polling:signinPolling, lineSending:signinLineSending, state:() => signinState, reason:() => signinReason, retryable:() => signinRetryable, attempt:() => signinAttempt});
+}
+
+// The link road's ending lines (plan section 6, "Endings"): what a person reads, and the one button, for each way a
+// link approval's sign-in can end. signin is the parts read's provider.signin once its phase is "ended" (state,
+// reason, code_sent, retryable, unconfirmed). Buttons: 'try_again' (a new attempt under the same approval),
+// 'link' (Link Claude: ask the card again) and 'check_again' (read once; it never starts anything).
+const LINK_ENDING_LINES = Object.freeze({
+  timeout:'The sign-in took too long.', // B12
+  cancelled:'The sign-in was cancelled.', // B12
+  interrupted:'The sign-in was interrupted on this computer.', // B12
+  notAccepted:'Claude did not accept the code.', // B12
+  unfinished:'The sign-in did not finish on this computer.', // B12
+  unreadable:'Claude replied in a way this computer could not read. Try again later.', // N10
+  settings:'A settings file on this computer needs fixing on the computer itself before Claude can be linked.', // N9
+  unconfirmed:'This computer could not confirm that the last Claude sign-in stopped. Restart this computer, then check again.', // N8
+  closing:'The sign-in could not start yet. Wait a moment, then choose Link Claude.'}); // B12
+export const LINK_ENDING_BUTTONS = Object.freeze({try_again:'Try again', link:'Link Claude', check_again:'Check again'});
+export const LINK_CLOSING = LINK_ENDING_LINES.closing;
+export function linkEnding({state, reason, code_sent:sent, retryable, unconfirmed}) {
+  const end = (line, button) => ({line, button});
+  // Restart and Check again only while the computer still holds that sign-in (unconfirmed). Once it no longer does
+  // (the person restarted it) the sign-in simply did not finish, and Link Claude starts a new one.
+  if (unconfirmed || state === 'unknown' && reason === 'child_quiet_unproven')
+    return unconfirmed ? end(LINK_ENDING_LINES.unconfirmed,'check_again') : end(LINK_ENDING_LINES.unfinished,'link');
+  if (['credential_already_present','environment_format'].includes(reason)) return end(LINK_ENDING_LINES.settings,'check_again');
+  if (state === 'needs_attention' && reason === 'timeout') return end(LINK_ENDING_LINES.timeout,retryable ? 'try_again' : 'link');
+  if (state === 'cancelled' && reason === 'effect_uncertain') return end(LINK_ENDING_LINES.cancelled,!sent && retryable ? 'try_again' : 'link');
+  if (reason === 'service_stopped' || state === 'unknown' && reason === 'interrupted') return end(LINK_ENDING_LINES.interrupted,'link');
+  if (['unsupported_output','ambiguous_output','output_limit'].includes(reason)) return end(LINK_ENDING_LINES.unreadable,'link');
+  if (reason === 'provider_failed' && sent) return end(LINK_ENDING_LINES.notAccepted,'link');
+  if (['unsupported_provider','artifact_copy_failed','environment_changed','storage_uncertain','private_path_changed',
+    'file_binding_changed','profile_changed','scope_changed'].includes(reason)) return end(SIGNIN_REASONS[reason],'link');
+  return end(LINK_ENDING_LINES.unfinished,'link'); // provider_failed with no code, boundary_or_process_failure, anything unknown
 }

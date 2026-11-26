@@ -33,6 +33,18 @@ const computerLabel = reference => {
   const label = name.length <= 80 ? name : name.slice(0, 77) + '…';
   return reference.transport === 'mac_openssh' ? label + ' (SSH)' : label;
 };
+// The setup page's answer to a request-run (plan N8): exactly these keys, and only these outcomes and reasons. An
+// update request is only ever answered stopped or refused/other. Anything else is not a message to this view.
+const RUN_OUTCOMES = ['approved','declined','timed_out','refused','stopped'];
+const RUN_REASONS = ['revision_differs','installation_changed','not_started','already_linked','signin_live','signin_unconfirmed',
+  'busy','credential_present','environment_format','install_failed','use_full_guide','other'];
+function runEndedMessage(data) {
+  if (!keys(data, ['type','version','run','outcome','reason']) || data.type !== 'claudfather.workspace.run-ended' || data.version !== 1
+    || !['link','update'].includes(data.run) || !RUN_OUTCOMES.includes(data.outcome)
+    || (data.outcome === 'refused' ? !RUN_REASONS.includes(data.reason) : data.reason !== null)
+    || data.run === 'update' && !(data.outcome === 'stopped' || data.outcome === 'refused' && data.reason === 'other')) return null;
+  return Object.freeze({run:data.run, outcome:data.outcome, reason:data.reason});
+}
 const failure = (state = 'unavailable', remediation = 'Open this workspace again to check its connection.') => ({state, provenance:null, remediation});
 
 export function createConnectedWorkspace({ documentContext, documentOrigin = globalThis.location?.origin,
@@ -58,6 +70,15 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   let phase = doc ? 'checking' : 'denied', accountUnavailable = false, disposed = false;
   let sequence = 0, loading = null, refreshTimer = null, paused = true;
   let framedWorking = false; // the browser carrier's frame shows its working form (render)
+  // The view asks the setup page (the frame's parent, at the exact shell origin) to run something; only a press in the
+  // Claude part calls this, never a read, a timer or a render. 'link': the permission card for linking Claude. 'update':
+  // only to bring the page's own update offer into view; the page starts nothing from it.
+  function requestRun(run) {
+    const view = mount?.document.defaultView;
+    if (!browserTransport || !doc || disposed || !view || view.parent === view || !['link','update'].includes(run)) return false;
+    try { view.parent.postMessage({type:'claudfather.workspace.request-run',version:1,run}, doc.shell_origin); return true; }
+    catch { return false; }
+  }
   const requests = new Set(), streams = new Set(), listeners = new Set(), pending = new Map();
   // Presentation only: the browser carrier serves the one saved reference its parent bound, so only
   // that computer is shown. Before the offer, or for a carrier that never bound, every computer is shown.
@@ -222,6 +243,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           onChange:() => { if (browserTransport && row.parts && !row.setup?.following()) void row.parts.release(); }});
         // On a bridged page the panel stays, and nothing is read for the parts, while it follows a launch this page sent.
         row.parts = createWorkspaceParts({client:row.client, key:row.key, names:partLabels, onChange:changed,
+          onSetupPage:browserTransport, request:requestRun, now, setTimeout, clearTimeout,
+          visible:() => !mount || mount.document.visibilityState !== 'hidden',
           hold:() => browserTransport && row.setup.following(), name:() => row.label || computerLabel(reference)});
         row.actions = row.client.createActions({key:row.key,
           onPause:(...args) => invoke(mount?.onActionPause,...args),
@@ -476,11 +499,11 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           const button = buttons.find(({operation}) => operation === 'enroll').button;
           (button.disabled ? row : button).focus();
         } }}); } element.append(row);
-      controls.rows.push({row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
+      controls.rows.push({row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading,setupEyebrow,focused:false,partsShown:false,working:false,panelPlace:help,approvalState:'idle',setupOnly:false,attentionState:null});
     });
     const attentionCleared = [];
     controls.rows.forEach((controls,index) => {
-      const {row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading} = controls;
+      const {row,label,detail,primary,goto,buttons,help,summary,steps,access,setupPanel,setupHeading,setupEyebrow} = controls;
       const {reference,client,enrollment} = clients[index], status = client.snapshot();
       row.hidden = phase !== 'ready' || !shown(reference); // a computer the browser carrier cannot reach is not listed
       const continuity = client.continuity?.();
@@ -518,7 +541,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       summary.textContent = controls.working ? 'Connection options' : 'Connection options and first-time setup';
       steps.hidden = controls.working;
       // What the computer says of a Launch is shown in the panel's steps; it sends nothing and resumes nothing.
-      if (browserTransport) setup.showLaunchUnderway?.(parts.launchUnfinished());
+      if (browserTransport) { setup.showLaunchUnderway?.(parts.launchUnfinished()); if (parts.noTeam()) setup.noTeam?.(); }
       const focused = phase === 'ready' && !!mount.setupHost && !row.hidden && !partsShown && !controls.working
         && (browserTransport ? bridged : status.state === 'setup_only');
       let panelFocus = false; // keyboard focus inside a panel that leaves the main area goes to the parts instead
@@ -535,7 +558,10 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         controls.partsShown = partsShown;
         if (partsShown && panelFocus && !focused) parts.root?.focus?.({preventScroll:true});
       }
-      setupHeading.textContent = focused ? `Finish setting up ${name}` : 'First-team setup';
+      // Before Connect the panel says nothing about first-team setup (40-02): it is the computer's name, Connect, and why.
+      const beforeConnect = browserTransport && focused && ['not_connected','denied','disconnected','signed_out','unavailable'].includes(connection);
+      setupHeading.textContent = beforeConnect ? name : focused ? `Finish setting up ${name}` : 'First-team setup';
+      setupEyebrow.hidden = beforeConnect;
       goto.hidden = !focused;
       const labels = {ready:'Connected',setup_only:'First-team setup',not_connected:'Not connected',denied:'Access denied',disconnected:'Disconnected',signed_out:'Disconnected',checking:'Checking connection',unavailable:'Connection unavailable',renewing:'Keeping connected',logout:'Disconnecting'};
       const pendingLabel = {connect:'Connecting',check:'Checking connection'}[pending.get(index)];
@@ -691,6 +717,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         if (document.visibilityState !== 'hidden') setup.resumeHandoff();
       }
       if (document.visibilityState !== 'hidden') void checkAccount();
+      if (document.visibilityState === 'visible') regained();
     };
     let lastReadingInput = null;
     const activity = event => {
@@ -713,8 +740,20 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       for (const {client,parts,reference} of clients) if (shown(reference) && client.snapshot().state === 'ready') void parts.refresh();
     };
     invoke(() => frame?.addEventListener?.('focus',regained));
+    // A page shown again (a tab switched back to: active, above; or restored from the back-forward cache: pageshow)
+    // reads once, like a focus. These are events, never a timer.
+    invoke(() => frame?.addEventListener?.('pageshow',regained));
+    // The setup page's answer to a request-run: only from the frame's parent at the shell origin, with exact keys.
+    const runEnded = event => {
+      if (disposed || !doc || !frame || frame.parent === frame || event.source !== frame.parent || event.origin !== doc.shell_origin) return;
+      const message = runEndedMessage(event.data);
+      if (message) for (const {parts,reference} of clients) if (shown(reference)) void parts.runEnded(message);
+    };
+    invoke(() => frame?.addEventListener?.('message',runEnded));
     mount.cleanup = () => {
       invoke(() => frame?.removeEventListener?.('focus',regained));
+      invoke(() => frame?.removeEventListener?.('pageshow',regained));
+      invoke(() => frame?.removeEventListener?.('message',runEnded));
       document.removeEventListener('visibilitychange',active);
       for (const name of inputs) document.removeEventListener(name,activity,true);
       observer?.disconnect();
