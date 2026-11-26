@@ -1283,7 +1283,13 @@ def test_a_present_team_account_meets_only_team_policy_in_the_leaf():
       account meets, of the passwd entry with the selection (its name and
       uid, a uid above 0, a login shell). The website makes the selection
       from logins.team.uid, and team_policy already requires /bin/bash.
-      binding() repeats that comparison for every account."""
+    - binding: for a team account it will create, the ids useradd will give
+      it; for any other account, the team account present among them, that
+      account_changed comparison again.
+    - inspect_plan: with the team account, it only chooses the binding, takes
+      team_block's login block and adds it to the plan.
+    test_only_these_leaf_functions_name_the_team_account pins which leaf
+    functions name the team account at all."""
     leaf = leaf_body()
     functions = {item.name: item for item in ast.parse(leaf).body if isinstance(item, ast.FunctionDef)}
 
@@ -1314,24 +1320,94 @@ def test_a_present_team_account_meets_only_team_policy_in_the_leaf():
     pinned = {id(node) for item in planned + branch[0].orelse for node in ast.walk(item)}
     assert [node.lineno for item in derive for node in ast.walk(item)
             if isinstance(node, ast.Name) and node.id == "TEAM" and id(node) not in pinned] == [], PRESENT_TEAM
+    # inspect_plan, the step every visit's inspection runs: what it does with
+    # the team account (its local team, the login team_block returns, TEAM)
+    # is choose the binding, take the login block and add it to the plan.
+    assert naming(leaf, functions["inspect_plan"], {"team", "login", "TEAM"}) == [
+        'team = selection["account"] == TEAM',
+        "bound = binding(selection, api, True) if team else binding(selection, api)",
+        "login = team_block(selection, kind, api) if team else None",
+        'if team:\n        plan.update(login=login, disclosure=DISCLOSURE + " " + TEAM_DISCLOSURE)',
+        'plan.update(login=login, disclosure=DISCLOSURE + " " + TEAM_DISCLOSURE)'], PRESENT_TEAM
+    # binding: a team account it will create must have the ids useradd will
+    # give it; any other account, the team account present among them, is
+    # the account_changed comparison with the selection that every account
+    # meets.
+    assert naming(leaf, functions["binding"], {"TEAM"}) == [
+        'if planned and selection["account"] == TEAM and lookup(pwd.getpwnam, TEAM) is None:\n'
+        "        # Planned: the worker makes it with exactly these ids. The output is\n"
+        "        # the same, so bindings before and after useradd compare equal.\n"
+        '        require((selection["gid"], selection["home"]) == (selection["uid"], TEAM_HOME), "account_changed")\n'
+        "    else:\n"
+        '        account = pwd.getpwnam(selection["account"])\n'
+        '        require((account.pw_uid, account.pw_gid, account.pw_dir) == (selection["uid"], selection["gid"], '
+        'selection["home"])\n'
+        '                and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh"), '
+        '"account_changed")'], PRESENT_TEAM
 
 
-def test_a_present_team_check_added_in_the_leaf_fails_the_pin(monkeypatch):
-    # The check the review added, in team_block's present branch.
-    old = "    if present:\n        team_policy()\n"
+def naming(source, function, names):
+    """The source of each statement in function whose own expressions name
+    one of names, in source order. An if, loop or with whose header names one
+    counts whole, so a check added inside it changes the list too."""
+    found = []
+    for node in ast.walk(function):
+        if node is function or not isinstance(node, ast.stmt):
+            continue
+        header = [child for child in ast.iter_child_nodes(node) if not isinstance(child, (ast.stmt, ast.excepthandler))]
+        if any(isinstance(name, ast.Name) and name.id in names for child in header for name in ast.walk(child)):
+            found.append((node.lineno, node.col_offset, ast.get_source_segment(source, node)))
+    return [text for _line, _column, text in sorted(found)]
+
+
+TEAM_MENTIONS = ("a leaf function now names the team account (TEAM or team_policy): review it against the probe's "
+                 "copy of team_policy ($team_check in host-readiness-probe.sh). If it checks a present team account, "
+                 "move the check into team_policy in the same change; then add the function here")
+
+
+def test_only_these_leaf_functions_name_the_team_account():
+    named = sorted(item.name for item in ast.parse(leaf_body()).body if isinstance(item, (ast.FunctionDef, ast.ClassDef))
+                   and any(isinstance(node, ast.Name) and node.id in ("TEAM", "team_policy") for node in ast.walk(item)))
+    assert named == ["binding", "derive_selection", "inspect_plan", "private_worker", "subordinate", "team_block",
+                     "team_lines", "team_plan", "team_policy", "team_state"], TEAM_MENTIONS
+
+
+@pytest.mark.parametrize("old,new,test,message", [
+    # The checks the review added: in team_block's present branch, beside
+    # derive_selection's branch, and in inspect_plan after the login block.
+    ("    if present:\n        team_policy()\n",
+     '    if present:\n        team_policy()\n        require(not running(selection["uid"]), "team_busy")\n',
+     test_a_present_team_account_meets_only_team_policy_in_the_leaf, "outside team_policy"),
+    ("        gid, home = account.pw_gid, account.pw_dir\n    _, profile = api_get(api, \"profiles/current\")\n",
+     "        gid, home = account.pw_gid, account.pw_dir\n"
+     '    require(selected["account"] != TEAM or quiet(), "team_busy")\n'
+     "    _, profile = api_get(api, \"profiles/current\")\n",
+     test_a_present_team_account_meets_only_team_policy_in_the_leaf, "outside team_policy"),
+    ("    login = team_block(selection, kind, api) if team else None\n",
+     "    login = team_block(selection, kind, api) if team else None\n"
+     '    require(not team or not running(selection["uid"]), "team_busy")\n',
+     test_a_present_team_account_meets_only_team_policy_in_the_leaf, "outside team_policy"),
+    ("    if team:\n        plan.update(login=login,",
+     '    if team:\n        require(quiet(), "team_busy")\n        plan.update(login=login,',
+     test_a_present_team_account_meets_only_team_policy_in_the_leaf, "outside team_policy"),
+    ("    else:\n        account = pwd.getpwnam(selection[\"account\"])\n",
+     "    else:\n        account = pwd.getpwnam(selection[\"account\"])\n"
+     '        require(account.pw_name != TEAM or quiet(), "team_busy")\n',
+     test_a_present_team_account_meets_only_team_policy_in_the_leaf, "outside team_policy"),
+    # A new function that names the team account.
+    ("\ndef team_state():\n",
+     '\ndef team_busy(selection):\n    return selection["account"] == TEAM and running(selection["uid"])\n\n\n'
+     "def team_state():\n",
+     test_only_these_leaf_functions_name_the_team_account, "review it against the probe's copy"),
+], ids=["team-block", "derive-selection", "inspect-plan", "inspect-plan-inside-if-team", "binding-present",
+        "a-new-function"])
+def test_a_present_team_check_added_in_the_leaf_fails_the_pin(monkeypatch, old, new, test, message):
     assert LEAF_SOURCE.count(old) == 1
-    drifted = LEAF_SOURCE.replace(old, old + '        require(not running(selection["uid"]), "team_busy")\n')
+    drifted = LEAF_SOURCE.replace(old, new)
+    ast.parse(drifted.split("# BEGIN EMBEDDED PYTHON\n", 1)[1].split("# END EMBEDDED PYTHON\n", 1)[0])
     monkeypatch.setitem(globals(), "LEAF_SOURCE", drifted)
-    with pytest.raises(AssertionError, match="outside team_policy"):
-        test_a_present_team_account_meets_only_team_policy_in_the_leaf()
-    # And one beside derive_selection's branch, for the team account alone.
-    old = "        gid, home = account.pw_gid, account.pw_dir\n    _, profile = api_get(api, \"profiles/current\")\n"
-    assert LEAF_SOURCE.count(old) == 1
-    drifted = LEAF_SOURCE.replace(old, old.replace(
-        "    _, profile", '    require(selected["account"] != TEAM or quiet(), "team_busy")\n    _, profile'))
-    monkeypatch.setitem(globals(), "LEAF_SOURCE", drifted)
-    with pytest.raises(AssertionError, match="outside team_policy"):
-        test_a_present_team_account_meets_only_team_policy_in_the_leaf()
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        test()
 
 
 def test_the_table_covers_every_code_and_the_probe_takes_only_the_team_codes():
