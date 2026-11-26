@@ -1,0 +1,3 @@
+### Changed — the owner guide's byte bound is 96 KiB, so the guide can change again
+
+`tests/test_owner_guide_preinstall.py` held `claudlobby/preinstall/owner-guide-v1.sh` to 64 KiB, and the script is 65,249 bytes, so any change of more than 287 bytes failed the test. The bound is now 96 KiB (98,304 bytes), named once as `GUIDE_BYTE_BOUND`. The website sends the guide as one command argument, Linux allows 128 KiB per argument, and the installer already runs over the same path at about 115 KiB. Tests only: the guide itself does not change. The website's build keeps its own 64 KiB guard until a pin carries a larger guide.
