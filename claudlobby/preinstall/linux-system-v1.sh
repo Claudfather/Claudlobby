@@ -667,7 +667,7 @@ def next_uid(passwd, group):
 
 def directory_service():
     # Accounts, passwords, groups and sudo rules come from local files only.
-    # Read as glibc does: # starts a comment, a name ends at a colon or a
+    # Read as glibc 2.39 does: # is no comment, a name ends at a colon or a
     # space, and names are exact (sudo alone reads its line in any case).
     # Every line for these must parse and list only files or systemd, with no
     # [action]; a later line replaces an earlier one, so this holds whichever
@@ -676,7 +676,7 @@ def directory_service():
     require(raw is not None and len(raw) <= 65536, "team_directory_service")
     seen, names = set(), (b"passwd", b"group", b"shadow", b"gshadow", b"initgroups", b"sudoers")
     for line in raw.split(b"\n"):
-        text = line.split(b"#", 1)[0].strip()
+        text = line.strip()
         text = text.lower() if text.lower().startswith(b"sudoers") else text
         if text.startswith(names):
             entry = re.fullmatch(rb"([a-z]+)[\s:]+(.*)", text)
@@ -743,10 +743,12 @@ def sudo_rules(code):
     require(len(names) <= 64, code)
     for name, child in [("sudoers", "")] + [("sudoers.d", n) for n in names]:
         raw = read_root(name, child=child) or b""
-        require(len(raw) <= 65536, code)
+        # No NUL (sudo ends a line there), no last \ (sudo carries it into the
+        # next file), and any include line exactly the one allowed.
+        require(len(raw) <= 65536 and b"\0" not in raw and not re.search(rb"\\\s*\Z", raw), code)
         for line in raw.split(b"\n"):
-            include = re.fullmatch(rb"\s*[#@]include(?:dir)?\s+(.*?)\s*", line)
-            require(not include or include[1] == b"/etc/sudoers.d", code)
+            include = re.match(rb"[\s!]*@include|\s*#include(?:dir)?\s", line)
+            require(not include or re.fullmatch(rb"\s*[#@]include(?:dir)?\s+/etc/sudoers\.d\s*", line), code)
         text = raw + b"\n" + re.sub(rb"\\[ \t]*\r?\n[ \t]*", b"", raw)
         text = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]), text).replace(b"\\", b"")
         require(not re.search(rb"\bclaudlobby\b", text, re.I), code)

@@ -1233,9 +1233,10 @@ def test_an_absent_team_account_gets_a_create_proposal(computer):
 def test_routes_on_other_ports_and_local_account_sources_are_admitted(computer):
     computer.daemon.serve = {"TCP": {"8443": {"HTTPS": True}},
                              "Web": {"other.example.ts.net:8443": {"Handlers": {"/": {"Text": "other"}}}}}
-    # glibc: a name ends at a colon or a space, and a later line replaces an
-    # earlier one; an action on another database does not touch accounts.
-    computer.extra["nsswitch"] = ("# local\npasswd: files # nothing else\ngroup:files\n\tgroup files systemd\n"
+    # glibc: a name ends at a colon or a space, a line starting with # names
+    # no database, and a later line replaces an earlier one; an action on
+    # another database does not touch accounts.
+    computer.extra["nsswitch"] = ("# local\npasswd: files\ngroup:files\n\tgroup files systemd\n"
                                   "hosts: files mdns4_minimal [NOTFOUND=return] dns\n")
     computer.extra["subuid"] = "fixture:100000:65536\nmalformed\n"
     computer.write()
@@ -1342,6 +1343,10 @@ PLAN_REFUSALS = {
     "sudo-uid-then-name": ("team_leftovers", _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) NOPASSWD: ALL\n")),
     # sudo joins a quoted word across a continued line: the user is claudlobby.
     "sudo-quoted-continued": ("team_leftovers", _set("sudoers_d", team='"claud\\\n  lobby" ALL=(ALL) NOPASSWD: ALL\n')),
+    # glibc 2.39 has no inline comment: this line tries a module "#", then sss.
+    "inline-hash-source": ("team_directory_service", _set("extra", nsswitch="passwd: files # sss\ngroup: files\n")),
+    # sudo carries a continuation from one file into the next.
+    "sudo-continued-across-files": ("team_leftovers", _set("sudoers_d", a='"claud\\\n', b='lobby" ALL=(ALL) NOPASSWD: ALL\n')),
     "sudo-quoted-continued-crlf": ("team_leftovers", _set("sudoers_d", team='"claud\\ \t\r\n\tlobby" ALL=(ALL) ALL\r\n')),
     "gshadow-oversize": ("team_leftovers", _set("gshadow", big="big:!::" + "x" * 262144)),
     "initgroups-ldap": ("team_directory_service", _set("extra", nsswitch="passwd: files\ngroup: files\ninitgroups: ldap\n")),
@@ -1490,6 +1495,20 @@ POLICY_REFUSALS = {
     "sudo-uid-then-name": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="#1001,claudlobby ALL=(ALL) ALL\n"))),
     "sudo-quoted-continued": ("team_account_sudo", 1500, _then(_team(), _set(
         "sudoers_d", team='"claud\\\n\tlobby" ALL=(ALL) NOPASSWD: ALL\n'))),
+    "inline-hash-source": ("team_directory_service", 1500, _then(_team(), _set(
+        "extra", nsswitch="passwd: files\ngroup: files # sss\n"))),
+    "sudo-continued-across-files": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", a='"claud\\\n', b='lobby" ALL=(ALL) NOPASSWD: ALL\n'))),
+    # sudo ends a line at a NUL, so \ then NUL continues it.
+    "sudo-nul-continuation": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team='"claud\\\0\n\tlobby" ALL=(ALL) ALL\n'))),
+    # Include forms sudo reads that a plain "@include <path>" pattern misses.
+    "sudo-include-quoted": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team='@include"/etc/sudoers.local"\n'))),
+    "sudo-include-hash": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team="@include#local\n"))),
+    "sudo-include-continued": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team="@include\\\n/etc/sudoers.local\n"))),
+    "sudo-include-after-bangs": ("team_account_sudo", 1500, _then(_team(), _set(
+        "sudoers_d", team="!!@include /etc/sudoers.local\n"))),
     "sudo-quoted-continued-crlf": ("team_account_sudo", 1500, _then(_team(), _set(
         "sudoers_d", team='"claud\\\r\nlobby" ALL=(ALL) NOPASSWD: ALL\r\n'))),
     "sudo-alias-after-uid": ("team_account_sudo", 1500, _then(_team(), _set("sudoers_d", team=(
