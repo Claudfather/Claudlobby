@@ -348,7 +348,8 @@ the smallest frames it can have less than without the fold, and then it scrolls
 inside itself as it does today. When Computers & status opens there, by attention or by the
 person, the line scrolls itself (never the page around the frame) to show the
 computer's card, from its name to its Connect, Check connection or Disconnect;
-when the line cannot show all of that, the buttons win. The parts strip keeps
+when the line cannot show all of that, the buttons win. Opening Message team
+afterwards narrows the line, so it shows the card again. The parts strip keeps
 each part's name, status in words and mark, and stops scrolling on its own.
 
 Computers & status opens itself when its computer asks for attention
@@ -356,8 +357,9 @@ Computers & status opens itself when its computer asks for attention
 again when `connected-workspace.js` says that attention cleared
 (`onConnectionAttentionCleared`, once the computer that asked is `ready`), or, if
 the team is not known yet then, as soon as the fold shows. It stays open once the
-person has used it: a pointer press, a wheel or trackpad scroll, or focus in it,
-or a close of their own.
+person has used it: a pointer press, a wheel or trackpad scroll, or focus in it
+(or a wheel or a press on the line itself, such as its scrollbar), or a close of
+their own.
 A drawer the person opened is never closed for them, and with more teams or
 computers nothing closes it. The fold sets no fixed or viewport height, so the
 Message team composer behaves above an on-screen keyboard as before. Any other
