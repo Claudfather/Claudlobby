@@ -232,6 +232,49 @@ test('unknown automatic renewal never retries on input, polling or timer callbac
   h.api.dispose();
 });
 
+test('continuity says a renewal is under way until its outcome is recorded, and only a permanent end is ended',async()=>{
+  const h=harness();await h.api.connect();
+  assert.deepEqual([h.api.continuity().renewing,h.api.continuity().ended,h.api.continuity().changed],[false,false,false]);
+  const held=deferred();h.overrides.set('renew',()=>held.promise);
+  const renewal=h.api.renew();await flush();
+  assert.equal(h.api.continuity().renewing,true);
+  held.resolve(Promise.reject(new Error('lost')));await renewal;await flush();
+  assert.deepEqual([h.api.continuity().renewing,h.api.continuity().renewalUnknown],[false,true]);
+  h.time=900000;h.runTimer(900000);await flush();
+  assert.equal(h.api.continuity().ended,false,'an expired session can Connect again');
+  h.api.dispose();
+});
+// A renewal the computer refused is a known outcome: only a renewal no answer settled is unknown.
+for(const [name,status,state,unknown] of [['refused',()=>reply(403,{state:'denied'}),'denied',false],
+  ['lost',()=>{throw new Error('lost status');},'unavailable',true]])
+  test(`a refused renewal whose status check is ${name} is ${unknown?'still unknown':'not unknown'} and reads as refused`,async()=>{
+    const h=harness();await h.api.connect();
+    h.overrides.set('renew',()=>reply(403,{state:'denied'}));h.overrides.set('status',status);
+    assert.equal(await h.api.renew(),false);await flush();
+    assert.equal(h.api.snapshot().state,state);assert.equal(h.api.continuity().renewalUnknown,unknown);
+    assert.equal(h.api.connectionState(),'denied','the computer refused the renewal');
+    h.api.dispose();
+  });
+// A well-formed challenge from another computer or binding at the same address ends this page's connection.
+for(const [name,change] of [['another computer',{host_uid:'host_'+'d'.repeat(32)}],['a new binding',{binding_generation:uuid(8)}],
+  ['a new binding revision',{binding_revision:2}]])
+  test(`a Connect whose challenge comes from ${name} is final and sends no issue`,async()=>{
+    const h=harness();await h.api.connect();h.time=900000;h.runTimer(900000);await flush();
+    assert.equal(h.api.continuity().reconnectRequired,true);
+    h.overrides.set('challenge',()=>reply(202,{...challenge,...change}));
+    const issued=h.calls.filter(c=>c.url.endsWith('/issue')).length;
+    assert.equal(await h.api.connect(),false);
+    assert.equal(h.api.snapshot().state,'unavailable');
+    assert.deepEqual([h.api.continuity().connectRequired,h.api.continuity().reconnectRequired],[false,false],'nothing to retry');
+    assert.deepEqual([h.api.continuity().ended,h.api.continuity().changed],[true,true],'ended because the computer changed');
+    assert.match(h.api.snapshot().remediation,/Reopen Plane/);
+    assert.equal(h.signings.length,1,'no website assertion is asked for');
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/issue')).length,issued,'no session issue is sent');
+    h.overrides.delete('challenge');
+    assert.equal(await h.api.connect(),false,'and a later Connect in this page is refused');
+    h.api.dispose();
+  });
+
 test('expired and explicitly disconnected sessions cannot renew or reconnect on later input',async()=>{
   for(const logout of [false,true]){
     const h=harness();await h.api.connect();h.api.activity({visible:true,userInput:true});

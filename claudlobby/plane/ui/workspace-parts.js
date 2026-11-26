@@ -347,6 +347,8 @@ export function createWorkspaceParts({client, name, names = null, key, hold = ()
     teams:() => started() ? current.teams : null,
     // The computer's read says it has no team and no Launch under way (true of a reset computer too).
     noTeam:() => live() && current.teams === 0 && current.team === 'none',
+    // Whether an answer for this connection is held, whatever it says; until one is, the entry keeps its form.
+    answered:() => live(),
     // The computer says a Launch it dispatched has not finished cleanly (in progress, or needing attention). Not tied to
     // started(): a first team's Launch runs on a computer that reads not_started until its configuration is committed,
     // and the panel must not say "nothing runs yet" there either. It only hides that line and holds the panel.

@@ -1,6 +1,7 @@
 // The Claude sign-in step on its own: its state, its four calls (begin, status, code, cancel), its retry rules,
 // its status lines and its markup. It was lifted out of guided-setup.js without a change in behaviour, so that the
-// team road and any other road that signs in to Claude share one step.
+// team road and any other road that signs in to Claude share one step. Since then it can also stop following an
+// attempt kept under another approval (setAside), for a computer set up again from nothing.
 // It is given: the four calls, a storage policy (where the one kept attempt lives, or nowhere) and a host that
 // answers about the approval it belongs to (its generation and end) and the page around it.
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -67,7 +68,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
   // While a Try again is unsettled, the other ID is kept (also in storage) until the host names the new one:
   // signinPredecessor, the ended ID it replaces (this browser follows the new one); signinSuccessor, the
   // unanswered new ID this browser set aside after the host named the ended one. At most one is set.
-  let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false, signinRetryable=false;
+  let signinAttempt=null, signinState=null, signinReason=null, signinUrl=null, signinNotice='', signinBlocked=false, signinRetryable=false, signinCancelledHere=null; // signinCancelledHere: the attempt ID this page's own Cancel sign-in press named
   let signinDeadline=null, signinRetryFrom=null, signinPredecessor=null, signinSuccessor=null;
   const signinRecord = () => ({...signinAttempt,...(signinPredecessor ? {replaces:signinPredecessor} : {}),
     ...(signinSuccessor ? {replaced_by:signinSuccessor} : {})});
@@ -136,6 +137,16 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     }
     } catch { signinBlocked=true; }
   }
+  // The computer's approval read named approval `generation` and holds no request there. An attempt this browser kept
+  // under another approval is one no call can follow under this one (each names its approval), and the computer holds
+  // none of it: it refuses that read while its current attempt belongs to another approval (provider_signin.py _row). So
+  // it is no longer followed, and this approval's own sign-in is offered. Its record stays until the next sign-in replaces it.
+  function setAside(generation) {
+    if (!signinAttempt || signinAttempt.generation===generation) return;
+    stopSigninPoll(); signinAttempt=signinPredecessor=signinSuccessor=signinCancelledHere=null;
+    signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
+    signinRetryable=signinHalted=false; signinNotice=''; if (refs) refs.code.value='';
+  }
   // One sign-in operation of the page's run: begin, retry, status, code or cancel. Returns what run returns for it.
   async function operate(operation, ticket) {
     const context=host.approval();
@@ -154,7 +165,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
       try { store.write(JSON.stringify(replaces ? {...value,replaces} : value)); }
       catch { throw Object.assign(new Error('This browser could not save the new sign-in, so nothing was sent. Choose Try again.'),
         {code:'signin_not_started'}); }
-      signinPredecessor=replaces; signinSuccessor=null;
+      signinPredecessor=replaces; signinSuccessor=null; signinCancelledHere=null;
       signinAttempt=Object.freeze(value); // Retain before ONE effect; no uncertain resend.
       if (action==='retry') { // nothing of the ended attempt carries over to the new one
         signinState=signinReason=signinUrl=signinDeadline=signinRefusal=signinCodeSent=signinCopy=null;
@@ -162,6 +173,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
       }
     }
     if (!signinAttempt || signinAttempt.generation!==context.generation) return false;
+    if (action==='cancel') signinCancelledHere=signinAttempt.attempt_id;
     let input={...signinAttempt};
     if (action==='code') {
       if (codeSent()) return false; // the computer already took this attempt's code
@@ -259,7 +271,11 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
       // Too little approval left for the host to start another sign-in; a new approval keeps this retained attempt.
       const ending = !retry && retryableEnding(signinState,signinReason) && !!context && context.expires_at-now() < SIGNIN_APPROVAL_ROOM;
       const why = !ending ? '' : context.expires_at <= now() ? 'Setup approval expired. ' : 'Setup approval ends too soon for a new sign-in. ';
-      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,'attention'];
+      // A cancel the person pressed on this page is their own choice, not a fault: an ordinary note, with Try again the one
+      // filled action. The host also reports a retryable cancel for a drained or idle conversation and a service shutdown:
+      // those the person did not choose, so they keep the attention style.
+      const chosen = retry && signinState === 'cancelled' && !!signinAttempt && signinCancelledHere === signinAttempt.attempt_id;
+      return [`${retry && signinState === 'cancelled' ? 'The sign-in stopped before a code was sent.' : signinOutcome(signinState,signinReason)} ${retry ? RETRY : why+NO_RETRY}`,chosen ? '' : 'attention'];
     }
     if (!signinAttempt) return ['Connect your Claude account.',''];
     if (signinSent()) return ['Code sent, finishing sign-in…',signinWorking() ? 'working' : ''];
@@ -338,7 +354,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     return refs = {signinStatus,signinLink,signinCopyButton,signinCopyNote,signinField,code,codeRow,
       signinControls:{begin,status:check,code:submit,cancel},steps:{signin}};
   }
-  return Object.freeze({load,operate,failed,restoreRetry,receipt:signinReceipt,flags,paint,mount,
+  return Object.freeze({load,setAside,operate,failed,restoreRetry,receipt:signinReceipt,flags,paint,mount,
     schedule:scheduleSigninPoll,stopPoll:stopSigninPoll,
     // The connection or approval changed: nothing of a live link carries over.
     lost() { stopSigninPoll(); clearSignin(['starting','waiting'].includes(signinState) ? lostNotice : undefined); },

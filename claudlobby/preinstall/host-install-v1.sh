@@ -15,6 +15,8 @@
 # The update actions (update-status, update, update-continue) read and move an
 # installation this script prepared: one canonical line naming expected_uid and
 # the action's own keys; their answers carry the action's own names.
+# update-status asked with ingress_node_key also reads, writing nothing, whether
+# Tailscale Serve already holds exactly the route the root ingress card would set.
 operation=host-install-v1
 if [ "$#" -eq 1 ]; then
     case "$1" in
@@ -66,7 +68,7 @@ BUDGETS = {"prepare": 900, "status": 15, "update-status": 15, "update": 900, "up
 UPDATE_ACTIONS = {"update-status": "host-update-status-v1", "update": "host-update-v1",
                   "update-continue": "host-update-continue-v1"}
 # Required, then optional, request keys of each update action.
-UPDATE_KEYS = {"update-status": ({"schema_version", "expected_uid"}, {"compare_revision"}),
+UPDATE_KEYS = {"update-status": ({"schema_version", "expected_uid"}, {"compare_revision", "ingress_node_key"}),
                "update": ({"schema_version", "expected_uid", "expected_installed_revision", "target_revision"}, set()),
                "update-continue": ({"schema_version", "expected_uid", "request_id"}, set())}
 # The updater's exit, before any dispatch, for an undispatched team preparation:
@@ -81,6 +83,7 @@ UPDATE_REFUSALS = {"update-status": set(),
 SHA = re.compile(r"[0-9a-f]{40}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+NODE_KEY = re.compile(r"nodekey:[0-9a-f]{64}")
 MAX_CHILD_OUTPUT = 2 * 1024 * 1024
 # The fixed directories this product's own setup guide adds beside a completed
 # preparation (commands/owner_setup_consent.py: policy, provider, account).
@@ -155,7 +158,9 @@ def update_request(action, value):
             and all(isinstance(value[key], str) and SHA.fullmatch(value[key]) for key in value
                     if key in {"compare_revision", "expected_installed_revision", "target_revision"})
             and ("request_id" not in value or isinstance(value["request_id"], str)
-                 and UUID.fullmatch(value["request_id"]) is not None))
+                 and UUID.fullmatch(value["request_id"]) is not None)
+            and ("ingress_node_key" not in value or isinstance(value["ingress_node_key"], str)
+                 and NODE_KEY.fullmatch(value["ingress_node_key"]) is not None))
 
 
 def plain_file(path, limit, mode=0o600, owner=None):
@@ -1800,6 +1805,221 @@ def dispatched(result, request_id=None, target=None):
     return {"state": "updating", "request_id": update["request_id"], "target": update["target"]}
 
 
+# update-status's ingress read: whether the system tailscaled already serves exactly
+# the route the root ingress card (linux-system-v1.sh, kind ingress) would publish
+# for this account, so a client can leave out a card that would change nothing.
+# That script runs as root from a root-only store and this one cannot read or
+# import it, so its predicate is copied below byte for byte; tests hold the copy to
+# the original and run both on the same cases. The read writes nothing and never
+# refuses: anything it cannot read answers unknown.
+NATIVE_VERSION = "1.104.7-tfb3b9b296-g0651cc45e"  # linux-system-v1.sh NATIVE_VERSION
+TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"  # linux-system-v1.sh SOCKET
+LOCAL_API_LIMIT = 262144  # linux-system-v1.sh LIMIT
+DNS_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,240}[a-z0-9])?\.ts\.net")  # linux-system-v1.sh binding
+# The longest the read takes, and it ends 5 s before the action's own budget.
+INGRESS_SECONDS = 4
+
+_SERVE_PREDICATE_SOURCE = r'''
+# BEGIN LINUX SYSTEM SERVE PREDICATE
+import json
+import re
+
+
+class Refusal(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def require(ok, code):
+    if not ok:
+        raise Refusal(code)
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def unique(pairs):
+    out = {}
+    for key, value in pairs:
+        require(key not in out, "duplicate_field")
+        out[key] = value
+    return out
+
+
+def decode(raw):
+    try:
+        return json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError):
+        raise Refusal("invalid_json") from None
+
+
+def closed_map(value, allowed):
+    require(type(value) is dict and set(value) <= allowed, "unknown_serve_schema")
+
+
+def serve_schema(value, service=False):
+    closed_map(value, {"TCP", "Web", "Tun"} if service else {"TCP", "Web", "Services", "AllowFunnel", "Foreground"})
+    for key in ("TCP", "Web", "Services", "AllowFunnel", "Foreground"):
+        if key in value:
+            require(value[key] is None or type(value[key]) is dict, "unknown_serve_schema")
+    for port, handler in (value.get("TCP") or {}).items():
+        require(re.fullmatch(r"[1-9][0-9]{0,4}", port) and int(port) < 65536, "unknown_serve_schema")
+        closed_map(handler, {"HTTPS", "HTTP", "TCPForward", "TerminateTLS", "ProxyProtocol"})
+        require(all(type(v) is bool for k, v in handler.items() if k in ("HTTPS", "HTTP"))
+                and all(type(v) is str for k, v in handler.items() if k in ("TCPForward", "TerminateTLS"))
+                and ("ProxyProtocol" not in handler or type(handler["ProxyProtocol"]) is int), "unknown_serve_schema")
+    for host, web in (value.get("Web") or {}).items():
+        require(type(host) is str and re.fullmatch(r"[A-Za-z0-9.-]+:[1-9][0-9]{0,4}", host), "unknown_serve_schema")
+        closed_map(web, {"Handlers"}); require(type(web.get("Handlers")) is dict, "unknown_serve_schema")
+        for mount, handler in web["Handlers"].items():
+            require(type(mount) is str and mount.startswith("/"), "unknown_serve_schema")
+            closed_map(handler, {"Path", "Proxy", "Text", "AcceptAppCaps", "Redirect"})
+            require(all(type(v) is str for k, v in handler.items() if k != "AcceptAppCaps")
+                    and ("AcceptAppCaps" not in handler or type(handler["AcceptAppCaps"]) is list
+                    and all(type(x) is str for x in handler["AcceptAppCaps"])), "unknown_serve_schema")
+    for config in (value.get("Services") or {}).values():
+        serve_schema(config, True)
+    for enabled in (value.get("AllowFunnel") or {}).values():
+        require(type(enabled) is bool, "unknown_serve_schema")
+    require(not value.get("Foreground"), "foreground_serve_refused")
+    if "Tun" in value:
+        require(type(value["Tun"]) is bool, "unknown_serve_schema")
+
+
+def ingress_after(old, dns, home):
+    value = {} if old is None else decode(canonical(old)); serve_schema(value)
+    target = dns + ":443"
+    require(not (value.get("AllowFunnel") or {}).get(target), "target_funnel_refused")
+    desired_tcp = {"HTTPS": True}
+    desired_web = {"Handlers": {"/": {"Proxy": "unix:" + home + "/.local/share/claudlobby-browser/data/state/owner/owner.sock"}}}
+    tcp = value.get("TCP") or {}; web = value.get("Web") or {}
+    require("443" not in tcp or tcp["443"] == desired_tcp, "occupied_443")
+    require(all(not key.endswith(":443") or key == target and entry == desired_web for key, entry in web.items()), "occupied_443")
+    value["TCP"] = dict(tcp); value["TCP"]["443"] = desired_tcp
+    value["Web"] = dict(web); value["Web"][target] = desired_web
+    return value
+# END LINUX SYSTEM SERVE PREDICATE
+'''
+
+
+def _serve_predicate():
+    """The root card's own predicate, in a namespace of its own, never installed code."""
+    namespace = {"__name__": "_claudlobby_fixed_serve_predicate"}
+    exec(compile(_SERVE_PREDICATE_SOURCE, "<linux-system serve predicate>", "exec"), namespace)
+    return namespace
+
+
+def _root_folders(path):
+    # Each folder above the socket is root's and no one else can write it.
+    for parent in reversed(path.parents):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise OSError("untrusted socket folder")
+
+
+def _native_socket():
+    # The system daemon's socket, as the root card admits it: a root-owned socket
+    # under root-owned folders that no one else can write.
+    path = Path(TAILSCALE_SOCKET).resolve(strict=True)
+    _root_folders(path)
+    info = path.lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
+        raise OSError("untrusted socket")
+    return path
+
+
+def _root_daemon(connection):
+    # The peer is a daemon run by root, as the root card checks it. An ordinary
+    # account cannot read a root process's executable, so that is not checked here.
+    import socket
+    import struct
+    pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    if uid != 0 or pid <= 1:
+        raise OSError("not the root daemon")
+
+
+def tailscale_get(endpoint, end):
+    """One GET from the system tailscaled's local API, sent as the root card sends it:
+    its bytes, at most LOCAL_API_LIMIT. Every wait ends by `end`."""
+    import http.client
+    import socket
+    if endpoint not in {"status", "serve-config"}:
+        raise ValueError(endpoint)
+    def left():
+        value = end - time.monotonic()
+        if value <= 0:
+            raise TimeoutError()
+        return value
+    class Bounded(socket.socket):
+        def recv_into(self, *arguments):
+            self.settimeout(left())
+            return super().recv_into(*arguments)
+    path = _native_socket()
+    connection = Bounded(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.settimeout(left())
+        connection.connect(str(path))
+        _root_daemon(connection)
+        client = http.client.HTTPConnection("local-tailscaled.sock", timeout=left())
+        client.sock = connection
+        connection.settimeout(left())
+        client.request("GET", "/localapi/v0/" + endpoint,
+                       headers={"Host": "local-tailscaled.sock", "Content-Type": "application/json"})
+        response = client.getresponse()
+        raw = response.read(LOCAL_API_LIMIT + 1)
+        if response.status != 200 or len(raw) > LOCAL_API_LIMIT:
+            raise OSError("local API answer refused")
+        return raw
+    finally:
+        connection.close()
+
+
+def ingress(node_key, home, deadline):
+    """exact: Serve already holds exactly the route the root card would set for this
+    account, on the node named, with the daemon as that card requires it; differs: a
+    fact read is otherwise, or the card would refuse what Serve holds; unknown:
+    something could not be read, and always off Linux. Never refuses, never writes.
+    exact says only that the card could not change Serve, not that it would succeed:
+    the card also checks what this read does not or cannot (the daemon's executable,
+    the current profile, the configuration's ETag, operations pending in its store,
+    the account's shell and the shape of its home)."""
+    end = min(time.monotonic() + INGRESS_SECONDS, deadline - 5)
+    try:
+        if platform.system() != "Linux":
+            return "unknown"
+        predicate = _serve_predicate()
+        def read(endpoint):
+            raw = tailscale_get(endpoint, end)
+            return predicate["decode"](raw) if raw else None
+        status = read("status")
+        own = status.get("Self") if isinstance(status, dict) else None
+        if not isinstance(own, dict):
+            return "unknown"
+        state, tun, version = status.get("BackendState"), status.get("TUN"), status.get("Version")
+        key, name, domains = own.get("PublicKey"), own.get("DNSName"), status.get("CertDomains")
+        if (not all(isinstance(item, str) for item in (state, version, key, name)) or type(tun) is not bool
+                or domains is not None and not isinstance(domains, list)):
+            return "unknown"
+        dns = name.rstrip(".")
+        if (state != "Running" or tun is not True or version != NATIVE_VERSION or key != node_key
+                or not DNS_NAME.fullmatch(dns) or dns not in (domains or [])):
+            return "differs"
+        before = read("serve-config")
+        try:
+            after = predicate["ingress_after"](before, dns, str(home))
+        except predicate["Refusal"]:
+            return "differs"
+        return "exact" if before == after else "differs"
+    except Refusal:
+        # Only the action's own signal handler raises this here: SIGTERM, SIGINT, or
+        # its budget alarm, which the read's own end keeps clear of. Each ends the
+        # action as it does anywhere else.
+        raise
+    except Exception:
+        return "unknown"
+
+
 def update_execute(action, value, deadline):
     runner = Runner(deadline)
     try:
@@ -1814,9 +2034,12 @@ def update_execute(action, value, deadline):
         if found is None:
             if action != "update-status":
                 raise Refusal("not_prepared")
-            return {"state": "absent", "recorded_revision": None, "installed_revision": None,
-                    "receipt_is_ancestor": None, "binding_sha256": None, "setup": None, "interpreter": None,
-                    "update": None, **({"relation": None} if "compare_revision" in value else {})}
+            answer = {"state": "absent", "recorded_revision": None, "installed_revision": None,
+                      "receipt_is_ancestor": None, "binding_sha256": None, "setup": None, "interpreter": None,
+                      "update": None, **({"relation": None} if "compare_revision" in value else {})}
+            if "ingress_node_key" in value:
+                answer["ingress"] = ingress(value["ingress_node_key"], home, deadline)
+            return answer
         head, source = found["head"], found["source"]
         update = read_record(runner, env, python, found)
         if action == "update-status":
@@ -1828,6 +2051,11 @@ def update_execute(action, value, deadline):
                 compare = value["compare_revision"]
                 answer["relation"] = ("same" if compare == head else "ahead"
                                       if ancestor(runner, reads, source, compare, head) else "other")
+            if "ingress_node_key" in value:
+                # Last: everything above is read before this read's own time starts.
+                # At most 20 bytes more (,"ingress":"differs"): an answer already
+                # within 20 bytes of 8192 answers unavailable, as any longer one does.
+                answer["ingress"] = ingress(value["ingress_node_key"], home, deadline)
             return answer
         if action == "update":
             target = value["target_revision"]

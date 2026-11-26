@@ -87,6 +87,12 @@ def receiver(monkeypatch, received=True):
     return calls
 
 
+def test_connected_message_context_marks_the_lead_its_task_contexts_name(connected_actions):
+    f=connected_actions;allow(f,"message");allow(f,"nudge")
+    message,nudge=context(f,"message"),context(f,"nudge")
+    assert len(message["recipients"])>1 and [r for r in message["recipients"] if r.get("lead")]==nudge["recipients"]
+
+
 @pytest.mark.parametrize("kind",["message","nudge","feedback"])
 def test_real_engines_exact_receipt_and_replay(connected_actions,monkeypatch,kind):
     f=connected_actions;allow(f,kind);calls=receiver(monkeypatch);r=row(f,kind);body=" exact comment — café\n  literal <tag> "

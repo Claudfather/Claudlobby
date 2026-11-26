@@ -96,7 +96,11 @@ class OwnerActions:
             raise AccessDenied("message_binding_changed")
         check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
                             refusal="message_binding_changed")
-        recipients = [{"id": actor.uid, "label": name} for name, actor in sorted(ctx.bots.items())]
+        # The team's configured manager, the lead the nudge and feedback contexts name, is marked so a
+        # new message can be addressed to it by default; every declared bot stays a recipient.
+        lead = selected.fleet.manager
+        recipients = [{"id": actor.uid, "label": name, **({"lead": True} if name == lead else {})}
+                      for name, actor in sorted(ctx.bots.items())]
         if not 1 <= len(recipients) <= 100:
             raise AccessUnavailable("owner actions unavailable")
         binding = scope_binding(access, reader, host)

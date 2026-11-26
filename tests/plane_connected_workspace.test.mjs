@@ -921,6 +921,10 @@ function setupHarness(options={}) {
   return {api,client,calls,saved,pending,context,preview,storage,
     change(next){state={...state,...next};api.connectionChanged(state);for(const fn of listeners)fn(state);}};
 }
+// The words before Launch team, approved 2026-11-24.
+const READY_BANNER='Your team is ready to launch.';
+const LAUNCH_STARTS='Launch starts your lead, engineer and reviewer on this computer. The lead plans the work, the engineer does it and the reviewer checks it. Merging, deploying, extra spending and destructive changes each need your permission first.';
+const OTHERS_RESTART='Bots already running here restart briefly.';
 test('preview owns original Git request before one explicit launch; lost response and reload only inspect',async()=>{
   const h=setupHarness();assert.equal(h.calls.length,0);
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
@@ -1052,7 +1056,7 @@ test('a timed-out Preview the computer is still preparing is checked again by it
   assert.equal(h.api.snapshot().note,'Your computer is still preparing your team. This page checks again by itself.');
   assert.deepEqual(doneSteps(panel),['done','done']);
   await p.tick();
-  assert.equal(h.api.snapshot().note,'Preview ready. Review it below, then choose Launch team.');
+  assert.equal(h.api.snapshot().note,READY_BANNER);
   assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
   assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(p.live().length,0,'checks stop once the preview is ready');
   await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
@@ -1161,7 +1165,7 @@ test('a preview that finished on the computer after this page gave up is picked 
   await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await flush();
   const snap=h.api.snapshot();
   assert.deepEqual(snap.pending,h.pending);assert.equal(snap.plan.phase,'quiesce');assert.equal(snap.goal,'Improve tests');
-  assert.equal(snap.note,'Preview ready. Review it below, then choose Launch team.');
+  assert.equal(snap.note,READY_BANNER);
   const launch=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Launch team');
   assert.equal(launch.hidden,false);assert.equal(launch.disabled,false);
   assert.equal(Object.fromEntries(stepShape(panel)).signin,'done');
@@ -1193,7 +1197,7 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
   assert.equal(panel.children.find(e=>e.tagName==='DETAILS'),detail);assert.equal(detail.open,true);assert.equal(ui.document.activeElement,detail);
   const authority=descendants(panel).find(e=>e.textContent.includes('This approval covers'));
-  assert.ok(descendants(detail).includes(authority),'approval scope lives under Details');
+  assert.ok(descendants(detail).includes(authority),'approval scope lives under Technical details');
   assert.ok(authority.textContent.includes(h.context.repository));assert.ok(authority.textContent.includes(h.context.source_revision));
   assert.match(authority.textContent,/for app version \S+ only\./);
   assert.match(authority.textContent,/starts the team and the app’s background services on this computer and may use the provider accounts you set up/);
@@ -1204,6 +1208,110 @@ test('setup panel retains disclosure/focus and refuses launch without durable or
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
   assert.match(h.api.snapshot().note,/could not save the setup identifiers, so nothing was launched/);
   h.api.dispose();
+});
+const launchBodyOf=panel=>stepsOf(panel).find(n=>n.dataset.step==='launch').children.find(n=>n.className==='setup-step-body');
+const drawerOf=panel=>panel.children.find(n=>n.tagName==='DETAILS');
+// A shown line in the launch step itself, before the row that holds Launch team.
+const aboveLaunch=(panel,text)=>{const order=launchBodyOf(panel).children;
+  const row=order.findIndex(n=>descendants(n).some(c=>c.tagName==='BUTTON'&&c.textContent==='Launch team'));
+  const at=order.findIndex(n=>n.textContent===text&&visible(n));return at>=0&&at<row;};
+test('a ready Preview says the team is ready to launch and, above Launch team, who Launch starts; the counts sit under Technical details',async()=>{
+  const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
+  const status=panel.children.find(n=>n.className==='setup-note'),drawer=drawerOf(panel),inside=new Set(descendants(drawer));
+  assert.equal(h.api.snapshot().note,READY_BANNER);assert.equal(status.textContent,READY_BANNER);
+  assert.ok(aboveLaunch(panel,LAUNCH_STARTS),'above Launch team, in the launch step');
+  assert.ok(!descendants(drawer).some(n=>n.textContent===LAUNCH_STARTS),'outside the drawer');
+  assert.equal(drawer.children[0].tagName,'SUMMARY');assert.equal(drawer.children[0].textContent,'Technical details');
+  const counts=descendants(panel).filter(n=>/^Launching changes /.test(n.textContent));
+  assert.deepEqual(counts.map(n=>[n.textContent,inside.has(n),visible(n)]),[['Launching changes 0 generated files and starts or restarts 1 bot.',true,true]],
+    'the counts, once, under Technical details');
+  assert.ok(!descendants(panel).some(n=>n.textContent.includes('Your team is ready.')),'the count sentence no longer opens with "Your team is ready."');
+  assert.ok(descendants(drawer).some(n=>n.textContent.includes(`for app version ${h.pending.source_revision} only.`)),'the version code is in the drawer');
+  assert.ok(!descendants(panel).some(n=>!inside.has(n)&&n.textContent.includes(h.pending.source_revision)),'and nowhere else');
+  const raw=descendants(drawer).find(n=>n.tagName==='PRE');
+  assert.deepEqual(JSON.parse(raw.textContent).effects,h.preview.effects,'so is the raw plan');
+  assert.ok(!descendants(panel).some(n=>n.textContent===OTHERS_RESTART),'only the team\'s own bot starts, so no restart line');
+  await h.api.run('launch');
+  assert.ok(!descendants(panel).some(n=>visible(n)&&[LAUNCH_STARTS,READY_BANNER].includes(n.textContent)),'once Launch is sent, neither line stays');
+  assert.equal(counts[0].hidden,true,'nor do the counts');
+  h.api.dispose();
+});
+test('Bots already running here restart briefly shows above Launch team only when Launch restarts bots outside the team',async()=>{
+  // Launch restarts every bot its plan names; this team's own are named shop/<bot>.
+  for(const [restart_bots,shown] of [[['shop/lead','shop/engineer','shop/reviewer'],false],[[],false],
+      [['shop/lead','other/lead'],true],[['other/lead'],true],[['shopping/lead'],true],[undefined,true]]){
+    const name=JSON.stringify(restart_bots);
+    const h=setupHarness({client:{async setupPreview(input){h.calls.push(['preview',input]);return {...h.preview,effects:{...h.preview.effects,restart_bots}};}}});
+    const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+    assert.ok(aboveLaunch(panel,LAUNCH_STARTS),name);
+    assert.equal(aboveLaunch(panel,OTHERS_RESTART),shown,name);
+    assert.equal(descendants(panel).some(n=>n.textContent===OTHERS_RESTART&&visible(n)),shown,name+': above Launch team or nowhere');
+    await h.api.run('launch');
+    assert.ok(!descendants(panel).some(n=>n.textContent===OTHERS_RESTART&&visible(n)),name+': gone once Launch is sent');
+    h.api.dispose();
+  }
+  // The same for a Preview the computer kept, shown again by the approval read.
+  const kept=setupHarness();signedIn(kept);
+  Object.assign(kept.context,{request:{...kept.pending},preview_state:'ready',
+    preview:{...kept.preview,effects:{...kept.preview.effects,restart_bots:['shop/lead','other/lead']},goal:'Improve tests'}});
+  const ui=dom(),panel=new ui.Element();kept.api.mountPanel({document:ui.document,element:panel});
+  await kept.api.run('context');
+  assert.equal(kept.api.snapshot().note,READY_BANNER);assert.ok(aboveLaunch(panel,OTHERS_RESTART));kept.api.dispose();
+});
+test('the ready banner goes once the Preview runs out, where Launch team says it expired, and nothing is sent',async()=>{
+  const clock={t:1800000000},h=setupHarness({setupOptions:{now:()=>clock.t}}),ui=dom(),panel=new ui.Element();
+  h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+  const status=panel.children.find(n=>n.className==='setup-note'),hint=launchBodyOf(panel).children.find(n=>n.className==='setup-hint');
+  const expired='This preview expired. Inspect the update on the computer.';
+  assert.equal(status.textContent,READY_BANNER);assert.equal(hint.textContent,'');
+  clock.t=h.preview.expires_at-1;h.change({});
+  assert.equal(status.textContent,READY_BANNER,'still ready inside its window');
+  clock.t=h.preview.expires_at;h.change({}); // any repaint once the window has passed
+  assert.equal(hint.textContent,expired);
+  assert.equal(h.api.snapshot().note,'');assert.doesNotMatch(status.textContent,/ready/i,'no "ready" beside "expired"');
+  assert.equal(buttonOf(panel,'Launch team').disabled,true);
+  assert.equal(await h.api.run('launch'),false);assert.equal(h.calls.filter(c=>c[0]==='launch').length,0,'nothing is sent');
+  assert.doesNotMatch(status.textContent,/ready/i);assert.equal(hint.textContent,expired);
+  h.api.dispose();
+  // With no repaint first, the Launch that finds the Preview ended takes the banner away the same way.
+  const late={t:1800000000},l=setupHarness({setupOptions:{now:()=>late.t}});
+  await l.api.run('context');l.api.setGoal('Improve tests');await l.api.run('preview');
+  assert.equal(l.api.snapshot().note,READY_BANNER);
+  late.t=l.preview.expires_at+60;assert.equal(await l.api.run('launch'),false);
+  assert.equal(l.api.snapshot().note,'');assert.equal(l.calls.filter(c=>c[0]==='launch').length,0);l.api.dispose();
+});
+test('the ready banner goes once the page no longer holds the Preview: a connection change, one during Launch, and its end with no read',async()=>{
+  const ready=async options=>{const h=setupHarness(options),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+    const status=panel.children.find(n=>n.className==='setup-note');assert.equal(status.textContent,READY_BANNER);return {h,panel,status};};
+  // A connection change drops the plan and with it Launch team; the banner goes too.
+  for(const next of [{epoch:2},{epoch:2,state:'unavailable'}]){
+    const name=JSON.stringify(next),{h,panel,status}=await ready();
+    h.change(next);
+    assert.equal(h.api.snapshot().plan,null,name);assert.equal(offered(panel,'Launch team'),false,name);
+    assert.equal(h.api.snapshot().note,'',name);assert.doesNotMatch(status.textContent,/ready/i,name);
+    if(next.state)assert.equal(status.textContent,'Connect this computer to continue setup.','the connection line stands alone');
+    h.api.dispose();
+  }
+  // The same while the one Launch request is in flight; its late answer is not used and nothing is sent again.
+  const held=deferred(),f=await ready({client:{async setupLaunch(input){f.h.calls.push(['launch',input]);return held.promise;}}});
+  const sending=f.h.api.run('launch');await flush();
+  assert.deepEqual(f.h.calls.filter(c=>c[0]==='launch'),[['launch',f.h.pending]]);assert.equal(f.status.textContent,READY_BANNER);
+  f.h.change({epoch:2});
+  assert.equal(f.h.api.snapshot().note,'');assert.doesNotMatch(f.status.textContent,/ready/i);
+  held.resolve({...f.h.pending,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}});
+  assert.equal(await sending,false,'an answer for the earlier connection is not used');
+  assert.doesNotMatch(f.status.textContent,/ready/i);assert.equal(f.h.calls.filter(c=>c[0]==='launch').length,1);
+  f.h.api.dispose();
+  // Past the Preview's end, a repaint with no read takes it away.
+  const clock={t:1800000000},e=await ready({setupOptions:{now:()=>clock.t}}),reads=e.h.calls.filter(c=>c[0]==='context').length;
+  clock.t=e.h.preview.expires_at+1;e.h.change({});
+  assert.equal(e.h.api.snapshot().note,'');assert.doesNotMatch(e.status.textContent,/ready/i);
+  assert.equal(e.h.calls.filter(c=>c[0]==='context').length,reads,'with no read');
+  e.h.api.dispose();
 });
 test('canonical request wins two-tab storage conflict, preserving both original bindings through reload',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
@@ -1218,12 +1326,34 @@ test('canonical request wins two-tab storage conflict, preserving both original 
   assert.equal(await reloaded.run('launch'),false);
   restored.dispose();reloaded.dispose();h.api.dispose();
 });
-test('null context or a new grant never clears the original request or permits another preview',async()=>{
+test('a null request under the same approval never clears the original request or permits another preview',async()=>{
   const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
   await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
-  h.context.generation=id(12);await h.api.run('context');assert.deepEqual(h.api.snapshot().pending,h.pending);
+  assert.match(h.api.snapshot().note,/^Setup was already submitted from this browser\./);
   assert.equal(await h.api.run('preview'),false);assert.equal(await h.api.run('launch'),false);
+  assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,1);h.api.dispose();
+});
+// The computer cannot hold a new approval while it keeps a request (OwnerSetup.allow refuses it), so a new approval
+// holding no request means it no longer has the original: it is set aside with the conflicting ones, never launched.
+test('a new approval holding no request sets the original request aside and never launches it again',async()=>{
+  const h=setupHarness();await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');await h.api.run('launch');
+  assert.equal(h.api.following(),true);
+  h.context.generation=id(12);await h.api.run('context');
+  assert.equal(h.api.snapshot().pending,null);assert.deepEqual(h.api.snapshot().conflicts,[h.pending]);
+  assert.deepEqual(JSON.parse(h.saved.get('test')),{version:2,pending:null,conflicts:[h.pending],legacy:[]});
+  assert.equal(h.api.following(),false,'the request set aside is no longer followed');
+  assert.equal(await h.api.run('launch'),false);
+  const next={...h.pending,generation:id(12),request_id:id(13)};
+  h.client.setupPreview=async input=>{h.calls.push(['preview',input]);return {...h.preview,...next};};
+  h.client.setupLaunch=async input=>{h.calls.push(['launch',input]);throw new Error('lost');};
+  assert.equal(await h.api.run('preview'),true);
+  assert.deepEqual(h.calls.filter(c=>c[0]==='preview').at(-1)[1],{generation:id(12),goal:'Improve tests'});
+  assert.equal(await h.api.run('launch'),false);
+  assert.deepEqual(h.calls.filter(c=>c[0]==='launch').map(c=>c[1]),[h.pending,next],'each request is launched once');
+  const reloaded=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().pending,next);assert.deepEqual(reloaded.snapshot().conflicts,[h.pending]);
+  reloaded.dispose();h.api.dispose();
 });
 test('historical sealed identifiers remain visible and block a replacement Git request',async()=>{
   const h=setupHarness(),legacy={generation:id(9),plan_id:'p-'+'a'.repeat(64),request_id:id(10)};
@@ -1233,6 +1363,7 @@ test('historical sealed identifiers remain visible and block a replacement Git r
   assert.deepEqual(restored.snapshot().legacy,[legacy]);assert.equal(restored.snapshot().pending,null);
   await restored.run('context');restored.setGoal('Improve tests');assert.equal(await restored.run('preview'),false);
   assert.ok(descendants(panel).some(e=>/identifiers from an older setup, so it cannot launch/.test(e.textContent)));
+  assert.ok(descendants(panel).some(e=>/they are listed under Technical details\./.test(e.textContent)),'it names the drawer by its label');
   assert.equal(h.saved.get('test'),JSON.stringify(legacy));assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);
   restored.dispose();h.api.dispose();
 });
@@ -1267,6 +1398,7 @@ test('prepared receipt shows exact server continuation and never launches or tre
   h.client.setupReceipt=async input=>({...input,version:2,state:'done',launch_reserved:true,
     config_committed:true,health_errors:{'example.service':'unknown start'}});
   assert.equal(await h.api.run('receipt'),true);assert.match(h.api.snapshot().note,/needs attention/);
+  assert.match(h.api.snapshot().note,/using the identifiers under Technical details\.$/,'it names the drawer by its label');
   assert.equal(h.calls.filter(c=>c[0]==='launch').length,0);h.api.dispose();
 });
 test('expired or revoked receipt preserves original identifiers and local inspection guidance',async()=>{
@@ -1644,7 +1776,7 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.ok(says('Setup approved'));
   const underDetails=new Set(descendants(panel.children.find(n=>n.tagName==='DETAILS')));
   assert.deepEqual(descendants(panel).filter(n=>visible(n)&&!underDetails.has(n)&&!n.children.length&&/\bteam shop\b/i.test(n.textContent)),[],
-    'the team\'s internal name stays under Details');
+    'the team\'s internal name stays under Technical details');
   assert.deepEqual(filled(),{approve:[],signin:['Sign in to Claude'],goal:[],launch:[]});
   await h.api.run('signin-begin');
   assert.deepEqual(filled().signin,[],'while starting, progress is checked automatically');
@@ -1676,28 +1808,32 @@ test('first-team setup is unnumbered steps in order, each with one filled action
   assert.equal(descendants(panel).find(n=>n.tagName==='LABEL'&&n.children.includes(area)).children[0].textContent,'What should your team work on first?');
   const recheck=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again');
   assert.equal(recheck.hidden,false);
-  assert.ok(descendants(panel.children.find(n=>n.tagName==='DETAILS')).includes(recheck),'re-checking a held approval sits under Details');
+  assert.ok(descendants(panel.children.find(n=>n.tagName==='DETAILS')).includes(recheck),'re-checking a held approval sits under Technical details');
   assert.ok(!descendants(panel).some(n=>n.className==='setup-step-done'&&descendants(n).some(c=>c.tagName==='BUTTON')),'"Setup approved" stands alone');
   h.api.setGoal('Ship the signup form');await h.api.run('preview');
   assert.equal(recheck.hidden,true,'re-checking approval would retire a fresh preview, so it is not offered while launchable');
   assert.deepEqual(shape().map(r=>r[1]),['done','done','done','current']);
   assert.ok(says('Goal: Ship the signup form'));
   assert.deepEqual(filled().launch,['Launch team']);
-  assert.ok(says('Your team is ready. Launching changes 0 generated files and starts or restarts 1 bot.'));
+  assert.ok(says(LAUNCH_STARTS));assert.ok(says('Launching changes 0 generated files and starts or restarts 1 bot.'));
   await h.api.run('launch');
   assert.deepEqual(filled().launch,['Check launch status'],'after one launch only its status check remains');
   assert.equal(recheck.hidden,false,'once the launch is spent, approval can be checked again');
   assert.ok(shown().every(n=>filledIn(n).length<=1));
   const details=panel.children.find(n=>n.tagName==='DETAILS');
-  assert.equal(details.children[0].textContent,'Details');
-  assert.ok(descendants(details).some(n=>n.textContent.includes('This approval covers')),'approval scope and identifiers sit under Details');
+  assert.equal(details.children[0].textContent,'Technical details');
+  assert.ok(descendants(details).some(n=>n.textContent.includes('This approval covers')),'approval scope and identifiers sit under Technical details');
   h.api.dispose();
   const reopened=createGuidedSetup({client:h.client,storage:h.storage,storageKey:'test',now:()=>1800000000,setTimeout:()=>0,clearTimeout:()=>{}});
   const ui=dom(),again=new ui.Element();reopened.mountPanel({document:ui.document,element:again});
   const shownAgain=stepsOf(again).filter(visible);
   assert.deepEqual(shownAgain.map(n=>[n.dataset.step,n.dataset.state]),[['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','current']],'a kept request is not drawn done before the computer confirms it (40-02)');
-  assert.deepEqual(shownAgain.map(filledIn),[[],[],[],['Check launch status']],'a reopened launch leads with its status check');
+  // Merge of 3123 (40-02, the steps above) with 3128 (41-01, what leads): the branch's "leads with its status check"
+  // predates 41-01. Until an approval is read, Check setup approval leads: that read is what shows a computer set up again.
+  assert.deepEqual(shownAgain.map(filledIn),[['Check setup approval'],[],[],[]],'a reopened launch leads with the approval check');
   assert.equal(descendants(again).find(n=>n.tagName==='BUTTON'&&n.textContent==='Check setup approval again').hidden,true,'with approval not yet read, only the step\'s own check is offered');
+  assert.equal(await reopened.run('context'),true);
+  assert.deepEqual(stepsOf(again).filter(visible).map(filledIn).at(-1),['Check launch status'],'once read, the launch\'s status check leads');
   reopened.dispose();
 });
 test('Sign in to Claude says it is starting in one place, and a session renewal meanwhile moves nothing and offers no check',async()=>{
@@ -2021,6 +2157,20 @@ test('a Try again whose storage write fails sends nothing, stays on the ended at
   assert.deepEqual(JSON.parse(h.saved.get('test:claude')),{generation:original.generation,attempt_id:calls[0][1].attempt_id,replaces:original.attempt_id});
   h.api.dispose();
 });
+test('a cancel the person pressed on this page is a neutral note; a new attempt clears that',async()=>{
+  const h=setupHarness({client:{async setupSignin(action,body){
+    return action==='cancel'?{...body,state:'cancelled',reason:'effect_uncertain',retryable:true}:{...body,state:'waiting',reason:null,url:'https://claude.ai/login',expires_at:1800000600};}}});
+  h.context.provider_signin=true;h.context.signin_attempt={...retryEnded,state:'waiting',reason:null};
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  await h.api.run('context');
+  const status=stepPart(panel,'signin','setup-signin-status');
+  await h.api.run('signin-cancel');await flush();
+  assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
+  assert.equal(status.dataset.tone,undefined,'a cancel the person chose is an ordinary note, not a fault');
+  assert.equal(status.attributes.role,'status','still announced politely');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again stays the one filled action');
+  h.api.dispose();
+});
 test('a cancel before any code is offered Try again; only the host\'s exact retryable endings are accepted',async()=>{
   const calls=[];
   const h=setupHarness({client:{async setupSignin(action,body){calls.push([action,body]);return {...body,state:'starting',reason:null};}}});
@@ -2029,6 +2179,8 @@ test('a cancel before any code is offered Try again; only the host\'s exact retr
   await h.api.run('context');
   const status=stepPart(panel,'signin','setup-signin-status'),retry=descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent==='Try again');
   assert.equal(status.textContent,'The sign-in stopped before a code was sent. Choose Try again for a new sign-in link.');
+  assert.equal(status.dataset.tone,'attention','a cancel this page did not press (the host drained or shut down) stays a fault note');
+  assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again is the one filled action');
   assert.equal(visible(retry),true);assert.deepEqual(calls,[]);
   retry.click();await flush();
   assert.equal(calls.length,1);assert.equal(calls[0][0],'begin');assert.notEqual(calls[0][1].attempt_id,retryEnded.attempt_id);
@@ -2889,7 +3041,7 @@ test('a hand-over that stops short of a finished launch lets go of the held step
   assert.equal(descendants(stepsOf(l.panel)[1]).some(n=>n.textContent==='Setup approved'&&visible(n)),false);
   assert.ok(stepButtons(l.panel).includes('Check setup approval'),'the approval can be checked again');
   l.h.api.dispose();
-  // A refused hand-over read leaves the approval context: Check setup approval again is offered under Details.
+  // A refused hand-over read leaves the approval context: Check setup approval again is offered under Technical details.
   const refused=managedLaunch({receipts:[Object.assign(new Error('refused'),{status:403})]});
   await refused.start();await refused.next();
   assert.equal(offered(refused.panel,'Check setup approval again'),true);
@@ -3129,6 +3281,129 @@ test('a held launch keeps no Claude sign-in from another approval',async()=>{
   assert.deepEqual(stepShape(panel)[1],['approve','done']);
   h.api.dispose();
 });
+// 41-01: a computer set up again from the same browser after a reset. This browser still keeps its earlier
+// installation's request, the computer's word that that Launch was reserved, and its Claude sign-in.
+const earlierInstallation=()=>[...keptLaunch(),['test:claude',JSON.stringify({generation:settingUp.generation,attempt_id:id(11)})]];
+test('records kept from a computer\'s earlier installation do not block Sign in, Preview or Launch on its new one',async()=>{
+  for(const [name,saved] of [['request, launch and sign-in kept',earlierInstallation()],['sign-in kept',earlierInstallation().slice(-1)]]){
+    const next={generation:id(20),request_id:id(21),config_fingerprint:'c'.repeat(64),source_revision:settingUp.source_revision};
+    const p=connectedPanel({saved,context:{generation:next.generation,provider_signin:true,signin_attempt:null,preview_state:'none'},
+      client:{async setupSignin(action,input){p.h.calls.push(['signin-'+action,input]);return {...input,state:'connected',reason:null};},
+        async setupPreview(input){p.h.calls.push(['preview',input]);return {...p.h.preview,...next};},
+        async setupLaunch(input){p.h.calls.push(['launch',input]);
+          return {...input,version:2,state:'quiesce',launch_reserved:true,config_committed:false,health_errors:{}};},
+        async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+    await p.finish();await flush();
+    assert.equal(p.reads(),1,name);
+    assert.equal(p.h.api.snapshot().note,'',name);
+    assert.equal(p.h.api.snapshot().pending,null,name);
+    assert.deepEqual(p.h.api.snapshot().conflicts,saved.length>1?[settingUp]:[],'the earlier request stays under Technical details: '+name);
+    assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']],name);
+    assert.equal(p.focused()?.textContent,'Sign in to Claude',name);
+    buttonOf(p.panel,'Sign in to Claude').click();await flush();
+    const begun=p.h.calls.filter(c=>c[0]==='signin-begin');
+    assert.equal(begun.length,1,name);assert.equal(begun[0][1].generation,next.generation,name);
+    assert.deepEqual(JSON.parse(p.h.saved.get('test:claude')),begun[0][1],'the new sign-in replaces the kept one: '+name);
+    p.h.api.setGoal('Improve tests');assert.equal(offered(p.panel,'Preview team'),true,name);
+    buttonOf(p.panel,'Preview team').click();await flush();
+    assert.deepEqual(p.h.calls.filter(c=>c[0]==='preview').map(c=>c[1]),[{generation:next.generation,goal:'Improve tests'}],name);
+    assert.equal(offered(p.panel,'Launch team'),true,name);
+    buttonOf(p.panel,'Launch team').click();await flush();
+    assert.deepEqual(p.h.calls.filter(c=>c[0]==='launch').map(c=>c[1]),[next],name);
+    assert.equal(p.h.calls.filter(c=>c[0]==='receipt').length,0,'the earlier request\'s status is never read: '+name);
+    assert.ok(p.h.calls.every(([,input])=>input?.request_id!==settingUp.request_id),name);
+    assert.deepEqual(JSON.parse(p.h.saved.get('test')),{version:2,pending:next,conflicts:saved.length>1?[settingUp]:[],legacy:[]},name);
+    const reloaded=createGuidedSetup({client:p.h.client,storage:p.h.storage,storageKey:'test',now:()=>1800000000});
+    assert.deepEqual(reloaded.snapshot().pending,next,name);assert.equal(await reloaded.run('launch'),false,name);
+    assert.equal(p.h.calls.filter(c=>c[0]==='launch').length,1,name);
+    reloaded.dispose();p.h.api.dispose();
+  }
+});
+test('on the same installation, a kept request still blocks Sign in, Preview and a second Launch, as before',async()=>{
+  const saved=earlierInstallation(),before=new Map(saved);
+  const p=connectedPanel({saved,context:{provider_signin:true,signin_attempt:null,preview_state:'none'},
+    client:{async setupSignin(action,input){p.h.calls.push(['signin-'+action,input]);throw new Error('lost');},
+      async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+  await p.finish();await flush();
+  assert.equal(p.reads(),1);
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);assert.deepEqual(p.h.api.snapshot().conflicts,[]);
+  assert.equal(p.h.api.snapshot().note,'Setup was already submitted from this browser. Use this installation’s stable CLI with host update continue. Reconnecting never launches again.');
+  assert.deepEqual(stepButtons(p.panel),['Check launch status']);
+  buttonOf(p.panel,'Check launch status').click();await flush();
+  assert.match(p.h.api.snapshot().note,/^The launch could not be confirmed\. .*Do not launch again\.$/);
+  for(const operation of ['signin-begin','preview','launch'])assert.equal(await p.h.api.run(operation),false,operation);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])||c[0].startsWith('signin-')).length,0);
+  assert.deepEqual(p.h.calls.filter(c=>c[0]==='receipt').map(c=>c[1]),[settingUp,settingUp],'only the kept request\'s status is read');
+  assert.deepEqual(new Map(p.h.saved),before,'nothing this browser kept is changed');
+  p.h.api.dispose();
+});
+test('a full list of conflicting identifiers drops its oldest when a computer set up again sets its request aside',async()=>{
+  const older=Array.from({length:16},(_,i)=>({generation:id(100+i),request_id:id(200+i),config_fingerprint:'d'.repeat(64),source_revision:settingUp.source_revision}));
+  const p=connectedPanel({saved:[['test',JSON.stringify({version:2,pending:settingUp,conflicts:older,legacy:[]})]],
+    context:{generation:id(20),preview_state:'none'}});
+  assert.deepEqual(p.h.api.snapshot().conflicts,older);
+  await p.finish();await flush();
+  assert.equal(p.h.api.snapshot().note,'');assert.equal(p.h.api.snapshot().pending,null);
+  const kept=[...older.slice(1),settingUp];
+  assert.deepEqual(p.h.api.snapshot().conflicts,kept,'the oldest goes; the list stays at 16');
+  assert.deepEqual(JSON.parse(p.h.saved.get('test')),{version:2,pending:null,conflicts:kept,legacy:[]});
+  assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['goal','current'],['launch','upcoming']]);
+  const details=descendants(p.panel).find(n=>n.tagName==='PRE').textContent;
+  assert.ok(details.includes(settingUp.request_id),'the request set aside is listed under Technical details');
+  assert.ok(!details.includes(older[0].request_id));
+  const reloaded=createGuidedSetup({client:p.h.client,storage:p.h.storage,storageKey:'test',now:()=>1800000000});
+  assert.deepEqual(reloaded.snapshot().conflicts,kept);assert.equal(reloaded.snapshot().pending,null);
+  reloaded.dispose();p.h.api.dispose();
+});
+test('after a failed first approval read, Check setup approval leads; once the computer approved, the earlier request is set aside',async()=>{
+  let reads=0;const refused=()=>Object.assign(new Error('refused'),{status:403});
+  const p=connectedPanel({saved:earlierInstallation(),context:{generation:id(20),provider_signin:true,signin_attempt:null,preview_state:'none'},
+    client:{async setupContext(){p.h.calls.push(['context']);if(++reads===1)throw refused();return p.h.context;},
+      async setupReceipt(input){p.h.calls.push(['receipt',input]);throw refused();}}});
+  await p.finish();await flush();
+  assert.equal(reads,1);assert.deepEqual(p.h.api.snapshot().pending,settingUp);
+  // Merge of 3128 (41-01) with 3123 (40-02): 41-01's four steps here predate 40-02. The kept request is not confirmed
+  // (the read failed), so it is drawn as for no request: Sign in to Claude shows as upcoming, as in the reopened panel of
+  // 'first-team setup is unnumbered steps...'. What leads is 41-01's rule, unchanged.
+  assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','current'],['signin','upcoming'],['goal','upcoming'],['launch','current']]);
+  assert.deepEqual(stepsOf(p.panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[],[]],'the approval check leads');
+  assert.equal(p.focused()?.textContent,'Check setup approval');
+  assert.equal(p.h.api.snapshot().note,'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.',
+    'the note matches the leading approval check');
+  // A failed launch status read keeps the launch's own note.
+  buttonOf(p.panel,'Check launch status').click();await flush();
+  assert.match(p.h.api.snapshot().note,/^The launch could not be confirmed\. Choose Check launch status/);
+  assert.deepEqual(stepsOf(p.panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[],[]],'the approval check still leads');
+  buttonOf(p.panel,'Check setup approval').click();await flush();
+  assert.equal(reads,2);assert.equal(p.h.api.snapshot().pending,null);assert.deepEqual(p.h.api.snapshot().conflicts,[settingUp]);
+  assert.deepEqual(stepShape(p.panel),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
+  assert.equal(offered(p.panel,'Sign in to Claude'),true);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])).length,0);
+  p.h.api.dispose();
+});
+test('a browser that cannot save keeps the earlier request as it was, shown once, when a new approval is read',async()=>{
+  const p=connectedPanel({saved:[keptLaunch()[0]],context:{generation:id(20),preview_state:'none'},
+    storage:saved=>({setItem:(key,value)=>{if(key==='test')throw new Error('full');saved.set(key,value);}})});
+  const before=p.h.saved.get('test');
+  await p.finish();await flush();
+  assert.equal(p.h.api.snapshot().note,'This browser could not save the setup identifiers, so nothing was launched. Allow site storage for this page, then try again.');
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);
+  assert.deepEqual(p.h.api.snapshot().conflicts,[],'never both kept and conflicting');
+  assert.equal(p.h.saved.get('test'),before);
+  assert.equal(p.h.calls.filter(c=>['preview','launch'].includes(c[0])).length,0);
+  p.h.api.dispose();
+});
+test('a new approval\'s read naming a sign-in this page cannot use is rejected before anything kept is set aside',async()=>{
+  const saved=earlierInstallation(),before=new Map(saved);
+  const p=connectedPanel({saved,context:{generation:id(20),provider_signin:true,preview_state:'none',
+      signin_attempt:{generation:id(20),attempt_id:id(30),state:'not-a-state',reason:null}},
+    client:{async setupReceipt(input){p.h.calls.push(['receipt',input]);throw new Error('lost');}}});
+  await p.finish();await flush();
+  assert.equal(p.reads(),1);assert.equal(p.h.api.snapshot().context,null,'the read is rejected');
+  assert.deepEqual(p.h.api.snapshot().pending,settingUp);assert.deepEqual(p.h.api.snapshot().conflicts,[]);
+  assert.deepEqual(new Map(p.h.saved),before,'no storage changed');
+  p.h.api.dispose();
+});
 test('the Launch team reassurance goes once the launch is held and stays gone after it finished',async()=>{
   const l=managedLaunch({launch:input=>({...reserved(input),managed_owner:undefined})});l.h.context.managed_owner=undefined;
   await l.h.api.run('context');l.h.api.setGoal('Improve checkout tests');await l.h.api.run('preview');
@@ -3204,7 +3479,7 @@ test('the setup panel offers Launch for a realistic 63 KB plan in a ready Contex
   assert.ok(bytesOf(plan)>55000&&bytesOf(plan)<75000,String(bytesOf(plan)));assert.ok(bytesOf(context)>55000&&bytesOf(context)<75000);
   const p=previewHarness({answers:[()=>context]}),{panel}=p;
   await p.start();
-  assert.equal(p.h.api.snapshot().note,'Preview ready. Review it below, then choose Launch team.');
+  assert.equal(p.h.api.snapshot().note,READY_BANNER);
   assert.equal(p.h.api.snapshot().plan.changes.length,76);
   assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
   p.h.api.dispose();h.api.dispose();
@@ -3462,7 +3737,7 @@ test('the panel lets go of the Launch it showed under way when the next parts re
     else{
       assert.equal(l.panel(),panel,name);
       assert.deepEqual(stepShape(panel),[['connect','done'],['approve','current'],['goal','done'],['launch','current']]);
-      assert.deepEqual(filledIn(stepsOf(panel).at(-1)),['Check launch status'],'Check launch status leads');
+      assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],['Check setup approval'],[],[]],'with no approval known, Check setup approval leads');
       assert.equal(lede(),true,'the "Nothing runs" line is back');
     }
     assert.equal(l.h.calls.filter(c=>/\/setup\/(?:launch|preview|context|receipt)$/.test(c.url)).length,0,'nothing was sent');
@@ -3743,6 +4018,211 @@ test('the parts view\'s styles use the existing colour names and no colour value
   assert.ok(rules.some(([selectors])=>/data-state/.test(selectors)),'each state has its mark');
 });
 
+// One team on one computer (approved 2026-11-24): app.js marks on main how many teams the view has (hidden ones
+// included) and connected-workspace.js the computers it lists; workspace.css folds the teams list and the computer's
+// parts strip to one line each only when both say 1. cssRules: every workspace.css rule, one per selector, with its
+// @media condition and its declarations.
+function cssRules(text) {
+  const css=text.replace(/\/\*[\s\S]*?\*\//g,''),rules=[];
+  const block=(part,media)=>{for(const [,selectors,body] of part.matchAll(/([^{}]+)\{([^{}]*)\}/g))for(const selector of selectors.split(','))
+    rules.push({media,selector:selector.trim().replace(/\s+/g,' '),decls:Object.fromEntries(body.split(';').filter(d=>d.includes(':'))
+      .map(d=>[d.slice(0,d.indexOf(':')).trim(),d.slice(d.indexOf(':')+1).trim()]))});};
+  for(let i=0;i<css.length;){
+    const at=css.indexOf('@media',i);if(at<0){block(css.slice(i),null);break;}
+    block(css.slice(i,at),null);const open=css.indexOf('{',at);let depth=1,j=open+1;
+    while(depth){depth+={'{':1,'}':-1}[css[j]]||0;j++;}
+    block(css.slice(open+1,j-1),css.slice(at+6,open).trim());i=j;
+  }
+  return rules;
+}
+const FOLD='main[data-teams="1"][data-computers="1"]',STRIP=' > #rail-channel[data-setup-focus="shared"] > .setup-focus';
+const foldRules=async()=>cssRules(await read('workspace.css')).filter(rule=>/data-teams|data-computers/.test(rule.selector));
+// The fold rules a view's main selects: each names both markers, so it applies only when main carries exactly those values.
+const foldedFor=(rules,main)=>rules.filter(rule=>{const [,teams,computers]=rule.selector.match(/main\[data-teams="(\d+)"\]\[data-computers="(\d+)"\]/)||[];
+  return main.dataset.teams===teams&&main.dataset.computers===computers;});
+// A fold rule's declaration, by the selector's part after the markers and its @media condition (null: none).
+const foldDecl=(rules,rest,property,media=null)=>rules.find(rule=>rule.selector===`.plane-workspace ${FOLD}${rest}`&&rule.media===media
+  &&Object.hasOwn(rule.decls,property))?.decls[property];
+// app.js's teams marker and its Computers & status drawer, run against a view's document; fleets: the teams the view has.
+const appText=await read('app.js'),{runInNewContext}=await import('node:vm');
+const drawerText=appText.slice(appText.indexOf('let computersAttention'),appText.indexOf('function renderFleetTabs()'));
+function teamsList(ui,fleets,details) {
+  const context={document:ui.document,$:id=>id==='computers-details'?details:ui.get(id),fleets};
+  runInNewContext(drawerText,context);
+  return context;
+}
+test('the view marks on main the computers it lists; listing none, before its account check or once retired, it clears both marks',async t=>{
+  for(const count of [1,2]){
+    const h=harness({count}),main=h.ui.get('main');main.dataset.teams='1';h.mount();
+    assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined],'nothing is listed while the account is checked');
+    await h.api.checkAccount();await flush();
+    assert.equal(main.dataset.computers,String(count),'a direct view lists every saved computer');
+    main.dataset.teams='1';h.metadataStatus=403;await h.api.checkAccount();await flush();
+    assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined],'a retired view marks neither');
+    h.api.dispose();
+  }
+  const l=landing(t);await l.workspace.checkAccount();await flush();const main=l.h.ui.get('main');
+  assert.equal(main.dataset.computers,'1','a bridged page lists only its bound computer of three');
+  main.dataset.teams='1';l.workspace.dispose();assert.deepEqual([main.dataset.computers,main.dataset.teams],[undefined,undefined]);
+});
+test('app.js marks how many teams the view has, hidden ones included, from its own renderer, and wires the drawer',()=>{
+  const ui=dom(),main=ui.get('main');main.dataset.computers='1';
+  for(const fleets of [[],[{alias:'one'}],[{alias:'one'},{alias:'two'}]]){teamsList(ui,fleets).markTeams();assert.equal(main.dataset.teams,String(fleets.length));}
+  delete main.dataset.computers;teamsList(ui,[{alias:'one'}]).markTeams();
+  assert.equal(main.dataset.teams,undefined,'while no computer is listed (before the account check, or retired) the teams stay unmarked');
+  const render=appText.slice(appText.indexOf('function renderFleetTabs()'));
+  assert.ok(render.indexOf('markTeams()')<render.indexOf('if (!fleets.length)'),'marked before an empty list returns');
+  assert.match(render,/hidden = hiddenTeams\(\)/,'the list itself leaves hidden teams out; the mark counts them');
+  assert.match(appText,/onConnectionAttention: openComputersForAttention,\n\s+onConnectionAttentionCleared: attentionCleared,/);
+  assert.match(appText,/for \(const \[type, handler\] of \[\["toggle", computersToggled\], \["pointerdown", keepComputersOpen\], \["wheel", keepComputersOpen\],\n\s+\["focusin", keepComputersOpen\]\]\) \$\("computers-details"\)\?\.addEventListener\(type, handler, \{ passive: true \}\);/);
+  assert.match(appText,/for \(const type of \["pointerdown", "wheel"\]\) \$\("rail-fleet"\)\?\.addEventListener\(type, keepComputersOpenOnLine, \{ passive: true \}\);/);
+  {const line={};
+   for(const [event,kept] of [[{type:'wheel',target:{},currentTarget:line},true],[{type:'pointerdown',target:line,currentTarget:line},true],[{type:'pointerdown',target:{},currentTarget:line},false]]){
+     main.dataset.computers='1';const d={open:false,contains:()=>false},l2=teamsList(ui,[{alias:'one'}],d);l2.markTeams();l2.openComputersForAttention();
+     l2.keepComputersOpenOnLine(event);l2.attentionCleared();
+     assert.equal(d.open,kept,`${event.type} on ${event.target===line?'the line itself':'a child'}: ${kept?'counts as use':'does not'}`);}}
+  assert.match(appText,/document\.addEventListener\("toggle", composerToggled, \{ capture: true \}\);/,'Message team\'s drawer is heard though toggle does not bubble');
+  assert.doesNotMatch(drawerText,/connection_state/,'attention clearing comes from the connected view, never a team snapshot');
+  assert.doesNotMatch(drawerText.replace(/\/\/.*$/gm,''),/scrollIntoView|scrollTo\(|scrollBy\(/,'only the line scrolls, by its own scrollTop');
+});
+test('opened in the fold, Computers & status brings its computer\'s card and buttons into view by scrolling the line itself',()=>{
+  const ui=dom(),main=ui.get('main'),one=[{alias:'c / team'}],rect=(top,height)=>({top,bottom:top+height,height});
+  // A wide screen's line: `view` px visible at 82px, scrolling; the card starts `cardAt` px into its content and its
+  // buttons end `end` px in.
+  const opened=({cardAt=140,end=190,view=117,scrollHeight=400,scrollTop=0,hidden=false,fleets=one,computers='1'}={})=>{
+    const line={clientTop:0,clientHeight:view,scrollHeight,scrollTop,getBoundingClientRect:()=>rect(82,view)},origin=()=>82-line.scrollTop;
+    const actions={getBoundingClientRect:()=>rect(origin()+end-29,29)};
+    const card={hidden,querySelector:s=>s==='.connection-actions'?actions:null,getBoundingClientRect:()=>rect(origin()+cardAt,end-cardAt+30)};
+    const details={open:true,contains:()=>false,querySelectorAll:s=>s==='.connection-card'?[card]:[]};
+    main.dataset.computers=computers;
+    const list=teamsList({...ui,get:id=>id==='rail-fleet'?line:ui.get(id)},fleets,details);list.markTeams();
+    list.computersToggled({target:details});return {line,details,list};
+  };
+  assert.equal(opened().line.scrollTop,81,'buttons below the visible part: the line scrolls just far enough, with a little room');
+  assert.equal(opened({cardAt:20,end:70}).line.scrollTop,0,'already in view: nothing moves');
+  assert.equal(opened({cardAt:20,end:200}).line.scrollTop,83,'a card taller than the line: its buttons win');
+  assert.equal(opened({scrollTop:250}).line.scrollTop,140,'scrolled past it: back to the card\'s top');
+  assert.equal(opened({scrollHeight:117}).line.scrollTop,0,'a line that does not scroll (a phone): nothing moves');
+  assert.equal(opened({fleets:[...one,{alias:'c / docs'}]}).line.scrollTop,0,'two teams: not folded');
+  assert.equal(opened({computers:'2'}).line.scrollTop,0,'two computers: not folded');
+  assert.equal(opened({hidden:true}).line.scrollTop,0,'only a listed computer\'s card');
+  // Message team opened after Computers & status: its narrower cap shrinks the line, so the card is shown again.
+  const narrowed=opened({cardAt:20,end:70,view:117});narrowed.line.clientHeight=40;
+  narrowed.list.composerToggled({target:{id:'work-composer',open:true}});
+  assert.equal(narrowed.line.scrollTop,30,'the buttons stay reachable after the cap shrinks');
+  const closed=opened({cardAt:20,end:70,view:117});closed.line.clientHeight=40;
+  closed.list.composerToggled({target:{id:'work-composer',open:false}});assert.equal(closed.line.scrollTop,0,'closing Message team moves nothing');
+  const other=opened({cardAt:20,end:70,view:40});other.line.scrollTop=0;
+  other.list.composerToggled({target:{id:'something-else',open:true}});assert.equal(other.line.scrollTop,0,'only Message team\'s drawer counts');
+  const shut=opened({cardAt:20,end:70,view:40});shut.line.scrollTop=0;shut.details.open=false;
+  shut.list.composerToggled({target:{id:'work-composer',open:true}});assert.equal(shut.line.scrollTop,0,'with Computers & status closed nothing moves');
+  const closing=opened({scrollTop:0,end:70,cardAt:20});closing.details.open=false;closing.line.scrollTop=5;
+  closing.list.computersToggled({target:closing.details});assert.equal(closing.line.scrollTop,5,'closing moves nothing');
+});
+test('a computer that asked for attention says when it cleared, once, after the computers are marked',async()=>{
+  const h=harness({count:1}),main=h.ui.get('main'),a=refs[0].endpoint_origin,attention=[],cleared=[];
+  h.mount({onConnectionAttention:event=>attention.push(event),onConnectionAttentionCleared:event=>cleared.push({...event,computers:main.dataset.computers})});
+  await h.api.checkAccount();await flush();
+  assert.deepEqual(attention,[{source:sourceA,state:'not_connected'}]);assert.deepEqual(cleared,[]);
+  await h.api.act(0,'connect');
+  assert.deepEqual(cleared,[{source:sourceA,state:'ready',computers:'1'}],'connected: the attention cleared, with the computers already marked');
+  await h.api.checkAccount();assert.equal(cleared.length,1,'a ready computer that asked nothing clears nothing');
+  h.overrides.set(a+'/api/owner/connected/status',()=>reply(503,{}));await h.api.act(0,'check');
+  assert.deepEqual(attention.at(-1),{source:sourceA,state:'unavailable'});assert.equal(cleared.length,1);
+  h.overrides.delete(a+'/api/owner/connected/status');await h.api.act(0,'check');
+  assert.deepEqual(cleared.at(-1),{source:sourceA,state:'ready',computers:'1'});assert.equal(cleared.length,2);
+  h.api.dispose();
+});
+test('one team on one computer folds the teams list and the computer\'s parts strip to one line each',async t=>{
+  const w=await workingPage(t),{l}=w,main=l.h.ui.get('main'),rules=await foldRules();
+  teamsList(l.h.ui,[{alias:sourceA+' / shop',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([main.dataset.teams,main.dataset.computers],['1','1']);
+  assert.ok(rules.length>=10&&rules.every(rule=>rule.selector.includes(FOLD)),'every fold rule needs both markers at 1');
+  assert.equal(foldedFor(rules,main).length,rules.length,'and here every one applies');
+  // The teams list is one wrapping row; on a wide screen it sits above the room and, with a drawer open on it, takes at
+  // most a quarter of the column (15% while the composer is open) and scrolls inside itself, so the room keeps the rest.
+  assert.equal(foldDecl(rules,' > #rail-fleet','display'),'flex');assert.equal(foldDecl(rules,' > #rail-fleet','flex-flow'),'row wrap');
+  assert.equal(foldDecl(rules,' #fleet-tabs','flex-direction'),'row');
+  const wide='(min-width:761px)';
+  assert.equal(foldDecl(rules,'','flex-direction',wide),'column');
+  assert.deepEqual(['max-height','overflow','min-height'].map(p=>foldDecl(rules,' > #rail-fleet',p,wide)),['25%','auto','0']);
+  assert.equal(rules.find(rule=>rule.media===wide&&rule.selector===`.plane-workspace ${FOLD}:has(> #rail-channel > #work-loop > #work-composer[open]) > #rail-fleet`)
+    ?.decls['max-height'],'15%');
+  assert.deepEqual(['flex','min-height'].map(p=>foldDecl(rules,' > #rail-channel',p,wide)),['1 1 0','0']);
+  // A drawer opens below the line, across it.
+  assert.equal(foldDecl(rules,' > #rail-fleet > details[open]','flex'),'1 1 100%');
+  // The parts strip above the room is one wrapping row and no longer scrolls on its own.
+  assert.equal(l.rail.dataset.setupFocus,'shared');
+  assert.equal(foldDecl(rules,STRIP,'overflow'),'visible');
+  assert.equal(foldDecl(rules,STRIP+' .parts-list','display'),'flex');assert.equal(foldDecl(rules,STRIP+' .part','display'),'flex');
+  // Folded, each part keeps its name, its status in words and its state (the mark).
+  assert.deepEqual(partRows(w.parts()),[['computer','linked','a.example.test','Linked'],['provider','not_linked','Claude','Not linked'],
+    ['bots','teams','Bots','1 team set up']]);
+});
+test('with two teams, or two computers, nothing folds',async t=>{
+  const rules=await foldRules(),w=await workingPage(t),main=w.l.h.ui.get('main');
+  teamsList(w.l.h.ui,[{alias:sourceA+' / shop',connection_state:'ready'},{alias:sourceA+' / docs',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([main.dataset.teams,main.dataset.computers],['2','1']);assert.deepEqual(foldedFor(rules,main),[]);
+  const h=harness({count:2});h.mount();await h.api.checkAccount();await flush();
+  teamsList(h.ui,[{alias:sourceA+' / shop',connection_state:'ready'}]).markTeams();
+  assert.deepEqual([h.ui.get('main').dataset.teams,h.ui.get('main').dataset.computers],['1','2']);assert.deepEqual(foldedFor(rules,h.ui.get('main')),[]);
+  h.api.dispose();
+});
+test('folded or not, the conversation and message box stay; the fold leaves out only All and Hide, and on a phone the heading',async()=>{
+  const rules=await foldRules(),html=await read('index.html'),css=(await read('workspace.css')).replace(/\/\*[\s\S]*?\*\//g,'');
+  // Both are in the page whatever its markers, and not folded no fold rule applies (above), so they show as today.
+  for(const id of ['channel','work-loop'])assert.ok(html.indexOf(`id="${id}"`)>html.indexOf('id="rail-channel"'),id);
+  // Folded, the only rules that hide anything: All and Hide (neither changes anything with one team), the sidebar in the
+  // All agents view as today, and on a phone the Teams heading. The team's choice, with its status words, stays everywhere.
+  assert.deepEqual(rules.filter(rule=>rule.decls.display==='none').map(rule=>[rule.media,rule.selector.replace(`.plane-workspace ${FOLD}`,'')]),[
+    [null,'.plane-workspace.agent-directory-view '+FOLD+' > #rail-fleet'],
+    [null,' .fleet-tab-choice:has(> [data-fleet="all"])'],[null,' .fleet-tab-choice > .fleet-hide'],[null,' .fleet-visibility'],[null,' .fleet-visibility-note'],
+    ['(max-width:650px)',' > #rail-fleet > h2']]);
+  // A browser without :has() drops a whole rule, so each fold rule that uses it stands alone.
+  const hasRules=[...css.matchAll(/([^{}]+)\{[^{}]*\}/g)].map(([,selectors])=>selectors.trim()).filter(s=>s.includes(FOLD)&&s.includes(':has('));
+  assert.equal(hasRules.length,2);for(const selectors of hasRules)assert.ok(!selectors.includes(','),selectors);
+  // No fixed or viewport heights and no new scroller on a phone, so the message box rides above the on-screen keyboard as
+  // today; only a wide screen's teams line scrolls, and only while a drawer opened on it outgrows the space.
+  for(const rule of rules){
+    assert.doesNotMatch(Object.values(rule.decls).join(';'),/\d(?:d|s|l)?v[hw]\b|position:|#[0-9a-f]{3,8}\b|rgba?\(|transition|animation/i,rule.selector);
+    if(rule.media!=='(min-width:761px)')for(const property of ['height','max-height','overflow','overflow-y'])
+      assert.ok(!Object.hasOwn(rule.decls,property)||rule.decls[property]==='visible',`${rule.selector} ${property}`);
+  }
+});
+test('Computers & status, opened for attention, closes in the fold when that attention clears, unless the person used it',()=>{
+  const ui=dom(),main=ui.get('main'),inside={},details={open:false,contains:node=>node===inside};
+  const one=[{alias:'c / team',connection_state:'ready'}],two=[...one,{alias:'c / docs',connection_state:'ready'}];
+  // A fresh page with teams marked; attention opens the drawer.
+  const page=(fleets,computers='1')=>{details.open=false;ui.document.activeElement=null;main.dataset.computers=computers;
+    const list=teamsList(ui,fleets,details);list.markTeams();list.openComputersForAttention();assert.equal(details.open,true,'attention opens it');return list;};
+  let list=page(one);list.markTeams();
+  assert.equal(details.open,true,'a team snapshot never clears attention, however ready it looks');
+  list.attentionCleared();assert.equal(details.open,false,'folded: the connected view says the attention cleared, and it closes');
+  // Cleared before the teams are known: it waits for the fold, and closes when one team arrives.
+  list=page([]);list.attentionCleared();assert.equal(details.open,true,'no team yet');
+  list.fleets=one;list.markTeams();assert.equal(details.open,false,'then the fold shows, and it closes');
+  // Attention raised again before then: it stays until that attention clears too.
+  list=page([]);list.attentionCleared();list.openComputersForAttention();list.fleets=one;list.markTeams();
+  assert.equal(details.open,true,'asked again, still open');list.attentionCleared();assert.equal(details.open,false);
+  // More teams or computers keep today's layout, where nothing closes it, even if the fold comes later.
+  list=page(two);list.attentionCleared();assert.equal(details.open,true,'two teams');
+  list.fleets=one;list.markTeams();assert.equal(details.open,true,'and it stays after a team goes');
+  list=page(one,'2');list.attentionCleared();assert.equal(details.open,true,'two computers');
+  // Any use by the person cancels it: a pointer press (Safari does not focus a pressed button), a wheel or trackpad
+  // scroll (which presses nothing), focus in it, or a close.
+  list=page(one);list.keepComputersOpen({type:'pointerdown'});list.attentionCleared();assert.equal(details.open,true,'a pointer press keeps it');
+  list=page(one);list.keepComputersOpen({type:'wheel'});list.attentionCleared();assert.equal(details.open,true,'a wheel or trackpad scroll keeps it');
+  list=page(one);list.keepComputersOpen({type:'focusin'});list.attentionCleared();assert.equal(details.open,true,'focus coming into it keeps it');
+  list=page(one);ui.document.activeElement=inside;list.attentionCleared();assert.equal(details.open,true,'focus already in it keeps it');
+  ui.document.activeElement=null;list.markTeams();list.attentionCleared();assert.equal(details.open,true,'and it stays theirs after focus leaves');
+  list=page(one);list.computersToggled({target:details});assert.equal(details.open,true,'its own opening is not the person\'s');
+  details.open=false;list.computersToggled({target:details});details.open=true;list.computersToggled({target:details});
+  list.attentionCleared();assert.equal(details.open,true,'closed and opened again by the person, it stays');
+  // A drawer the person opened is never closed for them.
+  details.open=true;main.dataset.computers='1';list=teamsList(ui,one,details);list.markTeams();list.openComputersForAttention();list.attentionCleared();
+  assert.equal(details.open,true,'a drawer the person opened stays open');
+});
+
 // Gate review of document 03, A: one failed refresh of the parts read never takes the working form away.
 test('on a bridged working page a refresh that is lost, refused or unusable keeps the working form and the room',async t=>{
   const url=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/state';
@@ -3805,6 +4285,124 @@ test('in the working form the first-team panel is not offered, not even in the c
   assert.ok(l.panel(),'and its first-team panel');
   assert.deepEqual(formsPosted(l),['setup','working','setup']);
 });
+// 41-07: a page left idle after a healthy Launch. No input reaches the frame, so the renewal window passes without a
+// renewal and the 900-second session runs out. The working form stays, with its card's Connect as the way back.
+const idleUntilExpiry=async l=>{
+  l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}await flush();
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,0,'an idle page is not renewed');
+  l.h.time=900000;l.h.timer(900000);await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'unavailable','the session ran out');
+};
+test('a healthy launched team left idle until its session runs out keeps the working form, and Connect brings it back',async t=>{
+  const {l}=await bridgedLaunch(t,cleanDone),a=landingRefs[0].endpoint_origin,posts=l.frame.sizes().length;
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);
+  await idleUntilExpiry(l);
+  assert.equal(setupMarker(l),undefined,'the working form stays');assert.equal(l.panel(),undefined,'the finished panel does not come back');
+  assert.deepEqual(formsPosted(l),['setup','working']);assert.equal(l.frame.sizes().length,posts,'no new height');
+  const card=l.cards()[0],primary=card.children[1].children[0];
+  assert.ok(visible(card));assert.match(card.children[0].textContent,/Session expired$/);
+  assert.equal(primary.textContent,'Connect');assert.equal(primary.disabled,false);
+  l.h.overrides.delete(a+'/api/owner/connected/issue'); // this time the computer issues a reading session
+  primary.click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(partsOf(l.host)?.hidden,false,'the new session\'s parts read answers');
+  assert.equal(setupMarker(l),undefined);assert.equal(l.rail.dataset.setupFocus,'shared');
+  assert.deepEqual(formsPosted(l),['setup','working'],'the form never changed, not even while connecting');
+  assert.equal(l.frame.sizes().length,posts);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,1,'never a second Launch');
+});
+test('after a lapse the next parts answer decides the form: a computer with no team goes back to the setup form',async t=>{
+  const w=await workingPage(t),{l}=w,a=landingRefs[0].endpoint_origin;
+  await idleUntilExpiry(l);
+  assert.equal(setupMarker(l),undefined);
+  l.h.overrides.set(a+'/api/owner/connected/setup/state',()=>reply(200,partsAnswer({teams:0})));
+  await l.workspace.act(0,'connect');await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready');
+  assert.equal(setupMarker(l),'setup');assert.deepEqual(formsPosted(l),['setup','working','setup']);
+});
+test('on a bridged working page a renewal whose answer is lost keeps the working form and offers Check connection',async t=>{
+  const {l}=await workingPage(t),renew=landingRefs[0].endpoint_origin+'/api/owner/connected/renew',posts=l.frame.sizes().length;
+  l.h.overrides.set(renew,()=>Promise.reject(new Error('lost')));
+  assert.equal(await l.workspace.act(0,'renew'),false);await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'unavailable');
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);assert.equal(l.panel(),undefined);
+  assert.equal(l.frame.sizes().length,posts,'no new height');
+  const primary=l.cards()[0].children[1].children[0];
+  assert.equal(primary.textContent,'Check connection');assert.equal(primary.disabled,false);
+  primary.click();await flush();
+  assert.equal(l.workspace.snapshot().computers[0].state,'ready','the session the renewal kept is still good');
+  assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);
+});
+for(const [name,answer,offer] of [['a refusal',()=>reply(403,{state:'denied'}),'Connect'],['a lost answer',()=>Promise.reject(new Error('lost')),'Check connection']])
+  test(`after a clean Launch a session check ending in ${name} brings back the setup form with its Connect step offered again`,async t=>{
+    const {l,panel}=await bridgedLaunch(t,cleanDone);
+    l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/status',answer);
+    await l.workspace.act(0,'check');await flush();
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+    assert.equal(setupMarker(l),'setup','a session check that ends anywhere but ready still brings back the setup form');
+    assert.equal(l.panel(),panel);
+    assert.deepEqual(stepShape(panel)[0],['connect','current'],'the Connect step is not ticked while this computer is not connected');
+    assert.ok(offered(panel,offer),'a way back inside the frame');
+    // 3123 replaced the Connect step's line with N1; 3129 hides that line once the team is launched, whatever it says.
+    assert.equal(descendants(panel).some(n=>n.textContent==='Connect to see what is set up on this computer.'&&visible(n)),false,
+      'no setup is left to finish once the team is launched');
+    assert.ok(descendants(stepsOf(panel).at(-1)).some(n=>n.textContent==='Team launched'&&visible(n)),'the Launch stays done');
+  });
+// An automatic renewal whose answer is lost keeps the working form, as Keep connected does: the transport reports
+// unavailable before the renewal's outcome is recorded, and the renewal under way holds the lapse until it is.
+for(const [how,answer] of [['rejected',()=>Promise.reject(new Error('lost'))],['answered 503',()=>reply(503,{state:'unavailable'})]])
+  test(`on a working page an automatic renewal ${how} keeps the working form and offers Check connection`,async t=>{
+    const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin,posts=l.frame.sizes().length;
+    l.h.overrides.set(a+'/api/owner/connected/renew',answer);
+    l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}
+    await flush();l.h.ui.listeners.get('pointerdown')({isTrusted:true});l.h.timer(0);await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,1,'one automatic renewal');
+    assert.equal(l.workspace.snapshot().computers[0].state,'unavailable');
+    assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working'],'no form change');
+    assert.equal(l.panel(),undefined);assert.equal(l.frame.sizes().length,posts,'no new height');
+    const primary=l.cards()[0].children[1].children[0];
+    assert.equal(primary.textContent,'Check connection');assert.equal(primary.disabled,false);
+  });
+// A renewal the computer refused is an answer, not a lapse: the setup form comes back whatever the follow-up check says.
+for(const [how,status] of [['refused',()=>reply(403,{state:'denied'})],['lost',()=>Promise.reject(new Error('lost'))]])
+  for(const automatic of [false,true])
+    test(`on a working page a ${automatic?'automatic':'Keep connected'} renewal refused, then a status check ${how}, brings back the setup form`,async t=>{
+      const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin;
+      l.h.overrides.set(a+'/api/owner/connected/renew',()=>reply(403,{state:'denied'}));
+      l.h.overrides.set(a+'/api/owner/connected/status',status);
+      if(automatic){
+        l.h.time=780000;for(const timer of l.h.timers.filter(timer=>timer.active&&timer.ms===780000)){timer.active=false;timer.fn();}
+        await flush();l.h.ui.listeners.get('pointerdown')({isTrusted:true});l.h.timer(0);
+      }else assert.equal(await l.workspace.act(0,'renew'),false);
+      await flush();
+      assert.equal(l.h.calls.filter(c=>c.url.endsWith('/renew')).length,1,'one renewal was asked for');
+      assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+      assert.equal(setupMarker(l),'setup','the refusal ends the team view');
+      assert.deepEqual(formsPosted(l),['setup','working','setup']);
+      assert.match(l.cards()[0].children[0].textContent,/Access denied$/);
+    });
+// A Connect from a lapsed page that reaches another computer or binding at the same address cannot bring the team back.
+for(const [name,change] of [['another computer',{host_uid:'host_'+'d'.repeat(32)}],['a new binding',{binding_generation:id(8)}]])
+  test(`a Connect from a lapsed working page whose challenge comes from ${name} brings back the setup form`,async t=>{
+    const {l}=await workingPage(t),a=landingRefs[0].endpoint_origin,url=a+'/api/owner/connected/challenge';
+    await idleUntilExpiry(l);
+    assert.equal(setupMarker(l),undefined);
+    const issued=l.h.calls.filter(c=>c.url.endsWith('/issue')).length;
+    l.h.overrides.set(url,init=>{l.h.overrides.delete(url);return l.h.dependencies.fetch(url,init).then(r=>r.json()).then(c=>reply(202,{...c,...change}));});
+    await l.workspace.act(0,'connect');await flush();
+    assert.equal(l.h.calls.filter(c=>c.url.endsWith('/issue')).length,issued,'no session is issued');
+    assert.notEqual(l.workspace.snapshot().computers[0].state,'ready');
+    assert.equal(setupMarker(l),'setup');assert.deepEqual(formsPosted(l),['setup','working','setup']);
+    // This page cannot reach that computer again, so nothing offers a Connect or check that would do nothing.
+    const panel=l.panel(),shown=text=>descendants(panel).some(n=>n.textContent===text&&visible(n));
+    assert.ok(panel,'the setup form shows its panel');
+    assert.equal(offered(panel,'Check connection')||offered(panel,'Connect'),false,'no way back that cannot work');
+    assert.ok(shown('Your account or saved computers changed. Reopen setup from your workspace.'),'what to do instead');
+    assert.equal(shown('The connection to this computer could not be confirmed. Choose Check connection to look again.'),false);
+    assert.equal(l.cards()[0].children[1].children[0].disabled,true,'nor in the card');
+    const calls=l.h.calls.length;
+    await l.workspace.act(0,'check');await l.workspace.act(0,'connect');await flush();
+    assert.equal(l.h.calls.length,calls,'and nothing is sent');
+  });
 
 // H: the frame tells the page which form it shows: once after ready, then only on a change; nothing else crosses.
 test('the framed view posts its form to the exact shell origin: setup at mount, working on entering, setup on leaving',async t=>{

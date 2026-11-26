@@ -282,6 +282,25 @@ def test_orientation_help_is_lazy_and_syntax_errors_do_not_echo_values(monkeypat
     assert error["code"] == "not_found" and "bot list" in error["hint"]
 
 
+def test_project_show_names_a_folder_project_and_its_source(staging_case, monkeypatch, capsys):
+    case = staging_case
+    monkeypatch.setattr(context, "get_resources", lambda: case.package)
+    folder = case.root.parent / "claudfather-projects" / "first-team"
+    folder.mkdir(parents=True)
+    doc = yaml.safe_load(case.paths.fleet_yaml.read_text())
+    for bot in doc["fleet"]["bots"].values():
+        bot["mounts"] = {"project": str(folder)}
+    case.paths.fleet_yaml.write_text(yaml.safe_dump(doc))
+    _commit(case)
+    project = _call(capsys, case.root, "project", "show", "first-team")["project"]
+    assert (project["title"], project["repos"], project["directory"]) == (str(folder), [], str(folder))
+    assert project["validation"]["source"] == "derived_from_bot_mounts"
+    assert project["validation"]["source_path"] == str(case.paths.fleet_yaml)
+    assert _call(capsys, case.root, "project", "list")["items"] == [project]
+    assert main(["--root", str(case.root), "project", "show", "first-team"]) == 0
+    assert f"first-team folder: {folder}" in capsys.readouterr().out
+
+
 def test_registry_freshness_names_selected_fleet_and_incomplete_scan(staging_case, monkeypatch, capsys):
     from claudlobby.plane import registry_read
     from claudlobby.plane.registry_read import last_scan

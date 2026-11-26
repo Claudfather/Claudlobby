@@ -261,6 +261,24 @@ the view as it was and shows nothing, and nothing retries it. The same word
 hides "Nothing runs on this computer until you choose Launch team." from the
 first paint. A request kept from a Preview alone, a word stored for another
 request, or a word this browser cannot read gets no launch status read.
+A computer set up again from nothing answers the approval read with a new
+approval that holds no request. A computer cannot hold a new approval while it
+keeps any Preview or Launch (`allow` refuses it with
+`setup_original_request_retained`), so the page then sets the request it kept
+under the earlier approval aside with the conflicting identifiers (still listed
+under Technical details, never launched or followed), and stops following a Claude
+sign-in it kept under the earlier approval. When that list already holds 16,
+its oldest entry goes, since conflicting identifiers gate nothing. The earlier
+request's `:launch` word stays in storage but has no effect, because it only
+counts for the request the page keeps. The new approval's sign-in, preview and
+launch are offered as on a fresh page. A null request under the same approval
+changes nothing. Until an approval read succeeds, Check setup approval leads
+over Check launch status, since that read is what shows a computer set up
+again. If only the owner database were wiped while the installation and its
+team stayed, the page would also set its request aside and no longer say "Do
+not launch again"; what then prevents a second team is the computer's own
+first-team checks (`setup_other_fleet`, `setup_other_inputs`,
+`setup_existing_runtime`), not this browser's record.
 Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
 enabled action, or stays where it is if there is none. A clean done receipt for the
 current request marks every shown step done, with "Team launched. Your team is
@@ -310,6 +328,43 @@ buttons beside bots send through the calls the carrier already admits
 "Messages: not authorized." and sends nothing. Nudges, task feedback and
 permission decisions cannot be sent over this connection: their preparation is
 refused locally. The form adds no request names, grants or server routes.
+
+**One team on one computer.** A connected view marks on `main` the computers it
+lists (`data-computers`, from `connected-workspace.js`), and `app.js` marks how
+many teams the view has, hidden ones included (`data-teams`), but only while the
+computers are marked. A view that lists no computers, before its account check
+or once it retires, has neither mark.
+Only when both are 1 does `workspace.css` fold the teams list and the parts strip
+to one line each, so the room takes the rest of the height. The teams line keeps
+the team's choice, with its status words, and the Bots in this team and
+Computers & status drawers. It leaves out All, Hide and the hidden-teams toggle,
+which change nothing with one team, and on a phone the Teams heading. A drawer
+opened on the line drops below it. On a wide screen the line, with an open
+drawer, takes at most a quarter of the column (15% while the composer is open)
+and scrolls inside itself, so the room keeps its heading, the conversation's
+floor and the Message team row at the website's smallest frame. With the composer
+and a drawer both open, the composer's room depends on what the room shows: at
+the smallest frames it can have less than without the fold, and then it scrolls
+inside itself as it does today. When Computers & status opens there, by attention or by the
+person, the line scrolls itself (never the page around the frame) to show the
+computer's card, from its name to its Connect, Check connection or Disconnect;
+when the line cannot show all of that, the buttons win. Opening Message team
+afterwards narrows the line, so it shows the card again. The parts strip keeps
+each part's name, status in words and mark, and stops scrolling on its own.
+
+Computers & status opens itself when its computer asks for attention
+(`onConnectionAttention`). In the fold, a drawer the page opened that way closes
+again when `connected-workspace.js` says that attention cleared
+(`onConnectionAttentionCleared`, once the computer that asked is `ready`), or, if
+the team is not known yet then, as soon as the fold shows. It stays open once the
+person has used it: a pointer press, a wheel or trackpad scroll, or focus in it
+(or a wheel or a press on the line itself, such as its scrollbar), or a close of
+their own.
+A drawer the person opened is never closed for them, and with more teams or
+computers nothing closes it. The fold sets no fixed or viewport height, so the
+Message team composer behaves above an on-screen keyboard as before. Any other
+count, and any view that is not a connected one (nothing marks its computers),
+keeps today's layout.
 
 After its ready message, the framed document observes its root element with
 `ResizeObserver`. Browsers deliver at most one notification per rendering
@@ -488,7 +543,9 @@ begin's own transaction, so a refused begin spends nothing, and nothing in the
 record changes, so every later admission of the same approval still matches.
 
 **The writer** runs in one write transaction and writes nothing when it refuses.
-In order: the owner's grant and the active binding (their own refusals); the
+In order: the owner's grant (`setup_denied`) and the active binding
+(`workspace_binding_required`, or `workspace_native_owner_required` when the
+owner is not a native one; both final for the run, a new run starts again); the
 installation and active revision (`setup_source_changed`); a retained team
 approval or Launch, by the computer run's own test (`use_full_guide`);
 `start_state` is `started` (`not_started`); the sign-in lease is free
@@ -591,8 +648,11 @@ The entry routes an exact team from the admitted source roster. One transport
 boundary projects canonical raw host/actor/task/assignment IDs into the selected
 source's qualified UI IDs and team name, and reverses only that exact qualifier
 before the fixed connected action POST. Mixed sources, another host, changed
-scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
-metadata remain canonical and raw; the shared ActionState saves the corresponding
+scope or undeclared recipients refuse without a send. The v1 message context lists
+every declared bot and marks the team's configured manager, the lead the nudge and
+feedback contexts name, with `lead: true`; a view addresses a new message to that
+lead by default. HTTP v1 message and v2 task metadata remain canonical and raw;
+the shared ActionState saves the corresponding
 qualified metadata, original UUID and digest, never the body. Source qualifiers
 are `c-` plus the complete reference UUID interpreted as a base36 integer,
 without truncation. Display labels remain ordinal; removing/reordering another
@@ -665,6 +725,11 @@ or project declarations; the whole-host plan must contain exactly the approved
 first fleet. The canonical plan identity, sealed release and input/output
 freshness checks remain unchanged. The preview expires after ten minutes, never
 later than its approval. No browser field selects the install directory.
+Launch restarts every bot its plan names in `effects.restart_bots`
+(`<fleet>/<bot>`), so the view's "Bots already running here restart briefly."
+shows above Launch team only when that list names a bot outside the approved
+fleet, or is not a list of names. Under the boundary above a first-team Preview
+names none, so the line does not show today.
 
 The browser saves the original UUID before one launch request. The authority
 store reserves that UUID/plan before canonical activation begins. Lost responses

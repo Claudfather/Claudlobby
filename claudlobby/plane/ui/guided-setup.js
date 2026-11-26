@@ -33,7 +33,7 @@ const PREVIEW_NOTES = {
   checking:'Checking what happened to the preview…',
   preparing:'Your computer is still preparing your team. This page checks again by itself.',
   stopped:'Automatic checks stopped after 10 minutes. Your computer was still preparing your team then. Choose Check preview to look again.',
-  ready:'Preview ready. Review it below, then choose Launch team.',
+  ready:'Your team is ready to launch.',
   expired:value => `The preview ran out before you chose Launch team, so this page can no longer launch it. To launch it from your computer, run there: ${onComputer(value)}`,
   failed:value => 'Preparing your team stopped on your computer before it finished. ' + (value.continuation
     ? `To retry it there, and launch your team if that works, run: ${value.continuation}` : 'This setup cannot go on from this page.'),
@@ -62,6 +62,21 @@ const nextAction = m => [m.lead,m.signinControls.begin,m.area,m.controls.launch]
   return true;
 }) ?? null;
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Above Launch team, outside the drawer, beside a launchable Preview. A Preview's first team is always one of the two
+// package templates in examples/teams/ (OwnerSetup's Preview runs fleet setup with the approval's template, written by
+// commands/setup.py _template_config), each a lead, an engineer and a reviewer under the task-scoped-effects guardrail,
+// which asks the person first for these four.
+const LAUNCH_STARTS = 'Launch starts your lead, engineer and reviewer on this computer. The lead plans the work, the engineer does it and the reviewer checks it. Merging, deploying, extra spending and destructive changes each need your permission first.';
+const OTHERS_RESTART = 'Bots already running here restart briefly.';
+// The drawer's name, the one the website's permission cards use (Claudfather/claudfather.ai#174).
+const TECHNICAL_DETAILS = 'Technical details';
+// Launch restarts every bot its plan declares (config_staging.py restart_bots: every bot, whatever the plan changes),
+// each named "<team>/<bot>"; the Preview's own team is its one fleet. Any other name is a bot already running here.
+// A plan that does not list them as names cannot rule that out, so it says so too.
+const othersRestart = plan => {
+  const bots = plan.effects?.restart_bots, own = plan.fleets[0] + '/';
+  return !Array.isArray(bots) || bots.some(name => typeof name !== 'string' || !name.startsWith(own));
+};
 // Shown above Launch team when the team card carried the messages mark (string S24): which form
 // follows the Preview answer's finish, page when this page must stay open for the goal to be sent.
 const GOAL_SENT = {
@@ -111,6 +126,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // and with this browser's own request kept, the approval is shown done. It sends, resumes and follows nothing.
   let launchUnderway = false;
   const launchHolding = () => standalone && !!pending && !!launchHeld && same(launchHeld,pending);
+  // An approval is known for this page's setup: one the computer holds a launch for, a launch it says is under way, or
+  // a live approval read. Until one is, Check setup approval leads (render) and a failed approval read says so (run).
+  const approvalKnown = (time = now()) => launchHolding() || standalone && launchUnderway && !!pending
+    || !!context && context.expires_at > time;
   const releaseLaunch = () => { if (!launched()) launchHeld = null; };
   const holdLaunch = reserved => { launchHeld = reserved ? pending : null; if (reserved) seeLaunch(pending); };
   // launchSeen is also kept in this browser (beside the request, as the sign-in attempt is), so a page opened again
@@ -214,21 +233,32 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else throw new Error();
     }
   } catch { incompatible = true; }
-  // unconfirmed: the request is only what this browser kept from an earlier visit. It still leads Check launch status
-  // and still blocks a second launch, but no step is drawn done for it until the computer says something about it in
-  // this visit (a read of the approval, a launch status, a Preview, or its parts read saying a Launch is unfinished).
-  // A computer that was reset otherwise shows a finished step it never had (40-02).
+  // unconfirmed: the request is only what this browser kept from an earlier visit. It still blocks a second launch, and
+  // its Check launch status leads once an approval is known (render), but no step is drawn done for it until the
+  // computer says something about it in this visit (an accepted read of the approval, a launch status, a Preview, or
+  // its parts read saying a Launch is unfinished). A computer that was reset otherwise shows a finished step it never
+  // had (40-02).
   let unconfirmed = !!pending;
   const drawn = () => !!pending && !unconfirmed;
   const active = () => !disposed && ['ready','setup_only'].includes(client.snapshot().state);
   const legacyBlocked = () => incompatible || legacy.length > 0;
-  function save(value) {
+  function save(value, kept = conflicts) {
     try {
       if (incompatible || !storage || typeof storage.setItem !== 'function') throw new Error();
-      storage.setItem(storageKey,JSON.stringify({version:2,pending:value,conflicts,legacy}));
+      storage.setItem(storageKey,JSON.stringify({version:2,pending:value,conflicts:kept,legacy}));
     } catch { throw Object.assign(new Error('This browser could not save the setup identifiers, so nothing was launched. Allow site storage for this page, then try again.'), {code:'setup_storage_unavailable'}); }
   }
   function changed() { render(); onChange(); }
+  // The kept request belongs to another approval, which the computer no longer holds (see the approval read in run):
+  // it joins the conflicting ones, still shown under Technical details, and this page stops following it. Saved first, and only
+  // then changed here, so a browser that cannot save keeps it as before. Conflicting identifiers gate nothing, so a full
+  // list drops its oldest one here, instead of a computer set up again many times stopping at the cap.
+  function setAside() {
+    const next = conflicts.some(item => request(item) && same(item,pending)) ? conflicts
+      : [...conflicts.slice(Math.max(0,conflicts.length-15)),Object.freeze({...pending})];
+    save(null,next); conflicts = next; pending = null;
+    stopHandoff(); followed = false; handoffUntil = 0; handoffReads = 0; connectionChecked = false;
+  }
   const RENEWAL_STATES=['renewing','ready','setup_only'];
   function connectionChanged(next) {
     // The client's own pre-begin renewal of a still-valid session rotates the epoch but is not
@@ -295,11 +325,21 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         previewState = said ?? null;
         if (said !== undefined && said !== 'none') previewWatch = true;
         if (said !== 'preparing') { previewUntil = 0; previewStopped = false; }
+        // An approval that holds no request, under another generation than a request or sign-in this browser kept: the
+        // computer holds neither, as after it was set up again from nothing. It cannot get here while it keeps that
+        // request: a new approval is refused while any Preview or Launch is retained (OwnerSetup.allow), and this read is
+        // refused while its sign-in attempt belongs to another approval (provider_signin.py _row). Never launched; see setAside.
+        // The sign-in is set aside and the computer's attempt checked first, so a read rejected there changes no storage.
+        if (value.request === null && value.provider_signin === true) signin.setAside(value.generation);
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
+        if (value.request === null && pending && pending.generation !== value.generation) setAside();
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
-          pending = binding(value.request); save(pending); unconfirmed = false;
+          pending = binding(value.request); save(pending);
         }
+        // An accepted approval read confirms what this page still keeps: a request under another approval was set aside
+        // just above, so one still kept is this approval's (a null request under it never proves the request vanished).
+        unconfirmed = false;
         holdLaunch(value.launch_reserved);
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
@@ -308,7 +348,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
         const shown = kept ? 'ready' : said === 'ready' ? 'expired' : said;
-        // A null request or new grant is never proof that an original request vanished.
+        // A null request under the same approval is never proof that an original request vanished.
         note = value.launch_reserved ? `Setup was already submitted from this browser. ${localContinue(value)} Reconnecting never launches again.`
           : shown === 'ready' ? PREVIEW_NOTES.ready
           : shown === 'expired' ? PREVIEW_NOTES.expired(value)
@@ -330,7 +370,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         // With the mark, the goal shown above Launch is the one the computer read back.
         pending = binding(value); unconfirmed = false; plan = Object.freeze({...value}); planGoal = value.goal ?? authored;
         save(pending); launchable = true;
-        note = 'Preview ready. Review it below, then choose Launch team.';
+        note = PREVIEW_NOTES.ready;
       } else if (operation === 'launch') {
         if (!context || !plan || !pending || !launchable || legacyBlocked() || !signin.ready() || !same(plan,pending)
             || planGoal !== goal || plan.expires_at <= now() || context.expires_at <= now()) return false;
@@ -378,7 +418,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
           });
           return false;
         }
-        note = error?.code === 'setup_storage_unavailable' ? error.message : pending
+        // A failed approval read with no approval known says so, as Check setup approval then leads (render).
+        note = error?.code === 'setup_storage_unavailable' ? error.message : pending && (operation !== 'context' || approvalKnown())
           ? 'The launch could not be confirmed. Choose Check launch status, or inspect the update on the computer if approval expired or was revoked. Do not launch again.'
           : 'Could not confirm setup approval. Make sure setup was approved on this computer, then check again.';
       }
@@ -417,7 +458,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       : sendsGoal || plan?.sends_goal === true ? 'Team launched. Once its bots show as running, you can message the lead here.'
       : 'Team launched. Once its bots show as running, message the lead with one concrete request; the setup goal alone does not start a task.'
       : value.state === 'unknown' || Object.keys(value.health_errors).length
-      ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Details.'
+      ? 'The launch needs attention on the computer. Do not launch again; inspect the update there using the identifiers under Technical details.'
       : value.state === 'quiesce' && !value.launch_reserved
       ? `Prepared but not launched. ${localContinue(value)} This page never resends it after reconnecting.`
       : value.state === 'quiesce' && value.launch_reserved
@@ -425,16 +466,21 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         : 'Launch received. Let the setup guide on the computer finish its handoff, then use its status and reconnect commands. Do not launch again.'
       : 'Still in progress. Checking status never repeats or resumes setup.';
   }
-  let detailsFor = null; // the plan, pending and identifier counts the Details JSON was last built from
-  const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Details.';
+  let detailsFor = null; // the plan, pending and identifier counts the Technical details JSON was last built from
+  const LEGACY = 'This browser holds identifiers from an older setup, so it cannot launch a new team here. Inspect them on the computer; they are listed under Technical details.';
   function render() {
+    // One clock reading per repaint, so the notes below and the expired line under Launch team agree.
+    const time = now();
     // Check preview needs a live approval: once this page's clock says it ended, a note offering it says so instead.
-    if (previewWatch && context && context.expires_at <= now() && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
+    if (previewWatch && context && context.expires_at <= time && /Check preview/.test(note)) note = PREVIEW_NOTES.readExpired;
+    // Nor does it say the team is ready once the Preview has run out, where Launch says the preview expired, or once
+    // this page no longer holds it (a connection change drops it). The banner is only ever set beside a plan.
+    if (note === PREVIEW_NOTES.ready && (!plan || plan.expires_at <= time)) note = '';
     if (!mount) return;
-    const m = mount, live = active(), time = now();
+    const m = mount, live = active();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
     const holding = launchHolding(), underway = standalone && launchUnderway;
-    const approved = holding || underway && !!pending || !!context && context.expires_at > time;
+    const approved = approvalKnown(time);
     // It keeps a sign-in this page saw connected for the same approval.
     const signinKnown = context?.provider_signin === true || holding && !context && signin.state() === 'connected'
       && signin.attempt()?.generation === pending.generation;
@@ -451,9 +497,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (m.steps.connect) states.connect = live || settling ? 'done' : 'current';
     if (connecting) for (const name of ['approve','launch']) if (states[name] === 'current') states[name] = 'upcoming';
     // The whole view ends on finished steps, even after the handoff's status check moved the connection
-    // on and cleared the approval context: nothing is left to approve or check again.
+    // on and cleared the approval context: nothing is left to approve or check again. Only its Connect step stays
+    // current while this computer is not connected, so the view keeps its way back.
     const finished = standalone && launched();
-    if (finished) for (const name of Object.keys(states)) if (states[name] !== null) states[name] = 'done';
+    if (finished) for (const name of Object.keys(states))
+      if (states[name] !== null && !(name === 'connect' && connecting)) states[name] = 'done';
     const progress = {approve:'',signin:'',goal:'',launch:''};
     progress.connect = connecting && connectView?.busy ? connectView.busy === 'check' ? 'Checking connection…' : 'Connecting…' : '';
     // A starting sign-in says so in its own line above the buttons instead, wherever that line is shown.
@@ -464,7 +512,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // While the computer prepares the preview the goal step keeps Preview team's own line, so nothing changes between checks.
     if (!progress.goal && !pending && previewPolling()) progress.goal = PROGRESS.preview[1];
     for (const [name,step] of Object.entries(m.steps)) {
-      const state = states[name]; step.root.hidden = state === null || connecting && name !== 'connect'; // before Connect, only Connect (40-02)
+      // Before Connect, only Connect (40-02). A Launch the computer said finished cleanly in this page is no stored tick:
+      // its done steps stay beside the current Connect step, which is the way back to the team (41-07).
+      const state = states[name]; step.root.hidden = state === null || connecting && name !== 'connect' && !finished;
       if (state === null) continue;
       step.root.dataset.state = state;
       if (step.done) step.done.hidden = state !== 'done';
@@ -488,8 +538,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const checkShown = approved && !pending && previewWatch && !previewOpen() && !previewPolling() && !previewChecking
       && !['refused','expired'].includes(previewProblem); // a refusal or an ended approval cannot change by looking again
     // One filled action: the step that can move leads. Preview team and Launch team are filled whenever shown;
-    // so is Sign in to Claude, except while it is held as sign-in starts.
-    const lead = pending ? launchShown ? null : 'receipt' // a retained launch's status check leads
+    // so is Sign in to Claude, except while it is held as sign-in starts. A retained launch's status check leads once
+    // an approval for it is known; until then Check setup approval does, since that read is what can show the computer
+    // was set up again (and the request set aside).
+    const lead = pending && approved ? launchShown ? null : 'receipt'
       : !approved ? 'context'
       : checkShown ? 'check'
       : states.signin !== 'current' ? null
@@ -508,8 +560,11 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
     m.area.disabled = !live || busy || !!pending || legacyBlocked() || !previewOpen();
     controls.launch.hidden = !launchShown;
-    setText(m.summary,launchShown ? `Your team is ready. Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.`
-      : 'Check launch status to see where setup stands. This page never sends a launch twice.');
+    setText(m.summary,launchShown ? LAUNCH_STARTS : 'Check launch status to see where setup stands. This page never sends a launch twice.');
+    setText(m.restart,launchShown && othersRestart(plan) ? OTHERS_RESTART : '');
+    // The counts sit under Technical details, beside the app version and the raw plan.
+    setText(m.counts,launchShown ? `Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.` : '');
+    m.counts.hidden = !m.counts.textContent;
     // The exact goal Launch approves, as plain text, with S24 directly above Launch team: only when Launch sends it.
     const sends = launchShown && plan.sends_goal === true;
     setText(m.launchGoal,sends ? planGoal : '');
@@ -520,8 +575,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       ? `Your team ${context.fleet} works in ${context.project_directory}. Once the team has finished starting and you’ve allowed messages to it, tell the lead what to do. The lead writes down the task and coordinates the work and an independent review.`
       : `Your team ${context.fleet} works on ${context.repository}, with a lead, an engineer and a reviewer. The team needs your permission before it merges a pull request.` : '');
     setText(m.authority,context ? `This approval covers ${context.template === 'local-project' ? `reading and changing files in ${context.project_directory}` : `work on ${context.repository}`}, for app version ${context.source_revision} only. Launching starts the team and the app’s background services on this computer and may use the provider accounts you set up. Some folders, tools or accounts may still need your approval on this computer. Merging, deploying, extra spending and destructive changes each need your separate permission.` : '');
-    // conflicts and legacy only grow (retain), so their lengths track every change.
-    const detailsKey = [plan, pending, conflicts.length, legacy.length];
+    // retain only grows conflicts and legacy, and a set-aside replaces conflicts whole (setAside, which may drop the
+    // oldest), so their identity and lengths track every change.
+    const detailsKey = [plan, pending, conflicts, conflicts.length, legacy.length];
     if (!detailsFor || detailsKey.some((value,index) => value !== detailsFor[index])) {
       detailsFor = detailsKey;
       setText(m.details,plan || pending || conflicts.length || legacy.length ? JSON.stringify({pending,conflicting_identifiers:conflicts,
@@ -535,7 +591,8 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       || operation === 'receipt' && !pending;
     m.recheck.disabled = controls.context.disabled;
     if (m.connect) {
-      const {button,hint} = m.connect;
+      const {button,hint,text} = m.connect;
+      text.hidden = finished; // once the team is launched there is no setup left to finish; the button stays
       setText(button,connectView?.operation === 'check' ? 'Check connection' : 'Connect');
       button.className = filled('connect','pill ghost');
       button.disabled = !connectView || !!connectView.disabled || !!connectView.busy;
@@ -562,7 +619,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       connectFocus = null; if (!m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
     }
   }
-  // Steps in order, each with a mark workspace.css draws from its state (✓ once done); only the current step shows its body. Long approval text and identifiers sit under Details.
+  // Steps in order, each with a mark workspace.css draws from its state (✓ once done); only the current step shows its body. Long approval text, the counts and identifiers sit under Technical details.
   // connect: optional, from an entry that owns Connect for this computer; it adds a first "Connect this computer" step.
   // standalone: the panel is the whole view, so its notes never point at a computer card and a launch ends on a done step.
   function mountPanel({document,element,connect,standalone:alone = false}) {
@@ -595,8 +652,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (connectFocus === 'sent') connectFocus = null; // the entry refused it, so nothing will move focus
       });
       connectRow.done.append(make('span','','Connected'));
-      connectRow.body.append(make('p','setup-step-text','Connect to see what is set up on this computer.'),row(button),hint);
-      connectStep = {button,hint};
+      const text = make('p','setup-step-text','Connect to see what is set up on this computer.');
+      connectRow.body.append(text,row(button),hint);
+      connectStep = {button,hint,text};
     }
     const approve = step('approve','Approve setup'), approveDone = make('span');
     const recheck = action('Check setup approval again','pill ghost','context'), approveHint = make('p','setup-hint');
@@ -615,15 +673,16 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
     goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHint);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
+    const restart = make('p','setup-step-text');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
     const launchGoal = make('p','setup-goal'), launchGoalNote = make('p','setup-step-text');
-    launchStep.body.append(summary,launchGoal,launchGoalNote,row(launch,receiptButton),launchHint);
+    launchStep.body.append(summary,restart,launchGoal,launchGoalNote,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
-    const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), details = make('pre');
-    disclosure.append(make('summary','','Details'),declaration,authority,row(recheck),details); element.append(disclosure);
+    const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), counts = make('p'), details = make('pre');
+    disclosure.append(make('summary','',TECHNICAL_DETAILS),declaration,authority,counts,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
       signinCopyNote:parts.signinCopyNote,signinField:parts.signinField,code:parts.code,codeRow:parts.codeRow,
-      signinControls:parts.signinControls,goalDone,goalText,area,goalHint,summary,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,details,
+      signinControls:parts.signinControls,goalDone,goalText,area,goalHint,summary,restart,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
   }

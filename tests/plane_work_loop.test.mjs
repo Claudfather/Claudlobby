@@ -1018,6 +1018,8 @@ test(`manager shortcut composes only an explicit matching granted lead and never
   h.loop.setRoom('web');await settle();
   assert.equal(h.get('work-manager').hidden,authority!=='matching');
   h.loop.setView('tasks');
+  // With the lead known a new message goes to the lead (41-08); this draft is written to the first recipient instead.
+  if(authority==='matching'){assert.equal(h.get('work-recipient').value,lead.id);h.get('work-recipient').value=first.id;h.get('work-recipient').onchange();}
   h.get('work-body').value='First recipient draft';h.get('work-body').emit('input');
   h.get('work-manager').onclick();await settle();
   assert.equal(h.get('work-composer').open,authority==='matching');
@@ -1028,6 +1030,71 @@ test(`manager shortcut composes only an explicit matching granted lead and never
     h.loop.invalidate(undefined,message.scope,'message');assert.equal(h.get('work-manager').hidden,true);
   } else assert.equal(h.get('work-recipient').value,first.id);
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// 41-08: a computer's message context lists its bots by name and marks no lead; the team's task contexts name its lead.
+// A new message goes to that lead, however the answers arrive; with no lead known it goes to the first bot, as before.
+const unmarkedMessage={...context,simulation:false,actions:['message'],recipients:[{id:'engineer',label:'engineer'},
+  {id:ownerNudge.recipients[0].id,label:'lead'},{id:'reviewer',label:'reviewer'}]};
+for(const order of ['message first','lead first','after Check action access'])
+test(`a new message goes to the team's lead by default: ${order}`,async()=>{
+  const lead=ownerNudge.recipients[0].id,message=deferred(),nudge=deferred();
+  let allowed=order!=='after Check action access';
+  const h=harness({interactionContext:()=>allowed?message.promise:null,nudgeContext:()=>allowed?nudge.promise:null});
+  h.loop.setRoom('web');await settle();
+  if(!allowed){
+    assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-check-access').hidden,false);
+    allowed=true;h.get('work-check-access').onclick();await settle();
+  }
+  if(order==='lead first'){nudge.resolve(ownerNudge);await settle();}
+  message.resolve(unmarkedMessage);await settle();
+  if(order!=='lead first'){
+    assert.equal(h.get('work-recipient').value,'engineer','before the lead is known: the first bot, as before');
+    nudge.resolve(ownerNudge);await settle();
+  }
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-recipient').value,lead);
+  assert.equal(h.get('work-mode-note').textContent,'Direct message to lead. This is not linked to a task.');
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// A computer that marks its lead on the message context needs no task grant: the lead is the default from the first paint.
+test('a message-only grant whose context marks the lead addresses a new message to the lead at once',async()=>{
+  const lead=ownerNudge.recipients[0].id,message=deferred();
+  const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label:'manager',lead:true},{id:'reviewer',label:'reviewer'}]};
+  const h=harness({interactionContext:()=>message.promise});
+  h.loop.setRoom('web');await settle();
+  message.resolve(marked);await settle();
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-recipient').value,lead,'the first value shown is the lead');
+  assert.match(h.get('work-recipient').innerHTML,/>manager · lead</);
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// A lead bot already named lead is listed once by name; any other lead keeps the mark.
+test('a lead whose name already is lead is not marked lead again in the To list',async()=>{
+  const lead=ownerNudge.recipients[0].id;
+  for(const [label,shown] of [['lead','lead'],['Lead','Lead'],['LEAD','LEAD'],['manager','manager · lead'],['team lead','team lead · lead']]){
+    const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label,lead:true},{id:'reviewer',label:'reviewer'}]};
+    const h=harness({interactionContext:()=>marked});
+    h.loop.setRoom('web');await settle();
+    const options=[...h.get('work-recipient').innerHTML.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)].map(m=>[m[1],m[2]]);
+    assert.deepEqual(options,[['engineer','engineer'],[lead,shown],['reviewer','reviewer']],label);
+    assert.equal(h.get('work-recipient').value,lead,`${label}: still the default`);
+  }
+});
+test('a bot the person chose, or a message already written, is not moved when the lead becomes known',async()=>{
+  for(const touch of ['chosen','written']){
+    const nudge=deferred(),h=harness({interactionContext:()=>unmarkedMessage,nudgeContext:()=>nudge.promise});
+    h.loop.setRoom('web');await settle();
+    assert.equal(h.get('work-recipient').value,'engineer',touch);
+    if(touch==='chosen'){h.get('work-recipient').value='reviewer';h.get('work-recipient').onchange();}
+    else{h.get('work-body').value='Hello engineer';h.get('work-body').emit('input');}
+    nudge.resolve(ownerNudge);await settle();
+    assert.equal(h.get('work-recipient').value,touch==='chosen'?'reviewer':'engineer',touch);
+    if(touch==='written')assert.equal(h.get('work-body').value,'Hello engineer');
+    h.loop.setRoom('web');await settle();
+    assert.equal(h.get('work-recipient').value,touch==='chosen'?'reviewer':'engineer',`${touch}: kept across an action refresh`);
+  }
 });
 const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
   crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});

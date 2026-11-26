@@ -275,9 +275,11 @@ def _bot(context, bot_id, *, capabilities=False):
 
 
 def _project(context, project):
-    source = "derived_from_bot_scope" if context.fleet.projects_derived else "projects_yaml_or_loader_default"
+    source = ("derived_from_bot_mounts" if project.directory is not None
+              else "derived_from_bot_scope" if context.fleet.projects_derived
+              else "projects_yaml_or_loader_default")
     return {"key": project.key, "title": project.title, "repos": sorted(project.repos),
-            "mission_file": project.mission_file,
+            "directory": project.directory, "mission_file": project.mission_file,
             "mission_base": str(context.paths.fleet_config_dir),
             "validation": {"tier": project.validation.tier, "source": source,
                            "source_path": str(context.paths.fleet_yaml if context.fleet.projects_derived
@@ -346,6 +348,7 @@ def dispatch(args) -> CommandOutput:
             data.update(items=shown, next_cursor=None)
         lines.extend(f"{item['key']}: {item['validation']['tier']} "
                      f"({item['validation']['source']}); checks not observed." for item in shown)
+        lines.extend(f"{item['key']} folder: {item['directory']}" for item in shown if item["directory"])
         lines.extend(f"Mission pointer: {item['mission_file']} (relative to {item['mission_base']})"
                      for item in shown if item["mission_file"])
     return CommandOutput(data, data["context"]["release"]["executing_release_id"], tuple(lines))
