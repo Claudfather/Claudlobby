@@ -24,6 +24,13 @@ export function graphemePrefix(text, limit) {
   return text;
 }
 
+// ASCII headings can still be shortened on browsers without a grapheme segmenter.
+export function clip(text, limit) {
+  const prefix = !characters && text.length > limit && /^[ -~]+$/.test(text)
+    ? text.slice(0, limit) : graphemePrefix(text, limit);
+  return prefix.length < text.length ? prefix + "…" : text;
+}
+
 export function ago(iso) {
   if (!iso) return "—";
   const s = (Date.now() - Date.parse(iso)) / 1000;
