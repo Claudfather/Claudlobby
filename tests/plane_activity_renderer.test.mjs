@@ -744,7 +744,10 @@ function taskBoardFocusHarness(change) {
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
   const syncRoom=source.slice(source.indexOf('function syncWorkRoom()'),source.indexOf('function activeRoom()'));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n${syncRoom}\n({renderTasks,acceptTaskPoll,resetTaskFilters,syncWorkRoom,snapshot:()=>taskSnapshot})`,{...panel,document,activeRoom:()=>room,workRoom:room,workLoop:{setRoom(){}},showLoading(){nodes.tasks.innerHTML="";nodes.attention.innerHTML="";}});
+  const board=runInNewContext(`${rendering}\n${boardSource}\n${syncRoom}\n({renderTasks,acceptTaskPoll,resetTaskFilters,syncWorkRoom,snapshot:()=>taskSnapshot})`, {
+    ...panel, document, workRoom:room, activeRoom:()=>room, workLoop:{setRoom(){}},
+    showLoading() { nodes.tasks.innerHTML = ""; nodes.attention.innerHTML = ""; },
+  });
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));

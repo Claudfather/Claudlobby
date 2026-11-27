@@ -1794,12 +1794,15 @@ function applyFleetVisibility() {
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
   const pickChanged = currentFleet !== f;
-  if (pickChanged && typeof closeRoomBot === "function") closeRoomBot();
-  if (pickChanged && typeof resetConversationFocus === "function") resetConversationFocus();
-  if (pickChanged) { ++generation; closeEquipment(); }
+  if (pickChanged) {
+    if (typeof closeRoomBot === "function") closeRoomBot();
+    if (typeof resetConversationFocus === "function") resetConversationFocus();
+    ++generation;
+    closeEquipment();
+  }
   currentFleet = f;
-  const roomChanged = syncWorkRoom();
-  if (pickChanged && !roomChanged && typeof resetTaskFilters === "function") resetTaskFilters();
+  // An explicit pick can select the same room the roster already inferred.
+  if (!syncWorkRoom() && pickChanged && typeof resetTaskFilters === "function") resetTaskFilters();
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
