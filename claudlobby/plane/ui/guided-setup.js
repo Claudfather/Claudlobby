@@ -85,14 +85,15 @@ const GOAL_SENT = {
 // The host accepts one paragraph, up to 2,000 Unicode code points.
 const maxGoalChars = 2000;
 const goalFits = value => value.length <= maxGoalChars || (value.length <= 2 * maxGoalChars && [...value].length <= maxGoalChars);
-const paragraphHint = 'Use one paragraph with no space at the start or end.';
+const paragraphHint = 'Use one paragraph, with no line breaks or tabs.';
 const trimGoal = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu,'');
 function goalHint(value) {
   if (!goalFits(value)) return 'Keep your goal to 2,000 characters or fewer.';
   const trimmed = trimGoal(value);
   if (!trimmed) return 'Write a goal to preview your team.';
   if (!value.isWellFormed() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) return 'Remove the unsupported characters from your goal.';
-  return /[\t\r\n]/.test(value) || trimmed !== value ? paragraphHint : '';
+  // Spaces at either end are trimmed at Preview, so typing between words never shows a hint.
+  return /[\t\r\n]/.test(value) ? paragraphHint : '';
 }
 let goalFieldCount = 0;
 // A Preview answer's goal fields: with the mark, the finish and the exact goal; without it, no finish.
@@ -375,6 +376,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else if (operation === 'preview') {
         if (!context || context.launch_reserved || pending || legacyBlocked() || !signin.ready() || context.expires_at <= now()
             || !previewOpen()) return false;
+        if (goal !== trimGoal(goal)) { goal = trimGoal(goal); if (mount) mount.area.value = goal; }
         const selected = context, authored = goal; previewWatch = true; previewTried = null;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;

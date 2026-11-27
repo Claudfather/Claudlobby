@@ -4443,7 +4443,7 @@ test('pasted goal formatting is corrected in the field before any Preview reques
     assert.equal(field.value,pasted);
     assert.equal(field.attributes['aria-invalid'],'true');
     const hint=descendants(panel).find(n=>n.id===field.attributes['aria-describedby']);
-    assert.equal(hint.textContent,'Use one paragraph with no space at the start or end.');
+    assert.equal(hint.textContent,'Use one paragraph, with no line breaks or tabs.');
     assert.equal(buttonOf(panel,'Preview team').disabled,true);
     assert.equal(await h.api.run('preview'),false);
     assert.equal(previews().length,0);
@@ -4459,6 +4459,27 @@ test('pasted goal formatting is corrected in the field before any Preview reques
   assert.equal(await h.api.run('preview'),true);
   assert.equal(previews()[0][1].goal,field.value);
   assert.equal(goalNode.textContent,field.value);
+  h.api.dispose();
+});
+
+test('spaces at either end of a typed goal show no hint and are trimmed when Preview is sent',async()=>{
+  const {h,panel,goalNode,field}=markedHarness('');
+  await h.api.run('context');
+  const preview=buttonOf(panel,'Preview team');
+  const hint=()=>descendants(panel).find(n=>n.id===field.attributes['aria-describedby']).textContent;
+  for(const typed of ['Add ','Add a ',' Add a form','Add a form \u00a0']){
+    field.value=typed;field.handlers.input();
+    assert.equal(hint(),'',typed);
+    assert.equal(field.attributes['aria-invalid'],'false',typed);
+    assert.equal(preview.disabled,false,typed);
+  }
+  assert.equal(await h.api.run('preview'),true);
+  const sent=h.calls.filter(([op])=>op==='preview');
+  assert.equal(sent.length,1);
+  assert.equal(sent[0][1].goal,'Add a form');
+  assert.equal(field.value,'Add a form');
+  assert.equal(h.api.snapshot().goal,'Add a form');
+  assert.equal(goalNode.textContent,'Add a form');
   h.api.dispose();
 });
 
