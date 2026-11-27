@@ -390,8 +390,8 @@ def signal_group(sig):
     except PermissionError as error:
         if sys.platform != "darwin" or error.errno != errno.EPERM:
             raise
-        # Darwin may report EPERM while the last group member exits. Reap the
-        # leader and keep the original failure unless the kernel confirms removal.
+        # Darwin may report EPERM while the last group members exit. Poll also
+        # reaps our leader if needed. Only a confirmed disappearance clears EPERM.
         end = time.monotonic() + 0.1
         while time.monotonic() < end:
             child.poll()
