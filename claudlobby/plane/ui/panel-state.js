@@ -11,6 +11,26 @@ export const esc = (s) => (s ?? "").toString()
   .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
                                  '"': "&quot;", "'": "&#39;" }[c]));
 
+const characters = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
+
+export function graphemePrefix(text, limit) {
+  // Older browsers keep the full bounded text when they cannot find a character boundary.
+  if (text.length <= limit || !characters) return text;
+  let count = 0;
+  for (const {index} of characters.segment(text)) {
+    if (count === limit) return text.slice(0, index);
+    count++;
+  }
+  return text;
+}
+
+// ASCII headings can still be shortened on browsers without a grapheme segmenter.
+export function clip(text, limit) {
+  const prefix = !characters && text.length > limit && /^[ -~]+$/.test(text)
+    ? text.slice(0, limit) : graphemePrefix(text, limit);
+  return prefix.length < text.length ? prefix + "…" : text;
+}
+
 export function ago(iso) {
   if (!iso) return "—";
   const s = (Date.now() - Date.parse(iso)) / 1000;
