@@ -390,12 +390,6 @@ def _operation_retained(root, retained, record):
         hint=_continuation(root,retained.grant) if retained and retained.grant else "host update status")
 
 
-def _original_launch(state):
-    raise CommandFailure("conflict", "a first-team launch is already retained; inspect its original receipt before continuing",
-                         data={"launch_id": state.launch_id, "launch_plan": state.launch_plan,
-                               "generation": state.grant.generation})
-
-
 @contextmanager
 def interrupted():
     """A direct SIGTERM follows the same owned cleanup as terminal cancellation."""
