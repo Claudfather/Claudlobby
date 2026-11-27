@@ -82,9 +82,23 @@ const othersRestart = plan => {
 const GOAL_SENT = {
   page:"Launch sends this goal to your team's lead as your first message, once the team is running. Keep this page open until then. A sent goal cannot be unsent.",
   computer:"Launch sends this goal to your team's lead as your first message, once the team is running. You can close this page. A sent goal cannot be unsent."};
+// The host accepts one paragraph, up to 2,000 Unicode code points.
+const maxGoalChars = 2000;
+const goalFits = value => value.length <= maxGoalChars || (value.length <= 2 * maxGoalChars && [...value].length <= maxGoalChars);
+const paragraphHint = 'Use one paragraph, with no line breaks or tabs.';
+const trimGoal = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu,'');
+function goalHint(value) {
+  if (!goalFits(value)) return 'Keep your goal to 2,000 characters or fewer.';
+  const trimmed = trimGoal(value);
+  if (!trimmed) return 'Write a goal to preview your team.';
+  if (!value.isWellFormed() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) return 'Remove the unsupported characters from your goal.';
+  // Spaces at either end are trimmed at Preview, so typing between words never shows a hint.
+  return /[\t\r\n]/.test(value) ? paragraphHint : '';
+}
+let goalFieldCount = 0;
 // A Preview answer's goal fields: with the mark, the finish and the exact goal; without it, no finish.
 const badGoal = (value, selected) => (value.sends_goal === true) !== (selected.sends_goal === true)
-  || value.sends_goal !== undefined && (!['page','computer'].includes(value.finish) || typeof value.goal !== 'string' || value.goal.length > 2000)
+  || value.sends_goal !== undefined && (!['page','computer'].includes(value.finish) || typeof value.goal !== 'string' || !goalFits(value.goal))
   || value.sends_goal === undefined && 'finish' in value;
 
 export function createGuidedSetup({client, storage, storageKey, now = () => Date.now()/1000, onChange = () => {},
@@ -286,7 +300,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // preview-check: the same read as context, asking the computer what became of a Preview. Once a Preview was sent or
   // the computer reported one (previewWatch), a read keeps the approval and the steps already done on screen.
   async function run(operation, {quiet = false} = {}) {
-    if (disposed || busy || !active()) return false;
+    if (disposed || busy || !active() || (operation === 'preview' && goalHint(goal))) return false;
     const reading = operation === 'context' || operation === 'preview-check';
     if (operation === 'preview-check' && (!context || pending)) return false;
     // Beside a fresh launchable plan a failed read still retires Launch, as before.
@@ -319,7 +333,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         // A Preview the computer finished and kept: offered while its window is open, never beside a reserved launch.
         const kept = value.preview && !value.launch_reserved && value.request && value.preview.expires_at > now() ? value.preview : null;
         if (value.preview !== undefined && (!value.request || value.launch_reserved
-            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || kept.goal.length > 2000
+            || kept && (badPlan(kept,value) || !same(kept,value.request) || typeof kept.goal !== 'string' || !goalFits(kept.goal)
               || badGoal(kept,value)))) throw rejected();
         context = Object.freeze({...value}); plan = null; launchable = false; previewProblem = null; sendsGoal = value.sends_goal === true;
         previewState = said ?? null;
@@ -360,8 +374,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       } else if (operation.startsWith('signin-')) {
         if (!await signin.operate(operation,ticket)) return false;
       } else if (operation === 'preview') {
-        if (!context || context.launch_reserved || pending || legacyBlocked() || !signin.ready() || !goal.trim() || context.expires_at <= now()
+        if (!context || context.launch_reserved || pending || legacyBlocked() || !signin.ready() || context.expires_at <= now()
             || !previewOpen()) return false;
+        if (goal !== trimGoal(goal)) { goal = trimGoal(goal); if (mount) mount.area.value = goal; }
         const selected = context, authored = goal; previewWatch = true; previewTried = null;
         const value = await client.setupPreview({generation:selected.generation,goal:authored});
         if (disposed || ticket !== epoch || selected !== context || !active()) return false;
@@ -557,8 +572,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       retry:m.steps.signin.retry,status:m.signinControls.status}[lead] ?? null;
     setText(m.goalDone,pending ? planGoal ? `Goal: ${planGoal}` : 'Team preview prepared' : '');
     setText(m.goalText,context ? `Your team works in ${context.template === 'local-project' ? context.project_directory : context.repository}.` : '');
-    setText(m.goalHint,goal.trim() ? '' : 'Write a goal to preview your team.');
+    const hint = goalHint(goal);
+    setText(m.goalHint,hint);
+    m.area.setAttribute('aria-invalid',String(Boolean(goal && hint)));
+    m.repairGoal.hidden = hint !== paragraphHint || !previewOpen();
     m.area.disabled = !live || busy || !!pending || legacyBlocked() || !previewOpen();
+    m.repairGoal.disabled = m.area.disabled;
     controls.launch.hidden = !launchShown;
     setText(m.summary,launchShown ? LAUNCH_STARTS : 'Check launch status to see where setup stands. This page never sends a launch twice.');
     setText(m.restart,launchShown && othersRestart(plan) ? OTHERS_RESTART : '');
@@ -585,7 +604,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     }
     m.disclosure.hidden = !context && !m.details.textContent;
     for (const [operation,button] of Object.entries(controls)) button.disabled = !live || busy
-      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signin.ready() || !goal.trim() || context.expires_at <= time || !previewOpen())
+      || operation === 'preview' && (!context || !!pending || legacyBlocked() || !signin.ready() || Boolean(hint) || context.expires_at <= time || !previewOpen())
       || operation === 'previewCheck' && !checkShown
       || operation === 'launch' && (!context || !plan || !pending || !launchable || legacyBlocked() || !signin.ready() || goal !== planGoal || plan.expires_at <= time || context.expires_at <= time)
       || operation === 'receipt' && !pending;
@@ -665,13 +684,24 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
       step:before => step('signin','Sign in to Claude',{done:false,before})});
     const goalStep = step('goal','Describe the goal'), goalDone = make('span'), goalText = make('p','setup-step-text');
     goalStep.done.append(goalDone);
-    const area = make('textarea','setup-input'); area.maxLength = 2000; area.rows = 4; area.value = goal;
+    const area = make('textarea','setup-input'); area.rows = 4; area.value = goal;
     area.setAttribute('placeholder','For example: Add a contact form to the homepage, with tests that check each message arrives.');
     area.addEventListener('input',() => { goal = area.value; changed(); });
-    const goalField = make('label','setup-field'), preview = action('Preview team','pill setup-primary','preview'), goalHint = make('p','setup-hint');
+    const goalField = make('label','setup-field'), preview = action('Preview team','pill setup-primary','preview'), goalHintNode = make('p','setup-hint');
+    goalHintNode.id = 'setup-goal-hint-' + ++goalFieldCount;
+    area.setAttribute('aria-describedby',goalHintNode.id);
+    const repairGoal = make('button','pill ghost','Make one paragraph');
+    repairGoal.type = 'button';
+    repairGoal.addEventListener('click',() => {
+      if (area.disabled || goalHint(goal) !== paragraphHint) return;
+      goal = goal.split(/[\r\n\t]+/).map(trimGoal).filter(Boolean).join(' ');
+      area.value = goal;
+      changed();
+      area.focus();
+    });
     const previewCheck = action('Check preview','pill ghost','preview-check');
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
-    goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHint);
+    goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHintNode,repairGoal);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
     const restart = make('p','setup-step-text');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
@@ -682,12 +712,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     disclosure.append(make('summary','',TECHNICAL_DETAILS),declaration,authority,counts,row(recheck),details); element.append(disclosure);
     mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
       signinCopyNote:parts.signinCopyNote,signinField:parts.signinField,code:parts.code,codeRow:parts.codeRow,
-      signinControls:parts.signinControls,goalDone,goalText,area,goalHint,summary,restart,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
+      signinControls:parts.signinControls,goalDone,goalText,area,goalHint:goalHintNode,repairGoal,summary,restart,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
   }
   return Object.freeze({mountPanel,run,connectionChanged,snapshot:() => ({busy,context,plan,pending,conflicts:[...conflicts],legacy:[...legacy],note,goal,previewState}),
-    setGoal(value) { if (typeof value === 'string' && value.length <= 2000 && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
+    setGoal(value) { if (typeof value === 'string' && goalFits(value) && !pending && !legacyBlocked()) { goal = value; if (mount) mount.area.value = value; changed(); } },
     resumeHandoff:() => { scheduleHandoff(); signin.schedule(); schedulePreviewPoll(); },
     // Whether this page follows a Launch it sent or followed (see followed) that has not ended in a clean done
     // receipt; the entry keeps the panel while it does. Once launched, the page is treated like one opened again.

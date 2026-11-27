@@ -4480,8 +4480,81 @@ function markedHarness(goal,{finish='page',marked=true}={}){
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const launchBody=stepsOf(panel).find(n=>n.dataset.step==='launch').children.find(n=>n.className==='setup-step-body');
   const goalNode=descendants(panel).find(n=>n.className==='setup-goal');
-  return {h,panel,launchBody,goalNode,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
+  const field=descendants(panel).find(n=>n.tagName==='TEXTAREA');
+  return {h,panel,ui,launchBody,goalNode,field,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
 }
+test('pasted goal formatting is corrected in the field before any Preview request',async()=>{
+  const {h,panel,ui,goalNode,field}=markedHarness('');
+  await h.api.run('context');
+  const previews=()=>h.calls.filter(([op])=>op==='preview');
+  for(const pasted of [' Review  signup.\r\n\t Write a checklist. ', '\u0085Review  signup.\tWrite a checklist.\u00a0']){
+    field.value=pasted;field.handlers.input();
+    assert.equal(field.value,pasted);
+    assert.equal(field.attributes['aria-invalid'],'true');
+    const hint=descendants(panel).find(n=>n.id===field.attributes['aria-describedby']);
+    assert.equal(hint.textContent,'Use one paragraph, with no line breaks or tabs.');
+    assert.equal(buttonOf(panel,'Preview team').disabled,true);
+    assert.equal(await h.api.run('preview'),false);
+    assert.equal(previews().length,0);
+    const repair=buttonOf(panel,'Make one paragraph');
+    assert.ok(visible(repair));repair.click();
+    assert.equal(field.value,'Review  signup. Write a checklist.');
+    assert.equal(h.api.snapshot().goal,field.value);
+    assert.equal(ui.document.activeElement,field);
+    assert.equal(field.attributes['aria-invalid'],'false');
+    assert.equal(previews().length,0,'editing the draft never contacts the computer');
+    assert.equal(visible(repair),false);assert.equal(buttonOf(panel,'Preview team').disabled,false);
+  }
+  assert.equal(await h.api.run('preview'),true);
+  assert.equal(previews()[0][1].goal,field.value);
+  assert.equal(goalNode.textContent,field.value);
+  h.api.dispose();
+});
+
+test('spaces at either end of a typed goal show no hint and are trimmed when Preview is sent',async()=>{
+  const {h,panel,goalNode,field}=markedHarness('');
+  await h.api.run('context');
+  const preview=buttonOf(panel,'Preview team');
+  const hint=()=>descendants(panel).find(n=>n.id===field.attributes['aria-describedby']).textContent;
+  for(const typed of ['Add ','Add a ',' Add a form','Add a form \u00a0']){
+    field.value=typed;field.handlers.input();
+    assert.equal(hint(),'',typed);
+    assert.equal(field.attributes['aria-invalid'],'false',typed);
+    assert.equal(preview.disabled,false,typed);
+  }
+  assert.equal(await h.api.run('preview'),true);
+  const sent=h.calls.filter(([op])=>op==='preview');
+  assert.equal(sent.length,1);
+  assert.equal(sent[0][1].goal,'Add a form');
+  assert.equal(field.value,'Add a form');
+  assert.equal(h.api.snapshot().goal,'Add a form');
+  assert.equal(goalNode.textContent,'Add a form');
+  h.api.dispose();
+});
+
+test('goal entry counts Unicode characters and keeps invalid drafts out of Preview',async()=>{
+  const limit='🙂'.repeat(2000);
+  const {h,panel,goalNode,field}=markedHarness(limit);
+  await h.api.run('context');
+  const preview=buttonOf(panel,'Preview team');
+  for(const draft of [limit+'a','a\u0000b','a\u000bb','a\u007fb','a\ud800b','\n\t ']){
+    field.value=draft;field.handlers.input();
+    assert.equal(preview.disabled,true);
+    assert.equal(await h.api.run('preview'),false);
+  }
+  assert.equal(h.calls.filter(([op])=>op==='preview').length,0);
+  h.api.setGoal(limit);
+  assert.equal(preview.disabled,false);
+  assert.equal(await h.api.run('preview'),true);
+  assert.equal(goalNode.textContent,limit);
+  const fresh=setupHarness();
+  Object.assign(fresh.context,{sends_goal:true,preview_state:'ready',request:fresh.pending,
+    preview:{...fresh.preview,sends_goal:true,finish:'page',goal:limit}});
+  assert.equal(await fresh.api.run('context'),true);
+  assert.equal(fresh.api.snapshot().goal,limit);
+  h.api.dispose();fresh.api.dispose();
+});
+
 test('a marked card shows the computer\'s goal and S24 directly above Launch team, and S17 after Launch',async()=>{
   const m=markedHarness('Add a contact form to the homepage');await m.ready();
   const order=m.launchBody.children;
