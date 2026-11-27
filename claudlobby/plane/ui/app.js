@@ -650,12 +650,15 @@ function acceptTaskPoll(env, settled = true) {
   renderTasks(env);
   return env;
 }
+function canLoadOlderTasks(data) {
+  return data?.task_page?.version === 1 && Boolean(data.task_page.next_cursor);
+}
 function paintTaskHistory(env) {
   const more = $("task-load-older"), refresh = $("task-refresh"), count = $("task-history-count");
   const data = env?.state === "ok" ? env.data : null;
   const unsupported = data?.task_page?.unavailable || data?.truncated && data?.task_page?.version !== 1;
   if (more) {
-    more.hidden = data?.task_page?.version !== 1 || !data?.task_page?.next_cursor;
+    more.hidden = !canLoadOlderTasks(data);
     more.disabled = taskHistoryBusy;
     more.textContent = taskHistoryBusy ? "Loading older work…" : "Load older work";
     more.onclick = loadOlderTasks;
@@ -671,7 +674,7 @@ function paintTaskHistory(env) {
 }
 async function loadOlderTasks() {
   const previous = taskSnapshot, token = previous?.data?.task_page?.next_cursor;
-  if (!token || previous.data.task_page.version !== 1 || taskHistoryBusy
+  if (!canLoadOlderTasks(previous?.data) || taskHistoryBusy
       || typeof sessionPaused !== "undefined" && sessionPaused) return;
   taskHistoryHeld = taskHistoryBusy = true; taskHistoryNotice = "";
   const version = ++taskHistoryVersion, room = currentFleet, session = sessionEpoch;
@@ -774,7 +777,10 @@ function renderTasks(env) {
   const filterCount = $("task-filter-count");
   if (filterCount) {
     filterCount.hidden = !filtered;
-    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} loaded task records match. Attention count is unfiltered and covers loaded records.` : "";
+    const summary = !visible.length && canLoadOlderTasks(env.data)
+      ? `0 of ${rows.length} match. Choose Load older work to keep looking.`
+      : `${visible.length} of ${rows.length} loaded task records match.`;
+    filterCount.textContent = filtered ? summary + " Filters don’t change the attention count for loaded tasks." : "";
   }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
