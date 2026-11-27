@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import stat
 import subprocess
+import symtable
 import sys
 import threading
 import time
@@ -840,6 +841,83 @@ def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
         assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == selector
 
 
+def _operation_python(script_text):
+    """The Python program a preinstall script runs, from its one fixed heredoc."""
+    start = "exec 3<<'FIXED_OPERATION_PYTHON'\n"
+    assert script_text.count(start) == 1
+    return script_text.split(start, 1)[1].split("\nFIXED_OPERATION_PYTHON\n", 1)[0]
+
+
+def _names_read_on_runtime(source):
+    """Every attribute a program reads on `_darwin_runtime()`, directly or through a
+    name bound to it on its own. Any other use of the module (passed to a function,
+    `getattr`, a walrus, a rebinding) is refused, because only an attribute read can
+    be checked against the embedded part."""
+    tree = ast.parse(source)
+    parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def scope(node):
+        while not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            node = parent[node]
+        return node
+
+    read = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_darwin_runtime"):
+            continue
+        assert not node.args and not node.keywords, ast.unparse(node)
+        above = parent[node]
+        if isinstance(above, ast.Attribute):
+            read.add(above.attr)
+        elif (isinstance(above, ast.Assign) and len(above.targets) == 1
+              and isinstance(above.targets[0], ast.Name)):
+            bound = above.targets[0]
+            for use in ast.walk(scope(above)):
+                if isinstance(use, ast.Name) and use.id == bound.id and use is not bound:
+                    assert isinstance(use.ctx, ast.Load) and isinstance(parent[use], ast.Attribute), \
+                        f"{bound.id} is used other than by attribute: {ast.unparse(parent[use])}"
+                    read.add(parent[use].attr)
+        else:
+            raise AssertionError(f"_darwin_runtime() is used other than by attribute: {ast.unparse(above)}")
+    return read
+
+
+def _unbound_globals(source, defined):
+    """Names that any scope of `source` reads from module level and `defined` lacks,
+    scope by scope, so a local in one function cannot hide another's global."""
+    missing = set()
+
+    def walk(table):
+        for symbol in table.get_symbols():
+            if symbol.is_referenced() and (table.get_type() == "module" or symbol.is_global()):
+                if symbol.get_name() not in defined:
+                    missing.add(symbol.get_name())
+        for child in table.get_children():
+            walk(child)
+
+    walk(symtable.symtable(source, "<source>", "exec"))
+    return missing - set(dir(builtins))
+
+
+def test_the_runtime_use_checks_refuse_what_they_cannot_follow():
+    followed = ("def f():\n    rt = _darwin_runtime()  # once\n    rt.admit_profile(1)\n"
+                "    return (_darwin_runtime()\n            .environment(2))\n")
+    assert _names_read_on_runtime(followed) == {"admit_profile", "environment"}
+    for refused in ("g(_darwin_runtime())\n",
+                    "getattr(_darwin_runtime(), 'status')\n",
+                    "def f():\n    if (rt := _darwin_runtime()):\n        rt.status()\n",
+                    "def f():\n    rt = _darwin_runtime()\n    g(rt)\n",
+                    "def f():\n    rt = _darwin_runtime()\n    rt = other\n    rt.status()\n"):
+        with pytest.raises(AssertionError):
+            _names_read_on_runtime(refused)
+    assert _unbound_globals("def f():\n    return later()\n", {"f"}) == {"later"}
+    assert _unbound_globals("def f():\n    status = 1\n    return status\n"
+                            "def g():\n    return status()\n", {"f", "g"}) == {"status"}
+    assert _unbound_globals("class C:\n    budget = BUDGET\n", {"C"}) == {"BUDGET"}
+    assert _unbound_globals("import os\ndef f(a=len):\n    return os.sep, a\n", {"os", "f"}) == set()
+
+
 def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call(monkeypatch):
     canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
     marker = "# END DARWIN RUNTIME ADMISSION\n"
@@ -849,29 +927,18 @@ def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call(mo
     monkeypatch.setitem(sys.modules, alone.__name__, alone)
     exec(compile(prefix, "<admission prefix>", "exec"), alone.__dict__)
     exec(compile(canonical, "<full runtime>", "exec"), whole.__dict__)
-    # Every name the installer and the owner guide use on the embedded module, read
-    # from the scripts themselves: `_darwin_runtime().<name>` and `<var>.<name>` for a
-    # variable bound to `_darwin_runtime()`. A call added later to a function that
-    # lives after the marker fails here, not only on a Mac.
+    # Every name the installer and the owner guide read on the embedded module, from
+    # the programs the scripts run. A call added later to a function that lives after
+    # the marker fails here, not only on a Mac.
     called = set()
     for script in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
-        text = script.read_text()
-        called |= set(re.findall(r"_darwin_runtime\(\)\.(\w+)", text))
-        for var in set(re.findall(r"^\s*(\w+) = _darwin_runtime\(\)\s*$", text, re.MULTILINE)):
-            called |= set(re.findall(rf"\b{var}\.(\w+)", text))
+        called |= _names_read_on_runtime(_operation_python(script.read_text()))
     assert {"admit_profile", "environment", "RuntimeRefusal"} <= called
     for name in sorted(called):
         assert hasattr(alone, name), name
     # Nothing the admission path needs lives after the marker: every global the
     # prefix's functions read is defined by the prefix alone.
-    tree = ast.parse(prefix)
-    defined = set(vars(alone)) | set(dir(builtins))
-    used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
-    local = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
-    local |= {arg.arg for node in ast.walk(tree) if isinstance(node, ast.arguments)
-              for arg in (*node.posonlyargs, *node.args, *node.kwonlyargs, node.vararg, node.kwarg) if arg}
-    local |= {node.name for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler) and node.name}
-    assert not (used - defined - local), sorted(used - defined - local)
+    assert not _unbound_globals(prefix, set(vars(alone))), sorted(_unbound_globals(prefix, set(vars(alone))))
     # The full module still has the rest, and the shared names match.
     for name in ("prepare", "discard", "main", "status", "git_argv", "validate_request"):
         assert callable(getattr(whole, name)) and not hasattr(alone, name)
