@@ -701,6 +701,9 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
+const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+
 function taskBoardFocusHarness(change) {
   let room = 'all';
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
@@ -820,8 +823,6 @@ test(`a task record whose source is still checking: ${outcome}`, () => {
 // draws must stay plain text. Each field carries markup; the rendered tag sequence must match a render of ordinary
 // words, no img, a, form or input is made from it, and its literal text is visible.
 const HOSTILE = '<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
-const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 const tagSequence = html => [...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m => m[0].toLowerCase());
 async function renderWorkingView(value) {
   const made = [], byId = new Map();
