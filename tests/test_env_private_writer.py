@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import stat
 from pathlib import Path
@@ -34,14 +36,51 @@ def _migrate(tmp_path: Path, fleet_vars=None, bot_vars=None):
     )
 
 
-def _spy_replace(monkeypatch, seen):
-    real = os.replace
+def _spy_writes(monkeypatch):
+    """Record each fsync of a regular file, each chmod and each replace, in order.
 
-    def spy(src, dst, *a, **k):
-        seen.append(stat.S_IMODE(os.stat(src).st_mode))
-        return real(src, dst, *a, **k)
+    A file is named by (st_dev, st_ino), so the temp file can be followed through
+    its rename to the file it became: a rename keeps the inode.
+    """
+    events: list[tuple] = []
+    real_fsync, real_chmod, real_replace = os.fsync, os.chmod, os.replace
 
-    monkeypatch.setattr(os, "replace", spy)
+    def fsync(fd):
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            events.append(("fsync", (info.st_dev, info.st_ino), stat.S_IMODE(info.st_mode)))
+        return real_fsync(fd)
+
+    def chmod(path, mode, *a, **k):
+        info = os.stat(path)
+        events.append(("chmod", (info.st_dev, info.st_ino), mode))
+        return real_chmod(path, mode, *a, **k)
+
+    def replace(src, dst, *a, **k):
+        info = os.stat(src)
+        events.append(("replace", (info.st_dev, info.st_ino), stat.S_IMODE(info.st_mode), Path(src), Path(dst)))
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "chmod", chmod)
+    monkeypatch.setattr(os, "replace", replace)
+    return events
+
+
+def _replaced_modes(events):
+    return [event[2] for event in events if event[0] == "replace"]
+
+
+def _assert_private_temp(events, destination: Path):
+    """The temp file that became ``destination`` had no group or other bits at its fsync,
+    before its chmod, and was renamed from the destination's own folder as .env.tmp-*."""
+    info = destination.stat()
+    own = [event for event in events if event[1] == (info.st_dev, info.st_ino)]
+    assert [event[0] for event in own][:3] == ["fsync", "chmod", "replace"]
+    assert own[0][2] & 0o077 == 0
+    source, target = own[2][3], own[2][4]
+    assert source.parent == target.parent == destination.parent
+    assert source.name.startswith(".env.tmp-")
 
 
 def test_old_names_still_importable_from_setup():
@@ -49,14 +88,54 @@ def test_old_names_still_importable_from_setup():
     assert _sync_parent is dotenv._sync_parent
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(0o640, 0o600), (0o644, 0o600), (0o400, 0o400), (None, 0o600)],
+    ids=["0640-becomes-0600", "0644-becomes-0600", "0400-stays-0400", "new-file-0600"],
+)
+def test_writer_keeps_owner_bits_of_existing_file(tmp_path, monkeypatch, before, after):
+    env = tmp_path / ".env"
+    if before is not None:
+        env.write_text("export OLD=1\n")
+        env.chmod(before)
+    events = _spy_writes(monkeypatch)
+    dotenv._write_config(env, b"export NEW=1\n", replace=True, prefix=".env.tmp-")
+    assert stat.S_IMODE(env.stat().st_mode) == after
+    assert _replaced_modes(events) == [after]
+    _assert_private_temp(events, env)
+    assert env.read_bytes() == b"export NEW=1\n"
+    assert [p.name for p in tmp_path.iterdir()] == [".env"]
+
+
+def test_folder_sync_failure_after_rename_warns_and_keeps_new_file(tmp_path, monkeypatch, caplog):
+    env = tmp_path / ".env"
+    env.write_text("export OLD=1\n")
+    env.chmod(0o600)
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "folder sync failed")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with caplog.at_level(logging.WARNING, logger="claudlobby.dotenv"):
+        dotenv._write_config(env, b"export NEW=1\n", replace=True, prefix=".env.tmp-")
+    assert env.read_bytes() == b"export NEW=1\n"
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == [".env"]
+    warnings = [r for r in caplog.records if r.name == "claudlobby.dotenv" and r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and str(env) in warnings[0].getMessage()
+
+
 def test_migration_writes_private_files_atomically(tmp_path, monkeypatch):
     (tmp_path / "runtime" / "worker").mkdir(parents=True)
-    seen: list[int] = []
-    _spy_replace(monkeypatch, seen)
+    events = _spy_writes(monkeypatch)
     assert _migrate(tmp_path) == 0
-    assert seen == [0o600, 0o600]
+    assert _replaced_modes(events) == [0o600, 0o600]
     for env in (tmp_path / "fleet" / ".env", tmp_path / "runtime" / "worker" / ".env"):
         assert stat.S_IMODE(env.stat().st_mode) == 0o600
+        _assert_private_temp(events, env)
     assert "fleet-secret" in (tmp_path / "fleet" / ".env").read_text()
     assert [p.name for p in (tmp_path / "fleet").iterdir()] == [".env"]
 
@@ -117,11 +196,11 @@ def _stub():
 
 def test_scaffold_writes_private_from_first_byte(tmp_path, monkeypatch):
     env = tmp_path / ".env"
-    seen: list[int] = []
-    _spy_replace(monkeypatch, seen)
+    events = _spy_writes(monkeypatch)
     _scaffold_env_merge(env, "# header", _stub())
-    assert seen == [0o600]
+    assert _replaced_modes(events) == [0o600]
     assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    _assert_private_temp(events, env)
     assert "export NEW_VAR=" in env.read_text()
 
 
