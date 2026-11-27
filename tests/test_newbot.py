@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from textwrap import dedent
-
-import os
 
 import pytest
 
@@ -19,7 +18,7 @@ from claudlobby.newbot import (
     _add_to_team,
     maybe_create_voice,
     interactive_collect,
-    write_token_to_env,
+    env_text_with_token,
 )
 from tests.package_fixtures import source_package
 from claudlobby.paths import Paths
@@ -433,7 +432,7 @@ def test_interactive_collect_retains_pasted_voice_without_writing(tmp_path, monk
     assert not (root / "voices").exists() and not (root / "library" / "voices").exists()
 
 
-@pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm"])
+@pytest.mark.parametrize("mode", ["dry-run", "decline", "confirm", "confirm-existing"])
 def test_new_bot_materializes_pending_voice_only_after_confirmation(
     tmp_path, monkeypatch, capsys, mode
 ):
@@ -459,18 +458,31 @@ def test_new_bot_materializes_pending_voice_only_after_confirmation(
     if mode == "dry-run":
         argv.append("--dry-run")
 
+    token_file = root / ".env"
+    reader = None
+    if mode == "confirm-existing":
+        # A readable .env with another secret, and a reader that opened it earlier.
+        token_file.write_text("OTHER=keep\n")
+        token_file.chmod(0o644)
+        reader = token_file.open()
+
     assert main(argv) == (4 if mode == "decline" else 0)
     output = capsys.readouterr()
 
     voice = root / "library" / "voices" / "bot-a.md"
     backup = root / "fleet.yaml.bak"
-    token_file = root / ".env"
-    if mode == "confirm":
+    if mode.startswith("confirm"):
         assert "host update apply FULL_COMMIT_SHA" in output.out and "config plan" not in output.out
         assert "Terse and blunt." in voice.read_text()
         assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
         assert backup.read_text() == FLEET_WITH_BOTS
-        assert "TELEGRAM_TOKEN_BOT_A=fixture-token" in token_file.read_text()
+        kept = "OTHER=keep\n" if mode == "confirm-existing" else ""
+        assert token_file.read_text() == kept + "TELEGRAM_TOKEN_BOT_A=fixture-token\n"
+        assert (token_file.stat().st_mode & 0o777) == 0o600
+        if reader is not None:
+            # The token went to a new file: the earlier reader still sees only the old one.
+            assert reader.read() == "OTHER=keep\n"
+            reader.close()
     else:
         assert not voice.exists() and not backup.exists() and not token_file.exists()
         assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
@@ -737,57 +749,17 @@ def test_bot_create_asks_again_until_the_token_env_is_a_variable_name(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-class TestWriteTokenToEnv:
-    def test_creates_new_env(self, tmp_path):
-        env = tmp_path / ".env"
-        write_token_to_env(env, "MY_TOKEN", "secret123")
-        assert env.is_file()
-        assert "MY_TOKEN=secret123" in env.read_text()
-        assert (env.stat().st_mode & 0o777) == 0o600
+class TestEnvTextWithToken:
+    def test_a_new_file(self):
+        assert env_text_with_token("", "MY_TOKEN", "secret123") == "MY_TOKEN=secret123\n"
 
-    def test_appends_to_existing(self, tmp_path):
-        env = tmp_path / ".env"
-        env.write_text("EXISTING=value\n")
-        write_token_to_env(env, "NEW_TOKEN", "abc")
-        text = env.read_text()
-        assert "EXISTING=value" in text
-        assert "NEW_TOKEN=abc" in text
+    def test_appends_to_existing(self):
+        assert env_text_with_token("EXISTING=value", "NEW_TOKEN", "abc") == "EXISTING=value\nNEW_TOKEN=abc\n"
 
-    def test_updates_existing_key(self, tmp_path):
-        env = tmp_path / ".env"
-        env.write_text("MY_TOKEN=old\nOTHER=keep\n")
-        write_token_to_env(env, "MY_TOKEN", "new")
-        text = env.read_text()
-        assert "MY_TOKEN=new" in text
-        assert "MY_TOKEN=old" not in text
-        assert "OTHER=keep" in text
+    def test_updates_existing_key(self):
+        assert (env_text_with_token("MY_TOKEN=old\nOTHER=keep\n", "MY_TOKEN", "new")
+                == "MY_TOKEN=new\nOTHER=keep\n")
 
-    def test_an_existing_readable_file_is_owner_only_before_the_token_is_written(self, tmp_path, monkeypatch):
-        env = tmp_path / ".env"
-        env.write_text("OTHER=keep\n")
-        env.chmod(0o644)
-        modes = []
-        real_fdopen = os.fdopen
-
-        def watched(fd, *args, **kwargs):
-            handle = real_fdopen(fd, *args, **kwargs)
-            real_write = handle.write
-
-            def write(text):
-                modes.append(os.fstat(handle.fileno()).st_mode & 0o777)
-                return real_write(text)
-
-            handle.write = write
-            return handle
-
-        monkeypatch.setattr("claudlobby.newbot.os.fdopen", watched)
-        write_token_to_env(env, "MY_TOKEN", "secret123")
-        assert modes == [0o600]
-        assert (env.stat().st_mode & 0o777) == 0o600
-        assert env.read_text() == "OTHER=keep\nMY_TOKEN=secret123\n"
-
-    def test_a_backslash_in_the_token_is_written_as_is(self, tmp_path):
-        env = tmp_path / ".env"
-        env.write_text("MY_TOKEN=old\n")
-        write_token_to_env(env, "MY_TOKEN", r"a\1b\g<0>c")
-        assert env.read_text() == "MY_TOKEN=a\\1b\\g<0>c\n"
+    def test_a_backslash_in_the_token_is_written_as_is(self):
+        assert (env_text_with_token("MY_TOKEN=old\n", "MY_TOKEN", r"a\1b\g<0>c")
+                == "MY_TOKEN=a\\1b\\g<0>c\n")
