@@ -524,7 +524,6 @@ function renderChannel(env) {
 //
 // A card has one attention timestamp. A delivery warning can sit behind an
 // escalation, so it has no independent send or queue time to display.
-const readDelivery = "Open the task to check its recorded delivery status.";
 const WHY = {
   permission_pending: (r) => [
     `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
@@ -537,8 +536,8 @@ const WHY = {
       ? `needs you: ${r.attention_question}`
       : "needs you — the question was not recorded",
     `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
-  send_failed: () => ["The assignment could not be sent", readDelivery],
-  never_activated: () => ["Assignment delivery is unconfirmed", readDelivery],
+  send_failed: () => ["The send attempt failed", "Open the task to see who is assigned."],
+  never_activated: () => ["The send attempt is unconfirmed", "Open the task to check its recorded delivery status."],
   // the nudge's own reason, when the operator gave one and the capture kept
   // it: "why did somebody poke this" is the first thing the reader asks, and
   // the server already stamps it for the leading arm (fold F10)
@@ -548,7 +547,7 @@ const WHY = {
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
   // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "Open the task to check the assignment and its latest update."],
+                   "Check the deadline and latest update in the task."],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
   // block clears and the worker records progress or completion). `attention_since`
@@ -607,15 +606,18 @@ function groupBy(rows, keyOf) {
   return out;
 }
 
-function assignmentCommands(reasons = []) {
-  const commands = [];
-  if (reasons.includes("send_failed"))
-    commands.push(["Withdraw the task", "claudlobby --json task withdraw TASK_ID --reason TEXT --request-id UUID"]);
-  if (reasons.includes("overdue"))
-    commands.push(["Change the deadline", "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"]);
-  if (reasons.includes("never_activated") || reasons.includes("overdue"))
-    commands.push(["Reassign the task", "claudlobby --json task reassign TASK_ID --bot BOT --reason TEXT --request-id UUID"]);
-  return commands.map(([label, command]) => `<div class="note">${esc(label)}: <code>${esc(command)}</code></div>`).join("");
+const assignmentRecovery = [
+  {reasons: ["send_failed"], label: "Withdraw the task", command: "claudlobby --json task withdraw TASK_ID --reason TEXT --request-id UUID"},
+  {reasons: ["overdue"], label: "Change the deadline", command: "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"},
+  {reasons: ["never_activated", "overdue"], label: "Reassign the task", command: "claudlobby --json task reassign TASK_ID --bot BOT --reason TEXT --request-id UUID"},
+];
+
+function assignmentCommands(reasons) {
+  if (!Array.isArray(reasons) || !reasons.length) return "";
+  const receipt = reasons.includes("send_failed") || reasons.includes("never_activated")
+    ? '<div class="note">Check the original message receipt before retrying delivery.</div>' : "";
+  return receipt + assignmentRecovery.filter(action => action.reasons.some(reason => reasons.includes(reason)))
+    .map(({label, command}) => `<div class="note">${esc(label)}: <code>${esc(command)}</code></div>`).join("");
 }
 
 function taskIssueNote(r) {

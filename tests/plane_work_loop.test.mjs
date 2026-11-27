@@ -463,13 +463,20 @@ test('task result and feedback precede closed history without inventing descript
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 
-test('missing current assignment receipt stays unconfirmed rather than implying delivery', async () => {
-  const response = canonicalDetail('task-a');
-  response.data.task.state = 'active'; response.data.task.current_assignment = {assignee_alias:'Worker'};
-  const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
-  assert.match(h.get('task-detail-content').innerHTML,/Delivery of the current assignment is not confirmed/);
-  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/No current assignment to check/);
-  assert.match(h.get('task-detail-content').innerHTML,/<h3>Latest recorded update<\/h3>/);
+test('the assigned worker stays visible when delivery has no confirming receipt', async () => {
+  for (const integrity of [null, 'unconfirmed']) {
+    const response = canonicalDetail('task-a');
+    response.data.task.state = 'active';
+    response.data.task.current_assignment = {assignee_alias:'Worker'};
+    response.data.task.delivery = {message_id:'msg_example', integrity};
+    const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+    const html = h.get('task-detail-content').innerHTML;
+    assert.match(html, /Assigned to<\/dt><dd>Worker/);
+    assert.ok(html.includes('<dt>Current assignment delivery</dt><dd>'
+      + (integrity || 'Delivery of the current assignment is not confirmed in this view.') + '</dd>'));
+    assert.doesNotMatch(html, /No current assignment to check/);
+    assert.match(html, /<h3>Latest recorded update<\/h3>/);
+  }
 });
 
 for (const mismatch of [null,'event_id','event','task_id','assignment_id'])

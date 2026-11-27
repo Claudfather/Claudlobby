@@ -852,20 +852,30 @@ test('delivery status distinguishes an unsuccessful send from an unconfirmed one
   const assignee = {assignee_short:'worker', expected_by:'2026-01-01T00:00:00Z'};
   const row = {task_id:wi, fleet:'example', title:'Review the checklist', current_assignment:assignee,
     state:'assigned', resolved:true, attention:true, attention_since:'2026-01-02T00:00:00Z'};
-  for (const [reason, label, command] of [
-    ['send_failed', 'The assignment could not be sent', 'task withdraw'],
-    ['never_activated', 'Assignment delivery is unconfirmed', 'task reassign'],
+  for (const [reason, label, advice, command] of [
+    ['send_failed', 'The send attempt failed', 'Open the task to see who is assigned.', 'task withdraw'],
+    ['never_activated', 'The send attempt is unconfirmed', 'Open the task to check its recorded delivery status.', 'task reassign'],
   ]) {
     for (const reasons of [[reason], ['escalated', reason, 'overdue']]) {
       board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:reasons}], issue_count:0, truncated:false}});
       const card = nodes.attention.innerHTML;
-      const details = card.match(/<details class="task-record">([\s\S]*?)<\/details>/)[1];
+      const details = card.match(/<details class="task-record">([\s\S]*?)<\/details>/)?.[1];
+      assert.ok(details, 'recovery commands start in the closed Record details');
       const shown = card.replace(/<details[\s\S]*?<\/details>/g, '');
       assert.ok(shown.includes(label + ' —'));
-      assert.ok(shown.includes('Open the task to check its recorded delivery status.'));
+      assert.ok(shown.includes(advice));
       assert.doesNotMatch(shown, /claudlobby --|never delivered/);
+      assert.ok(details.includes('Check the original message receipt before retrying delivery.'));
       assert.ok(details.includes('claudlobby --json ' + command));
       assert.equal(details.includes('assignment reschedule'), reasons.includes('overdue'));
+      assert.equal((details.match(/task reassign/g) || []).length,
+        reason === 'never_activated' || reasons.includes('overdue') ? 1 : 0);
     }
   }
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:['overdue']}], issue_count:0, truncated:false}});
+  const overdue = nodes.attention.innerHTML;
+  assert.ok(overdue.includes('assignment reschedule ASSIGNMENT_ID --expected-by'));
+  assert.doesNotMatch(overdue, /original message receipt|task withdraw/);
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention:false, attention_reason:null}], issue_count:0, truncated:false}});
+  assert.doesNotMatch(nodes.tasks.innerHTML, /claudlobby --|original message receipt/);
 });

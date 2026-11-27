@@ -1,3 +1,3 @@
 ### Fixed — explain assignment delivery status
 
-Task cards distinguish failed sends from unconfirmed delivery. Open the task for its recorded status. Operators can expand Record details for withdrawal, reassignment and deadline commands.
+Task cards distinguish a failed send attempt from an unconfirmed one. Withdrawal, reassignment and deadline commands appear in the closed Record details section for the matching condition.
