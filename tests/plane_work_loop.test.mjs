@@ -516,7 +516,7 @@ for (const [state, field, event] of [
 ]) {
   test(`the ${state} task preview counts whole visible characters`, async () => {
     const firstThousand = 'a'.repeat(997) + 'e\u0301🇨🇦👩🏽‍💻';
-    for (const tail of ['', '城']) {
+    for (const tail of ['', '城', '…']) {
       const response = canonicalDetail('task-a');
       const task = response.data.task;
       task.state = state;

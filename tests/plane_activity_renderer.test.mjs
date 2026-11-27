@@ -69,7 +69,8 @@ test('connected directory separates recorded activity from live evidence and ope
   c.openAgentTeam(b.uid);c.rosterIdentities.get(a.uid).fleet_uid='changed';c.openAgentTeam(a.uid);
   c.sessionPaused=true;c.openAgentTeam(a.uid);assert.equal(opened.length,0);
 });
-const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
+const panelSource = await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8');
+const panel = await import(`data:text/javascript;base64,${Buffer.from(panelSource).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
 assert.ok(rendering.includes('function threadArticle('));
@@ -256,6 +257,21 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(rendered, /<details><summary>Technical detail/);
   assert.ok(rendered.includes(panel.esc(t.messages[0].body)));
   assert.match(rendered, new RegExp(msg));
+});
+
+test('a room heading keeps whole characters from the first message', () => {
+  const prefix = 'x'.repeat(99);
+  for (const [character, tail] of [['👩🏽‍💻', ' details'], ['e\u0301', ' details'], ['界', ' details'], ['👩🏽‍💻', '']]) {
+    const body = prefix + character + tail;
+    const t = thread();
+    t.title = t.work_item_id = null;
+    t.task_events = [];
+    Object.assign(t.messages[0], {emitter: 'human', message_class: 'chat', work_item_id: null, body, body_words: body});
+    const rendered = html(t);
+    const heading = prefix + character + (tail ? '…' : '');
+    assert.ok(rendered.includes(`class="t-title">${heading}</span>`));
+    assert.ok(rendered.includes(body));
+  }
 });
 
 test('an assigned task uses its exact original assignment link and a plain title fallback', () => {
@@ -637,7 +653,7 @@ test('permission attention opens the existing task and clears after a fresh deci
   assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
 });
 
-test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+function taskCardHarness() {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
@@ -645,6 +661,30 @@ test('task-specific partial coverage cannot become a clear empty board and prese
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
+  return {board, nodes};
+}
+
+test('task card titles keep whole characters at the 160-character boundary', () => {
+  const {board, nodes} = taskCardHarness();
+  const first = '<note> ' + 'a'.repeat(152) + '👩🏽‍💻';
+  for (const tail of ['', ' details']) {
+    const row = {task_id:wi, fleet:'example', title:first + tail, state:'queued', resolved:true, attention:false};
+    board.renderTasks({state:'ok', data:{tasks:[row], issue_count:0, truncated:false}});
+    assert.ok(nodes.tasks.innerHTML.includes('>' + panel.esc(first) + (tail ? '…' : '') + '</button>'));
+  }
+});
+
+test('without a segmenter plain headings stay short and Unicode and full results are preserved', () => {
+  const legacy = runInNewContext(panelSource.replace(/^export /gm, '') + '\n({clip, graphemePrefix})', {Intl:{}});
+  const plain = 'a'.repeat(160);
+  assert.equal(legacy.clip(plain + ' tail', 160), plain + '…');
+  const joined = 'a'.repeat(99) + '👩🏽‍💻 résumé';
+  assert.equal(legacy.clip(joined, 100), joined);
+  assert.equal(legacy.graphemePrefix(plain + ' tail', 160), plain + ' tail');
+});
+
+test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+  const {board, nodes} = taskCardHarness();
   // Other endpoints can remain healthy; this envelope alone defines task coverage.
   const env = {state:'ok',data:{tasks:[],issue_count:0,truncated:false,
     coverage:{total:2,reachable:1,partial:true}}};

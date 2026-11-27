@@ -1,8 +1,6 @@
 import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
 import { createPermissionPanel, taskPermissionSummary } from "./permission-panel.js";
-import { esc, ago, stateBlock } from "./panel-state.js";
-
-const resultCharacters = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
+import { esc, ago, graphemePrefix, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
@@ -530,21 +528,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       text = prose(task.history?.find(same));
     }
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
-    // Older browsers can show the full bounded record when they cannot find a grapheme boundary.
-    let end = text.length;
-    if (end > 1000 && resultCharacters) {
-      let count = 0;
-      for (const {index} of resultCharacters.segment(text)) {
-        if (count === 1000) {
-          end = index;
-          break;
-        }
-        count++;
-      }
-    }
-    if (end === text.length) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    const preview = graphemePrefix(text, 1000);
+    if (preview === text) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
     return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(text.slice(0, end))}…</pre>
+      <pre class="task-record-body task-result">${esc(preview)}…</pre>
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
   function paintPermissionSummary(summary) {
