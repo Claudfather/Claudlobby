@@ -207,7 +207,7 @@ Zero saved computers has an explicit empty state. One or two saved computers
 start with read-only session checks, leaving explicit Connect available; no
 automatic sign-in, session mutation retry or host initialization occurs, with one
 exception: in the browser-carrier frame the first connect may follow the website's
-hand-off (see "The setup-only view" below). Per-host
+hand-off (see "First-team setup" below). Per-host
 Connect, Check connection, Keep connected and Disconnect operate independently.
 Disconnect ends only that connected session; closing the document disposes its
 streams/credentials without sending logout. Stable controls preserve keyboard
