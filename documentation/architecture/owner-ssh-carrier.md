@@ -511,7 +511,7 @@ unfinished `start-again/` folder, first, because after `install/` has moved noth
 else shows the computer was prepared (a family folder with neither is `absent`; one
 holding other content but no `install/` is `unknown_content`). Then, in order,
 `install/preparation.lock` (the preparation), `data/state/runtime-use.lock`,
-`update.lock` (made if missing), `owner/owner.sock.lock`, `setup-preview.lock` and
+`update.lock` (when it exists), `owner/owner.sock.lock`, `setup-preview.lock` and
 `provider-signin.lock`. These locks are opened without the preparation lock's empty-file
 rule, because some hold bytes. Then: the receipt (every binding field except the
 revision, the Linux interpreter digest exempt, `installation.json` exact, the checkout's
