@@ -56,19 +56,17 @@ TS=$(ts_iso)
 #                     nothing writes them and nothing reads them -- the plane
 #                     holds the events, plane prune ages its samples. Any file
 #                     left is the operator's archive, not this sweep's.)
-#   vetted log names  the known text logs, same name set log-rotate-fleet.sh
-#                     rotates under data/ (keep in lockstep). A bare *.log
-#                     glob would also match binary LevelDB / browser-profile
-#                     logs — live state, not logs.
+#   (log names        none: a bot's data/ holds its own files, a LevelDB or
+#                     browser profile's *.log among them, and no framework
+#                     job writes a log there, so no log is purged by name.
+#                     log-rotate-fleet.sh does not reach into data/ either.)
 #   *.bak             backup copies
 #   .plane-rc-relay-* the RC-relay Stop hook's dedupe markers (0-byte, one per relayed turn)
 # Durable assets (scripts, configs, ledgers, drafts) never match and are
 # never swept, wherever they sit under data/.
 find_stale_ephemeral() {
     find "$1" -type f \
-        \( -name 'cron.log' -o -name 'git-pull.log' \
-           -o -name 'briefing*.log' -o -name 'home-assistant.log' \
-           -o -name '*.bak' \
+        \( -name '*.bak' \
            -o -name '.plane-rc-relay-*' \) \
         -mtime +"$2" -print0 2>/dev/null
 }
