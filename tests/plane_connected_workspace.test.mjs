@@ -1747,8 +1747,9 @@ test('approval expiry clears the Claude link and code while a status read is in 
     p.code.value='pending-code';
     check=p.h.api.run('signin-status',{quiet:true});
     assert.equal(p.calls.at(-1)[0],'status');
+    const remaining=(p.h.context.expires_at-p.clock.t)*1000;
     p.clock.t=p.h.context.expires_at;
-    const deadline=p.timers.find(timer=>timer.live && timer.ms===3600000);
+    const deadline=p.timers.find(timer=>timer.live && timer.ms===remaining);
     assert.ok(deadline,'an in-flight read leaves the deadline armed');
     deadline.fn();
     assert.equal(p.link.hidden,true);
@@ -2342,8 +2343,8 @@ test('while this page is hidden, a live sign-in keeps a slow read-only check so 
   h.api.dispose();
 });
 test('the sign-in link shows the host\'s own deadline in local time, as text, with no timer of its own',async()=>{
-  const timers=[];let reply;
-  const h=setupHarness({setupOptions:{setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
+  const now=1800000000,timers=[];let reply;
+  const h=setupHarness({setupOptions:{now:()=>now,setTimeout(fn,ms){const t={fn,ms,live:true};timers.push(t);return t;},clearTimeout(t){if(t)t.live=false;}},
     client:{async setupSignin(_action,body){return reply(body);}}});
   h.context.provider_signin=true;
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
@@ -2351,13 +2352,13 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
   const status=stepPart(panel,'signin','setup-signin-status'),live=()=>liveSigninPolls(timers);
   const local=seconds=>new Date(seconds*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
   const ASK='Open Claude sign-in, then paste the code here.',by=time=>`Open Claude sign-in, then paste the code here by ${time}.`;
-  const minute=1800000000-1800000000%60,deadline=minute+59; // 59 seconds into its minute
+  const minute=now-now%60,deadline=minute+59; // 59 seconds into its minute
   reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL,expires_at:deadline});
   await h.api.run('signin-begin');
   assert.equal(status.textContent,by(local(minute)),'the minute it falls in, never rounded up');
   assert.match(local(minute),/\d:\d\d/);assert.notEqual(status.dataset.tone,'attention');
   assert.deepEqual(filledIn(stepsOf(panel)[1]),['Open Claude sign-in']);
-  assert.deepEqual(timers.filter(t=>t.live).map(t=>t.ms).sort((a,b)=>a-b),[2000,3600000],
+  assert.deepEqual(timers.filter(t=>t.live).map(t=>t.ms).sort((a,b)=>a-b),[2000,(h.context.expires_at-now)*1000],
     'the provider deadline adds no timer beside the status check and setup approval repaint');
   // Each answer replaces it: a link without expires_at shows no time, a later one shows the host's.
   reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL});
