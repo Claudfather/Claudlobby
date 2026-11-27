@@ -523,12 +523,8 @@ function renderChannel(env) {
 // printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
 // A reducer blocker is rendered separately by taskIssueNote.
 //
-// Each arm dates itself from the server instant that arm is ABOUT: the two
-// send arms from `attention_since` (the dispatch), the deadline arm from the
-// deadline — which is the same field when overdue is the only arm, and the
-// right one when it rides behind a failed send — and the two HUMAN arms
-// (chunk M-A, #1481) from the instant the human acted, which the server
-// already put in `attention_since` for them.
+// A card has one attention timestamp. A delivery warning can sit behind an
+// escalation, so it has no independent send or queue time to display.
 const WHY = {
   permission_pending: (r) => [
     taskPermissionSummary(r), "open the task for its status"],
@@ -540,14 +536,8 @@ const WHY = {
       ? `needs you: ${r.attention_question}`
       : "needs you — the question was not recorded",
     `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
-  send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
-                       "inspect the task and message receipt before an explicit delivery retry;"
-                       + " withdraw with claudlobby --json task withdraw TASK_ID"
-                       + " --reason TEXT --request-id UUID"],
-  never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
-                           "check the worker and message receipt before an explicit delivery retry;"
-                           + " reassign with claudlobby --json task reassign TASK_ID"
-                           + " --bot BOT --reason TEXT --request-id UUID"],
+  send_failed: () => ["The send attempt failed", "Open the task to see who is assigned."],
+  never_activated: () => ["The send attempt is unconfirmed", "Open the task to check its recorded delivery status."],
   // the nudge's own reason, when the operator gave one and the capture kept
   // it: "why did somebody poke this" is the first thing the reader asks, and
   // the server already stamps it for the leading arm (fold F10)
@@ -557,11 +547,7 @@ const WHY = {
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
   // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "check the worker; if it waits on something outside the worker, move its deadline"
-                   + " with claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by"
-                   + " RFC3339|none --reason TEXT --request-id UUID; to give it to another bot,"
-                   + " reassign with claudlobby --json task reassign TASK_ID"
-                   + " --bot BOT --reason TEXT --request-id UUID"],
+                   "Check the deadline and latest update in the task."],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
   // block clears and the worker records progress or completion). `attention_since`
@@ -620,6 +606,20 @@ function groupBy(rows, keyOf) {
     out.push(group);
   }
   return out;
+}
+
+const assignmentRecovery = [
+  {reasons: ["send_failed"], label: "Withdraw the task", command: "claudlobby --json task withdraw TASK_ID --reason TEXT --request-id UUID"},
+  {reasons: ["overdue"], label: "Change the deadline", command: "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"},
+  {reasons: ["never_activated", "overdue"], label: "Reassign the task", command: "claudlobby --json task reassign TASK_ID --bot BOT --reason TEXT --request-id UUID"},
+];
+
+function assignmentCommands(reasons) {
+  if (!Array.isArray(reasons) || !reasons.length) return "";
+  const receipt = reasons.includes("send_failed") || reasons.includes("never_activated")
+    ? '<div class="note">Check the original message receipt before retrying delivery.</div>' : "";
+  return receipt + assignmentRecovery.filter(action => action.reasons.some(reason => reasons.includes(reason)))
+    .map(({label, command}) => `<div class="note">${esc(label)}: <code>${esc(command)}</code></div>`).join("");
 }
 
 function taskIssueNote(r) {
@@ -813,7 +813,7 @@ function renderTasks(env) {
       <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
       <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
+      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}${assignmentCommands(r.attention_reason)}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
       + `</div>`;
   };
