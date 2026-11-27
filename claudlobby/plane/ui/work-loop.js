@@ -1,5 +1,5 @@
 import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
-import { createPermissionPanel } from "./permission-panel.js";
+import { createPermissionPanel, taskPermissionSummary } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
@@ -538,9 +538,11 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
+    const permissionStatus = taskPermissionSummary(task);
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
+      ${permissionStatus ? `<p class="task-question"><b>${esc(permissionStatus)}</b></p>` : ""}
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
       <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
       <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>

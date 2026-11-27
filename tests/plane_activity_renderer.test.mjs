@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { taskPermissionSummary } from '../claudlobby/plane/ui/permission-panel.js';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 
@@ -593,7 +594,7 @@ test('permission attention opens the existing task and clears after a fresh deci
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
-    ...panel, renderState: () => false, document: {
+    ...panel, taskPermissionSummary, renderState: () => false, document: {
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
@@ -601,6 +602,7 @@ test('permission attention opens the existing task and clears after a fresh deci
     attention: true, attention_reason: ['permission_pending'], permission_pending: 2};
   board.renderTasks({data: {tasks: [row]}});
   assert.match(nodes.attention.innerHTML, /2 permission requests need review/);
+  assert.match(nodes.attention.innerHTML, /open the task for its status/);
   assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
   assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
   assert.equal(nodes['attn-count'].textContent, 1);

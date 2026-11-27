@@ -1979,6 +1979,28 @@ test('permission panel distinguishes explicit denial from unavailable access wit
   }
 });
 
+test('a reader sees pending permission status by the task title as the record changes', async () => {
+  const detail = ownerDetail();
+  const task = detail.data.task;
+  const h = harness(permissionOptions({jget: () => detail, permissionContext: () => { throw actionDenied(); }}));
+  for (const [count, incomplete, expected] of [
+    [1, false, '1 permission request needs review'],
+    [2, true, 'At least 2 permission requests need review'],
+    [0, true, 'Permission history is incomplete'],
+    [0, false, null],
+  ]) {
+    task.permission_pending = count;
+    task.permission_incomplete = incomplete;
+    const panel = await openPermission(h);
+    const summary = h.get('task-detail-content').innerHTML.split('<dl class="task-facts">')[0];
+    if (expected) assert.ok(summary.includes(expected), expected);
+    else assert.doesNotMatch(summary, /permission/i);
+    assert.doesNotMatch(summary, /Only the reviewed commit|Ready &lt;for&gt; review/);
+    assert.equal(panel.querySelectorAll('[data-permission-decision]').length, 0);
+  }
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+
 test('message denial preserves the useful authorized feedback-only path',async()=>{
   const h=harness(feedbackOptions({interactionContext:()=>{throw actionDenied();}}));
   h.loop.setRoom('web');await settle();

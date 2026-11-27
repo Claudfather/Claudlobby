@@ -1,6 +1,12 @@
 import { runtimeFields, ActionState, scopeKey, validPermissionContext, samePermissionReceipt } from "./action-state.js";
 import { esc } from "./panel-state.js";
 
+export function taskPermissionSummary({permission_pending: count, permission_incomplete: incomplete}) {
+  if (!Number.isSafeInteger(count) || count < 1) return incomplete ? 'Permission history is incomplete' : '';
+  const requests = count === 1 ? 'permission request needs' : 'permission requests need';
+  return `${incomplete ? 'At least ' : ''}${count} ${requests} review`;
+}
+
 // Presentation and pending UUIDs only; all authority and decisions stay on host.
 export function createPermissionPanel({api, storage}) {
   const state = new ActionState(storage, 'plane.pending-permissions.v1');

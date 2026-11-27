@@ -13,6 +13,7 @@
 import { esc, ago, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
+import { taskPermissionSummary } from "./permission-panel.js";
 import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
@@ -530,8 +531,7 @@ function renderChannel(env) {
 // already put in `attention_since` for them.
 const WHY = {
   permission_pending: (r) => [
-    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
-    "open this task to review the exact action, target and limits"],
+    taskPermissionSummary(r), "open the task for its status"],
   permission_unavailable: () => [
     "permission history is incomplete",
     "open this task to inspect permission status; more requests may need a decision"],
