@@ -3880,6 +3880,7 @@ def _scaffold_env_merge(
     existing_keys: set[str] = set()
     existing_content = ""
     rewrote_stub = False
+    dotenv.refuse_unsafe_destination(env_path)
     if env_path.is_file():
         existing_content = env_path.read_text()
         existing_keys = set(dotenv.read(env_path).keys())
@@ -3953,8 +3954,9 @@ def _scaffold_env_merge(
             else:
                 lines.append(f"export {ev.name}=")
 
-    env_path.write_text("\n".join(lines) + "\n")
-    env_path.chmod(0o600)
+    dotenv._write_config(
+        env_path, ("\n".join(lines) + "\n").encode("utf-8"), replace=True, prefix=".env-"
+    )
     if new_vars:
         new_names = ", ".join(ev.name for ev in new_vars)
         msg = f"  {env_path.name}: added {len(new_vars)} new vars ({new_names})"

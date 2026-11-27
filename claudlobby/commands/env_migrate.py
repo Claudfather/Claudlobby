@@ -152,16 +152,26 @@ def _apply_env_migration(
         paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
     )
 
+    # Refuse every unsafe destination before any file is written.
+    if fleet_vars:
+        dotenv.refuse_unsafe_destination(fleet_env_path)
+    for name in bot_vars:
+        runtime = paths.bot_runtime(name)
+        if runtime.is_dir():
+            dotenv.refuse_unsafe_destination(runtime / ".env")
+
     if fleet_vars:
         merged = dotenv.merge_into(fleet_env_path, fleet_vars)
         fleet_env_path.parent.mkdir(parents=True, exist_ok=True)
-        fleet_env_path.write_text(
+        dotenv._write_config(
+            fleet_env_path,
             dotenv.format_file(
                 f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
                 merged,
-            )
+            ).encode("utf-8"),
+            replace=True,
+            prefix=".env-",
         )
-        fleet_env_path.chmod(0o600)
         log.info(
             "wrote %s (%d migrated, %d total)",
             fleet_env_path,
@@ -180,13 +190,15 @@ def _apply_env_migration(
             )
             continue
         merged = dotenv.merge_into(bot_env_path, vars_dict)
-        bot_env_path.write_text(
+        dotenv._write_config(
+            bot_env_path,
             dotenv.format_file(
                 f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
                 merged,
-            )
+            ).encode("utf-8"),
+            replace=True,
+            prefix=".env-",
         )
-        bot_env_path.chmod(0o600)
         bot_count += 1
         log.info(
             "wrote %s (%d migrated, %d total)",

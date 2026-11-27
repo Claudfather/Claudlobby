@@ -16,9 +16,13 @@ shlex.quote so $, backtick, backslash, and newlines are literal.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import tempfile
 from pathlib import Path
+
+from .command_result import CommandFailure
 
 
 def read(path: Path) -> dict[str, str]:
@@ -77,3 +81,38 @@ def format_file(header: str, vars_dict: dict[str, str]) -> str:
         lines.append(f"export {k}={shlex.quote(str(vars_dict[k]))}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _sync_parent(path: Path) -> None:
+    parent_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: str = ".fleet-yaml-") -> None:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        if replace:
+            os.replace(temporary, destination)
+        else:
+            try:
+                os.link(temporary, destination)
+            except FileExistsError as exc:
+                raise CommandFailure("conflict", "conflict: fleet configuration changed while setup was preparing") from exc
+        _sync_parent(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def refuse_unsafe_destination(path: Path) -> None:
+    """Refuse a private write over a symlink or a non-regular file; nothing is touched."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CommandFailure("conflict", f"conflict: {path} is not a regular file; left unchanged")
