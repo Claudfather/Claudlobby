@@ -18,9 +18,9 @@ def cmd_new_bot(args):
     import yaml
     from ..command_result import CommandFailure, CommandOutput
     from ..context import generated_selectors, load_context, resolve_paths
-    from ..newbot import (FleetYamlEditError, NewBotInputs, insert_bot_stanza,
-                          interactive_collect, materialize_voice, render_stanza,
-                          token_env_refusal, write_token_to_env)
+    from ..newbot import (FleetYamlEditError, NewBotInputs, env_text_with_token,
+                          insert_bot_stanza, interactive_collect, materialize_voice,
+                          render_stanza, token_env_refusal)
     from ..paths import InvalidPathSelector
     from .setup import _write_config
 
@@ -106,6 +106,8 @@ def cmd_new_bot(args):
             paths.assert_writable(paths.env_file)
             if paths.env_file.resolve() != paths.env_file:
                 raise CommandFailure("conflict", "fleet token tier is redirected")
+            if paths.env_file.exists() and not paths.env_file.is_file():
+                raise CommandFailure("conflict", "fleet token tier is not a regular file")
         stanza = render_stanza(inp)
         new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
         yaml.safe_load(new_text)
@@ -127,10 +129,15 @@ def cmd_new_bot(args):
         backup.write_text(paths.fleet_yaml.read_text())
         if inp.voice_text:
             materialize_voice(paths, inp.name, None, inp.voice_text)
+        # A temporary file beside each (created owner-only), then a rename: a reader
+        # or a crash never meets a truncated file, and the token never reaches a file
+        # another account can read, even through a descriptor opened earlier.
         if inp.telegram_token:
-            write_token_to_env(paths.env_file, inp.token_env, inp.telegram_token)
-        # A temporary file beside it, then a rename: a reader or a crash never
-        # meets a truncated manifest.
+            existing = (paths.env_file.read_text(encoding="utf-8", errors="surrogateescape")
+                        if paths.env_file.is_file() else "")
+            _write_config(paths.env_file, env_text_with_token(
+                existing, inp.token_env, inp.telegram_token).encode("utf-8", "surrogateescape"),
+                replace=True, prefix=".env-")
         _write_config(paths.fleet_yaml, new_text.encode("utf-8"), replace=True)
     except OSError as exc:
         raise CommandFailure("unavailable", "bot source write did not complete; inspect authored files") from exc

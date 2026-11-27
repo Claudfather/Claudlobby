@@ -318,21 +318,20 @@ def token_env_refusal(token_env: str | None, name: str) -> str | None:
 # ----------------------------------------------------------------------
 
 
-def write_token_to_env(env_path: Path, token_env: str, token: str) -> None:
-    """Append/update TOKEN_ENV=token in .env. Creates file if missing."""
-    if env_path.is_file():
-        text = env_path.read_text()
-    else:
-        text = ""
+def env_text_with_token(text: str, token_env: str, token: str) -> str:
+    """Return a .env file's ``text`` with TOKEN_ENV=token set: every line for the key
+    replaced, or the line appended. The caller writes the result to a new owner-only
+    file and renames it into place (``commands/scaffolding.py``), so the token never
+    reaches a file another account can read, even through a descriptor opened earlier.
+    """
     pattern = re.compile(rf"^{re.escape(token_env)}=.*$", re.MULTILINE)
+    line = f"{token_env}={token}"
     if pattern.search(text):
-        text = pattern.sub(f"{token_env}={token}", text)
-    else:
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += f"{token_env}={token}\n"
-    env_path.write_text(text)
-    env_path.chmod(0o600)
+        # A function, so a backslash in the token is written as is, never read as a group reference.
+        return pattern.sub(lambda _match: line, text)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + line + "\n"
 
 
 # ----------------------------------------------------------------------
