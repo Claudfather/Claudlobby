@@ -1,9 +1,9 @@
 # Local host workspace approval
 
-This optional core foundation binds one workspace to an existing host and its
-current native Tailscale paired owner. It does not connect a website, issue a
-session, expose a service, or grant fleet actions. Existing direct owner pairing,
-reads, sessions and explicit message/nudge/feedback grants remain independent.
+A workspace binding records the paired Tailscale owner's approval for one
+workspace on this host. The connected read service checks the binding when
+issuing a session and serving reads. Direct owner access and fleet action
+grants have their own lifecycles. [Connected read sessions](owner-connected-read.md)
 
 A local operator uses an explicit data root, outside generated bot/fleet/timer
 contexts, with a real terminal:
@@ -21,8 +21,8 @@ versioned optional tables to the same private owner-access database. Missing,
 partial or unsupported optional schema fails unavailable; reads never initialize
 or repair it. The original owner initialize door is unchanged.
 
-The future trusted consumer must obtain a fresh native principal through the
-canonical verifier. `OwnerAccess.workspace().begin(principal, issuer=...,
+The host's HTTP bootstrap handler obtains a fresh native principal through
+the canonical verifier. `OwnerAccess.workspace().begin(principal, issuer=...,
 operational_origin=...)` accepts trusted exact HTTPS configuration, captures the
 current owner and binding revisions, and creates a 300-second nonce. Its
 `expected(nonce, principal)` returns verifier expectations from that real pending
@@ -51,10 +51,10 @@ short assertion expiry limits approval, not the retained binding lifetime.
 Status reports absent, active, revoked or stale-owner from retained metadata.
 Only the latest revision is current. Status JSON exposes `effective_active`
 derived from the current owner and state; retained `binding.active` and
-`binding.owner.active` describe historical approval, not current authority. A
-future consumer must admit on the effective state together with a fresh verified
-owner, never on retained flags alone. Binding timestamps must be finite and
-nonnegative; a backward wall-clock correction does not prevent local revocation.
+`binding.owner.active` describe the original approval. Connected reads require
+the effective binding and a freshly verified owner. Binding timestamps must be
+finite and nonnegative. Local revocation also works after a backward clock
+correction.
 Pending proposals still refuse time before their creation or at/after expiry.
 Re-pairing cannot revive a stale binding;
 a current native owner must explicitly revoke it before approving a replacement.
@@ -62,21 +62,20 @@ Revocation requires REVOKE-WORKSPACE, changes only this binding revision and cle
 pending workspace proposals. Reapproval creates a new generation. Direct owner
 sessions, action grants and running fleets are unaffected.
 
-There is deliberately no remote consumption/credential issuance endpoint here.
-Later HTTP admission, trusted issuer/JWKS configuration and retrieval, operational
-browser carrier, session expiry/revocation and actual device/browser validation
-remain separate reviewed work. Website membership alone never confers host reads
-or actions, and metadata/profile shape alone never confers authentication.
+Removing the saved computer from the website removes its entry from the
+workspace list. An existing connected session can still read the host.
+To end that workspace's access immediately, use the local revoke command
+above. [Connected reads and revocation](owner-connected-read.md#canonical-reads-and-loss)
 
 
 ## Optional HTTP bootstrap precursor
 
 The foreground owner server accepts `--workspace-issuer` and
-`--workspace-origin` together as exact fixed HTTPS origins. This explicitly
-opts in only POST/OPTIONS `/api/owner/workspace/challenge` and
-`/api/owner/workspace/stage`; startup checks optional schema/dependencies without
-initializing or fetching keys. Existing direct lifecycle, cookies, reads and
-actions keep their original Origin boundary. No ambient configuration is used.
+`--workspace-origin` together as exact fixed HTTPS origins. Its bootstrap
+routes accept POST and OPTIONS at `/api/owner/workspace/challenge` and
+`/api/owner/workspace/stage`. Startup checks the optional schema and dependencies
+without initializing them or fetching keys. Direct lifecycle, cookies, reads
+and actions keep their original Origin boundary. No ambient configuration is used.
 
 The operational caller omits host credentials; these routes reject Cookie and
 Authorization and require exact configured operational Origin, host, JSON and
@@ -112,13 +111,10 @@ Signature/claims still pass the maintained pure verifier. No stale-cache
 fallback or generic discovery. Removed keys may remain trusted until expiry;
 local owner/workspace revocation supplies immediate host enforcement.
 
-This backend is a precursor: the canonical operational entry/acquisition
-controller is not mounted here. It must obtain issuer evidence using the
-selected same-site separate-origin website topology, keep it only in memory,
-and stage it directly at the pinned host. Current different-site deployment
-aliases, actual browser local-network consent, real native ingress and connected
-read carrier require separate proof. No browser or real host connection is
-claimed by synthetic ingress/HTTPX mock tests.
+The connected Plane document requests a signed host assertion from the website
+and stages it directly on the selected host. Local owner approval precedes
+session issuance. Browser local-network consent and native Tailscale ingress
+require a check on a real device. [First-use workspace approval](owner-connected-read.md#first-use-workspace-approval-in-the-connected-document)
 
 ## Before the first team
 

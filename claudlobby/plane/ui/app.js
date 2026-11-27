@@ -13,6 +13,7 @@
 import { esc, ago, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
+import { taskPermissionSummary } from "./permission-panel.js";
 import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
@@ -522,17 +523,12 @@ function renderChannel(env) {
 // printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
 // A reducer blocker is rendered separately by taskIssueNote.
 //
-// Each arm dates itself from the server instant that arm is ABOUT: the two
-// send arms from `attention_since` (the dispatch), the deadline arm from the
-// deadline — which is the same field when overdue is the only arm, and the
-// right one when it rides behind a failed send — and the two HUMAN arms
-// (chunk M-A, #1481) from the instant the human acted, which the server
-// already put in `attention_since` for them.
+// A card has one attention timestamp. A delivery warning can sit behind an
+// escalation, so it has no independent send or queue time to display.
 const WHY = {
   permission_pending: (r) => [
-    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
-    "open this task to review the exact action, target and limits"],
-  permission_unavailable: () => [
+    taskPermissionSummary(r), "open the task for its status"],
+  permission_unavailable: (r) => r.permission_incomplete && r.attention_reason.includes("permission_pending") ? null : [
     "permission history is incomplete",
     "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
@@ -540,14 +536,8 @@ const WHY = {
       ? `needs you: ${r.attention_question}`
       : "needs you — the question was not recorded",
     `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
-  send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
-                       "inspect the task and message receipt before an explicit delivery retry;"
-                       + " withdraw with claudlobby --json task withdraw TASK_ID"
-                       + " --reason TEXT --request-id UUID"],
-  never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
-                           "check the worker and message receipt before an explicit delivery retry;"
-                           + " reassign with claudlobby --json task reassign TASK_ID"
-                           + " --bot BOT --reason TEXT --request-id UUID"],
+  send_failed: () => ["The send attempt failed", "Open the task to see who is assigned."],
+  never_activated: () => ["The send attempt is unconfirmed", "Open the task to check its recorded delivery status."],
   // the nudge's own reason, when the operator gave one and the capture kept
   // it: "why did somebody poke this" is the first thing the reader asks, and
   // the server already stamps it for the leading arm (fold F10)
@@ -557,20 +547,16 @@ const WHY = {
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
   // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "check the worker; if it waits on something outside the worker, move its deadline"
-                   + " with claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by"
-                   + " RFC3339|none --reason TEXT --request-id UUID; to give it to another bot,"
-                   + " reassign with claudlobby --json task reassign TASK_ID"
-                   + " --bot BOT --reason TEXT --request-id UUID"],
+                   "Check the deadline and latest update in the task."],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
   // block clears and the worker records progress or completion). `attention_since`
   // is when it blocked. Leads a stale row,
   // which excludes it — so an aged block reads this, never "no progress".
   blocked_waiting: (r) => [
-    `blocked, waiting on you since ${ago(r.attention_since)}`,
-    "resolve the blocker, then the worker records claudlobby --json assignment"
-      + " progress ASSIGNMENT_ID --summary TEXT --request-id UUID, or completes it"],
+    r.attention_reason[0] === "blocked_waiting" && r.attention_since
+      ? `Work paused ${ago(r.attention_since)}` : "Work paused",
+    "Open the task to read the latest update."],
   // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
   // aging, no progress, and (the crux) the assignee is not working right now.
   // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it
@@ -583,9 +569,11 @@ const WHY = {
 
 function attentionWhy(r) {
   if (!r.attention) return "";
-  const parts = (r.attention_reason || []).filter((k) => WHY[k]).map((k) => {
-    const [reason, fix] = WHY[k](r);
-    return `${esc(reason)} — <small>${esc(fix)}</small>`;
+  const parts = (r.attention_reason || []).flatMap((k) => {
+    const description = WHY[k]?.(r);
+    if (!description) return [];
+    const [reason, fix] = description;
+    return [`${esc(reason)} — <small>${esc(fix)}</small>`];
   });
   if (!parts.length) return "";
   return `<div class="why">⚠ ${parts.join(" · ")}</div>`;
@@ -620,6 +608,20 @@ function groupBy(rows, keyOf) {
   return out;
 }
 
+const assignmentRecovery = [
+  {reasons: ["send_failed"], label: "Withdraw the task", command: "claudlobby --json task withdraw TASK_ID --reason TEXT --request-id UUID"},
+  {reasons: ["overdue"], label: "Change the deadline", command: "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"},
+  {reasons: ["never_activated", "overdue"], label: "Reassign the task", command: "claudlobby --json task reassign TASK_ID --bot BOT --reason TEXT --request-id UUID"},
+];
+
+function assignmentCommands(reasons) {
+  if (!Array.isArray(reasons) || !reasons.length) return "";
+  const receipt = reasons.includes("send_failed") || reasons.includes("never_activated")
+    ? '<div class="note">Check the original message receipt before retrying delivery.</div>' : "";
+  return receipt + assignmentRecovery.filter(action => action.reasons.some(reason => reasons.includes(reason)))
+    .map(({label, command}) => `<div class="note">${esc(label)}: <code>${esc(command)}</code></div>`).join("");
+}
+
 function taskIssueNote(r) {
   if (r.resolved) return "";
   const codes = (r.issues || []).filter((x) => x.blocking).map((x) => x.code);
@@ -650,12 +652,15 @@ function acceptTaskPoll(env, settled = true) {
   renderTasks(env);
   return env;
 }
+function canLoadOlderTasks(data) {
+  return data?.task_page?.version === 1 && Boolean(data.task_page.next_cursor);
+}
 function paintTaskHistory(env) {
   const more = $("task-load-older"), refresh = $("task-refresh"), count = $("task-history-count");
   const data = env?.state === "ok" ? env.data : null;
   const unsupported = data?.task_page?.unavailable || data?.truncated && data?.task_page?.version !== 1;
   if (more) {
-    more.hidden = data?.task_page?.version !== 1 || !data?.task_page?.next_cursor;
+    more.hidden = !canLoadOlderTasks(data);
     more.disabled = taskHistoryBusy;
     more.textContent = taskHistoryBusy ? "Loading older work…" : "Load older work";
     more.onclick = loadOlderTasks;
@@ -663,7 +668,7 @@ function paintTaskHistory(env) {
   if (refresh) { refresh.disabled = taskHistoryBusy; refresh.onclick = refreshTaskHistory; }
   if (count) {
     count.hidden = !data;
-    count.textContent = data ? `${data.tasks.length} loaded task records. `
+    count.textContent = data ? `${data.tasks.length} ${data.tasks.length === 1 ? "task" : "tasks"} loaded. `
       + (data.coverage?.partial || data.truncated || data.task_page?.unavailable ? "History coverage is incomplete. " : "Reached the oldest recorded work in the selected sources. ")
       + (unsupported ? "A source needs an update to load older work. " : "")
       + (taskHistoryHeld ? "Browsing loaded history; Refresh tasks returns to newest records. " : "") + taskHistoryNotice : "";
@@ -671,7 +676,7 @@ function paintTaskHistory(env) {
 }
 async function loadOlderTasks() {
   const previous = taskSnapshot, token = previous?.data?.task_page?.next_cursor;
-  if (!token || previous.data.task_page.version !== 1 || taskHistoryBusy
+  if (!canLoadOlderTasks(previous?.data) || taskHistoryBusy
       || typeof sessionPaused !== "undefined" && sessionPaused) return;
   taskHistoryHeld = taskHistoryBusy = true; taskHistoryNotice = "";
   const version = ++taskHistoryVersion, room = currentFleet, session = sessionEpoch;
@@ -774,7 +779,10 @@ function renderTasks(env) {
   const filterCount = $("task-filter-count");
   if (filterCount) {
     filterCount.hidden = !filtered;
-    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} loaded task records match. Attention count is unfiltered and covers loaded records.` : "";
+    const summary = !visible.length && canLoadOlderTasks(env.data)
+      ? `0 of ${rows.length} match. Choose Load older work to keep looking.`
+      : `${visible.length} of ${rows.length} loaded task records match.`;
+    filterCount.textContent = filtered ? summary + " Filters don’t change the attention count for loaded tasks." : "";
   }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
@@ -805,7 +813,7 @@ function renderTasks(env) {
       <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
       <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
+      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}${assignmentCommands(r.attention_reason)}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
       + `</div>`;
   };

@@ -24,6 +24,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -122,6 +123,11 @@ def _shell_function(script: str, name: str) -> str:
     text = ((LIB if script == "lib-common.sh" else HARNESS) / script).read_text()
     start = text.index(f"\n{name}() {{")
     return text[start : text.index("\n}\n", start) + 3]
+
+
+def _managed_probe():
+    shell = _shell_function("lib-common.sh", "measure_claude_version")
+    return shell.split("        probe='", 1)[1].split("\n'\n", 1)[0]
 
 
 # --- the door --------------------------------------------------------------------
@@ -695,7 +701,6 @@ def test_explicit_launch_path_bounds_the_actual_version_door_under_minimal_updat
 
 
 def _managed_shell_context(tmp_path):
-    import sys
     home = tmp_path / "home"
     family = home / ".local/share/claudlobby-browser"
     python = family / "runtime/profile/python/bin/python3.12"
@@ -720,7 +725,13 @@ def test_managed_python_bounds_existing_version_door(tmp_path, shape):
 def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path):
     context = _managed_shell_context(tmp_path)
     marker = tmp_path / "late-child"
-    hangs = _stub(tmp_path, "hangs-child", f'#!/bin/bash\n(sleep 2; touch "{marker}") &\nread -r data && exit 9\nsleep 30\n')
+    term_ignoring = tmp_path / "term-ignoring-child"
+    hangs = _stub(tmp_path, "hangs-child", f"""#!/bin/bash
+(sleep 2; touch "{marker}") &
+(trap "" TERM; sleep 2; touch "{term_ignoring}") </dev/null >/dev/null 2>&1 &
+read -r data && exit 9
+sleep 30
+""")
     prefix = f'. "{LIB}/lib-common.sh"; _OS=Darwin; _TIMEOUT_BIN=""; '
     eof = _stub(tmp_path, "stdin-closed", '#!/bin/bash\nif read -r data; then exit 8; fi\necho 2.1.281\n')
     r = _run(tmp_path, ["bash", "-c", prefix + f'printf "input\\n" | measure_claude_version "{eof}"; printf "%s" "$?"'], **context)
@@ -731,10 +742,95 @@ def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path)
     assert time.monotonic() - started < 4
     time.sleep(2.2)
     assert not marker.exists()
+    assert not term_ignoring.exists()
     flood = _stub(tmp_path, "flood", '#!/bin/bash\nwhile :; do printf "%01000d" 0; printf "%01000d" 0 >&2; done\n')
     r = _run(tmp_path, ["bash", "-c", prefix + f'measure_claude_version "{flood}" || printf "%s" "$CLAUDE_VERSION_WHY"'], CLAUDE_VERSION_TIMEOUT_S="2", _timeout=8, **context)
     assert "exited 125" in r.stdout, (r.stdout, r.stderr)
     assert len(r.stdout) < 600
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGKILL"])
+@pytest.mark.parametrize("platform, checks, measured", [
+    pytest.param("darwin", "denied,gone", True, id="darwin-group-disappears"),
+    pytest.param("darwin", "present", False, id="darwin-group-still-present"),
+    pytest.param("darwin", "denied", False, id="darwin-check-stays-denied"),
+    pytest.param("darwin", "unknown", False, id="darwin-check-returns-another-error"),
+    pytest.param("linux", "gone", False, id="linux-preserves-original-permission-error"),
+])
+def test_managed_version_cleanup_requires_confirmation_the_group_is_gone(tmp_path, signal_name, platform, checks, measured):
+    probe = _managed_probe()
+    binary = _stub(tmp_path, "healthy", healthy("2.1.318"))
+    # The provider exits normally. Simulate the kernel response to one cleanup signal.
+    scenario = """
+import errno, itertools, os, selectors, signal, subprocess, sys
+# Load the native process and selector modules before overriding the platform flag.
+probe, signal_name, platform, sequence = sys.argv[1:5]
+sys.argv = ["-c", *sys.argv[5:]]
+sys.platform = platform
+outcomes = sequence.split(",")
+answers = itertools.chain(outcomes, itertools.repeat(outcomes[-1]))
+def fake_killpg(pid, sig):
+    if sig == getattr(signal, signal_name):
+        raise PermissionError(errno.EPERM, "original group error")
+    if sig == signal.SIGTERM:
+        return  # Reach the SIGKILL case after a successful SIGTERM.
+    if sig == signal.SIGKILL:
+        raise AssertionError("signalled a group already confirmed gone")
+    if sig == 0:
+        outcome = next(answers)
+        if outcome == "gone":
+            raise ProcessLookupError(errno.ESRCH, "group exited")
+        if outcome == "denied":
+            raise PermissionError(errno.EPERM, "group check denied")
+        if outcome == "unknown":
+            raise OSError(errno.EINVAL, "unknown group check result")
+        return
+    raise AssertionError(f"unexpected signal {sig}")
+os.killpg = fake_killpg
+exec(probe)
+"""
+    result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario,
+                             probe, signal_name, platform, checks, "2", str(binary)], _timeout=5)
+    if measured:
+        assert result.returncode == 0, result.stderr
+        assert "2.1.318" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "original group error" in result.stderr
+
+
+def test_managed_version_timeout_reaps_a_late_leader(tmp_path):
+    probe = _managed_probe()
+    binary = _stub(tmp_path, "wait-for-termination", "#!/bin/bash\nexec sleep 30\n")
+    # Use a real timed-out process. Inject Darwin's refused signal on either CI
+    # platform, and require the actual leader to be reaped before accepting ESRCH.
+    scenario = """
+import errno, os, selectors, signal, subprocess, sys
+probe = sys.argv.pop(1)
+sys.platform = "darwin"
+poll, killpg = subprocess.Popen.poll, os.killpg
+leader = None
+def defer_first_poll(process):
+    global leader
+    leader = process
+    subprocess.Popen.poll = poll
+    return None
+def observe_killpg(pid, sig):
+    if sig == signal.SIGKILL:
+        assert leader is not None and leader.pid == pid and leader.returncode is None
+        raise PermissionError(errno.EPERM, "group is still exiting")
+    if sig == 0:
+        if leader.returncode is None:
+            return
+        print("checked group after reaping leader", file=sys.stderr)
+    return killpg(pid, sig)
+subprocess.Popen.poll = defer_first_poll
+os.killpg = observe_killpg
+exec(probe)
+"""
+    result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario, probe, "0.2", str(binary)], _timeout=5)
+    assert result.returncode == 124, result.stderr
+    assert "checked group after reaping leader" in result.stderr
 
 
 def test_managed_context_propagates_without_changing_provider_precedence(tmp_path, monkeypatch):

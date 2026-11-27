@@ -884,7 +884,7 @@ body.plane-workspace { padding:0 24px 24px; }
 .task-filters label { min-width:0; font-size:11px; color:var(--dim); }
 .task-filters select { display:block; margin-top:4px; padding:7px; max-width:260px; border:1px solid var(--edge); border-radius:6px; background:var(--panel); color:var(--ink); }
 @media (max-width:600px) {
-  .task-filters label { flex:1; }
+  .task-filters label { flex:1 1 45%; }
   .task-filters select { width:100%; max-width:100%; }
 }
 

@@ -569,6 +569,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       label.title = new URL(reference.endpoint_origin).hostname;
       row.setAttribute('aria-label', name + ' — ' + new URL(reference.endpoint_origin).hostname);
       const toPanel = 'Finish setting up this computer in the setup panel.';
+      const retryRefused = connection === 'denied' && status.state === 'unavailable' && !continuity?.ended && !continuity?.renewalUnknown;
       detail.textContent = continuity?.renewalUnknown && status.state === 'unavailable'
         ? 'Connection renewal was not confirmed. Choose Check connection; if it expired, choose Connect again. Nothing will retry automatically.'
         : continuity?.warning && status.state === 'ready'
@@ -576,6 +577,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         : status.state === 'setup_only' ? focused ? toPanel
           : 'Choose Check setup approval below to continue setting up your first team.'
         : connection === 'not_connected' ? focused ? toPanel : 'Choose Connect to read this computer. Its teams and bot states have not been checked.'
+        : retryRefused ? connectHint(status, connection, continuity, expired)
         : status.remediation || (status.state === 'denied'
         ? 'Choose Connect if this workspace is already approved. First time here? Set up computer access, then approve this workspace.'
         : '');
@@ -589,7 +591,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
           || approval.state !== 'idle' && approval.state !== controls.approvalState) help.open = true;
       controls.approvalState = approval.state;
       controls.setupOnly = status.state === 'setup_only';
-      const primaryOperation = expired || continuity?.connectRequired ? 'connect' : status.state === 'unavailable' ? 'check'
+      const primaryOperation = expired || continuity?.connectRequired || retryRefused ? 'connect' : status.state === 'unavailable' ? 'check'
         : ['ready','setup_only','logout'].includes(status.state) ? 'logout'
         : status.state === 'renewing' ? 'renew' : 'connect';
       const primaryTitle = {connect:'Connect',check:'Check connection',logout:'Disconnect',renew:'Keeping connected'}[primaryOperation];

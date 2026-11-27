@@ -1574,6 +1574,32 @@ test('Claude code goes only to the selected host and never enters retained UI st
 });
 
 const authorizeURL='https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference';
+test('the code field has one submit button that requires a code',async()=>{
+  const p=pollHarness(['waiting','connected']);
+  try {
+    await p.h.api.run('context');
+    await p.h.api.run('signin-begin');
+    await p.fire();
+    const row=p.code.parentNode.parentNode;
+    const submit=descendants(row).find(node=>node.tagName==='BUTTON');
+    assert.equal(row.tagName,'FORM');
+    assert.equal(submit.type,'submit');
+    assert.equal(submit.disabled,true);
+    assert.ok(!p.code.name,'the code does not enter form data');
+    let prevented=false;
+    row.handlers.submit({preventDefault(){prevented=true;}});
+    assert.equal(prevented,true,'the form never navigates');
+    p.code.value='example-input';p.code.handlers.input();
+    assert.equal(submit.disabled,false);
+    p.code.value='';p.code.handlers.input();
+    assert.equal(submit.disabled,true);
+    p.code.value='example-input';p.code.handlers.input();
+    submit.click();
+    await flush();
+    assert.equal(p.calls.filter(([action])=>action==='code').length,1);
+    assert.equal(p.code.value,'');
+  } finally {p.h.api.dispose();}
+});
 function pollHarness(statuses,options={}) {
   const timers=[],calls=[],clock={t:1800000000}; let active=0,overlap=0;
   const ui=dom(),panel=new ui.Element();
@@ -2831,6 +2857,29 @@ test('an offer admitted after the account check collapses the list onto its comp
   assert.equal(lost.status().textContent,'This page could not reach your computer. Reopen setup from your workspace.');
   assert.equal(lost.panel(),undefined);assert.deepEqual(lost.mutations(),[]);
 });
+test('after a refused connection the offered action requests a new session only when chosen',async t=>{
+  const l=landing(t);
+  await l.workspace.checkAccount();await flush();
+  const issue=landingRefs[0].endpoint_origin+'/api/owner/connected/issue';
+  const requests=()=>l.h.calls.filter(call=>call.url===issue).length;
+  l.h.overrides.set(issue,()=>reply(403,{state:'denied'}));
+  const panel=l.panel();
+  buttonOf(panel,'Connect').click();await flush();
+
+  assert.equal(requests(),1);
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect']]);
+  assert.ok(offered(panel,'Connect'));
+  const detail=l.cards()[0].children[2].textContent;
+  assert.match(detail,/workspace is approved/);
+  assert.ok(l.shownText().includes(detail));
+  l.h.overrides.set(issue,setupOnlyIssue);
+  l.h.ui.listeners.get('input')({isTrusted:true});await flush();
+  assert.equal(requests(),1);
+  buttonOf(panel,'Connect').click();await flush();
+  assert.equal(requests(),2);
+  assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
+});
+
 test('native workspace keeps every saved computer and its setup panel exactly as before',async t=>{
   const attention=[],l=landing(t,{browser:false,attention});await l.h.api.checkAccount();await flush();
   assert.deepEqual(l.shownCards(),['a.example.test · Not connected','b.example.test · Not connected','c.example.test · Not connected']);
