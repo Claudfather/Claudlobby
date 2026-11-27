@@ -701,10 +701,8 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
-for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal',
-    'record-open', 'record-lane', 'record-closed', 'record-peer', 'record-reset', 'record-unavailable', 'record-elsewhere'])
-test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
-  const watchRecord = change.startsWith('record');
+function taskBoardFocusHarness(change) {
+  let room = 'all';
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
   const body = {}; document.activeElement = body;
   const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
@@ -713,24 +711,25 @@ test(`task board refresh preserves exact keyboard position without stealing focu
     closest() { return this.hidden ? this : null; },
     focus() { if (!this.hidden) document.activeElement=this; },
     querySelectorAll(selector) {
-      return selector === '.task-record[open]' ? this.children.map(button => button.record).filter(record => record.open) : this.children;
+      return selector === '[data-task-open]' ? this.children : this.children.filter(button => button.record.open).map(button => button.summary);
     },
     set innerHTML(value) {
       for (const button of this.children) {
         button.isConnected = false;
         if (document.activeElement === button || document.activeElement === button.summary) document.activeElement = body;
       }
-      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => {
-        const card = {querySelector: selector => selector === '[data-task-open]' ? button
-          : selector === '.task-record' ? button.record : button.summary};
+      const records = [...value.matchAll(/<details class="task-record"( open)?><summary data-task-record="([^"]+)"/g)];
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map((match, index) => {
+        const card = {querySelector: () => button.summary};
+        const record = {open: Boolean(records[index][1])};
         const button = {
           dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
           closest:() => this.hidden ? this : null, parentElement:card,
           focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
-          record:{open:false, parentElement:card},
+          record,
           summary:{
-            matches:selector => selector === '.task-record > summary',
-            closest:selector => selector === '.card' ? card : null,
+            dataset:{taskRecord: records[index][2].replaceAll('&quot;', '"').replaceAll('&amp;', '&')},
+            parentElement:record,
             focus() { document.activeElement=this; },
           },
         };
@@ -741,15 +740,23 @@ test(`task board refresh preserves exact keyboard position without stealing focu
   }]));
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,resetTaskFilters})`,{...panel,document});
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,acceptTaskPoll,resetTaskFilters})`,{...panel,document,activeRoom:()=>room});
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));
+  return {board, document, nodes, env, row, selectRoom: value => { room = value; }};
+}
+
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal',
+    'record-open', 'record-lane', 'record-closed', 'record-peer', 'record-reset', 'record-unavailable', 'record-elsewhere'])
+test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const watchRecord = change.startsWith('record');
+  const {board, document, nodes, env, row} = taskBoardFocusHarness(change);
   const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
   if (watchRecord) { original.record.open = change !== 'record-closed'; original.summary.focus(); }
   const outside={id:change==='modal'?'task-detail-close':'work-body'};
   if (['elsewhere','modal','record-elsewhere'].includes(change)) document.activeElement=outside;
-  if (change === 'record-reset') board.resetTaskFilters();
+  if (change === 'record-reset') { board.resetTaskFilters(); assert.equal(original.record.open, false); }
   if (change==='hidden') nodes.tasks.hidden=true;
   const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
   board.renderTasks(['unavailable','record-unavailable'].includes(change)?{state:'unavailable'}:env(['removed','source','record-peer'].includes(change)?[peer]
@@ -773,6 +780,35 @@ test(`task board refresh preserves exact keyboard position without stealing focu
     assert.notEqual(document.activeElement,original);
     assert.equal(document.activeElement.dataset.taskFleet,row.fleet);
   }
+});
+
+for (const outcome of ['returns', 'initially-unavailable', 'refused', 'focus-moved', 'room-changed', 'session-paused'])
+test(`a task record whose source is still checking: ${outcome}`, () => {
+  const {board, document, nodes, row, selectRoom} = taskBoardFocusHarness();
+  const peer = {...row, task_id:'south::' + wi, fleet:'south / web'};
+  const reply = (tasks, status, state = 'ok') => ({state, data:{tasks,
+    sources:[{key:'north',state:status}, {key:'south',state:'ok'}]}});
+  const opened = nodes.tasks.children[0];
+  opened.record.open = true;
+  opened.summary.focus();
+  const read = {};
+  board.acceptTaskPoll(outcome === 'initially-unavailable' ? reply([], 'checking', 'unavailable') : reply([peer], 'checking'), false, read);
+  assert.ok(!nodes.tasks.children.some(button => button.dataset.taskOpen === row.task_id));
+  assert.equal(document.activeElement, nodes.tasks);
+  const outside = {id:'new-focus'};
+  if (outcome === 'focus-moved') document.activeElement = outside;
+  if (outcome === 'room-changed') selectRoom('another room');
+  if (outcome === 'session-paused') board.resetTaskFilters();
+  if (outcome === 'refused') {
+    board.acceptTaskPoll(reply([peer], 'denied'), true, read);
+    assert.equal(nodes.tasks.children[0].record.open,false);
+  }
+  board.acceptTaskPoll(reply([row, peer], 'ok'), true, read);
+  const [restored, other] = nodes.tasks.children;
+  assert.equal(other.record.open, false);
+  assert.equal(restored.record.open, ['returns','initially-unavailable','focus-moved'].includes(outcome));
+  const expected = outcome === 'focus-moved' ? outside : restored.record.open ? restored.summary : nodes.tasks;
+  assert.equal(document.activeElement,expected);
 });
 
 // Merge gate (document 03): once a team is ready the frame shows this connected view, so every bot-written field it

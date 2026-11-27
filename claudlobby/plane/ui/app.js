@@ -641,13 +641,13 @@ function refreshTaskHistory() {
   clearTaskHistory();
   void refreshBoards();
 }
-function acceptTaskPoll(env, settled = true) {
+function acceptTaskPoll(env, settled = true, recordState) {
   if (taskHistoryHeld) {
     if (!settled) return taskSnapshot;
     if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
     taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   }
-  renderTasks(env);
+  renderTasks(env, recordState, settled);
   return env;
 }
 function paintTaskHistory(env) {
@@ -708,6 +708,9 @@ function taskAssigneeKey(task) {
 function resetTaskFilters() {
   taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   taskFilters = {status:"",assignee:""}; taskSnapshot = null;
+  for (const rail of [$("attention"), $("tasks")]) {
+    for (const summary of openTaskSummaries(rail)) summary.parentElement.open = false;
+  }
   paintTaskFilters([],false);
   paintTaskHistory(null);
 }
@@ -736,43 +739,58 @@ function paintTaskFilters(rows, available) {
   assignee.onchange = () => { taskFilters.assignee = assignee.value; repaint(); };
   reset.onclick = () => { taskFilters = {status:"",assignee:""}; repaint(); };
 }
-function renderTasks(env) {
+function openTaskSummaries(rail) {
+  return rail?.querySelectorAll?.(".task-record[open] > summary[data-task-record]") || [];
+}
+function renderTasks(env, recordState, settled = true) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   const rails = [attEl, taskEl];
-  const recordKey = button => JSON.stringify([button.dataset.taskFleet || "", button.dataset.taskOpen]);
-  const expanded = new Set();
-  const sameBoard = taskSnapshot && env?.state === "ok";
-  if (sameBoard) {
+  const ok = env?.state === "ok";
+  const room = typeof activeRoom === "function" ? activeRoom() : null;
+  const carried = recordState?.version === taskHistoryVersion && recordState.room === room ? recordState : null;
+  const sameBoard = taskSnapshot || carried;
+  const expanded = new Set(carried?.expanded);
+  if (taskSnapshot) {
     for (const rail of rails) {
-      for (const record of rail.querySelectorAll?.(".task-record[open]") || []) {
-        const button = record.parentElement?.querySelector("[data-task-open]");
-        if (button) expanded.add(recordKey(button));
-      }
+      for (const summary of openTaskSummaries(rail)) expanded.add(summary.dataset.taskRecord);
     }
   }
-  taskSnapshot = env?.state === "ok" ? env : null;
-  paintTaskHistory(env);
-  paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
+  const recordKey = (fleet, id) => JSON.stringify([fleet || "", id]);
   const focused = document.activeElement;
-  const focusedRail = rails.find(el => el.contains?.(focused));
-  const summaryFocused = focusedRail && focused?.matches?.(".task-record > summary");
-  const origin = summaryFocused ? focused.closest(".card")?.querySelector("[data-task-open]") : focused;
-  const identity = focusedRail && origin?.dataset?.taskOpen ? recordKey(origin) : null;
-  const restoreBoard = () => {
-    if (!identity && !expanded.size) return;
-    const buttons = rails.flatMap(el => [...el.querySelectorAll("[data-task-open]")]);
-    if (expanded.size) {
-      for (const button of buttons) {
-        if (expanded.has(recordKey(button))) button.parentElement.querySelector(".task-record").open = true;
-      }
-    }
-    if (!identity) return; // A board refresh never takes focus from elsewhere.
+  const focusedRail = rails.find(el => el === focused || el.contains?.(focused));
+  const summaryKey = (focusedRail && focused?.dataset?.taskRecord) || (carried?.rail === focused ? carried?.focus : null);
+  const identity = summaryKey || (focusedRail && focused?.dataset?.taskOpen
+    ? recordKey(focused.dataset.taskFleet, focused.dataset.taskOpen) : null);
+
+  // One aggregate read draws checking sources as they settle. Carry only keys
+  // for those sources. Every displayed task still comes from the current reply.
+  const checking = settled ? [] : (env?.data?.sources || []).filter(s => s.state === "checking").map(s => s.key + "::");
+  const sourceStillChecking = key => {
+    if (!checking.length) return false;
+    const [, taskId] = JSON.parse(key);
+    return typeof taskId === "string" && checking.some(prefix => taskId.startsWith(prefix));
+  };
+  if (recordState) {
+    recordState.version = taskHistoryVersion;
+    recordState.room = room;
+    recordState.expanded = checking.length ? [...expanded].filter(sourceStillChecking) : [];
+    recordState.focus = recordState.rail = null;
+  }
+  taskSnapshot = ok ? env : null;
+  paintTaskHistory(env);
+  paintTaskFilters(ok ? env.data.tasks : [], ok);
+  const restoreFocus = () => {
+    if (!identity) return;
     const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
-    const button = buttons.find(button => recordKey(button) === identity && available(button));
-    const replacement = summaryFocused ? sameBoard && button?.parentElement.querySelector(".task-record > summary") : button;
+    const button = rails.flatMap(el => [...el.querySelectorAll("[data-task-open]")])
+      .find(button => recordKey(button.dataset.taskFleet, button.dataset.taskOpen) === identity && available(button));
+    const replacement = summaryKey ? sameBoard && button?.parentElement.querySelector(".task-record > summary") : button;
     const destination = replacement || [focusedRail, ...rails].find(available);
     if (!destination) return;
-    if (!replacement) destination.tabIndex = -1;
+    if (!replacement) {
+      destination.tabIndex = -1;
+      if (summaryKey && recordState && sourceStillChecking(summaryKey)) { recordState.focus = summaryKey; recordState.rail = destination; }
+    }
     destination.focus();
   };
   const coverage = env?.state === "ok" ? env.data?.coverage : null;
@@ -781,7 +799,7 @@ function renderTasks(env) {
                   { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
-    restoreBoard();
+    restoreFocus();
     return;
   }
   const rows = env.data.tasks;
@@ -819,12 +837,13 @@ function renderTasks(env) {
     const priorCount = r.assignment_count - (a ? 1 : 0);
     const prior = priorCount > 0
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
+    const key = recordKey(r.fleet, r.task_id);
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
       <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
       <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
+      + `<details class="task-record"${expanded.has(key) ? " open" : ""}><summary data-task-record="${esc(key)}">Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
       + `</div>`;
   };
@@ -844,7 +863,7 @@ function renderTasks(env) {
     : stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = visible.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no other tasks in readable sources" : "no other tasks" });
-  restoreBoard();
+  restoreFocus();
 }
 
 function railRow(a) {
@@ -1473,8 +1492,9 @@ async function refreshBoards() {
   const conversation = Promise.all([
     panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
     (async () => {
-      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false); });
-      return current() ? acceptTaskPoll(value,true) : value;
+      const recordState = {};
+      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false,recordState); });
+      return current() ? acceptTaskPoll(value,true,recordState) : value;
     })(),
   ]).then(([ch, tk]) => {
     // Partial paints never replace the work-loop's paired canonical snapshots.
