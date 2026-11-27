@@ -806,6 +806,19 @@ def test_status_never_reports_absent_beside_setup_state(tmp_path, monkeypatch):
     assert snapshot(home) == before
 
 
+def test_the_installer_sent_as_one_argument_stays_within_the_websites_margin():
+    # The website's carrier sends the installer as one exec argument:
+    # [/bin/]sh -c '<installer, each single quote escaped>' host-install <verb>.
+    # Linux refuses one argument over 131072 bytes (MAX_ARG_STRLEN, counting the
+    # terminating NUL). The website's own test keeps a 4096-byte margin; the same
+    # bound here makes a change that would fail there fail in this repository first.
+    escaped = SCRIPT.read_text().replace("'", "'\\''")
+    longest = max(len(f"{prefix}sh -c '{escaped}' host-install {verb}".encode()) + 1
+                  for verb in ("prepare", "status", "update-status", "update", "update-continue")
+                  for prefix in ("", "/bin/"))
+    assert longest <= 131072 - 4096, f"installer command is {longest} bytes; the bound is {131072 - 4096}"
+
+
 def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
     canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
     entry = (ROOT / "claudlobby/preinstall/darwin-runtime-v1.sh").read_text()
