@@ -568,9 +568,8 @@ const WHY = {
   // is when it blocked. Leads a stale row,
   // which excludes it — so an aged block reads this, never "no progress".
   blocked_waiting: (r) => [
-    `blocked, waiting on you since ${ago(r.attention_since)}`,
-    "resolve the blocker, then the worker records claudlobby --json assignment"
-      + " progress ASSIGNMENT_ID --summary TEXT --request-id UUID, or completes it"],
+    r.attention_since ? `Work paused ${ago(r.attention_since)}` : "Work paused",
+    "Open the task to read the latest update."],
   // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
   // aging, no progress, and (the crux) the assignee is not working right now.
   // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it

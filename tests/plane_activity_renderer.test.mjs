@@ -589,6 +589,21 @@ test('unavailable report content does not become status or evidence, legacy rema
 });
 
 
+test('the attention section distinguishes a paused task from a question for the reader', async () => {
+  const shell = await readFile(new URL('../claudlobby/plane/ui/index.html', import.meta.url), 'utf8');
+  assert.match(shell, /<h2>Needs attention <span id="attn-count"/);
+  const reasons = source.slice(source.indexOf('const WHY ='), source.indexOf('// An OUTSTANDING nudge'));
+  const describe = runInNewContext(reasons + '\nattentionWhy', {...panel, ago: () => '5m ago'});
+  const blocked = {attention: true, attention_reason: ['blocked_waiting']};
+  const paused = describe(blocked);
+  assert.match(paused, /Work paused — <small>/);
+  assert.match(paused, /Open the task to read the latest update\./);
+  assert.doesNotMatch(paused, /waiting on you|claudlobby --/);
+  assert.match(describe({...blocked, attention_since: '2026-01-01T00:00:00Z'}), /Work paused 5m ago/);
+  const asked = describe({attention: true, attention_reason: ['escalated'], attention_question: 'Which step needs review?'});
+  assert.match(asked, /needs you: Which step needs review\?/);
+});
+
 test('permission attention opens the existing task and clears after a fresh decided read', () => {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
