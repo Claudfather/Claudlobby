@@ -10,7 +10,7 @@
 // only presentation labels. The first version's copied vocabularies already
 // disagreed live with the SQL reducer.
 
-import { esc, ago, renderState, stateBlock } from "./panel-state.js";
+import { esc, ago, graphemePrefix, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
 import { taskPermissionSummary } from "./permission-panel.js";
@@ -114,7 +114,10 @@ function dueLabel(iso) {
   return s >= 0 ? `due in ${unit}` : `overdue ${unit}`;
 }
 
-const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + "…" : s);
+function clip(text, limit) {
+  const prefix = graphemePrefix(text, limit);
+  return prefix === text ? text : prefix + "…";
+}
 
 function latestTx(msg) {
   return msg.tx && msg.tx.length ? msg.tx[msg.tx.length - 1] : null;

@@ -258,6 +258,21 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(rendered, new RegExp(msg));
 });
 
+test('a room heading keeps whole characters from the first message', () => {
+  const prefix = 'x'.repeat(99);
+  for (const [character, tail] of [['👩🏽‍💻', ' details'], ['e\u0301', ' details'], ['界', ' details'], ['👩🏽‍💻', '']]) {
+    const body = prefix + character + tail;
+    const t = thread();
+    t.title = t.work_item_id = null;
+    t.task_events = [];
+    Object.assign(t.messages[0], {emitter: 'human', message_class: 'chat', work_item_id: null, body, body_words: body});
+    const rendered = html(t);
+    const heading = prefix + character + (tail ? '…' : '');
+    assert.ok(rendered.includes(`class="t-title">${heading}</span>`));
+    assert.ok(rendered.includes(body));
+  }
+});
+
 test('an assigned task uses its exact original assignment link and a plain title fallback', () => {
   const t = thread('Check this assigned task'), assignment = `asg_${'3'.repeat(32)}`;
   t.title = null; t.messages[0].assignment_id = assignment; t.task_events[0].assignment_id = assignment;
