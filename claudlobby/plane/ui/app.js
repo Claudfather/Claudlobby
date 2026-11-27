@@ -647,7 +647,7 @@ function acceptTaskPoll(env, settled = true, recordState) {
     if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
     taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   }
-  renderTasks(env, recordState, settled);
+  renderTasks(env, settled, recordState);
   return env;
 }
 function paintTaskHistory(env) {
@@ -742,12 +742,11 @@ function paintTaskFilters(rows, available) {
 function openTaskSummaries(rail) {
   return rail?.querySelectorAll?.(".task-record[open] > summary[data-task-record]") || [];
 }
-function renderTasks(env, recordState, settled = true) {
+function renderTasks(env, settled = true, recordState) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
   const rails = [attEl, taskEl];
   const ok = env?.state === "ok";
-  const room = typeof activeRoom === "function" ? activeRoom() : null;
-  const carried = recordState?.version === taskHistoryVersion && recordState.room === room ? recordState : null;
+  const carried = recordState?.version === taskHistoryVersion ? recordState : null;
   const sameBoard = taskSnapshot || carried;
   const expanded = new Set(carried?.expanded);
   if (taskSnapshot) {
@@ -757,7 +756,7 @@ function renderTasks(env, recordState, settled = true) {
   }
   const recordKey = (fleet, id) => JSON.stringify([fleet || "", id]);
   const focused = document.activeElement;
-  const focusedRail = rails.find(el => el === focused || el.contains?.(focused));
+  const focusedRail = rails.find(el => el.contains?.(focused));
   const summaryKey = (focusedRail && focused?.dataset?.taskRecord) || (carried?.rail === focused ? carried?.focus : null);
   const identity = summaryKey || (focusedRail && focused?.dataset?.taskOpen
     ? recordKey(focused.dataset.taskFleet, focused.dataset.taskOpen) : null);
@@ -772,8 +771,7 @@ function renderTasks(env, recordState, settled = true) {
   };
   if (recordState) {
     recordState.version = taskHistoryVersion;
-    recordState.room = room;
-    recordState.expanded = checking.length ? [...expanded].filter(sourceStillChecking) : [];
+    recordState.expanded = [...expanded].filter(sourceStillChecking);
     recordState.focus = recordState.rail = null;
   }
   taskSnapshot = ok ? env : null;
@@ -793,7 +791,7 @@ function renderTasks(env, recordState, settled = true) {
     }
     destination.focus();
   };
-  const coverage = env?.state === "ok" ? env.data?.coverage : null;
+  const coverage = ok ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
                   { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
@@ -1795,12 +1793,13 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
-  if (currentFleet !== f && typeof resetTaskFilters === "function") resetTaskFilters();
-  if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
-  if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
-  if (currentFleet !== f) { ++generation; closeEquipment(); }
+  const pickChanged = currentFleet !== f;
+  if (pickChanged && typeof closeRoomBot === "function") closeRoomBot();
+  if (pickChanged && typeof resetConversationFocus === "function") resetConversationFocus();
+  if (pickChanged) { ++generation; closeEquipment(); }
   currentFleet = f;
-  syncWorkRoom();
+  const roomChanged = syncWorkRoom();
+  if (pickChanged && !roomChanged && typeof resetTaskFilters === "function") resetTaskFilters();
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
@@ -2343,6 +2342,7 @@ let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
   if (workRoom === room) return false;
+  if (typeof resetTaskFilters === "function") resetTaskFilters();
   workRoom = room;
   workLoop.setRoom(room);
   showLoading();

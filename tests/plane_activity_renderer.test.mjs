@@ -707,7 +707,7 @@ function taskBoardFocusHarness(change) {
   const body = {}; document.activeElement = body;
   const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
     children:[], hidden:false, isConnected:true,
-    contains(node) { return this.children.some(button => button === node || button.summary === node); },
+    contains(node) { return this === node || this.children.some(button => button === node || button.summary === node); },
     closest() { return this.hidden ? this : null; },
     focus() { if (!this.hidden) document.activeElement=this; },
     querySelectorAll(selector) {
@@ -728,7 +728,7 @@ function taskBoardFocusHarness(change) {
           focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
           record,
           summary:{
-            dataset:{taskRecord: records[index][2].replaceAll('&quot;', '"').replaceAll('&amp;', '&')},
+            dataset:{taskRecord: visibleText(records[index][2])},
             parentElement:record,
             focus() { document.activeElement=this; },
           },
@@ -740,7 +740,8 @@ function taskBoardFocusHarness(change) {
   }]));
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,acceptTaskPoll,resetTaskFilters})`,{...panel,document,activeRoom:()=>room});
+  const syncRoom=source.slice(source.indexOf('function syncWorkRoom()'),source.indexOf('function activeRoom()'));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n${syncRoom}\n({renderTasks,acceptTaskPoll,resetTaskFilters,syncWorkRoom,snapshot:()=>taskSnapshot})`,{...panel,document,activeRoom:()=>room,workRoom:room,workLoop:{setRoom(){}},showLoading(){nodes.tasks.innerHTML="";nodes.attention.innerHTML="";}});
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));
@@ -797,7 +798,11 @@ test(`a task record whose source is still checking: ${outcome}`, () => {
   assert.equal(document.activeElement, nodes.tasks);
   const outside = {id:'new-focus'};
   if (outcome === 'focus-moved') document.activeElement = outside;
-  if (outcome === 'room-changed') selectRoom('another room');
+  if (outcome === 'room-changed') {
+    selectRoom('another room');
+    assert.equal(board.syncWorkRoom(), true);
+    assert.equal(board.snapshot(), null, 'an implicit room change retires the filter snapshot');
+  }
   if (outcome === 'session-paused') board.resetTaskFilters();
   if (outcome === 'refused') {
     board.acceptTaskPoll(reply([peer], 'denied'), true, read);

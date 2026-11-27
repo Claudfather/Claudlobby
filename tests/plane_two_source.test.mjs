@@ -863,13 +863,19 @@ test('slow overview does not block activity and stream traffic respects its minu
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,2);
   api.dispose();
 });
+async function roomSwitchHarness(api) {
+  const h = await appHarness(api);
+  const {runInNewContext} = await import('node:vm');
+  const app = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
+  Object.assign(h.c, {closeEquipment(){}, savePick(){}, currentView:'overview', $:()=>({hidden:true})});
+  runInNewContext(app.slice(app.indexOf('function pickFleet('), app.indexOf('let agentPresence =')), h.c);
+  h.c.fleetsSeen = true;
+  h.c.currentFleet = 'all';
+  return h;
+}
+
 test('fleet selection immediately retires the held board before the queued new-room refresh',async()=>{
-  const {api,a,b}=await pair(),h=await appHarness(api);
-  const {runInNewContext}=await import('node:vm');
-  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
-  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',$:()=>({hidden:true})});
-  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('let agentPresence =')),h.c);
-  h.c.fleetsSeen=true;h.c.currentFleet='all';
+  const {api,a,b}=await pair(), h=await roomSwitchHarness(api);
   const held=deferred();for(const source of [a,b])source.routes.set('/api/channel?limit=120',held.promise);
   const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));
   assert.equal(h.paints.length,1,'the available task panel paints before selection changes');
@@ -886,6 +892,37 @@ test('fleet selection immediately retires the held board before the queued new-r
   assert.equal(h.paints.length,beforeRetirement.length+2,'only the queued new-room panels add paints');
   api.dispose();
 });
+
+test('a room change retires a partial task read and its pending record state', {timeout: 3000}, async () => {
+  const {api, a, b} = await pair(), h = await roomSwitchHarness(api);
+  const held = deferred(), partial = deferred(), calls = [];
+  a.routes.set('/api/tasks', ok({tasks:[{task_id:wi, fleet:'team', title:'Ready task'}]}));
+  b.routes.set('/api/tasks', held.promise);
+  h.c.acceptTaskPoll = (env, settled, recordState) => {
+    calls.push({env, settled, recordState});
+    if (!settled) partial.resolve();
+    return env;
+  };
+  const reading = h.c.refreshBoards();
+  await partial.promise;
+  assert.equal(calls.length, 1);
+  const first = calls[0];
+  assert.equal(first.env.data.sources.find(s => s.key === 'b').state, 'checking');
+  h.c.pickFleet('a / team');
+  held.resolve(ok({tasks:[{task_id:wi, fleet:'team', title:'Retired task'}]}));
+  await reading;
+  assert.deepEqual(calls, [first], 'the retired final reply cannot repaint rows or restore its disclosure');
+  const next = h.callbacks.filter(x => x.ms === 400).at(-1);
+  assert.ok(next);
+  next.cb();
+  await h.settle();
+  assert.ok(calls.length > 1);
+  assert.notEqual(calls.at(-1).recordState, first.recordState);
+  assert.ok(calls.at(-1).env.data.tasks.every(task => task.task_id.startsWith('a::')));
+  api.dispose();
+});
+
+
 test('disconnect retires held overview and fast summary before either can repaint',async()=>{
   const {api}=await pair(),overview=deferred(),summary=deferred();
   const h=await appHarness({...api,jget:path=>path==='/api/overview'?overview.promise:path==='/api/summary'?summary.promise:api.jget(path)});
