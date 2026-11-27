@@ -503,16 +503,17 @@ test('long result is an escaped labelled excerpt with full text in a closed disc
   assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
 });
 
-for (const state of ['active', 'completed']) {
+for (const [state, field, event] of [
+  ['active', 'last_event', 'progress'],
+  ['completed', 'terminal_event', 'completed'],
+]) {
   test(`the ${state} task preview counts whole visible characters`, async () => {
     const firstThousand = 'a'.repeat(997) + 'e\u0301🇨🇦👩🏽‍💻';
     for (const tail of ['', '城']) {
       const response = canonicalDetail('task-a');
       const task = response.data.task;
       task.state = state;
-      const event = {event: state === 'completed' ? 'completed' : 'progress',
-        detail: JSON.stringify({summary: firstThousand + tail})};
-      task[state === 'completed' ? 'terminal_event' : 'last_event'] = event;
+      task[field] = {event, detail: JSON.stringify({summary: firstThousand + tail})};
       const h = harness({jget: () => response});
       h.loop.setRoom('web'); await settle(); h.open(); await settle();
       const html = h.get('task-detail-content').innerHTML;

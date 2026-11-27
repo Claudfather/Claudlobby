@@ -2,6 +2,8 @@ import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskAc
 import { createPermissionPanel } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
 
+const resultCharacters = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
+
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
 // Additive channel navigation metadata, not action authority or an actor alias.
@@ -529,14 +531,20 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     }
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
     // Older browsers can show the full bounded record when they cannot find a grapheme boundary.
-    let excerpt = text;
-    if (text.length > 1000 && typeof Intl.Segmenter === "function") {
-      const characters = new Intl.Segmenter().segment(text);
-      excerpt = Array.from(characters, part => part.segment).slice(0, 1000).join("");
+    let end = text.length;
+    if (end > 1000 && resultCharacters) {
+      let count = 0;
+      for (const {index} of resultCharacters.segment(text)) {
+        if (count === 1000) {
+          end = index;
+          break;
+        }
+        count++;
+      }
     }
-    if (excerpt === text) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    if (end === text.length) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
     return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(excerpt)}…</pre>
+      <pre class="task-record-body task-result">${esc(text.slice(0, end))}…</pre>
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
