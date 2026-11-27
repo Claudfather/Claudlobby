@@ -117,8 +117,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (continuity?.ended) return continuity.changed ? 'Your account or saved computers changed. Reopen setup from your workspace.'
       : status.remediation || '';
     if (expired) return 'Your connection to this computer expired. Choose Connect to continue.';
-    if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect again.';
-    if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect again.';
+    if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect.';
+    if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect.';
     if (['disconnected','signed_out'].includes(connection)) return 'Disconnected from this computer. Choose Connect to continue.';
     return 'The connection to this computer could not be confirmed. Choose Check connection to look again.';
   }
@@ -408,7 +408,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   // (an expiry, a failure, a denial, a Disconnect), Connect is only ever a press. A hidden page waits, still at most once.
   let autoConnectTried = false;
   function autoConnect() {
-    if (!browserTransport || !connectOnHandoff || autoConnectTried || disposed || phase !== 'ready' || !mount) return;
+    if (!browserTransport || !connectOnHandoff || autoConnectTried || disposed || phase !== 'ready' || accountUnavailable || loading || !mount) return;
     const bound = boundReference(); if (bound === null) return;
     const index = clients.findIndex(row => row.reference.reference_id === bound); if (index < 0) return;
     const {client, enrollment} = clients[index], continuity = client.continuity?.();
@@ -416,7 +416,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (connection === 'checking') return; // not yet known: look again at the next change
     if (connection !== 'not_connected' || continuity?.ended || continuity?.connectRequired || continuity?.reconnectRequired) { autoConnectTried = true; return; }
     if (mount.document.visibilityState !== 'visible' || pending.has(index) || enrollment.snapshot().busy) return;
-    autoConnectTried = true; void act(index, 'connect');
+    autoConnectTried = true; clients[index].setup.connectedByEntry?.();
+    void act(index, 'connect').then(done => { if (!done) clients[index]?.setup.connectRefused?.(); });
   }
   async function act(index, operation) {
     if (disposed || phase !== 'ready' || !current) return false;
@@ -734,7 +735,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
         if (document.visibilityState !== 'hidden') setup.resumeHandoff();
       }
       if (document.visibilityState !== 'hidden') void checkAccount();
-      if (document.visibilityState === 'visible') { regained(); autoConnect(); }
+      if (document.visibilityState === 'visible') regained();
     };
     let lastReadingInput = null;
     const activity = event => {

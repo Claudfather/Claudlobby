@@ -207,7 +207,7 @@ Zero saved computers has an explicit empty state. One or two saved computers
 start with read-only session checks, leaving explicit Connect available; no
 automatic sign-in, session mutation retry or host initialization occurs, with one
 exception: in the browser-carrier frame the first connect may follow the website's
-hand-off (see "First-team setup" below). Per-host
+hand-off (see "Browser-carrier setup view" below). Per-host
 Connect, Check connection, Keep connected and Disconnect operate independently.
 Disconnect ends only that connected session; closing the document disposes its
 streams/credentials without sending logout. Stable controls preserve keyboard
@@ -250,15 +250,16 @@ tab left open must not hold the computer's session forever, and computers cap
 sessions. Nothing else connects, signs in or retries a session mutation
 automatically, and failures say what to choose next in plain sentences. After Connect, the existing steps follow: approve setup,
 sign in to Claude, describe the goal, launch. When the computer is still in
-first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
-setup approval read (`context`, which changes nothing on the computer), so
+first-team setup (`setup_only`), a Connect chosen in the panel, or the one automatic
+first connect, is followed by one setup approval read (`context`, which changes nothing on the computer), so
 approve setup is done without a second click. A computer that is already set up
 gets no automatic approval read. If the read fails, no approval is shown, Check
 setup approval stays the step's action and nothing retries it. When the computer
 has said (`launch_reserved`) that the request this browser keeps holds a Launch,
 the browser keeps that word beside the request (`<storage key>:launch`). After
-each Connect or Check connection chosen in the panel, and after any approval
-read, the page then reads that launch's status once (`receipt`, which also
+each Connect or Check connection chosen in the panel, after the one automatic
+first connect (which runs the same follow-up reads and never moves keyboard focus),
+and after any approval read, the page then reads that launch's status once (`receipt`, which also
 changes nothing on the computer), exactly as Check launch status would, but only
 when the computer's word for the kept request was stored before that Connect. It
 never reads when the launch is already shown finished, when a Preview can be
