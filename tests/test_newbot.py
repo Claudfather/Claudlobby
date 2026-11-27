@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from textwrap import dedent
 
+import os
+
 import pytest
 
 from claudlobby.newbot import (
@@ -759,3 +761,33 @@ class TestWriteTokenToEnv:
         assert "MY_TOKEN=new" in text
         assert "MY_TOKEN=old" not in text
         assert "OTHER=keep" in text
+
+    def test_an_existing_readable_file_is_owner_only_before_the_token_is_written(self, tmp_path, monkeypatch):
+        env = tmp_path / ".env"
+        env.write_text("OTHER=keep\n")
+        env.chmod(0o644)
+        modes = []
+        real_fdopen = os.fdopen
+
+        def watched(fd, *args, **kwargs):
+            handle = real_fdopen(fd, *args, **kwargs)
+            real_write = handle.write
+
+            def write(text):
+                modes.append(os.fstat(handle.fileno()).st_mode & 0o777)
+                return real_write(text)
+
+            handle.write = write
+            return handle
+
+        monkeypatch.setattr("claudlobby.newbot.os.fdopen", watched)
+        write_token_to_env(env, "MY_TOKEN", "secret123")
+        assert modes == [0o600]
+        assert (env.stat().st_mode & 0o777) == 0o600
+        assert env.read_text() == "OTHER=keep\nMY_TOKEN=secret123\n"
+
+    def test_a_backslash_in_the_token_is_written_as_is(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("MY_TOKEN=old\n")
+        write_token_to_env(env, "MY_TOKEN", r"a\1b\g<0>c")
+        assert env.read_text() == "MY_TOKEN=a\\1b\\g<0>c\n"

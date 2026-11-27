@@ -18,6 +18,7 @@ Preserves all comments and formatting.
 
 from __future__ import annotations
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -319,20 +320,29 @@ def token_env_refusal(token_env: str | None, name: str) -> str | None:
 
 
 def write_token_to_env(env_path: Path, token_env: str, token: str) -> None:
-    """Append/update TOKEN_ENV=token in .env. Creates file if missing."""
+    """Append/update TOKEN_ENV=token in .env. Creates file if missing.
+
+    The file is owner-only (0600) before the token is written to it: a new file
+    is created with that mode and an existing one is narrowed first, so the token
+    is never readable by others, even briefly.
+    """
     if env_path.is_file():
         text = env_path.read_text()
     else:
         text = ""
     pattern = re.compile(rf"^{re.escape(token_env)}=.*$", re.MULTILINE)
+    line = f"{token_env}={token}"
     if pattern.search(text):
-        text = pattern.sub(f"{token_env}={token}", text)
+        # A function, so a backslash in the token is written as is, never read as a group reference.
+        text = pattern.sub(lambda _match: line, text)
     else:
         if text and not text.endswith("\n"):
             text += "\n"
-        text += f"{token_env}={token}\n"
-    env_path.write_text(text)
-    env_path.chmod(0o600)
+        text += line + "\n"
+    fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(text)
 
 
 # ----------------------------------------------------------------------

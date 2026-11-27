@@ -1,0 +1,3 @@
+### Fixed — a new bot's token is never readable by others while it is written to `.env`
+
+`write_token_to_env` (used when a bot is created with a Telegram token) wrote the token with `write_text` and only then set the file to 0600. A new `.env` was created with the umask's mode (usually 0644) and an existing readable one stayed readable until the write finished, so for a moment the token could be read by other accounts on the computer. The file is now opened with mode 0600 and narrowed to 0600 before anything is written. The token also no longer passes through a regular-expression replacement template, so a backslash in it is written as is. Nothing else about the file changes: the same lines are kept in the same order.
