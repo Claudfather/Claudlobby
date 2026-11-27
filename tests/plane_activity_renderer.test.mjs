@@ -709,9 +709,18 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assignee.value=board.taskAssigneeKey(row);assignee.onchange();
   assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
   assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
-  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Filters don’t change the attention count for loaded tasks/);
+  env.data.task_page = {version:1, next_cursor:'older'};
+  board.renderTasks(env);
+  assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
   assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
   status.value='blocked';status.onchange();
+  assert.match(nodes['task-filter-count'].textContent,/0 of 3 match\. Choose Load older work/);
+  for (const page of [{version:1, next_cursor:null}, {version:2, next_cursor:'older'}]) {
+    env.data.task_page = page;
+    board.renderTasks(env);
+    assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
+  }
   assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
   assert.doesNotMatch(nodes.attention.innerHTML,/no tasks need attention/);
   const selected=assignee.value;env.data.tasks=[peer];board.renderTasks(env);
