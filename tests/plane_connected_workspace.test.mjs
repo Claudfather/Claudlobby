@@ -4431,13 +4431,12 @@ function markedHarness(goal,{finish='page',marked=true}={}){
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   const launchBody=stepsOf(panel).find(n=>n.dataset.step==='launch').children.find(n=>n.className==='setup-step-body');
   const goalNode=descendants(panel).find(n=>n.className==='setup-goal');
-  return {h,panel,ui,launchBody,goalNode,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
+  const field=descendants(panel).find(n=>n.tagName==='TEXTAREA');
+  return {h,panel,ui,launchBody,goalNode,field,async ready(){await h.api.run('context');h.api.setGoal(goal);await h.api.run('preview');}};
 }
 test('pasted goal formatting is corrected in the field before any Preview request',async()=>{
-  const {h,panel,ui,goalNode}=markedHarness('');
+  const {h,panel,ui,goalNode,field}=markedHarness('');
   await h.api.run('context');
-  const field=descendants(panel).find(n=>n.tagName==='TEXTAREA');
-  const button=name=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===name);
   const previews=()=>h.calls.filter(([op])=>op==='preview');
   for(const pasted of [' Review  signup.\r\n\t Write a checklist. ', '\u0085Review  signup.\tWrite a checklist.\u00a0']){
     field.value=pasted;field.handlers.input();
@@ -4445,17 +4444,17 @@ test('pasted goal formatting is corrected in the field before any Preview reques
     assert.equal(field.attributes['aria-invalid'],'true');
     const hint=descendants(panel).find(n=>n.id===field.attributes['aria-describedby']);
     assert.equal(hint.textContent,'Use one paragraph with no space at the start or end.');
-    assert.equal(button('Preview team').disabled,true);
+    assert.equal(buttonOf(panel,'Preview team').disabled,true);
     assert.equal(await h.api.run('preview'),false);
     assert.equal(previews().length,0);
-    const repair=button('Make one paragraph');
+    const repair=buttonOf(panel,'Make one paragraph');
     assert.ok(visible(repair));repair.click();
     assert.equal(field.value,'Review  signup. Write a checklist.');
     assert.equal(h.api.snapshot().goal,field.value);
     assert.equal(ui.document.activeElement,field);
     assert.equal(field.attributes['aria-invalid'],'false');
     assert.equal(previews().length,0,'editing the draft never contacts the computer');
-    assert.equal(visible(repair),false);assert.equal(button('Preview team').disabled,false);
+    assert.equal(visible(repair),false);assert.equal(buttonOf(panel,'Preview team').disabled,false);
   }
   assert.equal(await h.api.run('preview'),true);
   assert.equal(previews()[0][1].goal,field.value);
@@ -4465,10 +4464,9 @@ test('pasted goal formatting is corrected in the field before any Preview reques
 
 test('goal entry counts Unicode characters and keeps invalid drafts out of Preview',async()=>{
   const limit='🙂'.repeat(2000);
-  const {h,panel,goalNode}=markedHarness(limit);
+  const {h,panel,goalNode,field}=markedHarness(limit);
   await h.api.run('context');
-  const field=descendants(panel).find(n=>n.tagName==='TEXTAREA');
-  const preview=descendants(panel).find(n=>n.textContent==='Preview team');
+  const preview=buttonOf(panel,'Preview team');
   for(const draft of [limit+'a','a\u0000b','a\u000bb','a\u007fb','a\ud800b','\n\t ']){
     field.value=draft;field.handlers.input();
     assert.equal(preview.disabled,true);
