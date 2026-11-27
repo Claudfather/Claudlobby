@@ -450,6 +450,7 @@ test('task result and feedback precede closed history without inventing descript
   const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
   const html = h.get('task-detail-content').innerHTML;
   assert.ok(html.indexOf('<h3>Recorded result</h3>') < html.indexOf('<h3>Feedback and conversation</h3>'));
+  assert.match(html, /Latest &lt;result&gt; from the recorded completion[\s\S]*<dt>Assigned to<\/dt>[\s\S]*<h3>Feedback and conversation<\/h3>/);
   assert.ok(html.indexOf('id="task-reports"') < html.indexOf('<summary>Task details and history</summary>'));
   assert.ok(html.indexOf('id="task-permissions"') < html.indexOf('<summary>Task details and history</summary>'));
   assert.match(html,/Latest &lt;result&gt; from the recorded completion/);
@@ -476,6 +477,7 @@ test('the assigned worker stays visible when delivery has no confirming receipt'
       + (integrity || 'Delivery of the current assignment is not confirmed in this view.') + '</dd>'));
     assert.doesNotMatch(html, /No current assignment to check/);
     assert.match(html, /<h3>Latest recorded update<\/h3>/);
+    assert.match(html, /<dt>Assigned to<\/dt>[\s\S]*<h3>Latest recorded update<\/h3>/);
   }
 });
 

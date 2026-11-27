@@ -545,20 +545,23 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
+    const factsAfterResult = task.state === "completed" && task.resolved === true && !boardOnly && !unavailable;
+    const assignmentFacts = `<dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
+      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
+      <dt>Current assignment delivery</dt><dd>${esc(!assignment ? "No current assignment to check."
+        : task.delivery?.integrity || "Delivery of the current assignment is not confirmed in this view.")}</dd></dl>`;
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
       <p id="task-permission-summary" class="task-question" role="status" hidden></p>
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
-      <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
-      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
-      <dt>Current assignment delivery</dt><dd>${esc(!assignment ? "No current assignment to check."
-        : task.delivery?.integrity || "Delivery of the current assignment is not confirmed in this view.")}</dd></dl>
+      ${factsAfterResult ? "" : assignmentFacts}
       ${task.attention_question || task.attention_reason?.includes("escalated") ? `<div class="task-question"><b>Needs your input</b><pre class="task-record-body">${esc(task.attention_question || "The question was not recorded.")}</pre></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
       ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
       <h3>${["completed", "failed", "cancelled"].includes(task.state) ? "Recorded result" : "Latest recorded update"}</h3>${recordedResult(task)}
       <p class="note">This is a task snapshot. Completion alone does not mean the result was reviewed.</p>`}
+      ${factsAfterResult ? assignmentFacts : ""}
       <h3>Feedback and conversation</h3><p class="note">Comments and replies appear first; recorded reports follow. This is the recent channel window, not a complete task history.</p>
       <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
       <p id="task-lineage-note" class="note" hidden></p>
