@@ -106,6 +106,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   copyText = text => globalThis.navigator.clipboard.writeText(text)}) {
   let context = null, plan = null, pending = null, conflicts = [], legacy = [], incompatible = false;
   let goal = '', planGoal = '', note = '', launchable = false, busy = false, disposed = false, epoch = 0, mount;
+  let replacedDraftRequest = null;
   let state = client.snapshot();
   // The Claude sign-in step is its own module (claude-signin.js); this page gives it the approval, the one kept
   // attempt's storage (the team road keeps it in this browser) and the page around it.
@@ -347,6 +348,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (value.request === null && value.provider_signin === true) signin.setAside(value.generation);
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
         if (value.request === null && pending && pending.generation !== value.generation) setAside();
+        if (kept && !pending && trimGoal(goal) && goal !== kept.goal) replacedDraftRequest = binding(kept);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
@@ -358,6 +360,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
+          if (mount) mount.area.value = goal; // the field shows the goal Preview and Launch would use
           seeLaunch(null); // the computer keeps this Preview only while nothing was dispatched, so nothing runs yet
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
@@ -584,9 +587,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // The counts sit under Technical details, beside the app version and the raw plan.
     setText(m.counts,launchShown ? `Launching changes ${count(plan.changes.length,'generated file','generated files')} and starts or restarts ${count(plan.effects?.restart_bots?.length || 0,'bot','bots')}.` : '');
     m.counts.hidden = !m.counts.textContent;
-    // The exact goal Launch approves, as plain text, with S24 directly above Launch team: only when Launch sends it.
     const sends = launchShown && plan.sends_goal === true;
-    setText(m.launchGoal,sends ? planGoal : '');
+    const replacedDraft = launchShown && replacedDraftRequest && same(plan,replacedDraftRequest);
+    m.draftNotice.hidden = !replacedDraft;
+    setText(m.launchGoal,sends || replacedDraft ? planGoal : '');
     setText(m.launchGoalNote,sends ? GOAL_SENT[plan.finish] ?? GOAL_SENT.page : '');
     setText(m.launchHint,plan && plan.expires_at <= time ? 'This preview expired. Inspect the update on the computer.' : '');
     setText(m.status,[note, legacyBlocked() ? LEGACY : !live && !m.connect ? 'Connect this computer to continue setup.' : ''].filter(Boolean).join(' '));
@@ -706,11 +710,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const restart = make('p','setup-step-text');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
     const launchGoal = make('p','setup-goal'), launchGoalNote = make('p','setup-step-text');
-    launchStep.body.append(summary,restart,launchGoal,launchGoalNote,row(launch,receiptButton),launchHint);
+    const draftNotice = make('p','setup-step-text','Your computer already prepared this goal. The goal you entered here was not saved.');
+    launchStep.body.append(summary,restart,draftNotice,launchGoal,launchGoalNote,row(launch,receiptButton),launchHint);
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), counts = make('p'), details = make('pre');
     disclosure.append(make('summary','',TECHNICAL_DETAILS),declaration,authority,counts,row(recheck),details); element.append(disclosure);
-    mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
+    mount = {root:element,document,lede,status,draftNotice,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
       signinCopyNote:parts.signinCopyNote,signinField:parts.signinField,code:parts.code,codeRow:parts.codeRow,
       signinControls:parts.signinControls,goalDone,goalText,area,goalHint:goalHintNode,repairGoal,summary,restart,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
