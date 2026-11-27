@@ -81,13 +81,14 @@ _events = read_fleet_events
 class TestDataSweep:
     # Purge is allowlist-scoped: only known-ephemeral classes may be removed.
     # Everything else under data/ is durable by default, however old —
-    # including unvetted .log names (a LevelDB-style 000003.log is live
-    # database state, not a text log).
-    EPHEMERAL = ["cron.log", "ledger.json.bak"]
+    # including every .log name (a LevelDB-style 000003.log is live database
+    # state, and a cron.log there is the bot's own file: no framework job
+    # writes a log under data/).
+    EPHEMERAL = ["ledger.json.bak"]
     # An events file is no longer the sweep's (F18 closure R2b-2): nothing
     # writes `data/events/*.jsonl` and nothing reads it, so a leftover is the
     # operator's archive — durable to this sweep, however old.
-    DURABLE = ["scripts/audit-tracker.py", "ledger.json", "notes.md", "000003.log", "events/old.jsonl"]
+    DURABLE = ["scripts/audit-tracker.py", "ledger.json", "notes.md", "000003.log", "cron.log", "events/old.jsonl"]
 
     def _fleet_data(self, root):
         data = root / "local" / "f7" / "runtime" / "bots" / "b1" / "data"

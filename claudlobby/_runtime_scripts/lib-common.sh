@@ -4512,6 +4512,17 @@ stat_size() {
     fi
 }
 
+stat_mode() {
+    # Print a file's permission bits in octal (644), the form chmod takes.
+    # A symbolic link reports the file it names, never its own bits.
+    local file="${1:?Usage: stat_mode <file>}"
+    if [ "$_OS" = "Darwin" ]; then
+        stat -L -f %Lp "$file"
+    else
+        stat -L -c %a "$file"
+    fi
+}
+
 iso_to_epoch() {
     # Convert an ISO-8601 UTC timestamp (e.g. 2026-05-15T14:30:00Z) to epoch
     # seconds. Portable across GNU date (Linux) and BSD date (Darwin). Prints

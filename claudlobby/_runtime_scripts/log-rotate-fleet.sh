@@ -1,8 +1,8 @@
 #!/bin/bash
 # Fleet-level log rotation — discovers and rotates all bot logs.
 #
-# Walks runtime/bots/<bot>/ for each fleet and rotates *.log files,
-# plus lib/logs/ for package-level logs.
+# Walks runtime/bots/<bot>/ for each fleet and rotates the *.log and *.jsonl
+# files at each bot's root and in its logs/, plus the host's state/logs/.
 #
 # Usage:
 #   log-rotate-fleet.sh [--keep N] [--fleet <name>] [<name>]
@@ -72,17 +72,9 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
         for f in "$bot_dir"logs/*.log "$bot_dir"logs/*.jsonl; do
             [ -f "$f" ] && LOGS+=("$f")
         done
-        # Bot data/ logs (only named cron.log, briefing*.log, git-pull.log, etc.)
-        # Skip binary logs (LevelDB, browser profiles) by matching known text log names.
-        # data-sweep.sh purges the same name set once abandoned — keep in lockstep.
-        if [ -d "${bot_dir}data" ]; then
-            while IFS= read -r -d '' f; do
-                LOGS+=("$f")
-            done < <(find "${bot_dir}data" -maxdepth 3 -type f \
-                \( -name 'cron.log' -o -name 'git-pull.log' -o -name 'briefing*.log' \
-                   -o -name 'home-assistant.log' \) \
-                -print0 2>/dev/null)
-        fi
+        # Nothing under data/ is rotated: a bot's data/ holds its own files,
+        # and no framework job writes a log there. data-sweep.sh purges no log
+        # by name either.
     done
 done
 
