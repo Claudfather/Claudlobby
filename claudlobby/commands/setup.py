@@ -214,8 +214,8 @@ def _restore_config(destination: Path, written: bytes, prior: bytes | None, crea
         return "restore_failed"
 
 
-def _write_config(destination: Path, content: bytes, *, replace: bool) -> None:
-    fd, name = tempfile.mkstemp(prefix=".fleet-yaml-", dir=destination.parent)
+def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: str = ".fleet-yaml-") -> None:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "wb") as stream:

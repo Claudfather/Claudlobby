@@ -106,6 +106,8 @@ def cmd_new_bot(args):
             paths.assert_writable(paths.env_file)
             if paths.env_file.resolve() != paths.env_file:
                 raise CommandFailure("conflict", "fleet token tier is redirected")
+            if paths.env_file.exists() and not paths.env_file.is_file():
+                raise CommandFailure("conflict", "fleet token tier is not a regular file")
         stanza = render_stanza(inp)
         new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
         yaml.safe_load(new_text)
@@ -131,9 +133,11 @@ def cmd_new_bot(args):
         # or a crash never meets a truncated file, and the token never reaches a file
         # another account can read, even through a descriptor opened earlier.
         if inp.telegram_token:
-            existing = paths.env_file.read_text() if paths.env_file.is_file() else ""
+            existing = (paths.env_file.read_text(encoding="utf-8", errors="surrogateescape")
+                        if paths.env_file.is_file() else "")
             _write_config(paths.env_file, env_text_with_token(
-                existing, inp.token_env, inp.telegram_token).encode("utf-8"), replace=True)
+                existing, inp.token_env, inp.telegram_token).encode("utf-8", "surrogateescape"),
+                replace=True, prefix=".env-")
         _write_config(paths.fleet_yaml, new_text.encode("utf-8"), replace=True)
     except OSError as exc:
         raise CommandFailure("unavailable", "bot source write did not complete; inspect authored files") from exc

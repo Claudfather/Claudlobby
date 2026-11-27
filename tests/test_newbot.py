@@ -477,12 +477,15 @@ def test_new_bot_materializes_pending_voice_only_after_confirmation(
         assert "voice: voices/bot-a.md" in (root / "fleet.yaml").read_text()
         assert backup.read_text() == FLEET_WITH_BOTS
         kept = "OTHER=keep\n" if mode == "confirm-existing" else ""
-        assert token_file.read_text() == kept + "TELEGRAM_TOKEN_BOT_A=fixture-token\n"
-        assert (token_file.stat().st_mode & 0o777) == 0o600
-        if reader is not None:
-            # The token went to a new file: the earlier reader still sees only the old one.
-            assert reader.read() == "OTHER=keep\n"
-            reader.close()
+        try:
+            assert token_file.read_text() == kept + "TELEGRAM_TOKEN_BOT_A=fixture-token\n"
+            assert (token_file.stat().st_mode & 0o777) == 0o600
+            if reader is not None:
+                # The token went to a new file: the earlier reader still sees only the old one.
+                assert reader.read() == "OTHER=keep\n"
+        finally:
+            if reader is not None:
+                reader.close()
     else:
         assert not voice.exists() and not backup.exists() and not token_file.exists()
         assert (root / "fleet.yaml").read_text() == FLEET_WITH_BOTS
