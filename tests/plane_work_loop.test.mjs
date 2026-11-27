@@ -528,8 +528,7 @@ for (const [state, field, event] of [
       const h = harness({jget: () => response});
       h.loop.setRoom('web'); await settle(); h.open(); await settle();
       const html = h.get('task-detail-content').innerHTML;
-      const excerpt = tail ? html.slice(html.indexOf('<div class="task-result-preview">')) : html;
-      const preview = excerpt.match(/<pre class="task-record-body task-result">([^<]*)<\/pre>/)[1];
+      const preview = [...html.matchAll(/<pre class="task-record-body task-result">([^<]*)<\/pre>/g)].at(-1)[1];
       assert.equal(preview, firstThousand + (tail ? '…' : ''));
       assert.equal(html.includes('<summary>Read full '), Boolean(tail));
       if (tail) assert.ok(html.includes(firstThousand + tail + '</pre>'));
