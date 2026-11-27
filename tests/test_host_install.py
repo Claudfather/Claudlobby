@@ -815,10 +815,10 @@ def test_the_installer_sent_as_one_argument_stays_within_the_websites_margin():
     # Linux refuses one argument over 131072 bytes (MAX_ARG_STRLEN, counting the
     # terminating NUL). The website's own test keeps a 4096-byte margin; the same
     # bound here makes a change that would fail there fail in this repository first.
-    escaped = SCRIPT.read_text().replace("'", "'\\''")
-    longest = max(len(f"{prefix}sh -c '{escaped}' host-install {verb}".encode()) + 1
-                  for verb in ("prepare", "status", "update-status", "update", "update-continue")
-                  for prefix in ("", "/bin/"))
+    escaped = SCRIPT.read_bytes().replace(b"'", b"'\\''")
+    longest = max(len(prefix + b"sh -c '" + escaped + b"' host-install " + verb) + 1
+                  for verb in (b"prepare", b"status", b"update-status", b"update", b"update-continue")
+                  for prefix in (b"", b"/bin/"))
     assert longest <= 131072 - 4096, f"installer command is {longest} bytes; the bound is {131072 - 4096}"
 
 
