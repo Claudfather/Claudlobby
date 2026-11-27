@@ -794,7 +794,6 @@ exec(probe)
         assert "original group error" in result.stderr
 
 
-@pytest.mark.skipif(os.uname().sysname != "Darwin", reason="Darwin process group reaping")
 def test_managed_version_timeout_reaps_a_late_leader(tmp_path):
     import sys
 
