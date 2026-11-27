@@ -1574,6 +1574,32 @@ test('Claude code goes only to the selected host and never enters retained UI st
 });
 
 const authorizeURL='https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference';
+test('the code field has one submit button that requires a code',async()=>{
+  const p=pollHarness(['waiting','connected']);
+  try {
+    await p.h.api.run('context');
+    await p.h.api.run('signin-begin');
+    await p.fire();
+    const row=p.code.parentNode.parentNode;
+    const submit=descendants(row).find(node=>node.tagName==='BUTTON');
+    assert.equal(row.tagName,'FORM');
+    assert.equal(submit.type,'submit');
+    assert.equal(submit.disabled,true);
+    assert.ok(!p.code.name,'the code does not enter form data');
+    let prevented=false;
+    row.handlers.submit({preventDefault(){prevented=true;}});
+    assert.equal(prevented,true,'the form never navigates');
+    p.code.value='example-input';p.code.handlers.input();
+    assert.equal(submit.disabled,false);
+    p.code.value='';p.code.handlers.input();
+    assert.equal(submit.disabled,true);
+    p.code.value='example-input';p.code.handlers.input();
+    submit.click();
+    await flush();
+    assert.equal(p.calls.filter(([action])=>action==='code').length,1);
+    assert.equal(p.code.value,'');
+  } finally {p.h.api.dispose();}
+});
 function pollHarness(statuses,options={}) {
   const timers=[],calls=[],clock={t:1800000000}; let active=0,overlap=0;
   const ui=dom(),panel=new ui.Element();

@@ -297,7 +297,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     return {ended, sent, waitingLink, typed, manualCheck, retryOffered:signinRetryOffered(), refusal:signinRefusal};
   }
   // Paints the step's own nodes. shown: whether the step is current or done; filled(name, quiet): the page's one filled action.
-  function paint({live, busy, shown, filled, flags:{ended, sent, waitingLink, manualCheck}}) {
+  function paint({live, busy, shown, filled, flags:{ended, sent, waitingLink, manualCheck, typed}}) {
     const m = refs;
     const [text,tone] = signinStatusLine();
     m.signinStatus.hidden = !shown;
@@ -324,8 +324,7 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     m.code.disabled = !live || signinState !== 'waiting' || sent; // not held while busy, so typing keeps focus during a check
     for (const [operation,button] of Object.entries(m.signinControls)) button.disabled=!live || busy || signinBlocked
       || operation==='begin' && !!signinAttempt || operation!=='begin' && !signinAttempt
-      || operation==='code' && signinState!=='waiting'
-      || operation==='code' && sent;
+      || operation==='code' && (signinState!=='waiting' || !typed);
     // Try again shows, filled, only where the host said a new attempt may replace the ended one.
     const retry = m.steps.signin.retry, retryShown = signinRetryOffered();
     retry.hidden = !retryShown; retry.className = filled('retry','pill ghost');
@@ -345,9 +344,11 @@ export function createClaudeSignin({calls, store, host, now = () => Date.now()/1
     const signinField = make('input','signin-link-field'); signinField.type = 'text'; signinField.readOnly = true; signinField.setAttribute('aria-label','Claude sign-in link');
     const code = make('input','setup-input'); code.type = 'password'; code.maxLength = 2305; code.dataset.field = 'signin-code';
     for (const [name,value] of [['autocomplete','off'],['autocapitalize','off'],['spellcheck','false']]) code.setAttribute(name,value);
-    // Emphasis only (the code is read solely by Submit code): repaint when the field turns empty or non-empty.
+    // Update the submit button when the field turns empty or non-empty.
     code.addEventListener('input',() => { if (!!code.value !== codeHad) repaint(); });
-    const codeLabel = make('label','setup-field'), submit = action('Submit code','pill ghost','signin-code'), codeRow = make('div','setup-code');
+    const codeLabel = make('label','setup-field'), submit = action('Submit code','pill ghost','signin-code'), codeRow = make('form','setup-code');
+    submit.type = 'submit'; // Enter activates the same button as a click.
+    codeRow.addEventListener('submit',event => event.preventDefault());
     codeLabel.append(make('span','setup-field-label','Code from Claude'),code); codeRow.append(codeLabel,submit);
     const check = action('Check sign-in progress','pill ghost','signin-status'), cancel = action('Cancel sign-in','pill ghost','signin-cancel');
     signin.body.append(row(begin,retry,signinLink,signinCopyButton,signinCopyNote),signinField,codeRow,row(check,cancel));
