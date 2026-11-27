@@ -1,4 +1,6 @@
 """Bounded preinstall protocol and real disposable Git/child fixtures."""
+import ast
+import builtins
 import hashlib
 import json
 import os
@@ -823,12 +825,48 @@ def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
     canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
     entry = (ROOT / "claudlobby/preinstall/darwin-runtime-v1.sh").read_text()
     begin, end = "# BEGIN CANONICAL DARWIN RUNTIME PYTHON\n", "# END CANONICAL DARWIN RUNTIME PYTHON\n"
-    for path in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh", ROOT / "claudlobby/installation.py"):
+    marker = "# END DARWIN RUNTIME ADMISSION\n"
+    admission = canonical.split(marker, 1)[0] + marker
+    # The installer and the owner guide embed only the admission prefix (what
+    # their calls reach); the Darwin entry and the installation payload keep the whole module.
+    for path in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
+        assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == admission
+    for path in (ROOT / "claudlobby/preinstall/darwin-runtime-v1.sh", ROOT / "claudlobby/installation.py"):
         assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == canonical
     begin, end = "# BEGIN DARWIN EXISTING PYTHON SHELL\n", "# END DARWIN EXISTING PYTHON SHELL\n"
     selector = entry.split(begin, 1)[1].split(end, 1)[0]
     for path in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
         assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == selector
+
+
+def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call():
+    canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
+    marker = "# END DARWIN RUNTIME ADMISSION\n"
+    assert canonical.count(marker) == 1
+    prefix = canonical.split(marker, 1)[0] + marker
+    alone, whole = types.ModuleType("admission_alone"), types.ModuleType("admission_whole")
+    sys.modules[alone.__name__] = alone
+    exec(compile(prefix, "<admission prefix>", "exec"), alone.__dict__)
+    exec(compile(canonical, "<full runtime>", "exec"), whole.__dict__)
+    # Every name the installer and the owner guide use on the embedded module.
+    for name in ("admit_profile", "environment", "RuntimeRefusal"):
+        assert callable(getattr(alone, name))
+    # Nothing the admission path needs lives after the marker: every global the
+    # prefix's functions read is defined by the prefix alone.
+    tree = ast.parse(prefix)
+    defined = set(vars(alone)) | set(dir(builtins))
+    used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    local = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
+    local |= {arg.arg for node in ast.walk(tree) if isinstance(node, ast.arguments)
+              for arg in (*node.posonlyargs, *node.args, *node.kwonlyargs, node.vararg, node.kwarg) if arg}
+    local |= {node.name for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler) and node.name}
+    assert not (used - defined - local), sorted(used - defined - local)
+    # The full module still has the rest, and the shared names match.
+    for name in ("prepare", "discard", "main", "status", "git_argv", "validate_request"):
+        assert callable(getattr(whole, name)) and not hasattr(alone, name)
+    for name in ("PROFILE_ID", "ALIASES", "_DESCRIPTOR"):
+        assert getattr(alone, name) == getattr(whole, name)
+    assert alone._policy() == whole._policy()
 
 
 def _darwin_policy_fixture(module, home, monkeypatch):

@@ -232,11 +232,8 @@ import uuid
 
 PROFILE_ID = "darwin15-arm64-py31216-git2561-tmux38-jq182-v1"
 LIMIT = 16384
-BUDGET = 900
-_INHERITED_LOCK_FD = None
 ALIASES = {"python3": "../python/bin/python3.12", "git": "../git/bin/git",
            "tmux": "../tmux/bin/tmux", "jq": "../jq/bin/jq"}
-CA_MEMBER = "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"
 # BEGIN FIXED DESCRIPTOR
 _DESCRIPTOR = {
     "artifacts": {
@@ -332,15 +329,6 @@ def _uuid(value):
         return False
 
 
-def validate_request(operation, value):
-    _require(operation in ("prepare", "status", "discard"), "invalid_operation")
-    _require(type(value) is dict and set(value) == {"schema_version", "request_id", "expected_uid", "expected_account"}, "invalid_request")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1 and _uuid(value["request_id"]), "invalid_request")
-    _require(type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1, "invalid_request")
-    _require(type(value["expected_account"]) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]{0,63}", value["expected_account"]), "invalid_request")
-    return value
-
-
 def _parents(path, uid):
     for parent in reversed(path.parents):
         info = parent.lstat()
@@ -417,34 +405,6 @@ def _load(path, uid, *, mode=0o600):
         raise RuntimeRefusal("invalid_retained_metadata") from None
 
 
-def _sync(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _save(path, value, uid, *, new=False):
-    raw = _canonical(value)
-    _require(len(raw) <= LIMIT, "metadata_oversize")
-    if new:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as out:
-            out.write(raw); out.flush(); os.fsync(out.fileno())
-    else:
-        _read(path, uid)
-        fd, temporary = tempfile.mkstemp(prefix=".record-", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(raw); out.flush(); os.fsync(out.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-    _sync(path.parent)
-
-
 def _binding(identity):
     return {"uid": identity.uid, "account": identity.account, "home": str(identity.home), "arch": "arm64",
             "profile_id": PROFILE_ID, "policy_sha256": _policy()}
@@ -475,97 +435,11 @@ def _tree(path, uid, *, staged=False):
     return _sha(_canonical(sorted(records, key=lambda row: row["name"])))
 
 
-def _safe_name(name):
-    _require(name and not name.startswith("/") and "\\" not in name and
-             all(part not in ("", ".", "..") for part in name.split("/")), "unsafe_archive_name")
-    return name
-
-
 def _safe_link(name, target):
     _require(target and not target.startswith("/") and "\\" not in target, "unsafe_archive_link")
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
     _require(resolved not in (".", "..") and not resolved.startswith("../"), "unsafe_archive_link")
     return resolved
-
-
-def _selection(member, kind):
-    name = member.name.removeprefix("./").rstrip("/")
-    if kind == "python":
-        return name[7:] if name.startswith("python/") else None
-    if kind == "tmux":
-        return "bin/tmux" if name == "tmux" else None
-    if kind == "git":
-        if name in ("bin/git", "libexec/git-core/git", "libexec/git-core/git-remote-http", "libexec/git-core/NOTICE", "COPYING", "LICENSE", "LICENSE.txt") or name.startswith("share/git-core/templates/"):
-            return name
-        if name.startswith("libexec/git-core/") and member.issym() and member.linkname in ("git", "../../bin/git", "git-remote-http"):
-            return name
-    return None
-
-
-def _inventory(archive, descriptor):
-    members = archive.getmembers(); records = []; names = set(); links = {}
-    _require(len(members) <= descriptor["members"] + 1, "archive_member_drift")
-    for member in members:
-        name = member.name.removeprefix("./").rstrip("/")
-        if name in ("", "."):
-            _require(member.isdir(), "unsafe_archive_name"); continue
-        _safe_name(name)
-        _require(name not in names and not member.mode & 0o7000, "archive_member_drift")
-        names.add(name)
-        kind = "directory" if member.isdir() else "file" if member.isfile() else "symlink" if member.issym() else None
-        _require(kind is not None, "unsafe_archive_type")
-        if member.issym():
-            links[name] = _safe_link(name, member.linkname)
-        records.append({"name": name, "type": kind, "mode": member.mode, "bytes": member.size, "link": member.linkname})
-    _require(len(records) == descriptor["members"] and sum(row["bytes"] for row in records) == descriptor["unpacked_bytes"]
-             and _sha(_canonical(sorted(records, key=lambda row: row["name"]))) == descriptor["members_sha256"], "archive_member_drift")
-    for name in names:
-        _require(not any(str(parent) in links for parent in PurePosixPath(name).parents), "archive_symlink_parent")
-    for name in links:
-        seen = {name}; target = links[name]
-        while target in links:
-            _require(target not in seen, "archive_link_cycle"); seen.add(target); target = links[target]
-        _require(target in names, "archive_link_missing")
-    return members
-
-
-def _extract(path, destination, kind, descriptor, uid):
-    _require(_sha(_read(path, uid, descriptor["bytes"])) == descriptor["sha256"], "artifact_mismatch")
-    _directory(destination, uid, 0o755, create=True)
-    with tarfile.open(path, mode="r:gz") as archive:
-        members = _inventory(archive, descriptor)
-        selected = {_selection(member, kind): member for member in members if _selection(member, kind)}
-        for name, member in selected.items():
-            if not member.issym():
-                continue
-            seen = {name}; target = _safe_link(name, member.linkname)
-            while target in selected and selected[target].issym():
-                _require(target not in seen, "archive_link_cycle")
-                seen.add(target); target = _safe_link(target, selected[target].linkname)
-            _require(target in selected, "selected_archive_link_missing")
-        links = []
-        for member in members:
-            relative = _selection(member, kind)
-            if not relative:
-                continue
-            _safe_name(relative); target = destination / relative
-            for parent in reversed(target.relative_to(destination).parents):
-                if str(parent) != ".":
-                    _directory(destination / parent, uid, 0o755, create=True)
-            if member.isdir():
-                _directory(target, uid, 0o755, create=True)
-            elif member.issym():
-                _safe_link(relative, member.linkname); links.append((target, member.linkname))
-            else:
-                mode = 0o755 if member.mode & 0o111 else 0o644
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-                with archive.extractfile(member) as source, os.fdopen(fd, "wb") as output:
-                    shutil.copyfileobj(source, output, 1024 * 1024)
-                    output.flush(); os.fsync(output.fileno())
-                os.chmod(target, mode, follow_symlinks=False)
-        for path, link in links:
-            path.symlink_to(link)
-    _require(_tree(destination, uid, staged=True) == descriptor["tree_sha256"], "extracted_tree_mismatch")
 
 
 def _verify_profile(profile, *, staged=False):
@@ -585,21 +459,6 @@ def _verify_profile(profile, *, staged=False):
         info = (profile.bin / name).lstat()
         _require(stat.S_ISLNK(info.st_mode) and info.st_uid == profile.uid and os.readlink(profile.bin / name) == target, "runtime_alias_changed")
     return receipt
-
-
-def _seal_profile(profile):
-    # Only the complete, exact staged profile can cross to immutable modes.
-    _verify_profile(profile, staged=True)
-    # Darwin requires write permission on a directory moved across parents.
-    # Keep only this private container0700; every component directory is0555.
-    for directory, directories, files in os.walk(profile.root, topdown=False, followlinks=False):
-        for name in files:
-            path = Path(directory) / name; info = path.lstat()
-            if not stat.S_ISLNK(info.st_mode):
-                os.chmod(path, 0o555 if info.st_mode & 0o111 else 0o444, follow_symlinks=False)
-        path = Path(directory)
-        os.chmod(path, 0o700 if path == profile.root else 0o555, follow_symlinks=False)
-    _verify_profile(profile)
 
 
 def admit_profile(*, expected_uid=None, expected_account=None):
@@ -623,313 +482,7 @@ def environment(profile):
             "SSL_CERT_FILE": str(profile.ca_bundle), "PIP_CONFIG_FILE": "/dev/null", "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1"}
 
 
-def git_argv(profile, *arguments):
-    _verify_profile(profile)
-    return [str(profile.git), *arguments]
-
-
-def _attempt(base, identity):
-    value = _load(base / "attempt.json", identity.uid)
-    _require(type(value) is dict and set(value) == {"schema_version", "binding", "request_id", "stage_device", "stage_inode", "phase", "files"}
-             and type(value["schema_version"]) is int and value["schema_version"] == 1 and value["binding"] == _binding(identity) and _uuid(value["request_id"])
-             and value["phase"] in ("bootstrap", "preparing", "ready", "failed") and type(value["files"]) is dict, "attempt_changed")
-    _require(all(type(value[key]) is int and value[key] > 0 for key in ("stage_device", "stage_inode")), "attempt_changed")
-    for name, inode in value["files"].items():
-        _require(name in {"python.tar.gz", "git.tar.gz", "tmux.tar.gz", "jq.bin"} and type(inode) is list and len(inode) == 2
-                 and all(type(part) is int and part > 0 for part in inode), "attempt_changed")
-    return value
-
-
-def status(value):
-    validate_request("status", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    profile = _profile(identity); base = _base(identity)
-    if profile.root.exists() or profile.root.is_symlink():
-        receipt = _verify_profile(profile)
-        return {"state": "ready", "profile_id": PROFILE_ID, "policy_sha256": _policy(), "request_id": value["request_id"],
-                "completion_request_id": receipt["request_id"], "never_replay": True}
-    if not base.exists():
-        return {"state": "absent", "request_id": value["request_id"], "never_replay": True}
-    _directory(base, identity.uid, 0o700)
-    if (base / "attempt.json").exists() or (base / "attempt.json").is_symlink():
-        attempt = _attempt(base, identity)
-        return {"state": "unknown", "request_id": attempt["request_id"], "phase": attempt["phase"], "never_replay": True}
-    return {"state": "absent", "request_id": value["request_id"], "never_replay": True}
-
-
-def _lock(base, uid):
-    path = base / "transition.lock"
-    inherited = os.fstat(_INHERITED_LOCK_FD) if _INHERITED_LOCK_FD is not None else None
-    if inherited is not None:
-        actual = path.lstat()
-        _require((inherited.st_dev, inherited.st_ino) == (actual.st_dev, actual.st_ino), "lock_identity_changed")
-        fd = os.dup(_INHERITED_LOCK_FD)
-    else:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        info = os.fstat(fd)
-        _require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
-                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0, "unsafe_lock")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except BaseException:
-        os.close(fd); raise
-
-
-def _stage(base, attempt, uid):
-    stage = base / ("stage-" + attempt["request_id"])
-    info = _directory(stage, uid, 0o700)
-    _require((info.st_dev, info.st_ino) == (attempt["stage_device"], attempt["stage_inode"]), "stage_identity_changed")
-    return stage
-
-
-class _HTTPSRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, response, code, message, headers, newurl):
-        _require(urllib.parse.urlsplit(newurl).scheme == "https", "insecure_artifact_redirect")
-        return super().redirect_request(request, response, code, message, headers, newurl)
-
-
-def _download(kind, stage, attempt, base, identity, deadline):
-    descriptor = _DESCRIPTOR["artifacts"][kind]
-    path = stage / (kind + (".bin" if kind == "jq" else ".tar.gz"))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    info = os.fstat(fd)
-    attempt["files"][path.name] = [info.st_dev, info.st_ino]
-    _save(base / "attempt.json", attempt, identity.uid)
-    try:
-        context = ssl.create_default_context(cafile=stage / "profile/python" / CA_MEMBER)
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context), _HTTPSRedirect())
-        remaining = deadline - time.monotonic(); _require(remaining > 0, "preparation_deadline")
-        with os.fdopen(fd, "wb") as output, opener.open(descriptor["url"], timeout=min(30, remaining)) as response:
-            total = 0; digest = hashlib.sha256()
-            while True:
-                _require(time.monotonic() < deadline, "preparation_deadline")
-                chunk = response.read1(min(65536, descriptor["bytes"] + 1 - total))
-                if not chunk:
-                    break
-                total += len(chunk); _require(total <= descriptor["bytes"], "artifact_oversize")
-                output.write(chunk); digest.update(chunk)
-            output.flush(); os.fsync(output.fileno())
-        _require(total == descriptor["bytes"] and digest.hexdigest() == descriptor["sha256"], "artifact_mismatch")
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    return path
-
-
-def _publish(stage, destination):
-    # Darwin renamex_np(RENAME_EXCL): never replace even an empty foreign dir.
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-    rename = libc.renamex_np
-    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    if rename(os.fsencode(stage), os.fsencode(destination), 0x4) != 0:
-        raise OSError(ctypes.get_errno(), "exclusive runtime publication failed")
-
-
-def prepare(value, *, bootstrap=False):
-    validate_request("prepare", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    profile = _profile(identity); base = _base(identity)
-    if profile.root.exists() or profile.root.is_symlink():
-        return status(value)
-    _require(bootstrap, "bootstrap_entry_required")
-    _parents(base, identity.uid)
-    _directory(base, identity.uid, 0o700)
-    lock = _lock(base, identity.uid)
-    try:
-        attempt = _attempt(base, identity)
-        _require(attempt["request_id"] == value["request_id"] and attempt["phase"] == "bootstrap", "original_attempt_required")
-        stage = _stage(base, attempt, identity.uid); work = stage / "profile"
-        _directory(work, identity.uid, 0o700)
-        _require(_tree(work / "python", identity.uid, staged=True) == _DESCRIPTOR["artifacts"]["python"]["tree_sha256"], "bootstrap_python_changed")
-        admitted = True
-        attempt["phase"] = "preparing"; _save(base / "attempt.json", attempt, identity.uid)
-        deadline = time.monotonic() + BUDGET
-        for kind in ("git", "tmux", "jq"):
-            archive = _download(kind, stage, attempt, base, identity, deadline)
-            if kind == "jq":
-                destination = work / "jq"; _directory(destination, identity.uid, 0o755, create=True)
-                _directory(destination / "bin", identity.uid, 0o755, create=True)
-                raw = _read(archive, identity.uid, _DESCRIPTOR["artifacts"][kind]["bytes"])
-                _require(_sha(raw) == _DESCRIPTOR["artifacts"][kind]["sha256"], "artifact_mismatch")
-                fd = os.open(destination / "bin/jq", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
-                os.fchmod(fd, 0o755)
-                with os.fdopen(fd, "wb") as out:
-                    out.write(raw); out.flush(); os.fsync(out.fileno())
-            else:
-                _extract(archive, work / kind, kind, _DESCRIPTOR["artifacts"][kind], identity.uid)
-        _directory(work / "bin", identity.uid, 0o755, create=True)
-        for name, target in ALIASES.items():
-            (work / "bin" / name).symlink_to(target)
-        ca = _read(work / "python" / CA_MEMBER, identity.uid, 1024 * 1024, 0o644)
-        _require(_sha(ca) == _DESCRIPTOR["ca_sha256"], "runtime_ca_changed")
-        fd = os.open(work / "ca-bundle.pem", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-        os.fchmod(fd, 0o644)
-        with os.fdopen(fd, "wb") as out:
-            out.write(ca); out.flush(); os.fsync(out.fileno())
-        receipt = {"schema_version": 1, "binding": _binding(identity), "request_id": value["request_id"], "state": "ready"}
-        _save(work / "receipt.json", receipt, identity.uid, new=True)
-        staged_profile = RuntimeProfile(profile.uid, profile.account, profile.home, work, work / "bin", work / "python/bin/python3.12",
-                                        work / "git/bin/git", work / "git/libexec/git-core", work / "tmux/bin/tmux", work / "jq/bin/jq",
-                                        work / "ca-bundle.pem", _policy())
-        _seal_profile(staged_profile)
-        _require(time.monotonic() < deadline, "preparation_deadline")
-        _publish(work, profile.root); _sync(base)
-        attempt["phase"] = "ready"; _save(base / "attempt.json", attempt, identity.uid)
-        return status(value)
-    except Exception:
-        if locals().get("admitted") and attempt.get("phase") != "ready":
-            attempt["phase"] = "failed"; _save(base / "attempt.json", attempt, identity.uid)
-        raise
-    finally:
-        os.close(lock)  # Never LOCK_UN: inherited holders share one description.
-
-
-def _owned_partial(component, archive_path, kind, descriptor, uid):
-    _require(_sha(_read(archive_path, uid, descriptor["bytes"])) == descriptor["sha256"], "unknown_stage_content")
-    _require(stat.S_IMODE(_directory(component, uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-    with tarfile.open(archive_path, "r:gz") as archive:
-        expected = {}
-        for member in _inventory(archive, descriptor):
-            name = _selection(member, kind)
-            if not name:
-                continue
-            for parent in PurePosixPath(name).parents:
-                if str(parent) != ".":
-                    expected.setdefault(str(parent), ("directory", 0o755, None))
-            expected[name] = ("directory", 0o755, None) if member.isdir() else ("symlink", 0, member.linkname) if member.issym() else ("file", 0o755 if member.mode & 0o111 else 0o644, member)
-        for directory, directories, files in os.walk(component, followlinks=False):
-            for name in directories + files:
-                path = Path(directory) / name; relative = path.relative_to(component).as_posix(); info = path.lstat()
-                _require(relative in expected and info.st_uid == uid, "unknown_stage_content")
-                kind_expected, mode, value = expected[relative]
-                if stat.S_ISLNK(info.st_mode):
-                    _require(kind_expected == "symlink" and info.st_nlink == 1 and os.readlink(path) == value, "unknown_stage_content")
-                    if name in directories:
-                        directories.remove(name)
-                elif stat.S_ISDIR(info.st_mode):
-                    _require(kind_expected == "directory" and stat.S_IMODE(info.st_mode) in (mode, mode & ~0o222), "unknown_stage_content")
-                else:
-                    _require(kind_expected == "file" and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                             and stat.S_IMODE(info.st_mode) in (mode, mode & ~0o222) and info.st_size <= value.size, "unknown_stage_content")
-                    # An interrupted known write may be a prefix, never foreign data.
-                    actual = _read(path, uid, value.size, stat.S_IMODE(info.st_mode))
-                    _require(archive.extractfile(value).read(len(actual)) == actual, "unknown_stage_content")
-
-
-def discard(value):
-    validate_request("discard", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    base = _base(identity); _parents(base, identity.uid); _directory(base, identity.uid, 0o700)
-    lock = _lock(base, identity.uid)
-    try:
-        attempt = _attempt(base, identity)
-        _require(attempt["request_id"] == value["request_id"], "original_attempt_required")
-        profile = _profile(identity)
-        if profile.root.exists() or profile.root.is_symlink():
-            _verify_profile(profile)
-        stage = _stage(base, attempt, identity.uid)
-        allowed = set(attempt["files"]) | {"profile"}
-        _require({p.name for p in stage.iterdir()} <= allowed, "unknown_stage_content")
-        for name, expected in attempt["files"].items():
-            _require(name in {"python.tar.gz", "git.tar.gz", "tmux.tar.gz", "jq.bin"}, "attempt_changed")
-            path = stage / name
-            if path.exists() or path.is_symlink():
-                info = path.lstat(); kind = name.split(".", 1)[0]
-                _require([info.st_dev, info.st_ino] == expected and stat.S_ISREG(info.st_mode) and info.st_uid == identity.uid
-                         and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
-                         and info.st_size <= _DESCRIPTOR["artifacts"][kind]["bytes"], "unknown_stage_content")
-        work = stage / "profile"
-        if work.exists() or work.is_symlink():
-            _directory(work, identity.uid, 0o700)
-            _require({p.name for p in work.iterdir()} <= set(_DESCRIPTOR["artifacts"]) | {"bin", "ca-bundle.pem", "receipt.json"}, "unknown_stage_content")
-            for kind in _DESCRIPTOR["artifacts"]:
-                path = work / kind
-                if not (path.exists() or path.is_symlink()):
-                    continue
-                if kind == "jq":
-                    _require(stat.S_IMODE(_directory(path, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                    _require({p.name for p in path.iterdir()} <= {"bin"}, "unknown_stage_content")
-                    binary_dir = path / "bin"
-                    if binary_dir.exists() or binary_dir.is_symlink():
-                        _require(stat.S_IMODE(_directory(binary_dir, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                        _require({p.name for p in binary_dir.iterdir()} <= {"jq"}, "unknown_stage_content")
-                        binary = binary_dir / "jq"
-                        if binary.exists() or binary.is_symlink():
-                            expected_raw = _read(stage / "jq.bin", identity.uid, _DESCRIPTOR["artifacts"][kind]["bytes"])
-                            mode = stat.S_IMODE(binary.lstat().st_mode)
-                            _require(mode in (0o755, 0o555) and _sha(expected_raw) == _DESCRIPTOR["artifacts"][kind]["sha256"]
-                                     and expected_raw.startswith(_read(binary, identity.uid, len(expected_raw), mode)), "unknown_stage_content")
-                else:
-                    _owned_partial(path, stage / (kind + ".tar.gz"), kind, _DESCRIPTOR["artifacts"][kind], identity.uid)
-            aliases = work / "bin"
-            if aliases.exists() or aliases.is_symlink():
-                _require(stat.S_IMODE(_directory(aliases, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                for path in aliases.iterdir():
-                    info = path.lstat()
-                    _require(path.name in ALIASES and stat.S_ISLNK(info.st_mode) and info.st_uid == identity.uid
-                             and info.st_nlink == 1 and os.readlink(path) == ALIASES[path.name], "unknown_stage_content")
-            ca = work / "ca-bundle.pem"
-            if ca.exists() or ca.is_symlink():
-                source_ca = work / "python" / CA_MEMBER
-                source_mode = stat.S_IMODE(source_ca.lstat().st_mode); mode = stat.S_IMODE(ca.lstat().st_mode)
-                _require(source_mode in (0o644, 0o444) and mode in (0o644, 0o444), "unknown_stage_content")
-                expected_ca = _read(source_ca, identity.uid, 1024 * 1024, source_mode)
-                _require(_sha(expected_ca) == _DESCRIPTOR["ca_sha256"] and expected_ca.startswith(_read(ca, identity.uid, len(expected_ca), mode)), "unknown_stage_content")
-            receipt = work / "receipt.json"
-            if receipt.exists() or receipt.is_symlink():
-                expected_receipt = _canonical({"schema_version": 1, "binding": _binding(identity), "request_id": value["request_id"], "state": "ready"})
-                mode = stat.S_IMODE(receipt.lstat().st_mode)
-                _require(mode in (0o600, 0o444) and expected_receipt.startswith(_read(receipt, identity.uid, mode=mode)), "unknown_stage_content")
-        # Lock acquisition proves no surviving admitted descendant owns the stage.
-        # Only exact inode-bound known content was admitted above; no generic reset.
-        if work.exists():
-            # All names, inodes, bytes and modes were admitted above. Restore
-            # directory write permission only in this owned disposable stage.
-            for directory, directories, files in os.walk(work, followlinks=False):
-                os.chmod(directory, 0o700 if Path(directory) == work else 0o755, follow_symlinks=False)
-            # Keep the running interpreter until all other work is removed.
-            # Interruption during its final removal still requires preservation.
-            for path in work.iterdir():
-                if path.name != "python":
-                    shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
-            if (work / "python").exists():
-                shutil.rmtree(work / "python")
-            work.rmdir()
-        for path in stage.iterdir():
-            path.unlink()
-        stage.rmdir(); (base / "attempt.json").unlink(); _sync(base)
-        return {"state": "discarded", "request_id": value["request_id"], "installed_profile_unchanged": True}
-    finally:
-        os.close(lock)
-
-
-def main():
-    global _INHERITED_LOCK_FD
-    try:
-        _require(len(sys.argv) in (3, 4), "invalid_request")
-        operation = sys.argv[1]; raw = sys.argv[2].encode("ascii")
-        _require(len(raw) <= 2048, "invalid_request")
-        value = json.loads(raw, object_pairs_hook=_unique)
-        validate_request(operation, value)
-        _require(raw == _canonical(value), "invalid_request")
-        if operation != "status":
-            _INHERITED_LOCK_FD = 9
-        result = status(value) if operation == "status" else discard(value) if operation == "discard" else prepare(value, bootstrap=len(sys.argv) == 4 and sys.argv[3] == "bootstrap")
-        sys.stdout.write(_canonical({"schema_version": 1, "result": result}).decode("ascii") + "\n")
-        return 0
-    except Exception as exc:
-        code = exc.code if isinstance(exc, RuntimeRefusal) else "runtime_unavailable"
-        sys.stdout.write(_canonical({"schema_version": 1, "state": "unavailable", "code": code}).decode("ascii") + "\n")
-        return 6
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# END DARWIN RUNTIME ADMISSION
 # END CANONICAL DARWIN RUNTIME PYTHON
 '''
 
