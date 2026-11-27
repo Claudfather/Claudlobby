@@ -49,11 +49,11 @@ def local(tmp_path, monkeypatch):
 
 
 def proposed(local):
-    access, workspace, owner, _clock = local
+    _access, workspace, owner, _clock = local
     challenge = workspace.begin(OWNER, issuer=ISSUER, operational_origin=ORIGIN)
-    # Issued by the computer's own clock after the challenge exists, as a real website signs:
+    # Issued by the clock `stage` checks, after the challenge exists, as a real website signs:
     # a time read before `begin` can fall a second behind the challenge on a real clock.
-    issued = int(access._now())
+    issued = int(workspace.access._now())
     attestation = WorkspaceAttestation(ISSUER, USER, WORKSPACE, owner.host_uid,
                                       challenge.nonce, ORIGIN, issued, issued + 120, JTI)
     return workspace.stage(attestation, OWNER)
