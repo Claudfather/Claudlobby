@@ -840,3 +840,32 @@ test('bot-written text in the connected view is drawn as plain text: rooms, chec
   for (const name of fields) assert.ok(text.includes(`${HOSTILE}·${name}`), `${name} is visible as its literal text`);
   for (const name of attributes) assert.ok(hostile.includes(`title="${panel.esc(`${HOSTILE}·${name}`)}"`), `${name} is an escaped title`);
 });
+
+test('delivery status distinguishes an unsuccessful send from an unconfirmed one', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  const assignee = {assignee_short:'worker', expected_by:'2026-01-01T00:00:00Z'};
+  const row = {task_id:wi, fleet:'example', title:'Review the checklist', current_assignment:assignee,
+    state:'assigned', resolved:true, attention:true, attention_since:'2026-01-02T00:00:00Z'};
+  for (const [reason, label, command] of [
+    ['send_failed', 'The assignment could not be sent', 'task withdraw'],
+    ['never_activated', 'Assignment delivery is unconfirmed', 'task reassign'],
+  ]) {
+    for (const reasons of [[reason], ['escalated', reason, 'overdue']]) {
+      board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:reasons}], issue_count:0, truncated:false}});
+      const card = nodes.attention.innerHTML;
+      const details = card.match(/<details class="task-record">([\s\S]*?)<\/details>/)[1];
+      const shown = card.replace(/<details[\s\S]*?<\/details>/g, '');
+      assert.ok(shown.includes(label + ' —'));
+      assert.ok(shown.includes('Open the task to check its recorded delivery status.'));
+      assert.doesNotMatch(shown, /claudlobby --|never delivered/);
+      assert.ok(details.includes('claudlobby --json ' + command));
+      assert.equal(details.includes('assignment reschedule'), reasons.includes('overdue'));
+    }
+  }
+});
