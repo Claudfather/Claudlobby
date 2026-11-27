@@ -24,8 +24,8 @@ Workers wait for a canonical assignment and perform only the explicitly assigned
 task; they do not admit work from human chat or the startup goal. Read `/fleet-ops`
 for the canonical context. For implementation and review, report intermediate
 assignment progress. Keep the same task through both phases, and only the lead
-completes it after accepting independent review. Put the short reviewed
-answer in the task’s completion summary and reply to the original human message
+completes it after accepting independent review. The lead puts the short reviewed
+answer in the task’s completion summary and replies to the original human message
 with that answer. A local scope description is not permission to begin work.
 
 Use the existing project conventions when an approved assignment arrives. Ask the
