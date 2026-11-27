@@ -32,6 +32,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+case "$KEEP" in
+    ''|*[!0-9]*)
+        echo "log-rotate.sh: --keep takes a whole number of lines, got '$KEEP'" >&2
+        exit 2
+        ;;
+esac
+
 if [ "${#LOGS[@]}" -eq 0 ]; then
     echo "log-rotate.sh: no log paths given" >&2
     exit 2
@@ -39,14 +46,15 @@ fi
 
 for log in "${LOGS[@]}"; do
     [ -f "$log" ] || continue
-    # Count lines as tail does: awk counts a last line that has no newline,
-    # and wc -l does not. A file that cannot be read is skipped.
-    lines=$(awk 'END { print NR }' "$log" 2>/dev/null || true)
+    # Count at most KEEP + 1 lines from the end, as tail counts them: awk
+    # counts a last line that has no newline, and wc -l does not. A file
+    # that cannot be read is skipped.
+    lines=$(tail -n "$((10#$KEEP + 1))" "$log" | awk 'END { print NR }' || true)
     case "$lines" in ''|*[!0-9]*) continue ;; esac
     [ "$lines" -gt "$KEEP" ] || continue
     # The temp is a mktemp file (0600) and the rename puts it in the log's
     # place, so it takes the log's mode first.
-    mode=$(stat_mode "$log" 2>/dev/null || true)
+    mode=$(stat_mode "$log" || true)
     [ -n "$mode" ] || continue
     tmp=$(safe_mktemp)
     tail -n "$KEEP" "$log" > "$tmp" || continue

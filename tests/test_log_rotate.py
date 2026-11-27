@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from tests.conftest import _scrubbed_env
+from tests.conftest import constructed_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROTATE = os.path.join(REPO_ROOT, "claudlobby", "_runtime_scripts", "log-rotate.sh")
@@ -18,7 +18,7 @@ OLD = 1_600_000_000
 def _run(tmp_path, *paths, keep=500):
     return subprocess.run(
         ["bash", ROTATE, "--keep", str(keep), *map(str, paths)],
-        env=_scrubbed_env(CLAUDLOBBY_ROOT=str(tmp_path / "root")),
+        env=constructed_env(CLAUDLOBBY_ROOT=tmp_path / "root"),
         capture_output=True,
         text=True,
         timeout=60,
@@ -64,3 +64,10 @@ def test_a_last_line_without_a_newline_counts_toward_the_cap(tmp_path):
     r = _run(tmp_path, log)
     assert r.returncode == 0, r.stderr + r.stdout
     assert log.read_text() == "".join(f"line {i}\n" for i in range(2, 501)) + "partial"
+
+
+def test_a_keep_that_is_not_a_whole_number_is_refused(tmp_path):
+    log = _log(tmp_path / "app.log", 600, 0o644)
+    r = _run(tmp_path, log, keep="5x")
+    assert r.returncode == 2 and "--keep" in r.stderr, r.stderr
+    assert log.read_text().count("\n") == 600
