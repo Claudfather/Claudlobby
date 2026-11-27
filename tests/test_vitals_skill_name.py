@@ -45,9 +45,10 @@ def _run(root: Path, payload: dict, scratch_plane_env, *, trace=False):
     if trace:
         # Each traced command names its file and function stack. PS4 is set in
         # a BASH_ENV file, not the environment: bash ignores an inherited PS4
-        # when it runs as root.
+        # when it runs as root. The stack reads with an empty default: under the
+        # hook's set -u, bash 3.2 stops at an unset FUNCNAME at the top level.
         ps4 = root / "ps4.sh"
-        ps4.write_text("PS4='+XTRACE ${BASH_SOURCE[0]##*/}|${FUNCNAME[*]}| '\n")
+        ps4.write_text("PS4='+XTRACE ${BASH_SOURCE[0]##*/}|${FUNCNAME[*]:-}| '\n")
         env["BASH_ENV"] = str(ps4)
         argv = ["bash", "-x", str(libdir / "bot-vitals.sh")]
     # errors="replace": the rig sets no locale, so bash -x quotes the hook's
