@@ -1215,6 +1215,27 @@ const drawerOf=panel=>panel.children.find(n=>n.tagName==='DETAILS');
 const aboveLaunch=(panel,text)=>{const order=launchBodyOf(panel).children;
   const row=order.findIndex(n=>descendants(n).some(c=>c.tagName==='BUTTON'&&c.textContent==='Launch team'));
   const at=order.findIndex(n=>n.textContent===text&&visible(n));return at>=0&&at<row;};
+test('a prepared goal that replaces a different draft is explained before Launch',async()=>{
+  const keptGoal='Prepare a welcome checklist';
+  const warning='Your computer already prepared this goal. The goal you entered here was not saved.';
+  for (const draft of ['Review the checkout button',keptGoal,'']) {
+    const h=setupHarness(),ui=dom(),panel=new ui.Element();
+    h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');
+    h.api.setGoal(draft);
+    Object.assign(h.context,{preview_state:'ready',request:{...h.pending},preview:{...h.preview,goal:keptGoal}});
+    for (let read=0;read<2;read++) {
+      assert.ok(await h.api.run('context'));
+      assert.equal(h.api.snapshot().goal,keptGoal);
+      const changed=!!draft && draft!==keptGoal;
+      assert.equal(aboveLaunch(panel,warning),changed);
+      assert.equal(aboveLaunch(panel,keptGoal),changed);
+    }
+    assert.ok(h.calls.every(call=>!['preview','launch'].includes(call[0])));
+    assert.ok([...h.saved.values()].every(value=>!value.includes('Review the checkout button')));
+    h.api.dispose();
+  }
+});
 test('a ready Preview says the team is ready to launch and, above Launch team, who Launch starts; the counts sit under Technical details',async()=>{
   const h=setupHarness(),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');h.api.setGoal('Improve checkout tests');await h.api.run('preview');
