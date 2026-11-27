@@ -1,3 +1,3 @@
-### Fixed — an open team preview shows when its launch window ends
+### Fixed — setup controls update when approval or preview expires
 
-The Launch button disables and an expiry notice appears when the preview reaches its ten-minute deadline. Returning to a suspended tab also refreshes its status.
+An idle setup page updates when the approval or preview expires. When a preview expires, Launch team is disabled and the page directs you to inspect the prepared update on the computer. Returning to a suspended tab refreshes the displayed status.

@@ -1037,7 +1037,7 @@ function previewHarness({answers,preview=timedOut,previewSent}={}) {
       return {...h.context,...answer(h)};},
       async setupPreview(input){h.calls.push(['preview',input]);previewSent?.(h);throw preview();}}});
   signedIn(h);h.api.mountPanel({document:ui.document,element:panel});
-  const live=()=>timers.filter(t=>t.live);
+  const live=()=>timers.filter(t=>t.live && t.ms===5000);
   return {h,panel,timers,clock,live,
     async start(){await h.api.run('context');h.api.setGoal('Improve tests');assert.equal(await h.api.run('preview'),false);await flush();},
     async tick(){const t=live()[0];assert.ok(t,'a check is scheduled');t.live=false;await t.fn();await flush();}};
@@ -1059,7 +1059,7 @@ test('a timed-out Preview the computer is still preparing is checked again by it
   assert.equal(h.api.snapshot().note,READY_BANNER);
   assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
   assert.deepEqual(doneSteps(panel),['done','done']);
-  assert.deepEqual(p.live().map(timer=>timer.ms),[(h.preview.expires_at-p.clock.t)*1000],
+  assert.deepEqual(p.timers.filter(timer=>timer.live).map(timer=>timer.ms),[(h.preview.expires_at-p.clock.t)*1000],
     'only the local expiry repaint remains once the preview is ready');
   await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
   assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);h.api.dispose();
@@ -1129,6 +1129,20 @@ test('an approval that ends with no read in between replaces a note offering Che
   p.clock.t=h.context.expires_at;h.api.showConnect({operation:'check'});
   assert.equal(h.api.snapshot().note,'Setup approval on your computer has ended, so this page cannot go on with this setup.');
   assert.equal(offered(panel,'Check preview'),false);h.api.dispose();
+});
+test('a preparing preview makes no further automatic check once approval expires',async()=>{
+  const p=previewHarness({answers:[said.preparing]}),{h,panel}=p;
+  try {
+    await p.start();
+    assert.equal(p.live().length,1);
+    const before=h.calls.length;
+    p.clock.t=h.context.expires_at;
+    await p.tick();
+    assert.equal(h.calls.length,before);
+    assert.equal(p.live().length,0);
+    assert.equal(offered(panel,'Check setup approval'),true);
+    assert.match(h.api.snapshot().note,/approval on your computer has ended/);
+  } finally {h.api.dispose();}
 });
 test('a refused check and an ended approval say this page cannot go on, and invite no retry',async()=>{
   for (const [answer,note] of [[fail(refused()),'Your computer refused this setup, so this page cannot go on with it.'],
@@ -1262,6 +1276,34 @@ test('Bots already running here restart briefly shows above Launch team only whe
   await kept.api.run('context');
   assert.equal(kept.api.snapshot().note,READY_BANNER);assert.ok(aboveLaunch(panel,OTHERS_RESTART));kept.api.dispose();
 });
+test('an idle approval stops offering Preview at its deadline without checking the computer',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const h=setupHarness({setupOptions:{now:()=>Date.now()/1000}});
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  try {
+    await h.api.run('context');h.api.setGoal('Improve tests');
+    t.mock.timers.tick(3599999);
+    assert.equal(offered(panel,'Preview team'),true);
+    t.mock.timers.tick(1);
+    assert.equal(offered(panel,'Preview team'),false);
+    assert.equal(offered(panel,'Check setup approval'),true);
+    assert.deepEqual(h.calls,[['context']]);
+  } finally { h.api.dispose(); }
+});
+test('returning to a suspended approval stops offering Preview before its timer can run',async()=>{
+  let time=1800000000;
+  const h=setupHarness({setupOptions:{now:()=>time,setTimeout:()=>1,clearTimeout:()=>{}}});
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  try {
+    await h.api.run('context');h.api.setGoal('Improve tests');
+    assert.equal(offered(panel,'Preview team'),true);
+    time=h.context.expires_at;
+    h.api.resumeHandoff();
+    assert.equal(offered(panel,'Preview team'),false);
+    assert.equal(offered(panel,'Check setup approval'),true);
+    assert.deepEqual(h.calls,[['context']]);
+  } finally { h.api.dispose(); }
+});
 test('an idle panel stops offering Launch at the preview deadline without checking the computer',async t=>{
   t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
   const h=setupHarness({setupOptions:{now:()=>Date.now()/1000}});
@@ -1305,9 +1347,9 @@ test('the ready banner goes once the Preview runs out, where Launch team says it
 test('returning to a suspended preview repaints immediately and closing the panel clears the deadline',async()=>{
   for(const leave of ['return','dispose']){
     let time=1800000000;
-    const timers=new Set();
+    const timers=new Map();
     const h=setupHarness({setupOptions:{now:()=>time,
-      setTimeout(fn){timers.add(fn);return fn;},clearTimeout(fn){timers.delete(fn);}}});
+      setTimeout(fn,ms){timers.set(fn,ms);return fn;},clearTimeout(fn){timers.delete(fn);}}});
     const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
     await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
     assert.equal(timers.size,1);
@@ -1315,7 +1357,7 @@ test('returning to a suspended preview repaints immediately and closing the pane
       time=h.preview.expires_at+60; // The background tab has not delivered its timer.
       h.api.resumeHandoff();
       assert.equal(buttonOf(panel,'Launch team').disabled,true);
-      assert.equal(timers.size,0);
+      assert.deepEqual([...timers.values()],[(h.context.expires_at-time)*1000]);
     }
     h.api.dispose();
     assert.equal(timers.size,0);
@@ -1612,6 +1654,7 @@ test('Claude code goes only to the selected host and never enters retained UI st
   assert.ok(!JSON.stringify([...h.saved]).includes(code));h.api.dispose();
 });
 
+const liveSigninPolls=timers=>timers.filter(timer=>timer.live && [2000,25000].includes(timer.ms));
 const authorizeURL='https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference';
 function pollHarness(statuses,options={}) {
   const timers=[],calls=[],clock={t:1800000000}; let active=0,overlap=0;
@@ -1627,7 +1670,7 @@ function pollHarness(statuses,options={}) {
     }}});
   h.context.provider_signin=true;h.api.mountPanel({document:ui.document,element:panel});
   const link=descendants(panel).find(n=>n.tagName==='A'),code=descendants(panel).find(n=>n.dataset.field==='signin-code');
-  const live=()=>timers.filter(t=>t.live);
+  const live=()=>liveSigninPolls(timers);
   const fire=async()=>{const t=live()[0];assert.ok(t,'a poll is scheduled');t.live=false;t.fn();await flush();};
   return {h,panel,calls,clock,link,code,live,fire,timers,get overlap(){return overlap;}};
 }
@@ -1676,6 +1719,44 @@ test('expiry, context loss and disposal stop the poll and clear link and code',a
     assert.ok(p.h.saved.has('test:claude'),'the original attempt is retained');
     if(loss!=='dispose')p.h.api.dispose();
   }
+});
+test('an expired setup approval sends neither a new Claude attempt nor a pasted code before repaint',async()=>{
+  for(const operation of ['begin','code']) {
+    const p=pollHarness(['waiting','connected']);
+    try {
+      await p.h.api.run('context');
+      if(operation==='code') {
+        await p.h.api.run('signin-begin');
+        await p.fire();
+        p.code.value='example-code';
+      }
+      const calls=p.calls.length,attempt=p.h.saved.get('test:claude');
+      p.clock.t=p.h.context.expires_at;
+      assert.equal(await p.h.api.run('signin-'+operation),false,operation);
+      assert.equal(p.calls.length,calls,operation);
+      assert.equal(p.h.saved.get('test:claude'),attempt,operation);
+      assert.equal(p.code.value,'');
+    } finally {p.h.api.dispose();}
+  }
+});
+test('approval expiry clears the Claude link and code while a status read is in flight',async()=>{
+  const gate=deferred(),p=pollHarness(['waiting',gate.promise]);
+  let check;
+  try {
+    await p.h.api.run('context');await p.h.api.run('signin-begin');await p.fire();
+    p.code.value='pending-code';
+    check=p.h.api.run('signin-status',{quiet:true});
+    assert.equal(p.calls.at(-1)[0],'status');
+    p.clock.t=p.h.context.expires_at;
+    const deadline=p.timers.find(timer=>timer.live && timer.ms===3600000);
+    assert.ok(deadline,'an in-flight read leaves the deadline armed');
+    deadline.fn();
+    assert.equal(p.link.hidden,true);
+    assert.equal(p.code.value,'');
+    gate.resolve('waiting');await check;
+    assert.equal(p.link.hidden,true,'a late result cannot bring the link back');
+    assert.equal(p.live().length,0);
+  } finally {gate.resolve('waiting');await check;p.h.api.dispose();}
 });
 test('Preview and Launch wait for an open provider sign-in; setups without one are unchanged',async()=>{
   const p=pollHarness(['connected']);p.h.api.setGoal('Ship it');
@@ -1959,14 +2040,14 @@ test('Try again appears for an ending the host marks retryable and starts one fr
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');
   const status=stepPart(panel,'signin','setup-signin-status'),button=text=>descendants(panel).find(n=>n.tagName==='BUTTON'&&n.textContent===text);
-  const retry=button('Try again'),live=()=>timers.filter(t=>t.live);
+  const retry=button('Try again'),live=()=>liveSigninPolls(timers);
   assert.equal(status.textContent,'The sign-in took too long. Choose Try again for a new sign-in link.');
   assert.equal(status.dataset.tone,'attention');
   assert.equal(visible(retry),true);assert.equal(retry.disabled,false);
   assert.deepEqual(filledIn(stepsOf(panel)[1]),['Try again'],'Try again is the one filled action');
   assert.equal(visible(button('Sign in to Claude')),false);assert.equal(visible(button('Cancel sign-in')),false);
   assert.equal(visible(button('Check sign-in progress')),false,'the host already said this attempt may be replaced: nothing to check');
-  // Nothing starts on its own: no timer, no begin from a resume, a re-check or the first-attempt door.
+  // Nothing starts on its own: no polling or begin from a resume, a re-check or the first-attempt door.
   h.api.resumeHandoff();await h.api.run('context');
   assert.equal(await h.api.run('signin-begin'),false);
   assert.equal(live().length,0);assert.deepEqual(calls,[]);
@@ -2242,7 +2323,7 @@ test('while this page is hidden, a live sign-in keeps a slow read-only check so 
   h.context.provider_signin=true;
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');
-  const live=()=>timers.filter(t=>t.live),actions=[];
+  const live=()=>liveSigninPolls(timers),actions=[];
   reply=(action,body)=>{actions.push(action);return {...body,state:'waiting',reason:null,url:authorizeURL};};
   await h.api.run('signin-begin');
   assert.deepEqual(live().map(t=>t.ms),[2000]);
@@ -2267,7 +2348,7 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
   h.context.provider_signin=true;
   const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
   await h.api.run('context');
-  const status=stepPart(panel,'signin','setup-signin-status'),live=()=>timers.filter(t=>t.live);
+  const status=stepPart(panel,'signin','setup-signin-status'),live=()=>liveSigninPolls(timers);
   const local=seconds=>new Date(seconds*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
   const ASK='Open Claude sign-in, then paste the code here.',by=time=>`Open Claude sign-in, then paste the code here by ${time}.`;
   const minute=1800000000-1800000000%60,deadline=minute+59; // 59 seconds into its minute
@@ -2276,7 +2357,8 @@ test('the sign-in link shows the host\'s own deadline in local time, as text, wi
   assert.equal(status.textContent,by(local(minute)),'the minute it falls in, never rounded up');
   assert.match(local(minute),/\d:\d\d/);assert.notEqual(status.dataset.tone,'attention');
   assert.deepEqual(filledIn(stepsOf(panel)[1]),['Open Claude sign-in']);
-  assert.equal(live().length,1,'only the ordinary status check is scheduled');
+  assert.deepEqual(timers.filter(t=>t.live).map(t=>t.ms).sort((a,b)=>a-b),[2000,3600000],
+    'the provider deadline adds no timer beside the status check and setup approval repaint');
   // Each answer replaces it: a link without expires_at shows no time, a later one shows the host's.
   reply=body=>({...body,state:'waiting',reason:null,url:authorizeURL});
   let t=live()[0];t.live=false;t.fn();await flush();
