@@ -700,47 +700,53 @@ reads. Every ordinary read/action still requires the bound recorder and its
 existing explicit action grants.
 
 An operator can explicitly approve **one** first-team setup with local
-`host owner allow-setup` (see its maintained help). Approval fixes the shipped
-`revenue-web-app` template, target fleet, repository, sealed release and native
-install directory, and pins the current owner/workspace binding. It lasts at most
+`host owner allow-setup` (see its maintained help). Approval binds the target
+fleet, managed source revision and native install directory to the current owner
+and workspace. The `revenue-web-app` template takes a repository. The
+`local-project` template takes a local project directory. Approval lasts at most
 24 hours. It authorizes the connected browser to author a goal, preview the
 canonical configuration plan, and explicitly launch that exact plan through the
 foreground owner server. Workspace approval alone grants none of this. Setup
 status and withdrawal use the local owner CLI. Expired/stale approvals require a
 new explicit approval; withdrawal never undoes already-started work. Browser
 receipt/session recovery is bounded by the same grant's expiry/revocation and
-current owner/workspace binding; it is not permanent journal authority. On expiry
-keep the original request UUID and plan ID. Locally inspect `host status --json`
-and `config diff PLAN_ID`; the retained exact journal is
-`ROOT/state/activations/REQUEST_UUID/activation.json` (read only), decoded/verified
-by `claudlobby.activation_state.read_activation(ROOT, REQUEST_UUID)`. A new
-approval does not authorize the browser to inspect the previous generation's
-journal. No receipt should be inferred from a new empty grant.
+current owner/workspace binding. After the grant expires, use the stable CLI
+and data root from installation to inspect the update on the computer.
 
-The finite connected setup routes are POST `context`, `preview`, `launch` and
+```sh
+"$CLI" --root "$DATA" host update status --json
+```
+
+Match the update's `request_id`, `config_fingerprint` and `target` to the
+prepared request, configuration fingerprint and source revision before reading
+its `phase`. A missing or different record leaves the original outcome unknown.
+A new approval only grants browser access to its own generation.
+
+The preview and launch flow uses POST `context`, `preview`, `launch` and
 `receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
 header-only session and private/no-store boundary. Optional setup tables are
 created only by local approval. Preview rejects other fleets and target overlay
 or project declarations; the whole-host plan must contain exactly the approved
-first fleet. The canonical plan identity, sealed release and input/output
-freshness checks remain unchanged. The preview expires after ten minutes, never
-later than its approval. No browser field selects the install directory.
+first fleet. Launch checks the rendered plan's inputs before reserving the
+update. The preview expires after ten minutes or when its approval expires,
+whichever comes first. No browser field selects the install directory.
 Launch restarts every bot its plan names in `effects.restart_bots`
 (`<fleet>/<bot>`), so the view's "Bots already running here restart briefly."
 shows above Launch team only when that list names a bot outside the approved
 fleet, or is not a list of names. Under the boundary above a first-team Preview
 names none, so the line does not show today.
 
-The browser saves the original UUID before one launch request. The authority
-store reserves that UUID/plan before canonical activation begins. Lost responses
-and receipt reloads inspect only that original journal. A canonical context
-request supersedes a conflicting saved tab request, retaining both identifiers
+The browser saves the approval generation, request ID, configuration fingerprint
+and source revision before launch. The owner service reserves the request ID and
+fingerprint before dispatch. After a lost response, the receipt reads the original
+managed update record. A canonical context request supersedes a conflicting
+saved tab request, retaining both identifiers
 for inspection. An explicit new generation clears stale blocking pending state;
 a same-generation null request never licenses retry. Compatible local reapproval
 retains content-checked ownership of its prior declaration, not authority to
 launch an expired preview; unrelated authored declarations cannot be overwritten.
-Receipts never replan, resume or resend activation. A reservation without a journal is **unknown**, requiring
-local operator investigation or a new explicit grant, not automatic gap filling.
+Receipts never replan, resume or resend activation. A reservation without an
+update record has an **unknown** outcome and requires local operator investigation.
 Current installation identity, private owner/workspace/session and the exact
 retained grant allow this receipt recovery even if partial activation left an
 unbound recorder. This grants no Plane-data read capability. New previews and
