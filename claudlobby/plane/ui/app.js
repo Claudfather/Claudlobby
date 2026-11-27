@@ -738,20 +738,39 @@ function paintTaskFilters(rows, available) {
 }
 function renderTasks(env) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
+  const rails = [attEl, taskEl];
+  const recordKey = button => JSON.stringify([button.dataset.taskFleet || "", button.dataset.taskOpen]);
+  const expanded = new Set();
+  const sameBoard = taskSnapshot && env?.state === "ok";
+  if (sameBoard) {
+    for (const rail of rails) {
+      for (const record of rail.querySelectorAll?.(".task-record[open]") || []) {
+        const button = record.parentElement?.querySelector("[data-task-open]");
+        if (button) expanded.add(recordKey(button));
+      }
+    }
+  }
   taskSnapshot = env?.state === "ok" ? env : null;
   paintTaskHistory(env);
   paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
   const focused = document.activeElement;
-  const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
-  const identity = focusedRail && focused?.dataset?.taskOpen
-    ? {id:focused.dataset.taskOpen, fleet:focused.dataset.taskFleet || ""} : null;
-  const restoreFocus = () => {
+  const focusedRail = rails.find(el => el.contains?.(focused));
+  const summaryFocused = focusedRail && focused?.matches?.(".task-record > summary");
+  const origin = summaryFocused ? focused.closest(".card")?.querySelector("[data-task-open]") : focused;
+  const identity = focusedRail && origin?.dataset?.taskOpen ? recordKey(origin) : null;
+  const restoreBoard = () => {
+    if (!identity && !expanded.size) return;
+    const buttons = rails.flatMap(el => [...el.querySelectorAll("[data-task-open]")]);
+    if (expanded.size) {
+      for (const button of buttons) {
+        if (expanded.has(recordKey(button))) button.parentElement.querySelector(".task-record").open = true;
+      }
+    }
     if (!identity) return; // A board refresh never takes focus from elsewhere.
     const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
-    const replacement = [attEl, taskEl].flatMap(el => [...el.querySelectorAll("[data-task-open]")])
-      .find(button => button.dataset.taskOpen === identity.id
-        && (button.dataset.taskFleet || "") === identity.fleet && available(button));
-    const destination = replacement || [focusedRail, attEl, taskEl].find(available);
+    const button = buttons.find(button => recordKey(button) === identity && available(button));
+    const replacement = summaryFocused ? sameBoard && button?.parentElement.querySelector(".task-record > summary") : button;
+    const destination = replacement || [focusedRail, ...rails].find(available);
     if (!destination) return;
     if (!replacement) destination.tabIndex = -1;
     destination.focus();
@@ -762,7 +781,7 @@ function renderTasks(env) {
                   { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
     renderState(attEl, env, { idleWhenEmpty: () => true });
     badge.hidden = true;
-    restoreFocus();
+    restoreBoard();
     return;
   }
   const rows = env.data.tasks;
@@ -825,7 +844,7 @@ function renderTasks(env) {
     : stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no tasks need attention in readable sources" : "no tasks need attention" }));
   taskEl.innerHTML = visible.filter((r) => !r.attention).map(card).join("")
     || stateBlock("idle", null, null, { label: filtered ? "no matching recorded tasks in this section" : partial ? "no other tasks in readable sources" : "no other tasks" });
-  restoreFocus();
+  restoreBoard();
 }
 
 function railRow(a) {

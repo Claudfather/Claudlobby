@@ -701,39 +701,69 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
-for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal',
+    'record-open', 'record-lane', 'record-closed', 'record-peer', 'record-reset', 'record-unavailable', 'record-elsewhere'])
 test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const watchRecord = change.startsWith('record');
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
   const body = {}; document.activeElement = body;
   const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
     children:[], hidden:false, isConnected:true,
-    contains(node) { return this.children.includes(node); },
+    contains(node) { return this.children.some(button => button === node || button.summary === node); },
     closest() { return this.hidden ? this : null; },
     focus() { if (!this.hidden) document.activeElement=this; },
-    querySelectorAll() { return this.children; },
+    querySelectorAll(selector) {
+      return selector === '.task-record[open]' ? this.children.map(button => button.record).filter(record => record.open) : this.children;
+    },
     set innerHTML(value) {
-      for (const child of this.children) { child.isConnected=false; if (document.activeElement===child) document.activeElement=body; }
-      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => ({
-        dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
-        closest:() => this.hidden ? this : null,
-        focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
-      }));
+      for (const button of this.children) {
+        button.isConnected = false;
+        if (document.activeElement === button || document.activeElement === button.summary) document.activeElement = body;
+      }
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => {
+        const card = {querySelector: selector => selector === '[data-task-open]' ? button
+          : selector === '.task-record' ? button.record : button.summary};
+        const button = {
+          dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
+          closest:() => this.hidden ? this : null, parentElement:card,
+          focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
+          record:{open:false, parentElement:card},
+          summary:{
+            matches:selector => selector === '.task-record > summary',
+            closest:selector => selector === '.card' ? card : null,
+            focus() { document.activeElement=this; },
+          },
+        };
+        return button;
+      });
       if (change==='disabled') for (const child of this.children) child.disabled=true;
     },
   }]));
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`,{...panel,document});
+  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks,resetTaskFilters})`,{...panel,document});
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));
   const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
+  if (watchRecord) { original.record.open = change !== 'record-closed'; original.summary.focus(); }
   const outside={id:change==='modal'?'task-detail-close':'work-body'};
-  if (['elsewhere','modal'].includes(change)) document.activeElement=outside;
+  if (['elsewhere','modal','record-elsewhere'].includes(change)) document.activeElement=outside;
+  if (change === 'record-reset') board.resetTaskFilters();
   if (change==='hidden') nodes.tasks.hidden=true;
   const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
-  board.renderTasks(change==='unavailable'?{state:'unavailable'}:env(['removed','source'].includes(change)?[peer]
-    : [peer,{...row,attention:change==='lane'}]));
+  board.renderTasks(['unavailable','record-unavailable'].includes(change)?{state:'unavailable'}:env(['removed','source','record-peer'].includes(change)?[peer]
+    : [peer,{...row,attention:['lane','record-lane'].includes(change)}]));
+  if (watchRecord) {
+    const buttons = [...nodes.attention.children, ...nodes.tasks.children];
+    const matching = buttons.find(button => button.dataset.taskFleet === row.fleet);
+    const other = buttons.find(button => button.dataset.taskFleet === peer.fleet);
+    if (other) assert.equal(other.record.open,false);
+    if (matching) assert.equal(matching.record.open,!['record-closed','record-reset'].includes(change));
+    const expected = change === 'record-elsewhere' ? outside : ['record-peer','record-reset','record-unavailable'].includes(change) ? nodes.tasks : matching.summary;
+    assert.equal(document.activeElement,expected);
+    return;
+  }
   if (['elsewhere','modal'].includes(change)) assert.equal(document.activeElement,outside);
   else if (['removed','source','unavailable','disabled'].includes(change)) {
     assert.equal(document.activeElement,nodes.tasks); assert.equal(nodes.tasks.tabIndex,-1);
