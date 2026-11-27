@@ -273,6 +273,25 @@ def main(argv):
     assert began and int(began.group(1)) >= startup, outcome.stdout + outcome.stderr
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the stamp reads its start from /proc")
+def test_the_stamp_names_when_its_process_started_not_when_it_stamped():
+    """The native unit entry stamps its process's start, which the service manager set
+    when it started the unit's command, not the moment the entry reached the stamp. A
+    process that stamps 2 s after it started still names its start, to within the
+    kernel's clock tick and a scheduling delay."""
+    late = 2
+    code = ("import sys, time; time.sleep(float(sys.argv[2])); sys.path.insert(0, sys.argv[1]); "
+            "from claudlobby.installation import _unit_started; print(_unit_started())")
+    before = time.monotonic()
+    child = subprocess.Popen([sys.executable, "-I", "-c", code, str(REPO), str(late)],
+                             stdout=subprocess.PIPE, text=True)
+    spawned = time.monotonic()
+    stdout, _ = child.communicate(timeout=60)
+    pid, started = stdout.split()
+    assert int(pid) == child.pid, stdout
+    assert before - 0.5 < float(started) < spawned + 0.5, (before, stdout, spawned)
+
+
 @pytest.fixture
 def native_shell(native):
     import shutil

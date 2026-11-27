@@ -56,9 +56,8 @@ def test_the_units_limit_keeps_every_run_inside_the_sealed_bound():
     assert fleet_pulse.UNIT_MARGIN_S == (
         fleet_pulse.TERM_GRACE_S + fleet_pulse.REAP_WAIT_S + fleet_pulse.EXIT_S
     )
-    assert (
-        fleet_pulse.EXIT_S > 8
-    )  # capped runs' exits took up to 8 s after the stop line
+    # EXIT_S leaves room for the main process's exit after the stop line.
+    assert fleet_pulse.EXIT_S > 8
     assert limit + 4 * fleet_pulse.UNIT_STOP_S + 5 * 0.25 <= 260
     assert fleet_pulse.unit_time_limit(600) == 600 + fleet_pulse.UNIT_MARGIN_S
     assert fleet_pulse.unit_time_limit(5) == 30 + fleet_pulse.UNIT_MARGIN_S

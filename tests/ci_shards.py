@@ -58,8 +58,9 @@ SKIP_CEILINGS = {
     # #3112: its test of a list read that runs out of memory needs an
     # address-space limit (RLIMIT_AS), which macOS does not enforce.
     # 147 from #3038: tests/test_timer_phase.py reads the reload's copies with
-    # systemd-analyze, which macOS does not have.
-    "supported (macos-latest, py3.11)": 147,
+    # systemd-analyze, which macOS does not have. 148 from #3149: a test in
+    # tests/test_git_native_entry.py reads a process's start from /proc.
+    "supported (macos-latest, py3.11)": 148,
 }
 
 # pytest's count line after a --collect-only listing: "9997/10002 tests
