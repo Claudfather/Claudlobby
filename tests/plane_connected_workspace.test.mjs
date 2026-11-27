@@ -2831,6 +2831,29 @@ test('an offer admitted after the account check collapses the list onto its comp
   assert.equal(lost.status().textContent,'This page could not reach your computer. Reopen setup from your workspace.');
   assert.equal(lost.panel(),undefined);assert.deepEqual(lost.mutations(),[]);
 });
+test('after a refused connection the offered action requests a new session only when chosen',async t=>{
+  const l=landing(t);
+  await l.workspace.checkAccount();await flush();
+  const issue=landingRefs[0].endpoint_origin+'/api/owner/connected/issue';
+  const requests=()=>l.h.calls.filter(call=>call.url===issue).length;
+  l.h.overrides.set(issue,()=>reply(403,{state:'denied'}));
+  const panel=l.panel();
+  buttonOf(panel,'Connect').click();await flush();
+
+  assert.equal(requests(),1);
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[['Connect']]);
+  assert.ok(offered(panel,'Connect'));
+  const detail=l.cards()[0].children[2].textContent;
+  assert.match(detail,/workspace is approved/);
+  assert.ok(l.shownText().includes(detail));
+  l.h.overrides.set(issue,setupOnlyIssue);
+  l.h.ui.listeners.get('input')({isTrusted:true});await flush();
+  assert.equal(requests(),1);
+  buttonOf(panel,'Connect').click();await flush();
+  assert.equal(requests(),2);
+  assert.equal(l.workspace.snapshot().computers[0].state,'setup_only');
+});
+
 test('native workspace keeps every saved computer and its setup panel exactly as before',async t=>{
   const attention=[],l=landing(t,{browser:false,attention});await l.h.api.checkAccount();await flush();
   assert.deepEqual(l.shownCards(),['a.example.test · Not connected','b.example.test · Not connected','c.example.test · Not connected']);
