@@ -108,8 +108,7 @@ class Computer:
         if owner is None or not owner.active:
             self.codes["pairing"] = self.access.begin_pairing(OWNER).token
         else:
-            self.codes["workspace"] = proposed((self.access, self.access.workspace(), owner,
-                                                [self.access._now()])).nonce
+            self.codes["workspace"] = proposed((self.access, self.access.workspace(), owner, None)).nonce
         try:
             yield SimpleNamespace()
         finally:
