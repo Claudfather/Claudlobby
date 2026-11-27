@@ -503,6 +503,28 @@ test('long result is an escaped labelled excerpt with full text in a closed disc
   assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
 });
 
+for (const [state, field, event] of [
+  ['active', 'last_event', 'progress'],
+  ['completed', 'terminal_event', 'completed'],
+]) {
+  test(`the ${state} task preview counts whole visible characters`, async () => {
+    const firstThousand = 'a'.repeat(997) + 'e\u0301🇨🇦👩🏽‍💻';
+    for (const tail of ['', '城']) {
+      const response = canonicalDetail('task-a');
+      const task = response.data.task;
+      task.state = state;
+      task[field] = {event, detail: JSON.stringify({summary: firstThousand + tail})};
+      const h = harness({jget: () => response});
+      h.loop.setRoom('web'); await settle(); h.open(); await settle();
+      const html = h.get('task-detail-content').innerHTML;
+      const preview = html.match(/<pre class="task-record-body task-result">([^<]*)<\/pre>/)[1];
+      assert.equal(preview, firstThousand + (tail ? '…' : ''));
+      assert.equal(html.includes('<summary>Read full '), Boolean(tail));
+      if (tail) assert.ok(html.includes(firstThousand + tail + '</pre>'));
+    }
+  });
+}
+
 test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
   const first=deferred();
   const h=harness({jget(url){return url.includes('task-a')?first.promise:canonicalDetail('task-b');}});
