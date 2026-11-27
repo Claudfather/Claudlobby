@@ -857,7 +857,7 @@ def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call(mo
     for script in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
         text = script.read_text()
         called |= set(re.findall(r"_darwin_runtime\(\)\.(\w+)", text))
-        for var in set(re.findall(r"(\w+) = _darwin_runtime\(\)", text)):
+        for var in set(re.findall(r"^\s*(\w+) = _darwin_runtime\(\)\s*$", text, re.MULTILINE)):
             called |= set(re.findall(rf"\b{var}\.(\w+)", text))
     assert {"admit_profile", "environment", "RuntimeRefusal"} <= called
     for name in sorted(called):
