@@ -3922,7 +3922,7 @@ def _scaffold_env_merge(
         if ev.name not in existing_keys
     ]
     if not new_vars and existing_content and not rewrote_stub:
-        env_path.chmod(0o600)
+        env_path.chmod(dotenv._kept_mode(env_path))  # the writer's rule: 0644 becomes 0600, 0400 stays
         _log.debug("%s: up to date", env_path.name)
         if log is not None:
             log(f"  {env_path.name}: up to date")

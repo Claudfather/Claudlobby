@@ -213,6 +213,19 @@ def test_scaffold_preserves_existing_key(tmp_path):
     assert stat.S_IMODE(env.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize(
+    ("before", "after"), [(0o400, 0o400), (0o644, 0o600)], ids=["0400-stays-0400", "0644-becomes-0600"]
+)
+def test_scaffold_up_to_date_file_keeps_owner_bits(tmp_path, before, after):
+    env = tmp_path / ".env"
+    env.write_text("export NEW_VAR=set\n")
+    env.chmod(before)
+    _scaffold_env_merge(env, "# header", _stub())
+    assert env.read_text() == "export NEW_VAR=set\n"
+    assert stat.S_IMODE(env.stat().st_mode) == after
+    assert [p.name for p in tmp_path.iterdir()] == [".env"]
+
+
 def test_scaffold_refuses_symlink_and_directory(tmp_path):
     target = tmp_path / "elsewhere"
     target.write_text("untouched")
